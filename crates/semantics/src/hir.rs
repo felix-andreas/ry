@@ -16,13 +16,60 @@ use {
         GreenElementAt, GreenNodeAt, SyntaxKind, SyntaxNode, TextRange, TextSize,
         ast::{is_expression_kind, name_text},
     },
+    thin_vec::ThinVec,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
-pub struct ExprId(pub u32);
+/// An expression's index in its [`Module`]. It stores the index plus one, so an
+/// `Option<ExprId>` is four bytes like the id itself; that keeps every `ExpressionKind` at
+/// sixteen bytes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
+pub struct ExprId(NonZeroU32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
-pub struct PatId(pub u32);
+/// A pattern's index in its [`Module`], stored like [`ExprId`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
+pub struct PatId(NonZeroU32);
+
+/// A name written at a site, such as the `b` of `a$b`, an argument's tag or a `for`
+/// variable, stored like [`ExprId`] and resolved with `module[id]`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NameId(NonZeroU32);
+
+macro_rules! dense_id {
+    ($id:ident) => {
+        impl $id {
+            pub fn new(index: usize) -> $id {
+                // Spans are `u32` offsets into the item's text, so no module comes near
+                // `u32::MAX` entries; past it ids would alias, which is worse than stopping.
+                u32::try_from(index)
+                    .ok()
+                    .and_then(|index| NonZeroU32::MIN.checked_add(index))
+                    .map($id)
+                    .expect("an item holds fewer than u32::MAX HIR entries")
+            }
+
+            pub fn index(self) -> usize {
+                (self.0.get() - 1) as usize
+            }
+        }
+
+        impl fmt::Debug for $id {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "{}({})", stringify!($id), self.index())
+            }
+        }
+    };
+}
+
+dense_id!(ExprId);
+dense_id!(PatId);
+dense_id!(NameId);
+
+/// The spelling and range of a name written at a site; see [`NameId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameSite {
+    pub name: Symbol,
+    pub range: TextRange,
+}
 
 /// An identifier, interned process-wide: the same spelling is one allocation shared by every
 /// item that mentions it, and a symbol is a four-byte index into that table, so an
@@ -38,7 +85,15 @@ static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHAR
     LazyLock::new(|| std::array::from_fn(|_| Mutex::new(FxHashMap::default())));
 
 /// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
-static SYMBOL_TEXT: LazyLock<boxcar::Vec<&'static str>> = LazyLock::new(boxcar::Vec::new);
+static SYMBOL_TEXT: LazyLock<boxcar::Vec<SymbolEntry>> = LazyLock::new(boxcar::Vec::new);
+
+/// What a hot loop asks of a symbol without reading its spelling: the spelling's hash for a
+/// map probe, and its length in characters for the typo scan's length filter.
+struct SymbolEntry {
+    text: &'static str,
+    hash: u64,
+    characters: u32,
+}
 
 thread_local! {
     /// Spellings this thread has interned. Lowering interns every identifier it meets, and
@@ -58,10 +113,25 @@ impl Symbol {
         symbol
     }
 
+    /// The symbol for `text` if any item has interned it, without interning it: a spelling
+    /// nothing has interned cannot key a map of symbols, and a probe must not grow the
+    /// process-wide table.
+    pub fn lookup(text: &str) -> Option<Symbol> {
+        if let Some(symbol) = LOCAL_SYMBOL_IDS.with_borrow(|local| local.get(text).copied()) {
+            return Some(symbol);
+        }
+        symbol_shard(text)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(text)
+            .copied()
+    }
+
     fn new_shared(text: &str) -> Symbol {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
-        let shard = &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS];
+        let text_hash = hasher.finish();
+        let shard = &SYMBOL_IDS[text_hash as usize % SYMBOL_SHARDS];
         // A poisoned shard means another thread died mid-insert; the map is still a valid
         // map of leaked strings, so keep serving it.
         let mut shard = shard
@@ -72,7 +142,11 @@ impl Symbol {
         }
         let interned: &'static str = Box::leak(text.into());
         // Pushed under the shard lock, so one spelling can never get two indexes.
-        let index = SYMBOL_TEXT.push(interned);
+        let index = SYMBOL_TEXT.push(SymbolEntry {
+            text: interned,
+            hash: text_hash,
+            characters: u32::try_from(interned.chars().count()).unwrap_or(u32::MAX),
+        });
         let symbol = Symbol(
             u32::try_from(index + 1)
                 .ok()
@@ -90,10 +164,25 @@ impl Symbol {
     }
 
     pub fn as_str(self) -> &'static str {
+        self.entry().text
+    }
+
+    /// The spelling's length in characters.
+    pub fn characters(self) -> usize {
+        self.entry().characters as usize
+    }
+
+    fn entry(self) -> &'static SymbolEntry {
         SYMBOL_TEXT
             .get(self.0.get() as usize - 1)
             .expect("a symbol indexes the table that minted it")
     }
+}
+
+fn symbol_shard(text: &str) -> &'static Mutex<FxHashMap<&'static str, Symbol>> {
+    let mut hasher = FxHasher::default();
+    text.hash(&mut hasher);
+    &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS]
 }
 
 impl ops::Deref for Symbol {
@@ -153,9 +242,13 @@ impl PartialEq<String> for Symbol {
     }
 }
 
+/// The spelling's hash, computed once when the symbol is minted. Project-wide name maps hash
+/// every name on each rebuild, and hashing the text dominated them. Hashing the index would be
+/// cheaper still, but it depends on which thread met a spelling first, so map iteration order
+/// would differ between runs.
 impl Hash for Symbol {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state);
+        state.write_u64(self.entry().hash);
     }
 }
 
@@ -168,12 +261,6 @@ impl PartialOrd for Symbol {
 impl Ord for Symbol {
     fn cmp(&self, other: &Symbol) -> std::cmp::Ordering {
         self.as_str().cmp(other.as_str())
-    }
-}
-
-impl std::borrow::Borrow<str> for Symbol {
-    fn borrow(&self) -> &str {
-        self.as_str()
     }
 }
 
@@ -214,16 +301,17 @@ impl fmt::Debug for Symbol {
 /// handful of allocations rather than one per list, and every kind is `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
-    kinds: Vec<ExpressionKind>,
-    ranges: Vec<TextRange>,
-    patterns: Vec<Pattern>,
-    arguments: Vec<Argument>,
-    parameters: Vec<Parameter>,
-    expression_lists: Vec<ExprId>,
-    record_fields: Vec<RecordField>,
-    arms: Vec<MatchArm>,
-    pattern_lists: Vec<PatId>,
-    pattern_fields: Vec<PatternField>,
+    kinds: ThinVec<ExpressionKind>,
+    ranges: ThinVec<TextRange>,
+    patterns: ThinVec<Pattern>,
+    arguments: ThinVec<Argument>,
+    parameters: ThinVec<Parameter>,
+    expression_lists: ThinVec<ExprId>,
+    record_fields: ThinVec<RecordField>,
+    arms: ThinVec<MatchArm>,
+    pattern_lists: ThinVec<PatId>,
+    pattern_fields: ThinVec<PatternField>,
+    name_sites: ThinVec<NameSite>,
     text: String,
     pub root: Option<ExprId>,
 }
@@ -315,6 +403,22 @@ impl fmt::Debug for Text {
     }
 }
 
+impl ops::Index<NameId> for Module {
+    type Output = NameSite;
+
+    fn index(&self, id: NameId) -> &NameSite {
+        &self.name_sites[id.index()]
+    }
+}
+
+impl ops::Index<&NameId> for Module {
+    type Output = NameSite;
+
+    fn index(&self, id: &NameId) -> &NameSite {
+        &self.name_sites[id.index()]
+    }
+}
+
 impl ops::Index<Text> for Module {
     type Output = str;
 
@@ -371,12 +475,13 @@ impl Module {
         self.arms.clear();
         self.pattern_lists.clear();
         self.pattern_fields.clear();
+        self.name_sites.clear();
         self.text.clear();
         self.root = None;
     }
 
     pub fn kind(&self, id: ExprId) -> &ExpressionKind {
-        &self.kinds[id.0 as usize]
+        &self.kinds[id.index()]
     }
 
     pub fn expression(&self, id: ExprId) -> Expression<'_> {
@@ -387,7 +492,7 @@ impl Module {
     }
 
     pub fn range(&self, id: ExprId) -> TextRange {
-        self.ranges[id.0 as usize]
+        self.ranges[id.index()]
     }
 
     /// Every expression's kind, indexed by `ExprId`.
@@ -408,12 +513,28 @@ impl Module {
             .map(|(kind, &range)| Expression { kind, range })
     }
 
+    pub fn name(&self, id: NameId) -> Symbol {
+        self[id].name
+    }
+
+    pub fn name_range(&self, id: NameId) -> TextRange {
+        self[id].range
+    }
+
+    pub fn argument_name(&self, argument: &Argument) -> Option<Symbol> {
+        argument.name.map(|name| self[name].name)
+    }
+
+    pub fn argument_name_range(&self, argument: &Argument) -> Option<TextRange> {
+        argument.name.map(|name| self[name].range)
+    }
+
     pub fn expression_count(&self) -> usize {
         self.kinds.len()
     }
 
     pub fn expression_ids(&self) -> impl Iterator<Item = ExprId> + use<> {
-        (0..self.kinds.len() as u32).map(ExprId)
+        (0..self.kinds.len()).map(ExprId::new)
     }
 
     /// Every pattern, indexed by `PatId`.
@@ -426,7 +547,7 @@ impl Module {
     }
 
     pub fn pattern(&self, id: PatId) -> &Pattern {
-        &self.patterns[id.0 as usize]
+        &self.patterns[id.index()]
     }
 
     /// The direct child expressions of `id`, in source order.
@@ -655,8 +776,7 @@ pub enum NaAtom {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argument {
-    pub name: Option<Symbol>,
-    pub name_range: Option<TextRange>,
+    pub name: Option<NameId>,
     /// `None` is a positional hole (`f(, x)`) or an empty tagged value.
     pub value: Option<ExprId>,
 }
@@ -704,8 +824,7 @@ pub enum ExpressionKind {
     Field {
         at: bool,
         target: ExprId,
-        name: Option<Symbol>,
-        name_range: Option<TextRange>,
+        name: Option<NameId>,
     },
     Namespace {
         internal: bool,
@@ -722,8 +841,7 @@ pub enum ExpressionKind {
         else_branch: Option<ExprId>,
     },
     For {
-        variable: Option<Symbol>,
-        variable_range: Option<TextRange>,
+        variable: Option<NameId>,
         sequence: ExprId,
         body: ExprId,
     },
@@ -754,8 +872,7 @@ pub enum ExpressionKind {
     /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
     /// parenthesized list, so a payload types exactly like the matching literal.
     Tag {
-        name: Symbol,
-        name_range: TextRange,
+        name: NameId,
         payload: Option<ExprId>,
     },
     Match {
@@ -800,8 +917,7 @@ pub enum PatternKind {
     },
     /// The payload is a `Tuple` or `Record` pattern spanning the parenthesized list.
     Tag {
-        name: Symbol,
-        name_range: TextRange,
+        name: NameId,
         payload: Option<PatId>,
     },
     Tuple(Span<PatId>),
@@ -839,6 +955,7 @@ pub fn lower_item(root: &SyntaxNode) -> Module {
         arms: scratch.arms.as_slice().into(),
         pattern_lists: scratch.pattern_lists.as_slice().into(),
         pattern_fields: scratch.pattern_fields.as_slice().into(),
+        name_sites: scratch.name_sites.as_slice().into(),
         text: scratch.text.as_str().into(),
         root: Some(root_id),
     };
@@ -869,7 +986,7 @@ struct Lowering {
 }
 
 /// Moves `stack[mark..]` to the end of `store`.
-fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut Vec<T>) -> Span<T> {
+fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut ThinVec<T>) -> Span<T> {
     let start = store.len() as u32;
     store.extend(stack.drain(mark..));
     Span {
@@ -881,9 +998,15 @@ fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut Vec<T>) -> Span<T> {
 
 impl Lowering {
     fn allocate(&mut self, kind: ExpressionKind, range: TextRange) -> ExprId {
-        let id = ExprId(self.module.kinds.len() as u32);
+        let id = ExprId::new(self.module.kinds.len());
         self.module.kinds.push(kind);
         self.module.ranges.push(range);
+        id
+    }
+
+    fn name_site(&mut self, name: Symbol, range: TextRange) -> NameId {
+        let id = NameId::new(self.module.name_sites.len());
+        self.module.name_sites.push(NameSite { name, range });
         id
     }
 
@@ -974,7 +1097,7 @@ impl Lowering {
                 let callee = self.lower_optional(callee_node, range);
                 // R evaluates a string call head by looking up the function of that name, so
                 // `"%in%.integer64"(x, y)` calls exactly what the bare name would.
-                if let Some(callee_kind) = self.module.kinds.get_mut(callee.0 as usize)
+                if let Some(callee_kind) = self.module.kinds.get_mut(callee.index())
                     && let ExpressionKind::Literal(LiteralKind::String(name)) = *callee_kind
                 {
                     *callee_kind =
@@ -1003,20 +1126,11 @@ impl Lowering {
                 let mut children = expression_children(node);
                 let target = children.next();
                 let target = self.lower_optional(target, range);
-                let name_node = children.next();
-                let name = name_node.and_then(field_name_text);
-                let name_range = name_node
-                    .map(|child| child.range())
-                    .filter(|_| name.is_some());
-                self.allocate(
-                    ExpressionKind::Field {
-                        at,
-                        target,
-                        name,
-                        name_range,
-                    },
-                    range,
-                )
+                let name = children.next().and_then(|name_node| {
+                    let name = field_name_text(name_node)?;
+                    Some(self.name_site(name, name_node.range()))
+                });
+                self.allocate(ExpressionKind::Field { at, target, name }, range)
             }
             SyntaxKind::NAMESPACE_EXPR => {
                 let internal = node
@@ -1063,11 +1177,11 @@ impl Lowering {
             }
             SyntaxKind::FOR_EXPR => {
                 let mut children = expression_children(node);
-                let (variable, variable_range) = match children.next() {
+                let variable = match children.next() {
                     Some(variable) if variable.kind() == SyntaxKind::NAME => {
-                        (name_symbol(variable), Some(variable.range()))
+                        name_symbol(variable).map(|name| self.name_site(name, variable.range()))
                     }
-                    _ => (None, None),
+                    _ => None,
                 };
                 let sequence = children.next();
                 let body = children.next();
@@ -1076,7 +1190,6 @@ impl Lowering {
                 self.allocate(
                     ExpressionKind::For {
                         variable,
-                        variable_range,
                         sequence,
                         body,
                     },
@@ -1128,16 +1241,10 @@ impl Lowering {
                     return self.missing(range);
                 };
                 let name = field_name_text(name_node).unwrap_or_default();
+                let name = self.name_site(name, name_node.range());
                 let payload = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
                     .map(|list| self.lower_items(list, list.range()));
-                self.allocate(
-                    ExpressionKind::Tag {
-                        name,
-                        name_range: name_node.range(),
-                        payload,
-                    },
-                    range,
-                )
+                self.allocate(ExpressionKind::Tag { name, payload }, range)
             }
             SyntaxKind::MATCH_EXPR => {
                 let scrutinee = expression_children(node).next();
@@ -1170,9 +1277,13 @@ impl Lowering {
             let field_mark = self.field_stack.len();
             for index in mark..self.argument_stack.len() {
                 let argument = self.argument_stack[index];
-                let (Some(name), Some(name_range)) = (argument.name, argument.name_range) else {
+                let Some(name) = argument.name else {
                     continue;
                 };
+                let NameSite {
+                    name,
+                    range: name_range,
+                } = self.module[name];
                 let value = match argument.value {
                     Some(value) => value,
                     None => self.missing(name_range),
@@ -1235,7 +1346,7 @@ impl Lowering {
     }
 
     fn allocate_pattern(&mut self, kind: PatternKind, range: TextRange) -> PatId {
-        let id = PatId(self.module.patterns.len() as u32);
+        let id = PatId::new(self.module.patterns.len());
         self.module.patterns.push(Pattern { kind, range });
         id
     }
@@ -1266,9 +1377,9 @@ impl Lowering {
                 Some(name_node) => {
                     let payload = child_of_kind(node, SyntaxKind::PATTERN_LIST)
                         .map(|list| self.lower_pattern(list));
+                    let name = field_name_text(name_node).unwrap_or_default();
                     PatternKind::Tag {
-                        name: field_name_text(name_node).unwrap_or_default(),
-                        name_range: name_node.range(),
+                        name: self.name_site(name, name_node.range()),
                         payload,
                     }
                 }
@@ -1397,7 +1508,6 @@ impl Lowering {
                     let value = self.lower_optional(operand, range);
                     self.argument_stack.push(Argument {
                         name: None,
-                        name_range: None,
                         value: Some(value),
                     });
                 }
@@ -1487,7 +1597,6 @@ impl Lowering {
             PipeShape::FirstArgument => {
                 self.argument_stack.push(Argument {
                     name: None,
-                    name_range: None,
                     value: Some(piped),
                 });
                 None
@@ -1523,7 +1632,6 @@ impl Lowering {
                         .child_tokens()
                         .any(|token| token.kind == SyntaxKind::EQ)
                 });
-            let name_range = tag.map(|tag| tag.range());
             // R's grammar also takes `NULL` as an argument tag: `switch(x, NULL = 1)`
             // labels the case for the string "NULL".
             let name = tag.and_then(|tag| {
@@ -1531,11 +1639,12 @@ impl Lowering {
                     && tag
                         .first_token()
                         .is_some_and(|token| token.kind == SyntaxKind::NULL_KW);
-                if null_tag {
-                    Some(Symbol::new("NULL"))
+                let name = if null_tag {
+                    Symbol::new("NULL")
                 } else {
-                    field_name_text(tag)
-                }
+                    field_name_text(tag)?
+                };
+                Some(self.name_site(name, tag.range()))
             });
             let value = match substitute {
                 Some((placeholder, piped)) if placeholder == index => Some(piped),
@@ -1548,11 +1657,7 @@ impl Lowering {
                     expressions.next().map(|node| self.lower_expression(node))
                 }
             };
-            self.argument_stack.push(Argument {
-                name,
-                name_range,
-                value,
-            });
+            self.argument_stack.push(Argument { name, value });
         }
     }
 

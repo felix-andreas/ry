@@ -139,6 +139,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
         SexpType::Closure => print_closure(value, options)?,
         SexpType::Environment => out(&format!("{}\n", environment_label(value)?)),
         SexpType::Promise => out("<promise>\n"),
+        SexpType::Dots => out("<...>\n"),
         SexpType::Language => {
             for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
                 out(&format!("{line}\n"));
@@ -154,7 +155,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 out(&format!("{line}\n"));
             }
         }
-        SexpType::Pairlist | SexpType::Dots => {
+        SexpType::Pairlist => {
             let list = values::pairlist_to_list(value)?;
             print_list(list, options, tag)?;
         }
@@ -339,7 +340,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
         options,
     );
     if names != nil() {
-        print_named_vector(&items, names, options);
+        print_named_vector(&items, names, vector.kind() == SexpType::Complex, options);
     } else {
         let right = vector.kind() != SexpType::String || options.right;
         let width = items
@@ -375,7 +376,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     Ok(())
 }
 
-unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptions) {
+unsafe fn print_named_vector(items: &[String], names: Sexp, complex: bool, options: &PrintOptions) {
     let name_texts: Vec<String> = (0..items.len())
         .map(|index| match values::string_at(names, index) {
             Some(text) => text.into_owned(),
@@ -397,9 +398,15 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptio
             text.push_str(&" ".repeat(options.gap));
         }
         text.push('\n');
-        for item in &items[chunk_start..chunk_end] {
-            text.push_str(&pad(item, width, true));
-            text.push_str(&" ".repeat(options.gap));
+        if complex {
+            // GNU R prints named complex values at their own width, unpadded to the names and
+            // without a trailing gap.
+            text.push_str(&items[chunk_start..chunk_end].join(&" ".repeat(options.gap)));
+        } else {
+            for item in &items[chunk_start..chunk_end] {
+                text.push_str(&pad(item, width, true));
+                text.push_str(&" ".repeat(options.gap));
+            }
         }
         text.push('\n');
     }
@@ -753,7 +760,13 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
     }
     let names = values::names(list);
     let saved = tag.len();
-    for index in 0..count {
+    // GNU R prints the whole list when it is at most one element over `max`.
+    let shown = if count <= options.max.saturating_add(1) {
+        count
+    } else {
+        options.max
+    };
+    for index in 0..shown {
         let element = list.element(index);
         let name = if names != nil() {
             values::string_at(names, index).map(|text| text.into_owned())
@@ -778,6 +791,12 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
         }
         tag.truncate(saved);
         out("\n");
+    }
+    if shown < count {
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted {} entries ]\n",
+            count - shown
+        ));
     }
     print_attributes(list, options, tag)
 }

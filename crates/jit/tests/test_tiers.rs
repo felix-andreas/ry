@@ -169,6 +169,76 @@ fn seeds_agree_across_tiers() {
             "(n = 4L)",
             false,
         ),
+        // An inlined typed closure keeps its checks: a call reached only after the loop compiled
+        // fails on its argument, or on its value, exactly as in tier 0.
+        (
+            "flag <- function(a: logical) -> logical !a\ns <- 0\nfor (i in 1:n) if (i > 300L) s <- s + flag(1.5)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "half <- function(a: double) -> integer a / 2\ns <- 0\nfor (i in 1:n) if (i > 300L) s <- s + half(2.5)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "half <- function(a: double) -> double a / 2\ns <- 0\nfor (i in 1:n) if (i > 300L) s <- s + half(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        // A variable forgotten across an opaque call keeps its type as a guess, which an
+        // opaque call that rebinds it to another type must fail.
+        (
+            "g <- function() total <<- 5L\ntotal <- 0\nfor (i in 1:n) { if (i == 450L) g(); if (i > 300L) total <- total + 1L }\ntotal",
+            "(n = 600L)",
+            false,
+        ),
+        // Reading Array items, which a double position past the last item cannot do.
+        (
+            "x <- as.Array(as.numeric(1:n) / n)\ns <- 0\nfor (i in 1:n) s <- s + x[[i]]\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "x <- as.Array(c(1, 2, 3))\ns <- 0\nfor (i in 1:n) s <- s + x[[if (i > 300L) 3.5 else 2]]\ns",
+            "(n = 600L)",
+            true,
+        ),
+        // Storing items keeps an Array an Array, through the copy a shared one needs.
+        (
+            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- i * 2\nlist(out[[n]], is.Array(out))",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "a <- as.Array(rep(0, n))\nb <- a\nfor (i in 1:n) b[[i]] <- 1\nlist(is.Array(b), sum(b), is.Array(a), sum(a))",
+            "(n = 600L)",
+            false,
+        ),
+        // A missing value cannot be an item, so storing one leaves the Array to tier 0.
+        (
+            "out <- as.Array(rep(0, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) 0 / 0 else i * 2\nlist(is.Array(out), out[[400]], out[[n]])",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "out <- as.Array(rep(0L, n))\nfor (i in 1:n) out[[i]] <- if (i == 400L) NA_integer_ else i\nlist(is.Array(out), out[[400]], out[[n]])",
+            "(n = 600L)",
+            false,
+        ),
+        // A loop compiled before the one after it has run: the second loop guesses an integer
+        // sequence, and a double one deoptimizes.
+        (
+            "s <- 0\nfor (x in 1:n) s <- s + x\nfor (y in as.numeric(1:n) / 2) s <- s + y\ns",
+            "(n = 600L)",
+            false,
+        ),
+        // A promise forced by a load whose type guard then fails keeps the visibility it set.
+        (
+            "wv <- function(x) .Internal(withVisible(x))\nseen <- 0L\nfor (i in 1:n) if (wv(if (i < 400L) i else y <- 2.5)$visible) seen <- seen + 1L\nseen",
+            "(n = 600L)",
+            false,
+        ),
     ];
     with_interpreter(|| {
         for (case, (body, call, fails)) in seeds.iter().enumerate() {
@@ -206,6 +276,22 @@ fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
                 outcomes,
                 ["FALSE", "TRUE", "TRUE", "FALSE", "TRUE", "FALSE"]
             );
+        }
+    });
+}
+
+#[test]
+fn formal_shadows_enclosing_function() {
+    // `sum` names a base function, but the call must reach the function passed in its place.
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("shadowing <- function(sum, n) {\nfor (i in 1:n) NULL\nsum(1, 2)\n}");
+        let outcomes: Vec<String> = (0..4)
+            .map(|_| run("shadowing(function(...) 99, 3L)"))
+            .collect();
+        jit::install_mode(Mode::Off);
+        for outcome in outcomes {
+            assert_eq!(outcome, "99");
         }
     });
 }

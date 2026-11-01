@@ -24,7 +24,10 @@
 // `do ... while (a > b)` they follow does; `a <= b` would loop forever.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
-use std::{cell::RefCell, ffi::c_int, rc::Rc};
+use {
+    crate::linalg::format_g,
+    std::{cell::RefCell, ffi::c_int, rc::Rc},
+};
 
 pub const DBL_EPSILON: f64 = f64::EPSILON;
 pub const DBL_MIN: f64 = f64::MIN_POSITIVE;
@@ -155,15 +158,6 @@ fn dt_log_of_log(p: f64, lower: bool) -> f64 {
     if lower { p } else { log1_exp(p) }
 }
 
-/// `R_D_fexp`: `exp(x) / sqrt(f)` on the requested scale.
-fn d_fexp(f: f64, x: f64, log: bool) -> f64 {
-    if log {
-        -0.5 * f.ln() + x
-    } else {
-        x.exp() / f.sqrt()
-    }
-}
-
 /// `R_Q_P01_check`: whether `p` is not a probability on its scale.
 fn q_p01_invalid(p: f64, log: bool) -> bool {
     (log && p > 0.0) || (!log && !(0.0..=1.0).contains(&p))
@@ -204,6 +198,12 @@ pub fn forceint(x: f64) -> f64 {
 /// `R_nonint`: whether `x` is not within rounding of an integer.
 fn nonint(x: f64) -> bool {
     (x - forceint(x)).abs() > 1e-9 * fmax2(1.0, x.abs())
+}
+
+/// Whether `choose` and `lchoose` treat `n` as an integer, which allows more slack than
+/// `nonint`, so `choose(4 - 1e-7, 4)` is 1.
+fn near_integer(x: f64) -> bool {
+    (x - forceint(x)).abs() <= 1e-7 * fmax2(1.0, x.abs())
 }
 
 /// `R_D_negInonint`.
@@ -1067,6 +1067,83 @@ fn bd0(x: f64, np: f64) -> f64 {
     x * (x / np).ln() + np - x
 }
 
+/// `bd0` as an unevaluated sum `high + low`. A plain double holds the deviance only to an
+/// absolute precision of an ulp of itself or, away from `x == np`, of `x`, which `exp(-bd0)`
+/// turns into a relative error of the density; the Poisson density needs it to the last digit.
+fn bd0_extended(x: f64, np: f64) -> (f64, f64) {
+    let ratio = x / np;
+    let plain = bd0(x, np);
+    // Past about 1e300 the product below overflows, and a deviance anywhere near that size
+    // leaves no density for the extra digits to refine.
+    if !(ratio.is_finite() && ratio > 0.0) || !(plain < 1e300) {
+        return (plain, 0.0);
+    }
+    let ratio_low = (-ratio).mul_add(np, x) / np;
+    let log_ratio = ln_double_double((ratio, ratio_low));
+    let product = double_double_mul_f64(log_ratio, x);
+    let difference = two_sum(np, -x);
+    double_double_add(product, difference)
+}
+
+/// The natural logarithm of a double-double, by `2 atanh((m - 1)/(m + 1))` on the mantissa
+/// reduced to [1/sqrt(2), sqrt(2)], where the series loses nothing to cancellation.
+fn ln_double_double(value: (f64, f64)) -> (f64, f64) {
+    const LN_2: (f64, f64) = (std::f64::consts::LN_2, 2.319_046_813_846_299_6e-17);
+    let mut exponent = value.0.log2().floor();
+    let mut scale = 2f64.powf(-exponent);
+    if value.0 * scale > std::f64::consts::SQRT_2 {
+        exponent += 1.0;
+        scale *= 0.5;
+    }
+    let mantissa = (value.0 * scale, value.1 * scale);
+    let numerator = two_sum(mantissa.0 - 1.0, mantissa.1);
+    let denominator = double_double_add(two_sum(mantissa.0, 1.0), (mantissa.1, 0.0));
+    let s = double_double_div(numerator, denominator);
+    let s_squared = double_double_mul(s, s);
+    let mut power = s;
+    let mut sum = s;
+    for k in 1..200 {
+        power = double_double_mul(power, s_squared);
+        let term = double_double_div(power, ((2 * k + 1) as f64, 0.0));
+        sum = double_double_add(sum, term);
+        if term.0.abs() <= 1e-34 * sum.0.abs() {
+            break;
+        }
+    }
+    let twice = (2.0 * sum.0, 2.0 * sum.1);
+    double_double_add(twice, double_double_mul_f64(LN_2, exponent))
+}
+
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    let error = (a - (sum - b_virtual)) + (b - b_virtual);
+    (sum, error)
+}
+
+fn double_double_add(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let (sum, error) = two_sum(a.0, b.0);
+    let error = error + a.1 + b.1;
+    two_sum(sum, error)
+}
+
+fn double_double_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let product = a.0 * b.0;
+    let error = a.0.mul_add(b.0, -product) + (a.0 * b.1 + a.1 * b.0);
+    two_sum(product, error)
+}
+
+fn double_double_mul_f64(a: (f64, f64), b: f64) -> (f64, f64) {
+    double_double_mul(a, (b, 0.0))
+}
+
+fn double_double_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let quotient = a.0 / b.0;
+    let remainder = double_double_add(a, double_double_mul((-quotient, 0.0), b));
+    let correction = remainder.0 / b.0;
+    two_sum(quotient, correction)
+}
+
 pub fn lbeta(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         return a + b;
@@ -1110,7 +1187,8 @@ pub fn beta(a: f64, b: f64) -> f64 {
         return 0.0;
     }
     if a + b < XMAX {
-        (1.0 / gammafn(a + b)) * (gammafn(a) * gammafn(b))
+        // Multiplying left to right keeps a tiny argument's huge gamma from overflowing.
+        (1.0 / gammafn(a + b)) * gammafn(a) * gammafn(b)
     } else {
         lbeta(a, b).exp()
     }
@@ -1150,7 +1228,7 @@ pub fn lchoose(n: f64, k: f64) -> f64 {
     }
     if n < 0.0 {
         return lchoose(-n + k - 1.0, k);
-    } else if !nonint(n) {
+    } else if near_integer(n) {
         let n = forceint(n);
         if n < k {
             return f64::NEG_INFINITY;
@@ -1175,7 +1253,7 @@ pub fn choose(n: f64, k: f64) -> f64 {
     }
     round_k_warning(k0, k);
     if k < K_SMALL_MAX {
-        if n - k < k && n >= 0.0 && !nonint(n) {
+        if n - k < k && n >= 0.0 && near_integer(n) {
             k = forceint(n - k);
         }
         if k < 0.0 {
@@ -1190,12 +1268,12 @@ pub fn choose(n: f64, k: f64) -> f64 {
             r *= (n - j + 1.0) / j;
             j += 1.0;
         }
-        return if !nonint(n) { forceint(r) } else { r };
+        return if near_integer(n) { forceint(r) } else { r };
     }
     if n < 0.0 {
         let r = choose(-n + k - 1.0, k);
         return if k != 2.0 * (k / 2.0).floor() { -r } else { r };
-    } else if !nonint(n) {
+    } else if near_integer(n) {
         let n = forceint(n);
         if n < k {
             return 0.0;
@@ -1575,7 +1653,8 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         let xsq = (at * 16.0).trunc() / 16.0;
         let del = (at - xsq) * (at + xsq);
         if log {
-            *cumulative = (-xsq * xsq * 0.5) - del * 0.5 + temp.ln();
+            // Halving before squaring keeps x near sqrt(DBL_MAX) finite.
+            *cumulative = (-0.5 * xsq * xsq) - del * 0.5 + temp.ln();
             if (lower && x > 0.0) || (upper && x <= 0.0) {
                 *complementary = (-(-xsq * xsq * 0.5).exp() * (-del * 0.5).exp() * temp).ln_1p();
             }
@@ -1864,7 +1943,19 @@ pub fn dpois_raw(x: f64, lambda: f64, log: bool) -> f64 {
         }
         return d_exp(-lambda + x * lambda.ln() - lgammafn(x + 1.0), log);
     }
-    d_fexp(M_2PI * x, -stirlerr(x) - bd0(x, lambda), log)
+    let (high, low) = bd0_extended(x, lambda);
+    let low = low + stirlerr(x);
+    // 2 pi x overflows for x near DBL_MAX, where sqrt(2 pi) sqrt(x) does not.
+    let root = M_SQRT_2PI * x.sqrt();
+    if log {
+        -low - high - root.ln()
+    } else if low.abs() > 1.0 {
+        // The low part stays below an ulp of the high part, which here is beyond the range
+        // where the density is representable.
+        (-(high + low)).exp() / root
+    } else {
+        (-low).exp() * (-high).exp() / root
+    }
 }
 
 pub fn dpois(x: f64, lambda: f64, log: bool) -> f64 {
@@ -1936,6 +2027,14 @@ pub fn pgamma(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
             dt0(lower, log)
         } else {
             dt1(lower, log)
+        };
+    }
+    // An infinite shape moves all the mass to infinity.
+    if shape == f64::INFINITY {
+        return if x == f64::INFINITY {
+            dt1(lower, log)
+        } else {
+            dt0(lower, log)
         };
     }
     regularized_gamma(x, shape, lower, log)
@@ -2112,8 +2211,11 @@ fn gamma_density_factor(x: f64, shape: f64, log: bool) -> f64 {
 /// `-shape log1pmx(lambda - 1)` is accurate to a few rounding errors relative. Far below,
 /// `lambda - 1` would round away `lambda` itself, but the logarithm dominates the direct form.
 fn gamma_deviance(x: f64, shape: f64) -> f64 {
-    if x >= 0.25 * shape {
-        -shape * log1pmx((x - shape) / shape)
+    let relative = (x - shape) / shape;
+    // A tiny shape against a huge `x` overflows `lambda - 1`; that far from 1 the direct form
+    // has nothing to cancel.
+    if x >= 0.25 * shape && relative.is_finite() {
+        -shape * log1pmx(relative)
     } else {
         shape * (shape.ln() - x.ln()) + x - shape
     }
@@ -3897,8 +3999,12 @@ fn bgrat(a: f64, b: f64, x: f64, y: f64, w: &mut f64, eps: f64, ierr: &mut i32, 
         } else if n == N_TERMS {
             *ierr = 4;
             warning(format!(
-                "bgrat(a={a}, b={b}, x={x}) *no* convergence: NOTIFY R-core!\n dj={dj}, rel.err={}",
-                dj.abs() / (sum + l)
+                "bgrat(a={}, b={}, x={}) *no* convergence: NOTIFY R-core!\n dj={}, rel.err={}",
+                format_g(a),
+                format_g(b),
+                format_g(x),
+                format_g(dj),
+                format_g(dj.abs() / (sum + l))
             ));
         }
     }
@@ -4681,6 +4787,15 @@ fn gamln(a: f64) -> f64 {
 /// smaller tail's log probability, safeguarded by bisection, so the answer is the root of
 /// `pbeta` to the last bits wherever `pbeta` itself is accurate.
 pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
+    // The search probes pbeta far from the quantile, where its series may fail to converge
+    // without that touching the answer, so those warnings are not the caller's.
+    let raised = WARNINGS.with(|warnings| warnings.borrow().len());
+    let quantile = qbeta_search(alpha, p, q, lower, log);
+    WARNINGS.with(|warnings| warnings.borrow_mut().truncate(raised));
+    quantile
+}
+
+fn qbeta_search(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     if alpha.is_nan() || p.is_nan() || q.is_nan() {
         return alpha + p + q;
     }
@@ -4700,10 +4815,12 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
                 0.5
             };
         }
-        if p == 0.0 || p / q == f64::INFINITY {
+        // A vanishing first shape (relative to the second) puts all the mass at 0, and a
+        // vanishing second shape puts it at 1.
+        if p == 0.0 || q / p == f64::INFINITY {
             return 0.0;
         }
-        if q == 0.0 || q / p == f64::INFINITY {
+        if q == 0.0 || p / q == f64::INFINITY {
             return 1.0;
         }
         return 0.5;
@@ -4759,8 +4876,19 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     let mut hi = 0.5_f64;
     for _ in 0..1000 {
         let value = pbeta(t, a, b, t_lower, true);
+        if value.is_nan() {
+            // pbeta's asymptotic expansion fails for an extreme second shape far from the
+            // quantile; the quantile lies nearer 0, where it converges.
+            hi = t;
+            t = if lo == 0.0 {
+                hi * 1e-3
+            } else {
+                (lo * hi).sqrt()
+            };
+            continue;
+        }
         let difference = direction * (value - target);
-        if difference == 0.0 || value.is_nan() {
+        if difference == 0.0 {
             break;
         }
         if difference > 0.0 {
@@ -4789,7 +4917,72 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
         }
         t = next;
     }
-    if near_zero { t } else { 0.5 - t + 0.5 }
+    let quantile = if near_zero { t } else { 0.5 - t + 0.5 };
+    // Newton's method converges in t, and turning a t near 1/2 into 1 - t rounds, so the
+    // quantile can land a few doubles from the one whose probability is nearest the target.
+    // A short walk over neighbouring doubles settles it. pbeta rounds to the same value over
+    // runs of adjacent doubles, so the walk looks a few doubles past a flat stretch.
+    const LOOKAHEAD: usize = 8;
+    let miss = |x: f64| (pbeta(x, p, q, lower, log) - alpha).abs();
+    let mut best = quantile;
+    let mut best_miss = miss(best);
+    // The log-scale solve resolves a probability only to |log p| ulps, which near 1e-60 is
+    // about a hundred ulps of p itself, so a few Newton steps on the caller's own scale
+    // recover the digits a small probability represents exactly.
+    for _ in 0..8 {
+        if best_miss == 0.0 || !(best > 0.0 && best < 1.0) {
+            break;
+        }
+        let value = pbeta(best, p, q, lower, log);
+        let density = dbeta(best, p, q, false);
+        let slope = if lower { density } else { -density };
+        let slope = if log { slope / value.exp() } else { slope };
+        if !(slope.is_finite() && slope != 0.0) {
+            break;
+        }
+        let next = best - (value - alpha) / slope;
+        if !(next > 0.0 && next < 1.0) {
+            break;
+        }
+        let next_miss = miss(next);
+        if next_miss >= best_miss {
+            break;
+        }
+        best = next;
+        best_miss = next_miss;
+    }
+    // A quantile of exactly 0 or 1 is a tail probability below the double range, which no
+    // interior double improves on.
+    let directions: &[fn(f64) -> f64] = if quantile > 0.0 && quantile < 1.0 {
+        &[f64::next_up, f64::next_down]
+    } else {
+        &[]
+    };
+    for step in directions {
+        'walk: loop {
+            let mut candidate = best;
+            for _ in 0..LOOKAHEAD {
+                candidate = step(candidate);
+                if !(candidate > 0.0 && candidate < 1.0) {
+                    break 'walk;
+                }
+                let candidate_miss = miss(candidate);
+                if candidate_miss < best_miss {
+                    best = candidate;
+                    best_miss = candidate_miss;
+                    continue 'walk;
+                }
+            }
+            break;
+        }
+    }
+    // GNU R never returns a subnormal beta quantile: it gives 0 or 2^-1024, whichever has
+    // the probability nearer the target, and its own tests rely on that.
+    if best < f64::MIN_POSITIVE {
+        let floor = f64::MIN_POSITIVE / 4.0;
+        best = if miss(floor) < miss(0.0) { floor } else { 0.0 };
+    }
+    best
 }
 
 /// AS 109's approximation of the lower-tail beta quantile at log probability `log_p`.
@@ -4919,14 +5112,22 @@ fn discrete_quantile(
     maximum: f64,
     distribution: &dyn Fn(f64, bool, bool) -> f64,
 ) -> f64 {
-    let slack = 64.0 * DBL_EPSILON * p.abs();
+    // The search accepts a value within 64 epsilon of the target probability, relative to
+    // the nearer end of [0, 1]: near 1, adjacent CDF values differ by a few ulps of 1, and a
+    // slack relative to p itself would return the quantile below. On the log scale the
+    // slack is 16 epsilon of the log probability.
+    let slack = if log {
+        16.0 * DBL_EPSILON * p.abs()
+    } else {
+        64.0 * DBL_EPSILON * p.abs().min(1.0 - p)
+    };
     let reached = |y: f64| {
         let value = distribution(y, lower, log);
         value.is_nan()
             || if lower {
                 value >= p - slack
             } else {
-                value <= p + slack
+                value < p + slack
             }
     };
     let normal = qnorm(p, 0.0, 1.0, lower, log);
@@ -5409,7 +5610,12 @@ pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
         return f64::NAN;
     }
     if lambda == 0.0 {
-        return 0.0;
+        let outside = if log {
+            p > 0.0
+        } else {
+            !(0.0..=1.0).contains(&p)
+        };
+        return if outside { f64::NAN } else { 0.0 };
     }
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
         return boundary;
@@ -5672,7 +5878,9 @@ pub fn qt(p: f64, ndf: f64, lower: bool, log: bool) -> f64 {
                 if !finite(x) || x.abs() <= 1e-14 * q.abs() {
                     break;
                 }
-                q += x * (1.0 + x * q * (ndf + 1.0) / (2.0 * (q * q + ndf)));
+                // q (q^2 + ndf)^-1 written as (q + ndf / q)^-1, because q^2 overflows when the
+                // tail probability is far below DBL_MIN's square root.
+                q += x * (1.0 + x * (ndf + 1.0) / (2.0 * (q + ndf / q)));
             }
         }
     }
@@ -5912,6 +6120,23 @@ pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         dpois_raw(shape, half, true),
         |index| log_half - (df / 2.0 + index + 1.0).ln(),
     );
+    // A lower tail below the double range underflows in the linear sum; on the log scale it
+    // is summed term by term, each component's log probability coming straight from pgamma.
+    if lower && log && lower_sum < 1e-280 {
+        let mut total = f64::NEG_INFINITY;
+        let mut index = 0.0;
+        while index < 1e6 {
+            let term =
+                dpois_raw(index, rate, true) + pgamma(half, df / 2.0 + index, 1.0, true, true);
+            total = logspace_add(total, term);
+            // Past the Poisson mode the terms only shrink, so one far below the total ends it.
+            if index > rate && term < total - 40.0 {
+                break;
+            }
+            index += 1.0;
+        }
+        return total;
+    }
     mixture_tail(lower_sum, upper_sum, lower, log)
 }
 
@@ -5989,6 +6214,15 @@ fn poisson_mixture_tails(
 /// The requested tail and scale from both tails of a mixture. A log probability near zero
 /// comes from the other tail, which keeps the digits the direct one has lost.
 fn mixture_tail(lower_sum: f64, upper_sum: f64, lower: bool, log: bool) -> f64 {
+    // The Poisson weights that were summed fall short of 1 by rounding and by the truncated
+    // remainder, so the tails are scaled by their total. Without that, a mixture whose every
+    // component is exactly 1 would come out a few units in the last place below 1.
+    let total = lower_sum + upper_sum;
+    let (lower_sum, upper_sum) = if total > 0.0 {
+        (lower_sum / total, upper_sum / total)
+    } else {
+        (lower_sum, upper_sum)
+    };
     let (direct, other) = if lower {
         (lower_sum, upper_sum)
     } else {
@@ -6051,7 +6285,10 @@ pub fn qnchisq(p: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
             }
         }
     }
-    bisect(low, high, below_root)
+    // GNU R stops at a relative accuracy of about 1e-13, and its own tests compare round trips
+    // with all.equal, which leaves exact matches out of the mean: a quantile that is exact more
+    // often than GNU's shifts that mean, so the search stops at the same accuracy.
+    bisect(low, high, 1e-13, below_root)
 }
 
 /// The density of the noncentral beta distribution, the Poisson mixture
@@ -6166,9 +6403,13 @@ fn pnbeta_both(x: f64, complement: f64, a: f64, b: f64, ncp: f64, lower: bool, l
     if error != 0 {
         precision_warning("pnbeta");
     }
-    let log_x = x.ln();
-    // x^s (1 - x)^b / (s B(s, b)) is the beta density times x (1 - x) / s.
-    let start_log_step = dbeta(x, shape, b, true) + log_x + complement.ln() - shape.ln();
+    // Near one, x itself rounds to 1 and only the complement keeps the distance from it.
+    let log_x = if x > 0.5 {
+        (-complement).ln_1p()
+    } else {
+        x.ln()
+    };
+    let start_log_step = shape * log_x + b * complement.ln() - lbeta(shape, b) - shape.ln();
     let (lower_sum, upper_sum) = poisson_mixture_tails(
         rate,
         mode,
@@ -6198,7 +6439,7 @@ pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         precision_warning("qnbeta");
         return f64::NAN;
     }
-    bisect(0.0, 1.0, |x| {
+    bisect(0.0, 1.0, 0.0, |x| {
         let value = pnbeta_both(x, 0.5 - x + 0.5, a, b, ncp, lower, log);
         if lower { value < p } else { value > p }
     })
@@ -6207,9 +6448,13 @@ pub fn qnbeta(p: f64, a: f64, b: f64, ncp: f64, lower: bool, log: bool) -> f64 {
 /// The point where `below_root` turns from true to false within `(low, high)`, to the
 /// resolution of a double. While the bracket spans more than a factor of four, its geometric
 /// mean is tried, so a root many orders of magnitude below `high` is found in a number of
-/// steps that grows with the number of exponent bits rather than mantissa bits.
-fn bisect(mut low: f64, mut high: f64, below_root: impl Fn(f64) -> bool) -> f64 {
+/// steps that grows with the number of exponent bits rather than mantissa bits. A positive
+/// `tolerance` stops the search once the bracket is narrower than that fraction of its midpoint.
+fn bisect(mut low: f64, mut high: f64, tolerance: f64, below_root: impl Fn(f64) -> bool) -> f64 {
     loop {
+        if high - low < tolerance * 0.5 * (low + high) {
+            return 0.5 * (low + high);
+        }
         let middle = if low == 0.0 {
             if high > 0.5 { 0.5 * high } else { high * high }
         } else if high > 4.0 * low {

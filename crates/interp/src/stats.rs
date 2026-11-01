@@ -9,12 +9,15 @@
 
 use {
     crate::{
+        arith,
         builtin_libraries::{NativeCall, NativeFn, c_result},
         coerce::coerce_vector,
-        linalg, stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize,
-        stats_port, stats_tests,
-        unwind::R,
-        values::{self, length, symbols},
+        distributions, linalg,
+        long_double::LongDouble,
+        random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
+        stats_optimize, stats_port, stats_spline, stats_tests,
+        unwind::{R, error},
+        values::{self, length, scalar_bool, scalar_integer, symbols},
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
 };
@@ -75,7 +78,17 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pp_sum", pp_sum),
     ("TSconv", ts_conv),
     ("isoreg", isoreg),
+    ("tukeyline", tukeyline),
+    ("Rsm", tukey_smooth),
     ("cutree", stats_cluster::cutree),
+    ("rWishart", r_wishart),
+    ("loess_raw", stats_loess::loess_raw),
+    ("loess_dfit", stats_loess::loess_dfit),
+    ("loess_dfitse", stats_loess::loess_dfitse),
+    ("loess_ifit", stats_loess::loess_ifit),
+    ("loess_ise", stats_loess::loess_ise),
+    ("lowesw", stats_loess::lowesw),
+    ("lowesp", stats_loess::lowesp),
     ("kmeans_Lloyd", stats_cluster::kmeans_lloyd),
     ("kmeans_MacQueen", stats_cluster::kmeans_macqueen),
     ("kmns", stats_cluster::kmns),
@@ -85,6 +98,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("nls_iter", stats_models::nls_iter),
     ("HoltWinters", holt_winters),
     ("eureka", eureka),
+    ("multi_yw", multi_yw),
     ("Burg", burg),
     ("SWilk", stats_tests::swilk),
     ("pKolmogorov2x", stats_tests::p_kolmogorov_2x),
@@ -100,6 +114,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pRho", stats_tests::p_rho),
     ("d2x2xk", stats_tests::d2x2xk),
     ("Fisher_sim", stats_tests::fisher_sim),
+    ("Fexact", stats_tests::fexact),
     ("chisq_sim", stats_tests::chisq_sim),
     ("r2dtable", stats_tests::r2dtable),
     ("ARIMA_transPars", stats_arima::transpars),
@@ -115,6 +130,8 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanSmooth", stats_arima::kalman_smooth),
     ("LogLin", loglin),
     ("stl", stl),
+    ("rbart", stats_spline::rbart),
+    ("bvalus", stats_spline::bvalus),
 ];
 
 /// The arguments of a `.C` or `.Fortran` call, coerced as the routine's declared types, ready
@@ -396,6 +413,13 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     if x_argument == values::nil() {
         return Err(call.error("'x' is NULL"));
     }
+    if [x_argument, y_argument].iter().any(|argument| {
+        argument.kind() == SexpType::Integer && values::inherits(*argument, "factor")
+    }) {
+        return Err(call.error(
+            "Calling var(x) on a factor x is defunct.\n  Use something like 'all(duplicated(x)[-1L])' to test for a constant vector.",
+        ));
+    }
     let x = real_values(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
     if length(x_argument) == 0
@@ -482,7 +506,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             for j in 0..y_columns {
                 if !missing_x[i] && !missing_y[j] {
                     result[i + j * x_columns] =
-                        complete_covariance(&x_data[i], &y_data[j], &used, kendall);
+                        complete_covariance(&x_data[i], &y_data[j], &used, kendall).to_f64();
                 }
             }
         }
@@ -494,7 +518,9 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                         if absent {
                             NA_REAL
                         } else {
-                            complete_covariance(column, column, &used, kendall).sqrt()
+                            complete_covariance(column, column, &used, kendall)
+                                .sqrt()
+                                .to_f64()
                         }
                     })
                     .collect()
@@ -554,62 +580,13 @@ unsafe fn column_names(x: Sexp) -> Sexp {
     }
 }
 
-/// A sum accumulated with an error term, standing in for the 80-bit `long double` GNU R sums
-/// in, so that rounding agrees in the last digit.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Accumulator {
-    high: f64,
-    low: f64,
-}
-
-impl Accumulator {
-    pub(crate) fn add(&mut self, value: f64) {
-        let sum = self.high + value;
-        let error = if self.high.abs() >= value.abs() {
-            (self.high - sum) + value
-        } else {
-            (value - sum) + self.high
-        };
-        self.high = sum;
-        self.low += error;
-    }
-
-    pub(crate) fn value(self) -> f64 {
-        self.high + self.low
-    }
-
-    pub(crate) fn divided(self, divisor: f64) -> f64 {
-        let quotient = self.high / divisor;
-        let remainder = (-quotient).mul_add(divisor, self.high);
-        quotient + (remainder + self.low) / divisor
-    }
-}
-
-/// The mean of the used entries, refined by a second pass over the deviations.
-fn refined_mean(data: &[f64], used: &[bool]) -> f64 {
-    let count = used.iter().filter(|&&flag| flag).count() as f64;
-    let mut sum = Accumulator::default();
-    for (value, _) in data.iter().zip(used).filter(|(_, flag)| **flag) {
-        sum.add(*value);
-    }
-    let mean = sum.divided(count);
-    if !mean.is_finite() {
-        return mean;
-    }
-    let mut correction = Accumulator::default();
-    for (value, _) in data.iter().zip(used).filter(|(_, flag)| **flag) {
-        correction.add(value - mean);
-    }
-    mean + correction.divided(count)
-}
-
 /// The covariance of two columns over the used rows, or Kendall's sum of concordance signs.
-fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> f64 {
+fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> LongDouble {
     let count = used.iter().filter(|&&flag| flag).count();
     if count < 2 {
-        return NA_REAL;
+        return LongDouble::from(NA_REAL);
     }
-    let mut sum = Accumulator::default();
+    let mut sum = LongDouble::ZERO;
     if kendall {
         for k in 0..x.len() {
             if !used[k] {
@@ -617,20 +594,27 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> f6
             }
             for other in 0..x.len() {
                 if used[other] {
-                    sum.add(sign(x[k] - x[other]) * sign(y[k] - y[other]));
+                    sum += sign(x[k] - x[other]) * sign(y[k] - y[other]);
                 }
             }
         }
-        return sum.value();
+        return sum;
     }
-    let x_mean = refined_mean(x, used);
-    let y_mean = refined_mean(y, used);
+    let x_mean = arith::long_double_mean(used_values(x, used));
+    let y_mean = arith::long_double_mean(used_values(y, used));
     for k in 0..x.len() {
         if used[k] {
-            sum.add((x[k] - x_mean) * (y[k] - y_mean));
+            sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
         }
     }
-    sum.divided((count - 1) as f64)
+    sum / (count - 1)
+}
+
+fn used_values<'a>(data: &'a [f64], used: &'a [bool]) -> impl Iterator<Item = f64> + Clone + 'a {
+    data.iter()
+        .zip(used)
+        .filter(|(_, flag)| **flag)
+        .map(|(value, _)| *value)
 }
 
 /// One entry of a pairwise-complete `cov` or `cor`.
@@ -642,12 +626,12 @@ fn pair_statistic(
     kendall: bool,
     zero_deviation: &mut bool,
 ) -> f64 {
-    let covariance = complete_covariance(x, y, used, kendall);
+    let covariance = complete_covariance(x, y, used, kendall).to_f64();
     if !correlate || covariance.is_nan() {
         return covariance;
     }
-    let x_scale = complete_covariance(x, x, used, kendall).sqrt();
-    let y_scale = complete_covariance(y, y, used, kendall).sqrt();
+    let x_scale = complete_covariance(x, x, used, kendall).sqrt().to_f64();
+    let y_scale = complete_covariance(y, y, used, kendall).sqrt().to_f64();
     if x_scale == 0.0 || y_scale == 0.0 {
         *zero_deviation = true;
         return NA_REAL;
@@ -738,7 +722,7 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
                 }
                 3 => (a - b).abs(),
                 4 => {
-                    let sum = (a + b).abs();
+                    let sum = a.abs() + b.abs();
                     let difference = (a - b).abs();
                     if sum > f64::MIN_POSITIVE || difference > f64::MIN_POSITIVE {
                         let ratio = difference / sum;
@@ -1092,7 +1076,6 @@ fn unit_root(angle: f64, multiple: usize, period: usize) -> (f64, f64) {
 /// `nextn(n, factors)`: for each `n`, the smallest integer at least `n` that factors entirely
 /// into `factors`.
 unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
-    let n = integer_values(call.arg(0))?;
     let factors = integer_values(call.arg(1))?;
     if factors.is_empty() {
         return Err(call.error("no factors"));
@@ -1103,30 +1086,63 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
     {
         return Err(call.error("invalid factors"));
     }
-    let mut result = Vec::with_capacity(n.len());
-    for &value in &n {
-        if value == NA_INTEGER {
-            result.push(NA_INTEGER);
-            continue;
-        }
-        let mut candidate = value.max(1) as i64;
+    let next = |value: u64| {
+        let mut candidate = value.max(1);
         loop {
             let mut rest = candidate;
             for &factor in &factors {
-                while rest % factor as i64 == 0 {
-                    rest /= factor as i64;
+                while rest % factor as u64 == 0 {
+                    rest /= factor as u64;
                 }
             }
             if rest == 1 {
-                break;
+                return candidate;
             }
             candidate += 1;
         }
-        result.push(if candidate > i32::MAX as i64 {
-            NA_INTEGER
-        } else {
-            candidate as i32
-        });
+    };
+    // A double `n` gives an integer result unless some answer exceeds the integer range, so
+    // `nextn(2.14e9)` is `2^31` as a double.
+    if call.arg(0).kind() == SexpType::Real {
+        let result: Vec<Option<u64>> = real_values(call.arg(0))?
+            .iter()
+            .map(|&value| (!value.is_nan()).then(|| next(value.trunc().max(1.0) as u64)))
+            .collect();
+        if result
+            .iter()
+            .flatten()
+            .all(|&value| value <= i32::MAX as u64)
+        {
+            let result: Vec<i32> = result
+                .iter()
+                .map(|value| value.map_or(NA_INTEGER, |value| value as i32))
+                .collect();
+            return values::integer_vector(&result);
+        }
+        let result: Vec<f64> = result
+            .iter()
+            .map(|value| value.map_or(NA_REAL, |value| value as f64))
+            .collect();
+        return values::real_vector(&result);
+    }
+    let mut overflow = false;
+    let result: Vec<i32> = integer_values(call.arg(0))?
+        .iter()
+        .map(|&value| {
+            if value == NA_INTEGER {
+                return NA_INTEGER;
+            }
+            i32::try_from(next(value.max(1) as u64)).unwrap_or_else(|_| {
+                overflow = true;
+                NA_INTEGER
+            })
+        })
+        .collect();
+    if overflow {
+        call.warning(&format!(
+            "nextn() found no solution < {} = INT_MAX (the maximal integer); pass '0+ n' instead of 'n'",
+            i32::MAX
+        ))?;
     }
     values::integer_vector(&result)
 }
@@ -1755,7 +1771,12 @@ unsafe fn runmed(call: &NativeCall<'_>) -> R<Sexp> {
     let missing: Vec<usize> = (0..n).filter(|&index| x[index].is_nan()).collect();
     if !missing.is_empty() {
         match na_action {
-            4 => return Err(call.error("runmed(x, .., na.action=\"na.fail\"): have NAs in x")),
+            4 => {
+                return Err(call.error(format!(
+                    "runmed(x, .., na.action=\"na.fail\"): have NAs starting at x[{}]",
+                    missing[0] + 1
+                )));
+            }
             3 => {
                 let kept: Vec<f64> = x.iter().copied().filter(|value| !value.is_nan()).collect();
                 let smoothed = running_median(&kept, span, end_rule);
@@ -2216,6 +2237,19 @@ unsafe fn isoreg(call: &NativeCall<'_>) -> R<Sexp> {
     for i in 0..n {
         cumulative[i + 1] = cumulative[i] + y[i];
     }
+    let total = cumulative[n];
+    if !total.is_finite() {
+        let shown = if total.is_nan() {
+            "nan"
+        } else if total > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        };
+        return Err(error(format!(
+            "non-finite sum(y) == {shown} is not allowed"
+        )));
+    }
     let mut fitted = vec![0.0; n];
     let mut knots: Vec<i32> = Vec::new();
     let mut known = 0usize;
@@ -2243,6 +2277,68 @@ unsafe fn isoreg(call: &NativeCall<'_>) -> R<Sexp> {
         ("yf", values::real_vector(&fitted)?),
         ("iKnots", values::integer_vector(&knots)?),
     ])
+}
+
+/// `tukeyline(x, y, iter, call)`: Tukey's resistant line. The outer thirds are the points at or
+/// beyond the 1/3 and 2/3 quantiles of `x`, each quantile the mean of the order statistics at
+/// the floor and ceiling of `p (n - 1)`. Each iteration adds the slope through the medians of
+/// the current residuals in the outer thirds, and the intercept is the residuals' median.
+unsafe fn tukeyline(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = values::reals(as_reals(call.arg(0))?).to_vec();
+    let y = values::reals(as_reals(call.arg(1))?).to_vec();
+    let iterations = values::as_integer_scalar(call.arg(2)).max(1);
+    let n = x.len().min(y.len());
+    let mut sorted = x[..n].to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let quantile = |probability: f64| {
+        let position = probability * n.saturating_sub(1) as f64;
+        let at = |index: f64| sorted.get(index as usize).copied().unwrap_or(f64::NAN);
+        (at(position.floor()) + at(position.ceil())) / 2.0
+    };
+    let (lower, upper) = (quantile(1.0 / 3.0), quantile(2.0 / 3.0));
+    let left: Vec<usize> = (0..n).filter(|&index| x[index] <= lower).collect();
+    let right: Vec<usize> = (0..n).filter(|&index| x[index] >= upper).collect();
+    let median_of = |values: &[f64], indices: &[usize]| {
+        median(
+            &mut indices
+                .iter()
+                .map(|&index| values[index])
+                .collect::<Vec<_>>(),
+        )
+    };
+    let x_spread = median_of(&x, &right) - median_of(&x, &left);
+    let mut slope = 0.0;
+    let mut residuals = y[..n].to_vec();
+    for _ in 0..iterations {
+        slope += (median_of(&residuals, &right) - median_of(&residuals, &left)) / x_spread;
+        for index in 0..n {
+            residuals[index] = y[index] - slope * x[index];
+        }
+    }
+    let intercept = median(&mut residuals.clone());
+    let fitted: Vec<f64> = x[..n]
+        .iter()
+        .map(|&value| intercept + slope * value)
+        .collect();
+    for index in 0..n {
+        residuals[index] = y[index] - fitted[index];
+    }
+    values::named_list(&[
+        ("call", call.arg(3)),
+        ("coefficients", values::real_vector(&[intercept, slope])?),
+        ("residuals", values::real_vector(&residuals)?),
+        ("fitted.values", values::real_vector(&fitted)?),
+    ])
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let count = values.len();
+    match count {
+        0 => f64::NAN,
+        _ if count % 2 == 1 => values[count / 2],
+        _ => (values[count / 2 - 1] + values[count / 2]) / 2.0,
+    }
 }
 
 /// `.C(HoltWinters, x, xl, alpha, beta, gamma, start.time, seasonal, period, dotrend,
@@ -2372,6 +2468,393 @@ unsafe fn eureka(call: &NativeCall<'_>) -> R<Sexp> {
     values::reals_mut(arguments[4]).copy_from_slice(&variances);
     values::reals_mut(arguments[5]).copy_from_slice(&a[1..]);
     c_return(call, &arguments)
+}
+
+/// `.Call(C_Rsm, x, kind, end_rule)`: Tukey's running median smoothers. `kind` counts from 1
+/// through "3RS3R", "3RSS", "3RSR", "3R", "3" and "S". For the median kinds `end_rule` is 1 to
+/// copy the end values or 2 for Tukey's end-point rule, negated in the "3RS" kinds to also split
+/// flats next to the ends; for "S" it is whether to split them. The result is `list(y, iter)`,
+/// or `list(y, changed)` for "S".
+unsafe fn tukey_smooth(call: &NativeCall<'_>) -> R<Sexp> {
+    let x = values::reals(as_reals(call.arg(0))?).to_vec();
+    let kind = values::as_integer_scalar(call.arg(1));
+    let end_rule = values::as_integer_scalar(call.arg(2));
+    let tukey_ends = end_rule.abs() == 2;
+    let split_ends = end_rule < 0;
+    if kind == 6 {
+        let split = split_flats(&x, end_rule != 0);
+        let y = values::real_vector(&split.values)?;
+        return values::named_list(&[("y", y), ("changed", scalar_bool(split.changed)?)]);
+    }
+    if matches!(kind, 4 | 5) && end_rule < 0 {
+        return Err(error(format!(
+            "invalid end-rule for running median of 3: {end_rule}"
+        )));
+    }
+    let (y, iterations) = match kind {
+        5 => {
+            let y = median_of_three_pass(&x, tukey_ends);
+            let changed = y != x;
+            (y, usize::from(changed))
+        }
+        4 => repeated_median(&x, tukey_ends),
+        // The split is kept only when the splitter reports a change. That report is the
+        // one GNU R computes, which is not always whether a value moved.
+        1 => {
+            let (smooth, iterations) = repeated_median(&x, tukey_ends);
+            let split = split_flats(&smooth, split_ends);
+            if split.changed {
+                let (resmoothed, more) = repeated_median(&split.values, tukey_ends);
+                (resmoothed, iterations + 1 + more)
+            } else {
+                (smooth, iterations)
+            }
+        }
+        2 => {
+            let (smooth, iterations) = repeated_median(&x, tukey_ends);
+            let split = split_flats(&smooth, split_ends);
+            if split.changed {
+                let again = split_flats(&split.values, split_ends);
+                let y = if again.changed {
+                    again.values
+                } else {
+                    split.values
+                };
+                (y, iterations + 1)
+            } else {
+                (smooth, iterations)
+            }
+        }
+        3 => {
+            let (mut y, mut iterations) = repeated_median(&x, tukey_ends);
+            loop {
+                iterations += 1;
+                let split = split_flats(&y, split_ends);
+                let (smooth, passes) = repeated_median(&split.values, tukey_ends);
+                y = smooth;
+                if !(split.changed || passes > 0) || iterations > 2 * x.len() {
+                    break;
+                }
+            }
+            (y, iterations)
+        }
+        _ => return Err(error(format!("invalid smoothing kind: {kind}"))),
+    };
+    values::named_list(&[
+        ("y", values::real_vector(&y)?),
+        ("iter", scalar_integer(iterations as i32)?),
+    ])
+}
+
+fn median_of_three(a: f64, b: f64, c: f64) -> f64 {
+    a.max(b).min(a.min(b).max(c))
+}
+
+/// One pass of the running median of three; the ends are copied, or moved by Tukey's end-point
+/// rule, which takes the median of the end value, its smoothed neighbour, and the straight
+/// line through the two smoothed values next to it.
+fn median_of_three_pass(x: &[f64], tukey_ends: bool) -> Vec<f64> {
+    let mut y = x.to_vec();
+    let n = x.len();
+    if n < 3 {
+        return y;
+    }
+    for index in 1..n - 1 {
+        y[index] = median_of_three(x[index - 1], x[index], x[index + 1]);
+    }
+    if tukey_ends {
+        y[0] = median_of_three(x[0], y[1], 3.0 * y[1] - 2.0 * y[2]);
+        y[n - 1] = median_of_three(x[n - 1], y[n - 2], 3.0 * y[n - 2] - 2.0 * y[n - 3]);
+    }
+    y
+}
+
+/// "3R": running medians repeated until nothing changes, with the number of passes that
+/// changed something.
+fn repeated_median(x: &[f64], tukey_ends: bool) -> (Vec<f64>, usize) {
+    let mut y = x.to_vec();
+    let mut passes = 0;
+    loop {
+        let next = median_of_three_pass(&y, tukey_ends);
+        if next == y {
+            return (y, passes);
+        }
+        passes += 1;
+        y = next;
+    }
+}
+
+struct Split {
+    values: Vec<f64>,
+    changed: bool,
+}
+
+/// "S": splits every two-value flat that is a peak or a valley, moving each half to the median
+/// of itself, its outer neighbour, and the line through the two values beyond. A flat next to
+/// an end is split only when `split_ends` is set, and then its end half copies the end value.
+/// `changed` follows GNU R: each interior flat sets it to whether the right half's line misses
+/// the flat value and something has changed so far, and a flat at an end sets it.
+fn split_flats(x: &[f64], split_ends: bool) -> Split {
+    let n = x.len();
+    let mut values = x.to_vec();
+    let mut changed = false;
+    for i in 1..n.saturating_sub(2) {
+        let j = i + 1;
+        if x[i] != x[j] || (x[i] - x[i - 1]) * (x[j + 1] - x[j]) >= 0.0 {
+            continue;
+        }
+        let left_inside = i >= 2;
+        let right_inside = j + 2 < n;
+        if !(left_inside && right_inside) && (!split_ends || !(left_inside || right_inside)) {
+            continue;
+        }
+        values[i] = if left_inside {
+            median_of_three(x[i], x[i - 1], 3.0 * x[i - 1] - 2.0 * x[i - 2])
+        } else {
+            x[i - 1]
+        };
+        let right_line = if right_inside {
+            3.0 * x[j + 1] - 2.0 * x[j + 2]
+        } else {
+            f64::NAN
+        };
+        values[j] = if right_inside {
+            median_of_three(x[j], x[j + 1], right_line)
+        } else {
+            x[j + 1]
+        };
+        changed = if left_inside && right_inside {
+            right_line != x[j] && (changed || values[i] != x[i] || values[j] != x[j])
+        } else {
+            true
+        };
+    }
+    Split { values, changed }
+}
+
+/// `.C(multi_yw, acf, n.obs, order.max, nser, coefs, pacf, var, aic, order, use.aic)`: the
+/// multivariate Yule-Walker fit by Whittle's recursion, which runs a forward and a backward
+/// autoregression side by side. Every matrix is an `nser` by `nser` block stored by rows:
+/// `acf` holds the lag covariances, `pacf` the forward partial autoregression of each order,
+/// `var` the forward innovations variance of each order, and `coefs` the coefficients of the
+/// chosen order with the opposite sign (lag 0 is the identity). The chosen order minimises
+/// the AIC when `use.aic` is set, and is `order.max` otherwise.
+unsafe fn multi_yw(call: &NativeCall<'_>) -> R<Sexp> {
+    let arguments = c_arguments(call)?;
+    let observations = values::as_integer_scalar(arguments[1]) as f64;
+    let order_max = values::as_integer_scalar(arguments[2]).max(0) as usize;
+    let size = values::as_integer_scalar(arguments[3]).max(0) as usize;
+    let use_aic = values::as_integer_scalar(arguments[9]) != 0;
+    let block = size * size;
+    let acf = values::reals(arguments[0]).to_vec();
+    if acf.len() < (order_max + 1) * block {
+        return Err(error("invalid autocovariances"));
+    }
+    let lag = |h: usize| &acf[h * block..(h + 1) * block];
+    let identity: Vec<f64> = (0..block)
+        .map(|index| {
+            if index / size == index % size {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let mut forward: Vec<Vec<f64>> = Vec::new();
+    let mut backward: Vec<Vec<f64>> = Vec::new();
+    let mut forward_variance = lag(0).to_vec();
+    let mut backward_variance = lag(0).to_vec();
+    let mut pacf = identity.clone();
+    let mut variances = forward_variance.clone();
+    let mut aic = vec![observations * matrix_log_determinant(&forward_variance, size)?];
+    let mut coefficients_by_order: Vec<Vec<Vec<f64>>> = vec![Vec::new()];
+    for order in 1..=order_max {
+        let mut innovation = lag(order).to_vec();
+        for (k, coefficient) in forward.iter().enumerate() {
+            let product = matrix_product(coefficient, lag(order - k - 1), size);
+            for (target, value) in innovation.iter_mut().zip(product) {
+                *target -= value;
+            }
+        }
+        let innovation_t = matrix_transpose(&innovation, size);
+        let forward_last = matrix_product(
+            &innovation,
+            &matrix_inverse(&backward_variance, size)?,
+            size,
+        );
+        let backward_last = matrix_product(
+            &innovation_t,
+            &matrix_inverse(&forward_variance, size)?,
+            size,
+        );
+        let mut next_forward = Vec::with_capacity(order);
+        let mut next_backward = Vec::with_capacity(order);
+        for k in 0..order - 1 {
+            let mut f = forward[k].clone();
+            for (target, value) in f.iter_mut().zip(matrix_product(
+                &forward_last,
+                &backward[order - k - 2],
+                size,
+            )) {
+                *target -= value;
+            }
+            let mut b = backward[k].clone();
+            for (target, value) in b.iter_mut().zip(matrix_product(
+                &backward_last,
+                &forward[order - k - 2],
+                size,
+            )) {
+                *target -= value;
+            }
+            next_forward.push(f);
+            next_backward.push(b);
+        }
+        for (target, value) in
+            forward_variance
+                .iter_mut()
+                .zip(matrix_product(&forward_last, &innovation_t, size))
+        {
+            *target -= value;
+        }
+        for (target, value) in
+            backward_variance
+                .iter_mut()
+                .zip(matrix_product(&backward_last, &innovation, size))
+        {
+            *target -= value;
+        }
+        pacf.extend_from_slice(&forward_last);
+        next_forward.push(forward_last);
+        next_backward.push(backward_last);
+        forward = next_forward;
+        backward = next_backward;
+        variances.extend_from_slice(&forward_variance);
+        aic.push(
+            observations * matrix_log_determinant(&forward_variance, size)?
+                + 2.0 * (order * block) as f64,
+        );
+        coefficients_by_order.push(forward.clone());
+    }
+    let chosen = if use_aic {
+        let mut best = 0;
+        for (order, &value) in aic.iter().enumerate() {
+            if value < aic[best] {
+                best = order;
+            }
+        }
+        best
+    } else {
+        order_max
+    };
+    let mut coefficients = identity;
+    for coefficient in &coefficients_by_order[chosen] {
+        coefficients.extend(coefficient.iter().map(|value| -value));
+    }
+    coefficients.resize((order_max + 1) * block, 0.0);
+    values::reals_mut(arguments[4]).copy_from_slice(&coefficients);
+    values::reals_mut(arguments[5]).copy_from_slice(&pacf);
+    values::reals_mut(arguments[6]).copy_from_slice(&variances);
+    values::reals_mut(arguments[7]).copy_from_slice(&aic);
+    if let Some(slot) = values::ints_mut(arguments[8]).first_mut() {
+        *slot = chosen as i32;
+    }
+    c_return(call, &arguments)
+}
+
+fn matrix_product(left: &[f64], right: &[f64], size: usize) -> Vec<f64> {
+    let mut result = vec![0.0; size * size];
+    for row in 0..size {
+        for column in 0..size {
+            result[row * size + column] = (0..size)
+                .map(|k| left[row * size + k] * right[k * size + column])
+                .sum();
+        }
+    }
+    result
+}
+
+fn matrix_transpose(matrix: &[f64], size: usize) -> Vec<f64> {
+    (0..size * size)
+        .map(|index| matrix[(index % size) * size + index / size])
+        .collect()
+}
+
+/// Gauss-Jordan elimination with partial pivoting.
+fn matrix_inverse(matrix: &[f64], size: usize) -> R<Vec<f64>> {
+    let mut work = matrix.to_vec();
+    let mut inverse: Vec<f64> = (0..size * size)
+        .map(|index| {
+            if index / size == index % size {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    for column in 0..size {
+        let pivot = (column..size)
+            .max_by(|&a, &b| {
+                work[a * size + column]
+                    .abs()
+                    .total_cmp(&work[b * size + column].abs())
+            })
+            .unwrap_or(column);
+        if work[pivot * size + column] == 0.0 {
+            return Err(error("singular matrix in 'multi_yw'"));
+        }
+        for k in 0..size {
+            work.swap(column * size + k, pivot * size + k);
+            inverse.swap(column * size + k, pivot * size + k);
+        }
+        let scale = work[column * size + column];
+        for k in 0..size {
+            work[column * size + k] /= scale;
+            inverse[column * size + k] /= scale;
+        }
+        for row in 0..size {
+            if row != column {
+                let factor = work[row * size + column];
+                for k in 0..size {
+                    work[row * size + k] -= factor * work[column * size + k];
+                    inverse[row * size + k] -= factor * inverse[column * size + k];
+                }
+            }
+        }
+    }
+    Ok(inverse)
+}
+
+/// The log of the determinant, from an LU factorization with partial pivoting.
+fn matrix_log_determinant(matrix: &[f64], size: usize) -> R<f64> {
+    let mut work = matrix.to_vec();
+    let mut determinant = 1.0;
+    for column in 0..size {
+        let pivot = (column..size)
+            .max_by(|&a, &b| {
+                work[a * size + column]
+                    .abs()
+                    .total_cmp(&work[b * size + column].abs())
+            })
+            .unwrap_or(column);
+        if pivot != column {
+            for k in 0..size {
+                work.swap(column * size + k, pivot * size + k);
+            }
+            determinant = -determinant;
+        }
+        let diagonal = work[column * size + column];
+        determinant *= diagonal;
+        if diagonal == 0.0 {
+            break;
+        }
+        for row in column + 1..size {
+            let factor = work[row * size + column] / diagonal;
+            for k in column..size {
+                work[row * size + k] -= factor * work[column * size + k];
+            }
+        }
+    }
+    Ok(determinant.ln())
 }
 
 /// `Burg(x, order.max)`: Burg's estimates of the autoregressions of every order up to
@@ -2830,4 +3313,82 @@ fn robustness_weights(y: &[f64], fitted: &[f64]) -> Vec<f64> {
             }
         })
         .collect()
+}
+
+/// `rWishart(n, df, Sigma)`: `n` Wishart draws by the Bartlett decomposition. Each draw fills an
+/// upper triangular factor column by column (a chi-square root on the diagonal, then standard
+/// normals above it), which is the order GNU R draws in, so seeded streams agree.
+unsafe fn r_wishart(call: &NativeCall<'_>) -> R<Sexp> {
+    let count = values::as_integer_scalar(call.arg(0));
+    let count = if count == NA_INTEGER || count <= 0 {
+        1
+    } else {
+        count as usize
+    };
+    let df = values::as_real_scalar(call.arg(1));
+    let scale = call.arg(2);
+    let p = match values::dims(scale) {
+        Some(dims) if scale.kind() == SexpType::Real && dims.len() == 2 && dims[0] == dims[1] => {
+            dims[0]
+        }
+        _ => return Err(error("'scal' must be a square, real matrix")),
+    };
+    if p == 0 || df.is_nan() || df < p as f64 {
+        return Err(error("inconsistent degrees of freedom and dimension"));
+    }
+    let sigma = values::reals(scale);
+    let mut factor = vec![0.0; p * p];
+    for j in 0..p {
+        let mut diagonal = sigma[j + j * p];
+        for k in 0..j {
+            diagonal -= factor[k + j * p] * factor[k + j * p];
+        }
+        if diagonal <= 0.0 {
+            return Err(error("'scal' matrix is not positive-definite"));
+        }
+        let root = diagonal.sqrt();
+        factor[j + j * p] = root;
+        for i in j + 1..p {
+            let mut entry = sigma[j + i * p];
+            for k in 0..j {
+                entry -= factor[k + j * p] * factor[k + i * p];
+            }
+            factor[j + i * p] = entry / root;
+        }
+    }
+    let result = values::alloc(SexpType::Real, p * p * count)?;
+    let dims = [p as i32, p as i32, count as i32];
+    values::set_attr(result, symbols().dim, values::integer_vector(&dims)?)?;
+    random::get_rng_state()?;
+    let mut deviates = distributions::SessionDeviates;
+    let mut bartlett = vec![0.0; p * p];
+    let mut product = vec![0.0; p * p];
+    for draw in 0..count {
+        for j in 0..p {
+            bartlett[j + j * p] = distributions::rchisq(&mut deviates, df - j as f64)?.sqrt();
+            for i in 0..j {
+                bartlett[i + j * p] = random::norm_rand()?;
+                bartlett[j + i * p] = 0.0;
+            }
+        }
+        for j in 0..p {
+            for i in 0..p {
+                product[i + j * p] = (i..=j)
+                    .map(|k| bartlett[i + k * p] * factor[k + j * p])
+                    .sum();
+            }
+        }
+        let out = &mut values::reals_mut(result)[draw * p * p..(draw + 1) * p * p];
+        for j in 0..p {
+            for i in 0..=j {
+                let entry: f64 = (0..p)
+                    .map(|k| product[k + i * p] * product[k + j * p])
+                    .sum();
+                out[i + j * p] = entry;
+                out[j + i * p] = entry;
+            }
+        }
+    }
+    random::put_rng_state()?;
+    Ok(result)
 }

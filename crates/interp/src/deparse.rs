@@ -6,7 +6,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        format, records, standard_library,
+        format, records, standard_library, strings,
         unwind::R,
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
     },
@@ -205,6 +205,10 @@ struct Deparser {
     in_list: usize,
     depth: usize,
     backtick: bool,
+    /// Set just before deparsing the left operand of a binary operator, to that operator's
+    /// precedence. Whatever ends that operand without parentheses (an `if`, a loop, or a
+    /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
+    left_of: Option<u8>,
 }
 
 impl Deparser {
@@ -221,6 +225,7 @@ impl Deparser {
             in_list: 0,
             backtick: true,
             depth: 0,
+            left_of: None,
         }
     }
 
@@ -263,6 +268,7 @@ impl Deparser {
     }
 
     unsafe fn deparse(&mut self, object: Sexp) {
+        let left_of = self.left_of.take();
         self.depth += 1;
         if self.depth > 500 {
             self.print("...");
@@ -283,12 +289,12 @@ impl Deparser {
         }
         // An expression vector written from its source text shows none of its attributes.
         let attributes = self.opts & options::SHOW_ATTRIBUTES != 0
-            && has_shown_attributes(object)
+            && has_shown_attributes(object, self.opts & options::NICE_NAMES != 0)
             && self.expression_srcrefs(object).is_none();
         if attributes {
             self.print("structure(");
         }
-        self.deparse_inner(object);
+        self.deparse_inner(object, if attributes { None } else { left_of });
         if attributes {
             self.attributes(object);
             self.print(")");
@@ -296,7 +302,7 @@ impl Deparser {
         self.depth -= 1;
     }
 
-    unsafe fn deparse_inner(&mut self, object: Sexp) {
+    unsafe fn deparse_inner(&mut self, object: Sexp, left_of: Option<u8>) {
         match object.kind() {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
@@ -324,14 +330,25 @@ impl Deparser {
             SexpType::ExternalPtr => self.print("<pointer: 0x0>"),
             SexpType::WeakRef => self.print("<weak reference>"),
             SexpType::Bytecode => self.print("<bytecode>"),
-            SexpType::Char => self.print(&format::encode_string(&char_str(object), Some('"'))),
-            SexpType::Language => self.language(object),
+            SexpType::Char => self.print(&format::encode_element(object, Some('"'))),
+            SexpType::Language => self.language(object, left_of),
             SexpType::Pairlist | SexpType::Dots => {
-                self.print("pairlist(");
+                // `pairlist()` evaluates its arguments, so an empty one only survives `alist()`.
+                let mut has_missing = false;
+                let mut cell = object;
+                while matches!(cell.kind(), SexpType::Pairlist | SexpType::Dots) {
+                    has_missing |= cell.car() == values::missing_arg();
+                    cell = cell.cdr();
+                }
+                self.print(if has_missing {
+                    "as.pairlist(alist("
+                } else {
+                    "pairlist("
+                });
                 self.in_list += 1;
                 self.arguments(object, false);
                 self.in_list -= 1;
-                self.print(")");
+                self.print(if has_missing { "))" } else { ")" });
             }
             SexpType::List => self.list(object, "list("),
             SexpType::Expression => match self.expression_srcrefs(object) {
@@ -485,7 +502,7 @@ impl Deparser {
         }
     }
 
-    unsafe fn language(&mut self, call: Sexp) {
+    unsafe fn language(&mut self, call: Sexp, left_of: Option<u8>) {
         // `quote()` wraps the outermost call once, and a formula evaluates to itself, so it needs
         // no wrapping at all.
         if self.opts & options::QUOTE_EXPRESSIONS != 0 {
@@ -494,7 +511,7 @@ impl Deparser {
             if !formula {
                 self.print("quote(");
             }
-            self.language(call);
+            self.language(call, None);
             if !formula {
                 self.print(")");
             }
@@ -598,7 +615,14 @@ impl Deparser {
                         self.print(&name_text);
                         let member = arguments.cdr().car();
                         if member.kind() == SexpType::String && length(member) == 1 {
-                            self.vector(member);
+                            // A syntactic name reads back the same bare, as GNU R prints it.
+                            let text = member.element(0);
+                            match std::str::from_utf8(text.bytes()) {
+                                Ok(name) if text != values::na_string() && is_syntactic(name) => {
+                                    self.print(name)
+                                }
+                                _ => self.vector(member),
+                            }
                         } else {
                             self.deparse(member);
                         }
@@ -610,6 +634,8 @@ impl Deparser {
                         let left_parens = needs_parens(info, left, true);
                         if left_parens {
                             self.print("(");
+                        } else {
+                            self.left_of = Some(info.precedence);
                         }
                         self.deparse(left);
                         if left_parens {
@@ -626,9 +652,12 @@ impl Deparser {
                         if info.kind == Kind::Binary {
                             self.line_break(&mut broken);
                         }
-                        let right_parens = needs_parens(info, right, false);
+                        let right_parens = needs_parens(info, right, false)
+                            || left_of.is_some_and(|outer| dangles(right, outer));
                         if right_parens {
                             self.print("(");
+                        } else {
+                            self.left_of = left_of;
                         }
                         self.deparse(right);
                         if right_parens {
@@ -679,6 +708,8 @@ impl Deparser {
                 let left_parens = needs_parens(info, left, true);
                 if left_parens {
                     self.print("(");
+                } else {
+                    self.left_of = Some(info.precedence);
                 }
                 self.deparse(left);
                 if left_parens {
@@ -689,9 +720,12 @@ impl Deparser {
                 self.print(" ");
                 let mut broken = false;
                 self.line_break(&mut broken);
-                let right_parens = needs_parens(info, right, false);
+                let right_parens = needs_parens(info, right, false)
+                    || left_of.is_some_and(|outer| dangles(right, outer));
                 if right_parens {
                     self.print("(");
+                } else {
+                    self.left_of = left_of;
                 }
                 self.deparse(right);
                 if right_parens {
@@ -723,9 +757,7 @@ impl Deparser {
             self.deparse(head);
         }
         self.print("(");
-        self.in_list += 1;
         self.arguments(arguments, false);
-        self.in_list -= 1;
         self.print(")");
     }
 
@@ -1035,9 +1067,16 @@ impl Deparser {
     unsafe fn plain_call(&mut self, name: &str, arguments: Sexp) {
         self.print(name);
         self.print("(");
-        self.in_list += 1;
+        // GNU R keeps a braced `if` on one line inside the arguments of a call to a
+        // primitive (`c`, `list`, `quote`), but breaks it inside any other call's.
+        let primitive = crate::builtins::primitive(name).is_some();
+        if primitive {
+            self.in_list += 1;
+        }
         self.arguments(arguments, false);
-        self.in_list -= 1;
+        if primitive {
+            self.in_list -= 1;
+        }
         self.print(")");
     }
 
@@ -1071,11 +1110,9 @@ impl Deparser {
             }
             if alternative.kind() == SexpType::Pairlist {
                 self.deparse(consequent);
+                self.write_line();
                 if !curly_ahead {
-                    self.write_line();
                     self.indent -= 1;
-                } else {
-                    self.print(" ");
                 }
                 self.print("else ");
                 self.deparse(alternative.car());
@@ -1099,7 +1136,6 @@ impl Deparser {
         let names = get_attr(list, symbols().names);
         let nice = self.opts & options::NICE_NAMES != 0 && names != nil();
         self.print(opener);
-        self.in_list += 1;
         let mut broken = false;
         for index in 0..count {
             // GNU R's vector deparse breaks a line that is past the cutoff before the next element
@@ -1119,7 +1155,6 @@ impl Deparser {
         if broken {
             self.indent -= 1;
         }
-        self.in_list -= 1;
         self.print(")");
     }
 
@@ -1196,18 +1231,7 @@ impl Deparser {
                 .all(|value| is_na_real(value.r)),
             _ => false,
         };
-        // Whole doubles keep their type through `as.double` only when some element shows it.
-        let surround_double = kind == SexpType::Real
-            && keep_integer
-            && !all_na
-            && values::reals(vector)
-                .iter()
-                .all(|&value| !value.is_finite() || (value.fract() == 0.0 && value.abs() < 1e15))
-            && false;
         let wrap = count > 1 || nice;
-        if surround_double {
-            self.print("as.double(");
-        }
         if wrap {
             self.print("c(");
         }
@@ -1248,17 +1272,17 @@ impl Deparser {
                         } else {
                             "NA".to_owned()
                         }
+                    } else if self.opts & options::HEX_NUMERIC != 0 && value.is_finite() {
+                        let sign = if value.is_sign_negative() { "-" } else { "" };
+                        format!(
+                            "{sign}{}",
+                            strings::hexadecimal_form(value.abs(), None, false)
+                        )
                     } else {
-                        let digits = if self.opts & options::DIGITS17 != 0 {
-                            17
+                        if self.opts & options::DIGITS17 != 0 {
+                            format::c_general(value, 17, false)
                         } else {
-                            15
-                        };
-                        let text = format::format_real_alone(value, digits);
-                        if keep_integer && kind == SexpType::Real && false {
-                            text
-                        } else {
-                            text
+                            format::format_real_alone(value, 15)
                         }
                     }
                 }
@@ -1284,6 +1308,14 @@ impl Deparser {
                             part(value.r),
                             part(value.i)
                         )
+                    } else if self.opts & options::DIGITS17 != 0 {
+                        // GNU R writes each part with `%.17g`, so the value parses back exactly.
+                        let imaginary = format::c_general(value.i, 17, false);
+                        let sign = if imaginary.starts_with('-') { "" } else { "+" };
+                        format!(
+                            "{}{sign}{imaginary}i",
+                            format::c_general(value.r, 17, false)
+                        )
                     } else {
                         format::format_complex_alone(value, 15)
                     }
@@ -1297,7 +1329,7 @@ impl Deparser {
                             "NA".to_owned()
                         }
                     } else {
-                        format::encode_string(&char_str(element), Some('"'))
+                        format::encode_element(element, Some('"'))
                     }
                 }
                 _ => String::new(),
@@ -1311,9 +1343,6 @@ impl Deparser {
             if self.length > self.cutoff {
                 self.write_line();
             }
-            self.print(")");
-        }
-        if surround_double {
             self.print(")");
         }
     }
@@ -1486,7 +1515,7 @@ unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
     })
 }
 
-unsafe fn has_shown_attributes(object: Sexp) -> bool {
+unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
     if matches!(
         object.kind(),
         SexpType::Language | SexpType::Symbol | SexpType::Environment | SexpType::Closure
@@ -1500,7 +1529,7 @@ unsafe fn has_shown_attributes(object: Sexp) -> bool {
             cell = cell.cdr();
             continue;
         }
-        if tag != symbols().names || !nice_names_ok(object) {
+        if tag != symbols().names || !nice_names || !nice_names_ok(object) {
             return true;
         }
         cell = cell.cdr();
@@ -1554,6 +1583,29 @@ unsafe fn ry_call_form(expression: Sexp) -> Option<RyForm> {
 
 unsafe fn is_curly(expression: Sexp) -> bool {
     expression.kind() == SexpType::Language && expression.car() == symbols().brace
+}
+
+/// Whether `argument`, ending the left operand of an operator of precedence `outer`, would
+/// extend past that operand when reparsed: a keyword construct always would, and a unary
+/// operator would when it binds more loosely than `outer`. A function definition would too,
+/// but GNU R leaves it bare, so ry does the same to keep the same text.
+unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
+    if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
+        return false;
+    }
+    let name = argument.car().car().bytes();
+    if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
+        return true;
+    }
+    values::pairlist_length(argument.cdr()) == 1
+        && operator_info(name).is_some_and(|info| {
+            let precedence = if info.precedence == precedence::SUM {
+                precedence::SIGN
+            } else {
+                info.precedence
+            };
+            precedence < outer
+        })
 }
 
 /// GNU R's `needsparens`: whether an operand of `main` must be parenthesized.

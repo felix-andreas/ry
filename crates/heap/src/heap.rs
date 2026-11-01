@@ -23,6 +23,7 @@ pub mod arena;
 pub mod env;
 pub mod object;
 pub mod records;
+mod space;
 pub mod strings;
 
 use {
@@ -33,9 +34,11 @@ use {
             VECTOR_DATA_OFFSET, flag_bits, gc_bits, gp, object_size, slot_for,
         },
         records::Layouts,
+        space::{SIZE_CLASS_BY_WORDS, SLOT_SIZES, Space, Swept},
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{alloc::Layout, cell::Cell, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
 };
 
@@ -45,11 +48,16 @@ pub const MAX_VECTOR_LENGTH: isize = 4_503_599_627_370_496;
 pub const DEFAULT_PROTECT_LIMIT: usize = 50_000;
 
 pub struct Heap {
-    classes: Vec<SizeClass>,
+    space: Space,
     large: FxHashSet<Sexp>,
-    /// Every object allocated since the last collection, which a minor collection sweeps.
-    young: Vec<Sexp>,
+    /// Large objects allocated since the last collection, which a minor collection sweeps.
+    young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
+    /// The last store target the barrier found unmarked. Marks are set only during a collection,
+    /// which clears this, so until then a store into it needs no barrier work. Native code fills
+    /// a fresh vector one `SET_STRING_ELT` at a time, and this makes each of those stores one
+    /// compare instead of a mark-bitmap lookup.
+    young_parent: Option<Sexp>,
     escaped: Vec<Sexp>,
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
@@ -67,7 +75,11 @@ pub struct Heap {
     sources: Vec<(u64, Rc<dyn RootSource>)>,
     next_source_id: u64,
     policy: GcPolicy,
+    /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
+    /// Bytes of large vectors allocated since the last collection, kept apart from
+    /// `young_bytes` because they have their own budget.
+    young_large_bytes: usize,
     old_bytes: usize,
     stats: GcStats,
     inhibit: u32,
@@ -82,6 +94,15 @@ pub struct Heap {
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
+}
+
+/// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
+/// for `missing()`.
+#[derive(Clone, Copy)]
+pub struct Formal {
+    pub symbol: Sexp,
+    pub value: Sexp,
+    pub missing: bool,
 }
 
 /// The objects every R session has, created with the heap.
@@ -128,6 +149,7 @@ pub trait RootSource {
 
 pub struct Marker<'a> {
     stack: &'a mut Vec<Sexp>,
+    space: &'a mut Space,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,9 +186,12 @@ pub fn gc_stress_requested() -> Option<GcStressStart> {
 }
 
 pub struct GcPolicy {
-    /// Bytes of young allocation that trigger a minor collection while the old generation is
+    /// Bytes of young small objects that trigger a minor collection while the old generation is
     /// small; past twice this size, half the old generation's bytes trigger one instead.
     pub young_limit: usize,
+    /// Bytes of young large vectors that trigger a minor collection, which also grows to half
+    /// the old generation.
+    pub young_large_limit: usize,
     /// Old-generation bytes that trigger a major collection after a minor one.
     pub old_limit: usize,
     pub min_old_limit: usize,
@@ -297,35 +322,7 @@ impl std::error::Error for HeapError {}
 
 pub type HeapResult<T> = Result<T, HeapError>;
 
-/// Slot sizes of the small-object pages. Forty bytes is a triple: a pairlist cell, a symbol, a
-/// closure. Anything above the last class is a large object.
-const SLOT_SIZES: [usize; 17] = [
-    32, 40, 48, 64, 80, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048,
-];
-/// The size class for each object size in 8-byte words, so allocation finds its class with one
-/// load instead of a search through `SLOT_SIZES`.
-const SIZE_CLASS_BY_WORDS: [u8; 2048 / 8 + 1] = {
-    let mut table = [0u8; 2048 / 8 + 1];
-    let mut units = 0;
-    let mut class = 0;
-    while units < table.len() {
-        while SLOT_SIZES[class] < units * 8 {
-            class += 1;
-        }
-        table[units] = class as u8;
-        units += 1;
-    }
-    table
-};
-const PAGE_SIZE: usize = 64 * 1024;
 const LARGE_CLASS: u8 = u8::MAX;
-const POISON: u8 = 0xDB;
-
-struct SizeClass {
-    slot_size: usize,
-    pages: Vec<NonNull<u8>>,
-    free: Vec<NonNull<u8>>,
-}
 
 impl Heap {
     pub fn new() -> Heap {
@@ -333,19 +330,12 @@ impl Heap {
     }
 
     pub fn with_policy(policy: GcPolicy) -> Heap {
-        let classes = SLOT_SIZES
-            .iter()
-            .map(|&slot_size| SizeClass {
-                slot_size,
-                pages: Vec::new(),
-                free: Vec::new(),
-            })
-            .collect();
         let mut heap = Heap {
-            classes,
+            space: Space::new(),
             large: FxHashSet::default(),
-            young: Vec::new(),
+            young_large: Vec::new(),
             remembered: Vec::new(),
+            young_parent: None,
             escaped: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
@@ -371,6 +361,7 @@ impl Heap {
             next_source_id: 0,
             policy,
             young_bytes: 0,
+            young_large_bytes: 0,
             old_bytes: 0,
             stats: GcStats::default(),
             inhibit: 1,
@@ -649,8 +640,10 @@ impl Heap {
         bindings: usize,
     ) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
-        let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
+        // Every field is written below, so zeroing the slot first would store it twice.
+        let object = self.allocate_with(SexpType::Environment, size, &[enclosure], 0)?;
         std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
+        self.space.set_finalizable(object);
         object.set_enclosure_unbarriered(enclosure);
         Ok(object)
     }
@@ -722,7 +715,7 @@ impl Heap {
             return Err(HeapError::TooLong);
         }
         let object = self.allocate(SexpType::Record, size, values)?;
-        let slots: Vec<Slot> = values
+        let slots: smallvec::SmallVec<[Slot; 4]> = values
             .iter()
             .enumerate()
             .map(|(index, &value)| slot_for(value, index))
@@ -819,17 +812,25 @@ impl Heap {
 
     // Stores, each through the write barrier and the reference counts.
 
-    #[inline]
+    #[inline(always)]
     pub unsafe fn write_barrier(&mut self, parent: Sexp, child: Sexp) {
-        if parent.gc_bits() & (gc_bits::MARK | gc_bits::REMEMBERED) == gc_bits::MARK
-            && !child.is_marked()
-        {
+        if self.young_parent == Some(parent) || parent.gc_bits() & gc_bits::REMEMBERED != 0 {
+            return;
+        }
+        self.write_barrier_slow(parent, child);
+    }
+
+    #[inline(never)]
+    unsafe fn write_barrier_slow(&mut self, parent: Sexp, child: Sexp) {
+        if !self.space.is_marked(parent) {
+            self.young_parent = Some(parent);
+        } else if !self.space.is_marked(child) {
             parent.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(parent);
         }
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
         if parent.flags() & flag_bits::UNTRACKED == 0 {
             new.increment_refcount();
@@ -864,13 +865,52 @@ impl Heap {
         cell.set_tag_unbarriered(value);
     }
 
+    /// Stores `count` elements of `from`, starting at `from_start`, into `to` from `to_start`,
+    /// as `set_element` would one at a time but with one barrier decision for the whole run.
+    /// Neither vector may be ALTREP, both ranges must be in bounds, and when `to` is `from` the
+    /// ranges must not overlap.
+    pub unsafe fn copy_elements(
+        &mut self,
+        to: Sexp,
+        to_start: usize,
+        from: Sexp,
+        from_start: usize,
+        count: usize,
+    ) {
+        debug_assert!(
+            to != from || to_start + count <= from_start || from_start + count <= to_start,
+            "copy_elements ranges overlap"
+        );
+        let tracked = to.flags() & flag_bits::UNTRACKED == 0;
+        for offset in 0..count {
+            let value = from.stored_element(from_start + offset);
+            if tracked {
+                value.increment_refcount();
+                to.stored_element(to_start + offset).decrement_refcount();
+            }
+            to.set_element_unbarriered(to_start + offset, value);
+        }
+        if count == 0 || self.young_parent == Some(to) || to.gc_bits() & gc_bits::REMEMBERED != 0 {
+            return;
+        }
+        if !self.space.is_marked(to) {
+            self.young_parent = Some(to);
+            return;
+        }
+        if (0..count).any(|offset| !self.space.is_marked(to.stored_element(to_start + offset))) {
+            to.set_gc_bit(gc_bits::REMEMBERED, true);
+            self.remembered.push(to);
+        }
+    }
+
+    #[inline(always)]
     pub unsafe fn set_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
         if vector.is_altrep()
             && let Some(elements) = crate::object::altrep_elements()
         {
             return (elements.write)(vector, index, value);
         }
-        self.store(vector, vector.element(index), value);
+        self.store(vector, vector.stored_element(index), value);
         vector.set_element_unbarriered(index, value);
     }
 
@@ -921,7 +961,7 @@ impl Heap {
         let mut escaped = std::mem::take(&mut self.escaped);
         for vector in escaped.drain(..) {
             vector.set_gc_bit(gc_bits::ESCAPED, false);
-            if vector.gc_bits() & (gc_bits::MARK | gc_bits::REMEMBERED) == gc_bits::MARK {
+            if vector.gc_bits() & gc_bits::REMEMBERED == 0 && self.space.is_marked(vector) {
                 vector.set_gc_bit(gc_bits::REMEMBERED, true);
                 self.remembered.push(vector);
             }
@@ -972,27 +1012,50 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            (*env.frame_ptr()).insert(cell);
+            (*env.frame_ptr()).insert(symbol, cell);
         }
         Ok(())
     }
 
-    /// Binds `symbol` in the frame of `env`, a new function frame, and returns the new cell. A
-    /// closure call binds each formal this way: the frame is new, so the lock checks of
-    /// [`Heap::define`] cannot matter, and its probe would only matter for duplicate formals,
-    /// where the frame keeps the first binding as GNU R does.
-    pub unsafe fn define_fresh(
-        &mut self,
-        env: Sexp,
-        symbol: Sexp,
-        value: Sexp,
-    ) -> HeapResult<Sexp> {
+    /// Binds each of `bindings` in `env`, a new function frame, as a closure call binds its
+    /// matched formals. The cells are allocated as one batch, with a single collection check
+    /// that keeps every value alive, so the values need no other root.
+    pub unsafe fn define_formals(&mut self, env: Sexp, bindings: &[Formal]) -> HeapResult<()> {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
-        let cell =
-            self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
-        self.write_barrier(env, cell);
-        (*env.frame_ptr()).insert(cell);
-        Ok(cell)
+        let size = object_size(SexpType::Binding, 0).ok_or(HeapError::TooLong)?;
+        let request = size * bindings.len();
+        if self.collection_due(request, false) {
+            let keep: SmallVec<[Sexp; 16]> = bindings
+                .iter()
+                .map(|binding| binding.value)
+                .chain([env])
+                .collect();
+            self.maybe_collect(request, false, &keep);
+        }
+        let nil = self.known.nil;
+        let frame = &mut *env.frame_ptr();
+        let mut first = true;
+        for binding in bindings {
+            let cell = self.allocate_uncollected(SexpType::Binding, size, 0)?;
+            cell.set_car_unbarriered(binding.symbol);
+            cell.set_cdr_unbarriered(binding.value);
+            cell.set_tag_unbarriered(nil);
+            binding.symbol.increment_refcount();
+            binding.value.increment_refcount();
+            nil.increment_refcount();
+            if binding.missing {
+                cell.set_gp_bits(gp::BINDING_MISSING, true);
+            }
+            frame.insert(binding.symbol, cell);
+            // A collection above may have made `env` old, and the cells are all young, so the
+            // first cell's barrier check covers every one, including when a later allocation
+            // fails and leaves the cells before it in the frame.
+            if first {
+                self.write_barrier(env, cell);
+                first = false;
+            }
+        }
+        Ok(())
     }
 
     pub unsafe fn set_binding_value(&mut self, cell: Sexp, value: Sexp) -> HeapResult<()> {
@@ -1093,11 +1156,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_symbols(env);
         }
-        (*env.frame_ptr())
-            .cells()
-            .iter()
-            .map(|cell| cell.car())
-            .collect()
+        (*env.frame_ptr()).symbols().collect()
     }
 
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
@@ -1126,6 +1185,15 @@ impl Heap {
         if !self.is_symbol_frame(env) && env != self.known.empty_env {
             (*env.frame_ptr()).set_hashed(size);
         }
+    }
+
+    /// The binding count of each bucket of `env`'s hash table and the table's chain counter, as
+    /// GNU R's `env.profile` reports them, or `None` when the frame is not hashed.
+    pub unsafe fn frame_hash_profile(&self, env: Sexp) -> Option<(Vec<usize>, usize)> {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return None;
+        }
+        unsafe { (*env.frame_ptr()).hash_profile() }
     }
 
     /// Marks the bindings of a closure frame made so far as its formals.
@@ -1158,7 +1226,7 @@ impl Heap {
         *self.roots.precious.entry(object).or_insert(0) += 1;
         // An old object keeps its mark, so a minor collection would skip it anyway. The caller
         // is preserving the object, so it is live.
-        if !unsafe { object.is_marked() } {
+        if !unsafe { self.space.is_marked(object) } {
             self.new_roots.push(object);
         }
     }
@@ -1225,22 +1293,34 @@ impl Heap {
         keep: &[Sexp],
         zeroed: usize,
     ) -> HeapResult<Sexp> {
-        self.maybe_collect(size, keep);
+        let large = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).is_none();
+        self.maybe_collect(size, large, keep);
+        self.allocate_uncollected(kind, size, zeroed)
+    }
+
+    /// [`Heap::allocate_with`] without the collection check, for a caller that ran it once for
+    /// a batch of objects.
+    unsafe fn allocate_uncollected(
+        &mut self,
+        kind: SexpType,
+        size: usize,
+        zeroed: usize,
+    ) -> HeapResult<Sexp> {
         let class = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).copied();
-        let (memory, size_class, gc) = match class {
+        let (memory, size_class) = match class {
             Some(class) => {
                 let class = class as usize;
-                let memory = match self.classes[class].free.pop() {
-                    Some(memory) => memory,
-                    None => self.grow_class(class)?,
-                };
+                let memory = self
+                    .space
+                    .allocate(class)
+                    .ok_or(HeapError::CannotAllocate { bytes: size })?;
                 // Every slot size is a multiple of 8 bytes, and zeroing word by word keeps the
                 // common small object clear of a call into `memset`.
                 let words = memory.as_ptr().cast::<u64>();
                 for word in 0..SLOT_SIZES[class].min(zeroed.next_multiple_of(8)) / 8 {
                     words.add(word).write(0);
                 }
-                (memory, class as u8, 0)
+                (memory, class as u8)
             }
             None => {
                 let layout = Layout::from_size_align(size, 16)
@@ -1253,7 +1333,7 @@ impl Heap {
                     })
                 }
                 .ok_or(HeapError::CannotAllocate { bytes: size })?;
-                (memory, LARGE_CLASS, gc_bits::LARGE)
+                (memory, LARGE_CLASS)
             }
         };
         let object = Sexp::from_non_null(memory.cast());
@@ -1263,37 +1343,18 @@ impl Heap {
         } else {
             self.known.nil
         };
-        object.init_header(kind, size_class, gc, nil);
-        if gc & gc_bits::LARGE != 0 {
+        object.init_header(kind, size_class, 0, nil);
+        if size_class == LARGE_CLASS {
             self.large.insert(object);
+            self.young_large.push(object);
+            self.young_large_bytes += size;
+        } else {
+            self.young_bytes += size;
         }
-        self.young.push(object);
-        self.young_bytes += size;
         Ok(object)
     }
 
-    unsafe fn grow_class(&mut self, class: usize) -> HeapResult<NonNull<u8>> {
-        let layout = Layout::from_size_align(PAGE_SIZE, 16)
-            .map_err(|_| HeapError::CannotAllocate { bytes: PAGE_SIZE })?;
-        let page = NonNull::new(std::alloc::alloc(layout))
-            .ok_or(HeapError::CannotAllocate { bytes: PAGE_SIZE })?;
-        let size_class = &mut self.classes[class];
-        let slot_size = size_class.slot_size;
-        let slots = PAGE_SIZE / slot_size;
-        for slot in (0..slots).rev() {
-            let memory = page.add(slot * slot_size);
-            *memory.as_ptr() = SexpType::Free as u8;
-            size_class.free.push(memory);
-        }
-        size_class.pages.push(page);
-        self.stats.pages += 1;
-        size_class
-            .free
-            .pop()
-            .ok_or(HeapError::CannotAllocate { bytes: slot_size })
-    }
-
-    unsafe fn maybe_collect(&mut self, request: usize, keep: &[Sexp]) {
+    unsafe fn maybe_collect(&mut self, request: usize, large: bool, keep: &[Sexp]) {
         if self.inhibit > 0 {
             return;
         }
@@ -1308,16 +1369,36 @@ impl Heap {
                 self.collect_keeping(kind, keep);
             }
             GcStress::Off => {
-                // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect
-                // on every large vector a big session allocates, rescanning the young ones each time.
-                let budget = self.policy.young_limit.max(self.old_bytes / 2);
-                if self.young_bytes + request > budget {
+                if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep);
                     if self.old_bytes > self.policy.old_limit {
                         self.collect_keeping(Collection::Major, keep);
                     }
                 }
             }
+        }
+    }
+
+    /// Whether allocating `request` more bytes, as one large vector or as small objects, runs a
+    /// collection.
+    fn collection_due(&self, request: usize, large: bool) -> bool {
+        if self.inhibit > 0 {
+            return false;
+        }
+        if self.policy.stress == GcStress::EveryAllocation {
+            return true;
+        }
+        // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
+        // every large vector a big session allocates, rescanning the young ones each time.
+        // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
+        // a reader such as `fread` allocates every column before filling any, so charging
+        // them to the nursery would buy a collection per column that rescans the columns
+        // already allocated.
+        let grown = self.old_bytes / 2;
+        if large {
+            self.young_large_bytes + request > self.policy.young_large_limit.max(grown)
+        } else {
+            self.young_bytes + request > self.policy.young_limit.max(grown)
         }
     }
 
@@ -1331,6 +1412,7 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        self.young_parent = None;
         self.major_marking = kind == Collection::Major;
         if kind == Collection::Major {
             self.clear_marks();
@@ -1354,7 +1436,10 @@ impl Heap {
             let mut escaped_strings = false;
             for index in 0..self.escaped.len() {
                 let parent = self.escaped[index];
-                if parent.kind() == SexpType::String && !parent.is_altrep() && parent.is_marked() {
+                if parent.kind() == SexpType::String
+                    && !parent.is_altrep()
+                    && self.space.is_marked(parent)
+                {
                     escaped_strings = true;
                     self.mark(parent.attrib());
                 } else {
@@ -1362,11 +1447,11 @@ impl Heap {
                 }
             }
             if escaped_strings {
-                for index in 0..self.young.len() {
-                    let object = self.young[index];
-                    if object.kind() == SexpType::Char {
-                        self.mark(object);
-                    }
+                // Every CHARSXP but the rooted `NA_STRING` is interned, so the young ones are
+                // the strings interned since the last collection.
+                for index in 0..self.strings.young().len() {
+                    let string = self.strings.young()[index];
+                    self.mark(string);
                 }
             }
         }
@@ -1374,30 +1459,38 @@ impl Heap {
         self.process_weak_refs();
         self.major_marking = false;
         // Before the sweep, while a mark still means "survives".
-        self.escaped.retain(|object| object.is_marked());
+        let space = &self.space;
+        self.escaped.retain(|&object| space.is_marked(object));
         match kind {
             Collection::Minor => {
-                self.strings.remove_dead_young();
+                self.strings.remove_dead_young(&self.space);
                 self.sweep_young();
                 self.stats.minor_collections += 1;
             }
             Collection::Major => {
-                self.strings.remove_dead();
+                self.strings.remove_dead(&self.space);
                 self.sweep_all();
                 self.stats.major_collections += 1;
-                self.policy.old_limit = (self.old_bytes * 2).max(self.policy.min_old_limit);
+                // The limit falls back towards twice what survived by an eighth per major
+                // collection rather than at once, as GNU R shrinks its trigger. Otherwise every
+                // explicit `gc()` between two large operations would drop the limit below the
+                // next one's peak and buy a full collection in the middle of it.
+                self.policy.old_limit = (self.old_bytes * 2)
+                    .max(self.policy.old_limit / 8 * 7)
+                    .max(self.policy.min_old_limit);
             }
         }
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
         }
         self.young_bytes = 0;
+        self.young_large_bytes = 0;
         self.inhibit -= 1;
     }
 
+    #[inline]
     unsafe fn mark(&mut self, object: Sexp) {
-        if !object.is_marked() {
-            object.set_gc_bit(gc_bits::MARK, true);
+        if self.space.mark(object) {
             self.mark_stack.push(object);
         }
     }
@@ -1420,9 +1513,9 @@ impl Heap {
         // copied out on every collection; a package with tens of thousands of symbols made that
         // copy a large part of each minor collection.
         let mark_stack = &mut self.mark_stack;
+        let space = &mut self.space;
         let mut mark = |object: Sexp| {
-            if !object.is_marked() {
-                object.set_gc_bit(gc_bits::MARK, true);
+            if space.mark(object) {
                 mark_stack.push(object);
             }
         };
@@ -1442,6 +1535,7 @@ impl Heap {
         for source in sources {
             let mut marker = Marker {
                 stack: &mut self.mark_stack,
+                space: &mut self.space,
             };
             source.trace(&mut marker);
         }
@@ -1505,7 +1599,7 @@ impl Heap {
             }
             Shape::Environment => {
                 self.mark(object.enclosure());
-                for &cell in (*object.frame_ptr()).cells() {
+                for cell in (*object.frame_ptr()).cells() {
                     self.mark(cell);
                 }
             }
@@ -1533,7 +1627,7 @@ impl Heap {
         let mut index = 0;
         while index < self.weak_refs.len() {
             let weak = self.weak_refs[index];
-            if weak.weak_key().is_marked() {
+            if self.space.is_marked(weak.weak_key()) {
                 index += 1;
             } else {
                 dying.push(self.weak_refs.swap_remove(index));
@@ -1561,10 +1655,10 @@ impl Heap {
             let mut changed = false;
             for index in 0..self.weak_refs.len() {
                 let weak = self.weak_refs[index];
-                if weak.weak_key().is_marked() {
+                if self.space.is_marked(weak.weak_key()) {
                     for child in [weak.weak_value(), weak.weak_finalizer()] {
-                        if !child.is_marked() {
-                            self.mark(child);
+                        if self.space.mark(child) {
+                            self.mark_stack.push(child);
                             changed = true;
                         }
                     }
@@ -1582,7 +1676,7 @@ impl Heap {
     /// next minor collection would free a live child.
     unsafe fn verify_barrier(&self) {
         let check = |parent: Sexp| {
-            if !parent.is_marked()
+            if !self.space.is_marked(parent)
                 || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
             {
                 return;
@@ -1607,7 +1701,7 @@ impl Heap {
                         children.push(parent.enclosure());
                         let frame = parent.frame_ptr();
                         if !frame.is_null() {
-                            children.extend((*frame).cells().iter().copied());
+                            children.extend((*frame).cells());
                         }
                     }
                     Shape::ExternalPtr => {
@@ -1621,7 +1715,7 @@ impl Heap {
                 }
             }
             for (position, child) in children.into_iter().enumerate() {
-                if !child.is_marked() {
+                if !self.space.is_marked(child) {
                     panic!(
                         "write barrier violated: old {:?} (length {}) holds young {:?} at child {position}",
                         parent.kind(),
@@ -1635,15 +1729,10 @@ impl Heap {
                 }
             }
         };
-        for class in &self.classes {
-            for &page in &class.pages {
-                for slot in 0..PAGE_SIZE / class.slot_size {
-                    let object = Sexp::from_non_null(page.add(slot * class.slot_size).cast());
-                    if object.kind_byte() != SexpType::Free as u8 {
-                        check(object);
-                    }
-                }
-            }
+        // Only marked objects are old, and the marked slots are exactly the live old objects:
+        // an allocated but unmarked slot may never have held one.
+        for object in self.space.marked_objects() {
+            check(object);
         }
         for &object in &self.large {
             check(object);
@@ -1651,78 +1740,57 @@ impl Heap {
     }
 
     unsafe fn clear_marks(&mut self) {
-        for class in &self.classes {
-            for &page in &class.pages {
-                for slot in 0..PAGE_SIZE / class.slot_size {
-                    let object = Sexp::from_non_null(page.add(slot * class.slot_size).cast());
-                    if object.kind_byte() != SexpType::Free as u8 {
-                        object.set_gc_bit(gc_bits::MARK | gc_bits::REMEMBERED, false);
-                    }
-                }
-            }
-        }
+        self.space.clear_marks();
         for &object in &self.large {
-            object.set_gc_bit(gc_bits::MARK | gc_bits::REMEMBERED, false);
+            object.set_gc_bit(gc_bits::MARK, false);
         }
-        self.remembered.clear();
+        for parent in self.remembered.drain(..) {
+            parent.set_gc_bit(gc_bits::REMEMBERED, false);
+        }
     }
 
     unsafe fn sweep_young(&mut self) {
-        let young = std::mem::take(&mut self.young);
-        for &object in &young {
-            if object.is_marked() {
+        let mut swept = Swept::default();
+        let change = self.space.sweep_young(&mut swept);
+        self.old_bytes = self.old_bytes.saturating_add_signed(change);
+        let young_large = std::mem::take(&mut self.young_large);
+        for &object in &young_large {
+            if object.gc_bits() & gc_bits::MARK != 0 {
                 self.old_bytes += self.size_of(object);
             } else {
-                self.free(object);
+                self.free_large(object);
+                swept.freed += 1;
             }
         }
-        self.young = young;
-        self.young.clear();
+        self.young_large = young_large;
+        self.young_large.clear();
+        self.stats.objects_freed += swept.freed;
         self.refresh_live_stats();
     }
 
     unsafe fn sweep_all(&mut self) {
-        let mut old_bytes = 0;
-        for class in 0..self.classes.len() {
-            let slot_size = self.classes[class].slot_size;
-            for page_index in 0..self.classes[class].pages.len() {
-                let page = self.classes[class].pages[page_index];
-                for slot in 0..PAGE_SIZE / slot_size {
-                    let object = Sexp::from_non_null(page.add(slot * slot_size).cast());
-                    if object.kind_byte() == SexpType::Free as u8 {
-                        continue;
-                    }
-                    if object.is_marked() {
-                        old_bytes += slot_size;
-                    } else {
-                        self.free(object);
-                    }
-                }
-            }
-        }
+        let mut swept = Swept::default();
+        let mut old_bytes = self.space.sweep_all(&mut swept);
         let large: Vec<Sexp> = self.large.iter().copied().collect();
         for object in large {
-            if object.is_marked() {
+            if object.gc_bits() & gc_bits::MARK != 0 {
                 old_bytes += self.size_of(object);
             } else {
-                self.free(object);
+                self.free_large(object);
+                swept.freed += 1;
             }
         }
-        self.young.clear();
+        self.young_large.clear();
         self.old_bytes = old_bytes;
+        self.stats.objects_freed += swept.freed;
         self.refresh_live_stats();
     }
 
     fn refresh_live_stats(&mut self) {
-        let free_slots: usize = self.classes.iter().map(|class| class.free.len()).sum();
-        let total_slots: usize = self
-            .classes
-            .iter()
-            .map(|class| class.pages.len() * (PAGE_SIZE / class.slot_size))
-            .sum();
-        self.stats.live_objects = (total_slots - free_slots + self.large.len()) as u64;
+        self.stats.live_objects = (self.space.live_slots() + self.large.len()) as u64;
         self.stats.live_bytes = self.old_bytes as u64;
         self.stats.large_objects = self.large.len() as u64;
+        self.stats.pages = self.space.page_count() as u64;
     }
 
     unsafe fn size_of(&self, object: Sexp) -> usize {
@@ -1738,32 +1806,13 @@ impl Heap {
         object_size(object.kind(), length).unwrap_or(0)
     }
 
-    unsafe fn free(&mut self, object: Sexp) {
-        if object.kind() == SexpType::Environment && !object.is_altrep() {
-            std::ptr::drop_in_place(object.frame_ptr());
-        }
-        self.stats.objects_freed += 1;
-        let class = object.size_class();
-        if class == LARGE_CLASS {
-            let size = self.size_of(object);
-            self.large.remove(&object);
-            std::alloc::dealloc(
-                object.as_ptr().cast(),
-                Layout::from_size_align_unchecked(size, 16),
-            );
-            return;
-        }
-        let slot_size = SLOT_SIZES[class as usize];
-        let memory = NonNull::new_unchecked(object.as_ptr().cast::<u8>());
-        // Poisoning makes a use after free fail loudly, but costs a store per byte of every
-        // freed slot, so only debug builds pay for it.
-        if cfg!(debug_assertions) {
-            std::ptr::write_bytes(memory.as_ptr(), POISON, slot_size);
-        }
-        // The kind and collector bytes stay meaningful: a free slot reads as `FREESXP` and unmarked.
-        *memory.as_ptr() = SexpType::Free as u8;
-        *memory.as_ptr().add(1) = 0;
-        self.classes[class as usize].free.push(memory);
+    unsafe fn free_large(&mut self, object: Sexp) {
+        let size = self.size_of(object);
+        self.large.remove(&object);
+        std::alloc::dealloc(
+            object.as_ptr().cast(),
+            Layout::from_size_align_unchecked(size, 16),
+        );
     }
 
     unsafe fn create_well_known(&mut self) {
@@ -1840,24 +1889,9 @@ impl Default for Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        // SAFETY: the heap owns every page and large object, and nothing outlives it.
+        // SAFETY: the heap owns every large object, and nothing outlives it. The space drops
+        // its own objects.
         unsafe {
-            for class in &self.classes {
-                for &page in &class.pages {
-                    for slot in 0..PAGE_SIZE / class.slot_size {
-                        let object = Sexp::from_non_null(page.add(slot * class.slot_size).cast());
-                        if object.kind_byte() == SexpType::Environment as u8
-                            && object.flags() & flag_bits::ALTREP == 0
-                        {
-                            std::ptr::drop_in_place(object.frame_ptr());
-                        }
-                    }
-                    std::alloc::dealloc(
-                        page.as_ptr(),
-                        Layout::from_size_align_unchecked(PAGE_SIZE, 16),
-                    );
-                }
-            }
             let large: Vec<Sexp> = self.large.iter().copied().collect();
             for object in large {
                 let size = self.size_of(object);
@@ -1917,6 +1951,8 @@ impl Default for GcPolicy {
             // A larger nursery collects less often but touches more fresh memory before its
             // first collection, and first touches are what a short-lived process pays for most.
             young_limit: 8 * 1024 * 1024,
+            // GNU R's initial vector heap trigger, `R_VSIZE`.
+            young_large_limit: 64 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: match gc_stress_requested() {
@@ -2000,8 +2036,7 @@ impl ProtectStack {
 
 impl Marker<'_> {
     pub unsafe fn mark(&mut self, object: Sexp) {
-        if !object.is_marked() {
-            object.set_gc_bit(gc_bits::MARK, true);
+        if self.space.mark(object) {
             self.stack.push(object);
         }
     }

@@ -1,0 +1,2 @@
+# FLSSS: fixed-length subset sum. Each solution is the index vector of one subset of `v`.
+FLSSS : fn(len: double, v: double[], target: double, ME: double, [solutionNeed]: double, [LB]: integer[], [UB]: integer[], [viaConjugate]: logical | NULL, [tlimit]: double, [useBiSrchInFB]: logical, [NfractionDigits]: double) -> list[integer[]]

@@ -12,7 +12,7 @@
 use {
     crate::{
         builtins::{BuiltinDef, Call, internal},
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{self, alloc, install, missing_arg, nil, symbols},
     },
     heap::{
@@ -36,7 +36,17 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
 /// Parses `text` like [`parse_text`], and keeps source references against `srcfile` when it is a
 /// srcfile environment, as GNU R's parser does when `parse` is given one.
 pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -> R<Sexp> {
-    let script = parse_script(text, source_name)?;
+    let condition_file = if srcfile.kind() == SexpType::Environment {
+        let filename = crate::eval::find_var_in_frame(install("filename")?, srcfile)?;
+        match filename.kind() {
+            SexpType::String => values::string_at(filename, 0)
+                .map_or_else(|| "<input>".to_owned(), |name| name.into_owned()),
+            _ => "<input>".to_owned(),
+        }
+    } else {
+        "<input>".to_owned()
+    };
+    let script = parse_script(text, source_name, &condition_file)?;
     let source = if srcfile.kind() == SexpType::Environment {
         Some(SourceMap::new(text, 0, srcfile)?)
     } else {
@@ -65,474 +75,13 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         // Package loaders and installers turn parse data off; building it costs more than
         // the parse itself on a large file.
         let keep_data = crate::envir::get_option("keep.parse.data");
-        if keep_data == nil() || values::as_logical_scalar(keep_data) == 1 {
-            let data = parse_data(source, &script.root)?;
+        if (keep_data == nil() || values::as_logical_scalar(keep_data) == 1)
+            && let Some(data) = crate::parse_data::parse_data(&script.root, source)?
+        {
             crate::heap().define(srcfile, install("parseData")?, data)?;
         }
     }
     Ok(result)
-}
-
-/// GNU R's `parseData`, which `getParseData` reads from a srcfile: an integer matrix with a
-/// column per token and per grammar symbol (`expr` and a few others), holding its first line and
-/// column, last line and column, whether it is a token, R's token number, its id and its
-/// parent's id, with the token names and texts as attributes. Ids follow GNU R's order, in which
-/// a symbol's id is above its children's, though GNU R's ids skip numbers these do not.
-unsafe fn parse_data(source: &SourceMap, root: &SyntaxNode) -> R<Sexp> {
-    let mut builder = ParseDataBuilder { rows: Vec::new() };
-    for element in root.children_with_tokens() {
-        match element {
-            SyntaxElement::Token(token) => builder.top_level_token(&token),
-            SyntaxElement::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
-                builder.comment_lines(&node)
-            }
-            SyntaxElement::Node(node) if is_skipped(&node) => {}
-            SyntaxElement::Node(node) => {
-                builder.expression(&node);
-            }
-        }
-    }
-    let rows = builder.rows;
-    let lines: Vec<(i32, i32, i32, i32)> = rows
-        .iter()
-        .map(|row| {
-            let (first_line, _, first_column) = position(source, row.start);
-            let last = source.text[..row.end]
-                .chars()
-                .next_back()
-                .map_or(row.start, |character| row.end - character.len_utf8())
-                .max(row.start);
-            let (last_line, _, last_column) = position(source, last);
-            (first_line, first_column, last_line, last_column)
-        })
-        .collect();
-    let parents: Vec<i32> = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| match row.parent {
-            Parent::Row(parent) => parent as i32 + 1,
-            Parent::TopLevel => 0,
-            Parent::Comment => comment_parent(&rows, &lines, index),
-        })
-        .collect();
-    let matrix = alloc(SexpType::Integer, 8 * rows.len())?;
-    let cells = values::ints_mut(matrix);
-    for (index, row) in rows.iter().enumerate() {
-        let (first_line, first_column, last_line, last_column) = lines[index];
-        cells[8 * index..8 * index + 8].copy_from_slice(&[
-            first_line,
-            first_column,
-            last_line,
-            last_column,
-            row.terminal as i32,
-            row.number,
-            index as i32 + 1,
-            parents[index],
-        ]);
-    }
-    let tokens: Vec<&str> = rows.iter().map(|row| row.token).collect();
-    let texts: Vec<&str> = rows
-        .iter()
-        .map(|row| {
-            if row.terminal {
-                &source.text[row.start..row.end]
-            } else {
-                ""
-            }
-        })
-        .collect();
-    values::set_attr(
-        matrix,
-        symbols().dim,
-        values::integer_vector(&[8, rows.len() as i32])?,
-    )?;
-    values::set_attr(matrix, install("tokens")?, values::string_vector(&tokens)?)?;
-    values::set_attr(matrix, install("text")?, values::string_vector(&texts)?)?;
-    values::set_attr(matrix, symbols().class, values::scalar_string("parseData")?)?;
-    Ok(matrix)
-}
-
-/// A comment's parent is the smallest grammar symbol around it. Outside every expression, GNU R
-/// gives it the negated id of the top-level expression that ends on its line or else of the next
-/// one, and 0 after the last.
-fn comment_parent(rows: &[ParseRow], lines: &[(i32, i32, i32, i32)], comment: usize) -> i32 {
-    let (start, end) = (rows[comment].start, rows[comment].end);
-    let enclosing = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| !row.terminal && row.start <= start && end <= row.end)
-        .min_by_key(|(_, row)| row.end - row.start);
-    if let Some((index, _)) = enclosing {
-        return index as i32 + 1;
-    }
-    let line = lines[comment].0;
-    let top_level = || {
-        rows.iter()
-            .enumerate()
-            .filter(|(_, row)| !row.terminal && matches!(row.parent, Parent::TopLevel))
-    };
-    top_level()
-        .find(|(index, row)| row.end <= start && lines[*index].2 == line)
-        .or_else(|| top_level().find(|(_, row)| row.start >= end))
-        .map_or(0, |(index, _)| -(index as i32 + 1))
-}
-
-struct ParseRow {
-    start: usize,
-    end: usize,
-    token: &'static str,
-    number: i32,
-    terminal: bool,
-    parent: Parent,
-}
-
-#[derive(Clone, Copy)]
-enum Parent {
-    Row(usize),
-    TopLevel,
-    /// Decided once every row exists, from where the comment sits.
-    Comment,
-}
-
-/// Where a name or constant sits decides its token, and outside an ordinary expression it is
-/// not wrapped in an `expr` of its own.
-#[derive(Clone, Copy)]
-enum Role {
-    Callee,
-    Argument,
-    Formal,
-    Field,
-    Slot,
-    Package,
-    LoopVariable,
-}
-
-struct ParseDataBuilder {
-    rows: Vec<ParseRow>,
-}
-
-impl ParseDataBuilder {
-    fn push(
-        &mut self,
-        start: usize,
-        end: usize,
-        token: &'static str,
-        number: i32,
-        terminal: bool,
-        parent: Parent,
-    ) -> usize {
-        self.rows.push(ParseRow {
-            start,
-            end,
-            token,
-            number,
-            terminal,
-            parent,
-        });
-        self.rows.len() - 1
-    }
-
-    fn token(&mut self, token: &SyntaxToken, (name, number): (&'static str, i32)) -> usize {
-        let range = token.text_range();
-        self.push(
-            range.start().into(),
-            range.end().into(),
-            name,
-            number,
-            true,
-            Parent::TopLevel,
-        )
-    }
-
-    fn top_level_token(&mut self, token: &SyntaxToken) {
-        match token.kind() {
-            SyntaxKind::COMMENT => {
-                let row = self.token(token, ("COMMENT", 290));
-                self.rows[row].parent = Parent::Comment;
-            }
-            kind if kind.is_trivia() => {}
-            kind => {
-                self.token(token, parse_token(kind));
-            }
-        }
-    }
-
-    /// A `#:` annotation is a run of comments to R, one per line.
-    fn comment_lines(&mut self, node: &SyntaxNode) {
-        let start = usize::from(node.text_range().start());
-        let text = node.text().to_string();
-        let mut offset = start;
-        for line in text.split('\n') {
-            let trimmed = line.trim_end();
-            if let Some(hash) = trimmed.find('#') {
-                let row = self.push(
-                    offset + hash,
-                    offset + trimmed.len(),
-                    "COMMENT",
-                    290,
-                    true,
-                    Parent::Comment,
-                );
-                self.rows[row].parent = Parent::Comment;
-            }
-            offset += line.len() + 1;
-        }
-    }
-
-    /// Adds the rows of an expression and returns the row of its `expr`.
-    fn expression(&mut self, node: &SyntaxNode) -> usize {
-        let mut children = Vec::new();
-        let mut symbol = ("expr", 79);
-        match node.kind() {
-            SyntaxKind::NAME | SyntaxKind::LITERAL => {
-                if let Some(token) = significant_token(node) {
-                    children.push(self.token(&token, parse_token(token.kind())));
-                }
-            }
-            SyntaxKind::FOR_EXPR => {
-                // `(variable in sequence)` is GNU R's `forcond` symbol, and the variable is a
-                // bare symbol inside it.
-                let mut condition = None::<Vec<usize>>;
-                let mut closed = false;
-                for element in node.children_with_tokens() {
-                    match (&element, condition.as_mut()) {
-                        (SyntaxElement::Token(token), None)
-                            if !closed && token.kind() == SyntaxKind::L_PAREN =>
-                        {
-                            condition = Some(vec![self.token(token, parse_token(token.kind()))]);
-                        }
-                        (SyntaxElement::Token(token), Some(rows))
-                            if token.kind() == SyntaxKind::R_PAREN =>
-                        {
-                            rows.push(self.token(token, parse_token(token.kind())));
-                            let rows = std::mem::take(rows);
-                            children.push(self.symbol(("forcond", 82), &rows));
-                            condition = None;
-                            closed = true;
-                        }
-                        (SyntaxElement::Node(child), Some(rows))
-                            if rows.len() == 1 && child.kind() == SyntaxKind::NAME =>
-                        {
-                            let row = self.bare(child, Role::LoopVariable);
-                            rows.extend(row);
-                        }
-                        (_, Some(rows)) => self.element(&element, rows),
-                        (_, None) => self.element(&element, &mut children),
-                    }
-                }
-            }
-            kind => {
-                if kind == SyntaxKind::BINARY_EXPR
-                    && node
-                        .children_with_tokens()
-                        .any(|element| element.kind() == SyntaxKind::EQ)
-                {
-                    symbol = ("expr_or_assign_or_help", 77);
-                }
-                let mut nodes_seen = 0;
-                for element in node.children_with_tokens() {
-                    let SyntaxElement::Node(child) = &element else {
-                        self.element(&element, &mut children);
-                        continue;
-                    };
-                    let plain = matches!(child.kind(), SyntaxKind::NAME | SyntaxKind::LITERAL);
-                    let role = match (kind, nodes_seen) {
-                        (SyntaxKind::CALL_EXPR, 0) if child.kind() == SyntaxKind::NAME => {
-                            Some(Role::Callee)
-                        }
-                        (SyntaxKind::DOLLAR_EXPR, 1) if plain => Some(Role::Field),
-                        (SyntaxKind::AT_EXPR, 1) if plain => Some(Role::Slot),
-                        (SyntaxKind::NAMESPACE_EXPR, 0) if plain => Some(Role::Package),
-                        (SyntaxKind::NAMESPACE_EXPR, 1) if plain => Some(Role::Field),
-                        _ => None,
-                    };
-                    if !is_skipped(child) {
-                        nodes_seen += 1;
-                    }
-                    match role {
-                        // A called name keeps an `expr` of its own.
-                        Some(Role::Callee) => {
-                            let rows: Vec<usize> =
-                                self.bare(child, Role::Callee).into_iter().collect();
-                            children.push(self.symbol(("expr", 79), &rows));
-                        }
-                        Some(role) => children.extend(self.bare(child, role)),
-                        None => self.element(&element, &mut children),
-                    }
-                }
-            }
-        }
-        self.symbol(symbol, &children)
-    }
-
-    fn symbol(&mut self, symbol: (&'static str, i32), children: &[usize]) -> usize {
-        let start = children
-            .iter()
-            .map(|&child| self.rows[child].start)
-            .min()
-            .unwrap_or(0);
-        let end = children
-            .iter()
-            .map(|&child| self.rows[child].end)
-            .max()
-            .unwrap_or(start);
-        let row = self.push(start, end, symbol.0, symbol.1, false, Parent::TopLevel);
-        for &child in children {
-            self.rows[child].parent = Parent::Row(row);
-        }
-        row
-    }
-
-    /// The token of a name or constant in `role`, without an `expr` around it.
-    fn bare(&mut self, node: &SyntaxNode, role: Role) -> Option<usize> {
-        let token = significant_token(node)?;
-        let name = match (role, token.kind()) {
-            (_, SyntaxKind::STRING | SyntaxKind::RAW_STRING) => ("STR_CONST", 260),
-            (_, SyntaxKind::NULL_KW) => ("NULL_CONST", 262),
-            (Role::Callee, _) => ("SYMBOL_FUNCTION_CALL", 296),
-            (Role::Argument, _) => ("SYMBOL_SUB", 295),
-            (Role::Formal, _) => ("SYMBOL_FORMALS", 292),
-            (Role::Slot, _) => ("SLOT", 298),
-            (Role::Package, _) => ("SYMBOL_PACKAGE", 297),
-            (Role::Field | Role::LoopVariable, kind) => parse_token(kind),
-        };
-        Some(self.token(&token, name))
-    }
-
-    /// Adds the rows of one child of an expression to `children`, looking through the argument
-    /// and parameter lists, which GNU R's grammar does not wrap.
-    fn element(&mut self, element: &SyntaxElement, children: &mut Vec<usize>) {
-        match element {
-            SyntaxElement::Token(token) => match token.kind() {
-                SyntaxKind::COMMENT => {
-                    let row = self.token(token, ("COMMENT", 290));
-                    self.rows[row].parent = Parent::Comment;
-                }
-                kind if kind.is_trivia() => {}
-                kind => children.push(self.token(token, parse_token(kind))),
-            },
-            SyntaxElement::Node(node) => match node.kind() {
-                SyntaxKind::ANNOTATION => self.comment_lines(node),
-                _ if is_skipped(node) => {}
-                SyntaxKind::ARGUMENT_LIST | SyntaxKind::PARAMETER_LIST => {
-                    for child in node.children_with_tokens() {
-                        self.element(&child, children);
-                    }
-                }
-                SyntaxKind::ARGUMENT | SyntaxKind::PARAMETER => {
-                    let formal = node.kind() == SyntaxKind::PARAMETER;
-                    let named = node
-                        .children_with_tokens()
-                        .any(|child| child.kind() == SyntaxKind::EQ);
-                    let mut before_equals = true;
-                    for child in node.children_with_tokens() {
-                        match &child {
-                            SyntaxElement::Token(token) if token.kind() == SyntaxKind::EQ => {
-                                before_equals = false;
-                                let name = if formal {
-                                    ("EQ_FORMALS", 293)
-                                } else {
-                                    ("EQ_SUB", 294)
-                                };
-                                children.push(self.token(token, name));
-                            }
-                            SyntaxElement::Token(token)
-                                if formal
-                                    && matches!(
-                                        token.kind(),
-                                        SyntaxKind::IDENT | SyntaxKind::DOTS
-                                    ) =>
-                            {
-                                children.push(self.token(token, ("SYMBOL_FORMALS", 292)));
-                            }
-                            SyntaxElement::Node(name)
-                                if named
-                                    && before_equals
-                                    && !formal
-                                    && matches!(
-                                        name.kind(),
-                                        SyntaxKind::NAME | SyntaxKind::LITERAL
-                                    ) =>
-                            {
-                                children.extend(self.bare(name, Role::Argument));
-                            }
-                            _ => self.element(&child, children),
-                        }
-                    }
-                }
-                _ => children.push(self.expression(node)),
-            },
-        }
-    }
-}
-
-fn significant_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-    node.children_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .find(|token| !token.kind().is_trivia())
-}
-
-/// GNU R's name and number for a token: its character code for a one-character operator, and
-/// the grammar's numbering from 258 otherwise.
-fn parse_token(kind: SyntaxKind) -> (&'static str, i32) {
-    use SyntaxKind::*;
-    match kind {
-        IDENT | DOTS | DOTDOTI => ("SYMBOL", 263),
-        INTEGER | DOUBLE | COMPLEX | TRUE_KW | FALSE_KW | INF_KW | NAN_KW | NA_KW
-        | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW | NA_CHARACTER_KW => ("NUM_CONST", 261),
-        STRING | RAW_STRING => ("STR_CONST", 260),
-        NULL_KW => ("NULL_CONST", 262),
-        UNDERSCORE => ("PLACEHOLDER", 300),
-        FUNCTION_KW => ("FUNCTION", 264),
-        LESS_MINUS | LESS2_MINUS | COLON_EQ => ("LEFT_ASSIGN", 266),
-        EQ => ("EQ_ASSIGN", 267),
-        MINUS_GREATER | MINUS_GREATER2 => ("RIGHT_ASSIGN", 268),
-        L_BRACKET2 => ("LBB", 269),
-        FOR_KW => ("FOR", 270),
-        IN_KW => ("IN", 271),
-        IF_KW => ("IF", 272),
-        ELSE_KW => ("ELSE", 273),
-        WHILE_KW => ("WHILE", 274),
-        NEXT_KW => ("NEXT", 275),
-        BREAK_KW => ("BREAK", 276),
-        REPEAT_KW => ("REPEAT", 277),
-        GREATER => ("GT", 278),
-        GREATER_EQ => ("GE", 279),
-        LESS => ("LT", 280),
-        LESS_EQ => ("LE", 281),
-        EQ2 => ("EQ", 282),
-        BANG_EQ => ("NE", 283),
-        AMP => ("AND", 284),
-        PIPE => ("OR", 285),
-        AMP2 => ("AND2", 286),
-        PIPE2 => ("OR2", 287),
-        COLON2 => ("NS_GET", 288),
-        COLON3 => ("NS_GET_INT", 289),
-        COMMENT => ("COMMENT", 290),
-        PIPE_GREATER => ("PIPE", 299),
-        SPECIAL => ("SPECIAL", 306),
-        BANG => ("'!'", 33),
-        DOLLAR => ("'$'", 36),
-        L_PAREN => ("'('", 40),
-        R_PAREN => ("')'", 41),
-        STAR => ("'*'", 42),
-        PLUS => ("'+'", 43),
-        COMMA => ("','", 44),
-        MINUS => ("'-'", 45),
-        SLASH => ("'/'", 47),
-        COLON => ("':'", 58),
-        SEMICOLON => ("';'", 59),
-        QUESTION => ("'?'", 63),
-        AT => ("'@'", 64),
-        L_BRACKET => ("'['", 91),
-        BACKSLASH => ("'\\\\'", 92),
-        R_BRACKET => ("']'", 93),
-        CARET => ("'^'", 94),
-        L_BRACE => ("'{'", 123),
-        R_BRACE => ("'}'", 125),
-        TILDE => ("'~'", 126),
-        _ => ("ERROR", 259),
-    }
 }
 
 /// Source text that parsed without a syntax error, with its top-level expressions still to be
@@ -544,43 +93,432 @@ pub struct Script<'text> {
     pub expressions: Vec<SyntaxNode>,
 }
 
-/// Parses `text`, or reports the first syntax error in GNU R's form.
-pub fn parse_script<'text>(text: &'text str, source_name: &str) -> R<Script<'text>> {
-    let parse = syntax::parse(text);
-    // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
-    if let Some(failure) = parse.errors().iter().find(|failure| !failure.in_annotation) {
-        let offset = usize::from(failure.range.start()).min(text.len());
-        let before = &text[..offset];
-        let line = before.matches('\n').count() + 1;
-        let column = before
-            .rsplit('\n')
-            .next()
-            .map_or(0, |line| line.chars().count());
-        return Err(error(format!(
-            "{source_name}:{line}:{column}: {}",
-            failure.message
-        )));
+/// A script's first syntax error: where it is in the text, and GNU R's message for it without
+/// the location. Most of GNU R's parse errors are plain errors, but the ones its grammar actions
+/// and lexer raise (a repeated formal argument, a misused pipe, a bad string escape) are
+/// conditions of class `parseError`, which `condition` describes.
+pub struct SyntaxFailure {
+    pub offset: usize,
+    pub message: String,
+    pub condition: Option<ParseCondition>,
+}
+
+/// The class and fields of a `parseError` condition.
+pub struct ParseCondition {
+    pub class: &'static str,
+    pub value: ConditionValue,
+    /// The expression the condition names as its call, lowered with each pipe placeholder as
+    /// the string `"_"`, as GNU R reports it.
+    pub call: Option<SyntaxNode>,
+}
+
+/// The `value` field of a `parseError` condition.
+pub enum ConditionValue {
+    Null,
+    Text(String),
+    Integer(i32),
+}
+
+/// Parses `text`, or reports the first syntax error in GNU R's form. `condition_file` is the
+/// file name a `parseError` condition reports.
+pub unsafe fn parse_script<'text>(
+    text: &'text str,
+    source_name: &str,
+    condition_file: &str,
+) -> R<Script<'text>> {
+    let (script, failure) = parse_script_prefix(text);
+    match failure {
+        None => Ok(script),
+        Some(failure) => Err(syntax_failure_unwind(
+            text,
+            &failure,
+            source_name,
+            condition_file,
+            0,
+        )),
     }
+}
+
+/// Parses `text` as far as it goes: the expressions that end before the line holding the first
+/// syntax error, and that error. GNU R reads a script one line at a time and runs each
+/// expression once it is complete, so everything before a broken line runs before the error
+/// stops the script.
+pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
+    let parse = syntax::parse(text);
+    let root = parse.syntax_node();
+    // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
+    let grammar_failure = parse
+        .errors()
+        .iter()
+        .find(|failure| !failure.in_annotation)
+        .map(|failure| {
+            let offset = usize::from(failure.range.start()).min(text.len());
+            pipe_bind_failure(text, offset).unwrap_or_else(|| SyntaxFailure {
+                offset,
+                message: failure.message.clone(),
+                condition: None,
+            })
+        });
+    // GNU R's lexer resolves escapes as it reads a string, so a bad escape in a string that
+    // starts before the grammar error, the unterminated string itself included, is the one
+    // reported.
+    let mut failure = match (grammar_failure, escape_failure(&root)) {
+        (Some(grammar), Some((start, escape))) if start <= grammar.offset => Some(escape),
+        (None, escape) => escape.map(|(_, escape)| escape),
+        (grammar, _) => grammar,
+    };
     let may_hold_placeholder = text.contains('_');
+    let may_hold_formals = text.contains("function") || text.contains('\\');
+    let may_hold_pipe = text.contains("|>");
     let mut expressions = Vec::new();
-    for child in parse.syntax_node().children() {
+    for child in root.children() {
         if is_skipped(&child) {
             continue;
         }
+        let start = usize::from(child.text_range().start()).min(text.len());
+        if let Some(failure) = &failure {
+            let failed_line = text[..failure.offset]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            if usize::from(child.text_range().end()) > failed_line {
+                break;
+            }
+        }
+        if (may_hold_formals || may_hold_pipe)
+            && let Some(found) = grammar_action_failure(&child)
+        {
+            failure = Some(found);
+            break;
+        }
         if may_hold_placeholder && has_stray_placeholder(&child) {
-            let offset = usize::from(child.text_range().start()).min(text.len());
-            let line = text[..offset].matches('\n').count() + 1;
-            return Err(error(format!(
-                "invalid use of pipe placeholder ({source_name}:{line}:0)"
-            )));
+            failure = Some(SyntaxFailure {
+                offset: start,
+                message: "invalid use of pipe placeholder".to_owned(),
+                condition: Some(ParseCondition {
+                    class: "invalidPlaceholder",
+                    value: ConditionValue::Null,
+                    call: Some(child),
+                }),
+            });
+            break;
         }
         expressions.push(child);
     }
-    Ok(Script {
-        text,
-        root: parse.syntax_node(),
-        expressions,
+    (
+        Script {
+            text,
+            root,
+            expressions,
+        },
+        failure,
+    )
+}
+
+/// GNU R's message for a plain `failure` in `text`, whose first line is line `line_offset + 1`
+/// of the source.
+pub fn syntax_failure_message(
+    text: &str,
+    failure: &SyntaxFailure,
+    source_name: &str,
+    line_offset: usize,
+) -> String {
+    let before = &text[..failure.offset.min(text.len())];
+    let line = line_offset + before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |line| line.chars().count());
+    format!("{source_name}:{line}:{column}: {}", failure.message)
+}
+
+/// The error `failure` raises: a plain error with GNU R's message, or the signalled
+/// `parseError` condition, whose location names `condition_file`.
+pub unsafe fn syntax_failure_unwind(
+    text: &str,
+    failure: &SyntaxFailure,
+    source_name: &str,
+    condition_file: &str,
+    line_offset: usize,
+) -> Unwind {
+    let Some(condition) = &failure.condition else {
+        return error(syntax_failure_message(
+            text,
+            failure,
+            source_name,
+            line_offset,
+        ));
+    };
+    let offset = failure.offset.min(text.len());
+    let before = &text[..offset];
+    let line = line_offset + before.matches('\n').count() + 1;
+    // GNU R reports a placeholder left over after the whole expression at column 0, and every
+    // other parse error at the 1-based column of the character it stopped on.
+    let column = if condition.class == "invalidPlaceholder" {
+        0
+    } else {
+        before
+            .rsplit('\n')
+            .next()
+            .map_or(0, |line| line.chars().count())
+            + 1
+    };
+    let message = format!("{} ({condition_file}:{line}:{column})", failure.message);
+    match signal_parse_condition(condition, &message, condition_file, line, column) {
+        Ok(()) => error(message),
+        Err(unwind) => unwind,
+    }
+}
+
+unsafe fn signal_parse_condition(
+    condition: &ParseCondition,
+    message: &str,
+    file: &str,
+    line: usize,
+    column: usize,
+) -> R<()> {
+    let call = match &condition.call {
+        Some(node) => quote_placeholders(lower(node, None)?)?,
+        None => nil(),
+    };
+    let value = match &condition.value {
+        ConditionValue::Null => nil(),
+        ConditionValue::Text(text) => values::scalar_string(text)?,
+        ConditionValue::Integer(number) => values::scalar_integer(*number)?,
+    };
+    let object = values::named_list(&[
+        ("message", values::scalar_string(message)?),
+        ("call", call),
+        ("value", value),
+        ("filename", values::scalar_string(file)?),
+        ("lineno", values::scalar_integer(line as i32)?),
+        ("colno", values::scalar_integer(column as i32)?),
+    ])?;
+    values::set_attr(
+        object,
+        symbols().class,
+        values::string_vector(&[condition.class, "parseError", "error", "condition"])?,
+    )?;
+    let stop = values::call(install("stop")?, &[object])?;
+    crate::eval::eval(stop, values::base_namespace())?;
+    Ok(())
+}
+
+/// `value` with every `_` symbol replaced by the string `"_"`, which is how GNU R's parser
+/// holds the pipe placeholder.
+unsafe fn quote_placeholders(value: Sexp) -> R<Sexp> {
+    let placeholder = install("_")?;
+    if value == placeholder {
+        return values::scalar_string("_");
+    }
+    if value.kind() == SexpType::Language {
+        let mut cell = value;
+        while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+            let item = quote_placeholders(cell.car())?;
+            crate::heap().set_car(cell, item);
+            cell = cell.cdr();
+        }
+    }
+    Ok(value)
+}
+
+/// `=>` lexes in GNU R as the pipe bind operator, which is disabled unless `_R_USE_PIPEBIND_`
+/// is set, so a grammar error at it is that parse error.
+fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
+    text[offset..].starts_with("=>").then(|| SyntaxFailure {
+        offset,
+        message: "'=>' is disabled; set '_R_USE_PIPEBIND_' envvar to a true value to enable it"
+            .to_owned(),
+        condition: Some(ParseCondition {
+            class: "pipebindDisabled",
+            value: ConditionValue::Null,
+            call: None,
+        }),
     })
+}
+
+/// The first string literal or backquoted name whose escapes GNU R's lexer rejects, with the
+/// offset where its token starts.
+fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
+    root.descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find_map(|token| {
+            let text = token.text();
+            let quote = match token.kind() {
+                SyntaxKind::STRING => text.chars().next()?,
+                SyntaxKind::IDENT if text.starts_with('`') => '`',
+                _ => return None,
+            };
+            let body = &text[1..];
+            let inner = match body.strip_suffix(quote) {
+                Some(inner) if !body.is_empty() => inner,
+                _ => body,
+            };
+            let failure = unescape_bytes(inner).err()?;
+            let start = usize::from(token.text_range().start());
+            Some((
+                start,
+                SyntaxFailure {
+                    offset: start + 1 + failure.offset,
+                    message: failure.message,
+                    condition: Some(ParseCondition {
+                        class: failure.class,
+                        value: failure.value,
+                        call: None,
+                    }),
+                },
+            ))
+        })
+}
+
+/// The first error GNU R's grammar actions raise in `node`, in the order its parser reduces:
+/// inner expressions before the ones that contain them.
+unsafe fn grammar_action_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
+    for child in node.children() {
+        if let Some(failure) = grammar_action_failure(&child) {
+            return Some(failure);
+        }
+    }
+    match node.kind() {
+        SyntaxKind::PARAMETER_LIST => repeated_formal(node),
+        SyntaxKind::BINARY_EXPR
+            if significant_tokens(node)
+                .iter()
+                .any(|token| token.kind() == SyntaxKind::PIPE_GREATER) =>
+        {
+            pipe_failure(node)
+        }
+        _ => None,
+    }
+}
+
+fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
+    let mut seen = std::collections::HashSet::new();
+    for parameter in parameters
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::PARAMETER)
+    {
+        let name = parameter
+            .children_with_tokens()
+            .find(|element| match element {
+                SyntaxElement::Token(token) => !token.kind().is_trivia(),
+                SyntaxElement::Node(node) => !is_skipped(node),
+            })?;
+        let (text, range) = match &name {
+            SyntaxElement::Token(token) => (token.text().to_owned(), token.text_range()),
+            SyntaxElement::Node(node) => (node.text().to_string(), significant_range(node)),
+        };
+        let name = identifier(&text);
+        if !seen.insert(name.clone()) {
+            let last = text.chars().next_back().map_or(0, char::len_utf8);
+            return Some(SyntaxFailure {
+                offset: usize::from(range.end()) - last,
+                message: format!("repeated formal argument '{name}'"),
+                condition: Some(ParseCondition {
+                    class: "repeatedFormal",
+                    value: ConditionValue::Text(name),
+                    call: None,
+                }),
+            });
+        }
+    }
+    None
+}
+
+/// GNU R's checks on a pipe's right side, which must be a call to an ordinary function with at
+/// most one placeholder, passed by name.
+unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
+    let right = expression_children(node).into_iter().nth(1)?;
+    let offset = usize::from(significant_range(&right).start());
+    let failure = |message: String, class, value, call: bool| {
+        Some(SyntaxFailure {
+            offset,
+            message,
+            condition: Some(ParseCondition {
+                class,
+                value,
+                call: call.then(|| right.clone()),
+            }),
+        })
+    };
+    // A right-hand side that fails to lower fails again, with its own error, when the whole
+    // expression is lowered after these grammar checks, so the checks defer to that error.
+    let value = lower(&right, None).ok()?;
+    if value.kind() != SexpType::Language {
+        return failure(
+            "The pipe operator requires a function call as RHS".to_owned(),
+            "RHSnotFnCall",
+            ConditionValue::Null,
+            true,
+        );
+    }
+    let placeholder = install("_").ok()?;
+    let head = value.car();
+    if mentions(head, placeholder) {
+        return failure(
+            "pipe placeholder cannot be used in the RHS function".to_owned(),
+            "placeholderInRHSFn",
+            ConditionValue::Null,
+            false,
+        );
+    }
+    let mut placeholders = 0;
+    let mut argument = value.cdr();
+    while argument.kind() == SexpType::Pairlist {
+        if argument.car() == placeholder {
+            if argument.tag() == nil() {
+                return failure(
+                    "pipe placeholder can only be used as a named argument".to_owned(),
+                    "placeholderNotNamed",
+                    ConditionValue::Null,
+                    true,
+                );
+            }
+            placeholders += 1;
+        }
+        argument = argument.cdr();
+    }
+    if placeholders > 1 {
+        return failure(
+            "pipe placeholder may only appear once".to_owned(),
+            "tooManyPlaceholders",
+            ConditionValue::Null,
+            true,
+        );
+    }
+    if placeholders == 0
+        && head.kind() == SexpType::Symbol
+        && let name = values::symbol_name(head).into_owned()
+        && SYNTACTIC_FUNCTIONS.contains(&name.as_str())
+    {
+        return failure(
+            format!("function '{name}' not supported in RHS call of a pipe"),
+            "unsupportedInPipe",
+            ConditionValue::Text(name),
+            true,
+        );
+    }
+    None
+}
+
+/// The functions GNU R's parser marks as syntactically special, which a pipe cannot call.
+const SYNTACTIC_FUNCTIONS: &[&str] = &[
+    "if", "while", "repeat", "for", "break", "next", "return", "function", "(", "{", "+", "-", "*",
+    "/", "^", "%%", "%/%", "%*%", ":", "::", ":::", "?", "~", "==", "!=", "<", ">", "<=", ">=",
+    "&", "|", "&&", "||", "!", "<-", "<<-", "=", "$", "[", "[[", "@", "$<-", "[<-", "[[<-", "@<-",
+];
+
+unsafe fn mentions(value: Sexp, symbol: Sexp) -> bool {
+    if value == symbol {
+        return true;
+    }
+    let mut cell = value;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        if mentions(cell.car(), symbol) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
 }
 
 /// Lowers one top-level expression of `script`. With `keep_source`, it keeps source references
@@ -625,7 +563,7 @@ pub unsafe fn lower_script_expression(
 /// What the lowering needs to build source references: the text with an index of its line
 /// starts, the line that is line 1 of the srcfile, and the srcfile environment itself.
 pub struct SourceMap<'text> {
-    text: &'text str,
+    pub(crate) text: &'text str,
     line_starts: Vec<usize>,
     first_line: usize,
     srcfile: Sexp,
@@ -687,7 +625,7 @@ unsafe fn srcref_object(source: &SourceMap, fields: [i32; 8]) -> R<Sexp> {
 
 /// The srcfile line, byte and column of the character at byte `offset`. A tab advances the column
 /// to the next multiple of 8, as in GNU R's parser.
-fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
+pub(crate) fn position(source: &SourceMap, offset: usize) -> (i32, i32, i32) {
     let line = source
         .line_starts
         .partition_point(|&start| start <= offset)
@@ -740,7 +678,7 @@ pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
     lower(node, None)
 }
 
-fn is_skipped(node: &SyntaxNode) -> bool {
+pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
         SyntaxKind::ANNOTATION
@@ -1004,7 +942,7 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
         SyntaxKind::PIPE_GREATER => pipe(left_value, right_value, placeholder_name(right)?),
-        // `**` lexes as a caret token but keeps its own spelling, and R's parser stores it as `^`.
+        // `**` lexes as `^` and calls it, as in GNU R.
         SyntaxKind::CARET => values::call(install("^")?, &[left_value, right_value]),
         _ => {
             let symbol = install(operator.text())?;
@@ -1457,9 +1395,21 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         SyntaxKind::INTEGER => {
             let body = &text[..text.len() - 1];
             let value = parse_number(body);
+            let decimal = body.contains('.');
             if value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
+                let hex = body.starts_with("0x") || body.starts_with("0X");
+                if decimal && (hex || !body.contains(['e', 'E'])) {
+                    crate::conditions::warning(format!(
+                        "integer literal {text} contains unnecessary decimal point"
+                    ))?;
+                }
                 values::scalar_integer(value as i32)
             } else {
+                crate::conditions::warning(if decimal {
+                    format!("integer literal {text} contains decimal; using numeric value")
+                } else {
+                    format!("non-integer value {text} qualified with L; using numeric value")
+                })?;
                 values::scalar_real(value)
             }
         }
@@ -1472,7 +1422,8 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         }
         SyntaxKind::STRING => {
             let inner = &text[1..text.len().saturating_sub(1).max(1)];
-            let (bytes, high_byte) = unescape_bytes(inner).map_err(error)?;
+            let (bytes, high_byte) =
+                unescape_bytes(inner).map_err(|failure| error(failure.message))?;
             let encoding = if high_byte {
                 Encoding::Native
             } else {
@@ -1557,29 +1508,51 @@ fn raw_string(text: &str) -> String {
 
 /// Resolves R's string escapes, with invalid UTF-8 from byte escapes replaced.
 pub fn unescape(text: &str) -> Result<String, String> {
-    let (bytes, _) = unescape_bytes(text)?;
+    let (bytes, _) = unescape_bytes(text).map_err(|failure| failure.message)?;
     Ok(String::from_utf8(bytes)
         .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned()))
+}
+
+/// A string escape GNU R's lexer rejects: the class of its parse error, the message, and the
+/// byte offset of the last character the lexer read, which is where GNU R reports it.
+pub struct EscapeFailure {
+    pub class: &'static str,
+    pub message: String,
+    pub offset: usize,
+    pub value: ConditionValue,
 }
 
 /// Resolves R's string escapes. Octal and `\x` escapes give single bytes, so the result need
 /// not be UTF-8; the flag says whether such an escape gave a byte past ASCII, which leaves the
 /// string in the native encoding instead of marked as UTF-8, as in GNU R.
-pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
+pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
     let mut bytes = Vec::with_capacity(text.len());
     let mut result = String::new();
     let mut high_byte = false;
     let mut unicode = false;
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
+    let mut characters = text.char_indices().peekable();
+    let failure = |class, message: String, offset, value| EscapeFailure {
+        class,
+        message,
+        offset,
+        value,
+    };
+    while let Some((_, character)) = characters.next() {
+        if let Some(byte) = values::escaped_byte(character) {
+            bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
+            bytes.push(byte);
+            high_byte = true;
+            continue;
+        }
         if character != '\\' {
             result.push(character);
             continue;
         }
-        let Some(escape) = characters.next() else {
+        let Some((escape_offset, escape)) = characters.next() else {
             result.push('\\');
             break;
         };
+        let mut last = escape_offset;
         match escape {
             'n' => result.push('\n'),
             't' => result.push('\t'),
@@ -1595,41 +1568,37 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
             ' ' => result.push(' '),
             '\n' => result.push('\n'),
             '0'..='7' => {
-                let mut value = escape.to_digit(8).unwrap_or(0);
-                for _ in 0..2 {
-                    match characters.peek().and_then(|next| next.to_digit(8)) {
-                        Some(digit) => {
-                            value = value * 8 + digit;
-                            characters.next();
-                        }
-                        None => break,
-                    }
-                }
+                let (rest, count) = escape_digits(&mut characters, 8, 2, &mut last);
+                let value = escape.to_digit(8).unwrap_or(0) * 8u32.pow(count as u32) + rest;
                 if value == 0 {
-                    return Err("nul character not allowed".into());
+                    return Err(failure(
+                        "nulNotAllowed",
+                        "nul character not allowed".into(),
+                        last,
+                        ConditionValue::Null,
+                    ));
                 }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
                 bytes.push((value & 0xFF) as u8);
                 high_byte |= value >= 0x80;
             }
             'x' => {
-                let mut value = 0;
-                let mut count = 0;
-                while count < 2 {
-                    match characters.peek().and_then(|next| next.to_digit(16)) {
-                        Some(digit) => {
-                            value = value * 16 + digit;
-                            characters.next();
-                            count += 1;
-                        }
-                        None => break,
-                    }
-                }
+                let (value, count) = escape_digits(&mut characters, 16, 2, &mut last);
                 if count == 0 {
-                    return Err("'\\x' used without hex digits in character string".into());
+                    return Err(failure(
+                        "badHex",
+                        "'\\x' used without hex digits in character string".into(),
+                        last,
+                        ConditionValue::Null,
+                    ));
                 }
                 if value == 0 {
-                    return Err("nul character not allowed".into());
+                    return Err(failure(
+                        "nulNotAllowed",
+                        "nul character not allowed".into(),
+                        last,
+                        ConditionValue::Null,
+                    ));
                 }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
                 bytes.push(value as u8);
@@ -1637,45 +1606,94 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
             }
             'u' | 'U' => {
                 let limit = if escape == 'u' { 4 } else { 8 };
-                let braced = characters.peek() == Some(&'{');
-                if braced {
-                    characters.next();
+                let braced = matches!(characters.peek(), Some(&(_, '{')));
+                if let Some((offset, _)) = characters.next_if(|&(_, next)| next == '{') {
+                    last = offset;
                 }
-                let mut value = 0u32;
-                let mut count = 0;
-                while count < limit {
-                    match characters.peek().and_then(|next| next.to_digit(16)) {
-                        Some(digit) => {
-                            value = value * 16 + digit;
-                            characters.next();
-                            count += 1;
-                        }
-                        None => break,
-                    }
-                }
-                if braced && characters.peek() == Some(&'}') {
-                    characters.next();
+                let (value, count) = escape_digits(&mut characters, 16, limit, &mut last);
+                if braced && let Some((offset, _)) = characters.next_if(|&(_, next)| next == '}') {
+                    last = offset;
                 }
                 if count == 0 {
-                    return Err(format!(
-                        "'\\{escape}' used without hex digits in character string"
+                    return Err(failure(
+                        "badUnicodeHex",
+                        format!("'\\{escape}' used without hex digits in character string"),
+                        last,
+                        ConditionValue::Null,
+                    ));
+                }
+                let Some(decoded) = char::from_u32(value).or_else(|| {
+                    // GNU R keeps a lone surrogate, which is not a Rust `char`.
+                    (0xD800..0xE000).contains(&value).then_some('\u{fffd}')
+                }) else {
+                    let form = match (escape, braced) {
+                        ('u', true) => "\\u{xxxx}",
+                        ('u', false) => "\\uxxxx",
+                        (_, true) => "\\U{xxxxxxxx}",
+                        (_, false) => "\\Uxxxxxxxx",
+                    };
+                    return Err(failure(
+                        "invalidUnicode",
+                        format!("invalid {form} value {value:x}"),
+                        last,
+                        ConditionValue::Integer(value as i32),
+                    ));
+                };
+                if value == 0 {
+                    return Err(failure(
+                        "nulNotAllowed",
+                        "nul character not allowed".into(),
+                        last,
+                        ConditionValue::Null,
                     ));
                 }
                 unicode |= value >= 0x80;
-                result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                result.push(decoded);
             }
             other => {
-                return Err(format!(
-                    "'\\{other}' is an unrecognized escape in character string"
+                return Err(failure(
+                    "unrecognizedEscape",
+                    format!("'\\{other}' is an unrecognized escape in character string"),
+                    last,
+                    ConditionValue::Text(other.to_string()),
                 ));
             }
         }
     }
     if unicode && high_byte {
-        return Err("mixing Unicode and octal/hex escapes in a string is not allowed".into());
+        return Err(failure(
+            "mixedEscapes",
+            "mixing Unicode and octal/hex escapes in a string is not allowed".into(),
+            text.len(),
+            ConditionValue::Null,
+        ));
     }
     bytes.extend_from_slice(result.as_bytes());
     Ok((bytes, high_byte))
+}
+
+/// Reads up to `limit` digits in `radix`, moving `last` to the offset of the last one read.
+fn escape_digits(
+    characters: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    radix: u32,
+    limit: usize,
+    last: &mut usize,
+) -> (u32, usize) {
+    let mut value = 0u32;
+    let mut count = 0;
+    while count < limit {
+        let Some((offset, digit)) = characters
+            .peek()
+            .and_then(|&(offset, next)| Some((offset, next.to_digit(radix)?)))
+        else {
+            break;
+        };
+        value = value * radix + digit;
+        *last = offset;
+        characters.next();
+        count += 1;
+    }
+    (value, count)
 }
 
 // The internals.

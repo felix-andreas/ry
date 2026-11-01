@@ -1774,18 +1774,39 @@ frame keeps a hash index.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
-remembered set and the escaped set, and sweeps only the young list (every object allocated since
-the last collection), so its cost is proportional to young data, not the heap. A major collection
-clears the marks first and sweeps every page. Small objects live in 64 KiB pages of 17 size
-classes, the 40-byte class being a triple; larger objects are allocated one by one. Freed slots are
-poisoned, with the kind byte set to `FREESXP` and the collector byte cleared, so a stale handle
-reads as freed and unmarked; any set of handles kept across a sweep is filtered before it. The write barrier records an old parent
-that receives a young child. A vector whose writable element pointer escaped (`STRING_PTR`,
-`DATAPTR` on a list) bypasses the barrier from then on, so it joins the escaped set and every minor
-collection rescans it. Weak references follow ephemeron rules, and the `CHARSXP` intern table is
-weak, with minor collections checking only the young strings. GNU R ages objects through several
-generations; one promotion after one survival is simpler and costs some premature tenuring, which
-profiling can revisit without changing the API.
+remembered set and the escaped set, and sweeps only the pages allocated into since the last
+collection, so its cost is proportional to young data, not the heap. A major collection clears the
+marks first and sweeps every page. The write barrier records an old parent that receives a young
+child. A vector whose writable element pointer escaped (`STRING_PTR`, `DATAPTR` on a list) bypasses
+the barrier from then on, so it joins the escaped set and every minor collection rescans it. Weak
+references follow ephemeron rules, and the `CHARSXP` intern table is weak, with minor collections
+checking only the young strings. GNU R ages objects through several generations; one promotion
+after one survival is simpler and costs some premature tenuring, which profiling can revisit
+without changing the API.
+
+**Small objects live in bitmap pages** (`crates/heap/src/space.rs`). Objects up to 2 KiB come from
+one reserved address range (64 GiB, halved on failure down to 1 GiB for a capped address space such
+as valgrind's) cut into 64 KiB pages of 17 size classes, the 40-byte class being a triple. Each page
+keeps its mark, allocated and finalizable bits in side bitmaps, one bit per slot, stored as
+struct-of-arrays per page. Reasons:
+- Marking an old object tests a dense bit instead of loading its header, and sweeping is word
+  operations (`dead = allocated & !marks`, then `allocated = marks`) that never read a dead object.
+  Only a dead environment is visited, through the finalizable bit, to drop its Rust-side frame.
+- Allocation claims a whole bitmap word of free slots in one step and hands them out with a
+  trailing-zero count, so there is no free list, no young list and no per-object free. A claimed
+  slot never handed out reads as unmarked and is swept like a dead one.
+- Empty pages return to a pool any class can take, so a phase heavy in one size does not strand
+  memory in its class.
+- Debug builds poison dead slots and set their kind byte to `FREESXP`. Release builds do not touch
+  them, so a stale handle is caught only in debug.
+- Large objects are allocated one by one with the global allocator and keep a header mark bit.
+Measured on a closure-call microbenchmark under cachegrind: 4% fewer instructions and 46% fewer L1
+data misses than the free-list pages. Full collections on the loaded dsbench heap take about 35 ms
+against GNU R's 130 ms.
+
+**libR keeps freed memory.** mimalloc's purge delay is set to never (`crates/libr/src/libr.rs`),
+because returning pages that stay free for 10 ms made the kernel zero them again on reuse, which was
+15% of the benchmark tests' profile. The cost is resident memory that stays at its peak.
 
 **Roots.** The `PROTECT` stack, the precious multiset, the handle stack, registered globals, every
 interned symbol, the weak-reference list, and any `RootSource` an interpreter or JIT registers. A
@@ -1991,9 +2012,9 @@ primitives, and nothing built or installed packages.
   while it has one, so no address is reused under a stale value. `SETLENGTH` makes the vector
   resizable. `FRAME` returns a snapshot pairlist (frames are hashed). `R_PPStack` is a real array
   that a root source scans up to `R_PPStackTop`, for code compiled with R's internal macros.
-- **The graphics engine is exported and errors when used.** Device packages (ragg, systemfonts)
-  must load and register; the colour and text helpers work. Implementing devices stays the open
-  question it was.
+- **The graphics engine C API is real** (`crates/libr/src/graphics.rs` over
+  `crates/interp/src/graphics_engine.rs`); see "One graphics engine for base graphics, grid and
+  device packages" below.
 - **`.C` and `.Fortran` copy their arguments** and pass data pointers through the same
   dispatcher as `.Call` (all arguments are pointers), returning the copies as a named list.
   `.Call` accepts `NativeSymbolInfo` objects, which packages that call `R_forceSymbols` require.
@@ -2084,8 +2105,8 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 `guides/loading-packages.md` describe the result. These choices settle architecture.
 
 - **The index lives in `semantics`, the diff in `crates/loader`, and only a backend knows the
-  runtime.** `semantics::load_index` derives per-item facts (`item_load`, `item_immediate_reads`),
-  a per-file layer (`file_items`) and the package join (`package_index`) from the analysis, with
+  runtime.** `semantics::load_index` derives per-file facts (`file_items`, `file_binds`), the
+  binding join (`package_bindings`) and the package join (`package_index`) from the analysis, with
   its own input `PackageSources` so a loader never perturbs a project's `ProjectFiles`. The diff
   produces a backend-neutral `loader::Plan`; the GNU R backend (`gnur.rs` plus `runtime.R`) applies
   it, and ry's runtime will apply the same plan, so the runtime swap touches neither the index nor
@@ -2199,35 +2220,60 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices record pages of shapes and render them when they close.** Every file device (pdf,
-  postscript, xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device`
-  holding its size, point size, the base graphics parameters and the pages drawn so far. A page is
-  a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
-  each with the clip rectangle in force, so the drawing routines know nothing about file formats
-  and each format is one writer over the same pages. `plot.new` starts a page when the layout's
-  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
-  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
-  system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
-  than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
-  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
-  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
-  R: vector devices create their file at open (so a bad path fails there), a pdf without pages
-  is still a valid document, and bitmap devices with no page write nothing.
-- **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is
-  1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline offset by
-  `ylbias`, symbols are sized from half the character height, font sizes round to whole points,
-  and text widths come from Helvetica's AFM metrics, the same table `strwidth` uses. Rendering a
-  plot through both engines' pdf devices and rasterizing them is how to check a change: plot,
-  hist, barplot and `par(mfrow)` layouts differ in a handful of pixels. Contour labels use a
-  clean-room "flattest window" placement, so they can sit in a different spot than GNU R's.
-- **Display lists and snapshots stay empty.** `dev.control` and
-  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
-  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
-  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
-  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
-  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
-  and that belongs with recording the display list, which would also let devices replay a
-  plot onto a resized or copied device.
+- **One graphics engine for base graphics, grid and device packages.** GNU R's split is kept:
+  graphics systems (base graphics, grid) call the engine (`graphics_engine.rs`), and the engine
+  calls a device through the C callbacks of a `DevDesc`. `GEDevDesc`, `DevDesc`, `GEContext` and
+  `GESystemDesc` are `#[repr(C)]` copies of R_GE_version 17's headers, because grid and ragg read
+  and write their fields directly; a built-in device is a `DevDesc` whose callbacks are Rust
+  (`graphics_render.rs`), so a ragg device and `pdf()` take exactly the same path. Previously base
+  graphics drew straight into the built-in devices' shape lists and the GE entry points errored, so
+  grid and ragg could not run and two drawing paths would have had to agree.
+  - The display list is struct-of-arrays inside the engine's own `EngineDevice` (parallel `ops`
+    and `args` vectors of the primitive and its argument pairlist), and `GEDevDesc.displayList`
+    stays `R_NilValue`. A pairlist is built only where GNU R exposes one: `recordPlot` snapshots
+    and `dev.copy`. Recording a call is two pushes, not a cons chain. The cost: a C device that
+    tests `displayList != R_NilValue` before replaying on resize (as GNU R's own window devices
+    do) never replays; ragg and the file devices never resize, so none does today.
+  - `R_GE_checkVersionOrDie` accepts engine versions 14 to 17 rather than GNU R's exact match,
+    so binaries built for any of R 4.1 to 4.6 load. `DevDesc` only grew into its reserved space
+    over those versions. `GEDevDesc` gained `lock` before `gesd` in 4.4, and the engine serves
+    both layouts by storing each system descriptor in two adjacent slots and mirroring `ask` into
+    the last one (`GEDevDesc`'s doc comment).
+  - `R_GE_getVersion`, `R_GE_version` in `GraphicsEngine.h` (through `Rversion.h`) and a recorded
+    plot's `engineVersion` follow the R release ry presents: 16 through R 4.5, 17 from R 4.6. A
+    device binary built for that release and `replayPlot()` on a plot it recorded then see the
+    version they expect.
+  - `GEregisterSystem` hands the caller its index (through a claim callback) before it calls the
+    system on the open devices, because grid's `InitState` reads its own index on that call.
+  - Built-in devices install no-op pattern, clip-path and mask callbacks, because grid's
+    `newpage` calls `releasePattern` unconditionally; `patternFill` defaults to `R_NilValue`,
+    which ragg reads.
+  - `fromDeviceHeight` in inches is `value * ipr` without a sign, as in GNU R; a y-down device
+    (every bitmap device) otherwise gets negative string heights, which shifted rotated grid text.
+  - Base text hands both adjustments to `GEText`, so an unspecified vertical adjustment centres
+    the label on its glyphs' extent from the device's metric callback, as GNU R does.
+  - Base graphics hands rasters to `GERaster` and X-splines to the engine's `xspline`, as GNU R
+    does, so a device package draws them itself. The X-spline is written from Blanc and
+    Schlick's paper; its sampling (one point for a segment between two corners, otherwise a step
+    of `2 / sqrt(length in 1/1200 inch)`, at most 0.2) reproduces GNU R's open splines exactly.
+  - `plot.new` marks the device dirty, because grid starts a page of its own on its first
+    drawing unless another system already drew.
+  - Text widths are Helvetica's AFM widths plus its ASCII kerning pairs (tables generated from
+    GNU R's `afm/Helvetica*.afm`), which makes `strwidth` on pdf match GNU R exactly. Bitmap
+    devices in GNU R measure with cairo's font instead, so their widths differ slightly.
+- **Built-in devices record pages of shapes and render them when they close.** Each built-in
+  device's callbacks append `graphics_render::Shape`s (paths, circles, text) in inches with the
+  clip in force to the current page, and each file format is one writer over the same pages: PDF,
+  SVG and PostScript as vectors, PNG, JPEG, BMP and TIFF rasterized with tiny-skia, text outlined
+  with ab_glyph from the system's Helvetica-compatible fonts. Rendering at close keeps devices free
+  of file handles and makes a multi-page bitmap device one file per page, as GNU R's `%d` names
+  expect. Vector devices create their file at open, so a bad path fails there.
+- **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
+  `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
+  offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
+  whole points. Base graphics computes positions in inches rather than through GNU R's NDC
+  pipeline, so the last bit of a coordinate can differ. Contour labels use a clean-room
+  "flattest window" placement, so they can sit in a different spot than GNU R's.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
@@ -2705,10 +2751,16 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
-  compiled code meant forcing every argument through a promise helper, which made
-  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
-  loop-only rule went with it.
+- **Every hot body compiles, loop or not, unless it would run nothing natively.** Loop-only
+  compilation was a stopgap while entering compiled code meant forcing every argument through a
+  promise helper, which made `function(a, b) a + b` slower compiled than in tier 0. Direct calls
+  removed that cost, so the loop-only rule went with it. A body whose plan has no loop and no
+  inlined call, direct call, arithmetic, comparison, intrinsic, element assignment or `&&`/`||`
+  (`Plan::runs_natively`) would only call the same helpers tier 0 does, so it is refused
+  (`analysis::NOTHING_NATIVE`, permanent) instead of costing a compile; most base R wrappers are
+  such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
+  callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
+  on top of the higher entry threshold's 280M.
 - **Function speculation is validated by the binding epoch alone.** Compiling marks each
   speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
   cell is assigned or a watched symbol is defined in any function frame (which could shadow the
@@ -2717,17 +2769,17 @@ first lines R had already read, leaving R mid-command.
   rare, and recompiles are capped per body. When the epoch has moved, each speculation is
   re-resolved from the environment its lookup started in, which for a function looked up inside an
   inlined or directly called closure is that closure's environment, not the compiled body's.
-- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
-  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
-  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
-  invisible when the callee cannot assign anything an argument reads before forcing it
-  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
-  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+- **A call to a speculated closure is direct and binds plain values.** Arguments that are
+  effect-free are evaluated eagerly in the caller and bound as values into the callee's frame,
+  skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early
+  evaluation is only invisible when the callee cannot assign anything an argument reads before
+  forcing it (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must
+  be frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
   lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
-  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
-  the one accepted hole. A promise object is still
-  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
-  needs compiled-to-compiled calls that know the callee never reflects.
+  while a calling handler is established. A frame-safe callee cannot call `substitute()`,
+  `missing()` or `sys.call()`, so no promise is needed, and the frame records no argument list
+  because only `nargs`, method dispatch and `standardGeneric` read it. S3 dispatch from those
+  builtins on a classed argument is the one accepted hole.
 - **Small local closures inline.** A call of a closure defined by a function expression in the same
   body, whose arguments and body compute a scalar from scalars without effects, runs inline on
   unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
@@ -2746,8 +2798,66 @@ first lines R had already read, leaving R mid-command.
   Strict typing costs a little at run time instead (about 200 instructions per annotated call for
   the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
   is still the plan in `r-runtime.md`.
+- **A cold body waits instead of compiling with boxed guesses.** A hot body whose arithmetic reads
+  an operand with no feedback, or whose `for` loop never ran, refuses to compile as `COLD`
+  (`analysis::COLD`), which resets its counters without spending a compile. This is the recursive
+  case: `fib` turns hot on its way down, before any call has returned, so compiling then types
+  every call result as a boxed unknown. `TIER_STATE` counts compiles in its low byte and cold
+  refusals above it (`runtime::COLD_REFUSAL`); after three cold refusals the body compiles with
+  what it has, so a body that never fills its feedback still compiles.
+- **A declared return type is the call result's early profile.** When a direct call's site has no
+  feedback, its result type comes from the callee's declared return annotation
+  (`annotations::declared_return_type`). A declared `double` still admits an integer through
+  promotion, so this is a profile, not a proof, and the usual guards stay. Typed recursive code therefore compiles on
+  the first try instead of waiting.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+- **Compile latency: what was measured and rejected.** Cranelift's `opt_level = "none"` as a
+  first tier did not shorten whole-process time on the why-ry programs (compiling is dominated by
+  lowering and register allocation, which `none` keeps), so there is one tier. A back-edge
+  threshold of 2000 instead of 500 changed instruction counts by under 4% either way. Not built:
+  background compilation (compiled code embeds heap pointers and speculations validated against
+  the interpreter's state at compile time, so a second thread would need the heap frozen or a
+  revalidation step) and a persistent code cache keyed by body hash (the same embedded pointers
+  make machine code process-specific; it would need relocations for every constant and
+  speculation).
+- **Inlining keeps annotation checks.** An inlined call has no frame, so `annotations::enter` and
+  `check_return` never run for it. The inliner therefore inlines a typed closure only when
+  `annotations::admits_inline` proves, from the argument and result storage types it inferred,
+  that every check would pass; otherwise the call stays a real call. Before this, a typed callee
+  inlined into a hot loop silently skipped its checks (`test_tiers.rs` pins both directions).
+- **A builtin's repeated calls check the signature once.** `lapply` and `vapply` over an atomic
+  vector call the same closure with one argument whose storage type is the vector's, so
+  `eval::KnownFirst` resolves `annotations::entry_for` once per function and later calls run as
+  `Entry::Checked`, skipping the per-call parameter checks. A list's elements differ, so lists
+  check every call.
+- **Arrays are their own JIT types.** `Ty::IntArr`, `DblArr` and `LglArr` come from three
+  feedback kinds (`feedback::INTEGER_ARRAY` and so on, which is why feedback is 16 bits per
+  instruction, stored as an integer vector). The guard reads the kind and the flag bits only,
+  because the Array bit promises no attributes. `x[[i]]` reads the item directly and
+  `x[[i]] <- v` stores it when `v` has the Array's exact item type and is not missing; a missing
+  value, another type or a position out of range goes to tier 0, which applies the Array rules
+  (a double position past the last item is an error, not truncated into range). `[` and
+  arithmetic on Arrays stay generic, because their results must be Arrays checked for missing
+  values. A copy for a shared Array keeps the bit (`jit_duplicate`). `List.len` is the `length`
+  intrinsic on an Array or list.
+- **A forgotten variable keeps its type as a guess.** An opaque call forgets every slot, since
+  it may rebind anything, but the slot keeps the type it had. A later load where tier 0 has
+  never read the variable (a branch not taken yet) speculates on that type behind a guard,
+  instead of loading it boxed and leaving its arithmetic to tier 0 for good.
+- **A failed guard after a load resumes after the load.** The load may have forced a promise,
+  and only that forcing set the visibility `withVisible(x)` reads, so tier 0 continues at the
+  next instruction with the boxed value instead of loading again.
+- **A closure's type names its source body.** A `function` site replaces its body constant with
+  the shared compiled code once it has run, so the analysis maps that code back to its source
+  before building `Ty::Closure`. Otherwise the closure guard never matches and the body
+  recompiles until it gives up, with every call left to tier 0.
+- **A backward jump compiles impatiently.** The cold refusal (wait for code that has never run to
+  record its types) applies only to compiles at entry. At a loop's back edge the loop is the hot
+  code, and waiting for the code after it ran three more rounds of back-edge thresholds in
+  tier 0. An impatient compile that reaches a loop which has never run guesses an integer
+  sequence behind the guard rather than refusing, because any refusal other than a cold one
+  disables the body for good.
 
 # Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
 
@@ -2986,7 +3096,7 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** Strict mode checked types only, so a strict package file whose top level called `cat()` or `options()` checked clean and ran the call on every load.
 - **Target shape.** `semantics::top_level::item_top_level` classifies each top-level item of a library file as a definition, a constant, or an effect with its range, and `strict` reports the first effect of each statement (`reference/type-system.mdx`, "A package file's top level"). A library file is a `DocumentKind::Package` file (`R/`); scripts, tests, helpers and the console are entries and unrestricted. Class definition forms are read from `object_system_function`, so the lint, the runtime refusal and this rule share one table.
 - **Purity is declared, never inferred** (Roc-style effect inference was rejected: R's higher-order functions take pure and effectful callbacks under one name, and an inferred effect in a type would let one added `cat()` change every transitive caller's interface). `item_declared_pure` is a per-item `bool` read from `#: @pure` or the inline `@pure` marker (`PURE_MARKER` in the syntax tree), so a body edit backdates it and callers never re-check; stubs mark names with `@pure`. The marker is trusted and means "no effect whatever the arguments", which is why `lapply` is not pure. A project definition shadows the stub, and a name with a conditional writer is never pure (`CalleeOrigin::Conditional`), because which definition runs depends on the condition.
-- **Lazy constants.** In a strict file, a single-writer constant is bound lazily by the loader (`load_index::package_index`) only when every package name its initializer mentions has one writer earlier in collation order; otherwise a later or second write would change what a late evaluation reads. `loader::diff` rebinds a lazy constant when anything its initializer reaches changes, and because laziness now depends on other files, it checks every name, not only the dirty items' names, for a flip. The loader installs the stubs and sets `ProjectFiles` only for a strict package, so non-strict loads never parse the stubs. The loader cannot read `ry.toml`, so each host passes strictness in with `Loader::set_strict`: the GNU R hosts read the planned root's config, and ry's runtime gets the project's through the `RUN_FLAG_STRICT` bit of `ry_run`, because libR links its own copy of `loader` and no process-global registration reaches it. Classification resolves callees through the project-wide definition maps. Their conditional-writers half skips `name <- function(...)` items without naming them, since a function body cannot write a top-level name, so strict planning names only the few non-function items and plans faster than a non-strict load (on finbench, about 0.8 s against 0.9 s, and a full load about 150 ms faster).
+- **Lazy constants.** In a strict file, a single-writer constant is bound lazily by the loader (`load_index::package_index`) only when every package name its initializer mentions has one writer earlier in collation order; otherwise a later or second write would change what a late evaluation reads. `loader::diff` rebinds a lazy constant when anything its initializer reaches changes, and because laziness now depends on other files, it checks every name, not only the dirty items' names, for a flip. The loader installs the stubs and sets `ProjectFiles` only for a strict package, so non-strict loads never parse the stubs. The loader cannot read `ry.toml`, so each host passes strictness in with `Loader::set_strict`: the GNU R hosts read the planned root's config, and ry's runtime gets the project's through the `RUN_FLAG_STRICT` bit of `ry_run`, because libR links its own copy of `loader` and no process-global registration reaches it. Classification resolves callees through the project-wide definition maps. Their conditional-writers half skips `name <- function(...)` items without naming them, since a function body cannot write a top-level name, so strict planning names only the few non-function items and plans faster than a non-strict load (on finbench, about 0.8 s against 0.9 s, and a full load about 150 ms faster). A `<<-` anywhere in a package function body (`top_level::item_super_assigned_names`, a scan of the item's flat expression arena) counts as a writer of its target placed after every top-level statement: the namespace locks once loading finishes, so such a write can only land during `.onLoad` or something it calls, and counting every function over-approximates that call graph without building it. A bare stub call takes its purity from the namespace of the name's winning declaration (`StubLibrary::declarations`), the same one its type comes from, instead of a flat name set. A replacement inside `local()` of an outer name is accepted when the outer binding is a literal or `c()`/`list()` of literals (`item_binds_plain_value`), because R replaces in a local copy; reading the outer constant's inferred type would put type inference on the load-planning path.
 - **Impact.** Loading a strict package binds names and registers classes only, so evaluation order between constants no longer matters and a reload reruns less. Incrementality holds: `test_incremental.rs` pins that adding `cat()` to a pure function re-derives only that function, and removing a marker re-classifies only its callers.
 
 # Decision record: one Rmath, one codec stack, and the clean-room numerical routines
@@ -3122,6 +3232,19 @@ first lines R had already read, leaving R mid-command.
 - **Semantic tokens are an `ide` query** (`semantic_tokens`, `classify_type_token`), and the server
   only maps `SemanticClass` to its legend. Before this the classification lived in the server and
   covered annotations only, which left `match`, `=>` and tags uncolored.
+- **Semantic tokens also color R names an R grammar cannot classify**: parameters (declarations and
+  reads that resolve to a parameter binding), call heads as functions, the package of `pkg::name` as a
+  namespace, and the left side of a function assignment. Everything else stays with the editor's R
+  grammar, so tokens add facts rather than replace the grammar. The server also answers range
+  requests, so a large file only pays for the viewport.
+- **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
+  `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
+  finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics
+  it publishes, after suppressions, so a suppressed finding offers no fix. `ry check --fix` can reuse
+  the same field.
+- **Outline sections and folds come from RStudio section comments** (a comment alone on its line
+  ending in four or more `-`, `=` or `#`). A section ends at the next header of the same or a higher
+  level in the same block, which matches RStudio's outline, so files written there look the same.
 - **An inlay hint states what the code does not.** A payload-free tag or an `@Name(...)` constructor
   already spells its type, so it gets no hint and no "add annotation" action, and a vector of
   records, tuples or tags (`Position[]`) is dropped from a hinted union because no such value exists.
@@ -3331,6 +3454,17 @@ first lines R had already read, leaving R mid-command.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
 
+## data.table's C runs at or below GNU R's time: barrier, pacing and string kernels
+
+- **Previous shape.** Inside `tools/bench/table/ops.R` several helpers trailed GNU R although they ran faster alone. The cost was the collector inside the timed region. Native code fills a fresh character vector one `SET_STRING_ELT` at a time, and each store looked up the parent's mark bit. `Rf_duplicate` of a character vector or list paid one barrier and one refcount check per element. Large vectors counted against the 8 MB nursery, so `fread`, which allocates every column before filling any, ran a minor collection per column, and each rescanned the 1e6-element string columns already allocated. After every major collection the old-generation limit fell straight to twice what survived, so the explicit `gc()` between two questions bought a full collection in the middle of the next one (31 ms of `rbindlist`'s 90 ms at 1e6 rows).
+- **Target shape.** All of it lives in `crates/heap/src/heap.rs`:
+  - `Heap::young_parent` caches the last store target the barrier found unmarked. Marks change only inside a collection, which clears the cache, so a repeated store into the same young vector costs one compare.
+  - `Heap::copy_elements` copies a range between vectors with one barrier decision for the whole range, and `Rf_duplicate` uses it.
+  - Large vectors have their own young budget, `GcPolicy::young_large_limit`: 64 MB, GNU R's initial `R_VSIZE`, or half the old generation if that is larger.
+  - The major-collection limit falls back towards twice the survivors by an eighth per collection instead of at once, as GNU R shrinks its trigger.
+- **Kernels.** `duplicated`/`unique` without incomparables hash a plain key per type, and for an all-ASCII character vector they hash the CHARSXP pointer, because interning makes equal ASCII text one object (`crates/interp/src/sort.rs`). `strsplit` with `fixed = TRUE` builds its `memchr::memmem` finder once per pattern and collects byte ranges instead of `String`s (`crates/interp/src/strings.rs`). `char_str` validates ASCII-flagged strings strictly, which runs a word at a time, but only as a hint: native code can set any gp bit through `SETLEVELS`, so the flag never licenses `from_utf8_unchecked`.
+- **Impact.** At 1e7 rows every helper in `ops.R` is as fast as on GNU R or faster (table in `contributing/design/r-runtime.md`, section 7). `tstrsplit` takes 3.71 s against 5.73 s, `fread` 2.36 s against 3.16 s, and `rbindlist` 0.71 s against 0.90 s. The first `dcast` of a session no longer warms up slowly: 0.028 s against 0.047 s at 1e6 rows. The cost is memory: up to 64 MB of dead large vectors, the same slack GNU R allows, and a collection limit that shrinks over eight collections. `RY_GC_VERIFY=1` passes the oracle suite, and `crates/oracle/cases/vectors__duplicated_fast_paths.R` pins the typed `duplicated` keys and fixed `strsplit` against GNU R.
+
 ## What keeps a dropped object alive: registers, handles, caches and dying finalizers
 
 GNU R finalizes an object at the first full `gc()` after its last reference goes, and R6, lgr's buffered appenders and processx all depend on that timing. Four places in ry's runtime held a reference GNU R does not have.
@@ -3356,7 +3490,7 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 
 ## Smaller runtime choices
 
-- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
+- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. The page is placed on the paper as GNU R places it (centred, turned a quarter for `horizontal = TRUE` with `%%Orientation: Landscape`), Only `onefile = FALSE` writes the `EPSF-3.0` header (one file per page through the `%d` name), and an EPS file has no `%%DocumentMedia` or `%%Orientation`. Otherwise `%%DocumentMedia` names the paper as given with its truncated size, `paper = "special"` is the device size (turned for `horizontal = TRUE`) and omits `%%Orientation`, and the bounding box is rounded; `graphics__device_files` pins these headers against GNU R. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
 - **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports ASCII as GNU R does and utf8's formatting under `LC_ALL=C` escapes what GNU R escapes.
 
 ## libR commits mimalloc arenas lazily, and handle vectors are not zeroed before their fill
@@ -3512,6 +3646,19 @@ contract.
 - **Target shape.** `Loader` records the fingerprint of the sources a plan read (taken before reading, so an edit made mid-read counts later) and promotes it on `commit`. `Loader::changed_roots` reports each committed package whose fingerprint moved, once per change. Both backends ask it: the binary's `ReloadWatcher` for GNU R, and for ry's runtime `libR.so` exports `ry_loader_changed`, which `repl`'s `RuntimeReloadWatcher` calls before each command. `ry_repl` attaches `tools:ry` and runs a startup load, so `ry run` in a package loads it as `ry R` does.
 - **Impact.** One source of truth per loaded package, one console loop on both runtimes, and the reload is the same `.ry_autoreload()`. The check stats `DESCRIPTION`, `NAMESPACE` and the code files in `R/` (the same extension test `collated_r_files` uses, so editor swap files do not reload) without reading them. It overlaps the per-file `stamps` that `Loader::read` keeps, on purpose: `stamps` decides which texts a plan rereads, the fingerprint decides whether to plan at all, and merging them would make the per-command check walk `Collate` too. `crates/loader/tests/test_reload_fuzz.rs` and `test_repl_e2e.rs` pin it.
 
+## A reload re-derives one file and rewrites only the bindings it changed
+
+- **Previous shape.** `package_index` built the package's name table (`names`) in its own body from every file's items, so any edit re-ran a loop over all 25,000 items of a large package; `loader::diff` then rescanned every name for a laziness flip, rebuilt the eager and constant lists, and compared the S3 directive sets in full. Each item's load facts were a tracked query (`item_load`, with `item_syntax` and `item_node` behind it), and on the R side every reload resynced the namespace's exports and the attached package environment by rescanning all 3,100 exports. A body edit on the 326,000-line package took 35 to 60 ms to reach output, 18 to 40 ms of it planning.
+- **Target shape.** The binding facts are a firewall of their own: `file_binds` per file and `package_bindings` joining them into `PackageBindings` (laziness per name, each lazy name's item position, the eager and constant positions in collation order), returned behind an `Arc`. A body edit leaves a file's binding facts equal, so `package_bindings` keeps its value and `diff` sees the same `Arc` (`Arc::ptr_eq`) and skips the laziness flip scan. An item's load facts are computed inside `file_items` from its node rather than memoized per item. The plan carries `keeps_names` (every binding it writes was bound before and none goes away), which lets `runtime.R` skip the exports resync and copy only the touched names into the package environment.
+- **Why per file, not per item.** Salsa re-verifies every memo whose durability an edit's input had: the package's files start at high durability, so the first edit of each file re-verifies every memo the plan reaches, and only later edits of the same file (now low durability) take the durability shortcut. One memo per file is far cheaper to re-verify than several per item; the first edit of a new file still re-verifies about 8 memos per file and 5 per eager item. Starting files at low durability would make every edit pay that cost, so it was rejected.
+- **Impact.** On the 326,000-line package a repeated body edit reaches output in 9 to 12 ms (plan 6 to 8 ms), and the first edit of each file in about 30 ms. `test_incremental.rs` pins that a body edit re-runs one file's layer and stops at `package_bindings`. The cold load also warms `file_binds` across cores.
+
+## A cold load is analyzed while base R starts
+
+- **Previous shape.** The first `load_all()` of a console or `ry load` session planned from nothing after base R had loaded, so parsing and indexing the package (about 400 ms on the 326,000-line package) ran strictly after R's own startup (about 140 ms). The plan also deep-cloned every indexed item into the diff's working lists, re-erased each item's text a second time only to hash it, and matched erasure marks through a hash lookup at every token boundary.
+- **Target shape.** `Loader::prepare` reads the sources and derives the whole index, `package_index` included, without making a plan; the host calls it on a thread before starting R (`ry_loader_prepare` exported from libR for ry's runtime, `load::prepare` for GNU R). The plan that follows takes the loader's lock, finds everything memoized, and only diffs. Strict mode moved to an atomic beside ry's runtime's session, so applying the session's flags never waits for the prepare to release the lock. The diff borrows items instead of cloning them, an item's hash comes from its slice of the file's erased text, and the eraser walks marks sorted in a single pass.
+- **Impact.** Cold `ry run` on the 326,000-line package went from about 0.95 s to about 0.74 s (median of seven), and the analysis has no second source of truth: prepare and plan share one salsa database, so a file edited between them is read again and re-derived as usual.
+
 # Decision record: a file's check names only what its interface reaches
 
 - **Previous source of truth.** Cyclic interface groups came from one project-wide query,
@@ -3578,7 +3725,11 @@ explicit allocators".
   `hashbrown::HashMap::new_in(&bump)` builds with hashbrown 0.16's `nightly` feature, which makes
   it take std's trait. So arenas are `bumpalo` through std's `Vec` and `Box`, maps stay on
   `hashbrown` (std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter), and the
-  earlier `allocator-api2` polyfill route is dropped: nothing needs it.
+  earlier `allocator-api2` polyfill route is dropped. One trap: in any build that also links
+  Cranelift, `bumpalo`'s `allocator_api` feature must stay off, because Cargo unifies it with the
+  `allocator-api2` feature `regalloc2` uses, and with both on `bumpalo` drops the `allocator-api2`
+  impl and `regalloc2` fails to compile. The JIT therefore wraps `&Bump` in its own std
+  `Allocator` (`Arena` in `crates/jit/src/analysis.rs`).
 - **The pin moves forward deliberately.** Bump the date in one commit that also fixes what the new
   nightly breaks (new lints, rustfmt changes), never by floating `nightly`, so a build is
   reproducible. `flake.nix` reads the channel from `rust-toolchain.toml`, so a bump also needs
@@ -3617,12 +3768,23 @@ explicit allocators".
   (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
   pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
   Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Measured: the JIT's analysis plan.** Operands borrowed from the bytecode words, abstract
+  states as rows of one flat matrix, liveness as bitsets, `block_at` as a dense array, all in one
+  `Bump` per compilation (`crates/jit/src/analysis.rs`). Over the seven `tools/bench/why`
+  programs, analysis time per program fell from about 6.0 ms to about 4.5 ms (min of five runs,
+  roughly 100 compiled bodies each). The first cut was 25% slower than the old layout, because the
+  state matrix grew by doubling inside the arena, and a bump arena cannot reuse a vector's old
+  buffer, so every regrowth copied the whole matrix: reserve arena lists whose final size is
+  roughly known. Analysis is about 5% of compile time; Cranelift's code generation is the rest.
 - **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
 
 # Decision record: every host keeps every tree
+
+The server still keeps every tree; `ry check` now releases them once (see "Decision record: `ry
+check` releases its trees once, and memoized records are compact" below).
 
 - **Previous source.** `limit_resident_trees` gave `parse`, `file_item_annotations`,
   `item_syntax` and `item_annotation_syntax` salsa LRU capacities in `RootDatabase::one_shot`,
@@ -3649,6 +3811,47 @@ explicit allocators".
   salsa claims on project-wide queries (`duplicate_binding_map`, `project_arithmetic_classes`,
   `project_type_definitions`) that one thread computes while others need them.
 
+# Decision record: `ry check` releases its trees once, and memoized records are compact
+
+- **Previous source.** `ry check` kept every tree to the end, because salsa's LRU records each
+  read under one mutex per query. The checker recorded strict-mode origins for every item, and
+  the host decided strictness on its own (`file_is_strict` in `crates/ry/src/diagnostics.rs`).
+  Memoized records held `BTreeMap`s, `Vec`s and boxed slices, one `Ty` per expression, and
+  `item_top_level_names` was a `BTreeSet`.
+- **Weakness.** Peak RSS was 536-544 MiB on the benchmark code bases. The trees were dead after
+  the syntax pass. Strict origins (about 14 MiB) were built for projects that never read them,
+  and the strict setting had two deciders. Most per-item lists are empty, yet an empty `Vec` is
+  24 bytes and a boxed slice 16, so `ItemNaming` was 320 bytes and `ItemCheck` 248, times 56,000
+  items, and the HIR module's twelve side arrays were 24 bytes each.
+- **Target shape.**
+  - The tree queries declare `lru = 0`, which records nothing per read. `semantics::release_trees`
+    raises the capacity to one, touches every tree on one thread, calls
+    `trigger_lru_eviction`, and lowers it again. The CLI calls it after the syntax pass and hands
+    each file tree to the naming worker that names that file, which frees it.
+  - `AnalysisSettings` carries `[check] strict`, and `semantics::file_is_strict` decides a
+    file's mode for the check (the loader's `load_index::file_is_strict` reads the package
+    default). The checker records strict origins only when it is true.
+  - Frozen per-item tables are `SortedMap`/`SortedSet` (`crates/semantics/src/sorted.rs`) over a
+    `ThinVec`, which is one pointer wide and allocates nothing when empty. The same goes for the
+    check and naming lists and the HIR module's side arrays.
+  - `ExpressionTypes` is a palette of the item's distinct types plus one `u16` slot per expression
+    (`u32` past 65,535 distinct types).
+  - Interned types carry content flags (`HAS_VAR`, `HAS_RIGID`, `HAS_UNKNOWN`, `HAS_NAMED`),
+    computed once at intern time, so a walk skips a type with nothing to rewrite.
+  - `file_binders` is keyed by `Symbol`, and `item_interface_reads` looks names up by symbol
+    instead of interning a query name for each read.
+- **Correctness.** JSON findings are byte-identical on the three benchmark code bases and on a
+  full-size typed (strict) finance bench, and both `[check] strict` and a `# typing:` directive
+  give the same findings as before on a small project.
+- **Performance.** Interleaved runs against main (4 cores): peak RSS went from 536-544 MiB to
+  417-419 MiB, the median wall time from 1.41-1.52 s to 1.39-1.44 s, and the median CPU from
+  4.7-5.0 s to 4.6-4.8 s. mimalloc's v2 build (489 MiB), its purge, reclaim, retention and
+  huge-page options, and a forced `mi_collect` at worker exit measured no saving, or one inside
+  the noise.
+- **Incremental.** The server never releases trees. `item_interface_reads` reads `file_binders`
+  directly, like `item_frame_binders` already did, and still backdates when a file's binders are
+  unchanged.
+
 # Decision record: HIR as struct-of-arrays, lowered from the green tree
 
 - **Previous shape.** `Module` held `expressions: Vec<Expression { kind, range }>` and
@@ -3671,6 +3874,14 @@ explicit allocators".
   once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
   the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
   rule of the data-oriented record above.
+- **Names at their own site are one side array, and ids carry a niche.** An argument name, a
+  field after `$` or `@`, a loop variable and a tag are a `NameId` into `Module::name_sites`, which
+  holds the `Symbol` with its range, instead of a `Symbol` and an `Option<TextRange>` inline in
+  every kind. `ExprId`, `PatId` and `NameId` are `NonZeroU32`, so `Option<ExprId>` is four bytes.
+  An expression kind went from 28 to 16 bytes and an argument from 24 to 8; together with hashing
+  `Symbol` by its index (`Ord` stays by spelling, so sorted output does not move) the cold check
+  took 3 to 8% less wall time and about 30 MiB less peak RSS. Read names through
+  `Module::name`, `Module::name_range` and `Module::argument_name`.
 - **Kept deliberately.** `ExprId` allocation order is the old one, so ids, fixtures and every
   downstream map are unchanged. `Module` still owns plain vectors and compares by value, so salsa
   backdating works as before.
@@ -3695,11 +3906,15 @@ explicit allocators".
   constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
   binding's type. A typed closure turns such a binding back into a promise on entry, because an
   inline annotation checks a default only when the body uses it.
-- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_fresh`
+- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_formals`
   skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
   cell, as GNU R's frame list does.
-- **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
-  `identical` has nine formals, and building a map per call cost more than scanning.
+- **Frames scan up to 16 cells before building a hash index**, and hold nine bindings inline as
+  symbol and cell pairs, so a lookup reads one cache line per four bindings. `identical` has nine
+  formals, and building a map per call cost more than scanning. Separate symbol and cell arrays
+  were measured and cost 3% more instructions, because inserts then check two spills.
+- **A call binds its formals in one batch** (`Heap::define_formals`): one collection check that
+  keeps every value and the environment alive, then the cells, then one write barrier.
 - **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
   compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
   a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
@@ -3733,6 +3948,24 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## A DataFrame column reads back as a plain vector, not an Array
+
+- `DataFrame(price = [12.5, 9.99])` checks each column as an Array, then stores it as the plain
+  vector, and `df$price` reads back a plain `double[]`, statically and at run time.
+- Typing the read as `Array<T>` was rejected: a frame's later steps can put `NA` into a column (a
+  left join's unmatched rows), so the column type would have to be tracked per verb and an
+  `NA`-holding column would need a second representation. One column type keeps the schema the
+  single source of truth. `as.Array(df$x)` is the checked way back, and it fails on an `NA`.
+
+## mimalloc's purge delay stays at its default
+
+- Raising `MIMALLOC_PURGE_DELAY` (or calling `mi_option_set` for `purge_delay` in
+  `crates/libr/src/libr.rs`) keeps freed pages resident. Measured on the whole db-benchmark script
+  with lazy arena commit (`LAZY_ARENA_COMMIT` in the same file), never purging was 7% faster and
+  raised peak memory by 1.4 GB. The option is process-wide, so every R program would pay the
+  memory for a gain that lies mostly in CSV loading. The numbers are in the backlog item "Large
+  allocations page-fault on every query"; revisit with a per-query arena, which keeps the gain without the global cost.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 
@@ -3777,21 +4010,102 @@ explicit allocators".
   is that environment's own compiled closure (whose updates the compiler orders with
   `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
   copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
-- **Rejected: moving a value into a helper's parameter.** `d <- helper(d, k)` handing the caller's
-  sole reference to the callee was implemented and removed. After an in-place update the caller's
-  variable no longer holds the old value, yet a second argument naming it, a nested closure,
-  `get(..., parent.frame())`, and an error unwinding through the assignment all read it. Making
-  it sound needs escape analysis of the callee plus an undo path, so helpers copy as in GNU R.
+- **Moving a value into a helper's parameter** was first rejected as unsound and is now built
+  with escape checks and an undo journal; see "Moving a collection into a helper's parameter".
 - **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
   vector, a value vector and an open-addressing index in an integer vector, all in the collector's
   heap, which a `SEXP`-holding value must be (`decisions.md`, "Data-oriented design and explicit
-  allocators"). Measured on a release build with 1,000,000 calls each: `Dict.len` (no hashing)
-  costs 0.62 us a call, `Dict.get` on a 1M-entry dictionary 0.67 us, and on a one-entry
-  dictionary 0.56 us. Hashing and probing are at most about 15% of a call; the rest is
-  interpreter dispatch, so a new layout cannot pay and the win is in call overhead.
+  allocators"). Hashing and probing were at most about 15% of a call, and the rest was call
+  overhead, which "Library leaves resolve at compile time" removes.
 - **Impact.** Value semantics are unchanged (pinned in
   `crates/interp/tests/test_standard_library.rs`, including the cases that broke the move), nested
   accumulator loops become linear, and incremental analysis is unaffected.
+
+## Library leaves resolve at compile time
+
+- **Before.** A call such as `Dict.len(d)` in a loop looked `Dict.len` up through the
+  environment chain, built an argument list with a promise per argument, and dispatched through
+  the builtin table on every iteration: about 0.27 us for `Dict.len` and 0.45 us for `Dict.get`
+  on the profiling build (0.6 us on an older build), against 0.001 us for an empty iteration.
+- **Tier 0.** The bytecode compiler resolves a qualified library name (`library_function` in
+  `bytecode.rs`) to its builtin when the name resolves to a native-accepting builtin and every
+  argument is positional with no `...`, and emits a guard on the symbol's binding, the builtin as
+  a constant and a direct `CallBuiltin`. A failed guard (someone rebound `Dict.len`) falls back to
+  the general call, so redefinition still works.
+- **Leaves.** `standard_library::is_leaf` names the functions that never call back into R
+  (`len`, `is_empty`, `get`, `contains` of `List`, `Dict` and `Set`). The JIT treats a leaf as an
+  opaque step with `Effect::PureUnlessObserved`, so it flushes nothing around it.
+- **Intrinsics.** `Dict.len`, `Set.len`, their `is_empty`, `Dict.contains`, `Set.contains` and
+  `Dict.get` compile to calls of small runtime helpers (`jit_collection_count`,
+  `jit_collection_position`, `jit_dict_get`) that take the key unboxed and return an unboxed
+  count or position. Anything they do not handle (a wrong type, `NA`, a mismatched key kind, a
+  one-entry collection stored without an index) hands the instruction to tier 0, which raises the
+  same error as before. `Dict.get` still allocates its `:Ok(value)` record; `:Err(:KeyNotFound)`
+  is one shared value (`standard_library::Tags`).
+- **Hash.** `key_hash` applies MurmurHash3's 64-bit finalizer after FxHash. FxHash's low bits are
+  constant for doubles that hold whole numbers, which the open-addressing index uses to pick a
+  slot, so integer-valued keys clustered and a miss probed linearly (0.80 us; 0.09 us with the
+  finalizer alone, before the intrinsics). The
+  index is not serialized, so the change needs no migration.
+- **Measured** (`ry run`, profiling build, minimum of 7 runs of 1,000,000 calls on a 1,000-entry
+  dictionary, us per call, before and after): `Dict.len` 0.271 to 0.009, `Dict.get` 0.450 to
+  0.053, `Dict.contains` 0.320 to 0.018, a missing key 0.800 to 0.025.
+- **Impact.** Library calls in loops are as cheap as `length()`, value semantics and errors are
+  unchanged (pinned in `test_standard_library.rs`, including compiled-loop error cases), and the
+  analysis is unaffected.
+
+## Moving a collection into a helper's parameter
+
+- **Before.** `d <- helper(d, k)` shared the dictionary between the caller's `d` and the
+  parameter, so the helper's `Dict.insert` copied it and a loop of such calls was quadratic. A
+  first version that cleared the caller's binding was removed, because a second argument naming
+  `d`, a nested closure, `get(..., parent.frame())` and an error unwinding through the assignment
+  all read the cleared variable.
+- **Target shape** (`crates/interp/src/moves.rs`). `rebind_call` offers a closure call to
+  `moves::call_moving`. A static check (`movable`) requires positional arguments without `...`,
+  and that the other arguments, the callee's defaults and its body call only closures and inert
+  builtins (`inert_builtin`, plus native-accepting library builtins), never naming the caller's
+  variable unless it is the callee's own local. Then the caller's binding is set to `NULL` for
+  the call. At run time any code the check did not cover ends the move first and restores the
+  binding: entering a closure other than the callee, forcing a promise the check did not see, a
+  library callback that is not a closure, and the default error handler.
+- **Undo journal.** An in-place update of a dictionary or set either appends or replaces a value
+  (`insert_in_place` reports replacements to `moves::replacing`), so the original is the first
+  `entries` entries with the replaced values put back (`collection_prefix`). A failed call, or an
+  early end, rebuilds the caller's value from it.
+- **Dead frame release.** When the call returns without the move having ended and the callee
+  creates no closure, its frame is unreachable, so `release_parameter` clears the parameter's
+  binding. Without that the dead frame keeps the result shared and the next call copies. The
+  heap does not count an environment's enclosure as a reference, so the environment's refcount
+  cannot decide this the way GNU R's `R_CleanupEnvir` does.
+- **Holes the static check cannot see.** A variable that holds an environment can reach any
+  frame, so `$`, `[[` and their assignments on an environment end every move
+  (`moves::reaching_environment`, in `subset.rs`). A local assignment of the caller's variable's
+  name does not shadow it, since a read before the assignment, or on a path that skips it,
+  finds the caller's variable, so such a body is not movable; only a parameter shadows. A closure
+  created in the body captures the frame without entering a closure, so a body or default that
+  may create one gets no tail update and no frame release (`moves::may_capture_frame`).
+- **A shared start does not stick.** A value something else also holds, such as `.Last.value`
+  holding the dict a top-level `d <- Dict.empty()` created, cannot move, but the call still runs
+  tracked (`Move::shared`, binding untouched) so the dead frame is released and the next call
+  moves. Before this, one shared call made every later call copy, because the dead frame kept
+  each result shared.
+- **Tail update.** A helper whose body ends in `f(p, ...)`, `f` a library builtin that reuses its
+  first argument and `p` the first parameter, compiles that call to `Op::CallTailUpdate`
+  (`bytecode::tail_update`). It updates `p`'s value in place only when, after its arguments are
+  evaluated, a move into this frame still lasts (`moves::frame_private`): then nothing has
+  captured the frame, and nothing in it runs after the call, so no one sees the parameter
+  change. The AST evaluator never does this, so the first two calls, before tier 0 compiles the
+  body, copy.
+- **Why static types do not prove it.** A type says what a value is, not which frames a
+  function reads or whether it captures its environment, so a typed helper needs the same body
+  check as an untyped one. Effect annotations would be the typed route, and ry has none.
+- **Measured.** 40,000 calls of `d <- add(d, i)`, profiling build: with `add <- function(d, k)
+  { d <- Dict.insert(d, k, k); d }` inside a function, 16.9 s before and 0.10 s after; at top
+  level inside `system.time`, 16 s before the shared-start fix and 0.066 s after; with the tail
+  form `add <- function(d, k) Dict.insert(d, k, k)`, 16.4 s before and 0.053 s after.
+- **Limits.** Lists are not moved, and the tail update covers only the last statement. Both are
+  in `backlog.md`.
 
 ## A key of the wrong type is an error, not a missing key
 
@@ -3835,6 +4149,62 @@ explicit allocators".
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
 
+## Character group keys get first-appearance codes during import, and the bridge widens to `dcast`
+
+- **Previous shape.** The grouping kernels (`crates/table/src/group.rs`) built mixed-radix digits for factors, integers and logicals only, so `by` on a character column went through Polars' general grouping, and at 1e6 rows the `[` bridge lost to data.table's C on string keys (`by = id3` 0.021 s against 0.017 s). Ranking the distinct strings with `ops::string_ranks` to make a digit was tried and was slower, because it sorts them. The bridge also declined every query from data.table's own namespace, any `j = eval(e)`, and any call whose head is a primitive object, so `dcast`'s aggregation `dat[, eval(fun.call), by = c(varnames)]`, with `fun.call` being `list(v1 = .Primitive("sum")(v1))`, always ran on data.table.
+- **Target shape.** Importing a character column into the engine (`import_column` in `crates/interp/src/data_table.rs`) already visits every CHARSXP, so it numbers each distinct string by first appearance through the CHARSXP's truelength, as data.table does, and restores the truelengths afterwards. The column is built from the distinct strings and the codes (`convert::strings_from_codes`, a parallel gather of views), and `Table::set_string_codes` stores the codes beside it (`StringCodes`). Any change to that column drops them (`forget_column`), and `set_key` drops all of them, so they cannot drift from the data. A code is a digit with radix `distinct + 1` (0 is `NA`). `keyby` ranks only the distinct strings, by byte order, so it sorts `k` strings, not `n` rows. In the bridge, `Piece::expand_eval` replaces `j = eval(e)` with the call `e` evaluates to, as `[.data.table` does, `frame::call_head` reads a primitive head by its name, and data.table's own namespace qualifies for grouped queries without `:=`.
+- **Exactness guards.** Outside GForce, base `sum` accumulates in `long double`, so the bridge still declines it, except `sum` of one integer or logical column (`sums_exactly`), which is exact in any order. GForce's integer `sum` widens to doubles with a warning as soon as a group's running total leaves the integer range, while the engine widens on the final total. The bridge therefore declines a GForce `sum` unless the absolute values of every integer column the query reads add up to at most `INT_MAX` (`running_sums_fit`), which rules out any running overflow. The same bound guards every grouped query that mentions `sum`, because outside GForce base `sum` widens only the overflowing group's total and data.table then rejects the mixed column types. `expand_eval` follows `[.data.table` exactly: it leaves `eval(e)` alone when a variable of `e` names a column, and declines when the expansion reads no column, since data.table decides `with = FALSE` before expanding (`eval(quote(1:2))` is `1:2` there, not columns 1 and 2). An evaluated `by` that names no column (`by = character()`, which `rollup` and `groupingsets` pass for the grand total) declines, because data.table answers it as one group. Strings intern by encoding, so when the distinct non-ASCII strings of a column carry different encoding marks, the column gets no codes and groups by its text, as data.table does. A negative truelength the import loop did not set (one left behind by C code that stopped midway) declines rather than aliasing two strings. An unnamed `by` expression is named as data.table names it (`by_expression_name`: the first suitable variable of `all.vars(key, functions = TRUE)`), and the case where data.table falls back to `deparse(key)` declines. A `j` that picks whole columns of every row also declines, because data.table copies those vectors while the engine would convert each string column in and back out (0.048 s against 0.006 s at 1e6 rows).
+- **Impact.** At 1e6 rows, best of 15: `by = c("id1", "id4")` takes 0.007 s against 0.011 s on GNU R, `by = id3` 0.007 s against 0.013 s, `keyby = id3` 0.015 s against 0.016 s, and `dcast(x, id1 ~ id4, value.var = "v1", fun.aggregate = sum)` 0.018 s against 0.027 s. All `tools/bench/table/ops.R` checksums match GNU R at 1e6 and 1e7. `fuzz_kernels_agree_with_the_polars_plans` covers string keys with `NA`s and up to 5,000 distinct values, and `crates/oracle/cases/datatable__dynamic.R` pins `eval`, spliced primitives, `dcast` and the running-overflow rule against GNU R.
+
+# Decision record: what typing finbench in strict mode settled
+
+## Shipped stubs are whatever `types/` holds
+
+- **Before.** `stubs.rs` listed every shipped `.Rtypes` and `.exports` file by hand, and a second
+  hand list named the conditional namespaces. A stub added to `types/` without editing both lists
+  either never shipped or was always active, which made a package's names resolve in projects that
+  never use it.
+- **Now.** `crates/semantics/build.rs` scans `types/`, embeds every file, orders the stubs (R's own
+  packages in search-path order, CRAN namespaces alphabetically, `ry` last, so later sources
+  override earlier ones the way R's search path does) and derives `CONDITIONAL_NAMESPACES` as every
+  namespace except R's own packages and `ry`. One source of truth: the directory.
+- `QUALIFIED_ONLY_NAMESPACES` stubs are gated by activation like conditional ones, so an inactive
+  package's `pkg::name` stays a manifest lookup rather than a typed call.
+
+## Override-stub problems are computed after `PackageMetadata` exists
+
+- `stub_library` is a HIGH-durability memo. Computed before the `PackageMetadata` singleton input
+  existed, it saw no active namespaces and was never re-verified, so a project with any
+  `stubs/*.Rtypes` lost every shipped conditional namespace. `cli.rs` creates the metadata input
+  first; `check_keeps_declared_packages_active_beside_override_stubs` in `test_cli.rs` pins it.
+
+## Strict mode implies type errors
+
+- `[check] strict = true` without `typing` used to report the strict findings but no type errors,
+  which made a strict project look clean while its calls did not type. Strict now turns typing on
+  (`diagnostics.rs`); `typing = false` beside it no longer turns type errors off. Strict code is
+  fully typed by definition, so there is no useful strict-but-untyped mode.
+
+## An all-`Any` overload does not veto agreement among unchecked fits
+
+- With an unchecked (`Unknown` or `Any`) argument every candidate fits, and the call is `Unknown`
+  unless the fits agree. A catch-all fallback such as `rep`'s `fn(...) -> Any` always disagreed, so
+  every overloaded call with one unknown argument was `Unknown`, the largest strict friction in the
+  port. `overloaded_call` (`check.rs`) drops all-`Any` fits when a more specific fit exists and
+  every specific fit still fits with each unchecked argument replaced by a witness type that only
+  `Any` or an unconstrained type parameter accepts (`unchecked_arguments_decide_nothing`), then
+  applies the agreement rule. Without the witness test, `levels(unknown)` became `character[]`
+  and `rep(unknown, 2)` a vector: the unknown argument was the one choosing the candidate. Rejected: taking the union of the fits' results. It is sound, but it
+  turns silence into false operand errors downstream (operators do not dispatch per union member),
+  against "the checker presumes R code is correct".
+
+## `$`, `[` and `[[` dispatch to a class's subset method
+
+- A stub or project method named `$.class`, `[.class` or `[[.class` types the access on a value of
+  nominal type `class` (`subset_method_result` in `check.rs`), as R's S3 dispatch would run it. It
+  is consulted before the structural read, so an opaque type gets typed field reads without
+  exposing a representation (`nominals.R.test`, `a_dollar_method_types_field_reads_on_its_class`).
+
 ## The C headers declare the API of the presented R version
 
 - ry presents the R version of its base `DESCRIPTION` (4.3.3), and packages branch on `R_VERSION`
@@ -3877,15 +4247,97 @@ explicit allocators".
 - **ry-built packages.** `rcmd` links with `-undefined dynamic_lookup` and an empty `LIBR`, so the
   binary records no libR and resolves R's API in the flat lookup that falls back to every loaded
   image. The same build then loads under ry and under GNU R, and needs no rewriting.
-- **Known gaps.** A package that loads a sibling dylib through `@loader_path` breaks in the
-  rebound copy, because the copy lives outside the package's `libs/`. A failed load of a rebound copy says so in its error. CRAN's own `libRblas.dylib`
-  could pull in GNU R's libR if a package links it directly; unobserved. The install-name match is
-  reasoned from dyld's source and verified only once the release smoke test runs on a Mac.
-- **Windows (designed, not built).** Name the library `R.dll`: the loader reuses an already loaded
-  module with the same base name, so Rtools-built package DLLs bind to ry's copy with no
-  rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
-  `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
-  The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).
+- **Relative dependencies.** The copy lives in the cache, outside the package's `libs/`, so the
+  cache mirrors the original's surroundings with links (`mirror_surroundings` in `dynload.rs`):
+  the copy's directory links every file beside the original, and `macho::Rebound::climb`, the
+  most `..` components any `@loader_path` load command or rpath starts with, decides how many
+  ancestor directories are mirrored too. Rewriting `@loader_path` to the original's absolute
+  directory was rejected: the longer string does not fit in the load command in place, and
+  growing load commands needs header padding and moves offsets. `.target` in the cache entry
+  records where the copy sits in the mirror.
+- **Known gaps.** CRAN's own `libRblas.dylib` could pull in GNU R's libR if a package links it
+  directly; unobserved. An `@rpath/../x` name combined with an `@loader_path` rpath is not counted
+  in the climb. The install-name match is reasoned from dyld's source and verified only once the
+  release smoke test runs on a Mac.
+
+## Windows runtime: `R.dll` and `ry.exe` for windows-gnullvm, linked with lld
+
+- **Before.** The runtime called libc directly (`dlopen`, `umask`, `utimensat`, `nl_langinfo`,
+  `iconv`, `kill` and signal numbers, process priorities, `getpwnam`), so it built only on Unix, and the Windows archive
+  carried `ry.exe` alone.
+- **Target.** `x86_64-pc-windows-gnullvm` for both binaries: the mingw-w64 ABI Rtools builds
+  packages with, on the UCRT that Rtools 4.2 and newer link. `windows-gnu` links `msvcrt.dll`, so
+  `errno`, `FILE *` and `malloc`/`free` pairs crossing the API would hit two C runtimes, and an MSVC
+  `ry.exe` loading a mingw `R.dll` mixes runtimes the same way, so neither is shipped. Package DLLs
+  import from `R.dll` by module name, and the loader reuses an already loaded module with the same
+  base name, so naming ry's library `R.dll` binds them with no rewriting. Exports come from
+  `__declspec(dllexport)` in `native.c` plus rustc's own exports, so there is no `.def` file to
+  drift from the code; the linker writes `libR.dll.a` for `rcmd`. `LibExtern` is
+  `__declspec(dllimport) extern` under `_WIN32`.
+- **One platform seam.** Every operating-system call the interpreter makes goes through
+  `crates/interp/src/platform.rs`, which has a Unix and a Windows `imp` with the same functions.
+  Operating-system *calls* never happen outside it, so a new libc use shows up as a Windows build
+  error in one file; platform *conventions* (`.Platform`, the platform string, `libs/x64`, the
+  routine table) still branch on `cfg!` where they are used. The heap's address-space
+  reservation has its own small seam (`virtual_memory` in `crates/heap/src/space.rs`: `mmap` or
+  `VirtualAlloc`). Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
+  same interface `Riconv` exports.
+- **lld is required.** GNU ld 2.41 (Ubuntu's mingw-w64) emits a `HIGHLOW` base relocation for
+  each `SECREL32` thread-local offset, so a relocated `R.dll` (ASLR, or a base-address collision)
+  computes a garbage address on every `thread_local` access. lld emits none. mingw's `gcc` is
+  configured `--with-ld` and ignores `-fuse-ld=lld`, so `clang --target=x86_64-w64-mingw32
+  -fuse-ld=lld` is the linker driver (`contributing/design/r-runtime.md`, section 11, has the
+  command).
+- **A 64 MiB main-thread stack** for `ry.exe` (`crates/ry/build.rs`): the session evaluates on the
+  main thread, and base R's startup overflows Windows' 1 MiB default. The UTF-8 code-page
+  manifest the MSVC build embedded through linker flags goes in as a `windres` resource object,
+  so the gnullvm build needs `windres` (`WINDRES`, else `llvm-windres` or `windres` on `PATH`).
+- **Jumps use `_setjmp(buffer, NULL)` and `longjmp`.** mingw's `setjmp` macro records the frame
+  and `longjmp` then unwinds through SEH. clang's `__builtin_setjmp` stores the canonical frame
+  address, but its landing code uses it as the frame pointer, so `R_UnwindProtect`, whose frame
+  pointer sits above its stack pointer, resumed with garbage locals when an R error landed in it.
+  A null frame makes the CRT's `longjmp` a plain register restore, as on Unix.
+- **`xerbla_` never jumps over Rust.** Windows' R.dll exports it for R's `Rblas.dll`/`Rlapack.dll`.
+  It raises an R error for a package's call, but returns while the interpreter's `DirectFortran`
+  guard (`linalg.rs`) is alive, and the routine's negative `info` reaches the Rust caller.
+- **Two modules named `R.dll`.** ry's runtime beside `ry.exe` shares GNU R's DLL name, so `ry R`
+  loads GNU R's `R.dll` first by full path; later by-name imports bind to the loaded module.
+- **Toolchain.** The release runner uses MSYS2's clang64 environment (`msys2/setup-msys2`).
+  Cross-building from Linux works with the host clang and lld over MSYS2's clang64 sysroot
+  packages; packages for tests are built with the Rtools ABI from MSYS2's ucrt64 GCC 14 headers
+  and static `libstdc++` (GCC 16's needs a newer clang than 18).
+- **Windows-only routines** that `utils` and `grDevices` reference at load time are registered in
+  `WINDOWS_ROUTINES` (`builtin_libraries.rs`), chained in only on Windows so Unix sessions keep
+  GNU R's Unix routine table.
+- **Impact.** `ry run` runs base R and Rtools-ABI package DLLs (jsonlite, data.table, digest, cli,
+  uuid, Rcpp with exceptions crossing R errors) under Wine with no GNU R binary executed, and the
+  release workflow ships `R.dll` beside `ry.exe`. Open items are in `r-runtime.md`, section 11.
+
+# Decision record: a new top-level name costs one project fold
+
+- **Before.** A name being typed is a new top-level definition on every keystroke. That re-ran
+  `package_definitions` and `duplicate_binding_map`, two folds over every package file's
+  definitions keyed by `String`; `item_interface_edges` read the project-wide maps directly, so
+  every item whose check was demanded afterwards re-derived its edges; and the unresolved-name
+  typo suggestion collected the characters of every project name before checking its length.
+  `examples/keystroke_probe.rs` measured 23 to 27 ms per new-name edit on dsbench and finbench.
+- **What was structurally weak.** Two folds of the same data, and a per-item query reading
+  project-wide maps despite the per-name firewall (`package_name`) built for exactly that.
+- **Shape.** `package_definition_index` folds once into the winners and the duplicated names;
+  `package_definitions` is a plain borrow of its winners, and `duplicate_binding_map` a tracked copy
+  of its duplicates, empty in a healthy project, which keeps the per-file duplicate check firewalled.
+  `item_interface_edges` reads `package_name` and `test_name`. Map keys are `Symbol`, whose hash
+  is the spelling's FxHash computed once at interning (not the index, so iteration order does not
+  depend on which thread interned a spelling first, which the robustness contract forbids from
+  reaching output; this replaces an earlier index hash, which saved only the read of the stored
+  hash from the symbol table); `Symbol` therefore no longer implements
+  `Borrow<str>`, and a lookup by text interns first (`Symbol::new`). The symbol table also stores
+  each spelling's character count, which the typo scan filters on before reading any spelling.
+- **Impact.** New-name edits take about 4 to 6 ms on dsbench and finbench, body edits about 2 ms
+  (unchanged). Pinned by `a_new_definition_rebuilds_no_other_files_interface_edges` in
+  `crates/semantics/tests/test_incremental.rs`. The probe's earlier 60 to 74 ms figure was an
+  artifact: it edited a digit inside an identifier, which renamed an item, and it entered the
+  stubs at `LOW` durability, which made every keystroke deep-verify about 51,000 memos.
 
 ## The runtime emulates the GNU R version it loads base R from
 
@@ -3927,3 +4379,94 @@ explicit allocators".
   hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
 - **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave
   exactly as under GNU R, and every kind the interpreter supports works from C at no extra cost.
+
+# Decision record: matching GNU R's own tests where its behavior is an artifact
+
+GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its implementation, not from the language. Each is reproduced from observed output (black-box against Rscript), never from GNU R's source.
+
+- **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes.
+- **`%%` and `%/%`** correct the remainder in extended precision, handle a divisor too large for the quotient, and warn past 2^63, matching GNU R's observed results on huge operands.
+- **Invalid UTF-8 bytes** survive text processing as private-use code points (one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. A strings-as-bytes representation would touch every string consumer, so the stand-in keeps the change small. It is not lossless: a string that already holds a real U+F780..U+F7FF character is indistinguishable from an invalid byte and prints as `\xNN` (backlog: byte strings).
+- **`agrep` and `adist`** use an approximate-match NFA over edit costs; `adist`'s `counts` traceback prefers the order GNU R reports (observed, not derived).
+- **Scripts run as console input**: one top-level expression at a time, with `stdin()` reading the rest of the script, because GNU R's tests read data from their own source that way.
+- **Message sinks and abort restarts**: `sink(type = "message")` diverts every stderr writer, reaching top level invokes an R-level `abort` restart, and messages are cut to `warning.length`.
+- **`.Last.value` holds no reference count**, so binding it never forces a copy on the next modification, as in GNU R.
+- **Replacement primitives called directly** (`` `names<-`(x, v) `` outside an assignment) copy their target, because only a complex assignment owns it.
+- **`pretty()` and plot axes near the double range**: the 4% axis extension is clamped to ±`DBL_MAX`; a log axis stays inside `log10(0.99*DBL_MAX)` and `log10(1.01*DBL_MIN)`; a zero log limit becomes -320 with GNU R's "nonfinite axis limits -- corrected now" warning. `GEPretty` and `Rf_CreateAtVector` in libR reuse the interpreter's `linear_axis` and `at_vector`, so grid and base graphics share one tick algorithm.
+- **Deparse parenthesizes dangling operands**: an `if`, loop or low-precedence unary operator that ends a binary operator's left operand gets parentheses (GNU R's PR#18232 fix). GNU R leaves `function` bare there, which reparses differently; ry keeps the parentheses on purpose.
+- **`smooth.spline`** (`rbart`, `bvalus` in `crates/interp/src/stats_spline.rs`) is written from the penalized B-spline method. It copies GNU R's 0.333 in the roughness integral because the printed matrices and fitted values depend on it. Near-interpolating GCV fits can settle on a different `spar`, since the criterion there is rounding noise; that divergence is accepted.
+- **`Fexact`, `parseLatex`, `gzcon`, `OutDec`, classed `parseError` conditions and `file(encoding=)` re-encoding** are native implementations of the documented interfaces, checked against GNU R's tests.
+- **Bytes-encoded strings force byte matching**: when any pattern or text element of `regexpr`, `gregexpr`, `regexec`, `grep`, `sub`, `gsub` or `strsplit` is marked `"bytes"`, the call behaves as `useBytes = TRUE` (byte positions, `index.type = "bytes"`, non-ASCII results marked `"bytes"`), as GNU R does.
+- **TRE compile errors** reject PCRE-only groups (`(?<`, `(?=`, `(?!`, `(?>`, `(?P<`) with "Invalid regexp" and an inverted interval with "Invalid contents of {}". The warning and error wording follows GNU R's three observed paths (wide-character `regexpr`/`grep`, `regexec`, everything else).
+- **Accepted divergences**: `fisher.test` on tables whose network exceeds GNU R's FEXACT hash computes the p-value instead of erroring "hash key ... > INT_MAX"; `gsub("\\b", ...)` does not reproduce TRE's re-match of `\b` after an empty match; printing a bytes string pads by its escaped width, not GNU R's single-escaped width.
+- **`nlminb` control ranges** are checked before minimizing, and an out-of-range control sets `iv[1]` to its PORT `v` position so that `nlminb`'s R code prints GNU R's "is out of range" message.
+- **`qbeta` polishes its last digits** with a neighbour walk over adjacent doubles that minimizes `|pbeta(x) - p|`, because GNU R's tests require a mean relative round-trip error below 8e-16.
+- **`traceOnOff`** keeps a real tracing state (default on), so `trace()` tracers run.
+- **`qbeta` past the log-scale solve**: Newton steps on the caller's own probability scale recover the digits a log-scale solve loses when `|log p|` is large; a NaN from pbeta's asymptotic expansion bisects toward 0; pbeta warnings raised while searching are dropped; a subnormal result snaps to 0 or 2^-1024, whichever probability is nearer the target, because GNU R never returns a subnormal quantile and `d-p-q-r-tst-2` relies on it.
+- **`dpois` deviance in double-double**: `bd0_extended` in `rmath.rs` computes `x log(x/np) + np - x` as an unevaluated sum, with its own atanh-series logarithm, because GNU R's tests pin densities like `dpois(1400, 1000)` to a few ulps.
+- **Discrete quantile slack**: a probability within 64 epsilon of the target, measured from the nearer end of [0, 1], counts as reached (16 epsilon of the log probability on the log scale). A slack relative to `p` alone returned the quantile below near 1, and a narrower one exposed `ppois` digits that differ from GNU R's.
+- **Deparse of braced `if` in calls**: a braced `if` stays on one line as an argument of a primitive call (`c`, `list`, `quote`, `return`, ...) and breaks inside closure calls, `[` and list elements; `else` after a braced consequent starts its own line.
+- **S4 arguments to `cbind` and `rbind`** hand the call to `methods:::cbind`/`methods:::rbind` with `deparse.level` tagged; a deparse level of -1 marks a call from methods' own `cbind2`/`rbind2` defaults and binds directly.
+- **`LC_CTYPE` is C.UTF-8** at session start, so `iconv(..., "ASCII//TRANSLIT")` transliterates as GNU R does in a UTF-8 locale.
+- **`qnchisq` stops at a relative accuracy of 1e-13**, as GNU R's results do. A full-precision search round-trips some quantiles exactly, and `all.equal` leaves exact matches out of its mean, so `d-p-q-r-tests` line 188 failed on a more precise answer.
+- **Accepted numeric divergence**: `pf(x, 1, 1, ncp = 20, lower = FALSE, log = TRUE)` is -17.1486, which an independent mixture sum confirms, while GNU R's less precise noncentral beta gives -17.1318 and `d-p-q-r-tst-2` line 302 asserts GNU R's range.
+- **Native `loess`** (`crates/interp/src/stats_loess.rs`) is written from the documented method and black-box checks against GNU R. Fits, robustness weights and `predict` match GNU R; the kd-tree vertex interpolation is a cubic Hermite blend along edges and, in two dimensions, a Coons patch (edge curves plus cross-edge slopes, minus the corner tensor product), found by fitting candidates to GNU R's predictions. Three or more predictors use the tensor product alone, unverified. With `span > 1` the neighbourhood radius is the largest distance times `sqrt(span)`. The approximate statistics (`enp`, `one.delta`, `two.delta`) are computed exactly rather than with GNU R's interpolation table, so they differ in the third digit; above 1000 observations the deltas use a cheaper approximation.
+- **URL transfers use `reqwest`, not libcurl** (`crates/interp/src/http.rs`). The blocking client was already linked through polars, honors the proxy variables and reads the platform's roots (`SSL_CERT_FILE`). A `url()` connection fetches its whole body when it opens and then reads from memory, like `unz()`. Failures are reported with libcurl's codes and wording, because R code and GNU R's tests match on them. Each request runs on a scoped thread (`on_transfer_thread`), since the blocking client panics inside an async runtime an embedder may own; a transfer thread that dies reports libcurl's "Failed initialization" instead of unwinding into R. `curlGetHeaders` follows redirects hop by hop, so it reports each hop's headers, but not the proxy's CONNECT response that libcurl adds. `curlVersion()` still returns an empty string.
+- **`warning(immediate. = TRUE)` signals like any warning**; a flag on the interpreter makes only the default handler print it at once, so calling handlers and `assertWarning` still see it.
+- **`Cstack_info()`** reports a fixed size of 7969177 bytes, current use from the remaining native stack, and the evaluation depth from the frame stack, since scripts only compare these against each other.
+- **`sort.list` is never an S3 method**: dispatch skips base's own `sort.list` closure when looking for a method of `sort`, because GNU R treats it as a plain function and `sort(x)` on a classed `x` must not reach it.
+- **A generic called without its first argument dispatches as on NULL**, matching GNU R's `UseMethod` instead of erroring on the missing argument.
+- **An S4 value assigned into a non-list vector** goes through `as.vector` (which dispatches) before `[<-`; into a list it is embedded with GNU R's "implicit list embedding of S4 objects is deprecated" warning.
+- **`zeroin2` reports a precision after hitting the iteration limit**: the bracket width `|c - b|`, not -1, so `uniroot`'s `estim.prec` matches GNU R on non-converged searches.
+- **JIT function speculation skips frame-bound symbols**: a call of a symbol the frame can bind (a formal or a local assignment) is never speculated from the enclosure, because a formal holding a function shadows a global of the same name (`uniroot(f, ...)` with a global `f`). Pinned by `formal_shadows_enclosing_function` in `crates/jit/tests/test_tiers.rs`.
+- **One implementation where two were written in parallel.** `sum` over doubles totals each argument in the long double model, rounds it to a double, and adds it to a long double total, which is what GNU R's observed results across arguments need; main's compensated sum was removed. Parse data comes from `crates/interp/src/parse_data.rs`, which replays GNU R's lexer contexts, instead of a second builder in `lower.rs`. A frame's hash chains are replayed in one place (`Frame::hash_chains` in `crates/heap/src/env.rs`), which both `env.profile` and the listing order read. Graphics devices keep the graphics engine's implementations.
+- **Impact:** no effect on static analysis. Each behavior has one implementation in `crates/interp`, and the GNU test runner (`contributing/corpus-and-oracle.md`) is the regression check.
+
+## A fix says whether it may be applied unseen
+
+- `Fix.applicability` (`diagnostics.rs`) is `Safe` when the edit keeps what the code means (the lint
+  rewrites, syncing a `#:` comment to the inline type that governs, removing an unreachable arm) and
+  `Unsafe` when it guesses intent or silences a finding without handling it (spelling suggestions,
+  `stop()` arms for missing cases). It follows ruff's model. `ry check --fix`, the editor's preferred
+  quick fix and the `source.fixAll` action apply only safe fixes, because nobody reviews those edits;
+  `--unsafe-fixes` and a click opt into the rest. The fix lives on the diagnostic, so the CLI and the
+  server share one source of truth (`applicable_fixes`, `apply_fixes`).
+- `ry check --fix` re-analyzes and repeats until no fix changes a file (at most `MAX_FIX_PASSES`),
+  because overlapping fixes are skipped within a pass and one fix can expose another. It refuses
+  to write a file whose text on disk no longer matches the analyzed text, and leaves a file with a
+  syntax error alone.
+- Safe means safe in context, not by syntax alone: `boolean-shorthand` holds only while the file
+  binds no `T`/`F` (it rides the lints' `unless_redefined` channel), and the `#:` comment fix is
+  withheld when the inline type names a type parameter the comment would not bind.
+- The server keeps each open document's settled fix-bearing findings with the text they were computed
+  for (`published_fixes` in `server.rs`). `codeAction` reuses them while the text matches, so a
+  request per cursor move costs no analysis, and the offered fixes are the findings on screen.
+
+## Parameter hints and call hierarchy follow R's own call rules
+
+- Parameter-name inlay hints (`inlay_hints` in `ide.rs`) map arguments to parameters with the
+  checker's own `argument_targets` (`check.rs`), so the hint and the type check never disagree on
+  where an argument goes. Hints stop at a forwarded `...` and skip a piped value. They show only in calls with at least two positional arguments, and skip one-letter
+  parameters and arguments whose text already names the parameter (`years` or `x$years`), because a
+  hint that repeats what is on screen is noise.
+- The call hierarchy is limited to project top-level functions (the `package_definitions` index),
+  because those are the items a reader navigates between and the index is already per-name tracked.
+  Only call heads count as calls, so passing `f` to `lapply` is a reference, not a call. A caller
+  that is a top-level statement is grouped as "(top level)". The server re-resolves a function item from
+  its uri and selection start instead of serializing ids into `data`, so a stale item never names
+  a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
+  statement calls first.
+
+## A conditional write of a formal covers the paths that run it
+
+- **Previous shape.** `FormalUses::assigned` held the names written on every path, so a read after
+  `if (flag) x <- 1` forced `x`. That contradicted the rule the spec opens with (a formal is required
+  only when every path forces it) and reported ks `kdde.binned(..., bin.par = bin.par)`, whose `w`
+  is rebound from `bin.par` on the branch the call takes.
+- **Target shape.** `assigned` holds the names some path wrote before forcing them, joined by
+  union, and a write of a name its path already forced is not recorded. A later read forces the
+  formal only when no path wrote it first. Loops and lazy operands keep the writes of the paths that
+  run them, and `local()` still discards its writes.
+- **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
+  A call that omits the formal and takes the non-writing path is no longer reported; that is the
+  accepted cost of a path-insensitive analysis that must not report correct calls.

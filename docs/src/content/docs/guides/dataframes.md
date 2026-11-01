@@ -17,9 +17,9 @@ so run scripts that use them with `ry run script.R`:
 
 ```r
 sales <- DataFrame(
-  region = c("eu", "us", "eu", "asia", "us"),
-  units = c(3L, 5L, 2L, 7L, 1L),
-  price = c(1.5, 2, 3, 0.5, 4)
+  region = ["eu", "us", "eu", "asia", "us"],
+  units = [3L, 5L, 2L, 7L, 1L],
+  price = [1.5, 2, 3, 0.5, 4]
 )
 sales |>
   DataFrame.filter(col("units") > 1L) |>
@@ -45,6 +45,11 @@ Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, a
 it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
 method dispatch: `DataFrame.filter` always means the same function.
 
+Write columns as [Arrays](/type-checking/arrays/) (`[1.5, 2]`), so the checker holds each one to a
+single type with no missing values. A plain R vector such as `c(1.5, 2)` works too. A column read
+back with `sales$price` is a plain R vector, because later steps such as a left join can put `NA`
+into a column; `as.Array(sales$price)` turns it back into an Array and fails if it holds an `NA`.
+
 ## Existing data.table code
 
 Code written for data.table runs unchanged under `ry run`, and most queries on a
@@ -53,10 +58,16 @@ behavior: `:=` still updates it in place, and every alias sees the change. ry an
 when it can produce exactly what data.table would, meaning the same values, attributes, printing
 and warnings. Otherwise data.table answers it. These go to data.table:
 
-- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
+- a keyed table, and a table with extra attributes or classes;
+- code inside data.table's own namespace, except a grouped query without `:=`, which is how
+  `dcast` aggregates;
+- a `j` that only picks whole columns of every row, such as `x[, .(a, b)]` or
+  `x[, cols, with = FALSE]`, because data.table copies them faster;
 - a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
 - `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
-  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
+  summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
+- a grouped `sum` of an integer column whose values could overflow while they add up, because
+  data.table then returns doubles even when each group's total fits;
 - a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
 - a query that warns or fails.
 
@@ -200,7 +211,7 @@ columns, then the right's non-key columns, and a right column whose name is alre
 `suffix` (`"_right"` by default), as in Polars.
 
 ```r
-regions <- DataFrame(region = c("eu", "us"), manager = c("Ana", "Bo"))
+regions <- DataFrame(region = ["eu", "us"], manager = ["Ana", "Bo"])
 DataFrame.join(sales, regions, on = "region", how = "left")
 ```
 
@@ -221,8 +232,8 @@ right row at or before the left row's value. `"forward"` takes the first one at 
 left join.
 
 ```r
-trades <- DataFrame(ticker = c("a", "b", "a"), time = c(5L, 3L, 1L), size = c(10, 20, 30))
-quotes <- DataFrame(ticker = c("a", "a", "b"), time = c(2L, 4L, 1L), bid = c(1.5, 1.6, 7))
+trades <- DataFrame(ticker = ["a", "b", "a"], time = [5L, 3L, 1L], size = [10, 20, 30])
+quotes <- DataFrame(ticker = ["a", "a", "b"], time = [2L, 4L, 1L], bid = [1.5, 1.6, 7])
 DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
 ```
 
@@ -309,5 +320,6 @@ db-benchmark's ten group-by and five join questions, three `:=` update loops and
 join, at ten million rows (db-benchmark's 0.5 GB size) on 4 cores, take 5.2 s on DataFrames and
 26.2 s on data.table using every thread, best of two runs each, with the same checksums, and
 DataFrames are faster on every question. data.table's own functions (`fread`, `setkey`, `rbindlist`,
-`melt` and the rest) run data.table's C code, at the speed they have under GNU R. The
+`melt` and the rest) run data.table's C code, and at ten million rows each is as fast as under
+GNU R or faster (`tstrsplit` 3.7 s against 5.7 s, `fread` 2.4 s against 3.2 s). The
 [design notes](/contributing/design/r-runtime/#7-the-table-type) describe the benchmark.

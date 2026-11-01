@@ -1,0 +1,227 @@
+#==== selection
+#---- grows_from_a_name
+f <- function(x) {
+  total <- sum(x, na.rm = T$0RUE)
+  total
+}
+#++++
+symbol f (Function fn(x)) at "f"
+fold 0..=2 Block
+token "f" Function
+token "x" Parameter
+token "sum" LibraryFunction
+token "x" Parameter
+select "TRUE"
+select "na.rm = TRUE"
+select "x, na.rm = TRUE"
+select "(x, na.rm = TRUE)"
+select "sum(x, na.rm = TRUE)"
+select "total <- sum(x, na.rm = TRUE)"
+select "total <- sum(x, na.rm = TRUE)\n  total"
+select "{\n  total <- sum(x, na.rm = TRUE)\n  total\n}"
+select "function(x) {\n  total <- sum(x, na.rm = TRUE)\n  total\n}"
+select "f <- function(x) {\n  total <- sum(x, na.rm = TRUE)\n  total\n}"
+
+#---- string_contents_first
+message("hel$0lo world")
+#++++
+token "message" LibraryFunction
+select "hello world"
+select "\"hello world\""
+select "(\"hello world\")"
+select "message(\"hello world\")"
+
+#---- cursor_in_whitespace
+f(a,  $0 b)
+#++++
+token "f" Function
+select "a,   b"
+select "(a,   b)"
+select "f(a,   b)"
+
+#==== tokens
+#---- r_names
+f <- function(x, n = 2) {
+  y <- stats::median(x)
+  helper(y, n)
+}
+#++++
+symbol f (Function fn(x, n)) at "f"
+fold 0..=2 Block
+token "f" Function
+token "x" Parameter
+token "n" Parameter
+token "stats" Namespace
+token "median" LibraryFunction
+token "x" Parameter
+token "helper" Function
+token "n" Parameter
+
+#---- project_definition_is_not_library
+paste <- function(...) "mine"
+report <- function() paste("a", nchar("b"))
+#++++
+symbol paste (Function fn(...)) at "paste"
+symbol report (Function fn()) at "report"
+token "paste" Function
+token "report" Function
+token "paste" Function
+token "nchar" LibraryFunction
+
+#==== fixes
+#---- lint_fixes
+flag = T
+c(1, 2,)
+#++++
+symbol flag (Value) at "flag"
+token "c" Function
+fix Change to `<-`: "=" -> "<-"
+fix Change to `TRUE`: "T" -> "TRUE"
+fix Remove the trailing comma: "," -> ""
+
+#---- misspelled_name
+#' @export
+compute <- function(values) {
+  total <- sum(values)
+  totl
+}
+#++++
+symbol compute (Function fn(values)) at "compute"
+fold 1..=3 Block
+token "compute" Function
+token "values" Parameter
+token "sum" LibraryFunction
+token "values" Parameter
+fix Change to `total` (unsafe): "totl" -> "total"
+
+#---- misspelled_argument
+f <- function(alpha, beta) alpha + beta
+f(alpah = 1, beta = 2)
+#++++
+symbol f (Function fn(alpha, beta)) at "f"
+token "f" Function
+token "alpha" Parameter
+token "beta" Parameter
+token "alpha" Parameter
+token "beta" Parameter
+token "f" Function
+fix Change to `alpha` (unsafe): "alpah" -> "alpha"
+
+#---- boolean_shorthand_only_on_values
+x <- list(T = 1)
+T <- 3
+y <- x$T
+f(T, F)
+#++++
+symbol x (Value) at "x"
+symbol T (Value) at "T"
+symbol y (Value) at "y"
+token "list" Function
+token "f" Function
+fix Change to `FALSE`: "F" -> "FALSE"
+
+#---- backticked_argument
+f <- function(`my value`, beta) beta
+f(`my valeu` = 1, beta = 2)
+#++++
+symbol f (Function fn(`my value`, beta)) at "f"
+token "f" Function
+token "`my value`" Parameter
+token "beta" Parameter
+token "beta" Parameter
+token "f" Function
+fix Change to `my value` (unsafe): "my valeu" -> "my value"
+
+#==== raw_strings
+#---- raw_string_contents_first
+message(r"(he$0llo)")
+#++++
+token "message" LibraryFunction
+select "hello"
+select "r\"(hello)\""
+select "(r\"(hello)\")"
+select "message(r\"(hello)\")"
+
+#---- unreachable_arm
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :Some(v) => v
+    _ => 0L
+    :None => 1L
+  }
+}
+#++++
+symbol f (Function fn(o)) at "f"
+fold 1..=6 Block
+token "fn" Keyword
+token "(" Operator
+token "o" Parameter
+token ":" Operator
+token ":" Tag
+token "Some" Tag
+token "(" Operator
+token "integer" Type
+token ")" Operator
+token "|" Operator
+token ":" Tag
+token "None" Tag
+token ")" Operator
+token "->" Operator
+token "integer" Type
+token "f" Function
+token "o" Parameter
+token "match" Keyword
+token "o" Parameter
+token ":" Tag
+token "Some" Tag
+token "=>" Operator
+token "=>" Operator
+token ":" Tag
+token "None" Tag
+token "=>" Operator
+fix Remove the unreachable arm: "    :None => 1L\n" -> ""
+
+#---- missing_arms
+#: fn(c: :Red | :Green | :Blue) -> integer
+f <- function(c) {
+  match (c) {
+    :Red => 1L
+  }
+}
+#++++
+symbol f (Function fn(c)) at "f"
+fold 1..=4 Block
+token "fn" Keyword
+token "(" Operator
+token "c" Parameter
+token ":" Operator
+token ":" Tag
+token "Red" Tag
+token "|" Operator
+token ":" Tag
+token "Green" Tag
+token "|" Operator
+token ":" Tag
+token "Blue" Tag
+token ")" Operator
+token "->" Operator
+token "integer" Type
+token "f" Function
+token "c" Parameter
+token "match" Keyword
+token "c" Parameter
+token ":" Tag
+token "Red" Tag
+token "=>" Operator
+fix Add arms for the missing cases (unsafe): "" -> "    :Green => stop(\"not handled yet\")\n    :Blue => stop(\"not handled yet\")\n"
+
+#---- comment_follows_inline_annotation
+#: double
+total: integer <- 1L
+#++++
+symbol total (Value) at "total"
+token "double" Type
+token ":" Operator
+token "integer" Type
+fix Change the `#:` comment to `integer`: "double" -> "integer"

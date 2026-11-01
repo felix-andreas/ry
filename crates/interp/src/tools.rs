@@ -2,14 +2,11 @@
 //! format strings, file permissions and processes. Rd parsing lives in `rd`; LaTeX parsing and
 //! the help server are not available yet and fail with a clear error.
 
-#[cfg(target_os = "linux")]
-use libc::__errno_location as errno_location;
-#[cfg(target_os = "macos")]
-use libc::__error as errno_location;
 use {
     crate::{
         builtin_libraries::{NativeCall, NativeFn},
         coerce::coerce_vector,
+        platform,
         unwind::{R, error},
         values::{self, alloc, length, nil, scalar_bool, scalar_integer, string_vector, symbols},
     },
@@ -34,13 +31,19 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("ps_priority", do_ps_priority),
     ("package_dependencies_scan", do_package_dependencies_scan),
     // The help server cannot start, so `startDynamicHelp` warns and carries on without it.
-    ("startHTTPD", |_| unsafe { scalar_integer(-1) }),
+    ("startHTTPD", |call| unsafe {
+        let port = values::as_integer_scalar(call.arg(1));
+        if port != NA_INTEGER && !(0..=65535).contains(&port) {
+            return Err(error(format!(
+                "Invalid port number {port}: should be in 0:65535, typically above 1024"
+            )));
+        }
+        scalar_integer(-1)
+    }),
     ("stopHTTPD", |_| Ok(nil())),
     ("parseRd", crate::rd::parse_rd),
     ("deparseRd", crate::rd::deparse_rd),
-    ("parseLatex", |_| {
-        Err(error("parsing LaTeX is not supported in ry yet"))
-    }),
+    ("parseLatex", crate::latex::parse_latex),
 ];
 
 /// `Rmd5(files)` and `Rsha256(files)`: the digest of each file in hexadecimal, `NA` when it
@@ -545,7 +548,6 @@ unsafe fn do_code_files_append(call: &NativeCall<'_>) -> R<Sexp> {
 /// `dirchmod(dir, group.writable)`: makes everything under `dir` readable by all: files 644
 /// (or 664), or 755 (775) when the owner may execute them, and directories 755 (775).
 unsafe fn do_dirchmod(call: &NativeCall<'_>) -> R<Sexp> {
-    use std::os::unix::fs::PermissionsExt;
     let directory = values::require_string(call.arg(0), "dir")?;
     let group_writable = values::as_logical_scalar(call.arg(1)) == 1;
     let group = if group_writable { 0o020 } else { 0 };
@@ -565,19 +567,17 @@ unsafe fn do_dirchmod(call: &NativeCall<'_>) -> R<Sexp> {
                 pending.push(entry_path.clone());
                 0o755 | group
             } else if metadata.is_file() {
-                let executable = metadata.permissions().mode() & 0o100 != 0;
+                let executable = platform::file_mode(&entry_path, &metadata) & 0o100 != 0;
                 (if executable { 0o755 } else { 0o644 }) | group
             } else {
                 continue;
             };
-            std::fs::set_permissions(&entry_path, std::fs::Permissions::from_mode(mode)).map_err(
-                |failure| {
-                    error(format!(
-                        "cannot change permissions of '{}': {failure}",
-                        entry_path.display()
-                    ))
-                },
-            )?;
+            platform::set_file_mode(&entry_path, mode).map_err(|failure| {
+                error(format!(
+                    "cannot change permissions of '{}': {failure}",
+                    entry_path.display()
+                ))
+            })?;
         }
     }
     Ok(nil())
@@ -590,7 +590,7 @@ unsafe fn do_ps_kill(call: &NativeCall<'_>) -> R<Sexp> {
     let outcomes: Vec<i32> = values::ints(pids)
         .iter()
         .map(|&pid| {
-            (pid != NA_INTEGER && pid > 0 && signal != NA_INTEGER && libc::kill(pid, signal) == 0)
+            (pid != NA_INTEGER && pid > 0 && signal != NA_INTEGER && platform::kill(pid, signal))
                 as i32
         })
         .collect();
@@ -600,21 +600,8 @@ unsafe fn do_ps_kill(call: &NativeCall<'_>) -> R<Sexp> {
 /// `ps_sigs(code)`: the platform's number for a signal named by its BSD number, which is how
 /// the `SIGxxx` constants of tools are defined; `NA` for the signals tools does not name.
 unsafe fn do_ps_sigs(call: &NativeCall<'_>) -> R<Sexp> {
-    let signal = match values::as_integer_scalar(call.arg(0)) {
-        1 => libc::SIGHUP,
-        2 => libc::SIGINT,
-        3 => libc::SIGQUIT,
-        9 => libc::SIGKILL,
-        15 => libc::SIGTERM,
-        17 => libc::SIGSTOP,
-        18 => libc::SIGTSTP,
-        19 => libc::SIGCONT,
-        20 => libc::SIGCHLD,
-        30 => libc::SIGUSR1,
-        31 => libc::SIGUSR2,
-        _ => NA_INTEGER,
-    };
-    scalar_integer(signal)
+    let signal = platform::signal_number(values::as_integer_scalar(call.arg(0)));
+    scalar_integer(signal.unwrap_or(NA_INTEGER))
 }
 
 /// `ps_priority(pid, value)`: each process's niceness, after setting it to `value` unless
@@ -628,17 +615,8 @@ unsafe fn do_ps_priority(call: &NativeCall<'_>) -> R<Sexp> {
             niceness.push(NA_INTEGER);
             continue;
         }
-        // getpriority may return -1 legitimately, so success is told apart through errno.
-        *errno_location() = 0;
-        let current = libc::getpriority(libc::PRIO_PROCESS, pid as libc::id_t);
-        if current == -1 && *errno_location() != 0 {
-            niceness.push(NA_INTEGER);
-            continue;
-        }
-        if value != NA_INTEGER {
-            libc::setpriority(libc::PRIO_PROCESS, pid as libc::id_t, value);
-        }
-        niceness.push(current);
+        let value = (value != NA_INTEGER).then_some(value);
+        niceness.push(platform::priority(pid, value).unwrap_or(NA_INTEGER));
     }
     let result = values::integer_vector(&niceness)?;
     let names = values::get_attr(call.arg(0), symbols().names);

@@ -349,6 +349,18 @@ f(c("a", "b"))
 f: fn(x: Unknown) -> Unknown
 Unknown
 
+#---- an_unchecked_argument_takes_the_fit_more_specific_than_the_catch_all
+n <- nrow(matrix(0, 2L, 2L))
+rep(0, n)
+#++++
+n: Any
+double[]
+
+#---- unchecked_arguments_the_specific_fits_disagree_on_stay_unknown
+seq(nrow(matrix(0, 2L, 2L)))
+#++++
+Unknown
+
 #==== precise_strings
 #---- trimws_is_character
 trimws("  hi  ")
@@ -509,7 +521,7 @@ NULL
 #---- tryCatch_resolves_with_handler
 tryCatch(1L, error = function(e) NULL)
 #++++
-Unknown
+integer | NULL
 
 #---- try_returns_any
 try(log(-1), silent = TRUE)
@@ -591,7 +603,7 @@ integer[]
 character[]
 logical[]
 
-#---- matrix_and_factor_return_their_nominals
+#---- matrix_and_factor_type_with_checked_formals
 matrix(c(1L, 2L), nrow = 1L)
 factor(c("a"), levels = c("a", "b"))
 #++++
@@ -729,9 +741,9 @@ table(group = c("a", "a"))
 #++++
 data.frame
 integer
+Any
 Unknown
-Unknown
-Unknown
+integer[]
 
 #==== still_any
 #---- reflection_resolves
@@ -845,8 +857,8 @@ words <- c("alpha", "beta")
 lapply(words, gsub, pattern = 1L, replacement = "o")
 #++++
 words: character[]
-Unknown
-42..46 error[type-mismatch] expected `fn(character) -> T`, found `fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character`
+list[Unknown]
+58..60 error[type-mismatch] expected `character`, found `integer`
 
 #==== missing_guarded_formals
 #---- missing_tested_formal_is_optional_at_call_sites
