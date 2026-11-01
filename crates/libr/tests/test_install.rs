@@ -341,6 +341,41 @@ fn install_packages_installs_a_source_package() {
     assert_eq!(output, "Hello, ry!");
 }
 
+/// `R CMD INSTALL --build` leaves a binary tarball in the working directory, which installs
+/// again as a binary package. pkgbuild's binary builds depend on it.
+#[test]
+fn install_build_packs_a_binary_package() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-build");
+    drop(std::fs::remove_dir_all(&directory));
+    std::fs::create_dir_all(directory.join("first")).expect("a library");
+    let source = rcode_source().display().to_string();
+    run_home(
+        "R",
+        &["CMD", "INSTALL", "--build", "-l", "first", &source],
+        &directory,
+    );
+    let tarball = std::fs::read_dir(&directory)
+        .expect("the build directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .map(|name| name.to_string_lossy().into_owned())
+        .find(|name| {
+            name.starts_with("rcode_") && name.contains("_R_") && name.ends_with(".tar.gz")
+        })
+        .expect("a binary tarball");
+    std::fs::create_dir_all(directory.join("second")).expect("a library");
+    run_home(
+        "R",
+        &["CMD", "INSTALL", "-l", "second", &tarball],
+        &directory,
+    );
+    let output = run_home(
+        "Rscript",
+        &["-e", "library(rcode, lib.loc = 'second'); cat(greet('ry'))"],
+        &directory,
+    );
+    assert_eq!(output, "Hello, ry!");
+}
+
 /// Rcpp turns dynamic symbols off and only then registers its routines, and still calls the
 /// unregistered `sourceCppContext` by name, because registering turns dynamic lookup back on.
 #[test]
