@@ -74,6 +74,34 @@ it runs the driver through `ry run --runtime ry` with the workspace's debug buil
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
+## Package tests
+
+```sh
+just corpus-sources                   # source tarballs, which carry the tests binary installs lack
+just package-tests                    # every closure package, under GNU R and ry's runtime
+just package-tests --runtime ry vctrs # one package, ry only, reusing the recorded GNU R result
+```
+
+`oracle packages` runs each corpus package's own tests the way `R CMD check` runs `tests/`: every
+top-level `tests/*.R` file runs as its own script with `tests/` as the working directory, and the
+file passes when its process exits with status 0. A package passes when all of its files pass, so
+a testthat suite passes when `testthat.R` finishes without a failed expectation. The harness also
+reads testthat's summary line (`[ FAIL 0 | WARN 1 | SKIP 2 | PASS 30 ]`) to report expectation
+counts beside the status.
+
+`tools/corpus/sources.R` downloads the source tarball of every package in the closure at its
+installed version into `.corpus/sources` and writes `.corpus/closure.txt`, the package list the
+harness runs. Results go to `.corpus/tests/<package>/<runtime>/` (the copied `tests/` directory,
+one `.Rout` per file, and `result.json`), and `.corpus/tests/summary.md` tables every package.
+A GNU R result is reused while the package version is unchanged, unless you pass
+`--rerun-gnu-r`. `--jobs` (default 4) runs packages in parallel, and `--timeout` (default 600
+seconds) bounds one package's suite under one runtime, after which its whole process group is
+killed. `ORACLE_RY` picks the ry binary; copy it, with `libR.so` beside it, to another directory
+first if you rebuild while a long run is going.
+
+The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
+measures the container, not ry. `MEMORY.md` records the current rate.
+
 ## The benchmark generator
 
 ```sh
