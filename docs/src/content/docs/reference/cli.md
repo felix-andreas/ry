@@ -75,7 +75,9 @@ must be installed, but no GNU R code runs. Unlike on GNU R, it also turns [inlin
 annotations](/type-checking/inline-annotations#running-annotated-code) into checks at function
 boundaries. This runtime is under construction: a script that calls
 something it lacks stops with an error naming it, such as a missing `.Internal` or a native routine
-of a default package. Graphics devices open and keep their parameters, but they draw nothing.
+of a default package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which
+are written when the device closes or the script ends; `jpeg` and `postscript` devices open but
+write no image yet.
 
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.

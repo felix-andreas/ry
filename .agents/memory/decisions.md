@@ -2134,20 +2134,35 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
-  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
-  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
-  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
-  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
-  write per finished page. Drawing routines check their arguments and a started plot, then return.
-  A real renderer would slot in behind the same table; nothing else reads pixels today.
-- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+- **Devices record pages of shapes and render them when they close.** Every file device (pdf,
+  postscript, xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device`
+  holding its size, point size, the base graphics parameters and the pages drawn so far. A page is
+  a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
+  each with the clip rectangle in force, so the drawing routines know nothing about file formats
+  and each format is one writer over the same pages. `plot.new` starts a page when the layout's
+  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
+  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
+  system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
+  than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
+  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
+  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
+  R: vector devices create their file at open (so a bad path fails there), a pdf without pages
+  is still a valid document, and bitmap devices with no page write nothing.
+- **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is
+  1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline offset by
+  `ylbias`, symbols are sized from half the character height, font sizes round to whole points,
+  and text widths come from Helvetica's AFM metrics, the same table `strwidth` uses. Rendering a
+  plot through both engines' pdf devices and rasterizing them is how to check a change: plot,
+  hist, barplot and `par(mfrow)` layouts differ in a handful of pixels. Contour labels use a
+  clean-room "flattest window" placement, so they can sit in a different spot than GNU R's.
+- **Display lists and snapshots stay empty.** `dev.control` and
   `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
   GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
   display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
   `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
   not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
-  and that belongs with real drawing, when the display list holds the calls to replay.
+  and that belongs with recording the display list, which would also let devices replay a
+  plot onto a resized or copied device.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
