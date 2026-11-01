@@ -3913,3 +3913,17 @@ explicit allocators".
   be reinstalled when the linked base version changes.
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
+
+## The C API draws from the interpreter's generator
+
+- **Before.** `libr` kept its own Mersenne Twister for `unif_rand`, `norm_rand`, `exp_rand` and
+  `R_unif_index`, beside the interpreter's `interp::random`, which implements every RNG kind. The
+  two shared only `.Random.seed`, so a package calling `unif_rand` after `RNGkind("Marsaglia-Multicarry")`
+  read a seed its copy could not parse (doParallel's stress test failed with "'.Random.seed' is not
+  a valid integer vector"), and `R_sample_kind` always answered `Rejection`.
+- **Now.** `libr::arith`'s `Rng` delegates every draw to `interp::random`, and
+  `GetRNGstate`/`PutRNGstate` are the interpreter's `get_rng_state`/`put_rng_state`.
+  `R_sample_kind` reports the method `RNGkind(sample.kind =)` chose. `R_binom_kind` still
+  hard-codes the pre-fix BTPE, which is the only `rbinom` stream ry implements.
+- **Impact.** One generator means one state and one stream, so a C draw and an R draw interleave
+  exactly as under GNU R, and every kind the interpreter supports works from C at no extra cost.
