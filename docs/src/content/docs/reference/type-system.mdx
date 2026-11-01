@@ -2306,8 +2306,12 @@ upper_names <- function(x) {
   names the nearest binding's type. A `NULL` binding is the exception, because it is usually a
   placeholder that a package fills in later, from `.onLoad` or with `<<-`. A call on a callee whose
   type is `NULL`, such as `reject(1)` after a top-level `reject <- NULL`, or `registry$invoke()` on
-  a `NULL` `registry`, is unchecked and types as `Unknown`. A callee that only may be `NULL`, such as
-  `(fn(x: T) -> T) | NULL`, is still reported.
+  a `NULL` `registry`, is unchecked and types as `Unknown`. A function the body computes that only
+  may be `NULL`, such as `fn <- switch(kind, upper = toupper, lower = tolower)`, is called as the
+  function, because the `NULL` path is one the code presumably rules out (`match.arg(kind)`). A
+  parameter whose default or declared type admits `NULL`, such as
+  `transform: (fn(x: character) -> character) | NULL`, is still reported, because the caller
+  supplies that `NULL`.
 - Hover and go-to-definition on the called name follow the binding the call reaches.
 
 `pkg::name` is never looked up this way: it names one namespace, as described next.

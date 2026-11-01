@@ -426,6 +426,7 @@ pick <- function(kind) {
   fn("Text")
 }
 #++++
+pick: <T> fn(kind: T) -> character
 
 #---- a_parameter_that_may_be_null_reports_the_nullability
 #: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
@@ -433,6 +434,8 @@ apply_transform <- function(text, transform) {
   transform(text)
 }
 #++++
+apply_transform: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
+136..145 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: character) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give the parameter a function default
 
 #---- a_default_branch_makes_the_switch_result_callable
 pick <- function(kind) {
