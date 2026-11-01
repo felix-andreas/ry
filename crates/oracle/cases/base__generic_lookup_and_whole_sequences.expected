@@ -50,10 +50,29 @@
 |   a    5    7
 |   b    6    8
 | 
+|  Factor w/ 1 level "1": 1 1 1
+|  Factor w/ 2 levels "a","b": 1 2 1
+|  int [1:4] 1 2 1 2
+|  Date[1:2], format: "2020-01-01" "2020-01-01"
+|  num [1:3] 1 2 1
+| [1] "rep method"
+| [1] "rep_len method"
+| [1] 1
+| [1] 1
+| [1] -1
+| [[1]]
+| [1] ""
+| 
+| [[2]]
+| [1] "" "" ""
+| 
+| [1] 6
+| [1] 6
+| [1] 10
+| [1] FALSE
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| structure(1:8, dim = c(2L, 2L, 2L), dimnames = list(r = c("a", 
-| "b"), NULL, s = c("u", "v")))
+logical
+| FALSE

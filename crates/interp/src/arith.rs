@@ -276,8 +276,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("rep", -1, do_rep)
         .generic(Generic::Internal)
         .keep_missing(),
-    internal("rep.int", 2, do_rep_int),
-    internal("rep_len", 2, do_rep_len),
+    internal("rep.int", 2, do_rep_int).generic(Generic::Internal),
+    internal("rep_len", 2, do_rep_len).generic(Generic::Internal),
     internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
     internal("choose", 2, |call| unsafe { math2(call, rmath::choose) }),
     internal("lchoose", 2, |call| unsafe { math2(call, rmath::lchoose) }),
@@ -3246,6 +3246,40 @@ unsafe fn whole_sequence(values: &[f64]) -> R<Sexp> {
     values::real_vector(values)
 }
 
+/// A classed `x` that has no `rep.int` or `rep_len` method of its own repeats through its
+/// class's `rep` method when there is one, as in GNU R: that is how a `Date` or a `difftime`
+/// keeps its class.
+unsafe fn rep_classed(call: &Call<'_>, count: &str, tagged: bool) -> R<Option<Sexp>> {
+    let classes = values::class_attr(call.arg(0));
+    let mut has_method = false;
+    for index in 0..length(classes) {
+        let class = values::string_at(classes, index).unwrap_or_default();
+        let name = values::install(&format!("rep.{class}"))?;
+        if crate::dispatch::lookup_method(name, call.env, values::base_namespace())?.is_some() {
+            has_method = true;
+            break;
+        }
+    }
+    if !has_method {
+        return Ok(None);
+    }
+    let count = values::install(count)?;
+    let expression = values::call(values::install("rep")?, &[values::install("x")?, count])?;
+    if tagged {
+        crate::heap().set_tag(expression.cdr().cdr(), count);
+    }
+    crate::eval::eval(expression, call.env).map(Some)
+}
+
+/// The internal code keeps a factor a factor, and drops every other attribute.
+unsafe fn keep_factor(object: Sexp, result: Sexp) -> R<Sexp> {
+    if values::inherits(object, "factor") {
+        values::set_attr(result, symbols().class, values::class_attr(object))?;
+        values::set_attr(result, symbols().levels, get_attr(object, symbols().levels))?;
+    }
+    Ok(result)
+}
+
 /// `rep(x, times, each, length.out)`.
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
@@ -3341,6 +3375,9 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
+    if let Some(value) = rep_classed(call, "times", false)? {
+        return Ok(value);
+    }
     let object = values::materialize(call.arg(0))?;
     let times = call.arg(1);
     let count = length(object);
@@ -3362,10 +3399,13 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     } else {
         return Err(call.error("invalid 'times' value"));
     }
-    crate::subset::select_elements(object, &indices)
+    keep_factor(object, crate::subset::select_elements(object, &indices)?)
 }
 
 unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
+    if let Some(value) = rep_classed(call, "length.out", true)? {
+        return Ok(value);
+    }
     let object = values::materialize(call.arg(0))?;
     let out = values::as_integer_scalar(call.arg(1));
     if out == NA_INTEGER || out < 0 {
@@ -3381,7 +3421,7 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
             }
         })
         .collect();
-    crate::subset::select_elements(object, &indices)
+    keep_factor(object, crate::subset::select_elements(object, &indices)?)
 }
 
 // Two-argument math.

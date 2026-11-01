@@ -2005,7 +2005,10 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
             continue;
         };
         let mut position = 0;
-        while position < element.len() {
+        // PCRE and fixed matching find the empty match in an empty string, and TRE does not.
+        let searches_empty = options.perl || options.fixed;
+        while position < element.len() || (searches_empty && element.is_empty() && table.rows == 0)
+        {
             let Some(found) = search(&element, position)? else {
                 break;
             };

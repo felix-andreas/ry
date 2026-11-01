@@ -45,3 +45,34 @@ A <- array(1:8, c(2, 2, 2))
 dimnames(A) <- c(attr(d, "out.attrs")$dimnames, list(c("p", "q")))
 print(A)
 print(array(1:8, c(2, 2, 2), dimnames = list(r = c("a", "b"), NULL, s = c("u", "v"))))
+
+# rep.int and rep_len dispatch on their own name, then on the class's rep method; their own
+# code keeps a factor a factor and drops every other attribute.
+str(rep.int(as.factor(1L), 3))
+str(rep_len(factor(c("a", "b")), 3))
+str(rep.int(structure(1:2, names = c("a", "b"), foo = 1), 2))
+str(rep.int(as.Date("2020-01-01"), 2))
+str(rep_len(structure(c(a = 1, b = 2), class = "zzz"), 3))
+rep.bar <- function(x, ...) "rep method"
+rep_len.bar <- function(x, length.out) "rep_len method"
+print(rep.int(structure(1, class = "bar"), 3))
+print(rep_len(structure(1, class = "bar"), 2))
+
+# An empty pattern matches an empty string under PCRE and fixed matching, but not under TRE.
+print(unlist(gregexpr("", "", perl = TRUE)))
+print(unlist(gregexpr("", "", fixed = TRUE)))
+print(unlist(gregexpr("", "")))
+print(regmatches(c("", "bar"), gregexpr("", c("", "bar"), perl = TRUE)))
+
+# A cached S4 method inherited from a group generic still sees .Generic.
+setClass("Measured", representation(x = "numeric"))
+setMethod("Summary", "Measured", function(x, ..., na.rm = FALSE) {
+  get(.Generic)(x@x, ..., na.rm = na.rm)
+})
+m <- new("Measured", x = c(1, 2, 3))
+print(sum(m))
+print(sum(m))
+print(max(m, 10))
+
+# The global environment does not keep the profile's .Library.site binding.
+print(exists(".Library.site", envir = globalenv(), inherits = FALSE))

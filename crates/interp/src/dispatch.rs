@@ -1354,7 +1354,8 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
                 return Ok(None);
             }
             SexpType::Closure => {
-                let value = apply_closure(call, method, &promised, env, None)?;
+                let vars = cached_method_vars(method, generic)?;
+                let value = apply_closure(call, method, &promised, env, Some(&vars))?;
                 return Ok(Some(value));
             }
             // The table holds the primitive itself where its own code is the method.
@@ -1367,6 +1368,26 @@ pub unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Op
         return Ok(None);
     }
     Ok(Some(value))
+}
+
+/// The dispatch variables a method found in the generic's cache sees, the ones `R_execMethod`
+/// copies from the generic's frame when dispatch goes through `standardGeneric`: a method
+/// inherited from a group generic such as `Summary` reads `.Generic` to learn which member ran.
+unsafe fn cached_method_vars(method: Sexp, generic: Sexp) -> R<Vec<(Sexp, Sexp)>> {
+    let mut vars = Vec::with_capacity(4);
+    let generic_symbol = values::install(".Generic")?;
+    let name = eval::find_var(generic_symbol, generic.tag())?;
+    if name != unbound() {
+        vars.push((generic_symbol, value_of(name)?));
+    }
+    vars.push((values::install(".Method")?, method));
+    for (name, slot) in [(".defined", "defined"), (".target", "target")] {
+        let value = get_attr(method, values::install(slot)?);
+        if value != nil() {
+            vars.push((values::install(name)?, value));
+        }
+    }
+    Ok(vars)
 }
 
 /// The value a generic returns to have the primitive's own code run instead.

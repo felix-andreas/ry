@@ -77,6 +77,13 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
             source_file(&site, base_env())?;
         }
     }
+    // The base profile binds `.Library.site` in the global environment too, so that a site
+    // profile can assign it directly; GNU R's global environment no longer holds it afterwards.
+    eval_text(
+        "if (exists(\".Library.site\", envir = globalenv(), inherits = FALSE)) \
+         rm(\".Library.site\", envir = globalenv())",
+        global_env(),
+    )?;
     if options.user_profile {
         // A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
         // points it at its own profile).
