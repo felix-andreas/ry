@@ -459,7 +459,8 @@ pub(crate) fn analyze_project(
 
 /// Runs `work` for every index in `order` across `workers` threads, `batch_len` indices at
 /// a time. Between batches the least recently used trees are evicted, so a cold pass holds
-/// about a batch of them instead of the whole project's.
+/// about a batch of them instead of the whole project's. Nothing is evicted after the last
+/// batch: the next call evicts before its second batch, and the check exits after the last.
 fn in_batches<T: Send>(
     db: &mut RootDatabase,
     workers: usize,
@@ -468,7 +469,11 @@ fn in_batches<T: Send>(
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for batch in order.chunks(batch_len.max(1)) {
+    for (number, batch) in order.chunks(batch_len.max(1)).enumerate() {
+        // The next pass's first barrier evicts what the last batch left resident.
+        if number > 0 {
+            db.trigger_lru_eviction();
+        }
         // Shared rather than dealt out: check times vary by orders of magnitude per file.
         let next = AtomicUsize::new(0);
         thread::scope(|scope| {
@@ -493,7 +498,6 @@ fn in_batches<T: Send>(
                 results.extend(handle.join().expect("check worker should not panic"));
             }
         });
-        db.trigger_lru_eviction();
     }
     results
 }
