@@ -202,7 +202,7 @@ action: Add inferred type annotation for `point`
   edit 0..0 -> "#: Record{x: double, y: character}\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: Record{x: double, y: character}\n"
-completion (28): X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs, xfig
+completion: none
 hint @5: Record{x: double, y: character}
 
 #---- hover_on_a_tag_payload_field_name
@@ -430,3 +430,139 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: Record{x: double, y: double}\n"
 completion (2): x, y
 hint @5: Record{x: double, y: double}
+
+#---- completion_in_a_record_literal_offers_the_missing_fields
+#: Record{amount: double, currency: character, rate: double}
+m <- (amount = 1, cu$0)
+#++++
+hover 66..82: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency
+
+#---- completion_in_an_empty_record_slot_offers_the_missing_fields
+#: Record{amount: double, currency: character}
+m <- (amount = 1, $0)
+#++++
+hover 52..66: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency
+
+#---- completion_of_a_first_field_offers_the_expected_fields
+#: Record{amount: double, currency: character}
+m <- (am$0)
+#++++
+hover 53..55: am: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): amount
+
+#---- completion_in_a_record_argument_follows_the_parameter
+#: fn(p: Record{x: double, y: double}) -> double
+f <- function(p) p$x
+v <- f((x = 1, $0))
+#++++
+hover 77..86: Record{x: double}
+definition: none
+references: none
+rename: none
+signature: fn(p: Record{x: double, y: double}) -> double
+parameters: [p: Record{x: double, y: double}]
+completion (1): y
+
+#---- completion_in_a_nested_record_follows_the_field
+#: Record{inner: Record{left: double, right: double}}
+p <- (inner = (left = 1, $0),)
+#++++
+hover 68..80: Record{left: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): right
+
+#---- completion_in_a_tag_payload_follows_the_expected_union
+#: :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Rect(width = 1, $0)
+#++++
+hover 76..89: Record{width: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): height
+
+#---- completion_in_a_tag_payload_falls_back_to_values_when_no_field_matches
+#: :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Circle(totalRadius$0)
+totalRadius <- 2
+#++++
+hover 79..90: totalRadius: double
+hover-definition: global 92..103
+definition 92..103
+references: 79..90, 92..103*
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 92..92 -> "#: double\n"
+completion (1): totalRadius
+hint @103: double
+
+#---- completion_in_a_nominal_constructor_follows_its_definition
+type Money = Record{amount: double, currency: character}
+m <- @Money((amount = 1, cur$0))
+#++++
+hover 69..86: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency
+
+#---- completion_in_an_unexpected_record_offers_nothing
+m <- (amount = 1, cu$0)
+#++++
+hover 5..21: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `m`
+  edit 0..0 -> "#: Record{amount: double}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Record{amount: double}\n"
+completion: none
+hint @1: Record{amount: double}
+
+#---- completion_in_an_unchecked_tag_payload_follows_the_type_definitions
+alias Shape = :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Rect(width = 1, he$0)
+#++++
+hover 87..102: Record{width: double}
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `s`
+  edit 77..77 -> "#: :Rect(width: double)\n"
+action: Add inferred type annotations for the whole file
+  edit 77..77 -> "#: :Rect(width: double)\n"
+completion (1): height
+hint @78: :Rect(width: double)
+
+#---- completion_in_a_record_literal_follows_an_inline_annotation
+m: Record{amount: double, currency: character} <- (amount = 1, cu$0)
+#++++
+hover 50..66: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency

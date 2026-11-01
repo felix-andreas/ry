@@ -1,34 +1,214 @@
 ---
 // The positioning diagram, shared by the landing page and why-ry. Text uses currentColor, so it
-// reads in light and dark themes; `id` keeps the aria ids unique per page.
+// reads in light and dark themes; `id` keeps the aria and clip ids unique per page. Setting
+// `data-step` (1 to 4) on the svg highlights the region a step of the typing path lives in and
+// moves the "your code" marker there; without it the diagram is static.
 interface Props {
     id: string;
+    step?: number;
 }
-const { id } = Astro.props;
+const { id, step } = Astro.props;
 ---
 
-<svg viewBox="0 0 660 400" role="img" aria-labelledby={`${id}-title ${id}-desc`} xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:660px;height:auto;font-family:inherit;color:inherit">
+<svg class="venn-svg" data-step={step} viewBox="60 6 560 392" role="img" aria-labelledby={`${id}-title ${id}-desc`} xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:660px;height:auto;font-family:inherit;color:inherit">
   <title id={`${id}-title`}>R, ry's additions, and strict mode</title>
   <desc id={`${id}-desc`}>Two overlapping circles. The left circle is R: untyped code, S4, R6 and eval run, with names checked but types unknown. The right circle is what ry adds: records, tagged unions, typed tables, the standard library and inline types, which need ry. The overlap is typed R written with #: comments, which is checked and also runs on GNU R. Both circles together are R++, everything ry runs. The right circle alone is strict mode, R--, where only typed code is allowed.</desc>
-  <path d="M 70 50 V 40 H 590 V 50" stroke="currentColor" stroke-opacity="0.45" fill="none"/>
-  <text x="330" y="30" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">R++: everything ry runs</text>
-  <circle cx="245" cy="210" r="150" fill="#3b82f6" fill-opacity="0.16" stroke="#3b82f6" stroke-width="2"/>
-  <circle cx="415" cy="210" r="150" fill="#a855f7" fill-opacity="0.16" stroke="#a855f7" stroke-width="2" stroke-dasharray="7 5"/>
-  <g fill="currentColor" text-anchor="middle">
-    <text x="175" y="165" font-size="22" font-weight="700">R</text>
-    <text x="175" y="198" font-size="13">untyped code</text>
-    <text x="175" y="217" font-size="13">S4, R6, eval</text>
-    <text x="175" y="246" font-size="12" fill-opacity="0.7">types unknown</text>
-    <text x="330" y="165" font-size="15" font-weight="700">typed R</text>
-    <text x="330" y="198" font-size="13" font-family="ui-monospace, monospace">#: comments</text>
-    <text x="330" y="246" font-size="12" fill-opacity="0.7">checked, and</text>
-    <text x="330" y="262" font-size="12" fill-opacity="0.7">runs on GNU R</text>
-    <text x="485" y="165" font-size="17" font-weight="700">ry additions</text>
-    <text x="485" y="194" font-size="13">records</text>
-    <text x="485" y="212" font-size="13">tagged unions</text>
-    <text x="485" y="230" font-size="13">typed tables</text>
-    <text x="485" y="248" font-size="13">stdlib, inline types</text>
-    <text x="485" y="274" font-size="12" fill-opacity="0.7">needs ry</text>
+  <defs>
+    <clipPath id={`${id}-left`}><circle cx="245" cy="210" r="150"/></clipPath>
+  </defs>
+  <g class="v-rpp">
+    <path d="M 70 50 V 40 H 590 V 50" stroke="currentColor" stroke-opacity="0.45" fill="none"/>
+    <text x="330" y="30" text-anchor="middle" fill="currentColor" font-size="16" font-weight="600">R++: everything ry runs</text>
   </g>
-  <text x="485" y="385" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">strict mode (R--): only this circle</text>
+  <circle class="v-left" cx="245" cy="210" r="150" fill="#3b82f6" fill-opacity="0.16" stroke="#3b82f6" stroke-width="2"/>
+  <circle class="v-right" cx="415" cy="210" r="150" fill="#a855f7" fill-opacity="0.16" stroke="#a855f7" stroke-width="2" stroke-dasharray="7 5"/>
+  <circle class="v-lens" cx="415" cy="210" r="150" clip-path={`url(#${id}-left)`} fill="currentColor" fill-opacity="0"/>
+  <g fill="currentColor" text-anchor="middle">
+    <g class="v-t-left">
+      <text x="175" y="165" font-size="22" font-weight="700">R</text>
+      <text class="v-detail" x="175" y="198" font-size="13">untyped code</text>
+      <text class="v-detail" x="175" y="217" font-size="13">S4, R6, eval</text>
+      <text class="v-detail" x="175" y="246" font-size="12" fill-opacity="0.7">types unknown</text>
+    </g>
+    <g class="v-t-mid">
+      <text x="330" y="165" font-size="15" font-weight="700">typed R</text>
+      <text class="v-detail" x="330" y="198" font-size="13" font-family="ui-monospace, monospace">#: comments</text>
+      <text class="v-detail" x="330" y="246" font-size="12" fill-opacity="0.7">checked, and</text>
+      <text class="v-detail" x="330" y="262" font-size="12" fill-opacity="0.7">runs on GNU R</text>
+    </g>
+    <g class="v-t-right">
+      <text x="485" y="165" font-size="17" font-weight="700">ry additions</text>
+      <text class="v-detail" x="485" y="194" font-size="13">records</text>
+      <text class="v-detail" x="485" y="212" font-size="13">tagged unions</text>
+      <text class="v-detail" x="485" y="230" font-size="13">typed tables</text>
+      <text class="v-detail" x="485" y="248" font-size="13">stdlib, inline types</text>
+      <text class="v-detail" x="485" y="274" font-size="12" fill-opacity="0.7">needs ry</text>
+    </g>
+  </g>
+  <text class="v-strict" x="415" y="385" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">strict mode (R--): only this circle</text>
+  <g class="v-marker" aria-hidden="true">
+    <circle class="v-pulse" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <circle r="5.5" fill="currentColor"/>
+    <text y="21" text-anchor="middle" fill="currentColor" font-size="11.5" font-weight="600">your code</text>
+  </g>
 </svg>
+
+<style>
+  .v-marker {
+    display: none;
+  }
+  [data-step] .v-marker {
+    display: inline;
+  }
+  [data-step] .v-left,
+  [data-step] .v-right,
+  [data-step] .v-lens,
+  [data-step] .v-t-left,
+  [data-step] .v-t-mid,
+  [data-step] .v-t-right,
+  [data-step] .v-strict,
+  [data-step] .v-rpp {
+    transition:
+      fill-opacity 0.6s ease,
+      stroke-opacity 0.6s ease,
+      opacity 0.6s ease;
+  }
+  [data-step] .v-marker {
+    transition: transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .v-pulse {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: v-pulse 2.2s ease-out infinite;
+  }
+  @keyframes v-pulse {
+    from {
+      transform: scale(1);
+      opacity: 0.7;
+    }
+    to {
+      transform: scale(2.6);
+      opacity: 0;
+    }
+  }
+
+  [data-step="1"] .v-marker {
+    transform: translate(200px, 284px);
+  }
+  [data-step="2"] .v-marker {
+    transform: translate(330px, 282px);
+  }
+  [data-step="3"] .v-marker {
+    transform: translate(430px, 306px);
+  }
+  [data-step="4"] .v-marker {
+    transform: translate(500px, 306px);
+  }
+  .v-marker text {
+    paint-order: stroke;
+    stroke: var(--background, transparent);
+    stroke-width: 4px;
+    stroke-linejoin: round;
+  }
+
+  [data-step="1"] .v-left {
+    fill-opacity: 0.3;
+  }
+  [data-step="1"] .v-right {
+    fill-opacity: 0.06;
+    stroke-opacity: 0.5;
+  }
+  [data-step="1"] .v-t-mid,
+  [data-step="1"] .v-t-right,
+  [data-step="1"] .v-strict {
+    opacity: 0.4;
+  }
+
+  [data-step="2"] .v-left,
+  [data-step="2"] .v-right {
+    fill-opacity: 0.05;
+    stroke-opacity: 0.45;
+  }
+  [data-step="2"] .v-lens {
+    fill-opacity: 0.2;
+  }
+  [data-step="2"] .v-t-left,
+  [data-step="2"] .v-t-right,
+  [data-step="2"] .v-strict {
+    opacity: 0.4;
+  }
+
+  [data-step="3"] .v-left {
+    fill-opacity: 0.06;
+    stroke-opacity: 0.5;
+  }
+  [data-step="3"] .v-right {
+    fill-opacity: 0.3;
+  }
+  [data-step="3"] .v-t-left,
+  [data-step="3"] .v-t-mid,
+  [data-step="3"] .v-strict {
+    opacity: 0.4;
+  }
+
+  [data-step="4"] .v-left {
+    fill-opacity: 0;
+    stroke-opacity: 0.18;
+  }
+  [data-step="4"] .v-right {
+    fill-opacity: 0.32;
+    stroke-dasharray: none;
+  }
+  [data-step="4"] .v-t-left,
+  [data-step="4"] .v-rpp {
+    opacity: 0.22;
+  }
+
+  /* Drawn narrower than 500px the detail lines fall below a readable size, so the step view keeps only
+     the region titles. The landing page makes the diagram's wrapper a size container. */
+  @container (max-width: 500px) {
+    [data-step] .v-detail {
+      display: none;
+    }
+    [data-step] .v-t-left,
+    [data-step] .v-t-mid,
+    [data-step] .v-t-right {
+      transform: translateY(46px);
+    }
+    [data-step] .v-t-left text {
+      font-size: 34px;
+    }
+    [data-step] .v-t-mid text {
+      font-size: 22px;
+    }
+    [data-step] .v-t-right text {
+      font-size: 24px;
+    }
+    [data-step] .v-strict,
+    [data-step] .v-rpp text {
+      font-size: 21px;
+    }
+    [data-step] .v-marker text {
+      font-size: 20px;
+      transform: translateY(9px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .v-pulse {
+      animation: none;
+      opacity: 0;
+    }
+    [data-step] .v-marker,
+    [data-step] .v-left,
+    [data-step] .v-right,
+    [data-step] .v-lens,
+    [data-step] .v-t-left,
+    [data-step] .v-t-mid,
+    [data-step] .v-t-right,
+    [data-step] .v-strict,
+    [data-step] .v-rpp {
+      transition: none;
+    }
+  }
+</style>

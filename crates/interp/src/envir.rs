@@ -1421,7 +1421,7 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::force_and_call(fun_call, 1, env)
+            eval::force_and_call_with(fun_call, 1, env, plain_element(list, i, element)?)
         })?;
         values::set_elt(result, index, value);
     }
@@ -1430,6 +1430,15 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(result, symbols.names, names)?;
     }
     Ok(result)
+}
+
+/// `X[[i]]` without evaluating the call when `X` is a vector with no class, where `[[` cannot
+/// dispatch and base's `[[` is the one `lapply` finds, so the result is the same.
+unsafe fn plain_element(list: Sexp, i: Sexp, element: Sexp) -> R<Option<Sexp>> {
+    if !list.kind().is_vector() || list.is_object() {
+        return Ok(None);
+    }
+    crate::subset::subset2(list, &[i], Some(true), element).map(Some)
 }
 
 unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
@@ -1455,7 +1464,7 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::force_and_call(fun_call, 1, env)
+            eval::force_and_call_with(fun_call, 1, env, plain_element(list, i, element)?)
         })?;
         if length(value) != template_length {
             return Err(error(format!(
@@ -1861,6 +1870,8 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
         package
     } else if values::first_string(package).is_some_and(|package_name| package_name == "base") {
         base_namespace()
+    } else if let Some(loaded) = loaded_namespace(package)? {
+        loaded
     } else {
         let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
         eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?
@@ -1912,4 +1923,15 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     Err(error(format!(
         "'{name}' is not an exported object from 'namespace:{package_name}'"
     )))
+}
+
+/// The namespace registered for a package name, without calling `asNamespace`, which costs
+/// several microseconds per `pkg::name` and would dominate a hot loop that uses one.
+unsafe fn loaded_namespace(package: Sexp) -> R<Option<Sexp>> {
+    let Some(package_name) = values::first_string(package) else {
+        return Ok(None);
+    };
+    let registry = crate::heap().known().namespace_registry;
+    let namespace = value_of(find_var_in_frame(values::install(&package_name)?, registry)?)?;
+    Ok((namespace.kind() == SexpType::Environment).then_some(namespace))
 }

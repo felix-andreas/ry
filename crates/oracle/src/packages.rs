@@ -45,6 +45,17 @@ pub struct Settings {
     pub timeout: Duration,
     /// Reuse a recorded GNU R result for the same package version instead of rerunning it.
     pub reuse_gnu_r: bool,
+    /// Run ry's side through an R home's `bin/Rscript` against the packages ry installed
+    /// (`oracle install`), instead of `ry run` against the GNU R library.
+    pub installed: Option<Installed>,
+}
+
+/// Packages ry installed from source, and the R home that installed them.
+pub struct Installed {
+    pub home: PathBuf,
+    /// Searched before the corpus library, which still supplies the test-only `Suggests`
+    /// outside the closure.
+    pub library: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,7 +164,10 @@ pub fn run_package(settings: &Settings, package: &str, runtimes: &[Runtime]) -> 
     let mut gnu_r = None;
     let mut ry = None;
     for runtime in [Runtime::GnuR, Runtime::Ry] {
-        let work = root.join(runtime.directory());
+        let work = match (runtime, &settings.installed) {
+            (Runtime::Ry, Some(_)) => root.join("ry-installed"),
+            _ => root.join(runtime.directory()),
+        };
         let recorded = read_result(&work).filter(|result| result.version == version);
         let rerun = runtimes.contains(&runtime)
             && !(runtime == Runtime::GnuR && settings.reuse_gnu_r && recorded.is_some());
@@ -239,6 +253,10 @@ fn run_suite(
     scripts.sort();
     let library = settings.corpus.join("library");
     let library = library.canonicalize().unwrap_or(library);
+    let library = match (runtime, &settings.installed) {
+        (Runtime::Ry, Some(installed)) => format!("{}:{}", installed.library.display(), library.display()),
+        _ => library.display().to_string(),
+    };
     let deadline = Instant::now() + settings.timeout;
     let mut files = Vec::new();
     for script in scripts {
@@ -254,11 +272,18 @@ fn run_suite(
                 command.arg("--vanilla").arg(&script);
                 command
             }
-            Runtime::Ry => {
-                let mut command = Command::new(&settings.ry);
-                command.args(["run", "--runtime", "ry"]).arg(&script);
-                command
-            }
+            Runtime::Ry => match &settings.installed {
+                Some(installed) => {
+                    let mut command = Command::new(installed.home.join("bin/Rscript"));
+                    command.arg("--vanilla").arg(&script);
+                    command
+                }
+                None => {
+                    let mut command = Command::new(&settings.ry);
+                    command.args(["run", "--runtime", "ry"]).arg(&script);
+                    command
+                }
+            },
         };
         command
             .current_dir(work)
@@ -312,7 +337,7 @@ fn run_suite(
 
 /// Runs `command` in its own process group and kills the group at `deadline`, or when the
 /// script exits, because test suites start workers (callr, parallel) that would outlive it.
-fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Status> {
+pub fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Status> {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
     let mut child = command.spawn()?;

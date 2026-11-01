@@ -105,18 +105,42 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
 /// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
-    token: Arc<Mutex<Option<salsa::CancellationToken>>>,
+    state: Arc<Mutex<CancelState>>,
+}
+
+#[derive(Default)]
+struct CancelState {
+    token: Option<salsa::CancellationToken>,
+    /// Whether the worker is running background work (the semantic wave, priming), which a
+    /// request preempts. One lock covers both fields so a request can never cancel another
+    /// request that started after the background unit ended.
+    idle: bool,
 }
 
 impl CancelHandle {
     fn cancel(&self) {
-        if let Some(token) = self.token.lock().expect("cancel token lock").as_ref() {
+        if let Some(token) = self.state.lock().expect("cancel state lock").token.as_ref() {
             token.cancel();
         }
     }
 
+    /// A background unit is cancelled and requeued, so the request runs next instead of
+    /// waiting for a whole file's settled diagnostics.
+    fn preempt_idle(&self) {
+        let state = self.state.lock().expect("cancel state lock");
+        if state.idle
+            && let Some(token) = state.token.as_ref()
+        {
+            token.cancel();
+        }
+    }
+
+    fn set_idle(&self, idle: bool) {
+        self.state.lock().expect("cancel state lock").idle = idle;
+    }
+
     fn install(&self, token: salsa::CancellationToken) {
-        *self.token.lock().expect("cancel token lock") = Some(token);
+        self.state.lock().expect("cancel state lock").token = Some(token);
     }
 }
 
@@ -178,7 +202,11 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
                     worker.refresh_cancellation();
                     match job {
                         Some(Job::Run(work)) => work(worker),
-                        _ => worker.run_idle_unit(),
+                        _ => {
+                            worker.cancel.set_idle(true);
+                            worker.run_idle_unit();
+                            worker.cancel.set_idle(false);
+                        }
                     }
                 }
                 // LSP allows dropping notifications before initialize.
@@ -210,7 +238,11 @@ impl ServerState {
             // The receiver is gone only when the client cancelled the request.
             reply.send(build(worker)).ok();
         }));
-        self.submit(job, receive)
+        // Queued first: a background unit cancelled before the request is queued would just
+        // start the next one.
+        let response = self.submit(job, receive);
+        self.cancel.preempt_idle();
+        response
     }
 
     fn submit<T: Send + 'static>(
@@ -277,6 +309,10 @@ struct Worker {
     pending_semantic_publishes: Vec<PathBuf>,
     /// Results are never published.
     prime_queue: VecDeque<PathBuf>,
+    /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
+    /// whose durability drops, so the first LOW write to a file re-derives everything that
+    /// depends on it. Idle time pays that once, so the first keystroke does not.
+    pending_lowering: Vec<PathBuf>,
     /// Non-empty sets only. Kept current per synced or primed file, never by a
     /// whole-project sweep, so keystroke work stays O(open documents).
     attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
@@ -385,22 +421,31 @@ impl Worker {
             virtual_document_uris: HashMap::new(),
             pending_semantic_publishes: Vec::new(),
             prime_queue: VecDeque::new(),
+            pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
         };
+        // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
+        // durable as its least durable input, and nearly every memo reads the stubs or the
+        // settings, so one LOW input would make a keystroke deep-verify the whole project.
         worker.install_stubs();
-        AnalysisSettings::new(&worker.db, worker.config.check.inline_annotations);
+        let _: AnalysisSettings = AnalysisSettings::builder(worker.config.check.inline_annotations)
+            .durability(Durability::MEDIUM)
+            .new(&worker.db);
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
-        PackageMetadata::new(
-            &worker.db,
+        let _: PackageMetadata = PackageMetadata::builder(
             metadata.imports,
             metadata.dependencies,
             Default::default(),
             metadata.package,
             metadata.native_symbols,
-        );
-        DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
+        )
+        .durability(Durability::MEDIUM)
+        .new(&worker.db);
+        let _: DataFiles = DataFiles::builder(scan_data_files(&worker.workspace_root))
+            .durability(Durability::MEDIUM)
+            .new(&worker.db);
         worker.load_workspace_sources();
 
         let result = initialize_result(encoding, worker.experimental_features);
@@ -424,7 +469,9 @@ impl Worker {
                 }
             }
         }
-        StubSources::new(&self.db, sources, shipped_export_manifests());
+        let _: StubSources = StubSources::builder(sources, shipped_export_manifests())
+            .durability(Durability::MEDIUM)
+            .new(&self.db);
     }
 
     /// The open NAMESPACE buffer wins over disk; DESCRIPTION is not a tracked
@@ -472,15 +519,16 @@ impl Worker {
     }
 
     /// When the project-wide attach union moves, every file's resolution universe
-    /// changes, so all diagnostics refresh.
-    fn refresh_attached(&mut self, path: &Path) {
+    /// changes, so all diagnostics refresh. Returns false when the scan was cancelled. A sync
+    /// can ignore that, because the edit that cancelled it re-scans in its own sync, but an
+    /// idle caller must requeue the file: a request preempts idle work without re-scanning.
+    fn refresh_attached(&mut self, path: &Path) -> bool {
         let scanned = match self.files.get(path) {
             Some(&file) => {
                 let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
                 match scan {
                     Ok(scanned) => scanned,
-                    // A newer edit is already queued; its own sync re-scans.
-                    Err(_) => return,
+                    Err(_) => return false,
                 }
             }
             None => Default::default(),
@@ -494,15 +542,16 @@ impl Worker {
             false
         };
         if !changed {
-            return;
+            return true;
         }
         let union = self.attached_union();
         let metadata = PackageMetadata::get(&self.db);
         if metadata.attached(&self.db) == &union {
-            return;
+            return true;
         }
         metadata.set_attached(&mut self.db).to(union);
         self.refresh_all_diagnostics();
+        true
     }
 
     /// A real change refreshes all diagnostics; a `Collate` change reorders the project.
@@ -566,6 +615,12 @@ impl Worker {
     }
 
     /// In the order the last-writer-wins symbol index and the CLI agree on.
+    ///
+    /// The file list is LOW although the files start at MEDIUM. Every project-wide map reads
+    /// it, so those maps are LOW from the start, and a file's first edit (its drop from MEDIUM
+    /// to LOW) lets them backdate. Salsa never backdates a memo whose durability drops, so a
+    /// MEDIUM list would make that first edit re-execute every name lookup and item check in
+    /// the project.
     fn rebuild_project_files(&mut self) {
         let order = project_order(&self.workspace_root, &self.collate_order);
         let mut ordered: Vec<(&PathBuf, &SourceFile)> = self.files.iter().collect();
@@ -575,13 +630,13 @@ impl Worker {
             Some(project) => {
                 project
                     .set_files(&mut self.db)
-                    .with_durability(Durability::MEDIUM)
+                    .with_durability(Durability::LOW)
                     .to(files);
             }
             None => {
                 // A singleton: queries reach it through `ProjectFiles::get`.
                 let _project = ProjectFiles::builder(files)
-                    .durability(Durability::MEDIUM)
+                    .durability(Durability::LOW)
                     .new(&self.db);
             }
         }
@@ -598,7 +653,9 @@ impl Worker {
     }
 
     fn has_idle_work(&self) -> bool {
-        !self.pending_semantic_publishes.is_empty() || !self.prime_queue.is_empty()
+        !self.pending_semantic_publishes.is_empty()
+            || !self.pending_lowering.is_empty()
+            || !self.prime_queue.is_empty()
     }
 
     fn run_idle_unit(&mut self) {
@@ -616,18 +673,33 @@ impl Worker {
             }
             return;
         }
+        if let Some(path) = self.pending_lowering.pop() {
+            if self.open_documents.contains(&path)
+                && let Some(&file) = self.files.get(&path)
+            {
+                let text = file.text(&self.db).to_owned();
+                file.set_text(&mut self.db)
+                    .with_durability(Durability::LOW)
+                    .to(text);
+                self.defer_semantic_publish(&path);
+            }
+            return;
+        }
         if let Some(path) = self.prime_queue.pop_front() {
             let Some(&file) = self.files.get(&path) else {
                 return;
             };
             let config = self.config.clone();
             let outcome = self.cancellable(|worker| {
-                let _ = document_diagnostics(&worker.db, file, &config);
+                drop(document_diagnostics(&worker.db, file, &config));
+                ide::warm_completion_indexes(&worker.db, file);
             });
             match outcome {
+                // Scans the startup workspace's attach facts without a blocking sweep.
                 Ok(()) => {
-                    // Scans the startup workspace's attach facts without a blocking sweep.
-                    self.refresh_attached(&path);
+                    if !self.refresh_attached(&path) {
+                        self.prime_queue.push_front(path);
+                    }
                 }
                 Err(_) => self.prime_queue.push_front(path),
             }
@@ -858,8 +930,17 @@ impl Worker {
 
         let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
+            // Opening usually shows the text already on disk. Rewriting it anyway would be a
+            // MEDIUM write (a setter keeps the field's durability), which makes every memo in
+            // the project deep-verify before the first diagnostics.
             Some(&file) => {
-                file.set_text(&mut self.db).to(params.text_document.text);
+                if *file.text(&self.db) == params.text_document.text {
+                    self.pending_lowering.push(path.clone());
+                } else {
+                    file.set_text(&mut self.db)
+                        .with_durability(Durability::LOW)
+                        .to(params.text_document.text);
+                }
             }
             None => {
                 let file = SourceFile::new(&self.db, params.text_document.text, kind);
@@ -905,6 +986,7 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let updated = self.apply_content_changes(text, &params.content_changes);
+        self.pending_lowering.retain(|owed| owed != &path);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
@@ -983,6 +1065,7 @@ impl Worker {
         }
         self.open_documents.remove(&path);
         self.pending_semantic_publishes.retain(|owed| owed != &path);
+        self.pending_lowering.retain(|owed| owed != &path);
 
         if self.is_project_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.

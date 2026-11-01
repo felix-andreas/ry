@@ -19,7 +19,12 @@
 //! exist to catch it.
 
 use crate::env::Frame;
-use std::{cell::Cell, ffi::c_void, fmt, ptr::NonNull};
+use std::{
+    cell::{Cell, UnsafeCell},
+    ffi::c_void,
+    fmt,
+    ptr::NonNull,
+};
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -288,6 +293,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
+    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
+    /// compiled code revalidates its lookups only when the epoch moved.
+    pub const WATCHED: u16 = 1 << 10;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.
     pub const TYPED_DEFINITION: u16 = 1 << 12;
@@ -340,7 +349,9 @@ pub(crate) struct TripleObject {
 #[repr(C)]
 pub(crate) struct EnvironmentObject {
     pub header: Header,
-    pub frame: Cell<*mut Frame>,
+    /// The frame lives inside the object, so a closure call's environment costs one heap
+    /// allocation and no malloc while its bindings fit the frame's inline cells.
+    pub frame: UnsafeCell<Frame>,
     pub enclosure: Cell<Sexp>,
     pub spare: Cell<usize>,
 }
@@ -725,10 +736,6 @@ impl Sexp {
 
     pub(crate) unsafe fn frame_ptr(self) -> *mut Frame {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
-    }
-
-    pub(crate) unsafe fn set_frame_ptr(self, frame: *mut Frame) {
-        unsafe { self.payload::<EnvironmentObject>().frame.set(frame) }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {

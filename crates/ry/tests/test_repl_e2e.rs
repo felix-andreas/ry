@@ -274,9 +274,11 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded promptpkg");
     session.send("options(prompt = \"R> \")\r");
-    session.settle(Duration::from_millis(300));
+    // The echoed command line never contains the joined text, so only the output matches.
+    session.send("cat(\"prompt\", \"changed\\n\")\r");
+    session.expect("prompt changed");
     fs::write(package.join("R/a.R"), "level <- function() \"level two\"\n").expect("write");
-    session.send("answer <- readline(\"answer: \")\r");
+    session.send("answer <- readline(paste0(\"ans\", \"wer: \"))\r");
     session.expect("answer: ");
     session.send("typed\r");
     session.send("cat(\"got\", answer, level(), \"\\n\")\r");
@@ -406,6 +408,30 @@ fn run_error_exits_nonzero() {
     assert!(
         !stdout.contains("unreached"),
         "the error must halt the script: {stdout}"
+    );
+}
+
+#[test]
+fn run_passes_trailing_arguments_to_the_script() {
+    if !r_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let script = directory.path().join("script.R");
+    fs::write(
+        &script,
+        "cat(commandArgs(trailingOnly = TRUE), sep = \"|\")\n",
+    )
+    .expect("write script");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .arg(&script)
+        .args(["--", "first", "--second"])
+        .output()
+        .expect("run the binary");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "first|--second"
     );
 }
 

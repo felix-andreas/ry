@@ -128,6 +128,7 @@ fn main() -> ExitCode {
                 startup: vec![load::embedded_runtime()],
                 file: Some(file.clone()),
                 batch: true,
+                arguments: arguments.clone(),
                 filter: Some(Box::new(Erase)),
                 ..repl::RunOptions::default()
             })

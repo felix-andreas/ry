@@ -313,9 +313,17 @@ pub enum Op {
     /// `srcref`: makes the srcref constant current, for a statement of a `{` with source
     /// references.
     SetSrcref,
+    /// `function expected target`: jumps unless the function is the primitive `expected`.
+    BranchUnlessPrimitive,
+    /// `src target`: jumps when the value in `src` is an object (it has a class).
+    BranchIfObject,
+    /// `dst function call subject`: calls a dispatch-or-eval special such as `[` whose first
+    /// argument already evaluated to the object in `subject`, so it dispatches on that object
+    /// with the other arguments as promises.
+    DispatchSubject,
 }
 
-pub const OPS: [Op; 23] = [
+pub const OPS: [Op; 26] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -339,6 +347,9 @@ pub const OPS: [Op; 23] = [
     Op::Closure,
     Op::SubAssign,
     Op::SetSrcref,
+    Op::BranchUnlessPrimitive,
+    Op::BranchIfObject,
+    Op::DispatchSubject,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -682,6 +693,9 @@ impl Compiler {
         let name = symbol_name(head).into_owned();
         if let Some(primitive) = self.base_primitive(head, &name)? {
             let args = values::pairlist_items(call.cdr());
+            if self.eager_subject(primitive, &args)? {
+                return self.subject_call(call, head, primitive, dst, &args);
+            }
             let plain = args.iter().all(|(tag, _)| *tag == nil());
             let inlined = match (name.as_str(), args.len()) {
                 ("(", 1) => plain && args[0].1 != symbols().dots,
@@ -795,7 +809,7 @@ impl Compiler {
         let inlinable = matches!(
             name,
             "{" | "(" | "if" | "for" | "while" | "repeat" | "break" | "next" | "return" | "<-" | "=" | "&&" | "||" | "function"
-                | "[<-" | "[[<-"
+                | "[" | "[[" | "[<-" | "[[<-"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1038,6 +1052,67 @@ impl Compiler {
         self.emit(Op::Invisible, &[]);
     }
 
+    /// Whether a call of `primitive` with `args` can evaluate its subject first and, when the
+    /// subject is not an object, its other arguments as values, which is what a dispatch-or-eval
+    /// special such as `[` does. A formal among the other arguments may be missing, which the
+    /// special passes on as an empty argument but a register cannot hold, so it takes the
+    /// generic path.
+    unsafe fn eager_subject(&self, primitive: Sexp, args: &[(Sexp, Sexp)]) -> R<bool> {
+        if primitive.kind() != SexpType::Special || !eval::builtin_def(primitive)?.is_dispatch_or_eval() {
+            return Ok(false);
+        }
+        let Some(((_, subject), rest)) = args.split_first() else {
+            return Ok(false);
+        };
+        let plain_argument = |value: Sexp| {
+            value != symbols().dots
+                && !may_modify_in_place(value)
+                && (value.kind() != SexpType::Symbol
+                    || value == missing_arg()
+                    || (!self.formals.contains(&value) && eval::dot_dot_index(value).is_none()))
+        };
+        Ok(*subject != missing_arg() && *subject != symbols().dots && rest.iter().all(|(_, value)| plain_argument(*value)))
+    }
+
+    /// A dispatch-or-eval special call: the subject evaluates first, an object dispatches with
+    /// the other arguments as promises, and any other subject calls the special on values, the
+    /// path the optimizing tier compiles.
+    unsafe fn subject_call(&mut self, call: Sexp, head: Sexp, primitive: Sexp, dst: u32, args: &[(Sexp, Sexp)]) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let call_constant = self.constant(call);
+        let cache = self.cache();
+        let mark = self.next_register;
+        let function = self.allocate();
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
+        let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
+        let base = self.next_register;
+        for _ in args {
+            self.allocate();
+        }
+        self.expression(args[0].1, base)?;
+        let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
+        for (index, (_, value)) in args.iter().enumerate().skip(1) {
+            if *value == missing_arg() {
+                let constant = self.constant(missing_arg());
+                self.emit(Op::Constant, &[base + index as u32, constant]);
+            } else {
+                self.expression(*value, base + index as u32)?;
+            }
+        }
+        self.emit(Op::CallBuiltin, &[dst, function, call_constant, base, args.len() as u32]);
+        let called = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(object);
+        self.emit(Op::DispatchSubject, &[dst, function, call_constant, base]);
+        let dispatched = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(generic);
+        self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+        self.patch(called);
+        self.patch(dispatched);
+        self.release_to(mark);
+        Ok(())
+    }
+
     unsafe fn general_call(&mut self, call: Sexp, head: Sexp, dst: u32) -> R<()> {
         let symbol = self.constant(head);
         let call_constant = self.constant(call);
@@ -1105,6 +1180,9 @@ pub fn operand_count(op: Op) -> usize {
         Op::Closure => 4,
         Op::SubAssign => 6,
         Op::SetSrcref => 1,
+        Op::BranchUnlessPrimitive => 3,
+        Op::BranchIfObject => 2,
+        Op::DispatchSubject => 4,
     }
 }
 
@@ -1320,6 +1398,29 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let function = register(operand(1));
             let call = constants.element(operand(2));
             let value = eval::apply_call(call, function, call.cdr(), env)?;
+            record_feedback(constants, at, value);
+            set(operand(0), value);
+        }
+        Op::BranchUnlessPrimitive => {
+            if register(operand(0)) != constants.element(operand(1)) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::BranchIfObject => {
+            if register(operand(0)).is_object() {
+                *pc = operand(1);
+                return Ok(None);
+            }
+        }
+        Op::DispatchSubject => {
+            let function = register(operand(1));
+            let call = constants.element(operand(2));
+            let definition = eval::builtin_def(function)?;
+            let value = match dispatch::dispatch_evaluated_subject(definition, call, function, call.cdr(), register(operand(3)), env)? {
+                Ok(value) => value,
+                Err(args) => call_builtin(definition, call, function, &args, env)?,
+            };
             record_feedback(constants, at, value);
             set(operand(0), value);
         }
