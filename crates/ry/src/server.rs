@@ -33,7 +33,8 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, Severity},
+        file_conditional_writers, file_interface_reads, item_naming, item_tree,
+        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics},
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -45,14 +46,21 @@ use {
         },
     },
     std::{
-        collections::{BTreeSet, HashMap, HashSet, VecDeque},
+        cmp::Reverse,
+        collections::{BTreeSet, HashMap, HashSet},
         env, fs,
         hash::{DefaultHasher, Hash, Hasher},
+        mem,
+        num::NonZero,
         ops::{ControlFlow, Range},
         panic::{self, AssertUnwindSafe},
         path::{Path, PathBuf},
         process,
-        sync::{Arc, Mutex, mpsc},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         thread,
         time::{Duration, Instant},
     },
@@ -110,11 +118,19 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
         .expect("language server main loop failed");
 }
 
+/// Files primed per idle unit. Small enough that pending publishes and lowering interleave
+/// with the cold check; large enough to keep every core busy.
+const PRIME_BATCH: usize = 64;
+
 /// The token exists only once the worker builds the database, so it arrives late
 /// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
     state: Arc<Mutex<CancelState>>,
+    /// Jobs sent to the worker that it has not received yet. A parallel background unit polls
+    /// this between files, because salsa clears a handle's cancellation flag whenever a
+    /// top-level query returns, so a flip that lands at the end of one query is lost.
+    queued: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -124,12 +140,19 @@ struct CancelState {
     /// request preempts. One lock covers both fields so a request can never cancel another
     /// request that started after the background unit ended.
     idle: bool,
+    /// Tokens of the database clones a parallel background unit runs on. Salsa's tokens are
+    /// per handle, so cancelling the worker's own token would not stop them.
+    helpers: Vec<salsa::CancellationToken>,
 }
 
 impl CancelHandle {
     fn cancel(&self) {
-        if let Some(token) = self.state.lock().expect("cancel state lock").token.as_ref() {
+        let state = self.state.lock().expect("cancel state lock");
+        if let Some(token) = state.token.as_ref() {
             token.cancel();
+        }
+        for helper in &state.helpers {
+            helper.cancel();
         }
     }
 
@@ -141,7 +164,34 @@ impl CancelHandle {
             && let Some(token) = state.token.as_ref()
         {
             token.cancel();
+            for helper in &state.helpers {
+                helper.cancel();
+            }
         }
+    }
+
+    /// Counted before the send, so a background unit never misses a job already on its way.
+    fn job_sent(&self) {
+        self.queued.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn job_received(&self) {
+        self.queued.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn has_queued_jobs(&self) -> bool {
+        self.queued.load(Ordering::SeqCst) > 0
+    }
+
+    /// A job queued before the helpers were registered still stops them.
+    fn set_helpers(&self, helpers: Vec<salsa::CancellationToken>) {
+        let mut state = self.state.lock().expect("cancel state lock");
+        if self.has_queued_jobs() {
+            for helper in &helpers {
+                helper.cancel();
+            }
+        }
+        state.helpers = helpers;
     }
 
     fn set_idle(&self, idle: bool) {
@@ -183,18 +233,25 @@ struct WorkerSeed {
 }
 
 fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
+    let cancel = seed.cancel.clone();
     let mut seed = Some(seed);
     let mut worker: Option<Worker> = None;
     loop {
         let job = if worker.as_ref().is_some_and(Worker::has_idle_work) {
             match receiver.try_recv() {
-                Ok(job) => Some(job),
+                Ok(job) => {
+                    cancel.job_received();
+                    Some(job)
+                }
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }
         } else {
             match receiver.recv() {
-                Ok(job) => Some(job),
+                Ok(job) => {
+                    cancel.job_received();
+                    Some(job)
+                }
                 Err(_) => return,
             }
         };
@@ -259,6 +316,7 @@ impl ServerState {
         job: Job,
         receive: oneshot::Receiver<Result<T, ResponseError>>,
     ) -> BoxFuture<'static, Result<T, ResponseError>> {
+        self.cancel.job_sent();
         if self.sender.send(job).is_err() {
             return Box::pin(async { Err(worker_gone_error()) });
         }
@@ -271,6 +329,9 @@ impl ServerState {
     where
         F: FnOnce(&mut Worker) + Send + 'static,
     {
+        // Counted first: a helper whose query returns as the cancel lands loses the flag
+        // to salsa's uncancel, and only the counter then stops it before the next file.
+        self.cancel.job_sent();
         self.cancel.cancel();
         if self.sender.send(Job::Run(Box::new(build))).is_err() {
             panic!("analysis worker is gone; cannot apply a notification");
@@ -316,8 +377,16 @@ struct Worker {
     virtual_document_uris: HashMap<PathBuf, lsp_types::Url>,
     /// Most recent last.
     pending_semantic_publishes: Vec<PathBuf>,
+    /// Workspace files whose attach facts the startup warm-up has not scanned yet. Until it
+    /// has, the attach union stays unapplied: applying it per file would re-run every
+    /// diagnostic each time it grows.
+    unscanned: Vec<PathBuf>,
+    /// Workspace files whose per-item naming the startup warm-up has not derived yet. Every
+    /// project-wide name map folds all of them, so while any remain, the first wave skips the
+    /// lints (which read those maps) and the semantic wave waits.
+    unwarmed: Vec<PathBuf>,
     /// Results are never published.
-    prime_queue: VecDeque<PathBuf>,
+    prime_queue: Vec<PathBuf>,
     /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
     /// whose durability drops, so the first LOW write to a file re-derives everything that
     /// depends on it. Idle time pays that once, so the first keystroke does not.
@@ -429,7 +498,9 @@ impl Worker {
             collate_order: Vec::new(),
             virtual_document_uris: HashMap::new(),
             pending_semantic_publishes: Vec::new(),
-            prime_queue: VecDeque::new(),
+            unscanned: Vec::new(),
+            unwarmed: Vec::new(),
+            prime_queue: Vec::new(),
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
         };
@@ -550,17 +621,21 @@ impl Worker {
         } else {
             false
         };
-        if !changed {
+        if !changed || !self.unscanned.is_empty() {
             return true;
         }
+        self.apply_attached_union();
+        true
+    }
+
+    fn apply_attached_union(&mut self) {
         let union = self.attached_union();
         let metadata = PackageMetadata::get(&self.db);
         if metadata.attached(&self.db) == &union {
-            return true;
+            return;
         }
         metadata.set_attached(&mut self.db).to(union);
         self.refresh_all_diagnostics();
-        true
     }
 
     /// A real change refreshes all diagnostics; a `Collate` change reorders the project.
@@ -616,9 +691,19 @@ impl Worker {
                 let file = SourceFile::builder(text, DocumentKind::Package)
                     .durability(Durability::MEDIUM)
                     .new(&self.db);
-                self.files.insert(path.clone(), file);
-                self.prime_queue.push_back(path);
+                self.files.insert(path, file);
             }
+            // Largest first, so the last file a warm-up thread picks up is a small one.
+            let mut cold: Vec<(PathBuf, usize)> = self
+                .files
+                .iter()
+                .map(|(path, &file)| (path.clone(), file.text(&self.db).len()))
+                .collect();
+            cold.sort_by_key(|(path, size)| (Reverse(*size), path.clone()));
+            let cold: Vec<PathBuf> = cold.into_iter().map(|(path, _)| path).collect();
+            self.unscanned = cold.clone();
+            self.unwarmed = cold.clone();
+            self.prime_queue = cold;
         }
         self.rebuild_project_files();
     }
@@ -662,12 +747,19 @@ impl Worker {
     }
 
     fn has_idle_work(&self) -> bool {
-        !self.pending_semantic_publishes.is_empty()
+        !self.unwarmed.is_empty()
+            || !self.pending_semantic_publishes.is_empty()
             || !self.pending_lowering.is_empty()
             || !self.prime_queue.is_empty()
     }
 
     fn run_idle_unit(&mut self) {
+        // The semantic wave reads the project-wide maps, so it waits for the warm-up: on one
+        // thread it would derive the same maps several times slower.
+        if !self.unwarmed.is_empty() {
+            self.warm_up();
+            return;
+        }
         if let Some(path) = self.pending_semantic_publishes.pop() {
             if !self.open_documents.contains(&path) {
                 return;
@@ -694,25 +786,140 @@ impl Worker {
             }
             return;
         }
-        if let Some(path) = self.prime_queue.pop_front() {
-            let Some(&file) = self.files.get(&path) else {
-                return;
-            };
+        if !self.prime_queue.is_empty() {
+            let batch_start = self.prime_queue.len().saturating_sub(PRIME_BATCH);
+            let batch = self.prime_queue.split_off(batch_start);
             let config = self.config.clone();
-            let outcome = self.cancellable(|worker| {
-                drop(document_diagnostics(&worker.db, file, &config));
-                ide::warm_completion_indexes(&worker.db, file);
+            let (_, rest) = self.in_parallel(batch, |db, file| {
+                drop(document_diagnostics(db, file, &config));
+                ide::warm_completion_indexes(db, file);
             });
-            match outcome {
-                // Scans the startup workspace's attach facts without a blocking sweep.
-                Ok(()) => {
-                    if !self.refresh_attached(&path) {
-                        self.prime_queue.push_front(path);
-                    }
+            self.prime_queue.extend(rest);
+        }
+    }
+
+    /// Scans every file's attach facts and applies their union once, then derives every
+    /// item's naming and the per-file folds the project-wide maps read, across all cores.
+    fn warm_up(&mut self) {
+        if !self.unscanned.is_empty() {
+            let paths = mem::take(&mut self.unscanned);
+            let (scanned, rest) =
+                self.in_parallel(paths, |db, file| file_attached_namespaces(db, file));
+            for (path, attached) in scanned {
+                if attached.is_empty() {
+                    self.attached_by_file.remove(&path);
+                } else {
+                    self.attached_by_file.insert(path, attached);
                 }
-                Err(_) => self.prime_queue.push_front(path),
+            }
+            self.unscanned = rest;
+            if !self.unscanned.is_empty() {
+                return;
+            }
+            // Before naming: every memo that reads the attach set would re-run after it.
+            self.apply_attached_union();
+        }
+        let paths = mem::take(&mut self.unwarmed);
+        let cancel = self.cancel.clone();
+        // A cancel can be lost to salsa's uncancel between two items, so a large file
+        // also checks the queue per item and is requeued when it stopped early.
+        let (done, mut rest) = self.in_parallel(paths, |db, file| {
+            for &item in item_tree(db, file) {
+                if cancel.has_queued_jobs() {
+                    return false;
+                }
+                item_naming(db, item);
+            }
+            file_interface_reads(db, file);
+            file_conditional_writers(db, file);
+            true
+        });
+        rest.extend(
+            done.into_iter()
+                .filter(|(_, complete)| !complete)
+                .map(|(path, _)| path),
+        );
+        self.unwarmed = rest;
+        if self.unwarmed.is_empty() {
+            // Open files so far published only their parse diagnostics.
+            self.refresh_all_diagnostics();
+        }
+    }
+
+    /// Runs `work` on one database clone per core. Returns each finished path's result and
+    /// the paths a cancellation left undone, for the caller to requeue.
+    fn in_parallel<T: Send>(
+        &mut self,
+        paths: Vec<PathBuf>,
+        work: impl Fn(&RootDatabase, SourceFile) -> T + Sync,
+    ) -> (Vec<(PathBuf, T)>, Vec<PathBuf>) {
+        let jobs: Vec<(PathBuf, SourceFile)> = paths
+            .into_iter()
+            .filter_map(|path| Some((path.clone(), *self.files.get(&path)?)))
+            .collect();
+        let workers = thread::available_parallelism()
+            .map(NonZero::get)
+            .unwrap_or(1)
+            .min(jobs.len());
+        let clones: Vec<RootDatabase> = (0..workers).map(|_| self.db.clone()).collect();
+        self.cancel.set_helpers(
+            clones
+                .iter()
+                .map(salsa::Database::cancellation_token)
+                .collect(),
+        );
+        // Shared rather than dealt out: per-file cost varies by orders of magnitude.
+        let next = AtomicUsize::new(0);
+        let finished: Vec<(usize, T)> = thread::scope(|scope| {
+            let handles: Vec<_> = clones
+                .into_iter()
+                .map(|db| {
+                    let (next, work, jobs, cancel) = (&next, &work, &jobs, &self.cancel);
+                    thread::Builder::new()
+                        .stack_size(crate::ANALYSIS_STACK_SIZE)
+                        .spawn_scoped(scope, move || {
+                            let mut done = Vec::new();
+                            while !cancel.has_queued_jobs() {
+                                let index = next.fetch_add(1, Ordering::Relaxed);
+                                let Some((_, file)) = jobs.get(index) else {
+                                    break;
+                                };
+                                match salsa::Cancelled::catch(AssertUnwindSafe(|| work(&db, *file)))
+                                {
+                                    Ok(result) => done.push((index, result)),
+                                    Err(_) => break,
+                                }
+                            }
+                            done
+                        })
+                        .expect("an analysis thread must spawn")
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|payload| panic::resume_unwind(payload))
+                })
+                .collect()
+        });
+        self.cancel.set_helpers(Vec::new());
+        let mut slots: Vec<Option<T>> = jobs.iter().map(|_| None).collect();
+        for (index, result) in finished {
+            if let Some(slot) = slots.get_mut(index) {
+                *slot = Some(result);
             }
         }
+        let mut done = Vec::new();
+        let mut rest = Vec::new();
+        for ((path, _), slot) in jobs.into_iter().zip(slots) {
+            match slot {
+                Some(result) => done.push((path, result)),
+                None => rest.push(path),
+            }
+        }
+        (done, rest)
     }
 
     fn cancellable<T>(
@@ -1302,13 +1509,23 @@ impl Worker {
         let config = self.config.clone();
         let diagnostics = self
             .cancellable(|worker| {
-                let rendered = first_wave_diagnostics(&worker.db, file, &config);
+                let rendered = worker.fast_diagnostics(file, &config);
                 worker.finish_diagnostics(file, rendered)
             })
             .unwrap_or_default();
         let uri = self.document_uri(path);
         self.publish(uri, diagnostics, Some(version));
         self.defer_semantic_publish(path);
+    }
+
+    /// Before the startup warm-up ends, only the parse diagnostics: the lints read the
+    /// project-wide maps, which one thread would take seconds to derive.
+    fn fast_diagnostics(&self, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
+        if self.unwarmed.is_empty() {
+            first_wave_diagnostics(&self.db, file, config)
+        } else {
+            parse_stage_diagnostics(&self.db, file)
+        }
     }
 
     fn defer_semantic_publish(&mut self, path: &Path) {
@@ -2249,6 +2466,24 @@ impl LanguageServer for ServerState {
                 while !worker.current_token.is_cancelled() && Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(5));
                 }
+            }
+            // The warm-up's end asks the client to pull again, so a client that cannot
+            // be asked waits for the full report instead of keeping a parse-only one.
+            if !worker.unwarmed.is_empty()
+                && worker.supports_diagnostic_refresh
+                && let Some(&file) = worker.files.get(&path)
+            {
+                let report = worker.cancellable(|worker| {
+                    let config = worker.config.clone();
+                    let rendered = worker.fast_diagnostics(file, &config);
+                    worker.finish_diagnostics(file, rendered)
+                });
+                return match report {
+                    Ok(diagnostics) => {
+                        Ok(diagnostic_report(diagnostics, params.previous_result_id))
+                    }
+                    Err(_) => Err(diagnostics_cancelled_error()),
+                };
             }
             match worker.cancellable(|worker| worker.settled_diagnostics(&path)) {
                 Ok(Some(diagnostics)) => {
