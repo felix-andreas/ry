@@ -1,13 +1,20 @@
-use crate::diagnostics::{Diagnostic, Severity};
-use crate::naming::BindingKind;
-use crate::stubs::{declaring_namespace, stubs};
-use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
-use rowan::NodeOrToken;
-use syntax::ast::BinaryExpr;
-use syntax::native_values::{object_system_function, object_systems_disabled_message};
-use syntax::{
-    GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange, is_green_inline_annotation, node_at,
-    walk_green,
+use {
+    crate::{
+        Db, SourceFile,
+        diagnostics::{Diagnostic, Severity},
+        is_s3_method_name, item_naming, item_spans,
+        naming::BindingKind,
+        parse, s3_generics,
+        stubs::{declaring_namespace, stubs},
+    },
+    rowan::NodeOrToken,
+    syntax::{
+        GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
+        ast::BinaryExpr,
+        is_green_inline_annotation,
+        native_values::{object_system_function, object_systems_disabled_message},
+        node_at, walk_green,
+    },
 };
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.

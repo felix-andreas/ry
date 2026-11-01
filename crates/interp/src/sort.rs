@@ -5,31 +5,33 @@
 //! an unstable algorithm (`sort` on doubles, `psort`, `qsort`) use the same textbook algorithm,
 //! because the arrangement of ties and of `NaN` is observable through them.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    coerce::{coerce_vector, factor_as_character},
-    conditions::warning,
-    eval, records, standard_library,
-    subset::select_elements,
-    unwind::{R, error},
-    values::{
-        self, alloc, as_logical_scalar, char_str, get_attr, length, na_string, nil, string_at,
-        symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        coerce::{coerce_vector, factor_as_character},
+        conditions::warning,
+        eval, records, standard_library,
+        subset::select_elements,
+        unwind::{R, error},
+        values::{
+            self, alloc, as_logical_scalar, char_str, get_attr, length, na_string, nil, string_at,
+            symbols,
+        },
     },
-};
-use heap::{
-    object::{
-        NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+    heap::{
+        object::{
+            NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+        },
+        records::NativeKind,
     },
-    records::NativeKind,
-};
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
-use std::{
-    borrow::Cow,
-    cell::Cell,
-    cmp::Ordering,
-    hash::{Hash, Hasher},
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
+    std::{
+        borrow::Cow,
+        cell::Cell,
+        cmp::Ordering,
+        hash::{Hash, Hasher},
+        sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[

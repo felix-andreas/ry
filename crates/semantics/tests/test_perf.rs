@@ -2,15 +2,20 @@
 //! `cargo test -p semantics --release --test test_perf -- --ignored --nocapture`.
 //! One test, so the resident-set reading is not polluted by a sibling test thread.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-
-use salsa::Setter;
-use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
-use semantics::infer::resolve_calls;
-use semantics::stubs::install_shipped_stubs;
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use {
+    salsa::Setter,
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{file_diagnostics, strict_diagnostics},
+        infer::resolve_calls,
+        stubs::install_shipped_stubs,
+    },
+    std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{Duration, Instant},
+    },
+};
 
 #[test]
 #[ignore = "needs the fetched corpus and a release build"]

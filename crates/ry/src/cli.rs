@@ -1,39 +1,51 @@
-use crate::config::{self, ExperimentalFeatures};
-use crate::diagnostics::{apply_suppressions, document_diagnostics};
-use crate::namespace;
-use crate::position::LineIndex;
-use console::style;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use miette::{
-    GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
-    Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
+use {
+    crate::{
+        config::{self, ExperimentalFeatures},
+        diagnostics::{apply_suppressions, document_diagnostics},
+        namespace,
+        position::LineIndex,
+    },
+    console::style,
+    ignore::gitignore::{Gitignore, GitignoreBuilder},
+    miette::{
+        GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
+        Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
+    },
+    rustc_hash::FxHashSet,
+    salsa::{Database, Durability},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax},
+        metadata::{
+            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_description_package, parse_namespace,
+        },
+        stubs::{
+            StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+            shipped_stub_sources, stub_source_problems,
+        },
+        test_document_kind,
+    },
+    std::{
+        cmp::Reverse,
+        collections::{BTreeMap, BTreeSet, HashMap},
+        env, fmt, fs,
+        io::Read,
+        iter, mem,
+        num::NonZero,
+        path::{Path, PathBuf},
+        sync::{
+            LazyLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    },
+    syntax::{
+        TextRange,
+        literate::{is_literate_extension, r_source_of_literate},
+    },
 };
-use rustc_hash::FxHashSet;
-use salsa::{Database, Durability};
-use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
-use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace,
-};
-use semantics::stubs::{
-    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
-    shipped_stub_sources, stub_source_problems,
-};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-    test_document_kind,
-};
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Read;
-use std::num::NonZero;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use std::{env, fmt, fs, iter, mem, thread};
-use syntax::TextRange;
-use syntax::literate::{is_literate_extension, r_source_of_literate};
 
 /// A run summary: not a finding, so a plain line rather than a report.
 pub fn info(message: &str) {
@@ -1443,8 +1455,10 @@ pub fn parse_experimental_flags(flags: &[impl AsRef<str>]) -> ExperimentalFeatur
 }
 
 fn print_diff(old: &str, new: &str) {
-    use console::Style;
-    use similar::{ChangeTag, TextDiff};
+    use {
+        console::Style,
+        similar::{ChangeTag, TextDiff},
+    };
 
     struct Line(Option<usize>);
     impl fmt::Display for Line {

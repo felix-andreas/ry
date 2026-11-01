@@ -1,10 +1,14 @@
 //! NAMESPACE problem diagnostics; parsing lives in `semantics::metadata`.
 
-use rustc_hash::FxHashSet;
-use semantics::diagnostics::{Diagnostic, Severity};
-use semantics::lints::{LintLevel, lint_severity};
-use semantics::metadata::NamespaceImport;
-use syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token};
+use {
+    rustc_hash::FxHashSet,
+    semantics::{
+        diagnostics::{Diagnostic, Severity},
+        lints::{LintLevel, lint_severity},
+        metadata::NamespaceImport,
+    },
+    syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token},
+};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
 /// error, not a warning, because R refuses to load the package.
@@ -167,10 +171,14 @@ pub fn collect_used_tokens<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use semantics::RootDatabase;
-    use semantics::metadata::parse_namespace;
-    use semantics::stubs::{install_shipped_stubs, namespace_exports, namespace_known};
+    use {
+        super::*,
+        semantics::{
+            RootDatabase,
+            metadata::parse_namespace,
+            stubs::{install_shipped_stubs, namespace_exports, namespace_known},
+        },
+    };
 
     fn stub_backed<'db>(
         db: &'db RootDatabase,

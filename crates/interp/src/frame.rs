@@ -13,31 +13,32 @@
 //! rebinds the variable the call named, so an alias taken earlier keeps the old columns. `setkey`
 //! always forks and rebinds.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin, special},
-    conditions, eval,
-    format::{Settings, display_width, format_real_common, format_real_with},
-    heap, interp, scope,
-    unwind::{R, Unwind, error, error_in},
-    values::{
-        self, char_str, install, is_nil, length, list_vector, missing_arg, na_string, nil,
-        scalar_integer, scalar_string, set_attr, string_vector, symbol_name, symbols,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, builtin, special},
+        conditions, eval,
+        format::{Settings, display_width, format_real_common, format_real_with},
+        heap, interp, scope,
+        unwind::{R, Unwind, error, error_in},
+        values::{
+            self, char_str, install, is_nil, length, list_vector, missing_arg, na_string, nil,
+            scalar_integer, scalar_string, set_attr, string_vector, symbol_name, symbols,
+        },
+        write_console,
     },
-    write_console,
-};
-use heap::object::{NA_INTEGER, Sexp, SexpType};
-use rustc_hash::FxHashSet;
-use std::{cell::Cell, ffi::c_void};
-use table::{
-    ColumnType, Table,
-    convert::{self, RVector, is_na_real},
-    polars::prelude::{
-        Column, DataFrame, DataType, IntoColumn, IntoLazy,
-        ParquetWriter, PlSmallStr, col,
-    },
-    query::{
-        self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
-        Select, SortKey, UnaryOp,
+    heap::object::{NA_INTEGER, Sexp, SexpType},
+    rustc_hash::FxHashSet,
+    std::{cell::Cell, ffi::c_void},
+    table::{
+        ColumnType, Table,
+        convert::{self, RVector, is_na_real},
+        polars::prelude::{
+            Column, DataFrame, DataType, IntoColumn, IntoLazy, ParquetWriter, PlSmallStr, col,
+        },
+        query::{
+            self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
+            Select, SortKey, UnaryOp,
+        },
     },
 };
 
@@ -173,7 +174,9 @@ local({
 pub fn package_functions() -> impl Iterator<Item = &'static str> {
     PACKAGE
         .lines()
-        .chain(crate::dataframe::PACKAGE.lines()).filter_map(|line| line.split_once(" <- ").map(|(name, _)| name)).filter(|name| !name.starts_with(' '))
+        .chain(crate::dataframe::PACKAGE.lines())
+        .filter_map(|line| line.split_once(" <- ").map(|(name, _)| name))
+        .filter(|name| !name.starts_with(' '))
 }
 
 /// Attaches `package:ry` at position 2 of the search path.
@@ -207,7 +210,9 @@ unsafe fn frame_tag() -> R<Sexp> {
 
 pub unsafe fn is_frame(object: Sexp) -> bool {
     object.kind() == SexpType::ExternalPtr
-        && TAG.with(Cell::get).is_some_and(|tag| object.external_tag() == tag)
+        && TAG
+            .with(Cell::get)
+            .is_some_and(|tag| object.external_tag() == tag)
         && !object.external_address().is_null()
 }
 
@@ -343,7 +348,10 @@ unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Col
     let Some(contents) = column_contents(value)? else {
         return Err(error_in(
             call,
-            format!("column `{name}` is a {}, which a DataFrame cannot hold", value.kind().name()),
+            format!(
+                "column `{name}` is a {}, which a DataFrame cannot hold",
+                value.kind().name()
+            ),
         ));
     };
     // An Array is never recycled, so only an R vector stretches to the frame's height.
@@ -351,11 +359,14 @@ unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Col
         .then(|| recycle(contents, height))
         .flatten()
         .ok_or_else(|| {
-        error_in(
-            call,
-            format!("column `{name}` has {} rows, but the DataFrame has {height}", length(value)),
-        )
-    })?;
+            error_in(
+                call,
+                format!(
+                    "column `{name}` has {} rows, but the DataFrame has {height}",
+                    length(value)
+                ),
+            )
+        })?;
     convert::to_series(PlSmallStr::from(name), contents)
         .map(IntoColumn::into_column)
         .map_err(|failure| table_error(call, failure))
@@ -392,11 +403,15 @@ unsafe fn table_from_values(columns: &[(String, Sexp)], call: Sexp) -> R<Table> 
     let mut seen = FxHashSet::default();
     for (name, value) in columns {
         if !seen.insert(name.as_str()) {
-            return Err(error_in(call, format!("the column name `{name}` is repeated")));
+            return Err(error_in(
+                call,
+                format!("the column name `{name}` is repeated"),
+            ));
         }
         converted.push(to_column(name, *value, height, call)?);
     }
-    let frame = DataFrame::new(height, converted).map_err(|failure| error_in(call, failure.to_string()))?;
+    let frame =
+        DataFrame::new(height, converted).map_err(|failure| error_in(call, failure.to_string()))?;
     Table::new(frame).map_err(|failure| table_error(call, failure))
 }
 
@@ -406,7 +421,10 @@ unsafe fn table_from_list(list: Sexp, call: Sexp) -> R<Table> {
         return Ok(table_of(list)?.fork());
     }
     if list.kind() != SexpType::List {
-        return Err(error_in(call, "a DataFrame is built from a list, a data.frame or a data.table"));
+        return Err(error_in(
+            call,
+            "a DataFrame is built from a list, a data.frame or a data.table",
+        ));
     }
     let names = values::names(list);
     let columns: Vec<(String, Sexp)> = (0..length(list))
@@ -477,8 +495,11 @@ unsafe fn do_to_list(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
     let factors = values::require_flag(call.arg(1), "strings_as_factors")?;
-    let fail = |failure: &dyn std::fmt::Display| error_in(call.call, format!("cannot read `{path}`: {failure}"));
-    let table = table::io::read_csv(std::path::Path::new(&path)).map_err(|failure| fail(&failure))?;
+    let fail = |failure: &dyn std::fmt::Display| {
+        error_in(call.call, format!("cannot read `{path}`: {failure}"))
+    };
+    let table =
+        table::io::read_csv(std::path::Path::new(&path)).map_err(|failure| fail(&failure))?;
     if !factors {
         return wrap(table);
     }
@@ -491,16 +512,22 @@ unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
         .collect();
     for name in text {
         let column = frame.column(&name).map_err(|failure| fail(&failure))?;
-        let factor = convert::string_to_factor(column.as_materialized_series()).map_err(|failure| fail(&failure))?;
-        frame.with_column(factor.into_column()).map_err(|failure| fail(&failure))?;
+        let factor = convert::string_to_factor(column.as_materialized_series())
+            .map_err(|failure| fail(&failure))?;
+        frame
+            .with_column(factor.into_column())
+            .map_err(|failure| fail(&failure))?;
     }
     wrap(Table::new(frame).map_err(|failure| fail(&failure))?)
 }
 
 unsafe fn do_read_parquet(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
-    let table = table::lazy::read_parquet(std::path::Path::new(&path), &table::io::ReadOptions::default())
-        .map_err(|failure| error_in(call.call, format!("cannot read `{path}`: {failure}")))?;
+    let table = table::lazy::read_parquet(
+        std::path::Path::new(&path),
+        &table::io::ReadOptions::default(),
+    )
+    .map_err(|failure| error_in(call.call, format!("cannot read `{path}`: {failure}")))?;
     wrap(table)
 }
 
@@ -515,7 +542,9 @@ unsafe fn do_write_csv(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_write_parquet(call: &Call<'_>) -> R<Sexp> {
     let table = table_of(call.arg(0))?;
     let path = values::require_string(call.arg(1), "path")?;
-    let fail = |failure: &dyn std::fmt::Display| error_in(call.call, format!("cannot write `{path}`: {failure}"));
+    let fail = |failure: &dyn std::fmt::Display| {
+        error_in(call.call, format!("cannot write `{path}`: {failure}"))
+    };
     let file = std::fs::File::create(&path).map_err(|failure| fail(&failure))?;
     let mut frame = table.frame().clone();
     ParquetWriter::new(file)
@@ -527,8 +556,16 @@ unsafe fn do_write_parquet(call: &Call<'_>) -> R<Sexp> {
 /// The column types as a named character vector, `c(id = "integer", ...)`.
 unsafe fn do_frame_schema(call: &Call<'_>) -> R<Sexp> {
     let schema = table_of(call.arg(0))?.schema();
-    let types: Vec<String> = schema.columns.iter().map(|(_, kind)| kind.name().to_string()).collect();
-    let names: Vec<String> = schema.columns.iter().map(|(name, _)| name.to_string()).collect();
+    let types: Vec<String> = schema
+        .columns
+        .iter()
+        .map(|(_, kind)| kind.name().to_string())
+        .collect();
+    let names: Vec<String> = schema
+        .columns
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
     let vector = string_vector(&types)?;
     set_attr(vector, symbols().names, string_vector(&names)?)?;
     Ok(vector)
@@ -552,12 +589,18 @@ unsafe fn do_frame_setkey(call: &Call<'_>) -> R<Sexp> {
     let name = call.arg(0);
     let env = call.arg(2);
     if name.kind() != SexpType::Symbol {
-        return Err(error_in(call.call, "`setkey` on a DataFrame needs the DataFrame's variable name"));
+        return Err(error_in(
+            call.call,
+            "`setkey` on a DataFrame needs the DataFrame's variable name",
+        ));
     }
     let subject = eval::eval(name, env)?;
     let mut table = table_of(subject)?.fork();
     let columns = values::strings(call.arg(1));
-    let columns: Vec<&str> = columns.iter().filter_map(|column| column.as_deref()).collect();
+    let columns: Vec<&str> = columns
+        .iter()
+        .filter_map(|column| column.as_deref())
+        .collect();
     table
         .set_key(&columns)
         .map_err(|failure| table_error(call.call, failure))?;
@@ -613,7 +656,10 @@ unsafe fn column_at(table: &Table, index: Sexp, call: Sexp) -> R<&Column> {
                 .and_then(|position| columns.get(position))
                 .ok_or_else(|| error_in(call, format!("the DataFrame has no column {position}")))
         }
-        _ => Err(error_in(call, "a column is selected by name or by position")),
+        _ => Err(error_in(
+            call,
+            "a column is selected by name or by position",
+        )),
     }
 }
 
@@ -621,7 +667,9 @@ unsafe fn do_set_column(call: &Call<'_>) -> R<Sexp> {
     let mut table = table_of(call.arg(0))?.fork();
     let name = match call.arg(1).kind() {
         SexpType::String => values::require_string(call.arg(1), "name")?,
-        _ => column_at(&table, call.arg(1), call.call)?.name().to_string(),
+        _ => column_at(&table, call.arg(1), call.call)?
+            .name()
+            .to_string(),
     };
     let value = call.arg(2);
     if is_nil(value) {
@@ -671,7 +719,11 @@ unsafe fn do_head(call: &Call<'_>) -> R<Sexp> {
     let count = matched[1].map_or(6, |value| values::as_integer_scalar(value) as i64);
     let table = table_of(subject)?;
     let height = table.height() as i64;
-    let count = if count < 0 { (height + count).max(0) } else { count.min(height) };
+    let count = if count < 0 {
+        (height + count).max(0)
+    } else {
+        count.min(height)
+    };
     let positions: Vec<u32> = (0..count as u32).collect();
     subset_rows(table, positions, call.call)
 }
@@ -682,7 +734,11 @@ unsafe fn do_tail(call: &Call<'_>) -> R<Sexp> {
     let count = matched[1].map_or(6, |value| values::as_integer_scalar(value) as i64);
     let table = table_of(subject)?;
     let height = table.height() as i64;
-    let count = if count < 0 { (height + count).max(0) } else { count.min(height) };
+    let count = if count < 0 {
+        (height + count).max(0)
+    } else {
+        count.min(height)
+    };
     let positions: Vec<u32> = ((height - count) as u32..height as u32).collect();
     subset_rows(table, positions, call.call)
 }
@@ -712,7 +768,14 @@ unsafe fn do_bracket_values(call: &Call<'_>) -> R<Sexp> {
         && rows != missing_arg()
     {
         let positions = row_positions(rows, result.height(), call.call)?;
-        result = match execute(&mut result, Query { rows: Rows::Positions(positions), ..Query::default() }, call.call)? {
+        result = match execute(
+            &mut result,
+            Query {
+                rows: Rows::Positions(positions),
+                ..Query::default()
+            },
+            call.call,
+        )? {
             Output::Table(table) => table,
             _ => return Err(call.error("the row selection did not produce a DataFrame")),
         };
@@ -721,8 +784,20 @@ unsafe fn do_bracket_values(call: &Call<'_>) -> R<Sexp> {
         && columns != missing_arg()
     {
         let names = column_names(&result, columns, call.call)?;
-        let select = Select::Columns(names.iter().map(|name| (name.clone(), Expr::Column(name.clone()))).collect());
-        return finish(&mut result, Query { select, ..Query::default() }, call.call);
+        let select = Select::Columns(
+            names
+                .iter()
+                .map(|name| (name.clone(), Expr::Column(name.clone())))
+                .collect(),
+        );
+        return finish(
+            &mut result,
+            Query {
+                select,
+                ..Query::default()
+            },
+            call.call,
+        );
     }
     wrap(result)
 }
@@ -736,7 +811,10 @@ unsafe fn column_names(table: &Table, selection: Sexp, call: Sexp) -> R<Vec<PlSm
                 let name = name.unwrap_or_default();
                 match schema.column(&name) {
                     Some(_) => Ok(PlSmallStr::from(name)),
-                    None => Err(error_in(call, format!("the DataFrame has no column `{name}`"))),
+                    None => Err(error_in(
+                        call,
+                        format!("the DataFrame has no column `{name}`"),
+                    )),
                 }
             })
             .collect(),
@@ -756,7 +834,10 @@ unsafe fn column_names(table: &Table, selection: Sexp, call: Sexp) -> R<Vec<PlSm
                 .map(|(name, _)| name.clone())
                 .collect())
         }
-        _ => Err(error_in(call, "columns are selected by name or by position")),
+        _ => Err(error_in(
+            call,
+            "columns are selected by name or by position",
+        )),
     }
 }
 
@@ -773,7 +854,10 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
             if flags.len() != height && flags.len() != 1 {
                 return Err(error_in(
                     call,
-                    format!("the row selection has {} values, but the DataFrame has {height} rows", flags.len()),
+                    format!(
+                        "the row selection has {} values, but the DataFrame has {height} rows",
+                        flags.len()
+                    ),
                 ));
             }
             Ok((0..height)
@@ -785,14 +869,23 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
             let numbers: Vec<f64> = if index.kind() == SexpType::Integer {
                 values::ints(index)
                     .iter()
-                    .map(|&value| if value == NA_INTEGER { f64::NAN } else { f64::from(value) })
+                    .map(|&value| {
+                        if value == NA_INTEGER {
+                            f64::NAN
+                        } else {
+                            f64::from(value)
+                        }
+                    })
                     .collect()
             } else {
                 values::reals(index).to_vec()
             };
             if numbers.iter().any(|&value| value < 0.0) {
                 if numbers.iter().any(|&value| value > 0.0 || value.is_nan()) {
-                    return Err(error_in(call, "cannot mix positive and negative row positions"));
+                    return Err(error_in(
+                        call,
+                        "cannot mix positive and negative row positions",
+                    ));
                 }
                 let mut keep = vec![true; height];
                 for value in numbers {
@@ -801,14 +894,20 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
                         keep[position - 1] = false;
                     }
                 }
-                return Ok((0..height).filter(|&row| keep[row]).map(|row| row as u32).collect());
+                return Ok((0..height)
+                    .filter(|&row| keep[row])
+                    .map(|row| row as u32)
+                    .collect());
             }
             let mut positions = Vec::with_capacity(numbers.len());
             for value in numbers {
                 if value.is_nan() || value as usize > height {
                     return Err(error_in(
                         call,
-                        format!("row {} is out of range for a DataFrame of {height} rows", format_position(value)),
+                        format!(
+                            "row {} is out of range for a DataFrame of {height} rows",
+                            format_position(value)
+                        ),
                     ));
                 }
                 if value >= 1.0 {
@@ -817,12 +916,19 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
             }
             Ok(positions)
         }
-        _ => Err(error_in(call, "rows are selected by a logical or numeric vector")),
+        _ => Err(error_in(
+            call,
+            "rows are selected by a logical or numeric vector",
+        )),
     }
 }
 
 fn format_position(value: f64) -> String {
-    if value.is_nan() { "NA".to_string() } else { format!("{value}") }
+    if value.is_nan() {
+        "NA".to_string()
+    } else {
+        format!("{value}")
+    }
 }
 
 // Printing.
@@ -841,7 +947,12 @@ unsafe fn render(table: &mut Table) -> R<String> {
     let height = table.height();
     let width = table.width();
     if width == 0 || height == 0 {
-        let names: Vec<String> = table.frame().get_column_names().iter().map(|name| name.to_string()).collect();
+        let names: Vec<String> = table
+            .frame()
+            .get_column_names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
         let mut text = format!("Empty DataFrame ({height} rows and {width} cols)");
         if !names.is_empty() {
             text.push_str(": ");
@@ -857,16 +968,30 @@ unsafe fn render(table: &mut Table) -> R<String> {
     } else {
         ((0..height as u32).collect(), None)
     };
-    let shown = match query::execute(table, Query { rows: Rows::Positions(positions.clone()), ..Query::default() })
-        .map_err(|failure| error(failure.to_string()))?
-        .output
+    let shown = match query::execute(
+        table,
+        Query {
+            rows: Rows::Positions(positions.clone()),
+            ..Query::default()
+        },
+    )
+    .map_err(|failure| error(failure.to_string()))?
+    .output
     {
         Output::Table(shown) => shown,
         _ => return Err(error("printing a DataFrame did not select rows")),
     };
-    let labels: Vec<String> = positions.iter().map(|position| format!("{}:", position + 1)).collect();
+    let labels: Vec<String> = positions
+        .iter()
+        .map(|position| format!("{}:", position + 1))
+        .collect();
     let separator_width = if split.is_some() { 3 } else { 0 };
-    let label_width = labels.iter().map(|label| label.len()).max().unwrap_or(0).max(separator_width);
+    let label_width = labels
+        .iter()
+        .map(|label| label.len())
+        .max()
+        .unwrap_or(0)
+        .max(separator_width);
     let mut lines: Vec<String> = vec![" ".repeat(label_width), " ".repeat(label_width)];
     for label in &labels {
         lines.push(format!("{label:>label_width$}"));
@@ -915,11 +1040,19 @@ unsafe fn format_cells(column: &Column, kind: ColumnType) -> R<Vec<String>> {
                 ..Settings::current()
             };
             let format = format_real_common(data, settings);
-            data.iter().map(|&value| format_real_with(value, format, "NA")).collect()
+            data.iter()
+                .map(|&value| format_real_with(value, format, "NA"))
+                .collect()
         }
         ColumnType::Integer => values::ints(vector)
             .iter()
-            .map(|&value| if value == NA_INTEGER { "NA".to_string() } else { value.to_string() })
+            .map(|&value| {
+                if value == NA_INTEGER {
+                    "NA".to_string()
+                } else {
+                    value.to_string()
+                }
+            })
             .collect(),
         ColumnType::Logical => values::ints(vector)
             .iter()
@@ -1115,7 +1248,9 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
                 finish(table, query, call)?
             }
         }
-        Plan { rows, select, by, .. } => fallback(subject, table, &parts, rows, select, by, &lowering)?,
+        Plan {
+            rows, select, by, ..
+        } => fallback(subject, table, &parts, rows, select, by, &lowering)?,
     };
     interp().visible = !assigns;
     Ok(result)
@@ -1147,7 +1282,12 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
                     0 => &mut parts.i,
                     1 => &mut parts.j,
                     2 => &mut parts.by,
-                    _ => return Err(error_in(call, "a DataFrame query takes at most `i`, `j` and `by`")),
+                    _ => {
+                        return Err(error_in(
+                            call,
+                            "a DataFrame query takes at most `i`, `j` and `by`",
+                        ));
+                    }
                 };
                 positional += 1;
                 if !piece.is_missing() {
@@ -1171,7 +1311,10 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
                     "with" => &mut parts.with,
                     "drop" | "verbose" | "allow.cartesian" if !strict => continue,
                     other => {
-                        return Err(error_in(call, format!("DataFrame queries do not support `{other} =`")));
+                        return Err(error_in(
+                            call,
+                            format!("DataFrame queries do not support `{other} =`"),
+                        ));
                     }
                 };
                 if !piece.is_missing() {
@@ -1210,7 +1353,15 @@ pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts
             .as_ref()
             .and_then(Piece::expression)
             .is_some_and(|expression| is_call_to(expression, ":="));
-    Ok((parts, Plan { rows, select, by, assigns }))
+    Ok((
+        parts,
+        Plan {
+            rows,
+            select,
+            by,
+            assigns,
+        },
+    ))
 }
 
 /// The column a bare symbol in `j` names: the symbol itself, except that `.N` names `N`.
@@ -1226,7 +1377,10 @@ unsafe fn finish(table: &mut Table, query: Query, call: Sexp) -> R<Sexp> {
     match execute(table, query, call)? {
         Output::Table(result) => wrap(result),
         Output::Vector(series) => column_value(&series.into_column()),
-        Output::Updated => Err(error_in(call, "the query updated the DataFrame unexpectedly")),
+        Output::Updated => Err(error_in(
+            call,
+            "the query updated the DataFrame unexpectedly",
+        )),
     }
 }
 
@@ -1238,9 +1392,16 @@ unsafe fn deparse_condition(call: Sexp) -> R<String> {
         (SexpType::Symbol, [(_, left), (_, right)])
             if left.kind() == SexpType::Symbol && right.kind() == SexpType::Symbol =>
         {
-            Ok(format!("{} {} {}", symbol_name(*left), symbol_name(operator), symbol_name(*right)))
+            Ok(format!(
+                "{} {} {}",
+                symbol_name(*left),
+                symbol_name(operator),
+                symbol_name(*right)
+            ))
         }
-        _ => Err(error("`on =` takes column names or comparisons between two columns")),
+        _ => Err(error(
+            "`on =` takes column names or comparisons between two columns",
+        )),
     }
 }
 
@@ -1313,7 +1474,10 @@ impl Lowering<'_> {
             return eval::eval(expression, env);
         }
         if !is_pure(expression, env)? {
-            return Err(error_in(self.call, "the query evaluates an expression that may have side effects"));
+            return Err(error_in(
+                self.call,
+                "the query evaluates an expression that may have side effects",
+            ));
         }
         conditions::quietly(|| eval::eval(expression, env))?
             .ok_or_else(|| error_in(self.call, "the query raised a condition"))
@@ -1324,12 +1488,16 @@ impl Lowering<'_> {
             && let Some((expression, env)) = piece.unevaluated()
             && !is_pure(expression, env)?
         {
-            return Err(error_in(self.call, "the query evaluates an expression that may have side effects"));
+            return Err(error_in(
+                self.call,
+                "the query evaluates an expression that may have side effects",
+            ));
         }
         if !self.strict {
             return piece.value();
         }
-        conditions::quietly(|| piece.value())?.ok_or_else(|| error_in(self.call, "the query raised a condition"))
+        conditions::quietly(|| piece.value())?
+            .ok_or_else(|| error_in(self.call, "the query raised a condition"))
     }
 
     unsafe fn rows(&self, piece: &Piece, parts: &Parts) -> R<Option<Rows>> {
@@ -1375,7 +1543,10 @@ impl Lowering<'_> {
             return self.join(other, parts).map(Rows::Join);
         }
         if parts.on.is_some() {
-            return Err(error_in(self.call, "a join with `on =` needs a DataFrame as `i`"));
+            return Err(error_in(
+                self.call,
+                "a join with `on =` needs a DataFrame as `i`",
+            ));
         }
         row_positions(value, self.height, self.call).map(Rows::Positions)
     }
@@ -1401,7 +1572,12 @@ impl Lowering<'_> {
                 Some("all") => Mult::All,
                 Some("first") => Mult::First,
                 Some("last") => Mult::Last,
-                _ => return Err(error_in(self.call, "`mult =` takes \"all\", \"first\" or \"last\"")),
+                _ => {
+                    return Err(error_in(
+                        self.call,
+                        "`mult =` takes \"all\", \"first\" or \"last\"",
+                    ));
+                }
             },
             None => Mult::All,
         };
@@ -1431,7 +1607,9 @@ impl Lowering<'_> {
                         let text = values::require_string(value, "on")?;
                         self.condition(tag_name(tag).as_deref(), &text)?
                     }
-                    SexpType::Language if tag_name(tag).is_none() => self.condition(None, &deparse_condition(value)?)?,
+                    SexpType::Language if tag_name(tag).is_none() => {
+                        self.condition(None, &deparse_condition(value)?)?
+                    }
                     _ => return Err(error_in(self.call, "`on =` takes column names")),
                 };
                 conditions.push(condition);
@@ -1449,7 +1627,9 @@ impl Lowering<'_> {
             let tag = if is_nil(names) {
                 None
             } else {
-                values::string_at(names, index).filter(|name| !name.is_empty()).map(|name| name.into_owned())
+                values::string_at(names, index)
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.into_owned())
             };
             for part in text.split(',') {
                 conditions.push(self.condition(tag.as_deref(), part)?);
@@ -1473,7 +1653,10 @@ impl Lowering<'_> {
             if let Some((own, other)) = text.split_once(symbol) {
                 let (own, other) = (own.trim(), other.trim());
                 if own.is_empty() || other.is_empty() {
-                    return Err(error_in(self.call, format!("`on =` cannot read the condition `{text}`")));
+                    return Err(error_in(
+                        self.call,
+                        format!("`on =` cannot read the condition `{text}`"),
+                    ));
                 }
                 return Ok(On::new(own, comparison, other));
             }
@@ -1503,7 +1686,10 @@ impl Lowering<'_> {
         }
         if is_call_to(expression, ".") || is_call_to(expression, "list") {
             let mut columns = Vec::new();
-            for (position, (tag, item)) in values::pairlist_items(expression.cdr()).into_iter().enumerate() {
+            for (position, (tag, item)) in values::pairlist_items(expression.cdr())
+                .into_iter()
+                .enumerate()
+            {
                 let name = match tag_name(tag) {
                     Some(name) => name,
                     None if item.kind() == SexpType::Symbol => symbol_column_name(item),
@@ -1519,7 +1705,10 @@ impl Lowering<'_> {
         if is_call_to(expression, "lapply") && length(expression) >= 3 {
             let target = expression.cdr().car();
             let function = expression.cdr().cdr().car();
-            if target.kind() == SexpType::Symbol && symbol_name(target) == ".SD" && function.kind() == SexpType::Symbol {
+            if target.kind() == SexpType::Symbol
+                && symbol_name(target) == ".SD"
+                && function.kind() == SexpType::Symbol
+            {
                 let Some(aggregate) = aggregate_named(&symbol_name(function)) else {
                     return Ok(None);
                 };
@@ -1539,7 +1728,14 @@ impl Lowering<'_> {
                     .into_iter()
                     .map(|name| {
                         let arg = Box::new(Expr::Column(name.clone()));
-                        (name, Expr::Aggregate { function: aggregate, arg, na_rm })
+                        (
+                            name,
+                            Expr::Aggregate {
+                                function: aggregate,
+                                arg,
+                                na_rm,
+                            },
+                        )
                     })
                     .collect();
                 return Ok(Some(Select::Columns(columns)));
@@ -1569,8 +1765,10 @@ impl Lowering<'_> {
         }
         if !self.mentions_columns(expression) {
             let value = self.evaluate(expression)?;
-            if matches!(value.kind(), SexpType::String | SexpType::Integer | SexpType::Real)
-                && !values::inherits(value, "factor")
+            if matches!(
+                value.kind(),
+                SexpType::String | SexpType::Integer | SexpType::Real
+            ) && !values::inherits(value, "factor")
             {
                 return self.columns_from_value(value).map(Some);
             }
@@ -1582,7 +1780,10 @@ impl Lowering<'_> {
         // A grouped bare symbol names its column after itself, as data.table does, while every
         // other grouped value is `V1`.
         if expression.kind() == SexpType::Symbol && by.as_ref().is_some_and(|by| !by.is_empty()) {
-            return Ok(Some(Select::Columns(vec![(PlSmallStr::from(symbol_column_name(expression)), expr)])));
+            return Ok(Some(Select::Columns(vec![(
+                PlSmallStr::from(symbol_column_name(expression)),
+                expr,
+            )])));
         }
         Ok(Some(Select::Value(expr)))
     }
@@ -1597,18 +1798,33 @@ impl Lowering<'_> {
                     if self.is_column(&name) {
                         Ok(PlSmallStr::from(name))
                     } else {
-                        Err(error_in(self.call, format!("the DataFrame has no column `{name}`")))
+                        Err(error_in(
+                            self.call,
+                            format!("the DataFrame has no column `{name}`"),
+                        ))
                     }
                 })
                 .collect::<R<_>>()?,
-            SexpType::Integer | SexpType::Real | SexpType::Logical => row_positions(value, height, self.call)?
-                .into_iter()
-                .filter_map(|position| self.schema.columns.get(position as usize))
-                .map(|(name, _)| name.clone())
-                .collect(),
-            _ => return Err(error_in(self.call, "`j` selects columns by name or by position here")),
+            SexpType::Integer | SexpType::Real | SexpType::Logical => {
+                row_positions(value, height, self.call)?
+                    .into_iter()
+                    .filter_map(|position| self.schema.columns.get(position as usize))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            }
+            _ => {
+                return Err(error_in(
+                    self.call,
+                    "`j` selects columns by name or by position here",
+                ));
+            }
         };
-        Ok(Select::Columns(names.into_iter().map(|name| (name.clone(), Expr::Column(name))).collect()))
+        Ok(Select::Columns(
+            names
+                .into_iter()
+                .map(|name| (name.clone(), Expr::Column(name)))
+                .collect(),
+        ))
     }
 
     /// The columns `.SD` covers: `.SDcols`, or every column that is not a group.
@@ -1642,10 +1858,20 @@ impl Lowering<'_> {
         if from.kind() != SexpType::Symbol || to.kind() != SexpType::Symbol {
             return None;
         }
-        let position = |name: &str| self.schema.columns.iter().position(|(column, _)| column == name);
+        let position = |name: &str| {
+            self.schema
+                .columns
+                .iter()
+                .position(|(column, _)| column == name)
+        };
         let (from, to) = (position(&symbol_name(from))?, position(&symbol_name(to))?);
         let (from, to) = if from <= to { (from, to) } else { (to, from) };
-        Some(self.schema.columns[from..=to].iter().map(|(name, _)| name.clone()).collect())
+        Some(
+            self.schema.columns[from..=to]
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+        )
     }
 
     unsafe fn assignments(&self, expression: Sexp) -> R<Option<Select>> {
@@ -1664,7 +1890,10 @@ impl Lowering<'_> {
                     if value.kind() != SexpType::String {
                         return Err(error_in(self.call, "the left side of `:=` names columns"));
                     }
-                    values::strings(value).into_iter().map(Option::unwrap_or_default).collect()
+                    values::strings(value)
+                        .into_iter()
+                        .map(Option::unwrap_or_default)
+                        .collect()
                 }
             };
             if names.len() == 1 {
@@ -1674,15 +1903,26 @@ impl Lowering<'_> {
                 if values.len() != names.len() {
                     return Err(error_in(
                         self.call,
-                        format!("`:=` names {} columns but gives {} values", names.len(), values.len()),
+                        format!(
+                            "`:=` names {} columns but gives {} values",
+                            names.len(),
+                            values.len()
+                        ),
                     ));
                 }
-                pairs.extend(names.into_iter().zip(values.into_iter().map(|(_, value)| value)));
+                pairs.extend(
+                    names
+                        .into_iter()
+                        .zip(values.into_iter().map(|(_, value)| value)),
+                );
             } else {
                 return Ok(None);
             }
         } else {
-            return Err(error_in(self.call, "`:=` takes `name := value` or named arguments"));
+            return Err(error_in(
+                self.call,
+                "`:=` takes `name := value` or named arguments",
+            ));
         }
         let mut assignments = Vec::with_capacity(pairs.len());
         for (name, value) in pairs {
@@ -1704,14 +1944,25 @@ impl Lowering<'_> {
         if let Some(expression) = piece.expression() {
             if expression.kind() == SexpType::Symbol && self.is_column(&symbol_name(expression)) {
                 let name = symbol_name(expression).into_owned();
-                return Ok(Some(vec![(PlSmallStr::from(name.as_str()), Expr::Column(name.into()))]));
+                return Ok(Some(vec![(
+                    PlSmallStr::from(name.as_str()),
+                    Expr::Column(name.into()),
+                )]));
             }
             if let Some(range) = self.column_range(expression) {
-                return Ok(Some(range.into_iter().map(|name| (name.clone(), Expr::Column(name))).collect()));
+                return Ok(Some(
+                    range
+                        .into_iter()
+                        .map(|name| (name.clone(), Expr::Column(name)))
+                        .collect(),
+                ));
             }
             if is_call_to(expression, ".") || is_call_to(expression, "list") {
                 let mut groups = Vec::new();
-                for (position, (tag, item)) in values::pairlist_items(expression.cdr()).into_iter().enumerate() {
+                for (position, (tag, item)) in values::pairlist_items(expression.cdr())
+                    .into_iter()
+                    .enumerate()
+                {
                     let name = match tag_name(tag) {
                         Some(name) => name,
                         None if item.kind() == SexpType::Symbol => symbol_name(item).into_owned(),
@@ -1737,7 +1988,10 @@ impl Lowering<'_> {
             for name in text.unwrap_or_default().split(',') {
                 let name = name.trim();
                 if !self.is_column(name) {
-                    return Err(error_in(self.call, format!("the DataFrame has no column `{name}`")));
+                    return Err(error_in(
+                        self.call,
+                        format!("the DataFrame has no column `{name}`"),
+                    ));
                 }
                 groups.push((PlSmallStr::from(name), Expr::Column(name.into())));
             }
@@ -1756,7 +2010,9 @@ impl Lowering<'_> {
                 if self.is_column(&name) {
                     return Ok(Some(Expr::Column(PlSmallStr::from(name.as_ref()))));
                 }
-                if name.starts_with(".SD") || matches!(name.as_ref(), ".I" | ".GRP" | ".BY" | ".NGRP") {
+                if name.starts_with(".SD")
+                    || matches!(name.as_ref(), ".I" | ".GRP" | ".BY" | ".NGRP")
+                {
                     return Ok(None);
                 }
                 let lookup = match name.strip_prefix("..") {
@@ -1782,9 +2038,15 @@ impl Lowering<'_> {
         }
         let name = symbol_name(head);
         let items = values::pairlist_items(expression.cdr());
-        let positional: Vec<Sexp> = items.iter().filter(|(tag, _)| is_nil(*tag)).map(|(_, value)| *value).collect();
+        let positional: Vec<Sexp> = items
+            .iter()
+            .filter(|(tag, _)| is_nil(*tag))
+            .map(|(_, value)| *value)
+            .collect();
         let unary = |op: UnaryOp, this: &Self| -> R<Option<Expr>> {
-            Ok(this.expr(positional[0])?.map(|inner| Expr::Unary(op, Box::new(inner))))
+            Ok(this
+                .expr(positional[0])?
+                .map(|inner| Expr::Unary(op, Box::new(inner))))
         };
         match (name.as_ref(), positional.len(), items.len()) {
             ("(", 1, 1) => self.expr(positional[0]),
@@ -1796,7 +2058,9 @@ impl Lowering<'_> {
                 let Some(op) = binary_op(operator) else {
                     return Ok(None);
                 };
-                let (Some(left), Some(right)) = (self.expr(positional[0])?, self.expr(positional[1])?) else {
+                let (Some(left), Some(right)) =
+                    (self.expr(positional[0])?, self.expr(positional[1])?)
+                else {
                     return Ok(None);
                 };
                 Ok(Some(Expr::Binary(op, Box::new(left), Box::new(right))))
@@ -1807,21 +2071,31 @@ impl Lowering<'_> {
                 let Ok(count) = usize::try_from(count) else {
                     return Ok(None);
                 };
-                Ok(self.expr(positional[0])?.map(|inner| Expr::Head(Box::new(inner), count)))
+                Ok(self
+                    .expr(positional[0])?
+                    .map(|inner| Expr::Head(Box::new(inner), count)))
             }
             ("cor", 2, 2) => {
-                let (Some(left), Some(right)) = (self.expr(positional[0])?, self.expr(positional[1])?) else {
+                let (Some(left), Some(right)) =
+                    (self.expr(positional[0])?, self.expr(positional[1])?)
+                else {
                     return Ok(None);
                 };
                 Ok(Some(Expr::Correlation(Box::new(left), Box::new(right))))
             }
             ("ifelse" | "fifelse", 3, 3) => {
-                let (Some(test), Some(yes), Some(no)) =
-                    (self.expr(positional[0])?, self.expr(positional[1])?, self.expr(positional[2])?)
-                else {
+                let (Some(test), Some(yes), Some(no)) = (
+                    self.expr(positional[0])?,
+                    self.expr(positional[1])?,
+                    self.expr(positional[2])?,
+                ) else {
                     return Ok(None);
                 };
-                Ok(Some(Expr::IfElse(Box::new(test), Box::new(yes), Box::new(no))))
+                Ok(Some(Expr::IfElse(
+                    Box::new(test),
+                    Box::new(yes),
+                    Box::new(no),
+                )))
             }
             (function, 1, _) if aggregate_named(function).is_some() => {
                 let Some(aggregate) = aggregate_named(function) else {
@@ -1867,7 +2141,9 @@ impl Lowering<'_> {
                 if head.kind() == SexpType::Language && self.mentions(head, specials) {
                     return true;
                 }
-                if head.kind() == SexpType::Symbol && matches!(symbol_name(head).as_ref(), "$" | "@") {
+                if head.kind() == SexpType::Symbol
+                    && matches!(symbol_name(head).as_ref(), "$" | "@")
+                {
                     return self.mentions(expression.cdr().car(), specials);
                 }
                 while cell.kind() == SexpType::Pairlist {
@@ -1886,8 +2162,8 @@ impl Lowering<'_> {
 /// Functions whose call has no side effect and whose result depends only on their arguments, for
 /// [`is_pure`].
 const PURE_FUNCTIONS: &[&str] = &[
-    "(", "c", "list", ":", "-", "+", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "!",
-    "&", "|",
+    "(", "c", "list", ":", "-", "+", "*", "/", "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=",
+    "!", "&", "|",
 ];
 
 /// Whether evaluating `expression` in `env` has no side effect: a constant, a variable (forcing
@@ -1895,10 +2171,14 @@ const PURE_FUNCTIONS: &[&str] = &[
 /// [`PURE_FUNCTIONS`] on such arguments.
 unsafe fn is_pure(expression: Sexp, env: Sexp) -> R<bool> {
     match expression.kind() {
-        SexpType::Symbol => Ok(expression != symbols().dots && eval::dot_dot_index(expression).is_none()),
+        SexpType::Symbol => {
+            Ok(expression != symbols().dots && eval::dot_dot_index(expression).is_none())
+        }
         SexpType::Language => {
             let head = expression.car();
-            if head.kind() != SexpType::Symbol || !PURE_FUNCTIONS.contains(&symbol_name(head).as_ref()) {
+            if head.kind() != SexpType::Symbol
+                || !PURE_FUNCTIONS.contains(&symbol_name(head).as_ref())
+            {
                 return Ok(false);
             }
             let base = eval::find_fun(head, values::base_env())?;
@@ -1918,7 +2198,10 @@ unsafe fn is_pure(expression: Sexp, env: Sexp) -> R<bool> {
 }
 
 fn is_special_symbol(name: &str) -> bool {
-    matches!(name, ".N" | ".SD" | ".I" | ".GRP" | ".BY" | ".NGRP" | ".SDcols")
+    matches!(
+        name,
+        ".N" | ".SD" | ".I" | ".GRP" | ".BY" | ".NGRP" | ".SDcols"
+    )
 }
 
 unsafe fn is_call_to(expression: Sexp, name: &str) -> bool {
@@ -1977,7 +2260,10 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
         SexpType::Integer if values::inherits(value, "factor") => {
             let code = values::ints(value)[0];
             let levels = values::get_attr(value, symbols().levels);
-            match usize::try_from(code).ok().and_then(|code| code.checked_sub(1)) {
+            match usize::try_from(code)
+                .ok()
+                .and_then(|code| code.checked_sub(1))
+            {
                 Some(code) if code < length(levels) => {
                     Expr::Character(char_str(levels.element(code)).into_owned())
                 }
@@ -1990,7 +2276,11 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
         },
         SexpType::Real => {
             let number = values::reals(value)[0];
-            if is_na_real(number) { Expr::Na(ColumnType::Double) } else { Expr::Double(number) }
+            if is_na_real(number) {
+                Expr::Na(ColumnType::Double)
+            } else {
+                Expr::Double(number)
+            }
         }
         SexpType::String => {
             let element = value.element(0);
@@ -2006,7 +2296,11 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
 
 unsafe fn roll(value: Sexp, call: Sexp) -> R<Roll> {
     match value.kind() {
-        SexpType::Logical => Ok(if values::as_logical_scalar(value) == 1 { Roll::Backward(None) } else { Roll::None }),
+        SexpType::Logical => Ok(if values::as_logical_scalar(value) == 1 {
+            Roll::Backward(None)
+        } else {
+            Roll::None
+        }),
         SexpType::Integer | SexpType::Real => {
             let limit = values::as_real_scalar(value);
             Ok(if limit == 0.0 {
@@ -2021,8 +2315,13 @@ unsafe fn roll(value: Sexp, call: Sexp) -> R<Roll> {
                 Roll::Forward(Some(-limit))
             })
         }
-        SexpType::String if values::first_string(value).as_deref() == Some("nearest") => Ok(Roll::Nearest),
-        _ => Err(error_in(call, "`roll =` takes TRUE, a number, or \"nearest\"")),
+        SexpType::String if values::first_string(value).as_deref() == Some("nearest") => {
+            Ok(Roll::Nearest)
+        }
+        _ => Err(error_in(
+            call,
+            "`roll =` takes TRUE, a number, or \"nearest\"",
+        )),
     }
 }
 
@@ -2042,7 +2341,12 @@ unsafe fn fallback(
     let (call, env) = (lowering.call, lowering.env);
     let by = match by {
         Some(by) if by.iter().all(|(_, expr)| matches!(expr, Expr::Column(_))) => by,
-        _ => return Err(error_in(call, "a computed group in `by` that ry cannot run as a query is not supported yet")),
+        _ => {
+            return Err(error_in(
+                call,
+                "a computed group in `by` that ry cannot run as a query is not supported yet",
+            ));
+        }
     };
     let positions: Option<Vec<u32>> = match rows {
         Some(Rows::All) => None,
@@ -2050,7 +2354,10 @@ unsafe fn fallback(
         // R code in `j` would need `i`'s columns in its data mask too, and rows of `i` without
         // a match have no position in `x`.
         Some(Rows::Join(_)) => {
-            return Err(error_in(call, "a join whose `j` ry cannot run as a query is not supported yet"));
+            return Err(error_in(
+                call,
+                "a join whose `j` ry cannot run as a query is not supported yet",
+            ));
         }
         Some(rows) => {
             // The IR selects the rows, and the positions follow from a row number column.
@@ -2071,10 +2378,15 @@ unsafe fn fallback(
     let Some(piece) = &parts.j else {
         return subset_rows(table, positions.unwrap_or_default(), call);
     };
-    let expression = piece.expression().ok_or_else(|| error_in(call, "`j` could not be evaluated"))?;
+    let expression = piece
+        .expression()
+        .ok_or_else(|| error_in(call, "`j` could not be evaluated"))?;
     if is_call_to(expression, ":=") {
         if !by.is_empty() {
-            return Err(error_in(call, "`:=` with `by` on an expression ry cannot run as a query is not supported yet"));
+            return Err(error_in(
+                call,
+                "`:=` with `by` on an expression ry cannot run as a query is not supported yet",
+            ));
         }
         let assignments = fallback_assignments(expression, env, call)?;
         let height = table.height();
@@ -2118,7 +2430,14 @@ unsafe fn fallback(
         // Only `i` needed R; the IR runs `j` on the selected rows.
         let mut rows_table = rows_table;
         let select = select.unwrap_or_default();
-        return finish(&mut rows_table, Query { select, ..Query::default() }, call);
+        return finish(
+            &mut rows_table,
+            Query {
+                select,
+                ..Query::default()
+            },
+            call,
+        );
     }
     let group_names: Vec<PlSmallStr> = by.iter().map(|(name, _)| name.clone()).collect();
     let sd_columns = lowering.sd_columns(parts, &by)?;
@@ -2130,7 +2449,15 @@ unsafe fn fallback(
         }
         return Ok(value);
     }
-    grouped_fallback(&rows_table, &group_names, &sd_columns, parts.keyed, expression, env, call)
+    grouped_fallback(
+        &rows_table,
+        &group_names,
+        &sd_columns,
+        parts.keyed,
+        expression,
+        env,
+        call,
+    )
 }
 
 /// The zero-based positions of the rows a lowered row selection keeps.
@@ -2139,7 +2466,11 @@ pub(crate) unsafe fn selected_positions(table: &mut Table, rows: Rows, call: Sex
     let height = numbered.height() as i32;
     let index: Vec<i32> = (0..height).collect();
     numbered
-        .set_column(convert::to_series(ROW_INDEX.into(), RVector::Integer(index)).map_err(|failure| table_error(call, failure))?.into_column())
+        .set_column(
+            convert::to_series(ROW_INDEX.into(), RVector::Integer(index))
+                .map_err(|failure| table_error(call, failure))?
+                .into_column(),
+        )
         .map_err(|failure| table_error(call, failure))?;
     let query = Query {
         rows,
@@ -2153,7 +2484,10 @@ pub(crate) unsafe fn selected_positions(table: &mut Table, rows: Rows, call: Sex
             .into_no_null_iter()
             .map(|position| position as u32)
             .collect()),
-        _ => Err(error_in(call, "the row selection did not produce positions")),
+        _ => Err(error_in(
+            call,
+            "the row selection did not produce positions",
+        )),
     }
 }
 
@@ -2166,13 +2500,22 @@ unsafe fn selected(table: &mut Table, positions: Vec<u32>, call: Sexp) -> R<Tabl
     };
     match execute(table, query, call)? {
         Output::Table(result) => Ok(result),
-        _ => Err(error_in(call, "the row selection did not produce a DataFrame")),
+        _ => Err(error_in(
+            call,
+            "the row selection did not produce a DataFrame",
+        )),
     }
 }
 
 /// The column `name` with `value` written at `positions`, recycled, as `x[i, name := value]`
 /// writes it. A new column holds `NA` everywhere else.
-unsafe fn scatter(table: &Table, name: &str, positions: &[u32], value: Sexp, call: Sexp) -> R<Column> {
+unsafe fn scatter(
+    table: &Table,
+    name: &str,
+    positions: &[u32],
+    value: Sexp,
+    call: Sexp,
+) -> R<Column> {
     let height = table.height();
     let base = match table.frame().column(name) {
         Ok(column) => values::duplicate(column_value(column)?)?,
@@ -2194,36 +2537,65 @@ unsafe fn scatter(table: &Table, name: &str, positions: &[u32], value: Sexp, cal
 
 unsafe fn call_function(name: &str, arguments: &[Sexp]) -> R<Sexp> {
     let function = eval::find_fun(install(name)?, values::base_env())?;
-    let args: Vec<Arg> = arguments.iter().map(|&value| Arg { tag: nil(), value }).collect();
+    let args: Vec<Arg> = arguments
+        .iter()
+        .map(|&value| Arg { tag: nil(), value })
+        .collect();
     eval::apply(nil(), function, &args, values::base_env())
 }
 
 /// The `name := value` pairs of a `:=` that runs as R code, with unevaluated values.
-unsafe fn fallback_assignments(expression: Sexp, env: Sexp, call: Sexp) -> R<Vec<(String, Option<Sexp>)>> {
+unsafe fn fallback_assignments(
+    expression: Sexp,
+    env: Sexp,
+    call: Sexp,
+) -> R<Vec<(String, Option<Sexp>)>> {
     let items = values::pairlist_items(expression.cdr());
     let some = |value: Sexp| if is_nil(value) { None } else { Some(value) };
     if items.iter().all(|(tag, _)| !is_nil(*tag)) {
-        return Ok(items.into_iter().map(|(tag, value)| (symbol_name(tag).into_owned(), some(value))).collect());
+        return Ok(items
+            .into_iter()
+            .map(|(tag, value)| (symbol_name(tag).into_owned(), some(value)))
+            .collect());
     }
     if items.len() != 2 {
-        return Err(error_in(call, "`:=` takes `name := value` or named arguments"));
+        return Err(error_in(
+            call,
+            "`:=` takes `name := value` or named arguments",
+        ));
     }
     let (left, right) = (items[0].1, items[1].1);
     let names: Vec<String> = match left.kind() {
         SexpType::Symbol => vec![symbol_name(left).into_owned()],
-        _ => values::strings(eval::eval(left, env)?).into_iter().map(Option::unwrap_or_default).collect(),
+        _ => values::strings(eval::eval(left, env)?)
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect(),
     };
     if names.len() == 1 {
         return Ok(vec![(names[0].clone(), some(right))]);
     }
     if !(is_call_to(right, "list") || is_call_to(right, ".")) {
-        return Err(error_in(call, "`:=` with several names takes a `list()` of values"));
+        return Err(error_in(
+            call,
+            "`:=` with several names takes a `list()` of values",
+        ));
     }
     let values = values::pairlist_items(right.cdr());
     if values.len() != names.len() {
-        return Err(error_in(call, format!("`:=` names {} columns but gives {} values", names.len(), values.len())));
+        return Err(error_in(
+            call,
+            format!(
+                "`:=` names {} columns but gives {} values",
+                names.len(),
+                values.len()
+            ),
+        ));
     }
-    Ok(names.into_iter().zip(values.into_iter().map(|(_, value)| some(value))).collect())
+    Ok(names
+        .into_iter()
+        .zip(values.into_iter().map(|(_, value)| some(value)))
+        .collect())
 }
 
 /// An environment over `env` that binds the columns `expression` mentions, data.table's special
@@ -2248,11 +2620,27 @@ unsafe fn data_mask(
             continue;
         }
         match name.as_str() {
-            ".N" => eval::define(install(name)?, scalar_integer(r_count(table.height())?)?, mask)?,
+            ".N" => eval::define(
+                install(name)?,
+                scalar_integer(r_count(table.height())?)?,
+                mask,
+            )?,
             ".SD" => {
-                let select = Select::Columns(sd_columns.iter().map(|name| (name.clone(), Expr::Column(name.clone()))).collect());
+                let select = Select::Columns(
+                    sd_columns
+                        .iter()
+                        .map(|name| (name.clone(), Expr::Column(name.clone())))
+                        .collect(),
+                );
                 let mut copy = table.fork();
-                let sd = finish(&mut copy, Query { select, ..Query::default() }, call)?;
+                let sd = finish(
+                    &mut copy,
+                    Query {
+                        select,
+                        ..Query::default()
+                    },
+                    call,
+                )?;
                 eval::define(install(name)?, sd, mask)?;
             }
             ".I" => {
@@ -2312,10 +2700,18 @@ unsafe fn grouped_fallback(
         .clone()
         .lazy()
         .with_row_index(ROW_INDEX, None)
-        .group_by_stable(group_names.iter().map(|name| col(name.clone())).collect::<Vec<_>>())
+        .group_by_stable(
+            group_names
+                .iter()
+                .map(|name| col(name.clone()))
+                .collect::<Vec<_>>(),
+        )
         .agg([col(ROW_INDEX)]);
     if keyed {
-        grouping = grouping.sort(group_names.iter().cloned().collect::<Vec<_>>(), Default::default());
+        grouping = grouping.sort(
+            group_names.iter().cloned().collect::<Vec<_>>(),
+            Default::default(),
+        );
     }
     let groups = grouping.collect().map_err(|failure| fail(&failure))?;
     let rows_column = groups.column(ROW_INDEX).map_err(|failure| fail(&failure))?;
@@ -2324,7 +2720,9 @@ unsafe fn grouped_fallback(
     let mut names: Vec<String> = Vec::new();
     let mut pieces: Vec<Vec<Sexp>> = Vec::new();
     for group_number in 0..rows_list.len() {
-        let Some(rows) = rows_list.get_as_series(group_number) else { continue };
+        let Some(rows) = rows_list.get_as_series(group_number) else {
+            continue;
+        };
         let rows: Vec<u32> = rows
             .idx()
             .map_err(|failure| fail(&failure))?
@@ -2333,7 +2731,14 @@ unsafe fn grouped_fallback(
         let mut subset = table.fork();
         let group_table = selected(&mut subset, rows.clone(), call)?;
         let value = scope(|| {
-            let mask = data_mask(&group_table, Some((group_number, &rows)), expression, env, sd_columns, call)?;
+            let mask = data_mask(
+                &group_table,
+                Some((group_number, &rows)),
+                expression,
+                env,
+                sd_columns,
+                call,
+            )?;
             eval::eval(expression, mask)
         })?;
         if is_nil(value) {
@@ -2346,9 +2751,14 @@ unsafe fn grouped_fallback(
                     let name = if is_nil(item_names) {
                         None
                     } else {
-                        values::string_at(item_names, index).filter(|name| !name.is_empty()).map(|name| name.into_owned())
+                        values::string_at(item_names, index)
+                            .filter(|name| !name.is_empty())
+                            .map(|name| name.into_owned())
                     };
-                    (name.unwrap_or_else(|| format!("V{}", index + 1)), value.element(index))
+                    (
+                        name.unwrap_or_else(|| format!("V{}", index + 1)),
+                        value.element(index),
+                    )
                 })
                 .collect()
         } else {
@@ -2358,9 +2768,16 @@ unsafe fn grouped_fallback(
             names = items.iter().map(|(name, _)| name.clone()).collect();
             pieces = vec![Vec::new(); names.len()];
         } else if items.len() != names.len() {
-            return Err(error_in(call, "every group's `j` must produce the same columns"));
+            return Err(error_in(
+                call,
+                "every group's `j` must produce the same columns",
+            ));
         }
-        let count = items.iter().map(|(_, item)| length(*item)).max().unwrap_or(0);
+        let count = items
+            .iter()
+            .map(|(_, item)| length(*item))
+            .max()
+            .unwrap_or(0);
         for (slot, (_, item)) in pieces.iter_mut().zip(&items) {
             let item = if length(*item) == count {
                 *item
@@ -2381,7 +2798,9 @@ unsafe fn grouped_fallback(
         let combined = crate::subset::combine(&items)?;
         heap().root(combined);
         let column = to_column(name, combined, result.height(), call)?;
-        result.set_column(column).map_err(|failure| table_error(call, failure))?;
+        result
+            .set_column(column)
+            .map_err(|failure| table_error(call, failure))?;
     }
     wrap(result)
 }

@@ -5,13 +5,15 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    collections::BTreeMap,
-    ffi::c_int,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        collections::BTreeMap,
+        ffi::c_int,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 const NA_REAL_BITS: u64 = 0x7ff0_0000_0000_07a2;

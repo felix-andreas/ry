@@ -2,17 +2,23 @@
 //! Symbols resolve eagerly so a missing one fails at startup by name; constant
 //! globals are only valid after `setup_Rmainloop`.
 
-use crate::ReplError;
-use libloading::Library;
-use std::env;
-use std::ffi::{CStr, CString, c_char, c_int, c_uchar, c_void};
 #[cfg(unix)]
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::ptr;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use {
+    crate::ReplError,
+    libloading::Library,
+    std::{
+        env,
+        ffi::{CStr, CString, c_char, c_int, c_uchar, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        ptr,
+        sync::{
+            OnceLock,
+            atomic::{AtomicPtr, Ordering},
+        },
+    },
+};
 
 /// Fill `buffer` (capacity `length`, NUL-terminated, newline included) and
 /// return 1, or return 0 for EOF.
@@ -723,8 +729,7 @@ fn trailing_arguments(arguments: &[String]) -> Result<Vec<CString>, ReplError> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::*;
-    use std::process;
+    use {super::*, std::process};
 
     #[test]
     fn missing_r_is_an_actionable_error() {

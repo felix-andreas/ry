@@ -9,11 +9,13 @@
 //! from primitives and call `.Internal` and `.Fortran` directly. That also checks that base's
 //! `.Fortran` routines work without the libR host.
 
-use heap::{
-    Heap,
-    object::{Sexp, SexpType},
+use {
+    heap::{
+        Heap,
+        object::{Sexp, SexpType},
+    },
+    interp::{eval, lower, unwind::Unwind, values},
 };
-use interp::{eval, lower, unwind::Unwind, values};
 
 /// The inputs: a 9 x 3 matrix `x`, a 9 x 5 matrix `n` whose second column nearly repeats its
 /// first (so `dqrdc2` must recompute that column's norm) and whose fourth is the sum of two

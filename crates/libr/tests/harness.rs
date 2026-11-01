@@ -9,12 +9,14 @@
 // API's own names so it reads like the C it binds.
 #![allow(dead_code, non_snake_case)]
 
-use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
-use std::{
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{Mutex, MutexGuard, OnceLock},
+use {
+    libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW},
+    std::{
+        ffi::{CStr, CString, c_char, c_int, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{Mutex, MutexGuard, OnceLock},
+    },
 };
 
 pub type Sexp = *mut c_void;
@@ -188,7 +190,11 @@ pub fn r() -> R<'static> {
 /// `readLines()`, rather than builtins alone.
 pub fn r_with_base() -> R<'static> {
     let r = r();
-    assert_eq!(unsafe { (r.api().ry_start_session)() }, 0, "base R did not load");
+    assert_eq!(
+        unsafe { (r.api().ry_start_session)() },
+        0,
+        "base R did not load"
+    );
     r
 }
 

@@ -12,14 +12,16 @@ mod lexer;
 mod parser;
 mod reparse;
 
-use rowan::{GreenNode, GreenNodeData, Language, NodeOrToken, WalkEvent};
-use std::sync::Arc;
-use std::{mem, ptr};
-
-pub use kind::SyntaxKind;
-pub use lexer::{Token, is_syntactic_name, lex};
-pub use parser::parse;
-pub use rowan::{TextRange, TextSize};
+pub use {
+    kind::SyntaxKind,
+    lexer::{Token, is_syntactic_name, lex},
+    parser::parse,
+    rowan::{TextRange, TextSize},
+};
+use {
+    rowan::{GreenNode, GreenNodeData, Language, NodeOrToken, WalkEvent},
+    std::{mem, ptr, sync::Arc},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RLanguage {}

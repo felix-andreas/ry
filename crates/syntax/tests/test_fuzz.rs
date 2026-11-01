@@ -1,12 +1,17 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
-use std::panic::catch_unwind;
-use syntax::literate::r_source_of_literate;
-use syntax::testing::{
-    SplitMix64, check_parse_invariants as check_invariants, corpus_sample, fuzz_iterations,
-    mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
+use {
+    std::panic::catch_unwind,
+    syntax::{
+        TextRange, TextSize, lex,
+        literate::r_source_of_literate,
+        parse, reparse,
+        testing::{
+            SplitMix64, check_parse_invariants as check_invariants, corpus_sample, fuzz_iterations,
+            mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
+        },
+    },
 };
-use syntax::{TextRange, TextSize, lex, parse, reparse};
 
 const SEEDS: &[&str] = &[
     "x <- 1L",

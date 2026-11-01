@@ -4,14 +4,16 @@
 //! open interval (0, 1), and its state lives where R keeps it, in `.Random.seed` in the global
 //! environment, so `GetRNGstate` and `PutRNGstate` exchange it with R code exactly as in GNU R.
 
-use crate::{
-    boundary::{ApiResult, enter, error},
-    environments::frame_value,
-    globals::R_SeedsSymbol,
-    runtime,
+use {
+    crate::{
+        boundary::{ApiResult, enter, error},
+        environments::frame_value,
+        globals::R_SeedsSymbol,
+        runtime,
+    },
+    heap::object::{NA_INTEGER, Rcomplex, SexpType, is_na_real},
+    std::{cmp::Ordering, f64::consts::LN_2, ffi::c_int},
 };
-use heap::object::{NA_INTEGER, Rcomplex, SexpType, is_na_real};
-use std::{cmp::Ordering, f64::consts::LN_2, ffi::c_int};
 
 const STATE_WORDS: usize = 624;
 /// `.Random.seed[1]` for the default kinds: Mersenne Twister, inversion for normals, and

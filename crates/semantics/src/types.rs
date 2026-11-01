@@ -1,14 +1,16 @@
-use hashbrown::HashTable;
-use rustc_hash::{FxBuildHasher, FxHashMap};
-use std::fmt;
-use std::hash::{BuildHasher, Hash, Hasher};
-use std::iter;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::{LazyLock, Mutex};
-
-use crate::Db;
-use crate::hir::Symbol;
+use {
+    crate::{Db, hir::Symbol},
+    hashbrown::HashTable,
+    rustc_hash::{FxBuildHasher, FxHashMap},
+    std::{
+        fmt,
+        hash::{BuildHasher, Hash, Hasher},
+        iter,
+        marker::PhantomData,
+        mem,
+        sync::{LazyLock, Mutex},
+    },
+};
 
 /// A name in a type (a type name, a field, a tag, a type parameter). It is a process-wide
 /// [`Symbol`], so equality is an index comparison and no database is consulted. The lifetime
@@ -803,8 +805,7 @@ fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
+    use {super::*, crate::RootDatabase};
 
     #[test]
     fn size_counts_the_tree_not_the_shared_graph() {
@@ -841,7 +842,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: scalar(&db, Atomic::Integer),
                     optional: true,
                     default: Some(var),

@@ -2,12 +2,14 @@
 //! directly, plus the numeric constants. They are set once when the runtime starts and never
 //! change afterwards, so each is a copy of the heap's own well-known object.
 
-use crate::Global;
-use heap::{
-    Heap,
-    object::{NA_INTEGER, NA_REAL, Sexp},
+use {
+    crate::Global,
+    heap::{
+        Heap,
+        object::{NA_INTEGER, NA_REAL, Sexp},
+    },
+    std::ffi::c_int,
 };
-use std::ffi::c_int;
 
 macro_rules! handle_globals {
     ($($name:ident),* $(,)?) => {

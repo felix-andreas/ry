@@ -2,18 +2,24 @@
 //! the member-wise `T | NULL` vs `U | NULL` case. Directional member-wise logic
 //! belongs in compatibility checking, never here.
 
-use crate::Db;
-use crate::annotations::NamedDefinition;
-use crate::diagnostics::nearest_name;
-use crate::stubs::stubs;
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind, array_element,
-    for_each_child_type, is_ry_value_type, map_child_types, scalar, substitute_rigid, union_of,
-    unknown,
+use {
+    crate::{
+        Db,
+        annotations::NamedDefinition,
+        diagnostics::nearest_name,
+        stubs::stubs,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
+            array_element, for_each_child_type, is_ry_value_type, map_child_types, scalar,
+            substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{Cell, RefCell},
+        mem,
+    },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{Cell, RefCell};
-use std::mem;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -1557,9 +1563,13 @@ fn constraint_rejects<'db>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
-    use crate::types::{Parameter, null, scalar};
+    use {
+        super::*,
+        crate::{
+            RootDatabase,
+            types::{Parameter, null, scalar},
+        },
+    };
 
     #[test]
     fn unify_binds_and_resolves() {
@@ -1695,7 +1705,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: int,
                     optional: false,
                     default: None,

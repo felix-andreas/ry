@@ -1,11 +1,12 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
-use format::check_format_invariants as check_invariants;
-use format::{Config, format};
-use std::panic::catch_unwind;
-use syntax::testing::{
-    SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes, mutate_seed,
-    program_corpus_sources, random_bytes, token_soup,
+use {
+    format::{Config, check_format_invariants as check_invariants, format},
+    std::panic::catch_unwind,
+    syntax::testing::{
+        SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes,
+        mutate_seed, program_corpus_sources, random_bytes, token_soup,
+    },
 };
 
 const SEEDS: &[&str] = &[

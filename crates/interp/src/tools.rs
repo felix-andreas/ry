@@ -2,13 +2,15 @@
 //! format strings, file permissions and processes. Rd parsing lives in `rd`; LaTeX parsing and
 //! the help server are not available yet and fail with a clear error.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    coerce::coerce_vector,
-    unwind::{R, error},
-    values::{self, alloc, length, nil, scalar_bool, scalar_integer, string_vector, symbols},
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        coerce::coerce_vector,
+        unwind::{R, error},
+        values::{self, alloc, length, nil, scalar_bool, scalar_integer, string_vector, symbols},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType};
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("Rmd5", do_md5),

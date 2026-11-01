@@ -2,12 +2,15 @@
 //! the registrations it makes, and the `NAMESPACE` directives a load honors.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::RootDatabase;
-use semantics::load_index::{PackageFile, PackageIndex, PackageSources, package_index};
-use semantics::metadata::NamespaceImportDirective;
-use semantics::{DocumentKind, SourceFile};
-use std::path::PathBuf;
-use syntax::testing::{run_fixture_suite, split_files};
+use {
+    semantics::{
+        DocumentKind, RootDatabase, SourceFile,
+        load_index::{PackageFile, PackageIndex, PackageSources, package_index},
+        metadata::NamespaceImportDirective,
+    },
+    std::path::PathBuf,
+    syntax::testing::{run_fixture_suite, split_files},
+};
 
 #[test]
 fn load_index_fixtures() {

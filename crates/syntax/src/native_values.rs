@@ -1,8 +1,7 @@
 //! Facts about ry's own records, tuples, tags, dictionaries and sets, and about the R object systems it
 //! discourages, that both the checker and the runtime need, kept here so the two cannot drift apart.
 
-use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::{collections::HashSet, sync::LazyLock};
 
 /// The R functions that accept a record, tuple, tag, dictionary or set as a top-level argument.
 /// The standard library's own functions are not listed: `types/ry.Rtypes` declares them for the

@@ -7,12 +7,14 @@
 //! `tools/corpus/sources.R`) as input; `ry-install/logs/<pkg>.{install,load}.log` and
 //! `ry-install/summary.tsv` as output.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{Condvar, Mutex},
+    time::{Duration, Instant},
+};
 
 /// Where things are and how to run them.
 pub struct Settings {
@@ -30,8 +32,14 @@ pub struct Settings {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     /// Installed, and `loaded` says whether `library()` then succeeded.
-    Installed { seconds: f64, loaded: Result<(), String> },
-    Failed { seconds: f64, error: String },
+    Installed {
+        seconds: f64,
+        loaded: Result<(), String>,
+    },
+    Failed {
+        seconds: f64,
+        error: String,
+    },
     /// A dependency failed or is missing, so the package was not attempted.
     Skipped(String),
     NoSources,
@@ -60,37 +68,58 @@ pub fn run(
             .into_iter()
             .filter(|dependency| !base.contains(dependency))
             .filter(|dependency| {
-                wanted.contains(dependency.as_str()) || !settings.library.join(dependency).join("DESCRIPTION").exists()
+                wanted.contains(dependency.as_str())
+                    || !settings
+                        .library
+                        .join(dependency)
+                        .join("DESCRIPTION")
+                        .exists()
             })
             .collect();
         dependencies.insert(package.clone(), needs);
         tarballs.insert(package.clone(), tarball);
     }
     for (package, needs) in &dependencies {
-        if let Some(missing) = needs.iter().find(|dependency| !wanted.contains(dependency.as_str())) {
-            outcomes.insert(package.clone(), Outcome::Skipped(format!("{missing} is not in the corpus")));
+        if let Some(missing) = needs
+            .iter()
+            .find(|dependency| !wanted.contains(dependency.as_str()))
+        {
+            outcomes.insert(
+                package.clone(),
+                Outcome::Skipped(format!("{missing} is not in the corpus")),
+            );
         }
     }
     for (package, outcome) in &outcomes {
         report(package, outcome);
     }
     let logs = settings.corpus.join("ry-install").join("logs");
-    if let Err(error) = fs::create_dir_all(&logs).and_then(|()| fs::create_dir_all(&settings.library)) {
+    if let Err(error) =
+        fs::create_dir_all(&logs).and_then(|()| fs::create_dir_all(&settings.library))
+    {
         eprintln!("cannot create {}: {error}", logs.display());
         return Vec::new();
     }
-    let state = Mutex::new(Schedule { outcomes, running: BTreeSet::new() });
+    let state = Mutex::new(Schedule {
+        outcomes,
+        running: BTreeSet::new(),
+    });
     let changed = Condvar::new();
     std::thread::scope(|scope| {
         for _ in 0..settings.jobs.max(1) {
             scope.spawn(|| {
                 loop {
                     let package = {
-                        let Ok(mut schedule) = state.lock() else { return };
+                        let Ok(mut schedule) = state.lock() else {
+                            return;
+                        };
                         loop {
                             let pending: Vec<&String> = tarballs
                                 .keys()
-                                .filter(|package| !schedule.outcomes.contains_key(*package) && !schedule.running.contains(*package))
+                                .filter(|package| {
+                                    !schedule.outcomes.contains_key(*package)
+                                        && !schedule.running.contains(*package)
+                                })
                                 .collect();
                             if pending.is_empty() {
                                 changed.notify_all();
@@ -101,18 +130,27 @@ pub fn run(
                             for package in pending {
                                 let needs = &dependencies[package];
                                 if let Some(failed) = needs.iter().find(|dependency| {
-                                    schedule.outcomes.get(*dependency).is_some_and(|outcome| !matches!(outcome, Outcome::Installed { .. }))
+                                    schedule.outcomes.get(*dependency).is_some_and(|outcome| {
+                                        !matches!(outcome, Outcome::Installed { .. })
+                                    })
                                 }) {
                                     newly_skipped.push((package.clone(), failed.clone()));
                                 } else if ready.is_none()
-                                    && needs.iter().all(|dependency| matches!(schedule.outcomes.get(dependency), Some(Outcome::Installed { .. })))
+                                    && needs.iter().all(|dependency| {
+                                        matches!(
+                                            schedule.outcomes.get(dependency),
+                                            Some(Outcome::Installed { .. })
+                                        )
+                                    })
                                 {
                                     ready = Some(package.clone());
                                 }
                             }
                             let any_skipped = !newly_skipped.is_empty();
                             for (package, failed) in newly_skipped {
-                                let outcome = Outcome::Skipped(format!("dependency {failed} did not install"));
+                                let outcome = Outcome::Skipped(format!(
+                                    "dependency {failed} did not install"
+                                ));
                                 report(&package, &outcome);
                                 schedule.outcomes.insert(package, outcome);
                             }
@@ -145,7 +183,9 @@ pub fn run(
                     };
                     let outcome = install_one(settings, &package, &tarballs[&package], &logs);
                     report(&package, &outcome);
-                    let Ok(mut schedule) = state.lock() else { return };
+                    let Ok(mut schedule) = state.lock() else {
+                        return;
+                    };
                     schedule.running.remove(&package);
                     schedule.outcomes.insert(package, outcome);
                     changed.notify_all();
@@ -153,10 +193,18 @@ pub fn run(
             });
         }
     });
-    let outcomes = state.into_inner().map(|schedule| schedule.outcomes).unwrap_or_default();
+    let outcomes = state
+        .into_inner()
+        .map(|schedule| schedule.outcomes)
+        .unwrap_or_default();
     packages
         .iter()
-        .map(|package| (package.clone(), outcomes.get(package).cloned().unwrap_or(Outcome::NoSources)))
+        .map(|package| {
+            (
+                package.clone(),
+                outcomes.get(package).cloned().unwrap_or(Outcome::NoSources),
+            )
+        })
         .collect()
 }
 
@@ -170,8 +218,14 @@ pub fn summary(outcomes: &[(String, Outcome)]) -> String {
     let mut text = String::from("package\tinstall\tload\tseconds\tdetail\n");
     for (package, outcome) in outcomes {
         let row = match outcome {
-            Outcome::Installed { seconds, loaded: Ok(()) } => format!("installed\tloaded\t{seconds:.1}\t"),
-            Outcome::Installed { seconds, loaded: Err(error) } => format!("installed\tfailed\t{seconds:.1}\t{error}"),
+            Outcome::Installed {
+                seconds,
+                loaded: Ok(()),
+            } => format!("installed\tloaded\t{seconds:.1}\t"),
+            Outcome::Installed {
+                seconds,
+                loaded: Err(error),
+            } => format!("installed\tfailed\t{seconds:.1}\t{error}"),
             Outcome::Failed { seconds, error } => format!("failed\t-\t{seconds:.1}\t{error}"),
             Outcome::Skipped(reason) => format!("skipped\t-\t\t{reason}"),
             Outcome::NoSources => "no sources\t-\t\t".to_owned(),
@@ -202,15 +256,28 @@ pub fn merge_summary(previous: &str, outcomes: &[(String, Outcome)]) -> String {
 
 /// `(packages, installed, loaded)` counts of a `summary.tsv`.
 pub fn summary_counts(summary: &str) -> (usize, usize, usize) {
-    let rows: Vec<Vec<&str>> = summary.lines().skip(1).map(|line| line.split('\t').collect()).collect();
-    let installed = rows.iter().filter(|row| row.get(1) == Some(&"installed")).count();
-    let loaded = rows.iter().filter(|row| row.get(2) == Some(&"loaded")).count();
+    let rows: Vec<Vec<&str>> = summary
+        .lines()
+        .skip(1)
+        .map(|line| line.split('\t').collect())
+        .collect();
+    let installed = rows
+        .iter()
+        .filter(|row| row.get(1) == Some(&"installed"))
+        .count();
+    let loaded = rows
+        .iter()
+        .filter(|row| row.get(2) == Some(&"loaded"))
+        .count();
     (rows.len(), installed, loaded)
 }
 
 /// `(installed, loaded)` counts.
 pub fn counts(outcomes: &[(String, Outcome)]) -> (usize, usize) {
-    let installed = outcomes.iter().filter(|(_, outcome)| matches!(outcome, Outcome::Installed { .. })).count();
+    let installed = outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, Outcome::Installed { .. }))
+        .count();
     let loaded = outcomes
         .iter()
         .filter(|(_, outcome)| matches!(outcome, Outcome::Installed { loaded: Ok(()), .. }))
@@ -225,13 +292,20 @@ fn install_one(settings: &Settings, package: &str, tarball: &Path, logs: &Path) 
         .args(["CMD", "INSTALL", "--no-test-load", "-l"])
         .arg(&settings.library)
         .arg(tarball);
-    let status = run_logged(install, settings, &logs.join(format!("{package}.install.log")));
+    let status = run_logged(
+        install,
+        settings,
+        &logs.join(format!("{package}.install.log")),
+    );
     let seconds = started.elapsed().as_secs_f64();
     if let Err(error) = status {
         return Outcome::Failed { seconds, error };
     }
     let mut load = Command::new(settings.home.join("bin/Rscript"));
-    load.args(["-e", &format!("suppressPackageStartupMessages(library({package}))")]);
+    load.args([
+        "-e",
+        &format!("suppressPackageStartupMessages(library({package}))"),
+    ]);
     let loaded = run_logged(load, settings, &logs.join(format!("{package}.load.log")));
     Outcome::Installed { seconds, loaded }
 }
@@ -239,7 +313,8 @@ fn install_one(settings: &Settings, package: &str, tarball: &Path, logs: &Path) 
 /// Runs `command` with the corpus environment, its output going to `log`. A failure returns the
 /// first line of the log that reads like an error.
 fn run_logged(mut command: Command, settings: &Settings, log: &Path) -> Result<(), String> {
-    let file = fs::File::create(log).map_err(|error| format!("cannot create {}: {error}", log.display()))?;
+    let file = fs::File::create(log)
+        .map_err(|error| format!("cannot create {}: {error}", log.display()))?;
     let errors = file.try_clone().map_err(|error| error.to_string())?;
     let library = settings.library.display().to_string();
     command
@@ -256,9 +331,13 @@ fn run_logged(mut command: Command, settings: &Settings, log: &Path) -> Result<(
         .map_err(|error| error.to_string())?;
     match status {
         crate::packages::Status::Pass => Ok(()),
-        crate::packages::Status::Timeout => Err(format!("timed out after {}s", settings.timeout.as_secs())),
+        crate::packages::Status::Timeout => {
+            Err(format!("timed out after {}s", settings.timeout.as_secs()))
+        }
         crate::packages::Status::Fail => {
-            let text = fs::read(log).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+            let text = fs::read(log)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
             Err(first_error(&text))
         }
     }
@@ -293,11 +372,15 @@ fn base_packages(home: &Path) -> BTreeSet<String> {
 
 fn find_tarball(sources: &Path, package: &str) -> Option<PathBuf> {
     let prefix = format!("{package}_");
-    fs::read_dir(sources).ok()?.flatten().map(|entry| entry.path()).find(|path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tar.gz"))
-    })
+    fs::read_dir(sources)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tar.gz"))
+        })
 }
 
 /// The packages a source package needs installed first, read from the `DESCRIPTION` in its
@@ -327,7 +410,11 @@ fn description_dependencies(tarball: &Path, package: &str) -> Vec<String> {
     for (name, value) in &fields {
         if matches!(name.as_str(), "Depends" | "Imports" | "LinkingTo") {
             for entry in value.split(',') {
-                let name = entry.trim().split(|character: char| character.is_whitespace() || character == '(').next().unwrap_or("");
+                let name = entry
+                    .trim()
+                    .split(|character: char| character.is_whitespace() || character == '(')
+                    .next()
+                    .unwrap_or("");
                 if !name.is_empty() && !needs.iter().any(|known| known == name) {
                     needs.push(name.to_owned());
                 }

@@ -1,13 +1,14 @@
 //! `NAMESPACE` and `DESCRIPTION` facts. `NAMESPACE` is R call syntax and parses with the
 //! ordinary grammar; `DESCRIPTION` is DCF.
 
-use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
-use crate::{Db, SiteRole, SourceFile, file_syntax_sites, parse};
-use std::collections::BTreeSet;
-use std::num::NonZero;
-use std::thread;
-use syntax::ast::is_expression_kind;
-use syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize};
+use {
+    crate::{
+        Db, SiteRole, SourceFile, file_syntax_sites, parse,
+        stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known},
+    },
+    std::{collections::BTreeSet, num::NonZero, thread},
+    syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind},
+};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
 #[salsa::input(singleton, debug)]

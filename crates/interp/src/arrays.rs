@@ -9,13 +9,15 @@
 //! dictionaries, sets or Arrays is a list. Setting any attribute clears the bit (see
 //! `Heap::set_attrib`), so no code path can produce an Array with names or a class.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin},
-    coerce,
-    unwind::{R, error_in},
-    values::{self, alloc, length, missing_arg, nil, symbol_name},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin},
+        coerce,
+        unwind::{R, error_in},
+        values::{self, alloc, length, missing_arg, nil, symbol_name},
+    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".ry_array", -1, do_array),
@@ -88,10 +90,14 @@ pub unsafe fn first_missing(vector: Sexp) -> Option<usize> {
             } else {
                 NA_INTEGER
             };
-            values::ints(vector).iter().position(|&item| item == missing)
+            values::ints(vector)
+                .iter()
+                .position(|&item| item == missing)
         }
         SexpType::Real => values::reals(vector).iter().position(|item| item.is_nan()),
-        SexpType::String => (0..count).find(|&index| values::string_elt(vector, index) == values::na_string()),
+        SexpType::String => {
+            (0..count).find(|&index| values::string_elt(vector, index) == values::na_string())
+        }
         _ => None,
     }
 }
@@ -246,7 +252,12 @@ unsafe fn do_is_array(call: &Call<'_>) -> R<Sexp> {
 /// `operands` its one or two arguments. Checks the strict rules before R's own operator runs:
 /// the item types match exactly, a second operand is an Array of the same length or a single
 /// plain value, and the operator suits the items.
-pub unsafe fn check_operands(call: Sexp, operator: &str, class: OperatorClass, operands: &[Sexp]) -> R<()> {
+pub unsafe fn check_operands(
+    call: Sexp,
+    operator: &str,
+    class: OperatorClass,
+    operands: &[Sexp],
+) -> R<()> {
     let length_of = |value: Sexp| length(value);
     let array_length = operands
         .iter()
@@ -305,7 +316,10 @@ pub unsafe fn check_operands(call: Sexp, operator: &str, class: OperatorClass, o
     if !allowed {
         return Err(error_in(
             call,
-            format!("`{operator}` is not defined for an Array of {} items", kind.name()),
+            format!(
+                "`{operator}` is not defined for an Array of {} items",
+                kind.name()
+            ),
         ));
     }
     Ok(())
@@ -331,13 +345,14 @@ pub unsafe fn finish_result(call: Sexp, operator: &str, result: Sexp) -> R<Sexp>
         ));
     }
     // Small results may be shared constants; never flag one of those in place.
-    let result = if values::maybe_shared(result) || length(result) <= 1 || values::has_attributes(result) {
-        let copy = values::shallow_duplicate(result)?;
-        values::clear_attributes(copy);
-        copy
-    } else {
-        result
-    };
+    let result =
+        if values::maybe_shared(result) || length(result) <= 1 || values::has_attributes(result) {
+            let copy = values::shallow_duplicate(result)?;
+            values::clear_attributes(copy);
+            copy
+        } else {
+            result
+        };
     Ok(finish(result))
 }
 
@@ -348,7 +363,12 @@ pub unsafe fn subset(array: Sexp, indices: &[Sexp], call: Sexp) -> R<Sexp> {
         [] => return Ok(array),
         [index] if *index == missing_arg() => return Ok(array),
         [index] => *index,
-        _ => return Err(error_in(call, "an Array has one dimension, so `[` takes one index")),
+        _ => {
+            return Err(error_in(
+                call,
+                "an Array has one dimension, so `[` takes one index",
+            ));
+        }
     };
     let positions = positions(array, index, call)?;
     let kind = items(array);
@@ -372,11 +392,20 @@ pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) 
         [] => (0..length(array)).collect(),
         [index] if *index == missing_arg() => (0..length(array)).collect(),
         [index] => positions(array, *index, call)?,
-        _ => return Err(error_in(call, "an Array has one dimension, so `[<-` takes one index")),
+        _ => {
+            return Err(error_in(
+                call,
+                "an Array has one dimension, so `[<-` takes one index",
+            ));
+        }
     };
     let kind = items(array);
     let replacement = replacement(kind, value, call, "[<-")?;
-    let count = if replacement.is_array() { length(replacement) } else { 1 };
+    let count = if replacement.is_array() {
+        length(replacement)
+    } else {
+        1
+    };
     if replacement.is_array() && count != positions.len() {
         return Err(error_in(
             call,
@@ -403,7 +432,10 @@ pub unsafe fn subassign2(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     let kind = items(array);
     let replacement = replacement(kind, value, call, "[[<-")?;
     if replacement.is_array() && kind != Items::RyValues {
-        return Err(error_in(call, "`[[<-` stores one item; use `[<-` to assign several"));
+        return Err(error_in(
+            call,
+            "`[[<-` stores one item; use `[<-` to assign several",
+        ));
     }
     let target = writable(array)?;
     store_single(kind, replacement, target, position);
@@ -423,7 +455,9 @@ pub unsafe fn item(array: Sexp, position: usize) -> R<Sexp> {
 
 unsafe fn copy_item(from: Sexp, source: usize, to: Sexp, target: usize) {
     match from.kind() {
-        SexpType::Logical | SexpType::Integer => values::ints_mut(to)[target] = values::ints(from)[source],
+        SexpType::Logical | SexpType::Integer => {
+            values::ints_mut(to)[target] = values::ints(from)[source]
+        }
         SexpType::Real => values::reals_mut(to)[target] = values::reals(from)[source],
         SexpType::String => values::set_elt(to, target, values::string_elt(from, source)),
         _ => values::set_elt(to, target, values::list_elt(from, source)),
@@ -454,7 +488,8 @@ unsafe fn replacement(kind: Items, value: Sexp, call: Sexp, operator: &str) -> R
     let found = if value.is_array() && !(kind == Items::RyValues && operator == "[[<-") {
         items(value)
     } else {
-        item_kind(value).map_err(|message| error_in(call, format!("`{operator}` on an Array: {message}")))?
+        item_kind(value)
+            .map_err(|message| error_in(call, format!("`{operator}` on an Array: {message}")))?
     };
     if found != kind {
         return Err(error_in(
@@ -471,12 +506,18 @@ unsafe fn replacement(kind: Items, value: Sexp, call: Sexp, operator: &str) -> R
 
 unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &str) -> R<usize> {
     let [index] = indices else {
-        return Err(error_in(call, format!("`{operator}` on an Array takes one position")));
+        return Err(error_in(
+            call,
+            format!("`{operator}` on an Array takes one position"),
+        ));
     };
     if !matches!(index.kind(), SexpType::Integer | SexpType::Real) || length(*index) != 1 {
         return Err(error_in(
             call,
-            format!("`{operator}` on an Array takes one whole-number position, not {}", describe(*index)),
+            format!(
+                "`{operator}` on an Array takes one whole-number position, not {}",
+                describe(*index)
+            ),
         ));
     }
     let positions = positions(array, *index, call)?;
@@ -503,7 +544,10 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
             let mut selected = Vec::new();
             for (position, &flag) in values::ints(index).iter().enumerate() {
                 if flag == NA_LOGICAL {
-                    return Err(error_in(call, format!("the logical mask is NA at {}", position + 1)));
+                    return Err(error_in(
+                        call,
+                        format!("the logical mask is NA at {}", position + 1),
+                    ));
                 }
                 if flag != 0 {
                     selected.push(position);
@@ -515,7 +559,13 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
             let numbers: Vec<f64> = if index.kind() == SexpType::Integer {
                 values::ints(index)
                     .iter()
-                    .map(|&number| if number == NA_INTEGER { f64::NAN } else { number as f64 })
+                    .map(|&number| {
+                        if number == NA_INTEGER {
+                            f64::NAN
+                        } else {
+                            number as f64
+                        }
+                    })
                     .collect()
             } else {
                 values::reals(index).to_vec()
@@ -523,11 +573,21 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
             numbers
                 .into_iter()
                 .map(|number| {
-                    if number.is_nan() || number.fract() != 0.0 || number < 1.0 || number > count as f64 {
-                        let shown = if number.is_nan() { "NA".to_owned() } else { format!("{number}") };
+                    if number.is_nan()
+                        || number.fract() != 0.0
+                        || number < 1.0
+                        || number > count as f64
+                    {
+                        let shown = if number.is_nan() {
+                            "NA".to_owned()
+                        } else {
+                            format!("{number}")
+                        };
                         Err(error_in(
                             call,
-                            format!("position {shown} is out of bounds for an Array of {count} items"),
+                            format!(
+                                "position {shown} is out of bounds for an Array of {count} items"
+                            ),
                         ))
                     } else {
                         Ok(number as usize - 1)
