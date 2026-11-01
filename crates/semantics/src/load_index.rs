@@ -1,15 +1,16 @@
 //! The package-load index: what a loader needs to know about a package's top-level items to
 //! load it lazily and to reload exactly what changed.
 //!
-//! Every fact comes from a per-item query (`item_load`, `item_top_level_names`,
-//! `item_immediate_reads`) or from one file's own text (`file_load_index`), so an edit inside
-//! one item re-derives that item alone. `package_index` only joins those per-item results.
+//! Every fact comes from one file's own items (`file_items`, `file_binds`) or text
+//! (`file_load_index`), so an edit inside one file re-derives that file alone. `package_bindings`
+//! joins the per-file binding facts and `package_index` joins the rest; each join is a firewall
+//! that returns the same value, and stops invalidation, when an edit changes no binding.
 
 use {
     crate::{
         Db, Item, ItemKind, SourceFile, TypingMode, file_typing_mode,
         hir::Symbol,
-        item_naming, item_spans, item_syntax,
+        item_naming, item_spans,
         metadata::{
             Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
             parse_namespace_spec, string_content,
@@ -18,7 +19,7 @@ use {
         top_level::{TopLevel, item_super_assigned_names, item_top_level},
     },
     rowan::{GreenNodeData, Language, NodeOrToken},
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashMap,
     serde::{Deserialize, Serialize},
     std::{collections::BTreeSet, sync::Arc},
     syntax::{
@@ -87,9 +88,12 @@ pub enum Registration {
     },
 }
 
-#[salsa::tracked(returns(ref))]
-pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
-    let Some(syntax) = item_syntax(db, item) else {
+/// What a load needs of one item, read from its syntax node. It is computed inside
+/// [`file_items`] rather than memoized per item: the first edit of a file lowers its
+/// durability, which makes salsa re-verify every memo the package index reaches, and one memo
+/// per file is far cheaper to re-verify than one per item.
+fn item_load(node: Option<&SyntaxNode>, text: &str) -> ItemLoad {
+    let Some(node) = node else {
         return ItemLoad {
             hash: 0,
             binding: None,
@@ -98,13 +102,14 @@ pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
             registrations: Vec::new(),
         };
     };
-    let node = syntax.syntax_node();
-    let (text, _) = erase_for_r(&node, &[]);
-    let definition = binding_definition(&node);
+    let definition = binding_definition(node);
     let mentions = definition.as_ref().map_or_else(Vec::new, |(_, value)| {
-        let mut names = BTreeSet::new();
-        collect_identifiers(value.green().as_ref(), &mut names);
-        names.into_iter().collect()
+        let green = value.green();
+        let mut names = Vec::new();
+        collect_identifiers(green.as_ref(), &mut names);
+        names.sort_unstable();
+        names.dedup();
+        names.into_iter().map(str::to_owned).collect()
     });
     ItemLoad {
         hash: fnv1a(text.as_bytes()),
@@ -113,7 +118,7 @@ pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
             .is_some_and(|(_, value)| value.kind() == SyntaxKind::FUNCTION_DEF),
         binding: definition.map(|(name, _)| name),
         mentions,
-        registrations: registrations(&node),
+        registrations: registrations(node),
     }
 }
 
@@ -200,10 +205,10 @@ pub fn file_load_index<'db>(db: &'db dyn Db, file: SourceFile) -> FileLoadIndex<
         }
         value_ranges.push(value);
     }
-    let (text, offsets) = erase_for_r(&root, &marks);
+    let (text, marks) = erase_for_r(&root, marks);
     let lines = LineStarts::new(&text);
-    let characters = character_offsets(&text, offsets.values().copied());
-    let position = |offset: TextSize| offsets.get(&offset).copied().unwrap_or(0);
+    let characters = character_offsets(&text, marks.erased.iter().copied());
+    let position = |offset: TextSize| marks.erased_offset(offset);
     let span_of = |range: TextRange| {
         let start = position(range.start());
         let end = position(range.end()).max(start);
@@ -251,11 +256,26 @@ pub struct PackageIndex {
     pub namespace: NamespaceSpec,
     /// Collation order, which is the order R runs top-level code in.
     pub files: Vec<IndexedFile>,
+    /// Which names are lazy and where their definitions are. An edit inside a function body
+    /// leaves it equal, so the analysis hands back the same `Arc`.
+    pub bindings: Arc<PackageBindings>,
+}
+
+/// The package's top-level names and how they load.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageBindings {
     /// Every top-level name the package binds, mapped to whether it is bound lazily: a name is
     /// lazy when its one writer defines a function or, in a strict file, a constant whose value
     /// calls only functions declared pure. Any other writer, including conditional or
     /// replacement code (`f <- memoise(f)`), makes every writer of the name run eagerly.
     pub names: FxHashMap<String, bool>,
+    /// The item that defines each lazy name, as a position in [`PackageIndex::files`] and a
+    /// position among that file's items.
+    pub lazy: FxHashMap<String, (u32, u32)>,
+    /// The items that run at load, in collation order, positioned as in `lazy`.
+    pub eager: Vec<(u32, u32)>,
+    /// The lazy constants of strict files, in collation order, positioned as in `lazy`.
+    pub constants: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,7 +346,28 @@ impl PackageIndex {
     }
 
     pub fn is_lazy(&self, name: &str) -> bool {
-        self.names.get(name).copied().unwrap_or(false)
+        self.bindings.names.get(name).copied().unwrap_or(false)
+    }
+
+    /// Whether the package binds `name` at top level.
+    pub fn binds(&self, name: &str) -> bool {
+        self.bindings.names.contains_key(name)
+    }
+
+    /// The item that defines the lazy name `name`.
+    pub fn lazy_item(&self, name: &str) -> Option<&IndexedItem> {
+        let &(file, item) = self.bindings.lazy.get(name)?;
+        self.files
+            .get(file as usize)?
+            .items
+            .items
+            .get(item as usize)
+    }
+
+    /// The item at a position of [`PackageBindings`], with its file's path.
+    pub fn item_at(&self, (file, item): (u32, u32)) -> Option<(&str, &IndexedItem)> {
+        let file = self.files.get(file as usize)?;
+        Some((file.path.as_str(), file.items.items.get(item as usize)?))
     }
 
     /// Every item with its file's path, in collation order.
@@ -360,12 +401,21 @@ pub fn namespace_spec(db: &dyn Db, sources: PackageSources) -> NamespaceSpec {
 #[salsa::tracked(returns(clone))]
 pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
     let index = file_load_index(db, file);
+    let root = parse(db, file).syntax_node();
     let items = index
         .items
         .iter()
         .map(|loaded| {
             let item = loaded.item;
-            let load = item_load(db, item);
+            let range = TextRange::new(
+                TextSize::from(loaded.span.source_start),
+                TextSize::from(loaded.span.source_end),
+            );
+            let node = root
+                .child_or_token_at_range(range)
+                .and_then(NodeOrToken::into_node)
+                .filter(|node| node.text_range() == range);
+            let load = item_load(node.as_ref(), loaded.span.slice(&index.text));
             let binding = load
                 .binding
                 .clone()
@@ -403,9 +453,9 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                 binding,
                 binds,
                 reads,
-                mentions: load.mentions.clone(),
+                mentions: load.mentions,
                 load_writes,
-                registrations: load.registrations.clone(),
+                registrations: load.registrations,
             }
         })
         .collect();
@@ -428,9 +478,29 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
             items: file_items(db, package_file.file),
         })
         .collect();
+    let bindings = package_bindings(db, sources);
+    Arc::new(PackageIndex {
+        package: description_field(description, "Package").unwrap_or_default(),
+        version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
+        depends: parse_description_depends(description),
+        namespace: namespace_spec(db, sources).clone(),
+        bindings,
+        files,
+    })
+}
+
+/// The package's [`PackageBindings`]. It reads each file's [`file_binds`], which an edit inside
+/// a function body leaves equal, so such an edit reuses the table instead of rebuilding it.
+#[salsa::tracked(returns(clone))]
+pub fn package_bindings(db: &dyn Db, sources: PackageSources) -> Arc<PackageBindings> {
+    let files: Vec<Arc<FileBinds>> = sources
+        .files(db)
+        .iter()
+        .map(|package_file| file_binds(db, sources, package_file.file))
+        .collect();
     // Each name's writer count and the position of its first writer, in load order.
     let mut writers: FxHashMap<&str, (u32, usize)> = FxHashMap::default();
-    let items = files.iter().flat_map(|file| &file.items.items);
+    let items = files.iter().flat_map(|file| &file.items);
     for (position, item) in items.enumerate() {
         for name in &item.binds {
             writers.entry(name.as_str()).or_insert((0, position)).0 += 1;
@@ -438,54 +508,140 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
     }
     // `.onLoad` runs after every top-level statement, so its writes come after them all, and
     // a lazy constant forced after it would see the new value where an eager one saw the old.
-    for item in files.iter().flat_map(|file| &file.items.items) {
+    for item in files.iter().flat_map(|file| &file.items) {
         for name in &item.load_writes {
             writers.entry(name.as_str()).or_insert((0, usize::MAX)).0 += 1;
         }
     }
     // Seen once and from a lazy definition: lazy. Seen again: eager.
     let mut names: FxHashMap<String, bool> = FxHashMap::default();
-    let mut position = 0;
-    for (package_file, file) in sources.files(db).iter().zip(&files) {
-        let strict = file_is_strict(db, sources, package_file.file);
-        let loaded = &file_load_index(db, package_file.file).items;
-        for (index, item) in file.items.items.iter().enumerate() {
-            // Strict mode refuses a top-level statement with an effect, so evaluating a
-            // constant's value later, at first use, observes the same thing as evaluating it
-            // at load, provided every package name the value mentions is written once and
-            // before it: a later or second write would change what a late evaluation reads.
-            let lazy = item.binding.as_ref().is_some_and(|binding| {
-                binding.function
-                    || (strict
-                        && is_constant_candidate(item)
-                        && item.mentions.iter().all(|name| {
-                            writers
-                                .get(name.as_str())
-                                .is_none_or(|&(count, first)| count == 1 && first < position)
-                        })
-                        && loaded.get(index).is_some_and(|loaded| {
-                            *item_top_level(db, loaded.item) == TopLevel::Constant
-                        }))
-            });
-            for name in &item.binds {
-                match names.get_mut(name.as_str()) {
-                    Some(lazy) => *lazy = false,
-                    None => {
-                        names.insert(name.clone(), lazy);
-                    }
+    let mut lazy_items: Vec<(&str, (u32, u32))> = Vec::new();
+    let items = files.iter().enumerate().flat_map(|(file_position, file)| {
+        file.items
+            .iter()
+            .enumerate()
+            .map(move |(item_position, item)| ((file_position as u32, item_position as u32), item))
+    });
+    let mut located = Vec::new();
+    for (position, (at, item)) in items.enumerate() {
+        // Strict mode refuses a top-level statement with an effect, so evaluating a constant's
+        // value later, at first use, observes the same thing as evaluating it at load,
+        // provided every package name the value mentions is written once and before it: a
+        // later or second write would change what a late evaluation reads.
+        let lazy = match &item.kind {
+            BindKind::Function => true,
+            BindKind::Constant { mentions } => mentions.iter().all(|name| {
+                writers
+                    .get(name.as_str())
+                    .is_none_or(|&(count, first)| count == 1 && first < position)
+            }),
+            BindKind::Other => false,
+        };
+        for name in &item.binds {
+            match names.get_mut(name.as_str()) {
+                Some(lazy) => *lazy = false,
+                None => {
+                    names.insert(name.clone(), lazy);
                 }
             }
-            position += 1;
         }
+        if let Some(name) = item.binding.as_deref() {
+            lazy_items.push((name, at));
+        }
+        located.push((
+            at,
+            item.binding.as_deref(),
+            matches!(item.kind, BindKind::Constant { .. }),
+        ));
     }
-    Arc::new(PackageIndex {
-        package: description_field(description, "Package").unwrap_or_default(),
-        version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
-        depends: parse_description_depends(description),
-        namespace: namespace_spec(db, sources).clone(),
+    // A binding is lazy when its name is, which only the whole package decides.
+    let is_lazy = |name: Option<&str>| name.is_some_and(|name| names.get(name) == Some(&true));
+    let eager = located
+        .iter()
+        .filter(|(_, name, _)| !is_lazy(*name))
+        .map(|(at, _, _)| *at)
+        .collect();
+    let constants = located
+        .iter()
+        .filter(|(_, name, constant)| *constant && is_lazy(*name))
+        .map(|(at, _, _)| *at)
+        .collect();
+    let lazy = lazy_items
+        .into_iter()
+        .filter(|(name, _)| is_lazy(Some(name)))
+        .map(|(name, at)| (name.to_owned(), at))
+        .collect();
+    Arc::new(PackageBindings {
         names,
-        files,
+        lazy,
+        eager,
+        constants,
     })
+}
+
+/// What [`package_bindings`] reads of one file's items, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBinds {
+    items: Vec<ItemBinds>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ItemBinds {
+    binds: Vec<String>,
+    /// The name of a `name <- value` binding, which is lazy when [`PackageBindings::names`]
+    /// says so.
+    binding: Option<String>,
+    /// Names its `<<-` assignments write while `.onLoad` runs.
+    load_writes: Vec<String>,
+    kind: BindKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BindKind {
+    /// A function definition, lazy unless another item writes its name.
+    Function,
+    /// A constant of a strict file, lazy when the names its value mentions allow it.
+    Constant {
+        mentions: Vec<String>,
+    },
+    Other,
+}
+
+#[salsa::tracked(returns(clone))]
+pub fn file_binds(db: &dyn Db, sources: PackageSources, file: SourceFile) -> Arc<FileBinds> {
+    let strict = file_is_strict(db, sources, file);
+    let loaded = &file_load_index(db, file).items;
+    let items = file_items(db, file)
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let function = item
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.function);
+            let constant = strict
+                && is_constant_candidate(item)
+                && loaded
+                    .get(index)
+                    .is_some_and(|loaded| *item_top_level(db, loaded.item) == TopLevel::Constant);
+            ItemBinds {
+                binds: item.binds.clone(),
+                binding: item.binding.as_ref().map(|binding| binding.name.clone()),
+                load_writes: item.load_writes.clone(),
+                kind: if function {
+                    BindKind::Function
+                } else if constant {
+                    BindKind::Constant {
+                        mentions: item.mentions.clone(),
+                    }
+                } else {
+                    BindKind::Other
+                },
+            }
+        })
+        .collect();
+    Arc::new(FileBinds { items })
 }
 
 /// Whether `file` follows strict mode: its own typing directive, else the package default.
@@ -657,26 +813,60 @@ fn registrations(node: &SyntaxNode) -> Vec<Registration> {
 /// The text R evaluates for `node`: inline annotations erased, with their line breaks kept so
 /// line numbers survive. Also maps each offset in `marks` (token boundaries of `node`) to its
 /// offset in the erased text. Walks the green tree, which allocates nothing per node.
-fn erase_for_r(node: &SyntaxNode, marks: &[TextSize]) -> (String, FxHashMap<TextSize, u32>) {
+fn erase_for_r(node: &SyntaxNode, mut marks: Vec<TextSize>) -> (String, Marks) {
+    marks.sort_unstable();
+    marks.dedup();
     let mut eraser = Eraser {
-        wanted: marks.iter().copied().collect(),
-        offsets: FxHashMap::default(),
+        erased: vec![0; marks.len()],
+        marks: Marks {
+            source: marks,
+            erased: Vec::new(),
+        },
+        next: 0,
         out: String::with_capacity(usize::from(node.text_range().len())),
     };
     eraser.node(node.green().as_ref(), None, node.text_range().start());
-    (eraser.out, eraser.offsets)
+    eraser.marks.erased = eraser.erased;
+    (eraser.out, eraser.marks)
 }
 
+/// Sorted source offsets and, at the same index, where each landed in the erased text.
+struct Marks {
+    source: Vec<TextSize>,
+    erased: Vec<u32>,
+}
+
+impl Marks {
+    fn erased_offset(&self, offset: TextSize) -> u32 {
+        self.source
+            .binary_search(&offset)
+            .ok()
+            .and_then(|index| self.erased.get(index).copied())
+            .unwrap_or(0)
+    }
+}
+
+/// The walk visits offsets in increasing order, so the marks are matched with one cursor
+/// instead of a lookup per token boundary.
 struct Eraser {
-    wanted: FxHashSet<TextSize>,
-    offsets: FxHashMap<TextSize, u32>,
+    marks: Marks,
+    erased: Vec<u32>,
+    next: usize,
     out: String,
 }
 
 impl Eraser {
     fn record(&mut self, offset: TextSize) {
-        if self.wanted.contains(&offset) {
-            self.offsets.entry(offset).or_insert(self.out.len() as u32);
+        while let Some(&mark) = self.marks.source.get(self.next) {
+            if mark > offset {
+                return;
+            }
+            if mark == offset
+                && let Some(slot) = self.erased.get_mut(self.next)
+            {
+                *slot = self.out.len() as u32;
+            }
+            self.next += 1;
         }
     }
 
@@ -709,7 +899,7 @@ impl Eraser {
     }
 }
 
-fn collect_identifiers(green: &GreenNodeData, names: &mut BTreeSet<String>) {
+fn collect_identifiers<'a>(green: &'a GreenNodeData, names: &mut Vec<&'a str>) {
     for child in green.children() {
         match child {
             NodeOrToken::Node(child) => collect_identifiers(child, names),
@@ -721,7 +911,7 @@ fn collect_identifiers(green: &GreenNodeData, names: &mut BTreeSet<String>) {
                     .strip_prefix('`')
                     .and_then(|text| text.strip_suffix('`'))
                     .unwrap_or(text);
-                names.insert(name.to_owned());
+                names.push(name);
             }
             NodeOrToken::Token(_) => {}
         }

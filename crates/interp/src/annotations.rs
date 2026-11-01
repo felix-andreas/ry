@@ -235,6 +235,70 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
     Ok(Some(signature))
 }
 
+/// How a closure call's arguments meet the closure's annotations.
+#[derive(Clone, Copy, Debug)]
+pub enum Entry {
+    /// [`enter`] checks the arguments bound in the new frame.
+    Unchecked,
+    /// The caller already checked them; holds the signature, `None` for an untyped closure.
+    Checked(Option<Sexp>),
+}
+
+/// Decides ahead of time what a call binding arguments of storage types `kinds` positionally to
+/// a closure's leading formals needs checked, for a compiler that knows those types before the
+/// call runs (`None` is a type it does not know). [`Entry::Unchecked`] means the checks must
+/// run with the values.
+pub unsafe fn entry_for(function: Sexp, kinds: &[Option<SexpType>]) -> Entry {
+    let Some(signature) = signature_of(function) else {
+        return Entry::Checked(None);
+    };
+    let masks = signature.element(MASKS);
+    let mut formal = function.car();
+    let mut slot = FIRST_FORMAL_SLOT;
+    while formal.kind() == SexpType::Pairlist {
+        let mask = mask_at(masks, slot);
+        if mask != 0 {
+            match kinds.get(slot - FIRST_FORMAL_SLOT) {
+                Some(&Some(kind))
+                    if formal.tag() != values::symbols().dots && mask & bit(kind) != 0 => {}
+                _ => return Entry::Unchecked,
+            }
+        }
+        formal = formal.cdr();
+        slot += 1;
+    }
+    Entry::Checked(Some(signature))
+}
+
+/// Checks the plain values a call binds to a closure's leading formals in order, as a direct
+/// call from compiled code does, straight from the values instead of reading them back from the
+/// frame. A typed formal left to its default, or a typed `...`, may hold a promise only [`enter`]
+/// can register, so such a call stays [`Entry::Unchecked`].
+pub unsafe fn enter_positional(call: Sexp, function: Sexp, values: &[Sexp]) -> R<Entry> {
+    let Some(signature) = signature_of(function) else {
+        return Ok(Entry::Checked(None));
+    };
+    let masks = signature.element(MASKS);
+    let mut formal = function.car();
+    let mut slot = FIRST_FORMAL_SLOT;
+    while formal.kind() == SexpType::Pairlist {
+        let index = slot - FIRST_FORMAL_SLOT;
+        if mask_at(masks, slot) != 0 {
+            match values.get(index) {
+                Some(&value) if formal.tag() != values::symbols().dots => {
+                    if value != values::missing_arg() {
+                        check_value(call, signature, slot, value)?;
+                    }
+                }
+                _ => return Ok(Entry::Unchecked),
+            }
+        }
+        formal = formal.cdr();
+        slot += 1;
+    }
+    Ok(Entry::Checked(Some(signature)))
+}
+
 /// Checks a typed closure's value.
 pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<()> {
     let mask = mask_at(signature.element(MASKS), RETURN_SLOT);
@@ -290,12 +354,57 @@ pub unsafe fn check_forced(promise: Sexp, value: Sexp) -> R<()> {
     Ok(())
 }
 
+/// The vector type a typed closure declares it returns, when its return annotation admits
+/// exactly one of `logical`, `integer` or `double` (each of which also admits the narrower ones,
+/// as R's coercions do). The JIT takes it as the expected type of a call's result before the
+/// call has ever returned.
+pub unsafe fn declared_return_type(function: Sexp) -> Option<SexpType> {
+    let signature = signature_of(function)?;
+    match mask_at(signature.element(MASKS), RETURN_SLOT) {
+        LOGICAL => Some(SexpType::Logical),
+        INTEGER => Some(SexpType::Integer),
+        DOUBLE => Some(SexpType::Real),
+        _ => None,
+    }
+}
+
+/// Whether a call that binds plain values of storage types `arguments` to the formals of the
+/// definition `formals`/`body`, one each in order, and returns a value of storage type `result`
+/// passes all of that definition's checks. A compiler that inlines the call decides this before
+/// the call runs, and leaves a call that would fail to the interpreter, which reports it.
+/// `None` is a type the compiler does not know.
+pub unsafe fn admits_inline(
+    formals: Sexp,
+    body: Sexp,
+    arguments: &[Option<SexpType>],
+    result: Option<SexpType>,
+) -> bool {
+    let Some(signature) = signature_for(formals, body) else {
+        return true;
+    };
+    let masks = values::ints(signature.element(MASKS));
+    let admitted = |mask: i32, kind: Option<SexpType>| {
+        mask == 0 || kind.is_some_and(|kind| mask as Mask & bit(kind) != 0)
+    };
+    let formal_masks = masks.get(FIRST_FORMAL_SLOT..).unwrap_or(&[]);
+    formal_masks.len() == arguments.len()
+        && formal_masks
+            .iter()
+            .zip(arguments)
+            .all(|(&mask, &kind)| admitted(mask, kind))
+        && admitted(masks.get(RETURN_SLOT).copied().unwrap_or(0), result)
+}
+
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
-    let formals = function.car();
+    signature_for(function.car(), crate::bytecode::closure_body(function))
+}
+
+/// The signature of the definition with these formals and this body (as source).
+unsafe fn signature_for(formals: Sexp, body: Sexp) -> Option<Sexp> {
     let key = if formals.kind() == SexpType::Pairlist {
         formals
     } else {
-        crate::bytecode::closure_body(function)
+        body
     };
     if !key.has_gp(gp::TYPED_DEFINITION) {
         return None;
@@ -305,7 +414,7 @@ unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
         return None;
     }
     let signature = weak.weak_value();
-    (signature.element(BODY) == crate::bytecode::closure_body(function)).then_some(signature)
+    (signature.element(BODY) == body).then_some(signature)
 }
 
 unsafe fn check_argument(

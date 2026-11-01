@@ -553,14 +553,15 @@ fn package(
 }
 
 const LOAD_QUERIES: &[&str] = &[
-    "item_load",
     "file_items",
+    "file_binds",
+    "package_bindings",
     "item_immediate_reads",
     "package_index",
 ];
 
 #[test]
-fn a_body_edit_rederives_one_item_of_the_load_index() {
+fn a_body_edit_rederives_one_file_of_the_load_index() {
     let mut db = ProbeDatabase::default();
     let (sources, files) = package(
         &db,
@@ -583,8 +584,8 @@ fn a_body_edit_rederives_one_item_of_the_load_index() {
     let index = package_index(&db, sources);
     assert_eq!(
         db.executions_since(LOAD_QUERIES),
-        [1, 1, 0, 1],
-        "only the edited item's load facts and its own file's layer run again"
+        [1, 1, 0, 0, 1],
+        "only the edited file's layer runs again, and its bindings stop at the firewall"
     );
     assert_eq!(
         index.files[0].items.items[0].hash,
@@ -607,7 +608,7 @@ fn a_namespace_edit_rederives_no_item() {
         .set_namespace(&mut db)
         .to("export(first)\nexport(value)\n".to_owned());
     let index = package_index(&db, sources);
-    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 1]);
+    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 0, 1]);
     assert_eq!(index.namespace.exports, ["first", "value"]);
 }
 
@@ -626,7 +627,7 @@ fn moving_a_statement_down_keeps_its_load_facts() {
     package_index(&db, sources);
     assert_eq!(
         db.executions_since(LOAD_QUERIES),
-        [0, 1, 0, 1],
+        [1, 1, 0, 0, 1],
         "positions are per-file facts, so only the file layer runs again"
     );
 }

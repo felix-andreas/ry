@@ -8,12 +8,17 @@
 
 use {
     crate::analysis::{Speculation, resolve_function},
-    heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+    heap::{
+        object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+    },
     interp::{
+        annotations::{self, Entry},
         arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
         eval, heap,
+        standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
         values,
     },
@@ -122,6 +127,22 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
 /// How many times a body may be compiled before the JIT gives up on it.
 pub const MAX_COMPILES: i32 = 4;
 
+/// How many times a body may be refused as cold before it compiles without the types it is
+/// missing.
+pub const MAX_COLD_REFUSALS: i32 = 3;
+
+/// The profile's tier state counts compilations in its low byte and cold refusals above it,
+/// because a cold refusal compiles nothing and so must not use up a compilation.
+pub const COLD_REFUSAL: i32 = 1 << 8;
+
+pub fn compiles(state: i32) -> i32 {
+    state & (COLD_REFUSAL - 1)
+}
+
+pub fn cold_refusals(state: i32) -> i32 {
+    state / COLD_REFUSAL
+}
+
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it
 /// keep running, so the objects it embeds stay rooted for the rest of the session.
 pub unsafe fn invalidate(code: Sexp) {
@@ -136,7 +157,7 @@ pub unsafe fn invalidate(code: Sexp) {
     let counters = values::ints_mut(constants.element(PROFILE));
     counters[profile::ENTRIES] = 0;
     counters[profile::BACK_EDGES] = 0;
-    if counters[profile::TIER_STATE] >= MAX_COMPILES {
+    if compiles(counters[profile::TIER_STATE]) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
     }
 }
@@ -339,14 +360,16 @@ pub unsafe extern "C" fn jit_closure_matches(
 
 /// Calls the closure `function` for `call` with arguments compiled code evaluated, and puts the
 /// result in register `dst`. `arguments` holds a representation and its bits for each argument
-/// (see [`representation`]); an argument whose expression is code is bound to a promise that
-/// already holds its value, so the callee cannot tell it was evaluated early.
+/// (see [`representation`]). Each argument is bound to its value rather than to a promise: the
+/// callee is frame-safe, so it never calls `substitute` or `missing`, and compiled code makes
+/// the call only while no handler is established, so no other R code can look at its frame.
 pub unsafe extern "C" fn jit_call(
     activation: *mut Activation,
     function: *mut Header,
     call: *mut Header,
     arguments: *const i64,
     count: i64,
+    signature: *mut Header,
     dst: i64,
 ) -> i32 {
     unsafe {
@@ -361,7 +384,6 @@ pub unsafe extern "C" fn jit_call(
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
                 let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
-                let mut expressions = call.cdr();
                 for pair in arguments.chunks_exact(2) {
                     let (kind, bits) = (pair[0] as i32, pair[1]);
                     let value = match kind {
@@ -372,21 +394,29 @@ pub unsafe extern "C" fn jit_call(
                             .ok_or_else(|| error("compiled code passed a null argument"))?,
                     };
                     heap.root(value);
-                    let expression = expressions.car();
-                    let value = match expression.kind() {
-                        SexpType::Symbol | SexpType::Language => {
-                            eval::forced_promise(expression, value)?
-                        }
-                        _ => value,
-                    };
-                    heap.root(value);
                     args.push(Arg {
                         tag: values::nil(),
                         value,
                     });
-                    expressions = expressions.cdr();
                 }
-                eval::apply_closure(call, function, &args, machine.env, None)
+                // `signature` is what the compiler decided about the callee's annotation checks:
+                // null when they depend on the values, `NULL` for an untyped callee, otherwise
+                // the signature of a typed callee whose arguments' types already satisfy it.
+                let entry = match Sexp::from_raw(signature) {
+                    None => {
+                        // The values are at hand, so the checks read them here instead of
+                        // looking each formal up again in the new frame.
+                        let values: SmallVec<[Sexp; 4]> =
+                            args.iter().map(|arg| arg.value).collect();
+                        annotations::enter_positional(call, function, &values)?
+                    }
+                    Some(signature) if signature == values::nil() => Entry::Checked(None),
+                    Some(signature) => Entry::Checked(Some(signature)),
+                };
+                // The frame records no argument list: only `nargs`, method dispatch and
+                // `standardGeneric` read it, and a frame-safe callee calls none of them.
+                let env = eval::bind_arguments(call, function, &args, None)?;
+                eval::run_closure(call, function, env, machine.env, values::nil(), entry)
             });
             match result {
                 Err(unwind) => {
@@ -460,6 +490,9 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
         guarded(activation, std::ptr::null_mut(), |activation| {
             let machine = machine(activation);
             let compiled = compiled(activation);
+            if std::env::var_os("RY_JIT_LOG").is_some() {
+                eprintln!("jit: deopt at pc {pc} (reason {why})");
+            }
             if why == reason::SPECULATION && activation.pending.is_none() {
                 invalidate(machine.code);
             }
@@ -539,6 +572,8 @@ pub unsafe extern "C" fn jit_duplicate(
             let old = *cell;
             match scoped(|| values::shallow_duplicate(old)) {
                 Ok(copy) => {
+                    // Assigning an item into an Array keeps it an Array, as tier 0 does.
+                    copy.set_array(old.is_array());
                     copy.increment_refcount();
                     *cell = copy;
                     if dirty != 0 {
@@ -582,6 +617,76 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
 
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
+}
+
+/// Key kinds [`jit_collection_position`] takes.
+pub mod key {
+    pub const INTEGER: i32 = 0;
+    pub const DOUBLE: i32 = 1;
+    pub const VALUE: i32 = 2;
+}
+
+fn collection_kind(set: i32) -> NativeKind {
+    if set != 0 {
+        NativeKind::Set
+    } else {
+        NativeKind::Dict
+    }
+}
+
+/// `Dict.len()` or `Set.len()`: the entry count, or -1 when tier 0 must run the call.
+pub unsafe extern "C" fn jit_collection_count(value: *mut Header, set: i32) -> i64 {
+    unsafe {
+        Sexp::from_raw(value)
+            .and_then(|value| standard_library::compiled_count(value, collection_kind(set)))
+            .map_or(-1, |count| count as i64)
+    }
+}
+
+/// Where the key is in a dict or set: its position, -1 when it is absent, or -2 when tier 0
+/// must run the call. `kind` says which of `integer`, `double` and `value` holds the key.
+pub unsafe extern "C" fn jit_collection_position(
+    collection: *mut Header,
+    set: i32,
+    kind: i32,
+    integer: i32,
+    double: f64,
+    value: *mut Header,
+) -> i64 {
+    unsafe {
+        let key = match kind {
+            key::INTEGER => CompiledKey::Integer(integer),
+            key::DOUBLE => CompiledKey::Double(double),
+            _ => match Sexp::from_raw(value) {
+                Some(value) => CompiledKey::Value(value),
+                None => return -2,
+            },
+        };
+        let Some(collection) = Sexp::from_raw(collection) else {
+            return -2;
+        };
+        match standard_library::compiled_position(collection, collection_kind(set), key) {
+            Some(Some(position)) => position as i64,
+            Some(None) => -1,
+            None => -2,
+        }
+    }
+}
+
+/// `Dict.get()`'s result for the entry at `position`, or for a missing key when it is -1.
+pub unsafe extern "C" fn jit_dict_get(
+    activation: *mut Activation,
+    dict: *mut Header,
+    position: i64,
+) -> *mut Header {
+    unsafe {
+        boxed(activation, || match Sexp::from_raw(dict) {
+            Some(dict) => {
+                standard_library::compiled_get_result(dict, usize::try_from(position).ok())
+            }
+            None => Err(error("Dict.get() reached compiled code without a dict")),
+        })
+    }
 }
 
 /// Whether a calling handler is established, so a warning would run R code.

@@ -701,7 +701,7 @@ impl Heap {
             return Err(HeapError::TooLong);
         }
         let object = self.allocate(SexpType::Record, size, values)?;
-        let slots: Vec<Slot> = values
+        let slots: smallvec::SmallVec<[Slot; 4]> = values
             .iter()
             .enumerate()
             .map(|(index, &value)| slot_for(value, index))

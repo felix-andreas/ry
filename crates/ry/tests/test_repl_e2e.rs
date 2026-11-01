@@ -303,21 +303,9 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
 #[test]
 fn lines_typed_while_the_console_starts_run_once_it_prompts() {
     for runtime in runtimes() {
-        let package = tempfile::tempdir().expect("temp dir");
-        let package = package.path();
-        fs::create_dir_all(package.join("R")).expect("create package");
-        fs::write(
-            package.join("DESCRIPTION"),
-            "Package: slowpkg\nVersion: 1.0\n",
-        )
-        .expect("write");
-        // A slow load holds the console back from its first prompt while the user types.
-        fs::write(
-            package.join("R/a.R"),
-            "Sys.sleep(1.5)\ngreet <- function() \"hello from slowpkg\"\n",
-        )
-        .expect("write");
-        let mut session = ReplSession::start_with(Some(package), &[runtime_command(runtime)]);
+        let package = slow_package();
+        let mut session =
+            ReplSession::start_with(Some(package.path()), &[runtime_command(runtime)]);
         session.send("x <- 20\r");
         // An arrow key pressed ahead of the prompt is dropped whole, not kept as `[A`.
         session.send("x + 22\u{1b}[A\r");
@@ -334,6 +322,67 @@ fn lines_typed_while_the_console_starts_run_once_it_prompts() {
         session.expect("[1] 10");
         session.quit();
     }
+}
+
+#[test]
+fn typed_ahead_lines_reach_commands_that_read_standard_input() {
+    for runtime in runtimes() {
+        let package = slow_package();
+        let mut session =
+            ReplSession::start_with(Some(package.path()), &[runtime_command(runtime)]);
+        // The console takes only the first typed-ahead line, so the next is the command's input.
+        session.send("x <- readLines(file(\"stdin\"), n = 1)\r");
+        session.send("typed ahead\r");
+        session.expect("Loaded slowpkg");
+        session.settle(Duration::from_millis(1000));
+        session.send("cat(\"read:\", x, \"\\n\")\r");
+        session.expect("read: typed ahead");
+        // A `system()` child reads the same descriptor.
+        session.send("Sys.sleep(1)\r");
+        session.settle(Duration::from_millis(300));
+        session.send("system(\"head -n 1 | tr a-z A-Z\")\r");
+        session.send("for the child\r");
+        session.expect("FOR THE CHILD");
+        session.quit();
+    }
+}
+
+#[test]
+fn ctrl_c_discards_the_lines_queued_behind_a_command() {
+    for runtime in runtimes() {
+        let mut session = ReplSession::start_with(None, &[runtime_command(runtime)]);
+        session.expect_prompt();
+        // One write, so the editor reads both lines at once and the console queues the second.
+        session.send("Sys.sleep(60)\rcat(\"queued\", 1, \"\\n\")\r");
+        session.settle(Duration::from_millis(1500));
+        session.send("\u{3}");
+        session.send("cat(\"after\", 2, \"\\n\")\r");
+        session.expect("after 2");
+        assert!(
+            !session.seen.contains("queued 1"),
+            "{runtime}: the queued line ran after Ctrl-C:\n{}",
+            session.seen
+        );
+        session.quit();
+    }
+}
+
+/// A package whose load sleeps, which holds the console back from its first prompt while the
+/// test types ahead.
+fn slow_package() -> tempfile::TempDir {
+    let package = tempfile::tempdir().expect("temp dir");
+    fs::create_dir_all(package.path().join("R")).expect("create package");
+    fs::write(
+        package.path().join("DESCRIPTION"),
+        "Package: slowpkg\nVersion: 1.0\n",
+    )
+    .expect("write");
+    fs::write(
+        package.path().join("R/a.R"),
+        "Sys.sleep(1.5)\ngreet <- function() \"hello from slowpkg\"\n",
+    )
+    .expect("write");
+    package
 }
 
 #[test]

@@ -442,9 +442,15 @@ unsafe fn scalar_position(call: &Call<'_>) -> Option<(Sexp, usize)> {
         SexpType::Real => index.slice::<f64>()[0],
         _ => return None,
     };
-    // NaN fails both comparisons, and `x[2.7]` truncates to the second element.
-    (position >= 1.0 && position < length(object) as f64 + 1.0)
-        .then(|| (object, position as usize - 1))
+    // NaN fails both comparisons, and `x[2.7]` truncates to the second element. An Array
+    // rejects a position past its last item before truncating, which its own path reports.
+    let count = length(object) as f64;
+    let within = if object.is_array() {
+        position <= count
+    } else {
+        position < count + 1.0
+    };
+    (position >= 1.0 && within).then(|| (object, position as usize - 1))
 }
 
 /// Splits a builtin's arguments into the object, the subscripts, and `drop`/`exact`.
@@ -476,8 +482,10 @@ unsafe fn subset_args(call: &Call<'_>) -> (Sexp, SmallVec<[Sexp; 2]>, Option<Sex
 // `[`.
 
 unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
+    // `[` on an Array makes an Array, which `subset` builds.
     if let Some((object, position)) = scalar_position(call)
         && !values::has_attributes(object)
+        && !object.is_array()
         && object.kind().is_atomic()
     {
         return vector_element(object, position);
@@ -820,6 +828,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         return Err(crate::unwind::error_in(call, "missing subscript"));
     }
     if object.kind() == SexpType::Environment {
+        crate::moves::reaching_environment()?;
         let index = indices[0];
         if index.kind() != SexpType::String || length(index) != 1 {
             return Err(crate::unwind::error_in(
@@ -1056,6 +1065,7 @@ pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
             dollar(list, name, call)
         }
         SexpType::Environment => {
+            crate::moves::reaching_environment()?;
             let symbol = crate::heap().install_char(name)?;
             let value = eval::find_var_in_frame(symbol, object)?;
             if value == unbound() {
@@ -1639,6 +1649,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         return Ok(object);
     }
     if object.kind() == SexpType::Environment {
+        crate::moves::reaching_environment()?;
         let index = indices.first().copied().unwrap_or(nil());
         if index.kind() != SexpType::String || length(index) != 1 {
             return Err(crate::unwind::error_in(
@@ -1774,6 +1785,7 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
     let object = values::materialize(object)?;
     match object.kind() {
         SexpType::Environment => {
+            crate::moves::reaching_environment()?;
             let symbol = crate::heap().install_char(name)?;
             eval::define(symbol, value, object)?;
             Ok(object)
@@ -1781,6 +1793,7 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
         SexpType::Object if object.has_gp(gp::S4_OBJECT) => {
             let data = get_attr(object, symbols().dot_xdata);
             if data.kind() == SexpType::Environment {
+                crate::moves::reaching_environment()?;
                 let symbol = crate::heap().install_char(name)?;
                 eval::define(symbol, value, data)?;
                 return Ok(object);

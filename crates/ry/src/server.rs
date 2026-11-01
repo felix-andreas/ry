@@ -39,7 +39,10 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics, warm_project_folds},
+        diagnostics::{
+            Applicability, Diagnostic, Severity, applicable_fixes, parse_stage_diagnostics,
+            warm_project_folds,
+        },
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -447,6 +450,15 @@ struct Worker {
     /// Files whose `library()` scan a cancellation interrupted. The edit that cancelled it may
     /// be to another file, so nothing else would rescan this one: idle time owes it.
     pending_attached_scans: BTreeSet<PathBuf>,
+    /// The fix-bearing findings of each open document's last settled publish, with the text they
+    /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
+    /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
+    published_fixes: HashMap<SourceFile, PublishedFixes>,
+}
+
+struct PublishedFixes {
+    text: String,
+    diagnostics: Vec<Diagnostic>,
 }
 
 struct WorkspaceMetadata {
@@ -558,6 +570,7 @@ impl Worker {
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
+            published_fixes: HashMap::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
         // durable as its least durable input, and nearly every memo reads the stubs or the
@@ -1111,6 +1124,46 @@ impl Worker {
         self.to_range(&text, range)
     }
 
+    fn convert_hierarchy_item(
+        &self,
+        item: ide::CallHierarchyItem,
+    ) -> Option<lsp_types::CallHierarchyItem> {
+        let path = self.path_of(item.file)?;
+        Some(lsp_types::CallHierarchyItem {
+            name: item.name,
+            kind: if item.is_function {
+                lsp_types::SymbolKind::FUNCTION
+            } else {
+                lsp_types::SymbolKind::VARIABLE
+            },
+            tags: None,
+            detail: item.detail,
+            uri: self.document_uri(path),
+            range: self.to_range_in(item.file, item.range),
+            selection_range: self.to_range_in(item.file, item.selection),
+            data: None,
+        })
+    }
+
+    /// The client hands back an item from an earlier answer, and the function is found again at
+    /// its name.
+    fn resolve_hierarchy_item(
+        &mut self,
+        item: &lsp_types::CallHierarchyItem,
+    ) -> Option<ide::CallHierarchyItem> {
+        // Only a function re-resolves from its name. A caller shown as a top-level statement
+        // starts at whatever that statement calls first, which would name a different function.
+        if item.kind != lsp_types::SymbolKind::FUNCTION {
+            return None;
+        }
+        let (file, text) = self.document(&item.uri)?;
+        let offset = self.to_offset(&text, item.selection_range.start);
+        let files = ProjectFiles::get(&self.db);
+        self.cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
+            .ok()
+            .flatten()
+    }
+
     fn path_of(&self, file: SourceFile) -> Option<&PathBuf> {
         self.files
             .iter()
@@ -1371,6 +1424,9 @@ impl Worker {
             return;
         }
         self.open_documents.remove(&path);
+        if let Some(file) = self.files.get(&path) {
+            self.published_fixes.remove(file);
+        }
         self.pending_semantic_publishes.retain(|owed| owed != &path);
         self.pending_lowering.retain(|owed| owed != &path);
 
@@ -1638,8 +1694,40 @@ impl Worker {
     fn settled_diagnostics(&mut self, path: &Path) -> Option<Vec<lsp_types::Diagnostic>> {
         let &file = self.files.get(path)?;
         let config = self.config.clone();
-        let rendered = document_diagnostics(&self.db, file, &config);
-        Some(self.finish_diagnostics(file, rendered))
+        let text = self.text(file);
+        let published = apply_suppressions(document_diagnostics(&self.db, file, &config), &text);
+        let fixable = published
+            .iter()
+            .filter(|diagnostic| diagnostic.fix.is_some())
+            .cloned()
+            .collect();
+        let converted = published
+            .into_iter()
+            .map(|diagnostic| self.convert_diagnostic(&text, diagnostic))
+            .collect();
+        self.published_fixes.insert(
+            file,
+            PublishedFixes {
+                text,
+                diagnostics: fixable,
+            },
+        );
+        Some(converted)
+    }
+
+    /// The settled findings that carry a fix, from the last publish while the text still matches
+    /// it, and derived afresh otherwise. Suppressions apply first, so a suppressed finding
+    /// offers nothing.
+    fn fixable_diagnostics(&self, file: SourceFile, text: &str) -> Vec<Diagnostic> {
+        if let Some(published) = self.published_fixes.get(&file)
+            && published.text == text
+        {
+            return published.diagnostics.clone();
+        }
+        apply_suppressions(document_diagnostics(&self.db, file, &self.config), text)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.fix.is_some())
+            .collect()
     }
 
     fn finish_diagnostics(
@@ -1870,7 +1958,10 @@ fn initialize_result(
             }),
             code_action_provider: Some(lsp_types::CodeActionProviderCapability::Options(
                 lsp_types::CodeActionOptions {
-                    code_action_kinds: Some(vec![lsp_types::CodeActionKind::QUICKFIX]),
+                    code_action_kinds: Some(vec![
+                        lsp_types::CodeActionKind::QUICKFIX,
+                        lsp_types::CodeActionKind::SOURCE_FIX_ALL,
+                    ]),
                     ..Default::default()
                 },
             )),
@@ -1904,6 +1995,7 @@ fn initialize_result(
             }),
             references_provider: Some(lsp_types::OneOf::Left(true)),
             document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+            call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
             folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
             selection_range_provider: Some(lsp_types::SelectionRangeProviderCapability::Simple(
                 true,
@@ -1926,7 +2018,9 @@ fn initialize_result(
                                 lsp_types::SemanticTokenType::FUNCTION,
                                 lsp_types::SemanticTokenType::NAMESPACE,
                             ],
-                            token_modifiers: Vec::new(),
+                            token_modifiers: vec![
+                                lsp_types::SemanticTokenModifier::DEFAULT_LIBRARY,
+                            ],
                         },
                         full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
                         range: Some(true),
@@ -2137,6 +2231,89 @@ impl LanguageServer for ServerState {
         })
     }
 
+    fn prepare_call_hierarchy(
+        &mut self,
+        params: lsp_types::CallHierarchyPrepareParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyItem>>, Self::Error>> {
+        self.read(move |worker| {
+            let Some((file, _, offset)) = worker.document_at(&params.text_document_position_params)
+            else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let item = worker
+                .cancellable(|worker| ide::call_hierarchy_item(&worker.db, files, file, offset))
+                .unwrap_or_default();
+            Ok(item
+                .and_then(|item| worker.convert_hierarchy_item(item))
+                .map(|item| vec![item]))
+        })
+    }
+
+    fn incoming_calls(
+        &mut self,
+        params: lsp_types::CallHierarchyIncomingCallsParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyIncomingCall>>, Self::Error>>
+    {
+        self.read(move |worker| {
+            let Some(item) = worker.resolve_hierarchy_item(&params.item) else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let calls = worker
+                .cancellable(|worker| ide::incoming_calls(&worker.db, files, &item))
+                .unwrap_or_default();
+            Ok(Some(
+                calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let from_ranges = call
+                            .ranges
+                            .iter()
+                            .map(|range| worker.to_range_in(call.item.file, *range))
+                            .collect();
+                        Some(lsp_types::CallHierarchyIncomingCall {
+                            from: worker.convert_hierarchy_item(call.item)?,
+                            from_ranges,
+                        })
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
+    fn outgoing_calls(
+        &mut self,
+        params: lsp_types::CallHierarchyOutgoingCallsParams,
+    ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::CallHierarchyOutgoingCall>>, Self::Error>>
+    {
+        self.read(move |worker| {
+            let Some(item) = worker.resolve_hierarchy_item(&params.item) else {
+                return Ok(None);
+            };
+            let files = ProjectFiles::get(&worker.db);
+            let calls = worker
+                .cancellable(|worker| ide::outgoing_calls(&worker.db, files, &item))
+                .unwrap_or_default();
+            Ok(Some(
+                calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let from_ranges = call
+                            .ranges
+                            .iter()
+                            .map(|range| worker.to_range_in(item.file, *range))
+                            .collect();
+                        Some(lsp_types::CallHierarchyOutgoingCall {
+                            to: worker.convert_hierarchy_item(call.item)?,
+                            from_ranges,
+                        })
+                    })
+                    .collect(),
+            ))
+        })
+    }
+
     fn document_highlight(
         &mut self,
         params: lsp_types::DocumentHighlightParams,
@@ -2268,7 +2445,10 @@ impl LanguageServer for ServerState {
                     .map(|hint| lsp_types::InlayHint {
                         position: worker.to_position(&text, hint.offset),
                         label: lsp_types::InlayHintLabel::String(hint.label),
-                        kind: Some(lsp_types::InlayHintKind::TYPE),
+                        kind: Some(match hint.kind {
+                            ide::InlayHintKind::Type => lsp_types::InlayHintKind::TYPE,
+                            ide::InlayHintKind::Parameter => lsp_types::InlayHintKind::PARAMETER,
+                        }),
                         text_edits: None,
                         tooltip: None,
                         padding_left: Some(false),
@@ -2324,16 +2504,35 @@ impl LanguageServer for ServerState {
             };
             let text = worker.text(file);
             let range = worker.to_text_range(&text, params.range);
-            // Fixes come from the findings the server publishes, after suppressions, so a
-            // suppressed finding offers nothing.
+            // An editor that asks only for the fix-all action (on save, typically) gets nothing
+            // else, and one that asks only for quick fixes never gets it.
+            let only = params.context.only.as_deref();
+            let wants = |kind: &lsp_types::CodeActionKind| {
+                only.is_none_or(|kinds| {
+                    kinds
+                        .iter()
+                        .any(|asked| kind.as_str().starts_with(asked.as_str()))
+                })
+            };
+            let wants_quick_fixes = wants(&lsp_types::CodeActionKind::QUICKFIX);
+            let wants_fix_all = wants(&lsp_types::CodeActionKind::SOURCE_FIX_ALL);
             let actions = worker
                 .cancellable(|worker| {
-                    let published = apply_suppressions(
-                        document_diagnostics(&worker.db, file, &worker.config),
-                        &text,
-                    );
-                    let mut actions = ide::diagnostic_fixes(&published, range);
-                    actions.extend(ide::code_actions(&worker.db, file, range));
+                    let fixable = worker.fixable_diagnostics(file, &text);
+                    let mut actions = Vec::new();
+                    if wants_quick_fixes {
+                        actions.extend(ide::diagnostic_fixes(&fixable, range));
+                        actions.extend(ide::code_actions(&worker.db, file, range));
+                    }
+                    // Listed beside the quick fixes only when it does more than one of them.
+                    let worth_listing =
+                        only.is_some() || applicable_fixes(&fixable, false).len() > 1;
+                    if wants_fix_all
+                        && worth_listing
+                        && let Some(action) = ide::fix_all(&fixable)
+                    {
+                        actions.push(action);
+                    }
                     actions
                 })
                 .unwrap_or_default();
@@ -2353,12 +2552,20 @@ impl LanguageServer for ServerState {
                                 new_text: edit.replacement,
                             })
                             .collect();
-                        // A diagnostic's own fix is what an editor's "fix" shortcut applies.
-                        let is_preferred =
-                            (action.kind == ide::CodeActionKind::DiagnosticFix).then_some(true);
+                        // An editor's "fix" shortcut applies the preferred action unseen, so only
+                        // a fix that keeps the code's meaning may be preferred.
+                        let is_preferred = (action.kind
+                            == ide::CodeActionKind::DiagnosticFix(Applicability::Safe))
+                        .then_some(true);
+                        let kind = match action.kind {
+                            ide::CodeActionKind::FixAll => {
+                                lsp_types::CodeActionKind::SOURCE_FIX_ALL
+                            }
+                            _ => lsp_types::CodeActionKind::QUICKFIX,
+                        };
                         lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
                             title: action.title,
-                            kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                            kind: Some(kind),
                             is_preferred,
                             edit: Some(lsp_types::WorkspaceEdit {
                                 changes: Some(HashMap::from([(uri.clone(), edits)])),
@@ -2916,14 +3123,13 @@ fn ry_semantic_tokens(
                 range.start() < viewport.end() && viewport.start() < range.end()
             })
         })
-        .map(|(range, class)| (range, semantic_class_index(class)))
         .collect();
     delta_encode_tokens(spans, text, encoding)
 }
 
-/// The class's index in the advertised legend.
-fn semantic_class_index(class: SemanticClass) -> u32 {
-    match class {
+/// The class's token type index in the advertised legend, and its modifier bits.
+fn semantic_class_index(class: SemanticClass) -> (u32, u32) {
+    let token_type = match class {
         SemanticClass::Type => 0,
         SemanticClass::TypeParameter => 1,
         SemanticClass::Parameter => 2,
@@ -2931,16 +3137,22 @@ fn semantic_class_index(class: SemanticClass) -> u32 {
         SemanticClass::Decorator => 4,
         SemanticClass::Keyword => 5,
         SemanticClass::Tag => 6,
-        SemanticClass::Function => 7,
+        SemanticClass::Function | SemanticClass::LibraryFunction => 7,
         SemanticClass::Namespace => 8,
-    }
+    };
+    // Bit 0 is `defaultLibrary`, the only advertised modifier.
+    let modifiers = match class {
+        SemanticClass::LibraryFunction => 1,
+        _ => 0,
+    };
+    (token_type, modifiers)
 }
 
 /// Each declaration's type half runs through the annotation grammar, offset back
 /// into the buffer.
 fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types::SemanticToken> {
     let index = LineIndex::new(text);
-    let mut spans: Vec<(TextRange, u32)> = Vec::new();
+    let mut spans: Vec<(TextRange, SemanticClass)> = Vec::new();
     for (line_number, raw_line) in text.lines().enumerate() {
         let line_start = index.line_start(line_number as u32) as usize;
         let content = match raw_line.find('#') {
@@ -2953,7 +3165,10 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
         if trimmed.is_empty() {
             continue;
         }
-        let push = |spans: &mut Vec<(TextRange, u32)>, start: usize, len: usize, class: u32| {
+        let push = |spans: &mut Vec<(TextRange, SemanticClass)>,
+                    start: usize,
+                    len: usize,
+                    class: SemanticClass| {
             let absolute = (line_start + start) as u32;
             spans.push((
                 TextRange::new(absolute.into(), (absolute + len as u32).into()),
@@ -2961,11 +3176,11 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             ));
         };
         if let Some(rest) = trimmed.strip_prefix("@type") {
-            push(&mut spans, indent, "@type".len(), 4);
+            push(&mut spans, indent, "@type".len(), SemanticClass::Decorator);
             let name = rest.trim_start();
             if !name.is_empty() {
                 let name_start = indent + trimmed.len() - name.len();
-                push(&mut spans, name_start, name.len(), 0);
+                push(&mut spans, name_start, name.len(), SemanticClass::Type);
             }
             continue;
         }
@@ -2978,7 +3193,12 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
         type_offset += leading;
         type_text = type_text.trim_start();
         if let Some(rest) = type_text.strip_prefix("@masked") {
-            push(&mut spans, type_offset, "@masked".len(), 4);
+            push(
+                &mut spans,
+                type_offset,
+                "@masked".len(),
+                SemanticClass::Decorator,
+            );
             let after = rest.trim_start();
             type_offset += type_text.len() - after.len();
             type_text = after;
@@ -2996,7 +3216,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             if u32::from(range.start()) < 3 || range.is_empty() {
                 continue;
             }
-            if let Some(class) = classify_type_token(&token).map(semantic_class_index) {
+            if let Some(class) = classify_type_token(&token) {
                 let start = usize::from(range.start()) - 3;
                 let length = usize::from(range.len());
                 if start + length <= type_text.len() + 1 {
@@ -3009,7 +3229,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
 }
 
 fn delta_encode_tokens(
-    mut spans: Vec<(TextRange, u32)>,
+    mut spans: Vec<(TextRange, SemanticClass)>,
     text: &str,
     encoding: PositionEncoding,
 ) -> Vec<lsp_types::SemanticToken> {
@@ -3018,7 +3238,8 @@ fn delta_encode_tokens(
     let mut data = Vec::new();
     let mut previous_line = 0u32;
     let mut previous_start = 0u32;
-    for (range, token_type) in spans {
+    for (range, class) in spans {
+        let (token_type, token_modifiers_bitset) = semantic_class_index(class);
         let position = match encoding {
             PositionEncoding::Utf8 => index.line_column(range.start()),
             PositionEncoding::Utf16 => index.line_column_utf16(range.start(), text),
@@ -3040,7 +3261,7 @@ fn delta_encode_tokens(
             delta_start,
             length,
             token_type,
-            token_modifiers_bitset: 0,
+            token_modifiers_bitset,
         });
         previous_line = position.line;
         previous_start = position.column;
