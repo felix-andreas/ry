@@ -45,7 +45,7 @@ rowan = "0.16.1"
 boxcar = "0.2.14"
 hashbrown = { version = "0.17", default-features = false }
 # Pinned: salsa breaks its API between minor releases, so upgrade on purpose.
-salsa = "=0.28.0"
+salsa = "=0.28.5"
 
 async-lsp = { version = "0.2.2", features = ["tokio"] }
 tower = { version = "0.5.2" }

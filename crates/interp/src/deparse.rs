@@ -270,6 +270,11 @@ impl Deparser {
             self.depth -= 1;
             return;
         }
+        if object.is_array() {
+            self.array(object);
+            self.depth -= 1;
+            return;
+        }
         if object.has_gp(gp::S4_OBJECT)
             && let Some(parts) = s4_parts(object)
         {
@@ -767,6 +772,51 @@ impl Deparser {
         self.print(")");
     }
 
+    /// An Array as its literal, `[1, 2, 3]`, which is the code that rebuilds it.
+    unsafe fn array(&mut self, object: Sexp) {
+        let count = values::length(object);
+        // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
+        if count == 0 {
+            match object.kind() {
+                SexpType::Integer => return self.print("as.Array(integer(0))"),
+                SexpType::Real => return self.print("as.Array(numeric(0))"),
+                SexpType::String => return self.print("as.Array(character(0))"),
+                SexpType::List => return self.print("as.Array(list())"),
+                _ => {}
+            }
+        }
+        self.print("[");
+        self.in_list += 1;
+        let mut broken = false;
+        for index in 0..count {
+            let item = match object.kind() {
+                SexpType::Logical => values::scalar_logical(values::ints(object)[index]),
+                SexpType::Integer => values::scalar_integer(values::ints(object)[index]),
+                SexpType::Real => values::scalar_real(values::reals(object)[index]),
+                SexpType::String => {
+                    values::scalar_string_charsxp(values::string_elt(object, index))
+                }
+                _ => Ok(values::list_elt(object, index)),
+            };
+            // The deparser cannot fail, and boxing one item fails only on an exhausted heap.
+            match item {
+                Ok(value) => self.deparse(value),
+                Err(failure) => {
+                    panic!("an Array item could not be boxed for deparsing: {failure:?}")
+                }
+            }
+            if index + 1 < count {
+                self.print(", ");
+                self.line_break(&mut broken);
+            }
+        }
+        if broken {
+            self.indent -= 1;
+        }
+        self.in_list -= 1;
+        self.print("]");
+    }
+
     /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
     /// `Set.empty()`.
     unsafe fn collection(&mut self, object: Sexp, dict: bool) {
@@ -822,6 +872,13 @@ impl Deparser {
                     self.print(",");
                 }
                 self.print(")");
+            }
+            RyForm::Array => {
+                self.print("[");
+                self.in_list += 1;
+                self.arguments(arguments, false);
+                self.in_list -= 1;
+                self.print("]");
             }
             RyForm::Tag => {
                 self.print(":");
@@ -1452,6 +1509,7 @@ unsafe fn has_shown_attributes(object: Sexp) -> bool {
 /// The calls ry's own syntax lowers to.
 #[derive(Clone, Copy)]
 enum RyForm {
+    Array,
     Record,
     Tuple,
     Tag,
@@ -1466,6 +1524,7 @@ unsafe fn ry_form(name: &[u8], arguments: Sexp) -> Option<RyForm> {
     match name {
         b".ry_record" if !items.is_empty() && named == items.len() => Some(RyForm::Record),
         b".ry_tuple" if named == 0 => Some(RyForm::Tuple),
+        b".ry_array" if named == 0 => Some(RyForm::Array),
         b".ry_tag" => {
             let (first_tag, first) = items.first()?;
             (*first_tag == nil() && first.kind() == SexpType::String && length(*first) == 1)

@@ -275,16 +275,20 @@ pub enum Constraint {
     /// runtime's collections use.
     Key,
     ScalarNumeric,
+    /// What an Array can hold: a `logical`, `integer`, `double` or `character` scalar, or a ry
+    /// value (a record, tuple, tag, Array, `Dict` or `Set`).
+    ArrayItem,
 }
 
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 4] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 5] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
+        ("item", Constraint::ArrayItem),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -308,7 +312,9 @@ impl Constraint {
             (a, b) if a == b => a,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
             (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
-            (Key, AtomicElement) | (AtomicElement, Key) => Key,
+            (Key, AtomicElement | ArrayItem) | (AtomicElement | ArrayItem, Key) => Key,
+            (ArrayItem, AtomicElement) | (AtomicElement, ArrayItem) => Key,
+            (ArrayItem, Numeric) | (Numeric, ArrayItem) => ScalarNumeric,
             _ => unreachable!("all constraint pairs are covered"),
         }
     }
@@ -355,6 +361,53 @@ pub fn null(db: &dyn Db) -> Ty<'_> {
 
 pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
+}
+
+/// `Array<element>`, ry's strict typed vector.
+pub fn array<'db>(db: &'db dyn Db, element: Ty<'db>) -> Ty<'db> {
+    Ty::new(db, TyKind::Named(Name::new(db, "Array"), vec![element]))
+}
+
+/// The item type of the standard library's `Array<T>`, and `None` for any other type, including a
+/// project's own type that happens to be called `Array`.
+pub fn array_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    match ty.kind(db) {
+        TyKind::Named(name, arguments)
+            if arguments.len() == 1
+                && name.text(db) == "Array"
+                && crate::stubs::is_ry_type(db, "Array") =>
+        {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+/// Whether every value of `ty` is a tag, so that two such types join into one tag union.
+pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Tag(..) | TyKind::OtherTags => true,
+        TyKind::Union(members) => members.iter().all(|&member| is_tag_type(db, member)),
+        _ => false,
+    }
+}
+
+/// Whether every value of `ty` is one of ry's own values (a record, tuple, tag, or a standard
+/// library collection), which an Array stores boxed in a list rather than unboxed.
+pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::NativeRecord(_) | TyKind::NativeTuple(_) | TyKind::Tag(..) | TyKind::OtherTags => {
+            true
+        }
+        TyKind::Named(name, _) => {
+            matches!(name.text(db), "Array" | "Dict" | "Set")
+                && crate::stubs::is_ry_type(db, name.text(db))
+        }
+        TyKind::Union(members) => {
+            !members.is_empty() && members.iter().all(|&member| is_ry_value_type(db, member))
+        }
+        _ => false,
+    }
 }
 
 /// Sorts by name in byte order, the one order a record's fields are stored and printed in.
@@ -414,7 +467,13 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     match ty.kind(db) {
         TyKind::Scalar(_) => Ty::new(db, TyKind::Vector(ty)),
         TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
-        _ => ty,
+        // A frame stores an Array column as the plain R vector underneath it.
+        _ => match array_element(db, ty) {
+            Some(element) if matches!(element.kind(db), TyKind::Scalar(_)) => {
+                Ty::new(db, TyKind::Vector(element))
+            }
+            _ => ty,
+        },
     }
 }
 

@@ -661,6 +661,7 @@ pub fn mode_type(mode: &str) -> Option<SexpType> {
 
 /// `as.vector(x, mode)`: converts and drops attributes, except a list's names.
 pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
+    let object = values::plain(object)?;
     if mode == "any" {
         if object.kind().is_atomic() && values::has_attributes(object) {
             let copy = values::shallow_duplicate(object)?;
@@ -876,7 +877,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 ];
 
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
-    let object = call.arg(0);
+    let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
         return Ok(object);
     }
