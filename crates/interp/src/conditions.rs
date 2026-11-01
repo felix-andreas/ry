@@ -448,7 +448,7 @@ pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
             call,
         }));
     }
-    if level == 1 {
+    if level == 1 || interp().immediate_warning {
         write_console(immediate_warning_text(call, message).as_bytes(), true);
         return Ok(());
     }
@@ -703,14 +703,10 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     } else {
         String::new()
     };
-    if immediate {
-        write_console(
-            immediate_warning_text(condition_call, &message).as_bytes(),
-            true,
-        );
-    } else {
-        warning_call(condition_call, message.clone())?;
-    }
+    let outer = std::mem::replace(&mut interp().immediate_warning, immediate);
+    let signalled = warning_call(condition_call, message.clone());
+    interp().immediate_warning = outer;
+    signalled?;
     scalar_string(&message)
 }
 

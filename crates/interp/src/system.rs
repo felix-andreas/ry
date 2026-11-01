@@ -1,6 +1,7 @@
 //! The operating system as R sees it: environment variables, files and directories, time and
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
+use crate::http::FetchError;
 use crate::{
     builtins::{BuiltinDef, Call, builtin, internal, special},
     interp,
@@ -78,12 +79,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Err(call.error("file.choose() needs an interactive session"))
     }),
     internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
-    internal("curlGetHeaders", 5, |call| unsafe {
-        Err(call.error("libcurl is not available in this session"))
-    }),
-    internal("curlDownload", 6, |call| unsafe {
-        Err(call.error("libcurl is not available in this session"))
-    }),
+    internal("curlGetHeaders", 5, do_curl_get_headers),
+    internal("curlDownload", 6, do_curl_download),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
     internal("R.home", 0, |_| unsafe { scalar_string(&r_home()) }),
     internal("Sys.getenv", 2, do_sys_getenv),
@@ -2386,11 +2383,140 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
         "long.double",
         "libcurl",
     ];
-    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0];
+    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1];
     let result = values::logical_vector(&flags)?;
     let names = string_vector(&names)?;
     values::set_attr(result, symbols().names, names)?;
     Ok(result)
+}
+
+/// `curlDownload(url, destfile, quiet, mode, cacheOK, headers)`: fetches each URL into its
+/// destination file. A single URL reports its progress the way GNU R's libcurl method does and
+/// errors when the transfer fails; several URLs only announce themselves and warn per failure.
+unsafe fn do_curl_download(call: &Call<'_>) -> R<Sexp> {
+    let urls = call.arg(0);
+    let destinations = call.arg(1);
+    let quiet = values::as_logical_scalar(call.arg(2)) == 1;
+    let headers = crate::connections::header_lines(call.arg(5));
+    let count = length(urls);
+    if count == 0 {
+        return Err(call.error("no URL supplied"));
+    }
+    if length(destinations) != count {
+        return Err(call.error("lengths of 'url' and 'destfile' must match"));
+    }
+    let mut failed = 0;
+    for index in 0..count {
+        let (Some(url), Some(destination)) = (
+            values::string_at(urls, index),
+            values::string_at(destinations, index),
+        ) else {
+            return Err(call.error("invalid 'url' argument"));
+        };
+        if !quiet {
+            crate::write_console(format!("trying URL '{url}'\n").as_bytes(), true);
+        }
+        let fetched = match crate::http::fetch(&url, &headers) {
+            Ok(fetched) => fetched,
+            Err(failure) => {
+                let message = match failure {
+                    FetchError::Status(status) => format!(
+                        "cannot open URL '{url}': HTTP status was '{}'",
+                        crate::http::status_text(status)
+                    ),
+                    FetchError::Transport { message, .. } => format!(
+                        "URL '{}': status was '{message}'",
+                        crate::http::normalized(&url)
+                    ),
+                };
+                crate::conditions::warning(message)?;
+                if count == 1 {
+                    return Err(call.error(format!("cannot open URL '{url}'")));
+                }
+                failed += 1;
+                continue;
+            }
+        };
+        let path = crate::connections::expand_path(&destination);
+        std::fs::write(&path, &fetched.body).map_err(|failure| {
+            call.error(format!(
+                "cannot open destfile '{destination}', reason '{failure}'"
+            ))
+        })?;
+        if !quiet && count == 1 {
+            let size = fetched.body.len() as u64;
+            let length = match fetched.content_length {
+                Some(length) => {
+                    let scaled = transfer_size(length);
+                    if scaled.ends_with("bytes") {
+                        format!("length {scaled}")
+                    } else {
+                        format!("length {length} bytes ({scaled})")
+                    }
+                }
+                None => "length unknown".to_owned(),
+            };
+            let report = format!(
+                "Content type '{}' {length}\n{}\ndownloaded {}\n\n",
+                fetched.content_type.as_deref().unwrap_or("unknown"),
+                "=".repeat(50),
+                transfer_size(size)
+            );
+            crate::write_console(report.as_bytes(), true);
+        }
+    }
+    if failed > 0 {
+        crate::conditions::warning("some files were not downloaded")?;
+    }
+    scalar_integer(0)
+}
+
+/// A transfer size the way GNU R's download progress prints it.
+fn transfer_size(bytes: u64) -> String {
+    if bytes > 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes > 10 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// `curlGetHeaders(url, redirect, verify, timeout, TLS)`: the response header lines, with the
+/// final HTTP status as attribute `status`.
+unsafe fn do_curl_get_headers(call: &Call<'_>) -> R<Sexp> {
+    let url = values::require_string(call.arg(0), "url")?;
+    let follow = values::as_logical_scalar(call.arg(1)) != 0;
+    let seconds = values::as_real_scalar(call.arg(3));
+    let timeout =
+        (seconds > 0.0 && seconds.is_finite()).then(|| std::time::Duration::from_secs_f64(seconds));
+    match crate::http::header_lines(&url, follow, timeout) {
+        Ok((lines, status)) => {
+            let result = string_vector(&lines)?;
+            values::set_attr(
+                result,
+                values::install("status")?,
+                scalar_integer(i32::from(status))?,
+            )?;
+            Ok(result)
+        }
+        Err(FetchError::Status(status)) => Err(call.error(format!(
+            "libcurl error code 22:\n\tThe requested URL returned error: {}\n",
+            status.as_u16()
+        ))),
+        Err(FetchError::Transport { code, detail, .. }) => {
+            let detail = if code == 6 {
+                let host = reqwest::Url::parse(&url)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(str::to_owned))
+                    .unwrap_or_default();
+                format!("Could not resolve host: {host}")
+            } else {
+                detail
+            };
+            Err(call.error(format!("libcurl error code {code}:\n\t{detail}\n")))
+        }
+    }
 }
 
 unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {

@@ -19,6 +19,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
+    http::{self, FetchError},
     interp,
     unwind::{R, Unwind, error},
     values::{self, nil, scalar_bool, scalar_integer, symbols},
@@ -52,9 +53,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         compressed_file(call, Compressed::Xz)
     }),
     internal("fifo", 4, |_| Err(unsupported("fifo"))),
-    internal("url", 6, |_| {
-        Err(error("ry does not support URL connections yet"))
-    }),
+    internal("url", 6, do_url),
     internal("pipe", 3, do_pipe),
     internal("rawConnection", 3, do_raw_connection),
     internal("unz", 3, do_unz),
@@ -320,6 +319,11 @@ pub unsafe fn resolve(object: Sexp, not_connection: &str) -> R<(usize, Rconnecti
     if !values::inherits(object, "connection") {
         return Err(error(not_connection));
     }
+    resolve_number(object)
+}
+
+/// The connection numbered by `object`, which need not carry the `connection` class.
+unsafe fn resolve_number(object: Sexp) -> R<(usize, Rconnection)> {
     let invalid = || error("invalid connection");
     let slot = match object.kind() {
         SexpType::Integer if object.length() >= 1 => {
@@ -585,8 +589,11 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let text_encoding = values::first_string(call.arg(3))
         .map(|name| name.into_owned())
         .filter(|name| !name.is_empty() && name != "native.enc");
-    if description.contains("://") {
-        return Err(error("ry does not support URL connections yet"));
+    if ["http://", "https://", "ftp://", "ftps://"]
+        .iter()
+        .any(|scheme| description.starts_with(scheme))
+    {
+        return url_connection(&description, &open, Vec::new());
     }
     // A device or pipe is read as is, never sniffed for compression; GNU R says so for every
     // special file except `/dev/null`.
@@ -739,13 +746,65 @@ unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
     let Some((archive, member)) = description.rsplit_once(':') else {
         return Err(error("invalid 'description' argument"));
     };
-    let device = Device::Zip(ZipDevice {
-        archive: PathBuf::from(expand_path(archive)),
-        member: member.to_owned(),
+    let device = Device::Loaded(LoadedDevice {
+        source: LoadSource::ZipMember {
+            archive: PathBuf::from(expand_path(archive)),
+            member: member.to_owned(),
+        },
         data: Vec::new(),
         position: 0,
     });
-    new_builtin("unz", description.as_bytes(), &open, "r", device, |_| {})
+    new_builtin("unz", description.as_bytes(), &open, "r", device, |con| {
+        (*con).canwrite = 0;
+    })
+}
+
+/// `url(description, open, blocking, encoding, method, headers)`. A `file://` URL reads the
+/// file; any other URL is fetched whole when the connection opens.
+unsafe fn do_url(call: &Call<'_>) -> R<Sexp> {
+    let description = values::require_string(call.arg(0), "description")?;
+    let open = values::require_string(call.arg(1), "open")?;
+    let headers = header_lines(call.arg(5));
+    url_connection(&description, &open, headers)
+}
+
+/// A connection reading `url`, with class `file` for a `file://` URL and `url-libcurl`
+/// otherwise, as GNU R names them.
+unsafe fn url_connection(url: &str, open: &str, headers: Vec<String>) -> R<Sexp> {
+    let (class, source) = match url.strip_prefix("file://") {
+        Some(path) => ("file", LoadSource::File(PathBuf::from(expand_path(path)))),
+        None => (
+            "url-libcurl",
+            LoadSource::Url {
+                url: url.to_owned(),
+                headers,
+            },
+        ),
+    };
+    let device = Device::Loaded(LoadedDevice {
+        source,
+        data: Vec::new(),
+        position: 0,
+    });
+    new_builtin(class, url.as_bytes(), open, "r", device, |con| {
+        (*con).canwrite = 0;
+    })
+}
+
+/// Request header lines from `url()`'s or `download.file()`'s `headers`: NULL, or strings that
+/// each hold one or more CRLF-terminated `Name: value` lines.
+pub(crate) unsafe fn header_lines(headers: Sexp) -> Vec<String> {
+    let mut lines = Vec::new();
+    for index in 0..values::length(headers) {
+        if let Some(text) = values::string_at(headers, index) {
+            lines.extend(
+                text.split(['\r', '\n'])
+                    .filter(|line| !line.trim().is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    lines
 }
 
 /// `gzcon(con, level, allowNonCompressed, text)`: wraps `con` so that reads decompress gzip
@@ -1397,7 +1456,8 @@ unsafe fn do_flush(call: &Call<'_>) -> R<Sexp> {
 
 /// `summary.connection(object)`: description, class, mode, text, opened, can read, can write.
 unsafe fn summary(con: Sexp) -> R<Sexp> {
-    let con = resolve(con, "invalid connection")?.1;
+    // GNU R's `showConnections()` passes bare connection numbers.
+    let con = resolve_number(con)?.1;
     let yes_no = |flag: Rboolean| if flag != 0 { "yes" } else { "no" };
     let description = values::scalar_string(&description_of(con))?;
     let class = values::scalar_string(&class_of(con))?;
@@ -2063,6 +2123,12 @@ fn temporary_path() -> PathBuf {
 
 unsafe fn open_con(con: Rconnection) -> R<()> {
     if !method_open(con)? {
+        if class_of(con) == "url-libcurl" {
+            return Err(error(format!(
+                "cannot open the connection to '{}'",
+                description_of(con)
+            )));
+        }
         return Err(error("cannot open the connection"));
     }
     Ok(())
@@ -2854,7 +2920,7 @@ enum Device {
     TextInput(TextInput),
     TextOutput(TextOutput),
     Pipe(PipeDevice),
-    Zip(ZipDevice),
+    Loaded(LoadedDevice),
     Gzcon(GzconDevice),
 }
 
@@ -2964,12 +3030,17 @@ struct GzconDevice {
     position: usize,
 }
 
-/// `unz()`: a member of a zip archive, decompressed whole when the connection opens.
-struct ZipDevice {
-    archive: PathBuf,
-    member: String,
+/// `unz()` and `url()`: a body read whole when the connection opens.
+struct LoadedDevice {
+    source: LoadSource,
     data: Vec<u8>,
     position: usize,
+}
+
+enum LoadSource {
+    ZipMember { archive: PathBuf, member: String },
+    Url { url: String, headers: Vec<String> },
+    File(PathBuf),
 }
 
 struct TextInput {
@@ -3125,24 +3196,65 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             (*con).save = NO_SAVE;
             return Ok(true);
         }
-        Device::Zip(zip) => {
+        Device::Loaded(loaded) => {
             if mode.write {
-                return Err(error("can only open zip file connections for reading"));
+                return Err(error(match loaded.source {
+                    LoadSource::ZipMember { .. } => {
+                        "can only open zip file connections for reading"
+                    }
+                    LoadSource::Url { .. } | LoadSource::File(_) => {
+                        "can only open URLs for reading"
+                    }
+                }));
             }
-            let archive_name = zip.archive.to_string_lossy().into_owned();
-            let Ok(archive) = std::fs::read(&zip.archive) else {
-                crate::conditions::warning(format!("cannot open zip file '{archive_name}'"))?;
-                return Ok(false);
+            let data = match &loaded.source {
+                LoadSource::ZipMember { archive, member } => {
+                    let archive_name = archive.to_string_lossy().into_owned();
+                    let Ok(bytes) = std::fs::read(archive) else {
+                        crate::conditions::warning(format!(
+                            "cannot open zip file '{archive_name}'"
+                        ))?;
+                        return Ok(false);
+                    };
+                    let Some(data) = crate::utils::zip_member_named(&bytes, member) else {
+                        crate::conditions::warning(format!(
+                            "cannot locate file '{member}' in zip file '{archive_name}'"
+                        ))?;
+                        return Ok(false);
+                    };
+                    data
+                }
+                LoadSource::File(path) => match std::fs::read(path) {
+                    Ok(data) => data,
+                    Err(failure) => {
+                        crate::conditions::warning(format!(
+                            "cannot open file '{}': {}",
+                            path.to_string_lossy(),
+                            os_message(&failure)
+                        ))?;
+                        return Ok(false);
+                    }
+                },
+                LoadSource::Url { url, headers } => match http::fetch(url, headers) {
+                    Ok(fetched) => fetched.body,
+                    Err(FetchError::Status(status)) => {
+                        crate::conditions::warning(format!(
+                            "cannot open URL '{url}': HTTP status was '{}'",
+                            http::status_text(status)
+                        ))?;
+                        return Ok(false);
+                    }
+                    Err(FetchError::Transport { message, .. }) => {
+                        crate::conditions::warning(format!(
+                            "URL '{}': status was '{message}'",
+                            http::normalized(url)
+                        ))?;
+                        return Ok(false);
+                    }
+                },
             };
-            let Some(data) = crate::utils::zip_member_named(&archive, &zip.member) else {
-                crate::conditions::warning(format!(
-                    "cannot locate file '{}' in zip file '{archive_name}'",
-                    zip.member
-                ))?;
-                return Ok(false);
-            };
-            zip.data = data;
-            zip.position = 0;
+            loaded.data = data;
+            loaded.position = 0;
             (*con).canseek = 0;
             (*con).isopen = 1;
             (*con).canread = 1;
@@ -3390,9 +3502,9 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
             }
             Ok(())
         }
-        Device::Zip(zip) => {
-            zip.data = Vec::new();
-            zip.position = 0;
+        Device::Loaded(loaded) => {
+            loaded.data = Vec::new();
+            loaded.position = 0;
             Ok(())
         }
         Device::Gzcon(gzcon) => {
@@ -3456,7 +3568,7 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
         },
         Device::Raw(RawDevice { data, position })
         | Device::TextInput(TextInput { data, position })
-        | Device::Zip(ZipDevice { data, position, .. })
+        | Device::Loaded(LoadedDevice { data, position, .. })
         | Device::Gzcon(GzconDevice { data, position, .. }) => {
             let available = data.get(*position..).unwrap_or_default();
             let count = available.len().min(buffer.len());
@@ -3598,7 +3710,7 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             raw.position = end;
             Ok(bytes.len())
         }
-        Device::TextInput(_) | Device::Zip(_) => Err(error("cannot write to this connection")),
+        Device::TextInput(_) | Device::Loaded(_) => Err(error("cannot write to this connection")),
         Device::Gzcon(gzcon) => {
             gzcon.data.extend_from_slice(bytes);
             Ok(bytes.len())
@@ -3650,7 +3762,7 @@ unsafe fn device_seek(
 ) -> R<f64> {
     let query = position.is_nan();
     match device(con)? {
-        Device::Standard(_) | Device::Pipe(_) | Device::Zip(_) | Device::Gzcon(_) => {
+        Device::Standard(_) | Device::Pipe(_) | Device::Loaded(_) | Device::Gzcon(_) => {
             Err(missing("seek"))
         }
         Device::TextInput(_) | Device::TextOutput(_) => {

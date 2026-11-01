@@ -41,6 +41,7 @@ pub mod format;
 pub mod frame;
 pub mod graphics;
 pub mod graphics_render;
+pub mod http;
 pub mod latex;
 pub mod linalg;
 pub mod long_double;
@@ -175,6 +176,9 @@ pub struct Interp {
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
+    /// Set while `warning(immediate. = TRUE)` signals, so that the default handler prints the
+    /// warning at once instead of deferring it.
+    pub immediate_warning: bool,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
     /// Whether the default error handler prints (`R_ShowErrorMessages`).
@@ -287,6 +291,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         returned_values: Vec::new(),
         assignment_call: None,
         warnings: Vec::new(),
+        immediate_warning: false,
         error_message: String::new(),
         show_error_messages: true,
         in_error: 0,
