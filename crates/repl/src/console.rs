@@ -33,8 +33,9 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let startup = std::mem::take(&mut options.startup);
     install(options, false)?;
     install_sigint_handler();
-    // A batch run prints only what its code prints.
-    api.initialize(read_console, write_console_ex, batch)?;
+    // A batch run prints only what its code prints, and so does a console reading a pipe.
+    let quiet = batch || !stdin().is_terminal();
+    api.initialize(read_console, write_console_ex, quiet)?;
     api.register_call_routines(&routines);
     for statement in &startup {
         api.eval(statement);
@@ -50,10 +51,12 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
                 "if (isTRUE(getOption(\"width\") == 80L)) options(width = {columns}L)"
             ));
         }
-        eprintln!(
-            "ry R console, R at {}. Type q() or Ctrl-D to quit.",
-            api.r_home.display()
-        );
+        if !quiet {
+            eprintln!(
+                "ry R console, R at {}. Type q() or Ctrl-D to quit.",
+                api.r_home.display()
+            );
+        }
     }
     api.run_main_loop();
     Ok(())

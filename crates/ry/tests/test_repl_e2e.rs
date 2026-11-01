@@ -665,6 +665,9 @@ fn piped_input_is_evaluated_and_autoprinted_on_both_runtimes() {
         assert!(output.status.success(), "{runtime}: {output:?}");
         assert!(stdout.contains("[1] 2\n"), "{runtime}: {stdout}");
         assert!(stdout.contains("[1] 42\n"), "{runtime}: {stdout}");
+        assert_eq!(stdout.trim(), "[1] 2\n[1] 42", "{runtime}: no banner, only results");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("Type q() or Ctrl-D"), "{runtime}: {stderr}");
     }
 }
 
