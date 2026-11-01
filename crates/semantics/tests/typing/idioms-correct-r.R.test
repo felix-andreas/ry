@@ -644,3 +644,16 @@ negate_nothing <- function() -NULL
 drop_marked: <T, U> fn(res: T, labels: U) -> Unknown
 negate_nothing: Unknown
 169..173 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
+
+#---- a_test_that_narrows_only_its_false_edge_keeps_the_value_after_the_if
+first_rows <- function(vectors, firstEig = 1, lastEig = 3) vectors[firstEig:lastEig, ]
+reduce <- function(X, n.comp, firstEig = NULL, lastEig = NULL) {
+  if (is.null(firstEig)) firstEig = 1
+  if (!is.null(firstEig)) {
+    if (is.null(lastEig)) lastEig = firstEig + n.comp
+  }
+  first_rows(X, firstEig, lastEig)
+}
+#++++
+first_rows: <T, U: scalar numeric, V: scalar numeric> fn(vectors: T, [firstEig]: U, [lastEig]: V) -> Unknown
+reduce: <T, U, V, W: scalar numeric> fn(X: T, [n.comp]: U, [firstEig]: V | NULL, [lastEig]: W | NULL) -> Unknown

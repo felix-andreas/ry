@@ -1992,7 +1992,9 @@ rebinding `stop` is not modelled.
 
 A condition that applies a type-guard predicate to a plain local variable refines that variable's
 type along each edge of the `if`. Inside each branch, the variable keeps the refined type until a
-write replaces it, and the refinements merge back at the join exactly as branch writes do. With `x`
+write replaces it, and the refinements merge back at the join exactly as branch writes do. A
+branch the guard does not refine holds the value from before the test, so `if (!is.null(x)) ...` on
+an untyped `x` leaves `x` untyped after the `if`, not `NULL`. With `x`
 a local variable or parameter, the recognized guards are:
 
 - `is.null(x)` makes `x` a `NULL` in the true branch, and removes `NULL` from its union in the false

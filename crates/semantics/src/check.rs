@@ -3075,6 +3075,18 @@ impl<'db> Checker<'db, '_> {
             }
         }
         self.environment.rollback(mark);
+        // The then branch holds the pre-guard value of a slot only the false edge narrows, so
+        // `if (!is.null(x)) ...` on an untyped `x` does not leave `x` as `NULL` afterwards.
+        if let Some(guard) = &guard {
+            for refinement in &guard.false_edge {
+                let SlotRefinement::Narrow(slot, _) = *refinement else {
+                    continue;
+                };
+                if then_writes.iter().all(|(written, _)| *written != slot) {
+                    then_writes.push((slot, self.environment.get(slot)));
+                }
+            }
+        }
 
         // The false edge applies to the else branch and, when the then branch diverges,
         // to everything after the `if`.
@@ -4597,7 +4609,9 @@ impl<'db> Checker<'db, '_> {
         // has ruled that out, as in `if (length(k)) res <- res[-k]`. A bare `NULL` stays an error.
         let resolved = match resolved.kind(self.db) {
             TyKind::Union(members)
-                if members.iter().any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
+                if members
+                    .iter()
+                    .any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
             {
                 union_of(
                     self.db,
