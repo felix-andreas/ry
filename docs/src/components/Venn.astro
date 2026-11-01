@@ -26,23 +26,23 @@ const { id, step } = Astro.props;
   <g fill="currentColor" text-anchor="middle">
     <g class="v-t-left">
       <text x="175" y="165" font-size="22" font-weight="700">R</text>
-      <text x="175" y="198" font-size="13">untyped code</text>
-      <text x="175" y="217" font-size="13">S4, R6, eval</text>
-      <text x="175" y="246" font-size="12" fill-opacity="0.7">types unknown</text>
+      <text class="v-detail" x="175" y="198" font-size="13">untyped code</text>
+      <text class="v-detail" x="175" y="217" font-size="13">S4, R6, eval</text>
+      <text class="v-detail" x="175" y="246" font-size="12" fill-opacity="0.7">types unknown</text>
     </g>
     <g class="v-t-mid">
       <text x="330" y="165" font-size="15" font-weight="700">typed R</text>
-      <text x="330" y="198" font-size="13" font-family="ui-monospace, monospace">#: comments</text>
-      <text x="330" y="246" font-size="12" fill-opacity="0.7">checked, and</text>
-      <text x="330" y="262" font-size="12" fill-opacity="0.7">runs on GNU R</text>
+      <text class="v-detail" x="330" y="198" font-size="13" font-family="ui-monospace, monospace">#: comments</text>
+      <text class="v-detail" x="330" y="246" font-size="12" fill-opacity="0.7">checked, and</text>
+      <text class="v-detail" x="330" y="262" font-size="12" fill-opacity="0.7">runs on GNU R</text>
     </g>
     <g class="v-t-right">
       <text x="485" y="165" font-size="17" font-weight="700">ry additions</text>
-      <text x="485" y="194" font-size="13">records</text>
-      <text x="485" y="212" font-size="13">tagged unions</text>
-      <text x="485" y="230" font-size="13">typed tables</text>
-      <text x="485" y="248" font-size="13">stdlib, inline types</text>
-      <text x="485" y="274" font-size="12" fill-opacity="0.7">needs ry</text>
+      <text class="v-detail" x="485" y="194" font-size="13">records</text>
+      <text class="v-detail" x="485" y="212" font-size="13">tagged unions</text>
+      <text class="v-detail" x="485" y="230" font-size="13">typed tables</text>
+      <text class="v-detail" x="485" y="248" font-size="13">stdlib, inline types</text>
+      <text class="v-detail" x="485" y="274" font-size="12" fill-opacity="0.7">needs ry</text>
     </g>
   </g>
   <text class="v-strict" x="485" y="385" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">strict mode (R--): only this circle</text>
@@ -124,10 +124,11 @@ const { id, step } = Astro.props;
 
   [data-step="2"] .v-left,
   [data-step="2"] .v-right {
-    fill-opacity: 0.1;
+    fill-opacity: 0.05;
+    stroke-opacity: 0.45;
   }
   [data-step="2"] .v-lens {
-    fill-opacity: 0.16;
+    fill-opacity: 0.2;
   }
   [data-step="2"] .v-t-left,
   [data-step="2"] .v-t-right,
@@ -159,6 +160,38 @@ const { id, step } = Astro.props;
   [data-step="4"] .v-t-left,
   [data-step="4"] .v-rpp {
     opacity: 0.22;
+  }
+
+  /* On a phone the diagram renders at half size, so the step view keeps only the region titles. */
+  @media (max-width: 640px) {
+    [data-step] .v-detail {
+      display: none;
+    }
+    [data-step] .v-t-left,
+    [data-step] .v-t-mid,
+    [data-step] .v-t-right {
+      transform: translateY(46px);
+    }
+    [data-step] .v-t-left text {
+      font-size: 34px;
+    }
+    [data-step] .v-t-mid text {
+      font-size: 22px;
+    }
+    [data-step] .v-t-right text {
+      font-size: 24px;
+    }
+    [data-step] .v-strict,
+    [data-step] .v-rpp text {
+      font-size: 21px;
+    }
+    [data-step] .v-strict {
+      transform: translateX(-48px);
+    }
+    [data-step] .v-marker text {
+      font-size: 20px;
+      transform: translateY(9px);
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {

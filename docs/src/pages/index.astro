@@ -1826,6 +1826,13 @@ ry check .</code></pre>
                         if (panel) playPanel(panel);
                     }
                     if (venn) venn.setAttribute("data-step", String(index + 1));
+                    if (tablist && tablist.scrollWidth > tablist.clientWidth) {
+                        const tab = tabs[index];
+                        tablist.scrollTo({
+                            left: tab.offsetLeft - (tablist.clientWidth - tab.offsetWidth) / 2,
+                            behavior: reduce ? "auto" : "smooth",
+                        });
+                    }
                     placeIndicator();
                     for (const note of footNotes)
                         note.classList.toggle(
@@ -3068,16 +3075,10 @@ ry check .</code></pre>
                 z-index: 0;
                 border-radius: 7px;
                 pointer-events: none;
-                background: linear-gradient(
-                    180deg,
-                    oklch(1 0 0 / 0.12),
-                    oklch(1 0 0 / 0.07)
-                );
+                background: oklch(0.27 0.004 286);
                 box-shadow:
-                    0 1px 2px oklch(0 0 0 / 0.5),
-                    0 8px 20px -10px
-                        color-mix(in oklch, var(--cap) 70%, transparent),
-                    inset 0 1px 0 oklch(1 0 0 / 0.08);
+                    0 1px 2px oklch(0 0 0 / 0.45),
+                    inset 0 1px 0 oklch(1 0 0 / 0.07);
             }
             .seg-ind.is-ready {
                 transition:
@@ -3086,9 +3087,19 @@ ry check .</code></pre>
                     height 0.42s cubic-bezier(0.22, 1, 0.36, 1);
             }
             /* Below this width the pills wrap rather than hide behind a scroll. */
-            @media (min-width: 700px) {
-                .seg {
-                    flex-wrap: nowrap;
+            .seg {
+                flex-wrap: nowrap;
+            }
+            /* On narrow screens the pills scroll sideways in one row; wrapping would break the track. */
+            @media (max-width: 699px) {
+                .seg:not(.seg-steps) {
+                    overflow-x: auto;
+                    scrollbar-width: none;
+                    -webkit-mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+                    mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+                }
+                .seg:not(.seg-steps)::-webkit-scrollbar {
+                    display: none;
                 }
             }
             .seg [role="tab"] {
@@ -3682,9 +3693,8 @@ ry check .</code></pre>
             @media (max-width: 900px) {
                 .stage.split .stage-body {
                     grid-template-columns: minmax(0, 1fr);
-                    /* Leftover cell height collects once at the bottom instead of twice. */
-                    grid-auto-rows: min-content;
-                    align-content: start;
+                    /* The shared cell is as tall as the tallest panel; the output pane absorbs the rest. */
+                    grid-template-rows: auto 1fr;
                 }
                 .stage.split .pane + .pane {
                     border-left: 0;
@@ -3899,7 +3909,7 @@ ry check .</code></pre>
 
             /* The runtime band: centered, taller, with a slow aura behind the stage. */
             #runtime.showband {
-                padding-block: clamp(4.8rem, 10vw, 8.5rem);
+                padding-block: clamp(5.5rem, 12vw, 10rem);
             }
             #runtime .band-head {
                 margin-inline: auto;
@@ -3918,8 +3928,8 @@ ry check .</code></pre>
                 z-index: 0;
                 pointer-events: none;
                 background-image:
-                    linear-gradient(oklch(1 0 0 / 0.035) 1px, transparent 1px),
-                    linear-gradient(90deg, oklch(1 0 0 / 0.035) 1px, transparent 1px);
+                    linear-gradient(oklch(1 0 0 / 0.05) 1px, transparent 1px),
+                    linear-gradient(90deg, oklch(1 0 0 / 0.05) 1px, transparent 1px);
                 background-size: 56px 56px;
                 background-position: center top;
                 -webkit-mask-image: radial-gradient(60% 55% at 50% 45%, #000 20%, transparent 75%);
@@ -3947,7 +3957,7 @@ ry check .</code></pre>
             }
             .stage-hero {
                 --code-size: 14px;
-                border-color: color-mix(in oklch, var(--cap) 24%, var(--border));
+                border-color: color-mix(in oklch, var(--cap) 10%, var(--border));
                 box-shadow:
                     0 50px 120px -50px color-mix(in oklch, var(--cap) 50%, transparent),
                     0 30px 70px -50px oklch(0 0 0 / 0.9);
@@ -3961,9 +3971,6 @@ ry check .</code></pre>
                 z-index: 3;
                 height: 1px;
                 background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--cap) 80%, transparent), transparent);
-            }
-            .stage-hero .stage-body {
-                min-height: 340px;
             }
             .stage-hero .code {
                 padding-block: 20px;
@@ -3992,11 +3999,6 @@ ry check .</code></pre>
                     --code-size: 13px;
                 }
             }
-            @media (max-width: 900px) {
-                .stage-hero .stage-body {
-                    min-height: 0;
-                }
-            }
             @media (max-width: 640px) {
                 .stage-hero {
                     --code-size: 11.5px;
@@ -4023,19 +4025,25 @@ ry check .</code></pre>
                 justify-content: space-between;
                 gap: 1rem;
                 width: 100%;
-                padding: 0.85rem 1rem;
+                align-items: center;
+                padding: 1rem 1.1rem;
                 font-size: 15px;
                 text-align: left;
                 white-space: normal;
             }
             .step-where {
                 flex: none;
+                padding: 0.12rem 0.5rem;
+                border-radius: 999px;
                 font-family: "Geist Mono", ui-monospace, monospace;
                 font-size: 11px;
-                color: oklch(0.58 0 0);
+                color: oklch(0.72 0 0);
+                background: oklch(1 0 0 / 0.06);
+                transition: color 0.2s ease, background 0.2s ease;
             }
             [aria-selected="true"] > .step-where {
-                color: color-mix(in oklch, var(--cap) 75%, oklch(0.7 0 0));
+                color: color-mix(in oklch, var(--cap) 85%, white);
+                background: color-mix(in oklch, var(--cap) 16%, transparent);
             }
             @media (min-width: 900px) {
                 .path {
