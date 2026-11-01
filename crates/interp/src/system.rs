@@ -633,42 +633,18 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str) -> String {
             output.push(character);
             continue;
         }
-        let Some(spec) = characters.next() else {
+        let Some(mut spec) = characters.next() else {
             output.push('%');
             break;
         };
-        match spec {
-            'Y' => output.push_str(&time.year.to_string()),
-            'y' => output.push_str(&format!("{:02}", time.year.rem_euclid(100))),
-            'm' => output.push_str(&format!("{:02}", time.month)),
-            'd' => output.push_str(&format!("{:02}", time.day)),
-            'e' => output.push_str(&format!("{:2}", time.day)),
-            'H' => output.push_str(&format!("{:02}", time.hour)),
-            'I' => output.push_str(&format!("{:02}", if time.hour % 12 == 0 { 12 } else { time.hour % 12 })),
-            'M' => output.push_str(&format!("{:02}", time.minute)),
-            'S' => output.push_str(&format!("{:02}", time.second.floor() as i64)),
-            'p' => output.push_str(if time.hour < 12 { "AM" } else { "PM" }),
-            'j' => output.push_str(&format!("{:03}", time.yearday + 1)),
-            'B' => output.push_str(MONTHS[(time.month - 1) as usize]),
-            'b' | 'h' => output.push_str(&MONTHS[(time.month - 1) as usize][..3]),
-            'A' => output.push_str(WEEKDAYS[time.weekday as usize]),
-            'a' => output.push_str(&WEEKDAYS[time.weekday as usize][..3]),
-            'u' => output.push_str(&(if time.weekday == 0 { 7 } else { time.weekday }).to_string()),
-            'w' => output.push_str(&time.weekday.to_string()),
-            'Z' => output.push_str(zone),
-            'z' => output.push_str("+0000"),
-            'F' => output.push_str(&format!("{}-{:02}-{:02}", time.year, time.month, time.day)),
-            'T' => output.push_str(&format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second.floor() as i64)),
-            'D' => output.push_str(&format!("{:02}/{:02}/{:02}", time.month, time.day, time.year.rem_euclid(100))),
-            'R' => output.push_str(&format!("{:02}:{:02}", time.hour, time.minute)),
-            'n' => output.push('\n'),
-            't' => output.push('\t'),
-            '%' => output.push('%'),
-            'O' => {
-                if characters.peek() == Some(&'S') {
-                    characters.next();
-                    let digits = characters.peek().and_then(|digit| digit.to_digit(10));
-                    match digits {
+        // The E and O modifiers select a locale's alternative representation,
+        // which every locale R supports spells like the plain directive. Only
+        // `%OSn`, R's own fractional-seconds extension, means something else.
+        if spec == 'E' || spec == 'O' {
+            let modifier = spec;
+            match characters.next() {
+                Some('S') if modifier == 'O' => {
+                    match characters.peek().and_then(|digit| digit.to_digit(10)) {
                         Some(digits) => {
                             characters.next();
                             let width = 3 + digits as usize;
@@ -676,15 +652,94 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str) -> String {
                         }
                         None => output.push_str(&format!("{:02}", time.second.floor() as i64)),
                     }
+                    continue;
+                }
+                Some(base) => spec = base,
+                None => {
+                    output.push('%');
+                    output.push(modifier);
+                    break;
                 }
             }
-            other => {
-                output.push('%');
-                output.push(other);
-            }
         }
+        push_directive(&mut output, spec, time, zone);
     }
     output
+}
+
+fn push_directive(output: &mut String, spec: char, time: &BrokenDown, zone: &str) {
+    let hour12 = if time.hour % 12 == 0 { 12 } else { time.hour % 12 };
+    let seconds = time.second.floor() as i64;
+    let text = match spec {
+        'Y' => time.year.to_string(),
+        'y' => format!("{:02}", time.year.rem_euclid(100)),
+        'C' => format!("{:02}", time.year.div_euclid(100)),
+        'm' => format!("{:02}", time.month),
+        'd' => format!("{:02}", time.day),
+        'e' => format!("{:2}", time.day),
+        'H' => format!("{:02}", time.hour),
+        'k' => format!("{:2}", time.hour),
+        'I' => format!("{:02}", hour12),
+        'l' => format!("{:2}", hour12),
+        'M' => format!("{:02}", time.minute),
+        'S' => format!("{:02}", seconds),
+        'p' => (if time.hour < 12 { "AM" } else { "PM" }).to_string(),
+        'P' => (if time.hour < 12 { "am" } else { "pm" }).to_string(),
+        'j' => format!("{:03}", time.yearday + 1),
+        'B' => MONTHS[(time.month - 1) as usize].to_string(),
+        'b' | 'h' => MONTHS[(time.month - 1) as usize][..3].to_string(),
+        'A' => WEEKDAYS[time.weekday as usize].to_string(),
+        'a' => WEEKDAYS[time.weekday as usize][..3].to_string(),
+        'u' => (if time.weekday == 0 { 7 } else { time.weekday }).to_string(),
+        'w' => time.weekday.to_string(),
+        'U' => format!("{:02}", (time.yearday + 7 - time.weekday) / 7),
+        'W' => format!("{:02}", (time.yearday + 7 - (time.weekday + 6) % 7) / 7),
+        'V' => format!("{:02}", iso_week(time).1),
+        'G' => iso_week(time).0.to_string(),
+        'g' => format!("{:02}", iso_week(time).0.rem_euclid(100)),
+        's' => {
+            let days = days_from_civil(time.year, time.month, time.day);
+            (days * 86400 + time.hour * 3600 + time.minute * 60 + seconds).to_string()
+        }
+        'Z' => zone.to_string(),
+        'z' => "+0000".to_string(),
+        'F' => format!("{}-{:02}-{:02}", time.year, time.month, time.day),
+        'T' | 'X' => format!("{:02}:{:02}:{:02}", time.hour, time.minute, seconds),
+        'D' | 'x' => format!("{:02}/{:02}/{:02}", time.month, time.day, time.year.rem_euclid(100)),
+        'R' => format!("{:02}:{:02}", time.hour, time.minute),
+        'r' => format!("{:02}:{:02}:{:02} {}", hour12, time.minute, seconds, if time.hour < 12 { "AM" } else { "PM" }),
+        'c' => format!(
+            "{} {} {:2} {:02}:{:02}:{:02} {}",
+            &WEEKDAYS[time.weekday as usize][..3],
+            &MONTHS[(time.month - 1) as usize][..3],
+            time.day,
+            time.hour,
+            time.minute,
+            seconds,
+            time.year
+        ),
+        'n' => "\n".to_string(),
+        't' => "\t".to_string(),
+        '%' => "%".to_string(),
+        other => format!("%{other}"),
+    };
+    output.push_str(&text);
+}
+
+/// The ISO 8601 week-based year and week number: weeks start on Monday, and
+/// week 1 is the one holding the year's first Thursday.
+fn iso_week(time: &BrokenDown) -> (i64, i64) {
+    let monday_based = (time.weekday + 6) % 7;
+    let thursday = time.yearday - monday_based + 3;
+    let year_length = |year: i64| if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 366 } else { 365 };
+    if thursday < 0 {
+        let previous = time.year - 1;
+        (previous, (thursday + year_length(previous)) / 7 + 1)
+    } else if thursday >= year_length(time.year) {
+        (time.year + 1, 1)
+    } else {
+        (time.year, thursday / 7 + 1)
+    }
 }
 
 fn format_time(seconds: f64, format: &str) -> String {

@@ -424,12 +424,14 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         }
         return Ok(nil());
     }
+    // GNU R dispatches on the first supplied argument, so a generic called without one, even
+    // where the formal has a default, dispatches on NULL.
+    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(eval::BINDING_MISSING)) {
+        return Ok(nil());
+    }
     let value = eval::find_var_in_frame(first, env)?;
     if value == missing_arg() {
-        return Err(error(format!(
-            "argument \"{}\" is missing, with no default",
-            symbol_name(first)
-        )));
+        return Ok(nil());
     }
     if value == unbound() {
         return Ok(nil());
