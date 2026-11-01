@@ -1,0 +1,29 @@
+[stdout]
+|      Package Title      Description                        A   B 
+| [1,] "foo"   "A  title" "line one\nline two\n\nline three" "2" NA
+| [2,] "bar"   NA         NA                                 NA  ""
+|      C                
+| [1,] NA               
+| [2,] "tab\there\ncont"
+|      Description                             Zed
+| [1,] "line one\n   line two\n\n  line three" NA 
+| [2,] NA                                      NA 
+|      Package A  
+| [1,] "foo"   "2"
+| [2,] "bar"   NA 
+| 'data.frame':	2 obs. of  6 variables:
+|  $ Package    : chr  "foo" "bar"
+|  $ Title      : chr  "A  title" NA
+|  $ Description: chr  "line one\nline two\n\nline three" NA
+|  $ A          :List of 2
+|   ..$ : chr  "1" "2"
+|   ..$ : chr NA
+|  $ B          : chr  NA ""
+|  $ C          : chr  NA "tab\there\ncont"
+| [1] "Line starting 'not a field ...' is malformed!"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "Line starting 'not a field ...' is malformed!"

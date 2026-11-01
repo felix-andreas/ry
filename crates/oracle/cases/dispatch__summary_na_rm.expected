@@ -1,0 +1,23 @@
+[stdout]
+| Summary.foo(1, 2, na.rm = FALSE)
+| [1] FALSE
+| [1] 1
+| Summary.foo(1, na.rm = TRUE)
+| [1] TRUE
+| [1] 1
+| Summary.foo(1, na.rm = FALSE)
+| [1] FALSE
+| [1] 1
+| [1] b
+| Levels: a < b
+| [1] a b
+| Levels: a < b
+| Summary.foo(1, na.rm = TRUE)
+| [1] TRUE
+| [1] 1
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| 1

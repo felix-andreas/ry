@@ -1,0 +1,87 @@
+[stdout]
+| [1] FALSE
+| NULL
+| [1] "srcref"      "srcfile"     "wholeSrcref"
+| [1] 4
+| [1] 1 1 1 6 1 6 1 1
+| [1] 2 1 4 1 1 1 2 4
+| [1] 5 1 5 7 1 6 5 5
+| [1]  5 10  5 15  9 14  5  5
+| f <- function(a,  b) {
+|   a + b  # sum
+| }
+| [1] "f <- function(a,  b) {" "  a + b  # sum"         "}"                     
+| [1] "srcfilecopy" "srcfile"    
+| [1] "x <- 1 # c"             "f <- function(a,  b) {" "  a + b  # sum"        
+| [4] "}"                      "é <- 2; y <- 3"        
+| [1] 1 0 6 0 0 0 1 6
+| [1] "srcref"
+| function(a,  b) {
+|   a + b  # sum
+| }
+| function (a, b) 
+| {
+|     a + b
+| }
+| [1] "srcref"      "srcfile"     "wholeSrcref"
+| [[1]]
+| [1]  2 22  2 22 22 22  2  2
+| 
+| [[2]]
+| [1] 3 3 3 7 3 7 3 3
+| 
+| [1] 1 0 4 1 0 1 1 4
+| function(a,  b) {
+|   a + b  # sum
+| }
+| [1] "function (a, b) " "{"                "    a + b"        "}"               
+| [1] "function(a,  b) {" "  a + b  # sum"    "}"                
+| [1] 2 6 4 1 6 1 2 4
+| [1] "f <- function(a,  b) {" "  a + b  # sum"        
+| expression(x  +  1, function(a)   a)
+| [1] "expression(x  +  1, function(a)   a)"
+| [1] "function(a) a"
+| [[1]]
+| [1]  1  2  1  8  9 17  1  1
+| 
+| [[2]]
+| [1]  2  3  2  3 17 17  2  2
+| 
+| [[1]]
+| [1] 1 1 2 2 1 2 1 2
+| 
+| [[2]]
+| [1] 2 7 3 2 7 2 2 3
+| 
+| NULL
+| [[1]]
+| [1] 1 1 1 8 1 8 1 1
+| 
+| [[2]]
+| [1] 2 1 2 6 1 6 2 2
+| 
+| [[3]]
+| [1] 3 1 3 6 1 6 3 3
+| 
+| [[4]]
+| [1] 4 1 4 2 1 2 4 4
+| 
+| [[5]]
+| [1]  5  1  5 18  1 18  5  5
+| 
+| [1] 2
+| [1] "srcref"      "srcfile"     "wholeSrcref"
+| function (z) 
+| z * 2
+| [1] 16
+| NULL
+| NULL
+| [1] "tb()"
+| NULL
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

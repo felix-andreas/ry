@@ -62,11 +62,10 @@ is written:
 <TabItem label="Inline">
 
 ```r
-#: @type Person {list{name: character}}
+type Person = list{name: character}
 
 make_person <- function(name: character) -> Person {
-  #: @new Person
-  list(name = name)
+  @Person(list(name = name))
 }
 ```
 
@@ -153,6 +152,14 @@ first <- function(items) items[[1L]]
 - `-> TYPE` between the parameter list and the body declares a function's return type.
 - `<T, U: numeric>` directly after `function` or `\` declares the function's type parameters, with
   the same names and constraints as the compact `<...>` binder.
+- `type Name<T> = TYPE` and `alias Name<T> = TYPE` at the top level of a file define a
+  [named type](#named-types-and-generic-application), like `#: @type Name<T> {TYPE}` and
+  `#: @alias Name<T> {TYPE}`.
+- `name: @trust TYPE <- value`, `name: @if-unknown TYPE <- value` and `name: @new Name <- value`
+  write a binding's [coercion](#unknown-only-coercions) inline.
+- `@Name(value)` and `@Name<ARGS>(value)` introduce a nominal type on a value, like `#: @new Name`
+  on that value. The `(` must follow the type directly, and `value` may be any expression, including
+  a record or tuple: `@Point((x = 1, y = 2))`.
 
 Every `TYPE` is the type grammar of `#:` comments, so anything a `#:` type can say an inline type can
 say, and a type reads the same written either way.
@@ -169,6 +176,10 @@ same annotation:
   [The formal list](#annotations-and-the-formal-list) rules apply unchanged, and an unannotated
   parameter keeps its inferred type.
 - A parameter with a default is optional, so the inline form never needs `[name]`.
+- `type` and `alias` definitions are the `@type` and `@alias` definitions of the same name, in the
+  same project-global namespace.
+- A binding's directive, as in `x: @trust integer <- v`, is the same directive in a `#:` block above
+  the binding. `@Name(value)` is `(value)` with `#: @new Name` on it.
 - A function without `-> TYPE` infers its return type from its body, as an
   [elided return](#elided-return-types) on a definition does. A function type inside an inline
   annotation, such as `f: fn(integer)` or `callback: fn(integer)`, follows the `#:` rule for that
@@ -187,7 +198,26 @@ function and the binding's type is then checked against it like any other value.
 A parameter's type and a function's return type and type parameters can be written on any function
 literal. A binding's type is recognized only where a statement starts, at the top level of a file or
 directly inside `{ }`. Elsewhere, such as in a braceless `if` branch, `y: integer <- 1L` is R's
-reading of `y:integer` as an assignment target, which is reported as a syntax error.
+reading of `y:integer` as an assignment target, which is reported as a syntax error. A binding's type
+continues onto the next line inside an open bracket, after a `|`, and onto a line that starts with
+`|`.
+
+`type` and `alias` start a definition only at the start of a statement and only when a name follows
+them on the same line, so `type <- "x"`, `alias(y)` and every other use of them as ordinary names
+keep their R meaning. A definition inside a function body or any other block parses, but is an
+`annotation` error: definitions belong at the top level of a file. A definition ends at the end of
+its line, and nothing but a comment may follow it there, so `type Id = integer; x <- 1` is a syntax
+error. Its type continues onto the next line after `=`, after a `|`, inside an open bracket, and
+onto a line that starts with `|`. No R statement starts with `|`, so a union may line
+up its members:
+
+```r
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+```
+
+A leading `|` is allowed in any union, in a `#:` comment too.
 
 A return type is read as far as the type grammar reaches, and the body starts after it. A list or
 function type must hug its bracket, as the formatter writes it: `-> list{name: character}` is a
@@ -203,10 +233,19 @@ R's own parser rejects every inline annotation except a binding's, which R reads
 `name:TYPE` through a `` `:<-` `` replacement function that base R does not define. So no working R
 program contains one, and existing R code parses and behaves exactly as before.
 
+`type` and `alias` definitions and `@Name(value)` are not R either: a definition is two names in a
+row, and `@` cannot start an R expression. At the start of a line, `@Name` reads as a constructor
+only when `(` or `<` follows the name, so a slot access broken across lines, `obj` then `@slot`,
+keeps R's own syntax error.
+
 Removing each inline annotation turns an annotated program into the plain R program it means:
-delete a binding's or parameter's `: TYPE`, a function's `<...>`, and its `-> TYPE`. Comments and
-`#:` blocks stay. `count: integer <- 0L` erases to `count <- 0L`, and
-`function<T>(x: T) -> T x` to `function(x) x`.
+delete a binding's or parameter's `: TYPE` (with its directive), a function's `<...>`, its
+`-> TYPE`, and the `@Name` of `@Name(value)`. A type definition becomes its `#:` comment, line for
+line, so the erased program still declares the type, and a definition paired with a `#:` block
+directly above it is removed, because that block already declares it. Comments and `#:` blocks
+stay. `count: integer <- 0L`
+erases to `count <- 0L`, `function<T>(x: T) -> T x` to `function(x) x`, `@UserId(5L)` to `(5L)`,
+and `type UserId = integer` to `#: @type UserId {integer}`.
 
 ### Inline and comment annotations together
 
@@ -215,8 +254,9 @@ where a slot is the binding's value, one parameter, the rest parameter, or the r
 
 - A slot only one of them types takes that type.
 - A slot both type takes the inline type.
-- A `#:` block in a coercion form (`@trust`, `@if-unknown`, `@new`) says how the value gets its type,
-  so it governs the value, and the inline type is only compared against it.
+- A coercion (`@trust`, `@if-unknown`, `@new`) says how the value gets its type, so it governs the
+  value wherever it is written, and the other side's type is only compared against it. When both
+  sides are coercions, the inline one governs.
 
 A slot typed both ways with different types is reported as `annotation-mismatch`, a warning at the
 inline type that points at the comment's type, so the reader always learns which one ry uses.
@@ -225,6 +265,15 @@ with `character | integer`. Type parameters pair by position, so `<T>` in the co
 the code agree, and a binder whose constraint differs is reported the same way, with the inline
 constraint winning. A positional parameter type in a compact `#:` annotation is compared with
 the formal it pairs with.
+
+A type definition pairs the same way. A `#:` definition directly above an inline definition of the
+same name, with nothing but a line break between them, is one definition written twice. It counts
+once, so it is not a duplicate, and the inline definition is the one that applies. When the two
+differ in kind (`@type` against `alias`), in the number of type parameters, in a constraint, or in
+the type itself, ry reports `annotation-mismatch` at the inline definition, pointing at the comment.
+Type parameters pair by position, so `#: @alias Pair<T> {tuple{T, T}}` and
+`alias Pair<U> = tuple{U, U}` agree. A `#:` definition anywhere else in the project with the same
+name is a duplicate, as two `#:` definitions are.
 
 This example deliberately uses both spellings on one function:
 
@@ -244,7 +293,10 @@ apply_discount <- function(price: integer, rate) price * (1 - rate)
 also run under R. An annotation that is off types nothing, and each one is reported once as an
 `inline-annotation` warning, because R cannot run that code. ry also warns once per run, and the
 language server once per load, for as long as the setting stays off. A `#:` block on the same
-statement then applies alone. The setting also governs running code: `ry run` and `ry repl` still
+statement then applies alone, and so does a paired `#:` definition. An inline type definition with
+no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
+`type` stays nominal, so a plain value is still not accepted where it is expected, but its
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry repl` still
 erase the annotations, but ry's runtime registers no checks for them.
 
 ### Inline annotations at run time
@@ -279,6 +331,8 @@ these rules:
   before `on.exit` code runs.
 - **Bindings are not checked.** `x: integer <- value` types `x` for the checker and is erased at
   run time.
+- **Type definitions and `@Name(value)` do nothing at run time.** A definition is skipped, and
+  `@Name(value)` runs as `(value)`.
 - **A check tests the value's storage type only.** `logical`, `integer`, `double`, `complex`,
   `character`, `raw`, and `NULL` admit values of that type, and each numeric type also admits the
   types below it in the promotion order, as the checker does. A list type admits any list, a
@@ -447,16 +501,18 @@ and the block carries no typing payload.
 #### Constraints
 
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
-`<T: numeric> fn(values: T) -> T`. There are three constraints:
+`<T: numeric> fn(values: T) -> T`. These are the constraints:
 
 - `numeric` admits `integer` and `double`, scalar or vector, and any class that declares an
   arithmetic [operator method](#operator-methods-on-a-class).
 - `atomic` admits one of the six atomic scalar types: `logical`, `integer`, `double`, `complex`,
   `character`, and `raw`.
+- `key` admits a scalar `logical`, `integer`, `double` or `character`, the types a dictionary key
+  or set element may have. `complex` and `raw` are left out.
 - `scalar numeric` admits a scalar `integer` or `double`, which is both bounds at once. It is what an
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 
-Any other constraint name is an annotation error, and the error lists the three that exist. An
+Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call.
 
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.
@@ -491,11 +547,14 @@ refused.
 Named types are declared with `@type` and `@alias`, and either may take parameters, as in
 `NAME<T, U>`:
 
-- `#: @type NAME {TYPE}` declares a *nominal type* whose representation is `TYPE`.
-- `#: @alias NAME {TYPE}` declares a *structural alias* for `TYPE`.
+- `type NAME = TYPE`, or `#: @type NAME {TYPE}`, declares a *nominal type* whose representation is
+  `TYPE`.
+- `alias NAME = TYPE`, or `#: @alias NAME {TYPE}`, declares a *structural alias* for `TYPE`.
 
-The two forms share one namespace, so reusing a name under either form is an error. A definition
-block is allowed only at the top level of a file. Definitions are project-global, so a reference need
+The two forms share one namespace, so reusing a name under either form is an error, except for a
+`#:` definition paired with the inline one directly below it
+([inline and comment annotations together](#inline-and-comment-annotations-together)). A definition
+is allowed only at the top level of a file. Definitions are project-global, so a reference need
 not come after the declaration; [type names](#type-names) has the scoping rules.
 
 The declared type parameters are in scope only within `TYPE`, where they shadow any project-global
@@ -527,7 +586,7 @@ is not reported.
 <TabItem label="Inline">
 
 ```r
-#: @alias Box<T> {list{ value: T }}
+alias Box<T> = list{ value: T }
 
 value: Box<integer> <- list(value = 1L)
 ```
@@ -569,11 +628,10 @@ structural value does not satisfy the nominal type:
 <TabItem label="Inline">
 
 ```r
-#: @type Person {list{ name: character, age: double }}
-#: @type Pet {list{ name: character, age: double }}
+type Person = list{ name: character, age: double }
+type Pet = list{ name: character, age: double }
 
-#: @new Person
-person <- list(name = "bob", age = 20)
+person <- @Person(list(name = "bob", age = 20))
 
 shape: list{ name: character, age: double } <- person
 
@@ -754,7 +812,9 @@ A union that lists `..` as a member is *open*: it also holds every tag it does n
 
 There are no row variables, so a function cannot pass the unlisted tags of an open union through
 with their types. Generic tag unions come from aliases, such as
-`#: @alias Option<T> {:Some(T) | :None}`; none is built in.
+`#: @alias Option<T> {:Some(T) | :None}`. One is built in: the
+[standard library](/reference/standard-library/) defines `Result<T, E>` as `{:Ok(T) | :Err(E)}`, and a
+project's own `Result` alias shadows it.
 
 ### `match`
 
@@ -1128,15 +1188,34 @@ representation. Use [`@new`](#nominal-introduction) instead.
 already knows the type, `@if-unknown` is an error, even if the requested type matches the known one,
 so it can never override information the checker has.
 
-Coercions have no inline spelling and are written only as `#:` comments:
+Inline, the directive goes between the binding's `:` and its type:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
 
 ```r
-#: @if-unknown integer
-value <- unsupported_value   # valid only if `unsupported_value` is `Unknown`
+frame <- data.frame(a = 1)
+
+gap: @if-unknown integer <- frame$a   # valid: `frame$a` is `Unknown`
+
+value: @if-unknown integer <- 1L      # an error: the type is already known
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+frame <- data.frame(a = 1)
 
 #: @if-unknown integer
-value <- 1L                  # an error: the type is already known
+gap <- frame$a   # valid: `frame$a` is `Unknown`
+
+#: @if-unknown integer
+value <- 1L      # an error: the type is already known
 ```
+
+</TabItem>
+</Tabs>
 
 ### Trusted coercions
 
@@ -1144,10 +1223,27 @@ value <- 1L                  # an error: the type is already known
 the usual compatibility at that site. It has the same effect as coercing the value to `Any` and then
 to `TYPE`, and exists as a shorter way to write that.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
+callback <- function(x) x
+
+render_count: @trust fn(count: integer) -> character <- callback
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+callback <- function(x) x
+
 #: @trust fn(count: integer) -> character
 render_count <- callback
 ```
+
+</TabItem>
+</Tabs>
 
 A trusted coercion silences a real error as readily as a false one, so use it only when you know
 more than the checker does.
@@ -1168,7 +1264,20 @@ expression has the nominal type from then on.
 - `@new` is an annotation form, not a type expression, so it cannot appear inside a compact type or
   an expanded function annotation.
 
-Type definitions and `@new` have no inline spelling and are written only as `#:` comments:
+Inline, `@Person(value)` introduces the nominal type on any expression, and `x: @new Person <- value`
+on a binding:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Person<T> = list{ value: T }
+
+value <- @Person<integer>(list(value = 1L))
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: @type Person<T> {list{ value: T }}
@@ -1176,6 +1285,9 @@ Type definitions and `@new` have no inline spelling and are written only as `#:`
 #: @new Person<integer>
 value <- list(value = 1L)
 ```
+
+</TabItem>
+</Tabs>
 
 ## Operators
 
@@ -1503,9 +1615,10 @@ array-like or map-like logical vector is not accepted, so `c(TRUE, FALSE) && TRU
 
 Each operand is a `logical`, `integer`, or `double` scalar or vector, and the result is `logical`.
 It is a scalar when both operands are scalars, and `logical[]` otherwise, so `a > 0 & b > 0` on two
-`double[]` parameters is `logical[]`. A bare parameter used as an operand is inferred as `logical`.
-When either operand is `Unknown` or `Any`, the result is `Unknown`. Strict mode reports an
-`Unknown` operand where its type was lost, and does not report the operator itself.
+`double[]` parameters is `logical[]`. An operand whose type is `Any` makes the result `Any`, and
+one whose type is `Unknown` makes it `Unknown`, which strict mode reports where the operand's type
+was lost. An operand with no type yet, such as an unannotated parameter, could be a scalar or a
+vector, so the operator gives `Unknown` and strict mode reports it; annotate the parameter.
 
 ## Calls
 
@@ -2227,9 +2340,13 @@ price_of <- function(prices) prices$price
 
 A column is always a vector, so a scalar column type broadens: `frame{id: integer}` is
 `frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
-reference on it is a silent `Unknown`. Because a frame's run-time class is `c("frame", "data.frame")`,
-a frame satisfies a `data.frame` parameter. The name is `frame`, not `table`, so that base `table()`
-keeps working.
+reference on it is a silent `Unknown`. A frame is no `data.frame`: its run-time class is `"frame"`
+alone, so passing one to a `data.frame` parameter is a type error, and `as.data.frame()` and
+`as.frame()` convert between the two. A frame satisfies a `list` parameter, because `lapply()`, `Map()`
+and `Filter()` call `as.list()`, which turns it into the list of its columns. This is unsound for
+a function that indexes its `list` argument with `[`, which on a frame selects rows; overloads
+that take a frame directly would close the gap. The name is
+`frame`, not `table`, so that base `table()` keeps working.
 
 `frame()` builds one without any import. Each named argument becomes a column of its vector type, and
 an unnamed variable keeps its name:
@@ -2258,7 +2375,8 @@ unresolved
 
 This is an `unresolved` warning rather than a type error, because R looks a non-column up in the
 enclosing scope, so only a name nothing defines is certainly wrong. `.N`, `.GRP`, and `.NGRP` are
-`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns. A called
+`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns, or the
+columns `.SDcols` selects (see [Every column at once](#every-column-at-once)). A called
 name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A
 `..name` read is the variable `name` from the enclosing scope, never a column, and a bare `..name`
 as `j` selects the columns it names, which makes the result a `frame` with unknown columns.
@@ -2274,9 +2392,10 @@ The result of the query follows from its arguments:
 | any `j` with `by` | the group columns first, then the `j` columns |
 | `f[, y := v]` | `f` with `y` added, or with its type replaced |
 
-In a `.()` or `list()` `j`, an unnamed bare column keeps its name, and any other unnamed item is named
-by its position, as data.table names it: `f[, .(id, price * 2)]` is `frame{id: integer[], V2: double[]}`.
-An unnamed computed `j` under `by` becomes the column `V1`. The groups can be written `by = g`,
+In a `.()` or `list()` `j`, an unnamed bare column keeps its name, `.N` becomes the column `N`, and
+any other unnamed item is named by its position, as data.table names it: `f[, .(id, price * 2)]` is
+`frame{id: integer[], V2: double[]}`. Under `by`, a bare `.N` as `j` is the column `N`, and any other
+unnamed computed `j` becomes the column `V1`. The groups can be written `by = g`,
 `by = .(g, h)`, `by = c("g", "h")`, or `by = "g"`, and `keyby` works the same way. A group named
 in a string must be a column, so a misspelled one is a type error:
 
@@ -2297,6 +2416,54 @@ chain, and each step sees the columns the step before it produced:
 sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 # frame{team: character[], total: double[]}
 ```
+
+#### Every column at once
+
+`f[, lapply(.SD, g)]` applies `g` to each column of `.SD`, so its result has one column per column
+of `.SD`, each typed as `g` applied to that column alone. Under `by`, the group columns come first:
+
+```r
+sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales[, lapply(.SD, sum), by = team]
+# frame{team: character[], units: integer[], price: double[]}
+sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
+# frame{price: double[]}
+```
+
+Because each column is checked on its own, a function that does not fit one column is reported
+with that column's name, not against the union of all column types:
+
+```text
+type-mismatch
+
+  x this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
+   --[main.R:2:27]
+ 1 | sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ 2 | print(sales[, lapply(.SD, function(v) v * 2)])
+   |                           ^^^^^^^^^^^^^^^^^
+```
+
+A finding that every column causes is about `g` itself, so it is reported once and without a
+column name.
+
+`.SDcols` selects `.SD`'s columns, in the frame's order, in any of these forms:
+
+| `.SDcols` | Columns of `.SD` |
+| --- | --- |
+| `"a"`, `c("a", "b")` | the named columns |
+| `a:b` | the columns from `a` to `b` |
+| `is.numeric`, `is.integer`, `is.double`, `is.character`, `is.logical` | the columns of that type |
+| any of the above after `!` or `-` | the other columns |
+
+A named column must exist, so a misspelled name in a string or a range is a type error on that
+name. `.SDcols` names `.SD`'s columns exactly, so a group column it names stays in `.SD`, and the
+result then repeats that column's name, as data.table repeats it. A frame type cannot hold two
+columns of one name, so such a result has unknown columns, as does any other `.SDcols` form, such
+as `patterns()` or column positions.
+
+`c("a", "b") := lapply(.SD, g)` assigns the applied columns to the named ones in order, and
+`(c("a", "b")) := ...` does the same. A left side that is a variable, such as `(cols) := ...`,
+names columns ry cannot see, so the updated frame has unknown columns.
 
 #### Column updates
 
@@ -2321,6 +2488,22 @@ replaces the whole column, as in `f[, price := 1:3]`, replaces its type, and a c
 creates takes the value's type. Only a literal counts as a single value: a call such as `sum(x)` also
 returns one value at runtime, but the checker types `f[, price := sum(id)]` as a replacement.
 
+A value the column keeps its type for must fit it. Strings written into a logical or numeric column
+are parsed, so a string that is no number becomes `NA`, and a literal with a fraction written into an
+integer column is truncated. data.table only warns about either, but each is a type error here:
+
+```text
+type-mismatch
+
+  x column `amount` holds `integer[]`, so this `character` value is parsed as a number, and a string that is not one becomes `NA`
+   --[a.R:7:27]
+ 7 | events[id > 1L, amount := "none"]
+   |                           ^^^^^^
+```
+
+A number written into a string column is converted without loss, so it is accepted, and a value that
+replaces the whole column, such as `f[, amount := as.character(id)]`, replaces its type instead.
+
 The rebinding applies only to a name the current scope already binds: any top-level name, or a
 function's own local or parameter. A `:=` on any other name, such as a global updated inside a
 function, creates no local binding, so the name keeps resolving to its original definition for
@@ -2339,15 +2522,80 @@ unchanged <- sales                # frame{team: character[], amount: double[]}
 
 #### Joins
 
-`x[y, on = keys]` joins two frames. The keys may be written `"id"`, `"a==b"`, `"a,b"`, `c("id")`,
-`c(a = "b")`, `.(id)`, or `.(a = b)`, and each one must be a column of the frame it names. The result
-has `x`'s columns, each key taking `y`'s key type, followed by `y`'s other columns; a column both
-frames have is renamed `i.name`, as data.table names it. Inside the join, `j` can also read either
-side by prefix: `x.price` is `x`'s `price` and `i.price` is the joined frame's, which works for a key
+`x[i, on = conditions]` joins two frames. Each condition pairs a column of `x` with a column of `i`
+through `==` or one of the orderings `<`, `<=`, `>`, `>=`, and every form data.table documents is
+typed:
+
+| Form | Conditions |
+| --- | --- |
+| `"id"`, `.(id)`, `c("id")` | `id == id` |
+| `"a==b"`, `.(a = b)`, `c(a = "b")` | `a == b` |
+| `"id,t>=lo"`, `c("id", "t>=lo")` | `id == id` and `t >= lo` |
+| `.(id, t >= lo, t < hi)` | `id == id`, `t >= lo`, and `t < hi` |
+
+Each column a condition names must exist on its side. A missing column is a type error, and in a
+condition string the error points at the name inside the string:
+
+```text
+type-mismatch
+
+  x the frame `windows` has no column `low`. Its columns are `id`, `lo`, `hi`
+   --[a.R:5:38]
+ 5 | print(events[windows, on = "id, t >= low"])
+   |                                      ^^^
+```
+
+The two columns of a condition must hold values the join can compare, as data.table requires: numbers
+with numbers (an integer column joins a double one), strings with strings, and logicals with
+logicals. Any other pair is a type error, and so is an ordering on a column of strings, because only
+`==` joins strings:
+
+```text
+type-mismatch
+
+  x the join condition `t > label` compares numbers, but `label` is `character[]`. Only `==` joins strings.
+   --[a.R:6:32]
+ 6 | print(events[names, on = .(t > label)])
+   |                                ^^^^^
+```
+
+A factor column is typed `Any`, so it is not checked. `roll =` keeps the type of the join, and
+combining it with an ordering condition is a type error, since a rolling join needs every condition
+to be `==`.
+
+The result follows data.table's layout. First come `x`'s columns, where a column a condition compares
+takes the values, and so the type, of `i`'s column in its first condition. A further condition on the
+same column `t` adds a column `t.1`, then `t.2`, carrying that condition's values of `i`. Last come the
+columns of `i` that no condition uses, renamed `i.name` when `x` has the same name. A name that still
+repeats takes the first free numeric suffix, as R's `make.unique` gives it:
+
+```r
+events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2L, 5L))
+events[windows, on = .(id, t >= lo)]           # frame{id: integer[], t: double[], v: character[], hi: integer[]}
+events[windows, on = .(t >= lo, t < hi)]       # frame{id: integer[], t: double[], v: character[], t.1: integer[], i.id: integer[]}
+```
+
+Inside the join, `j` can also read either side by prefix: `x.t` is `x`'s own `t`, which the join
+replaced with `i`'s values, and `i.lo` is the joined frame's `lo`. This works for a compared column
 and for a column whose name does not clash. A prefixed name the side does not have is reported like
 any other missing column, and a prefixed name in a query that is no join ry can see is a silent
-`Unknown`. `roll =` does not change the type. A join whose `i` is not a frame, or whose `on` is some
-other form, is `Unknown`.
+`Unknown`. A join whose `i` is not a frame, or whose `on` is some other form, such as a variable
+holding the conditions, is `Unknown`.
+
+`by = .EACHI` runs `j` once per row of `i`. The result's group columns are the compared columns, in
+the order of their conditions and named as in the join's layout, followed by `j`'s columns. Within
+`j`, a column carrying `i`'s values is that row's single value, while a column of `x` is the vector of
+the rows the row matched, and `.N` counts those rows:
+
+```r
+counts <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+counts[windows, on = .(t >= lo), .(n = .N, total = sum(v), wide = if (hi > 2L) "yes" else "no"), by = .EACHI]
+# frame{t: double[], n: integer[], total: integer[], wide: character[]}
+```
+
+The `if` on `hi` is accepted because `hi` is one value per row of `i`; the same `if` on `v` is a type
+error, since `v` is a vector.
 
 #### Columns
 
@@ -2433,13 +2681,12 @@ enough to get slot types, constructor arity, and field access checked on an S4 o
 <TabItem label="Inline">
 
 ```r
-#: @type Point {list{x: double, y: double}}
+type Point = list{x: double, y: double}
 
 setClass("Point", representation(x = "numeric", y = "numeric"))
 
 make_point <- function(x: double, y: double) -> Point {
-  #: @new Point
-  new("Point", x = x, y = y)
+  @Point(new("Point", x = x, y = y))
 }
 
 norm2 <- function(p: Point) -> double sqrt(p$x^2 + p$y^2)

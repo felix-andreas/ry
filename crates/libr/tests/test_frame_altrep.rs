@@ -1,12 +1,11 @@
 //! Frame columns exposed to R as ALTREP vectors, read back through libr's own accessors, which
 //! are the paths `INTEGER`, `REAL_ELT`, `STRING_ELT` and `DATAPTR_OR_NULL` take.
 
-#![cfg(feature = "runtime")]
-
 use std::sync::{Mutex, MutexGuard};
 
 use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
-use libr::{
+use R::{
+    frame_altrep::{expose_column, expose_table, import_column},
     altrep::{dataptr, dataptr_or_null, int_elt, length, no_na, real_elt, sexp_elt},
     attributes::get_attrib,
     globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol},
@@ -14,7 +13,6 @@ use libr::{
 };
 use table::{
     Table,
-    altrep::{expose_column, expose_table, import_column},
     convert::{RVector, is_na_real},
     polars::prelude::PlSmallStr,
 };
@@ -223,7 +221,7 @@ fn a_write_through_a_writable_pointer_changes_the_vector_not_the_frame() {
 fn a_plain_r_vector_imports_with_na_as_validity() {
     let _session = session();
     unsafe {
-        let vector = libr::memory::alloc_vector(SexpType::Integer, 3)
+        let vector = R::memory::alloc_vector(SexpType::Integer, 3)
             .unwrap_or_else(|error| panic!("{error:?}"));
         vector
             .slice_mut::<i32>()

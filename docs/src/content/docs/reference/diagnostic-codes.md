@@ -124,7 +124,8 @@ checking any R.
 ## Opt-in
 
 **`type-mismatch`** (error), with `[check] typing = true` or `# typing: on`: a value of the wrong
-type, a call with the wrong arguments, a field or frame column that does not exist, and every other rule in the
+type, a call with the wrong arguments, a field or frame column that does not exist, a join of columns
+that cannot be compared, a `:=` that would convert a column's values with loss, and every other rule in the
 [type system](/reference/type-system).
 
 **`non-exhaustive-match`** (error), with typing on: a `match` that some value of the scrutinee's

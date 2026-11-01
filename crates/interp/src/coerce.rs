@@ -2,7 +2,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, Generic, builtin, internal},
-    conditions, deparse, heap,
+    conditions, deparse,
     unwind::{R, error},
     values::{
         self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
@@ -240,16 +240,15 @@ unsafe fn coerce_symbol(symbol: Sexp, kind: SexpType) -> R<Sexp> {
 }
 
 unsafe fn coerce_pairlist(list: Sexp, kind: SexpType, warnings: &mut CoercionWarnings) -> R<Sexp> {
+    // A call or pairlist is a single expression, as in GNU R.
+    if kind == SexpType::Expression {
+        let result = alloc(kind, 1)?;
+        values::set_elt(result, 0, list);
+        return Ok(result);
+    }
     match kind {
-        SexpType::List | SexpType::Expression => {
+        SexpType::List => {
             let result = values::pairlist_to_list(list)?;
-            if kind == SexpType::Expression {
-                let expression = alloc(SexpType::Expression, length(result))?;
-                for index in 0..length(result) {
-                    values::set_elt(expression, index, result.element(index));
-                }
-                return Ok(expression);
-            }
             if list.kind() != SexpType::Language {
                 let attributes = list.attrib();
                 let mut cell = attributes;
@@ -673,7 +672,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("as.complex", -1, |call| unsafe { as_type(call, SexpType::Complex) }).generic(Generic::Internal),
     builtin("as.raw", 1, |call| unsafe { as_type(call, SexpType::Raw) }).generic(Generic::Internal),
     internal("as.vector", 2, do_as_vector).generic(Generic::Internal),
-    builtin("as.call", 1, do_as_call),
+    builtin("as.call", 1, do_as_call).generic(Generic::Internal),
     internal("as.function.default", 2, do_as_function),
     internal("typeof", 1, |call| unsafe { scalar_string(type_name(call.arg(0))) }),
     internal("vector", 2, do_vector),
@@ -700,12 +699,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("is.numeric", 1, do_is_numeric).generic(Generic::Internal),
     builtin("is.matrix", 1, |call| unsafe { {
         scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2))
-    } }),
-    builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }),
-    // R 4.3, the version ry implements, still counts `NULL` as atomic, and base R's own code
-    // (`var`, through `sd`) relies on it.
+    } }).generic(Generic::Internal),
+    builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }).generic(Generic::Internal),
     builtin("is.atomic", 1, |call| unsafe { {
-        scalar_bool(call.arg(0) == nil() || call.arg(0).kind().is_atomic())
+        // GNU R 4.3, whose R code runs here, still counts NULL as atomic.
+        let kind = call.arg(0).kind();
+        scalar_bool(kind.is_atomic() || kind == SexpType::Nil)
     } }),
     builtin("is.recursive", 1, |call| unsafe { {
         scalar_bool(matches!(
@@ -718,9 +717,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 | SexpType::Expression
                 | SexpType::Special
                 | SexpType::Builtin
-                | SexpType::ExternalPtr
-                | SexpType::WeakRef
-                | SexpType::Object
+                | SexpType::Promise
+                | SexpType::Dots
         ))
     } }),
     builtin("is.call", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Language) }),
@@ -842,7 +840,7 @@ unsafe fn do_as_function(call: &Call<'_>) -> R<Sexp> {
         formals.push((values::install(&name)?, value));
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
-    crate::eval::make_closure(formals, list.element(count - 1), env)
+    crate::eval::make_closure(formals, list.element(count - 1), values::nil(), env)
 }
 
 unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
@@ -943,10 +941,6 @@ pub unsafe fn na_of(kind: SexpType) -> R<Sexp> {
         _ => {}
     }
     Ok(result)
-}
-
-pub unsafe fn heap_unused() {
-    let _ = crate::heap();
 }
 
 /// The labels of a factor's codes, `NA` for a missing or out-of-range code.

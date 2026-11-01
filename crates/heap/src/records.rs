@@ -2,6 +2,11 @@
 //! interner. Both only grow, so an id handed out once stays valid for the life of the heap, and
 //! two values have the same shape exactly when their layout ids are equal.
 //!
+//! The standard library's dictionaries and sets are record objects too, with a fixed layout of
+//! their own: a dictionary holds its keys, values and hash index in three slots, and a set its
+//! elements and index in two. Sharing the record object keeps one boundary check, one tracer and
+//! one value-semantics rule for every ry value.
+//!
 //! Tag and field names are interned symbols, which the heap roots for its whole life, so the
 //! tables hold them without tracing.
 
@@ -16,12 +21,18 @@ pub struct Layout {
     pub fields: Fields,
 }
 
-/// The slots of a layout: positional (a tuple, or a tag with a positional payload) or named.
+/// The slots of a layout: positional (a tuple, or a tag with a positional payload), named, or
+/// one of the standard library's collections.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Fields {
     Positional(u32),
     /// Field-name symbols, sorted by the bytes of their names.
     Named(Box<[Sexp]>),
+    /// Keys (an atomic vector, or `NULL` when empty), values (a list) and the hash index (an
+    /// integer vector).
+    Dict,
+    /// Elements (an atomic vector, or `NULL` when empty) and the hash index.
+    Set,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,6 +40,8 @@ pub enum NativeKind {
     Record,
     Tuple,
     Tag,
+    Dict,
+    Set,
 }
 
 impl NativeKind {
@@ -38,6 +51,8 @@ impl NativeKind {
             NativeKind::Record => "record",
             NativeKind::Tuple => "tuple",
             NativeKind::Tag => "tag",
+            NativeKind::Dict => "dict",
+            NativeKind::Set => "set",
         }
     }
 
@@ -47,6 +62,8 @@ impl NativeKind {
             NativeKind::Record => "ry_record",
             NativeKind::Tuple => "ry_tuple",
             NativeKind::Tag => "ry_tag",
+            NativeKind::Dict => "ry_dict",
+            NativeKind::Set => "ry_set",
         }
     }
 }
@@ -54,6 +71,8 @@ impl NativeKind {
 impl Layout {
     pub fn kind(&self) -> NativeKind {
         match (&self.tag, &self.fields) {
+            (_, Fields::Dict) => NativeKind::Dict,
+            (_, Fields::Set) => NativeKind::Set,
             (Some(_), _) => NativeKind::Tag,
             (None, Fields::Named(_)) => NativeKind::Record,
             (None, Fields::Positional(_)) => NativeKind::Tuple,
@@ -64,14 +83,16 @@ impl Layout {
         match &self.fields {
             Fields::Positional(count) => *count as usize,
             Fields::Named(names) => names.len(),
+            Fields::Dict => 3,
+            Fields::Set => 2,
         }
     }
 
     /// The field names, empty for a positional layout.
     pub fn names(&self) -> &[Sexp] {
         match &self.fields {
-            Fields::Positional(_) => &[],
             Fields::Named(names) => names,
+            Fields::Positional(_) | Fields::Dict | Fields::Set => &[],
         }
     }
 }

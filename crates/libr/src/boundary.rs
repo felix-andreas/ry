@@ -294,15 +294,26 @@ pub unsafe fn run_pending_finalizers() {
     }
     state.running_finalizers = true;
     let mark = state.heap.handle_mark();
-    for &weak in &ready {
-        state.heap.root(weak);
-    }
+    root_finalizable(&ready);
     for weak in ready {
         run_finalizer(weak);
     }
     let state = runtime();
     state.heap.release_handles(mark);
     state.running_finalizers = false;
+}
+
+/// Roots what the finalizers of `weaks` need until they have run. Rooting a weak reference
+/// alone is not enough: the collector never traces a weak reference's fields, and once taken
+/// off the heap's lists nothing else keeps them alive while an earlier finalizer allocates.
+pub unsafe fn root_finalizable(weaks: &[Sexp]) {
+    let heap = &mut runtime().heap;
+    for &weak in weaks {
+        heap.root(weak);
+        heap.root(weak.weak_key());
+        heap.root(weak.weak_value());
+        heap.root(weak.weak_finalizer());
+    }
 }
 
 pub unsafe fn run_finalizer(weak: Sexp) {
@@ -335,8 +346,17 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     }
 }
 
+/// Defers a warning without a call to the end of the top-level call, as the interpreter's own
+/// warnings are, so there is one list of pending warnings.
 pub fn warn(message: impl Into<String>) {
-    runtime().warnings.push(message.into());
+    if !interp::is_installed() {
+        return;
+    }
+    let warnings = &mut interp::interp().warnings;
+    // GNU R keeps at most 50 deferred warnings.
+    if warnings.len() < 50 {
+        warnings.push((runtime().nil(), message.into()));
+    }
 }
 
 /// Prints an unwind the way R's top level does and records it for `R_curErrorBuf`.
@@ -457,10 +477,8 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
             None => format!("Warning: {message}\n"),
         };
         write_console(text.as_bytes(), true);
-        warn(message);
         return;
     }
-    runtime().warnings.push(message.clone());
     if !interp::is_installed() {
         return;
     }

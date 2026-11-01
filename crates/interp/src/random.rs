@@ -667,7 +667,10 @@ unsafe fn set_kinds(kind: Sexp, normal_kind: Sexp, sample_kind: Sexp) -> R<()> {
             code => NormalKind::from_code(code)
                 .ok_or_else(|| error("invalid Normal type in 'RNGkind'"))?,
         };
-        if !matches!(normal_kind, NormalKind::Inversion | NormalKind::BoxMuller) {
+        if !matches!(
+            normal_kind,
+            NormalKind::Inversion | NormalKind::BoxMuller | NormalKind::KindermanRamage
+        ) {
             return Err(error(format!(
                 "normal.kind \"{}\" is not supported by ry",
                 normal_kind.name()
@@ -998,10 +1001,66 @@ fn next_normal(rng: &mut Rng) -> R<f64> {
             rng.box_muller_saved = radius * theta.sin();
             Ok(radius * theta.cos())
         }
+        NormalKind::KindermanRamage => Ok(kinderman_ramage(&mut rng.state)),
         other => Err(error(format!(
             "normal.kind \"{}\" is not supported by ry",
             other.name()
         ))),
+    }
+}
+
+/// Kinderman and Ramage's (1976) normal generator with Josef Leydold's correction, as GNU R's
+/// `norm_rand` runs it.
+#[allow(clippy::excessive_precision)]
+fn kinderman_ramage(state: &mut State) -> f64 {
+    const A: f64 = 2.216035867166471;
+    let g = |x: f64| 0.398942280401433 * (-x * x / 2.0).exp() - 0.180025191068563 * (A - x);
+    let signed = |u2: f64, u3: f64, value: f64| if u2 < u3 { value } else { -value };
+    let u1 = next_uniform(state);
+    if u1 < 0.884070402298758 {
+        let u2 = next_uniform(state);
+        return A * (1.131131635444180 * u1 + u2 - 1.0);
+    }
+    if u1 >= 0.973310954173898 {
+        loop {
+            let u2 = next_uniform(state);
+            let u3 = next_uniform(state);
+            let tail = A * A - 2.0 * u3.ln();
+            if u2 * u2 < (A * A) / tail {
+                return if u1 < 0.986655477086949 { tail.sqrt() } else { -tail.sqrt() };
+            }
+        }
+    }
+    if u1 >= 0.958720824790463 {
+        loop {
+            let u2 = next_uniform(state);
+            let u3 = next_uniform(state);
+            let value = A - 0.630834801921960 * u2.min(u3);
+            if u2.max(u3) <= 0.755591531667601 || 0.034240503750111 * (u2 - u3).abs() <= g(value) {
+                return signed(u2, u3, value);
+            }
+        }
+    }
+    if u1 >= 0.911312780288703 {
+        loop {
+            let u2 = next_uniform(state);
+            let u3 = next_uniform(state);
+            let value = 0.479727404222441 + 1.105473661022070 * u2.min(u3);
+            if u2.max(u3) <= 0.872834976671790 || 0.049264496342790 * (u2 - u3).abs() <= g(value) {
+                return signed(u2, u3, value);
+            }
+        }
+    }
+    loop {
+        let u2 = next_uniform(state);
+        let u3 = next_uniform(state);
+        let value = 0.479727404222441 - 0.595507138015940 * u2.min(u3);
+        if value < 0.0 {
+            continue;
+        }
+        if u2.max(u3) <= 0.805577924423817 || 0.053377549506886 * (u2 - u3).abs() <= g(value) {
+            return signed(u2, u3, value);
+        }
     }
 }
 

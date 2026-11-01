@@ -400,6 +400,12 @@ fn mask_of(node: &SyntaxNode) -> Mask {
             }
             mask
         }
+        // A frame is an external pointer to a table, so its columns are not in its storage.
+        SyntaxKind::TYPE_RECORD
+            if node.first_token().is_some_and(|token| token.text() == "frame") =>
+        {
+            0
+        }
         SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_LIST => LIST,
         SyntaxKind::TYPE_FUNCTION => FUNCTION,
         _ => 0,

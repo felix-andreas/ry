@@ -1097,6 +1097,99 @@ void ry_run_task_callbacks(SEXP expr, SEXP value, Rboolean succeeded, Rboolean v
     ry_sweep_task_callbacks();
 }
 
+/* A task callback that `addTaskCallback()` registered from R. Its data is a preserved list of
+   the R function, the user data, and whether the function takes the data. The call quotes the
+   expression and the value so that evaluating the call does not evaluate them again. */
+static Rboolean ry_r_task_callback(SEXP expr, SEXP value, Rboolean succeeded, Rboolean visible,
+                                   void *data)
+{
+    SEXP state = (SEXP) data;
+    int use_data = Rf_asLogical(VECTOR_ELT(state, 2)) == TRUE;
+    SEXP call = PROTECT(Rf_allocVector(LANGSXP, use_data ? 6 : 5));
+    SEXP quote = Rf_install("quote");
+    SEXP cell = call;
+    SETCAR(cell, VECTOR_ELT(state, 0));
+    cell = CDR(cell);
+    SETCAR(cell, Rf_lang2(quote, expr));
+    cell = CDR(cell);
+    SETCAR(cell, Rf_lang2(quote, value));
+    cell = CDR(cell);
+    SETCAR(cell, Rf_ScalarLogical(succeeded));
+    cell = CDR(cell);
+    SETCAR(cell, Rf_ScalarLogical(visible));
+    if (use_data)
+        SETCAR(CDR(cell), VECTOR_ELT(state, 1));
+    int failed = 0;
+    SEXP result = R_tryEval(call, R_GlobalEnv, &failed);
+    Rboolean again = FALSE;
+    if (!failed) {
+        PROTECT(result);
+        if (TYPEOF(result) != LGLSXP)
+            Rf_warning("top-level task callback did not return a logical value");
+        /* NA keeps the callback, because only an explicit FALSE removes it. */
+        again = Rf_asLogical(result) != FALSE;
+        UNPROTECT(1);
+    }
+    UNPROTECT(1);
+    return again;
+}
+
+static void ry_release_task_state(void *data)
+{
+    R_ReleaseObject((SEXP) data);
+}
+
+/* The routine behind base R's `addTaskCallback()`: it returns the zero-based position, named
+   with the callback's name. */
+SEXP ry_add_r_task_callback(SEXP function, SEXP data, SEXP use_data, SEXP name)
+{
+    SEXP state = PROTECT(Rf_allocVector(VECSXP, 3));
+    SET_VECTOR_ELT(state, 0, function);
+    SET_VECTOR_ELT(state, 1, data);
+    SET_VECTOR_ELT(state, 2, use_data);
+    const char *label = NULL;
+    if (TYPEOF(name) == STRSXP && XLENGTH(name) > 0 && STRING_ELT(name, 0) != NA_STRING)
+        label = Rf_translateChar(STRING_ELT(name, 0));
+    int position = 0;
+    RyToplevelCallback *callback =
+        Rf_addTaskCallback(ry_r_task_callback, state, ry_release_task_state, label, &position);
+    R_PreserveObject(state);
+    SEXP result = PROTECT(Rf_ScalarInteger(position - 1));
+    Rf_setAttrib(result, R_NamesSymbol, Rf_mkString(callback->name));
+    UNPROTECT(2);
+    return result;
+}
+
+/* The routine behind `removeTaskCallback()`: a name, or a one-based position. */
+SEXP ry_remove_r_task_callback(SEXP id)
+{
+    Rboolean removed = FALSE;
+    if (TYPEOF(id) == STRSXP) {
+        if (XLENGTH(id) > 0 && STRING_ELT(id, 0) != NA_STRING)
+            removed = Rf_removeTaskCallbackByName(Rf_translateChar(STRING_ELT(id, 0)));
+    } else {
+        int index = Rf_asInteger(id);
+        if (index != NA_INTEGER)
+            removed = Rf_removeTaskCallbackByIndex(index);
+    }
+    return Rf_ScalarLogical(removed);
+}
+
+SEXP ry_task_callback_names(void)
+{
+    R_xlen_t count = 0;
+    for (RyToplevelCallback *node = ry_task_callbacks; node != NULL; node = node->next)
+        if (!node->removed)
+            count++;
+    SEXP names = PROTECT(Rf_allocVector(STRSXP, count));
+    R_xlen_t index = 0;
+    for (RyToplevelCallback *node = ry_task_callbacks; node != NULL; node = node->next)
+        if (!node->removed)
+            SET_STRING_ELT(names, index++, Rf_mkChar(node->name));
+    UNPROTECT(1);
+    return names;
+}
+
 /* R_maphashC's callback is native code; the status is unused because an error jumps instead. */
 SEXP ry_maphash_call(SEXP (*function)(SEXP, SEXP, void *), SEXP key, SEXP value, void *data,
                      int *status)

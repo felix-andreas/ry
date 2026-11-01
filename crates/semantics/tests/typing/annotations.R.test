@@ -235,8 +235,8 @@ two <- function(x) x
 #++++
 one: <T> fn(x: T) -> T
 two: <T> fn(x: T) -> T
-7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
-59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `numeric`, `atomic`, `key`, or `scalar numeric`.
+59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `numeric`, `atomic`, `key`, or `scalar numeric`.
 
 #---- value_annotation_checks
 #: integer
@@ -368,7 +368,7 @@ value: integer
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, `key`, or `scalar numeric`.
 
 #---- a_refused_higher_rank_block_carries_no_payload
 # The parser refuses the binder and reads the type as if it were absent, which

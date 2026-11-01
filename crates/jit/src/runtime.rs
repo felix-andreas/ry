@@ -106,7 +106,7 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
         return true;
     }
     for speculation in &compiled.speculations {
-        match resolve_function(speculation.symbol, compiled.enclosure) {
+        match resolve_function(speculation.symbol, speculation.env) {
             Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
             _ => return false,
         }

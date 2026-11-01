@@ -78,3 +78,17 @@ x: :Some(integer) | :None | .. <- :None
 f <- function(p: record{x: double}, t: tuple{integer}) -> :Ok(value: double) p
 #: :Some(integer) | :None
 y <- :None
+
+#---- colon_before_tag_keeps_its_space
+l: :Sost$field[g[2]]$name
+#++++
+l : :Sost$field[g[2]]$name
+
+#---- call_on_payloadless_tag_keeps_space
+f <- :None (x)
+g <- :None ()
+h <- :Some(1)(x)
+#++++
+f <- :None (x)
+g <- :None ()
+h <- :Some(1)(x)

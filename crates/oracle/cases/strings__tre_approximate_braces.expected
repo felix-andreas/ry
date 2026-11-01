@@ -1,0 +1,11 @@
+[stdout]
+| [1] "filter"
+| [1] TRUE
+| [1] ":"
+| [1] "f00"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "f00"

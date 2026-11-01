@@ -139,6 +139,8 @@ pub struct GcPolicy {
     pub old_limit: usize,
     pub min_old_limit: usize,
     pub stress: GcStress,
+    /// Checks the write barrier's invariant before every minor collection (`RY_GC_VERIFY`).
+    pub verify: bool,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -889,7 +891,7 @@ impl Heap {
         self.binding_epoch
     }
 
-    /// The symbols bound in `env`'s own frame.
+    /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
     pub unsafe fn frame_symbols(&self, env: Sexp) -> Vec<Sexp> {
         if self.is_symbol_frame(env) {
             return self
@@ -903,10 +905,23 @@ impl Heap {
             return Vec::new();
         }
         (*env.frame_ptr())
-            .cells()
+            .listed_cells()
             .iter()
             .map(|cell| cell.car())
             .collect()
+    }
+
+    /// Makes `env`'s frame hashed, as `new.env(hash = TRUE, size = size)` creates it, which
+    /// decides the order the frame is listed in.
+    pub unsafe fn set_frame_hashed(&mut self, env: Sexp, size: i32) {
+        if !self.is_symbol_frame(env) && env != self.known.empty_env {
+            (*env.frame_ptr()).set_hashed(size);
+        }
+    }
+
+    /// Marks the bindings of a closure frame made so far as its formals.
+    pub unsafe fn mark_frame_formals(&mut self, env: Sexp) {
+        (*env.frame_ptr()).mark_formals();
     }
 
     // Roots.
@@ -1095,6 +1110,8 @@ impl Heap {
         self.inhibit += 1;
         if kind == Collection::Major {
             self.clear_marks();
+        } else if self.policy.verify {
+            self.verify_barrier();
         }
         for &object in keep {
             self.mark(object);
@@ -1280,6 +1297,71 @@ impl Heap {
             } else {
                 self.clear_weak_ref(weak);
             }
+        }
+    }
+
+    /// The write barrier's invariant: an old object that is neither remembered nor escaped
+    /// points only to old objects. A violation means some store skipped the barrier, and the
+    /// next minor collection would free a live child.
+    unsafe fn verify_barrier(&self) {
+        let check = |parent: Sexp| {
+            if !parent.is_marked() || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
+            {
+                return;
+            }
+            let mut children = vec![parent.attrib()];
+            if parent.is_altrep() {
+                children.extend([parent.car(), parent.cdr(), parent.tag()]);
+            } else {
+                match parent.kind().shape() {
+                    Shape::Vector
+                        if matches!(
+                            parent.kind(),
+                            SexpType::String | SexpType::List | SexpType::Expression
+                        ) =>
+                    {
+                        children.extend((0..parent.length() as usize).map(|i| parent.element(i)));
+                    }
+                    Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
+                    Shape::Environment => {
+                        children.push(parent.enclosure());
+                        let frame = parent.frame_ptr();
+                        if !frame.is_null() {
+                            children.extend((*frame).cells().iter().copied());
+                        }
+                    }
+                    Shape::ExternalPtr => {
+                        children.extend([parent.external_tag(), parent.external_protected()])
+                    }
+                    Shape::Record => children.extend(
+                        (0..parent.record_slot_count()).filter_map(|i| parent.record_handle(i)),
+                    ),
+                    _ => {}
+                }
+            }
+            for (position, child) in children.into_iter().enumerate() {
+                if !child.is_marked() {
+                    panic!(
+                        "write barrier violated: old {:?} (length {}) holds young {:?} at child {position}",
+                        parent.kind(),
+                        if parent.kind().shape() == Shape::Vector { parent.length() } else { 0 },
+                        child.kind(),
+                    );
+                }
+            }
+        };
+        for class in &self.classes {
+            for &page in &class.pages {
+                for slot in 0..PAGE_SIZE / class.slot_size {
+                    let object = Sexp::from_non_null(page.add(slot * class.slot_size).cast());
+                    if object.kind_byte() != SexpType::Free as u8 {
+                        check(object);
+                    }
+                }
+            }
+        }
+        for &object in &self.large {
+            check(object);
         }
     }
 
@@ -1550,6 +1632,7 @@ impl Default for GcPolicy {
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: GcStress::Off,
+            verify: std::env::var_os("RY_GC_VERIFY").is_some(),
         }
     }
 }

@@ -469,6 +469,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                     }
                     value
                 };
+                // The body must see the sequence as shared, as in the interpreter, so that
+                // modifying the variable it came from copies it.
+                self.increment(sequence);
                 let count = self.builder.ins().load(I64, flags(), sequence, LENGTH);
                 let zero = self.builder.ins().iconst(I64, 0);
                 self.builder.def_var(self.loop_counts[index], count);
@@ -508,6 +511,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.ins().jump(label, &[]);
                 self.fill_edges()?;
                 return Ok(true);
+            }
+            Action::ForEnd { src } => {
+                let sequence = self.load_register(src);
+                let yes = self.builder.ins().iconst(I8, 1);
+                self.decrement_if(sequence, yes);
             }
             Action::Visible(flag) => self.set_visible(&before, flag),
             Action::LogicLeft { dst, src, is_and } => {
@@ -632,6 +640,14 @@ impl<'p, 'b> Translator<'p, 'b> {
     #[allow(clippy::too_many_arguments)]
     unsafe fn direct_call(&mut self, position: usize, before: State, steps: Vec<(Action, State)>, function: Sexp, call: Sexp, args: &[Argument], dst: (usize, Ty)) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
+        // A calling handler could run R code during the callee, before it forces an argument
+        // that this call evaluates early, so tier 0 makes such a call lazily.
+        let handlers = self
+            .call(runtime::jit_handlers_present as *const () as usize, &[], Some(I32), &[])
+            .ok_or(Refusal("a helper without a result"))?;
+        let observed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::HANDOFF);
+        let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, handlers, 0);
+        self.guard(unobserved, observed);
         for (step, state) in steps {
             self.action(position, state, step)?;
         }
@@ -1590,10 +1606,12 @@ impl<'p, 'b> Translator<'p, 'b> {
             Ty::Closure(formals, body) => {
                 let formals = self.builder.ins().iconst(I64, formals.as_ptr() as i64);
                 let body = self.builder.ins().iconst(I64, body.as_ptr() as i64);
-                let matches = self
-                    .call(runtime::jit_closure_matches as *const () as usize, &[I64, I64, I64, I64], Some(I32), &[self.activation, value, formals, body])
-                    .unwrap_or(formals);
-                return self.builder.ins().icmp_imm_s(IntCC::NotEqual, matches, 0);
+                // A helper call without a result cannot happen for a helper declared with one,
+                // and failing the check keeps the code correct if it ever did.
+                return match self.call(runtime::jit_closure_matches as *const () as usize, &[I64, I64, I64, I64], Some(I32), &[self.activation, value, formals, body]) {
+                    Some(matches) => self.builder.ins().icmp_imm_s(IntCC::NotEqual, matches, 0),
+                    None => self.builder.ins().iconst(I8, 0),
+                };
             }
             Ty::Int => (SexpType::Integer, true),
             Ty::Dbl => (SexpType::Real, true),
@@ -1706,7 +1724,7 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::BranchUnlessBuiltin => vec![operand(0)],
         Op::Arithmetic => vec![operand(2), operand(3)],
         Op::SubAssign => vec![operand(2), operand(3)],
-        Op::JumpUnless | Op::Return => vec![operand(0)],
+        Op::JumpUnless | Op::Return | Op::ForEnd => vec![operand(0)],
         Op::ForInit | Op::ForStep | Op::LogicLeft => vec![operand(1)],
         Op::LogicRight => vec![operand(1), operand(2)],
         Op::SetVar => vec![operand(1)],

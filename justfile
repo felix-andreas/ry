@@ -259,6 +259,15 @@ release-kind $version:
 corpus:
     Rscript tools/corpus/install.R
 
+# Download the corpus packages' source tarballs, which carry the tests binary installs lack.
+corpus-sources:
+    Rscript tools/corpus/sources.R
+
+# Run corpus packages' own tests under GNU R and ry's runtime: `just package-tests [--runtime ry] [PKG...]`.
+package-tests *args:
+    cargo build -q --release -p ry-lang -p libr
+    ORACLE_RY=target/release/ry cargo run -q --release -p oracle -- packages {{ args }}
+
 # The differential oracle: `just oracle verify`, `record`, `compare` or `show FILE`.
 oracle *args:
     cargo run -q -p oracle -- {{ args }}
@@ -266,6 +275,11 @@ oracle *args:
 # Generate the synthetic benchmark code bases, e.g. `just bench-gen --out .bench --lines 10000`.
 bench-gen *args:
     python3 -I tools/bench/generate.py {{ args }}
+
+# Compare generated packages' tests under GNU R and ry's runtime test by test, e.g. `just bench-compare .bench/finbench`.
+bench-compare *args:
+    cargo build -q --release -p ry-lang -p libr -p oracle
+    R_LIBS=$PWD/.corpus/library ./target/release/oracle bench --ry target/release/ry {{ args }}
 
 # Run a generated package's tests under GNU R, e.g. `just bench-test .bench/finbench`.
 bench-test package reporter="summary":

@@ -293,7 +293,10 @@ Refusing an unsupported construct loudly is acceptable policy. Mistyping one sil
 `stop(...)` types as `Any`, not `NULL` or `Unknown`. There is no bottom type, and `Any` is the one
 type that fits every branch and return position without strict mode reporting it, so a
 `if (bad) stop(...)` guard costs strict users nothing. `&` and `|` are typed elementwise (logical
-scalar or vector) rather than opaque, so their operands resolve normally in naming.
+scalar or vector) rather than opaque, so their operands resolve normally in naming. An operand
+whose type is still a variable is not unified with scalar `logical`, as `!`'s operand is, because
+`&` is mostly used on vectors and the unification made `h(c(TRUE, FALSE), TRUE)` an error; the
+operator is opaque for it instead.
 
 ## A reported column counts characters, and caret art counts terminal cells
 
@@ -812,8 +815,8 @@ carries its own annotation).
 
 **Both spellings on one statement** merge per slot (value, parameter, rest, return), and type
 parameters pair by position (the comment's are renamed to the inline names first), with the inline
-side winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
-(`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
+side winning, except that a coercion (`@trust`, `@if-unknown`, `@new`) governs the value wherever it
+is written, and the inline one wins when both sides carry one (`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
 file-absolute ranges, comparing types after alias expansion and union-member sorting, so the warning
 can point at both written types. Positional comment parameter types pair with formals the way
 `check_declared_function` pairs them.
@@ -838,6 +841,43 @@ A parameter a `#:` block also names keeps the comment's `[name]`, which is check
 
 **Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
 `lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.
+
+## Inline type definitions, coercions and nominal constructors
+
+**Syntax.** `type Name<T: c> = TYPE` declares a nominal type and `alias Name = TYPE` an alias, as
+statements at the top level of a file; `x: @trust T <- v` (also `@if-unknown`, `@new`) is a coercing
+binding; and `@Name(value)` or `@Name<Args>(value)` constructs a nominal value, the expression form of
+`#: @new Name`. Docs: `reference/type-system.mdx#inline-annotation-syntax`.
+
+**Why it is unambiguous.** Two names in a row are not valid R, and neither is `@` at the start of an
+expression, so none of these forms gives a valid R program a new reading. `type` and `alias` are
+contextual: the definition is recognized only at a statement start with the defined name on the same
+line, so `type <- 1`, `alias(type)` and `type` as a parameter keep working. At a line start
+`@Name` is a constructor only before `(` or `<`, so `obj` newline `@slot` keeps R's own error;
+after an operator a bare `@Name` is a constructor, so completion works while it is typed. A nested definition is an
+`annotation` error rather than a silent new scope, because a type's scope is the file. Rejected:
+`@type Name = T` (reads as a decorator, and `@` at statement start would collide with the constructor),
+and `newtype` (a second keyword for no new meaning).
+
+**Leading `|`.** A union may open with `|`, in `#:` comments too, and inline a union continues onto a
+line that starts with `|`. No R statement starts with `|`, so this never swallows the next statement,
+and it lets a tagged union list one member per line.
+
+**One meaning.** A definition lowers to the same `NamedDefinition` as its `#:` block, and every
+consumer reads definitions through `file_type_definitions`. A `#:` definition directly above an
+inline one of the same name is one definition written twice (`paired_comment_definition`): with
+inline annotations on, the inline one is used and any disagreement in kind, parameters, constraints
+or body is an `annotation-mismatch` warning; with them off, the comment applies alone. An unpaired
+inline definition with inline annotations off still declares its name, with an `Unknown` body, so
+uses of the name do not turn into unknown-type errors on top of the `inline-annotation` warning.
+
+**Erasure and run time.** Erasure turns a definition into its `#: @type`/`#: @alias` comment, line
+for line and keeping comments, so the erased program still declares the type. A paired definition
+erases to nothing, since its partner already declares it (two copies would be a duplicate). Because
+the comment would swallow the rest of its line, a definition must end its line, which the parser
+enforces. Erasure also drops the `@Name` of a constructor, leaving `(value)`, and drops
+a coercing binding's `: @trust T`. The runtime skips definitions and lowers `@Name(value)` to its
+parenthesized value; a nominal type has no run-time representation.
 
 ## Testing doctrine for `syntax`
 
@@ -1834,6 +1874,47 @@ there was no evaluator, so there was no previous source of truth.
 - **A complex assignment's `*tmp*` does not count as a reference** (`Heap::untrack_references`,
   GNU R's `DISABLE_REFCNT`): counting it made every `x[i] <- v` copy `x`, which made fill loops
   quadratic.
+- **Top-level task callbacks live in libr's C, behind two interpreter hooks**
+  (`Hooks::run_task_callbacks`, `Hooks::task_callback_routine`). C packages register callbacks
+  through `Rf_addTaskCallback`, so the list has to be the C one; R's `addTaskCallback` reaches the
+  same list through the routine hook rather than keeping a second list in `interp`.
+  `session::run_toplevel` runs them after printing the task's warnings, as GNU R does.
+- **S4 objects get their S3 class vector from a cache keyed by class name** (`Globals::s4_extends`,
+  filled by `.cache_class` or by calling methods' `.extendsForS3` on a miss). This is GNU R's
+  `R_S4_extends_table`: without it, S3 dispatch on an S4 object sees only its own class and misses
+  methods for the classes it contains.
+- **`.External2` routines get GNU R's four-argument convention** `(call, op, args, env)`, which
+  rlang's `ffi_eval` relies on to evaluate in the caller's environment.
+
+# Decision record: one connection table, in the interpreter
+
+- **Previous sources of truth.** There were two connection tables. `libr::connections` held GNU R's
+  `struct Rconn` table (128 slots, the devices, custom connections, the C entry points) and an R
+  function table (`PRIMITIVES`) that nothing registered once the interpreter was installed.
+  `interp::connections` held a second, simpler table (its own connection records and class enum)
+  with the sinks, `cat` and every connection builtin the interpreter actually ran. A connection that
+  R code opened was therefore invisible to `R_GetConnection`, and a custom connection a package
+  created could not be read with `readLines`.
+- **What was duplicated.** The table, the slot numbering, the R-level connection object, every
+  device kind and the read and write paths existed twice, and the libr copy was dead code apart from
+  the C entry points. Warnings were also kept twice: libr's `Runtime.warnings` beside the
+  interpreter's deferred list.
+- **Target shape.** `interp::connections` owns the `#[repr(C)] Rconn`, the table, the devices, the
+  sinks and every connection internal, registered with GNU R 4.3.3's arities. A package's own C
+  method is called through the `Hooks::connection_method` hook, which libr implements with the
+  `native.c` trampolines under a native scope, and ry's methods that C calls enter through
+  `Hooks::enter_from_native`, libr's `enter`, so an R error becomes the `longjmp` C expects. The
+  default `vfprintf` is native code, so its address comes in as `Hooks::connection_vfprintf`. libr
+  keeps only `R_new_custom_connection`, `R_GetConnection`, `R_ReadConnection`, `R_WriteConnection`
+  and `ry_connection_count`. The interpreter's root source traces what the table holds (a text
+  output connection's variable and environment), replacing preserve and release. libr's
+  `boundary::warn` defers onto the interpreter's warning list, which the test exports read.
+- **Impact.** One table means R code and C code see the same connections, which makes the custom
+  connections of curl and processx readable from R. The interpreter still builds and tests
+  without libR, because native calls go through hooks whose defaults error, and the merged table
+  is about 750 lines smaller than the two were.
+- **`closeAllConnections` is not an internal.** GNU R defines it as a base closure over
+  `getAllConnections` and `close`, so ry registers no internal for it.
 
 # Decision record: the full C API surface and package installation
 
@@ -2022,6 +2103,30 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
   namespace, S3/S4, collation and reload tests on both runtimes.
 
+# Decision record: package tests through the oracle
+
+`oracle packages` (`crates/oracle/src/packages.rs`, `contributing/corpus-and-oracle.md`, "Package
+tests") runs each corpus package's own `tests/` under GNU R and under ry and reports pass or fail per
+package. It is the measure for "the corpus packages run on ry".
+
+- **A file passes when its process exits with status 0, and a package passes when every file
+  does**, which is the rule `R CMD check` applies to `tests/`. The `.Rout` files are not diffed,
+  because they carry timings, temporary paths and addresses; testthat's summary counts are read
+  from them and reported beside the verdict, which shows how far a failing package got.
+- **The pass rate counts only packages GNU R passes**, because a package whose tests fail on GNU R
+  (missing suggests, network, a display) says nothing about ry.
+- **GNU R's results are reused** for the same package version unless `--rerun-gnu-r`, since they
+  change only when the corpus does.
+- **Each file runs in its own process group under `--timeout`**, killed as a group, because a hung
+  test usually leaves a child (callr, processx) behind that would keep the pipe open.
+- **Run it against a copied binary** (`ORACLE_RY`), not `target/release/ry`, because a full run is
+  long and a rebuild under it changes the engine midway.
+
+Fixes the harness drove are classes, each with an oracle case under `crates/oracle/cases/`:
+`deparse.level` naming in `cbind`/`rbind` (read from the closure's `...` promises), the `Summary`
+group's `na.rm` reordering, list comparison coercion, `return` outside a function, POSIXlt balancing,
+graphical parameters, `file.append` and anonymous `file()` buffers.
+
 # Decision record: base R's linear algebra
 
 - **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.
@@ -2034,14 +2139,40 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 
 The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by package in
 `builtin_libraries::implementation`. Each behavior was derived from GNU R's documentation and its
-observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
-never from its C source.
+observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
+`utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **The session has only the null device.** `dev.cur()` is device 1, `.Device` and `.Devices` are
-  bound at startup, and every grDevices or graphics routine without an entry in the tables fails
-  with "graphics devices are not supported in ry yet" (`graphics::no_devices` is the fallback, so a
-  new routine needs no stub). `cairoProps` reports no cairo, so the default device is `pdf` and
-  `bitmapType` is `"Xlib"`, as in a headless build. A real device is a later step.
+- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
+  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
+  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
+  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
+  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
+  write per finished page. Drawing routines check their arguments and a started plot, then return.
+  A real renderer would slot in behind the same table; nothing else reads pixels today.
+- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
+  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
+  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
+  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
+  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
+  and that belongs with real drawing, when the display list holds the calls to replay.
+- **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
+  (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
+  are rebound from the table after every change, `dev.set(1)` starts the default device but
+  reports device 1 as GNU R does, and any routine that needs a device opens
+  `getOption("device")` first, which is how a script with no device gets `pdf("Rplots.pdf")`.
+- **One copy of `par`.** GNU R keeps default and current parameters so a high-level call's inline
+  parameters apply for its duration; ry reads inline parameters from the call instead, so a single
+  `Pars` is the source of truth.
+- **Regions remember the unit they were set in** (`Margins`, `OuterMargins`, `PlotRegion`,
+  `FigureRegion` enums). Base graphics recomputes the others from that one when the device, `cex`,
+  `mex` or the layout changes, so `par(mai = ...)` followed by `par(cex = 2)` keeps the inches and
+  moves `mar`, and storing all units would let them drift apart.
+- **Text metrics are Helvetica's published AFM widths** (regular and bold; the oblique faces share
+  them) at the nearest whole point size, with the cap height for `strheight`. That matches the pdf
+  device's numbers exactly; bitmap devices in GNU R measure with cairo fonts and can differ.
+- **`cairoProps` reports cairo**, so `capabilities()` lists png, jpeg and tiff and the bitmap
+  devices take the cairo path, which needs no display.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
   low byte), because only the colour routines read it and the interpreter is single-threaded.
 - **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`
@@ -2093,6 +2224,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   `c("frame", "data.frame")` use a name base R does not give a meaning to in a type position.
   `graphics::frame()` exists, so the checker treats `frame()` as the built-in only with at least one
   argument and when the project defines no `frame` of its own.
+- **At run time `frame` is one closure that delegates a call without arguments to
+  `graphics::frame`**, and it is bound in an environment attached ahead of `package:graphics` on
+  the search path. `graphics::frame` is `plot.new`, which takes no arguments, so every call that
+  worked before still runs graphics' code, and every call with arguments, which was an error, now
+  builds a frame. R's own lookup then gives the checker's rule for free: a `frame` defined in
+  `.GlobalEnv` or a package namespace is found first, and a package that imports `graphics::frame`
+  keeps it. The rejected options: binding it in base (top-level code finds `package:graphics` before
+  `package:base`, so `frame(a = 1)` would hit `plot.new`), and renaming the type (the name was
+  chosen to stay clear of base's `table`). The cost is that `identical(frame, graphics::frame)` is
+  `FALSE`, which no known code tests. The interpreter wiring that binds it is still open.
 - **`:=` has value semantics in the checker.** `f[, y := e]` rebinds `f` to the extended type, and
   aliases keep the old type. Column sets are exact. At runtime the update is copy-on-write: the
   interpreter passes an unshared `&mut Table` (reference count one) and the update happens in place,
@@ -2127,11 +2268,13 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   column is cast back to `i`'s type.
 - **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
   `group_by_stable` and a sort.
-- **ALTREP lives in the `table` crate behind the `runtime` feature**, which links `libr` and `heap`.
-  The dependency points from the engine to the runtime so that `libr`, which every native package
-  loads, never compiles Polars. An exposed column's `data1` owns the Arrow array and `data2` holds
-  R's layout once something needs it; a column that R never materialized comes back from
-  `import_column` as the same buffer.
+- **ALTREP column exposure lives in `libr` (`crates/libr/src/frame_altrep.rs`), and `libr` links
+  Polars.** Frames are interpreter values, so `interp` depends on `table`, and `libr` (which
+  depends on `interp`) links Polars either way; keeping ALTREP in `table` behind a feature would
+  only make the engine depend on the runtime. The dependency points from the runtime to the
+  engine, and `libR.so` grows by the engine's size. An exposed column's `data1` owns the Arrow
+  array and `data2` holds R's layout once something needs it; a column that R never materialized
+  comes back from `import_column` as the same buffer.
 - **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
   layouts, which is what makes the zero-copy paths possible.
 
@@ -2184,6 +2327,69 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   stays logical), and hidden probe sums pick the version
   (`assign` in `query.rs`). Where data.table's grouped `:=` takes the column type from the first
   group, the engine makes the column a double if any group overflows.
+- **Non-equi joins and `.EACHI` follow data.table, with one naming exception.** A join condition is
+  an `On { x, op, i }`; an ordering compares numbers only (data.table refuses characters too), and
+  a rolling join must be all `==`. `join_layout` is the single description of the output columns,
+  read by the plan, the kernel and `join_schema`: `x`'s columns with a join column taking `i`'s
+  values from its first condition, then one column per further condition on the same `x` column
+  (`t.1`, `t.2`), then `i`'s unused columns. data.table names those extra columns `t, t`, a
+  duplicate that ry does not reproduce. A name that still repeats (a real column `t.1`, or `i`
+  holding both `v` and `i.v`) takes the next free numeric suffix, as `make.unique` would. NA and NaN match only the same missing value, and only
+  under `<=`, `>=` or `==`, as data.table does. The kernel (`non_equi` in `join.rs`) groups the
+  equality conditions, sorts each group's rows of `x` by the first ordering column and narrows
+  every row of `i` by binary search, checking any other condition per candidate. `.EACHI` reruns the
+  query as a join with hidden row numbers and groups by the row of `i`, so `j` sees an unmatched row
+  as one NA row with `.N` zero, and a column of `i` outside an aggregate is that row's value.
+- **Warnings are data in `Executed`, not side effects.** `execute` returns the output with a list
+  of `Warning`s, which the interpreter raises as R warnings after the query succeeds, so a failed
+  query raises none and the kernels and plans can be compared on them. Two exist, raised where
+  data.table raises its own: an integer `sum` that a grouped query (`by` or `keyby`) selects plainly
+  or assigns with `:=` and that overflows (one warning per column, none for an ungrouped, nested or
+  `.EACHI` sum), and a `:=` into an existing column whose type loses part of the value (a double
+  truncated or out of range in an integer column, a number other than 0 or 1 in a logical one).
+  NaN becomes NA silently, as in R. In a grouped join, `j` is typed against the joined rows, whose
+  join columns carry `i`'s types.
+  The wording is ry's. A narrowing `:=` skips the kernel, because detecting the loss needs the
+  value before the conversion; it is not a db-benchmark shape. A third warning, `Parsed`, marks
+  strings written into a logical or numeric column: data.table warns on every such write, whatever
+  the strings hold, so the warning is decided from the types alone, and the strings are parsed as
+  `as.logical`, `as.integer` (through a double, so `"3.7"` is 3) or `as.double` would.
+- **Prefixed join columns are copies, not a second layout.** `x.t` and `i.lo` in `j` or `by` are
+  resolved before the join runs (`prefixed_copies` in `query.rs`): each side gains a copy of the
+  named column under the prefixed name, so the copy survives the join as an ordinary column and
+  every later stage (kernels, plans, `.EACHI`) needs no knowledge of prefixes. `join_layout` stays
+  the only description of the visible output; `result_type` drops the copies from `j = .SD`-like
+  results.
+- **Under `.EACHI`, an aggregate over a column of `i` alone sees the row's one value.** data.table
+  evaluates `j` with `i`'s columns of length one, so `sum(k)` is `k` and `mean(k)` is `k` as a
+  double even for an unmatched row. The rewrite (`single_value`) replaces such an aggregate with
+  the group's first value, using a hidden `FIRST_OF_ROW` mask where `na.rm` must see exactly one
+  value; an aggregate that also reads a column of `x` is left alone.
+- **The checker mirrors `join_layout`; it does not call it.** `semantics` must not depend on Polars,
+  so `join_columns` in `check.rs` reimplements the layout (names, order, `t.1` suffixes, `i.`
+  prefixes, `make.unique`), with the engine as the authority and the typing fixtures
+  (`frame_joins`) pinning both against data.table. Condition compatibility follows the engine's
+  `comparison_types`: numbers with numbers, strings with strings, logicals with logicals, and an
+  ordering never on strings. A factor column is `Any` to the checker, so it is not checked.
+- **Under `.EACHI` the checker types `i`'s columns as scalars inside `j`.** Each row of `i` runs
+  `j` once, so a column carrying `i`'s values (a compared column or an unused column of `i`) is its
+  element type in the scope, while `x`'s columns stay vectors. The groups are the compared columns
+  in condition order, matching `each_i` in the engine.
+- **A lossy `:=` is a type error, though data.table only warns.** Strings into a logical or numeric
+  column, or a fractional literal into an integer column, when the column keeps its type (partial,
+  grouped or literal write). The runtime result is almost always a bug (NA or a truncated value),
+  and an explicit `as.*()` call states the intent. A number into a string column converts without
+  loss and stays accepted, as R code relies on it.
+- **`lapply(.SD, f)` is typed once per column, not through `lapply`'s signature.** Typed through
+  `lapply`, `.SD` is a list of the union of its column types, so `f` is checked against that union
+  (a false error for any `f` that fits each column) and the result has one element type. Instead
+  `subset_apply` in `check.rs` types the call once per column with `.SD` read as a one-column list;
+  an overloaded `f` passed by name is called directly on each column through `overloaded_call`,
+  because an overload set has no single function type for `lapply` to use. A finding every column
+  causes is reported once; one only some columns cause names the column.
+- **A query result that repeats a column name has unknown columns.** data.table keeps both columns
+  (`.SDcols` naming a group column, or `.(g = x)` under `by = g`), but a `frame{...}` type cannot
+  hold two fields of one name, and annotations must round-trip.
 
 ## Records, tuples and tags are ry values, not R lists
 
@@ -2290,6 +2496,54 @@ or raised with only trivia left), which the parser knows and a range check canno
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
 
+## Frames as runtime values
+
+- **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`
+  and classed `"frame"` alone** (`crates/interp/src/frame.rs`). A weak reference with a C
+  finalizer drops the box. The table is the only copy of the data: a column becomes an R vector
+  when R code reads it (`$`, `[[`, `as.list`, a data mask). It is no longer a `data.frame` (the
+  class was `c("frame", "data.frame")`), because nothing about a data.frame's list layout or row
+  names holds for it, and the checker agrees: a frame fails a `data.frame` parameter but passes a
+  `list` one, because `as.list` gives its columns.
+- **`x[i, j, by]` on a frame never reaches the `[` primitive.** `[` is a `DispatchOrEval`
+  special, so `dispatch::dispatch_or_eval` evaluates only the subject, and when it is a frame
+  hands the unevaluated call to `frame::run`. Dispatching through `[.frame` would be too late,
+  because `i`, `j` and `by` name columns. `[.frame` still exists for calls that arrive with
+  evaluated arguments (`do.call`, `Map`). The bytecode compiles `[` as a generic call, so loops
+  that subset run the same path.
+- **Any other object subject of `[` dispatches lazily, as GNU R's `DispatchOrEval` does.** The
+  method receives the remaining arguments as promises, so `DT[, sum(x), by = g]` reaches
+  `[.data.table` with expressions instead of failing with "object 'x' not found".
+- **libr's option reads (`Rf_GetOption1`, `Rf_GetOptionWidth`, `Rf_GetOptionDigits`) go to the
+  interpreter's `options()` when the interpreter is installed.** The `.Options` pairlist in base
+  is the one source of truth; libr's own options environment serves only standalone use without
+  the interpreter. With two stores, C code sees no option R code set, and data.table's `alloccol`
+  fails with "Has getOption('datatable.alloccol') somehow become unset?".
+- **Lowering first, R second.** `Lowering` turns `i`, `j` and `by` into the engine's IR; any part
+  that returns `None` runs as R in a data mask that binds only the columns the expression
+  mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
+  for the grouping (row indices per group) and evaluates once per group.
+- **Copy-on-modify, not by-reference.** `:=` updates in place when the frame's refcount is at most
+  one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
+  call named, searching enclosing scopes, so a global updated inside a function is rebound where
+  it lives. An alias taken before the update keeps the old columns, as the checker models.
+  `setkey` always forks and rebinds.
+- **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
+  `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
+  so `ry::setkey` and `ry::List.map` work after another package masks the bare name. It is the one
+  home of the standard library and the frame functions: the builtins bind the standard library in
+  a `package:ry` just above base, and session startup moves those bindings into the namespace and
+  replaces that environment with the full package in front of the default packages, so `frame`
+  masks `graphics::frame`. It holds the user-facing functions;
+  `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
+  delegate to data.table for anything that is not a frame. S3 methods for other packages' generics
+  are registered in the generic's methods table, as an installed package's `S3method()`
+  directives are; `as.data.table.frame` is registered from a data.table `onLoad` hook, because
+  data.table is not loaded at startup. The checker's stubs are `types/ry.Rtypes`
+  and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
+  `test_standard_library.rs` keeps both equal to what the runtime binds.
+
+
 # Decision record: the JIT tier
 
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
@@ -2340,10 +2594,18 @@ first lines R had already read, leaving R mid-command.
   cell is assigned or a watched symbol is defined in any function frame (which could shadow the
   speculated binding). A call site then checks one integer instead of re-walking the environment
   chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
-  rare, and recompiles are capped per body.
+  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
+  re-resolved from the environment its lookup started in, which for a function looked up inside an
+  inlined or directly called closure is that closure's environment, not the compiled body's.
 - **A call to a speculated closure is direct and passes forced promises.** Arguments that are
   effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
-  positionally into a frame sized for the formals, skipping the matcher. A promise object is still
+  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
+  invisible when the callee cannot assign anything an argument reads before forcing it
+  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
+  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
+  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
+  the one accepted hole. A promise object is still
   allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
   needs compiled-to-compiled calls that know the callee never reflects.
 - **Small local closures inline.** A call of a closure defined by a function expression in the same
@@ -2366,3 +2628,55 @@ first lines R had already read, leaving R mid-command.
   is still the plan in `r-runtime.md`.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+
+# Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
+
+- **Previous shape:** none. Results were a user-declared `@alias`, and the only stdlib was the stubs
+  for R's own packages (the first record in this file), so every project re-declared `Result` and
+  wrote its own helpers over plain lists.
+- **Names:** plain qualified names such as `List.map` are ordinary R symbols with a dot, bound in a
+  `package:ry` environment attached just above `package:base` (`standard_library::attach`); session
+  startup moves them into the `ry` namespace, attached in front of the default packages beside the
+  frame functions (see "Frames as runtime values"). There
+  is no static dispatch, so a call is a symbol lookup and the checker reads one stub per name. A
+  definition in the user's code shadows a library name like any R binding, and
+  `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so
+  plain R cannot change meaning. Module names are Roc's; a Roc name that already means something
+  else in R is renamed (`Result.try` is `Result.and_then`).
+- **One source of truth per side:** the types live once in `types/ry.Rtypes` (namespace `ry`,
+  always active), and the runtime functions live once in `crates/interp/src/standard_library.rs`,
+  registered with `BuiltinDef::accepting_native`. A test asserts the two name sets are equal and
+  that every declared parameter name is accepted at run time.
+- **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
+  with value semantics, insertion order and an open-addressing index, because a named list
+  matches partially and allows duplicates, and an environment has reference semantics.
+  `identical()` ignores order, as Roc's equality does. Updates copy, which makes a growing loop
+  quadratic until the compiler can reuse a value it owns (backlog).
+- **Errors are tags, not conditions:** a function that can fail returns `:Ok(x) | :Err(:Tag)`, and a
+  wrong argument type raises an R error that names the parameter, so a misuse is loud and a domain
+  failure is a value.
+- **Impact:** no change for plain R (no shipped name collides, and all names are new symbols). The
+  checker, hover, completion and goto-definition read the stub file like any other, so incremental
+  analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
+  the draft with open questions is `contributing/design/standard-library.md`.
+
+## The benchmark harness compares test by test through `ry load`
+
+- **Shape.** `oracle bench` (`crates/oracle/src/bench.rs`) runs a generated package's testthat suite as `ry load <package> --file bench.R`, once with `--runtime gnu-r` and once with `--runtime ry`. The loader plan is the same on both sides, so a difference is an evaluation difference, not a loading one. The driver (`bench.R`) writes one JSON line per `test_that()` block with its status, problems, a deparse of its value and its time.
+- **Why per test, not per file.** A whole-file pass rate hides progress: one missing native fails a file of 30 tests. Per-test results also give the failure messages that the tally groups into fix classes.
+- **GNU R runs twice.** A test whose value or problems GNU R does not reproduce (a UUID, a timestamp, a temp path) is compared by status alone, so only what GNU R itself reproduces counts against ry, and no hand-maintained ignore list is needed.
+
+## `[`, `[[`, `[<-` and `[[<-` dispatch before evaluating their other arguments
+
+- **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
+- **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
+
+## libr reads options from base's `.Options`
+
+- **Previous shape.** libr's `Runtime` held its own options environment that nothing wrote, so `Rf_GetOption1` always returned `NULL` and packages (data.table's `datatable.*` options) saw defaults only.
+- **Target shape.** `Rf_GetOption1` walks `interp::envir::options()`, the interpreter's `.Options` pairlist, which is the single store `options()` writes.
+
+## parallel's natives without fork
+
+- `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.

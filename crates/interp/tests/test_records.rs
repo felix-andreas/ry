@@ -31,6 +31,8 @@ all.equal.default <- function(target, current, ...) if (identical(target, curren
 point <- (y = 2, x = 1)
 pair <- (1L, "a")
 circle <- :Circle(radius = 2)
+type UserId = integer
+alias Shape = :Circle(radius: double) | :Empty
 "#;
 
 /// Each case's code and what printing its value shows.
@@ -99,6 +101,12 @@ const PRINTS: &[(&str, &str)] = &[
     // format and deparse use ry syntax.
     ("format(circle)", "[1] \":Circle(radius = 2)\"\n"),
     ("deparse(point)", "[1] \"(x = 1, y = 2)\"\n"),
+    // Inline type definitions and nominal constructors exist only for the checker.
+    ("@UserId(7L)", "[1] 7\n"),
+    ("deparse(quote(@UserId(7L)))", "[1] \"(7L)\"\n"),
+    ("@Shape(:Circle(radius = 1))", ":Circle(radius = 1)\n"),
+    ("{ id: @new UserId <- 5L; id }", "[1] 5\n"),
+    ("{ type <- 3; alias <- 4; type + alias }", "[1] 7\n"),
     ("deparse(quote((x = 1, y = 2)))", "[1] \"(x = 1, y = 2)\"\n"),
     ("deparse(quote((b = 1, a = 2)))", "[1] \"(b = 1, a = 2)\"\n"),
     ("deparse(quote((1L,)))", "[1] \"(1L,)\"\n"),

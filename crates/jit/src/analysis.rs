@@ -298,6 +298,8 @@ pub enum Action {
     Return { src: usize },
     ForInit { index: usize, src: usize, refine: Option<Ty> },
     ForStep { index: usize, src: usize, slot: usize },
+    /// Releases the reference `ForInit` took on the sequence.
+    ForEnd { src: usize },
     Visible(bool),
     LogicLeft { dst: usize, src: usize, is_and: bool },
     LogicRight { dst: usize, left: usize, right: usize, is_and: bool },
@@ -309,6 +311,9 @@ pub enum Action {
 #[derive(Clone, Debug)]
 pub struct Speculation {
     pub symbol: Sexp,
+    /// The environment the lookup starts from, which differs from the compiled body's enclosure
+    /// for a function an inlined or directly called closure looks up from its own environment.
+    pub env: Sexp,
     /// The binding cell the lookup found.
     pub cell: Sexp,
     pub function: Sexp,
@@ -424,6 +429,7 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         registers,
         defaulted: defaulted_formals(formals),
         hints: Vec::new(),
+        frame_safe: FxHashMap::default(),
     };
     builder.collect_slots();
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
@@ -508,6 +514,8 @@ struct Builder<'a> {
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: Vec<Ty>,
+    /// Whether each closure called directly is frame-safe, so each body is walked once.
+    frame_safe: FxHashMap<Sexp, bool>,
 }
 
 impl Builder<'_> {
@@ -858,6 +866,7 @@ impl Builder<'_> {
                 state.slots[slot] = Slot { status: status::DIRTY, ty: element };
                 Action::ForStep { index: operand(0), src: operand(1), slot }
             }
+            Op::ForEnd => Action::ForEnd { src: operand(0) },
             Op::Invisible => {
                 state.visible = Some(false);
                 Action::Visible(false)
@@ -879,6 +888,8 @@ impl Builder<'_> {
                 state.visible = Some(true);
                 Action::LogicRight { dst: operand(0), left: operand(1), right: operand(2), is_and: operand(4) == 1 }
             }
+            // The interpreter's own step sets the current srcref; it touches no register.
+            Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
             Op::Closure => {
                 state.visible = Some(true);
                 let ty = Ty::Closure(self.constant(operand(1)), self.constant(operand(2)));
@@ -960,7 +971,13 @@ impl Builder<'_> {
     /// Calls `function` directly when every argument is a scalar computed without effects or a
     /// variable, which then need no promise to evaluate: each is bound to a promise that
     /// already holds its value, so `substitute` still sees the argument's expression.
+    ///
+    /// Evaluating an argument before the call is only invisible when nothing can change what it
+    /// reads before the callee forces it, so the callee must be frame-safe.
     unsafe fn direct_call(&mut self, state: &mut State, call: Sexp, function: Sexp, dst: (usize, Ty)) -> Option<Action> {
+        if !self.frame_safe(function) {
+            return None;
+        }
         let mut lowering = Lowering { state: state.clone(), steps: Vec::new(), next: self.registers, scope: Vec::new(), closed: None };
         let mut args = Vec::new();
         for (tag, expression) in values::pairlist_items(call.cdr()) {
@@ -1242,6 +1259,30 @@ impl Builder<'_> {
         Ok(self.opaque_step(state, Some((dst, feedback)), Vec::new(), Effect::Opaque))
     }
 
+    /// Whether `function` can never assign a variable in its caller's frame or anywhere else:
+    /// its defaults and body call only itself and base builtins from [`FRAME_SAFE_BUILTINS`],
+    /// and assign only to its own locals. Each function a call resolves to is recorded as a
+    /// speculation from the closure's environment, so a redefinition invalidates the code.
+    /// Calling handlers are the remaining way R code could run inside such a call; the direct
+    /// call checks for them when it runs.
+    unsafe fn frame_safe(&mut self, function: Sexp) -> bool {
+        if let Some(&safe) = self.frame_safe.get(&function) {
+            return safe;
+        }
+        // A recursive call is safe exactly when the rest of the body is, so it is assumed safe
+        // while the body is walked.
+        self.frame_safe.insert(function, true);
+        let mut found = Vec::new();
+        let defaults = values::pairlist_items(function.car());
+        let safe = defaults.iter().all(|&(_, default)| safe_expression(default, function, &mut found))
+            && safe_expression(bytecode::closure_body(function), function, &mut found);
+        if safe {
+            self.speculations.extend(found);
+        }
+        self.frame_safe.insert(function, safe);
+        safe
+    }
+
     /// The function `symbol` resolves to from the enclosure, found without forcing promises,
     /// recorded as a speculation.
     unsafe fn speculate(&mut self, symbol: Sexp) -> Option<Sexp> {
@@ -1258,6 +1299,59 @@ impl Builder<'_> {
     }
 }
 
+/// Base builtins that never run R code of the caller's choosing nor touch any environment but
+/// their own arguments, apart from S3 dispatch on a classed argument.
+const FRAME_SAFE_BUILTINS: &[&str] = &[
+    "{", "(", "if", "for", "while", "repeat", "break", "next", "return", "invisible", "+", "-", "*", "/",
+    "^", "%%", "%/%", "==", "!=", "<", ">", "<=", ">=", "!", "&", "|", "&&", "||", "sqrt", "exp", "log",
+    "abs", "floor", "ceiling", "trunc", "round", "signif", "sin", "cos", "tan", "log2", "log10", "log1p",
+    "expm1", "length", "[", "[[", "c", "is.na", "is.null", "sum", "prod", "max", "min", "cumsum", "cumprod",
+    "seq_len", "seq_along", ":", "vector", "numeric", "integer", "double", "logical", "character", "rep",
+    "rep.int", "rep_len", "nchar", "any", "all", "which", "rev", "as.integer", "as.numeric", "as.double",
+    "as.logical", "is.numeric", "is.character", "is.logical", "identical", "range", "pmin", "pmax",
+];
+
+/// Whether `expression`, in the body of `function`, keeps `function` frame-safe (see
+/// `Builder::frame_safe`), collecting the speculation for every function it calls.
+unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut Vec<Speculation>) -> bool {
+    if expression.kind() != SexpType::Lang {
+        return true;
+    }
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol {
+        return false;
+    }
+    let Some(speculation) = resolve_function(head, function.tag()) else {
+        return false;
+    };
+    let callee = speculation.function;
+    let arguments = values::pairlist_items(expression.cdr());
+    let safe = if callee == function {
+        true
+    } else {
+        match base_builtin(callee, head).as_deref() {
+            // An assignment to a symbol binds in the function's own frame; one to `x[i]`
+            // also calls the replacement builtin, and any other target could call a closure.
+            Some("<-" | "=") => match arguments.first() {
+                Some(&(_, target)) if target.kind() == SexpType::Symbol => true,
+                Some(&(_, target)) if target.kind() == SexpType::Lang && target.car().kind() == SexpType::Symbol => {
+                    let index = values::symbol_name(target.car());
+                    matches!(index.as_ref(), "[" | "[[")
+                        && values::pairlist_items(target.cdr()).first().is_some_and(|&(_, value)| value.kind() == SexpType::Symbol)
+                }
+                _ => false,
+            },
+            Some(name) => FRAME_SAFE_BUILTINS.contains(&name),
+            None => false,
+        }
+    };
+    if !safe {
+        return false;
+    }
+    found.push(speculation);
+    arguments.iter().all(|&(_, argument)| safe_expression(argument, function, found))
+}
+
 /// The name of the base builtin `function`, when `symbol` names it.
 unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
     if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
@@ -1269,8 +1363,9 @@ unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
 
 /// Walks from `enclosure` to the binding a function lookup of `symbol` finds, as tier 0 does,
 /// but gives up instead of forcing a promise or calling an active binding.
-pub unsafe fn resolve_function(symbol: Sexp, mut env: Sexp) -> Option<Speculation> {
+pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
+    let mut env = start;
     let empty = heap.known().empty_env;
     while env != empty {
         if let Some(cell) = heap.frame_cell(env, symbol) {
@@ -1285,7 +1380,7 @@ pub unsafe fn resolve_function(symbol: Sexp, mut env: Sexp) -> Option<Speculatio
                 value = value.car();
             }
             if values::is_function(value) {
-                return Some(Speculation { symbol, cell, function: value });
+                return Some(Speculation { symbol, env: start, cell, function: value });
             }
         }
         env = env.enclosure();
@@ -1388,7 +1483,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible => {}
+        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
         Op::JumpUnless | Op::Return => gen_(operand(0), live),
         Op::Arithmetic => {
             kill(operand(1), live);
@@ -1396,6 +1491,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             gen_(operand(3), live);
         }
         Op::ForInit | Op::ForStep => gen_(operand(1), live),
+        Op::ForEnd => gen_(operand(0), live),
         Op::LogicLeft => gen_(operand(1), live),
         Op::LogicRight => {
             kill(operand(0), live);

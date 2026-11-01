@@ -2,7 +2,7 @@
 //! live in the server. Per-item query results carry item-relative ranges, while this API speaks
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
-use semantics::annotations::{block_refusal, statement_inline_site};
+use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
 use semantics::check::ItemCheck;
 use semantics::diagnostics::TypeRenderer;
 use semantics::hir::{Argument, ExprId, ExpressionKind, Module};
@@ -849,10 +849,10 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
     let mut actions = Vec::new();
 
     let root = semantics::parse(db, file).syntax_node();
-    for annotation in root
-        .descendants()
-        .filter(|node| node.kind() == ANNOTATION && ranges_overlap(node.text_range(), viewport))
-    {
+    for annotation in root.descendants().filter(|node| {
+        matches!(node.kind(), ANNOTATION | TYPE_ASCRIPTION)
+            && ranges_overlap(node.text_range(), viewport)
+    }) {
         for directive in annotation
             .descendants()
             .filter(|node| node.kind() == ANNOTATION_DIRECTIVE)
@@ -1113,6 +1113,27 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
         });
     }
     let root = semantics::parse(db, file).syntax_node();
+    for definition in root.children().filter(|node| node.kind() == TYPE_DEFINITION) {
+        let keyword = type_definition_keyword(&definition);
+        let kind = if keyword == "alias" {
+            DocumentSymbolKind::AliasDefinition
+        } else {
+            DocumentSymbolKind::TypeDefinition
+        };
+        let Some(name_token) =
+            child_node(&definition, NAME).and_then(|name| child_token(&name, IDENT))
+        else {
+            continue;
+        };
+        symbols.push(DocumentSymbol {
+            name: name_token.text().to_owned(),
+            kind,
+            detail: Some(keyword),
+            range: definition.text_range(),
+            selection: name_token.text_range(),
+            children: Vec::new(),
+        });
+    }
     for directive in root
         .descendants()
         .filter(|node| node.kind() == ANNOTATION_DIRECTIVE)
@@ -1327,7 +1348,7 @@ fn annotation_type_at(
         NAME => {
             let grandparent = parent.parent()?;
             match grandparent.kind() {
-                TYPE_APPLY => true,
+                TYPE_APPLY | TYPE_DEFINITION => true,
                 ANNOTATION_DIRECTIVE if is_type_directive(&grandparent) => true,
                 other if type_kind(other) => false,
                 _ => return None,
@@ -1510,15 +1531,17 @@ fn is_type_directive(directive: &SyntaxNode) -> bool {
     matches!(directive_name(directive).as_deref(), Some("type" | "alias"))
 }
 
-/// The type parameters a region's types may name: a `#:` block's own binders, or the
-/// `<...>` of the function an inline parameter or return type belongs to.
+/// The type parameters a region's types may name: a `#:` block's or a type definition's
+/// own binders, or the `<...>` of the function an inline parameter or return type belongs to.
 fn binder_names(region: &SyntaxNode) -> Vec<String> {
-    // A binding's type sees no enclosing function's binders, as in the checker.
-    let binders = if region.kind() == ANNOTATION {
+    // A binding's type and the type of `@Name(value)` see no enclosing function's binders, as
+    // in the checker.
+    let binders = if matches!(region.kind(), ANNOTATION | TYPE_DEFINITION) {
         Some(region.clone())
-    } else if region
-        .parent()
-        .is_some_and(|parent| parent.kind() == BINARY_EXPR)
+    } else if region.kind() == NEW_TYPE
+        || region
+            .parent()
+            .is_some_and(|parent| parent.kind() == BINARY_EXPR)
     {
         None
     } else {
@@ -1622,12 +1645,13 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
                     .collect();
                 format!("<{}>", names.join(", "))
             };
-            let keyword = if definition.alias { "@alias" } else { "@type" };
-            format!(
-                "{keyword} {}{parameters} {{{}}}",
-                cursor.name,
-                TypeRenderer::default().render(db, definition.body)
-            )
+            let body = TypeRenderer::default().render(db, definition.body);
+            match (definition.inline, definition.alias) {
+                (true, true) => format!("alias {}{parameters} = {body}", cursor.name),
+                (true, false) => format!("type {}{parameters} = {body}", cursor.name),
+                (false, true) => format!("@alias {}{parameters} {{{body}}}", cursor.name),
+                (false, false) => format!("@type {}{parameters} {{{body}}}", cursor.name),
+            }
         }
         None => cursor.name.clone(),
     };
@@ -1698,6 +1722,7 @@ fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Oc
                     TYPE_REF => false,
                     NAME => match node.parent() {
                         Some(parent) if parent.kind() == TYPE_APPLY => false,
+                        Some(parent) if parent.kind() == TYPE_DEFINITION => true,
                         Some(parent)
                             if parent.kind() == ANNOTATION_DIRECTIVE
                                 && is_type_directive(&parent) =>
@@ -1814,6 +1839,14 @@ fn annotation_completion(
         .iter()
         .map(|(name, definition)| (name.text(db).to_owned(), definition.body))
         .collect();
+    if let Some(library) = stubs(db) {
+        for (name, definition) in &library.type_definitions {
+            let label = name.text(db).to_owned();
+            if !definitions.iter().any(|(known, _)| *known == label) {
+                definitions.push((label, definition.body));
+            }
+        }
+    }
     for definition in file_type_definitions(db, file) {
         let label = definition.name.text(db).to_owned();
         if !definitions.iter().any(|(name, _)| *name == label) {
