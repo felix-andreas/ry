@@ -861,7 +861,10 @@ pub unsafe fn clear_attributes(object: Sexp) {
 }
 
 pub unsafe fn names(object: Sexp) -> Sexp {
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
+    if matches!(
+        object.kind(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    ) {
         return pairlist_names(object).unwrap_or(nil());
     }
     if object.kind() == SexpType::Environment {
@@ -1231,6 +1234,7 @@ pub unsafe fn pairlist_to_list(list: Sexp) -> R<Sexp> {
     let items = pairlist_items(list);
     let values: Vec<Sexp> = items.iter().map(|(_, value)| *value).collect();
     let result = list_vector(&values)?;
+    copy_attributes(list, result)?;
     if items.iter().any(|(tag, _)| *tag != nil()) {
         let names = alloc(SexpType::String, items.len())?;
         for (index, (tag, _)) in items.iter().enumerate() {

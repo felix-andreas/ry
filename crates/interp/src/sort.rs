@@ -1530,6 +1530,13 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
                 )
                 && (flags.ignore_environment || x.tag() == y.tag())
         }
+        // Promises match when they would evaluate the same code in the same environment, so two
+        // `...` objects built from the same call site compare equal.
+        SexpType::Promise => {
+            x.tag() == y.tag()
+                && identical(x.car(), y.car(), flags)
+                && identical(x.cdr(), y.cdr(), flags)
+        }
         SexpType::Builtin | SexpType::Special => x.primitive_index() == y.primitive_index(),
         SexpType::ExternalPtr => {
             !flags.external_pointer_as_reference && x.external_address() == y.external_address()

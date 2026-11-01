@@ -314,6 +314,17 @@ unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
             }
         }
         if let Some(failure) = failure {
+            if failure.condition.is_some() {
+                report_toplevel(crate::lower::syntax_failure_unwind(
+                    rest,
+                    &failure,
+                    source_name,
+                    "<input>",
+                    line_offset,
+                ));
+                write_console(b"Execution halted\n", true);
+                return Outcome::Failed;
+            }
             let message =
                 crate::lower::syntax_failure_message(rest, &failure, source_name, line_offset);
             write_console(
@@ -350,7 +361,7 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
         }
         let text = std::mem::take(&mut buffer);
         let mark = crate::heap().handle_mark();
-        match crate::lower::parse_script(&text, "<text>") {
+        match crate::lower::parse_script(&text, "<text>", "<input>") {
             Ok(script) => {
                 for node in &script.expressions {
                     let succeeded =

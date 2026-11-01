@@ -132,6 +132,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
         SexpType::Closure => print_closure(value, options)?,
         SexpType::Environment => out(&format!("{}\n", environment_label(value)?)),
         SexpType::Promise => out("<promise>\n"),
+        SexpType::Dots => out("<...>\n"),
         SexpType::Language => {
             for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
                 out(&format!("{line}\n"));
@@ -147,7 +148,7 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 out(&format!("{line}\n"));
             }
         }
-        SexpType::Pairlist | SexpType::Dots => {
+        SexpType::Pairlist => {
             let list = values::pairlist_to_list(value)?;
             print_list(list, options, tag)?;
         }

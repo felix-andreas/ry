@@ -1545,8 +1545,9 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         let list = values::pairlist_to_list(object)?;
         let result = subassign2(list, indices, value, call)?;
         let result = values::list_to_pairlist(result, object.kind())?;
-        // The call keeps its attributes, such as a formula's class and environment.
-        values::copy_most_attributes(object, result, false)?;
+        // The call keeps its attributes, such as a formula's class and environment, and a
+        // pairlist keeps its dimensions.
+        values::copy_most_attributes(object, result, true)?;
         return Ok(result);
     }
     if indices.len() == 1
@@ -2147,7 +2148,7 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
         values::remove_attr(object, symbols().dimnames);
         return Ok(object);
     }
-    if !object.kind().is_vector() {
+    if !object.kind().is_vector() && object.kind() != SexpType::Pairlist {
         return Err(call.error("invalid first argument, must be vector (list or atomic)"));
     }
     let dims = coerce_vector(dims, SexpType::Integer)?;

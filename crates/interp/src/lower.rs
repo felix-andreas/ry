@@ -11,7 +11,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    unwind::{R, error},
+    unwind::{R, Unwind, error},
     values::{self, alloc, install, missing_arg, nil, symbols},
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
@@ -32,7 +32,17 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
 /// Parses `text` like [`parse_text`], and keeps source references against `srcfile` when it is a
 /// srcfile environment, as GNU R's parser does when `parse` is given one.
 pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -> R<Sexp> {
-    let script = parse_script(text, source_name)?;
+    let condition_file = if srcfile.kind() == SexpType::Environment {
+        let filename = crate::eval::find_var_in_frame(install("filename")?, srcfile)?;
+        match filename.kind() {
+            SexpType::String => values::string_at(filename, 0)
+                .map_or_else(|| "<input>".to_owned(), |name| name.into_owned()),
+            _ => "<input>".to_owned(),
+        }
+    } else {
+        "<input>".to_owned()
+    };
+    let script = parse_script(text, source_name, &condition_file)?;
     let source = if srcfile.kind() == SexpType::Environment {
         Some(SourceMap::new(text, 0, srcfile)?)
     } else {
@@ -78,23 +88,48 @@ pub struct Script<'text> {
 }
 
 /// A script's first syntax error: where it is in the text, and GNU R's message for it without
-/// the location.
+/// the location. Most of GNU R's parse errors are plain errors, but the ones its grammar actions
+/// and lexer raise (a repeated formal argument, a misused pipe, a bad string escape) are
+/// conditions of class `parseError`, which `condition` describes.
 pub struct SyntaxFailure {
     pub offset: usize,
     pub message: String,
+    pub condition: Option<ParseCondition>,
 }
 
-/// Parses `text`, or reports the first syntax error in GNU R's form.
-pub fn parse_script<'text>(text: &'text str, source_name: &str) -> R<Script<'text>> {
+/// The class and fields of a `parseError` condition.
+pub struct ParseCondition {
+    pub class: &'static str,
+    pub value: ConditionValue,
+    /// The expression the condition names as its call, lowered with each pipe placeholder as
+    /// the string `"_"`, as GNU R reports it.
+    pub call: Option<SyntaxNode>,
+}
+
+/// The `value` field of a `parseError` condition.
+pub enum ConditionValue {
+    Null,
+    Text(String),
+    Integer(i32),
+}
+
+/// Parses `text`, or reports the first syntax error in GNU R's form. `condition_file` is the
+/// file name a `parseError` condition reports.
+pub unsafe fn parse_script<'text>(
+    text: &'text str,
+    source_name: &str,
+    condition_file: &str,
+) -> R<Script<'text>> {
     let (script, failure) = parse_script_prefix(text);
     match failure {
         None => Ok(script),
-        Some(failure) => Err(error(syntax_failure_message(
+        Some(failure) => Err(syntax_failure_unwind(
             text,
             &failure,
             source_name,
+            condition_file,
             0,
-        ))),
+        )),
     }
 }
 
@@ -102,19 +137,33 @@ pub fn parse_script<'text>(text: &'text str, source_name: &str) -> R<Script<'tex
 /// syntax error, and that error. GNU R reads a script one line at a time and runs each
 /// expression once it is complete, so everything before a broken line runs before the error
 /// stops the script.
-pub fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
+pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
     let parse = syntax::parse(text);
+    let root = parse.syntax_node();
     // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
-    let mut failure = parse
+    let grammar_failure = parse
         .errors()
         .iter()
         .find(|failure| !failure.in_annotation)
-        .map(|failure| SyntaxFailure {
-            offset: usize::from(failure.range.start()).min(text.len()),
-            message: failure.message.clone(),
+        .map(|failure| {
+            let offset = usize::from(failure.range.start()).min(text.len());
+            pipe_bind_failure(text, offset).unwrap_or_else(|| SyntaxFailure {
+                offset,
+                message: failure.message.clone(),
+                condition: None,
+            })
         });
+    // GNU R's lexer resolves escapes as it reads a string, so a bad escape in a string that
+    // starts before the grammar error, the unterminated string itself included, is the one
+    // reported.
+    let mut failure = match (grammar_failure, escape_failure(&root)) {
+        (Some(grammar), Some((start, escape))) if start <= grammar.offset => Some(escape),
+        (None, escape) => escape.map(|(_, escape)| escape),
+        (grammar, _) => grammar,
+    };
     let may_hold_placeholder = text.contains('_');
-    let root = parse.syntax_node();
+    let may_hold_formals = text.contains("function") || text.contains('\\');
+    let may_hold_pipe = text.contains("|>");
     let mut expressions = Vec::new();
     for child in root.children() {
         if is_skipped(&child) {
@@ -129,10 +178,21 @@ pub fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
                 break;
             }
         }
+        if (may_hold_formals || may_hold_pipe)
+            && let Some(found) = grammar_action_failure(&child)
+        {
+            failure = Some(found);
+            break;
+        }
         if may_hold_placeholder && has_stray_placeholder(&child) {
             failure = Some(SyntaxFailure {
                 offset: start,
                 message: "invalid use of pipe placeholder".to_owned(),
+                condition: Some(ParseCondition {
+                    class: "invalidPlaceholder",
+                    value: ConditionValue::Null,
+                    call: Some(child),
+                }),
             });
             break;
         }
@@ -148,8 +208,8 @@ pub fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailure>) {
     )
 }
 
-/// GNU R's message for `failure` in `text`, whose first line is line `line_offset + 1` of the
-/// source.
+/// GNU R's message for a plain `failure` in `text`, whose first line is line `line_offset + 1`
+/// of the source.
 pub fn syntax_failure_message(
     text: &str,
     failure: &SyntaxFailure,
@@ -158,14 +218,299 @@ pub fn syntax_failure_message(
 ) -> String {
     let before = &text[..failure.offset.min(text.len())];
     let line = line_offset + before.matches('\n').count() + 1;
-    if failure.message == "invalid use of pipe placeholder" {
-        return format!("invalid use of pipe placeholder ({source_name}:{line}:0)");
-    }
     let column = before
         .rsplit('\n')
         .next()
         .map_or(0, |line| line.chars().count());
     format!("{source_name}:{line}:{column}: {}", failure.message)
+}
+
+/// The error `failure` raises: a plain error with GNU R's message, or the signalled
+/// `parseError` condition, whose location names `condition_file`.
+pub unsafe fn syntax_failure_unwind(
+    text: &str,
+    failure: &SyntaxFailure,
+    source_name: &str,
+    condition_file: &str,
+    line_offset: usize,
+) -> Unwind {
+    let Some(condition) = &failure.condition else {
+        return error(syntax_failure_message(
+            text,
+            failure,
+            source_name,
+            line_offset,
+        ));
+    };
+    let offset = failure.offset.min(text.len());
+    let before = &text[..offset];
+    let line = line_offset + before.matches('\n').count() + 1;
+    // GNU R reports a placeholder left over after the whole expression at column 0, and every
+    // other parse error at the 1-based column of the character it stopped on.
+    let column = if condition.class == "invalidPlaceholder" {
+        0
+    } else {
+        before
+            .rsplit('\n')
+            .next()
+            .map_or(0, |line| line.chars().count())
+            + 1
+    };
+    let message = format!("{} ({condition_file}:{line}:{column})", failure.message);
+    match signal_parse_condition(condition, &message, condition_file, line, column) {
+        Ok(()) => error(message),
+        Err(unwind) => unwind,
+    }
+}
+
+unsafe fn signal_parse_condition(
+    condition: &ParseCondition,
+    message: &str,
+    file: &str,
+    line: usize,
+    column: usize,
+) -> R<()> {
+    let call = match &condition.call {
+        Some(node) => quote_placeholders(lower(node, None)?)?,
+        None => nil(),
+    };
+    let value = match &condition.value {
+        ConditionValue::Null => nil(),
+        ConditionValue::Text(text) => values::scalar_string(text)?,
+        ConditionValue::Integer(number) => values::scalar_integer(*number)?,
+    };
+    let object = values::named_list(&[
+        ("message", values::scalar_string(message)?),
+        ("call", call),
+        ("value", value),
+        ("filename", values::scalar_string(file)?),
+        ("lineno", values::scalar_integer(line as i32)?),
+        ("colno", values::scalar_integer(column as i32)?),
+    ])?;
+    values::set_attr(
+        object,
+        symbols().class,
+        values::string_vector(&[condition.class, "parseError", "error", "condition"])?,
+    )?;
+    let stop = values::call(install("stop")?, &[object])?;
+    crate::eval::eval(stop, values::base_namespace())?;
+    Ok(())
+}
+
+/// `value` with every `_` symbol replaced by the string `"_"`, which is how GNU R's parser
+/// holds the pipe placeholder.
+unsafe fn quote_placeholders(value: Sexp) -> R<Sexp> {
+    let placeholder = install("_")?;
+    if value == placeholder {
+        return values::scalar_string("_");
+    }
+    if value.kind() == SexpType::Language {
+        let mut cell = value;
+        while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+            let item = quote_placeholders(cell.car())?;
+            crate::heap().set_car(cell, item);
+            cell = cell.cdr();
+        }
+    }
+    Ok(value)
+}
+
+/// `=>` lexes in GNU R as the pipe bind operator, which is disabled unless `_R_USE_PIPEBIND_`
+/// is set, so a grammar error at it is that parse error.
+fn pipe_bind_failure(text: &str, offset: usize) -> Option<SyntaxFailure> {
+    text[offset..].starts_with("=>").then(|| SyntaxFailure {
+        offset,
+        message: "'=>' is disabled; set '_R_USE_PIPEBIND_' envvar to a true value to enable it"
+            .to_owned(),
+        condition: Some(ParseCondition {
+            class: "pipebindDisabled",
+            value: ConditionValue::Null,
+            call: None,
+        }),
+    })
+}
+
+/// The first string literal or backquoted name whose escapes GNU R's lexer rejects, with the
+/// offset where its token starts.
+fn escape_failure(root: &SyntaxNode) -> Option<(usize, SyntaxFailure)> {
+    root.descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find_map(|token| {
+            let text = token.text();
+            let quote = match token.kind() {
+                SyntaxKind::STRING => text.chars().next()?,
+                SyntaxKind::IDENT if text.starts_with('`') => '`',
+                _ => return None,
+            };
+            let body = &text[1..];
+            let inner = match body.strip_suffix(quote) {
+                Some(inner) if !body.is_empty() => inner,
+                _ => body,
+            };
+            let failure = unescape_bytes(inner).err()?;
+            let start = usize::from(token.text_range().start());
+            Some((
+                start,
+                SyntaxFailure {
+                    offset: start + 1 + failure.offset,
+                    message: failure.message,
+                    condition: Some(ParseCondition {
+                        class: failure.class,
+                        value: failure.value,
+                        call: None,
+                    }),
+                },
+            ))
+        })
+}
+
+/// The first error GNU R's grammar actions raise in `node`, in the order its parser reduces:
+/// inner expressions before the ones that contain them.
+unsafe fn grammar_action_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
+    for child in node.children() {
+        if let Some(failure) = grammar_action_failure(&child) {
+            return Some(failure);
+        }
+    }
+    match node.kind() {
+        SyntaxKind::PARAMETER_LIST => repeated_formal(node),
+        SyntaxKind::BINARY_EXPR
+            if significant_tokens(node)
+                .iter()
+                .any(|token| token.kind() == SyntaxKind::PIPE_GREATER) =>
+        {
+            pipe_failure(node)
+        }
+        _ => None,
+    }
+}
+
+fn repeated_formal(parameters: &SyntaxNode) -> Option<SyntaxFailure> {
+    let mut seen = std::collections::HashSet::new();
+    for parameter in parameters
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::PARAMETER)
+    {
+        let name = parameter
+            .children_with_tokens()
+            .find(|element| match element {
+                SyntaxElement::Token(token) => !token.kind().is_trivia(),
+                SyntaxElement::Node(node) => !is_skipped(node),
+            })?;
+        let (text, range) = match &name {
+            SyntaxElement::Token(token) => (token.text().to_owned(), token.text_range()),
+            SyntaxElement::Node(node) => (node.text().to_string(), significant_range(node)),
+        };
+        let name = identifier(&text);
+        if !seen.insert(name.clone()) {
+            let last = text.chars().next_back().map_or(0, char::len_utf8);
+            return Some(SyntaxFailure {
+                offset: usize::from(range.end()) - last,
+                message: format!("repeated formal argument '{name}'"),
+                condition: Some(ParseCondition {
+                    class: "repeatedFormal",
+                    value: ConditionValue::Text(name),
+                    call: None,
+                }),
+            });
+        }
+    }
+    None
+}
+
+/// GNU R's checks on a pipe's right side, which must be a call to an ordinary function with at
+/// most one placeholder, passed by name.
+unsafe fn pipe_failure(node: &SyntaxNode) -> Option<SyntaxFailure> {
+    let right = expression_children(node).into_iter().nth(1)?;
+    let offset = usize::from(significant_range(&right).start());
+    let failure = |message: String, class, value, call: bool| {
+        Some(SyntaxFailure {
+            offset,
+            message,
+            condition: Some(ParseCondition {
+                class,
+                value,
+                call: call.then(|| right.clone()),
+            }),
+        })
+    };
+    let value = lower(&right, None).ok()?;
+    if value.kind() != SexpType::Language {
+        return failure(
+            "The pipe operator requires a function call as RHS".to_owned(),
+            "RHSnotFnCall",
+            ConditionValue::Null,
+            true,
+        );
+    }
+    let placeholder = install("_").ok()?;
+    let head = value.car();
+    if mentions(head, placeholder) {
+        return failure(
+            "pipe placeholder cannot be used in the RHS function".to_owned(),
+            "placeholderInRHSFn",
+            ConditionValue::Null,
+            false,
+        );
+    }
+    let mut placeholders = 0;
+    let mut argument = value.cdr();
+    while argument.kind() == SexpType::Pairlist {
+        if argument.car() == placeholder {
+            if argument.tag() == nil() {
+                return failure(
+                    "pipe placeholder can only be used as a named argument".to_owned(),
+                    "placeholderNotNamed",
+                    ConditionValue::Null,
+                    true,
+                );
+            }
+            placeholders += 1;
+        }
+        argument = argument.cdr();
+    }
+    if placeholders > 1 {
+        return failure(
+            "pipe placeholder may only appear once".to_owned(),
+            "tooManyPlaceholders",
+            ConditionValue::Null,
+            true,
+        );
+    }
+    if placeholders == 0
+        && head.kind() == SexpType::Symbol
+        && let name = values::symbol_name(head).into_owned()
+        && SYNTACTIC_FUNCTIONS.contains(&name.as_str())
+    {
+        return failure(
+            format!("function '{name}' not supported in RHS call of a pipe"),
+            "unsupportedInPipe",
+            ConditionValue::Text(name),
+            true,
+        );
+    }
+    None
+}
+
+/// The functions GNU R's parser marks as syntactically special, which a pipe cannot call.
+const SYNTACTIC_FUNCTIONS: &[&str] = &[
+    "if", "while", "repeat", "for", "break", "next", "return", "function", "(", "{", "+", "-", "*",
+    "/", "^", "%%", "%/%", "%*%", ":", "::", ":::", "?", "~", "==", "!=", "<", ">", "<=", ">=",
+    "&", "|", "&&", "||", "!", "<-", "<<-", "=", "$", "[", "[[", "@", "$<-", "[<-", "[[<-", "@<-",
+];
+
+unsafe fn mentions(value: Sexp, symbol: Sexp) -> bool {
+    if value == symbol {
+        return true;
+    }
+    let mut cell = value;
+    while matches!(cell.kind(), SexpType::Language | SexpType::Pairlist) {
+        if mentions(cell.car(), symbol) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
 }
 
 /// Lowers one top-level expression of `script`. With `keep_source`, it keeps source references
@@ -1047,7 +1392,8 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         }
         SyntaxKind::STRING => {
             let inner = &text[1..text.len().saturating_sub(1).max(1)];
-            let (bytes, high_byte) = unescape_bytes(inner).map_err(error)?;
+            let (bytes, high_byte) =
+                unescape_bytes(inner).map_err(|failure| error(failure.message))?;
             let encoding = if high_byte {
                 Encoding::Native
             } else {
@@ -1132,21 +1478,36 @@ fn raw_string(text: &str) -> String {
 
 /// Resolves R's string escapes, with invalid UTF-8 from byte escapes replaced.
 pub fn unescape(text: &str) -> Result<String, String> {
-    let (bytes, _) = unescape_bytes(text)?;
+    let (bytes, _) = unescape_bytes(text).map_err(|failure| failure.message)?;
     Ok(String::from_utf8(bytes)
         .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned()))
+}
+
+/// A string escape GNU R's lexer rejects: the class of its parse error, the message, and the
+/// byte offset of the last character the lexer read, which is where GNU R reports it.
+pub struct EscapeFailure {
+    pub class: &'static str,
+    pub message: String,
+    pub offset: usize,
+    pub value: ConditionValue,
 }
 
 /// Resolves R's string escapes. Octal and `\x` escapes give single bytes, so the result need
 /// not be UTF-8; the flag says whether such an escape gave a byte past ASCII, which leaves the
 /// string in the native encoding instead of marked as UTF-8, as in GNU R.
-pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
+pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
     let mut bytes = Vec::with_capacity(text.len());
     let mut result = String::new();
     let mut high_byte = false;
     let mut unicode = false;
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
+    let mut characters = text.char_indices().peekable();
+    let failure = |class, message: String, offset, value| EscapeFailure {
+        class,
+        message,
+        offset,
+        value,
+    };
+    while let Some((_, character)) = characters.next() {
         if let Some(byte) = values::escaped_byte(character) {
             bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
             bytes.push(byte);
@@ -1157,10 +1518,11 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
             result.push(character);
             continue;
         }
-        let Some(escape) = characters.next() else {
+        let Some((escape_offset, escape)) = characters.next() else {
             result.push('\\');
             break;
         };
+        let mut last = escape_offset;
         match escape {
             'n' => result.push('\n'),
             't' => result.push('\t'),
@@ -1176,41 +1538,37 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
             ' ' => result.push(' '),
             '\n' => result.push('\n'),
             '0'..='7' => {
-                let mut value = escape.to_digit(8).unwrap_or(0);
-                for _ in 0..2 {
-                    match characters.peek().and_then(|next| next.to_digit(8)) {
-                        Some(digit) => {
-                            value = value * 8 + digit;
-                            characters.next();
-                        }
-                        None => break,
-                    }
-                }
+                let (rest, count) = escape_digits(&mut characters, 8, 2, &mut last);
+                let value = escape.to_digit(8).unwrap_or(0) * 8u32.pow(count as u32) + rest;
                 if value == 0 {
-                    return Err("nul character not allowed".into());
+                    return Err(failure(
+                        "nulNotAllowed",
+                        "nul character not allowed".into(),
+                        last,
+                        ConditionValue::Null,
+                    ));
                 }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
                 bytes.push((value & 0xFF) as u8);
                 high_byte |= value >= 0x80;
             }
             'x' => {
-                let mut value = 0;
-                let mut count = 0;
-                while count < 2 {
-                    match characters.peek().and_then(|next| next.to_digit(16)) {
-                        Some(digit) => {
-                            value = value * 16 + digit;
-                            characters.next();
-                            count += 1;
-                        }
-                        None => break,
-                    }
-                }
+                let (value, count) = escape_digits(&mut characters, 16, 2, &mut last);
                 if count == 0 {
-                    return Err("'\\x' used without hex digits in character string".into());
+                    return Err(failure(
+                        "badHex",
+                        "'\\x' used without hex digits in character string".into(),
+                        last,
+                        ConditionValue::Null,
+                    ));
                 }
                 if value == 0 {
-                    return Err("nul character not allowed".into());
+                    return Err(failure(
+                        "nulNotAllowed",
+                        "nul character not allowed".into(),
+                        last,
+                        ConditionValue::Null,
+                    ));
                 }
                 bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
                 bytes.push(value as u8);
@@ -1218,45 +1576,94 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
             }
             'u' | 'U' => {
                 let limit = if escape == 'u' { 4 } else { 8 };
-                let braced = characters.peek() == Some(&'{');
-                if braced {
-                    characters.next();
+                let braced = matches!(characters.peek(), Some(&(_, '{')));
+                if let Some((offset, _)) = characters.next_if(|&(_, next)| next == '{') {
+                    last = offset;
                 }
-                let mut value = 0u32;
-                let mut count = 0;
-                while count < limit {
-                    match characters.peek().and_then(|next| next.to_digit(16)) {
-                        Some(digit) => {
-                            value = value * 16 + digit;
-                            characters.next();
-                            count += 1;
-                        }
-                        None => break,
-                    }
-                }
-                if braced && characters.peek() == Some(&'}') {
-                    characters.next();
+                let (value, count) = escape_digits(&mut characters, 16, limit, &mut last);
+                if braced && let Some((offset, _)) = characters.next_if(|&(_, next)| next == '}') {
+                    last = offset;
                 }
                 if count == 0 {
-                    return Err(format!(
-                        "'\\{escape}' used without hex digits in character string"
+                    return Err(failure(
+                        "badUnicodeHex",
+                        format!("'\\{escape}' used without hex digits in character string"),
+                        last,
+                        ConditionValue::Null,
+                    ));
+                }
+                let Some(decoded) = char::from_u32(value).or_else(|| {
+                    // GNU R keeps a lone surrogate, which is not a Rust `char`.
+                    (0xD800..0xE000).contains(&value).then_some('\u{fffd}')
+                }) else {
+                    let form = match (escape, braced) {
+                        ('u', true) => "\\u{xxxx}",
+                        ('u', false) => "\\uxxxx",
+                        (_, true) => "\\U{xxxxxxxx}",
+                        (_, false) => "\\Uxxxxxxxx",
+                    };
+                    return Err(failure(
+                        "invalidUnicode",
+                        format!("invalid {form} value {value:x}"),
+                        last,
+                        ConditionValue::Integer(value as i32),
+                    ));
+                };
+                if value == 0 {
+                    return Err(failure(
+                        "nulNotAllowed",
+                        "nul character not allowed".into(),
+                        last,
+                        ConditionValue::Null,
                     ));
                 }
                 unicode |= value >= 0x80;
-                result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                result.push(decoded);
             }
             other => {
-                return Err(format!(
-                    "'\\{other}' is an unrecognized escape in character string"
+                return Err(failure(
+                    "unrecognizedEscape",
+                    format!("'\\{other}' is an unrecognized escape in character string"),
+                    last,
+                    ConditionValue::Text(other.to_string()),
                 ));
             }
         }
     }
     if unicode && high_byte {
-        return Err("mixing Unicode and octal/hex escapes in a string is not allowed".into());
+        return Err(failure(
+            "mixedEscapes",
+            "mixing Unicode and octal/hex escapes in a string is not allowed".into(),
+            text.len(),
+            ConditionValue::Null,
+        ));
     }
     bytes.extend_from_slice(result.as_bytes());
     Ok((bytes, high_byte))
+}
+
+/// Reads up to `limit` digits in `radix`, moving `last` to the offset of the last one read.
+fn escape_digits(
+    characters: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    radix: u32,
+    limit: usize,
+    last: &mut usize,
+) -> (u32, usize) {
+    let mut value = 0u32;
+    let mut count = 0;
+    while count < limit {
+        let Some((offset, digit)) = characters
+            .peek()
+            .and_then(|&(offset, next)| Some((offset, next.to_digit(radix)?)))
+        else {
+            break;
+        };
+        value = value * radix + digit;
+        *last = offset;
+        characters.next();
+        count += 1;
+    }
+    (value, count)
 }
 
 // The internals.
