@@ -63,18 +63,56 @@ names(before)   # "team" "amount"
 ```
 
 When nothing else refers to the frame, the update happens in place and costs only the new column.
-`setkey(x, col)` sorts and keys a frame, and `key(x)` reads the key. Attaching data.table masks
-ry's `setkey`, `setkeyv`, `key` and `copy`; data.table's versions do not accept a frame, so call
-`ry::setkey(x, col)` then.
+`setkey(x, col)` sorts and keys a frame, and `key(x)` reads the key. These and `copy` keep
+working on frames after `library(data.table)`, and on a data.table they call data.table's own.
+
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
+data.table run on the same engine as frames. A data.table keeps all of data.table's behavior:
+`:=` still updates it in place, and every alias sees the change. ry answers a query only when it
+can produce exactly what data.table would, meaning the same values, attributes, printing and
+warnings. Otherwise data.table answers it. These go to data.table:
+
+- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
+- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
+- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
+  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
+- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a query that warns or fails.
+
+Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
+`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
+every query to data.table.
+
+```r
+library(data.table)
+options(ry.datatable.trace = TRUE)
+dt <- data.table(g = c("a", "b", "a"), x = 1:3)
+dt[x > 1L, .(n = .N), by = g]
+setkey(dt, g)
+dt[x > 1L]
+```
+
+```
+[ry] dt[x > 1L, .(n = .N), by = g]
+   g n
+1: b 1
+2: a 1
+[data.table] dt[x > 1L]
+   g x
+1: a 3
+2: b 2
+```
 
 ## Speed
 
 `tools/bench/table/` runs db-benchmark's group-by and join questions, `:=` update loops and a
 keyed rolling join, written as the same R script for data.table under GNU R and for frames under
 `ry run --runtime ry`. On 1 million rows with 4 threads, both produce the same checksums, and frames
-are faster on every group-by question (2 to 39 times), every join (2 to 4 times), and the full and
-added-column `:=` loops (5 to 6 times). A filtered `:=` loop and the keyed rolling join run about
-as fast as data.table. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
+are faster on every group-by question (2 to 39 times), every join (2 to 4 times), the full and
+added-column `:=` loops (5 to 6 times), a filtered `:=` loop (1.4 times) and the keyed rolling
+join (2 times). The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
 
 `tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers
 on the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums.

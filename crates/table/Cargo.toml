@@ -27,6 +27,7 @@ polars = { version = "0.55", default-features = false, features = [
     "dtype-i16",
     "dtype-u8",
     "dtype-u16",
+    "cum_agg",
 ] }
 polars-arrow = { version = "0.55", default-features = false }
 # The kernels run on Polars' own thread pool, so `POLARS_MAX_THREADS` governs them too.
