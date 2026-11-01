@@ -19,10 +19,11 @@
 
 use {
     crate::{
-        arith::CompensatedSum,
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
-        eval, records, scope,
+        eval,
+        long_double::LongDouble,
+        records, scope,
         sort::{IdenticalFlags, identical},
         unwind::{R, error},
         values::{
@@ -270,6 +271,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.reserve", set_reserve).reusing_first_argument(),
 ];
 
+thread_local! {
+    static BUILTINS_ENV: std::cell::Cell<Option<Sexp>> = const { std::cell::Cell::new(None) };
+}
+
+/// The environment the builtins of `package:ry` are bound in. S3 method lookup falls back to it,
+/// because lookup from the global environment skips the search path, and with base R loaded the
+/// environment is no longer on it.
+pub(crate) fn builtins_env() -> Option<Sexp> {
+    BUILTINS_ENV.with(std::cell::Cell::get)
+}
+
 /// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
 /// global environment's enclosure is the base environment, and `library()` attaches between the
 /// global environment and its enclosure, so `package:ry` stays the last entry before base.
@@ -281,6 +293,8 @@ pub(crate) unsafe fn attach() -> Sexp {
         .alloc_environment(base)
         .unwrap_or_else(|failure| panic!("cannot create `package:ry`: {failure}"));
     heap.set_enclosure(global, env);
+    heap.preserve(env);
+    BUILTINS_ENV.with(|cell| cell.set(Some(env)));
     let name = values::install("name")
         .and_then(|symbol| Ok((symbol, scalar_string("package:ry")?)))
         .and_then(|(symbol, value)| values::set_attr(env, symbol, value));
@@ -1603,14 +1617,16 @@ unsafe fn fold_numbers(
     number_value(Number::Integer(total))
 }
 
-// R's `sum()` accumulates doubles in extended precision, and `CompensatedSum` tracks that, so
-// `List.sum(xs)` and `sum(xs)` agree to the last bit on ordinary input.
+// R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
+// with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
     fold_numbers(call, 0, i32::checked_add, |start, items| {
-        let mut sum = CompensatedSum::default();
-        sum.add(start);
-        sum.add_all(items);
-        sum.total()
+        let mut total = LongDouble::ZERO;
+        total += start;
+        for &item in items {
+            total += item;
+        }
+        total.to_f64()
     })
 }
 

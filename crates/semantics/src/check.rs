@@ -21,6 +21,7 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
+        sorted::{SortedMap, SortedSet},
         stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -37,6 +38,7 @@ use {
         sync::atomic::{AtomicUsize, Ordering},
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
+    thin_vec::ThinVec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -308,31 +310,31 @@ pub struct ItemCheck<'db> {
     /// annotated binding, a call argument or a nominal constructor, so completion can offer
     /// the fields a literal still lacks. Nested literals record nothing: their expectation is
     /// the enclosing one's field or payload.
-    pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
+    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
     /// The element type each `for` loop binds its variable to, keyed by the loop. The
     /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
-    pub loop_variables: FxHashMap<ExprId, Ty<'db>>,
-    pub errors: Vec<TypeError<'db>>,
-    pub strict_origins: Vec<StrictOrigin>,
+    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
+    pub errors: ThinVec<TypeError<'db>>,
+    pub strict_origins: ThinVec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
     /// Index into the declared overload set; absent when no candidate matched.
-    pub selected_overloads: FxHashMap<ExprId, usize>,
+    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
-    pub masked_reads: FxHashSet<ExprId>,
+    pub masked_reads: SortedSet<ExprId>,
     /// Bare names inside a query on a frame with known columns that name no column and
     /// no lexical binding. Reported only when nothing else (a global, a builtin) defines
     /// the name, because R falls back to the enclosing scope for a non-column.
-    pub column_misses: FxHashMap<ExprId, ColumnMiss>,
+    pub column_misses: SortedMap<ExprId, ColumnMiss>,
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
-    pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+    pub top_level_bindings: ThinVec<(Symbol, TypeScheme<'db>)>,
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
-    pub match_findings: Vec<MatchFinding>,
+    pub match_findings: ThinVec<MatchFinding>,
     /// Call heads whose lookup skipped the binding naming resolved, because that binding
     /// cannot hold a function. Editor features navigate to the binding the call reaches.
-    pub callee_targets: FxHashMap<ExprId, CalleeTarget>,
+    pub callee_targets: SortedMap<ExprId, CalleeTarget>,
 }
 
 /// A DataFrame function whose result the checker computes from its arguments.
@@ -409,15 +411,68 @@ pub enum CalleeTarget {
     Library,
 }
 
-/// Settled type of every expression the checker recorded, indexed by expression id.
-/// Ids are dense within an item, so a slot per expression costs one word where a hash
-/// entry costs several.
+/// Settled type of every expression the checker recorded, indexed by expression id. Ids are
+/// dense within an item, so each expression has a slot. An item uses few distinct types, so a
+/// slot holds a narrow index into the item's palette of them rather than a pointer: this is
+/// the most numerous memoized table, and the narrow slots make it a quarter of the size.
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
-pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
+pub struct ExpressionTypes<'db> {
+    palette: ThinVec<Ty<'db>>,
+    slots: PaletteSlots,
+}
+
+/// One past the palette index, so zero is an expression with no recorded type.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+enum PaletteSlots {
+    Narrow(ThinVec<u16>),
+    /// For an item with more distinct types than a `u16` can count.
+    Wide(ThinVec<u32>),
+}
+
+impl Default for PaletteSlots {
+    fn default() -> Self {
+        PaletteSlots::Narrow(ThinVec::new())
+    }
+}
 
 impl<'db> ExpressionTypes<'db> {
     pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
-        self.0.get(id.index())?.as_ref()
+        let slot = match &self.slots {
+            PaletteSlots::Narrow(slots) => u32::from(*slots.get(id.index())?),
+            PaletteSlots::Wide(slots) => *slots.get(id.index())?,
+        };
+        self.palette
+            .get(usize::try_from(slot).ok()?.checked_sub(1)?)
+    }
+}
+
+impl<'db> FromIterator<Option<Ty<'db>>> for ExpressionTypes<'db> {
+    fn from_iter<I: IntoIterator<Item = Option<Ty<'db>>>>(types: I) -> Self {
+        let mut palette = Vec::new();
+        let mut positions: FxHashMap<Ty<'db>, u32> = FxHashMap::default();
+        let slots: Vec<u32> = types
+            .into_iter()
+            .map(|ty| {
+                ty.map_or(0, |ty| {
+                    *positions.entry(ty).or_insert_with(|| {
+                        palette.push(ty);
+                        u32::try_from(palette.len()).unwrap_or(u32::MAX)
+                    })
+                })
+            })
+            .collect();
+        let slots = match slots
+            .iter()
+            .map(|&slot| u16::try_from(slot))
+            .collect::<Result<ThinVec<u16>, _>>()
+        {
+            Ok(narrow) => PaletteSlots::Narrow(narrow),
+            Err(_) => PaletteSlots::Wide(ThinVec::from(slots)),
+        };
+        ExpressionTypes {
+            palette: ThinVec::from(palette),
+            slots,
+        }
     }
 }
 
@@ -439,7 +494,7 @@ impl<'db> RecordedTypes<'db> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
-pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
+pub struct PatternTypes<'db>(ThinVec<Option<Ty<'db>>>);
 
 impl<'db> PatternTypes<'db> {
     pub fn get(&self, id: PatId) -> Option<Ty<'db>> {
@@ -534,6 +589,7 @@ pub fn check_item_with_annotation<'db>(
     annotation: Option<&Annotation<'db>>,
     expression_annotations: &[(ExprId, Annotation<'db>)],
     globals: Option<&dyn GlobalEnv<'db>>,
+    record_strict_origins: bool,
 ) -> ItemCheck<'db> {
     CHECK_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     let mut table = InferenceTable::default();
@@ -565,6 +621,7 @@ pub fn check_item_with_annotation<'db>(
         column_misses: FxHashMap::default(),
         query_depth: 0,
         errors: Vec::new(),
+        record_strict_origins,
         strict_origins: Vec::new(),
         overload_probe_depth: 0,
         return_frames: Vec::new(),
@@ -711,19 +768,17 @@ pub fn check_item_with_annotation<'db>(
         }
     }
     let recorded = mem::take(&mut context.recorded.0);
-    let expression_types = ExpressionTypes(
-        recorded
-            .into_iter()
-            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
-            .collect(),
-    );
+    let expression_types: ExpressionTypes = recorded
+        .into_iter()
+        .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+        .collect();
     let mut pattern_types = vec![None; module.pattern_count()];
     for (&id, &ty) in &context.recorded_patterns {
         if let Some(slot) = pattern_types.get_mut(id.index()) {
             *slot = Some(context.table.resolve(context.db, ty));
         }
     }
-    let pattern_types = PatternTypes(pattern_types.into_boxed_slice());
+    let pattern_types = PatternTypes(ThinVec::from(pattern_types));
     let literal_expectations = context
         .recorded_expectations
         .iter()
@@ -769,19 +824,19 @@ pub fn check_item_with_annotation<'db>(
     }
     let match_findings = match_findings(db, context.table.definitions, module, &expression_types);
     ItemCheck {
-        match_findings,
+        match_findings: ThinVec::from(match_findings),
         expression_types,
         pattern_types,
         literal_expectations,
         loop_variables,
-        errors,
-        strict_origins: context.strict_origins,
+        errors: ThinVec::from(errors),
+        strict_origins: ThinVec::from(context.strict_origins),
         scheme,
-        selected_overloads: context.selected_overloads,
-        callee_targets: context.callee_targets,
-        masked_reads: context.masked_reads,
-        column_misses: context.column_misses,
-        top_level_bindings,
+        selected_overloads: context.selected_overloads.into_iter().collect(),
+        callee_targets: context.callee_targets.into_iter().collect(),
+        masked_reads: context.masked_reads.into_iter().collect(),
+        column_misses: context.column_misses.into_iter().collect(),
+        top_level_bindings: ThinVec::from(top_level_bindings),
     }
 }
 
@@ -999,6 +1054,8 @@ struct Checker<'db, 'a> {
     /// that is no column still reads its global.
     query_depth: u32,
     errors: Vec<TypeError<'db>>,
+    /// Off outside strict files, where nothing reports the origins.
+    record_strict_origins: bool,
     strict_origins: Vec<StrictOrigin>,
     /// Non-zero while probing an overload candidate: the literal-as-integer courtesy is
     /// off so it cannot decide the winner (exact matches outrank conversions).
@@ -1826,6 +1883,9 @@ impl<'db> Checker<'db, '_> {
 
     /// Idempotent: loop re-walks and re-passes must not duplicate an origin.
     fn record_strict_origin(&mut self, expression: ExprId, kind: StrictOriginKind) {
+        if !self.record_strict_origins {
+            return;
+        }
         let range = self.module.range(expression);
         let origin = StrictOrigin {
             expression,
@@ -2687,6 +2747,9 @@ impl<'db> Checker<'db, '_> {
         parameters: &[(&Formal, Option<Ty<'db>>)],
         ret: Ty<'db>,
     ) {
+        if !self.record_strict_origins {
+            return;
+        }
         let db = self.db;
         let level = self.table.level;
         let mut mentioned: FxHashMap<InferenceVar, usize> = FxHashMap::default();
@@ -13875,7 +13938,7 @@ mod tests {
             .expect("one top-level item");
         let module = lower_item(&item);
         let naming = resolve_item(&module, &FxHashMap::default());
-        check_item_with_annotation(db, &module, &naming, annotation.as_ref(), &[], None)
+        check_item_with_annotation(db, &module, &naming, annotation.as_ref(), &[], None, true)
     }
 
     #[test]

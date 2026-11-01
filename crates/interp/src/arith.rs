@@ -6,7 +6,9 @@ use {
         arrays::{self, OperatorClass},
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
         coerce::{self, coerce_vector},
-        conditions, rmath,
+        conditions,
+        long_double::LongDouble,
+        rmath,
         unwind::{R, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -277,7 +279,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("rep", -1, do_rep).generic(Generic::Internal),
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),
-    internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
+    internal("atan2", 2, |call| unsafe { do_atan2(call) }),
     internal("choose", 2, |call| unsafe { math2(call, rmath::choose) }),
     internal("lchoose", 2, |call| unsafe { math2(call, rmath::lchoose) }),
     internal("beta", 2, |call| unsafe { math2(call, rmath::beta) }),
@@ -379,7 +381,7 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
     let inner = if rows { col_count } else { row_count };
     let result = alloc(SexpType::Real, outer)?;
     for position in 0..outer {
-        let mut total = CompensatedSum::default();
+        let mut total = LongDouble::ZERO;
         let mut counted = 0usize;
         for along in 0..inner {
             let index = if rows {
@@ -391,11 +393,14 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
             if value.is_nan() && na_rm {
                 continue;
             }
-            total.add(value);
+            total += value;
             counted += 1;
         }
-        let sum = total.total();
-        values::reals_mut(result)[position] = if mean { sum / counted as f64 } else { sum };
+        values::reals_mut(result)[position] = if mean {
+            (total / counted).to_f64()
+        } else {
+            total.to_f64()
+        };
     }
     Ok(result)
 }
@@ -435,16 +440,21 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
                 interval = 1;
             }
         }
-        if all_inside {
-            interval = interval.clamp(1, count as i32 - 1);
+        // An empty `vec` has no inside, so every point stays in interval 0.
+        if all_inside && count > 0 {
+            if interval == 0 {
+                interval = 1;
+            } else if interval == count as i32 {
+                interval = count as i32 - 1;
+            }
         }
         values::ints_mut(result)[index] = interval;
     }
     Ok(result)
 }
 
-/// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias), eps.correct, bounds)`: GNU R's
-/// rule for round tick values covering `[lo, up]` in about `n` steps.
+/// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias, f.min), eps.correct, bounds)`:
+/// GNU R's rule for round tick values covering `[lo, up]` in about `n` steps.
 unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
     let biases = call.arg(5);
     let high_bias = crate::subset::numeric_element(biases, 0);
@@ -453,19 +463,35 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
     } else {
         0.5 + 1.5 * high_bias
     };
+    let smallest_factor = if length(biases) > 2 {
+        crate::subset::numeric_element(biases, 2)
+    } else {
+        20.0
+    };
+    let bounds = values::as_logical_scalar(call.arg(7)) != 0;
     let result = pretty(
         values::as_real_scalar(call.arg(0)),
         values::as_real_scalar(call.arg(1)),
         values::as_integer_scalar(call.arg(2)).max(0),
         values::as_integer_scalar(call.arg(3)).max(0),
         values::as_real_scalar(call.arg(4)),
-        [high_bias, five_bias],
+        [high_bias, five_bias, smallest_factor],
         values::as_integer_scalar(call.arg(6)),
-        values::as_logical_scalar(call.arg(7)) != 0,
+        bounds,
     );
+    if let Some(message) = &result.warning {
+        crate::conditions::warning(message.clone())?;
+    }
+    if bounds {
+        return values::named_list(&[
+            ("l", scalar_real(result.low)?),
+            ("u", scalar_real(result.high)?),
+            ("n", scalar_integer(result.count)?),
+        ]);
+    }
     values::named_list(&[
-        ("l", scalar_real(result.low)?),
-        ("u", scalar_real(result.high)?),
+        ("ns", scalar_real(result.low)?),
+        ("nu", scalar_real(result.high)?),
         ("n", scalar_integer(result.count)?),
         ("unit", scalar_real(result.unit)?),
     ])
@@ -478,10 +504,17 @@ pub struct Pretty {
     pub high: f64,
     pub count: i32,
     pub unit: f64,
+    /// GNU R's warning when the step size had to be clamped into the double range.
+    pub warning: Option<String>,
 }
 
+/// The step size is kept at most this factor below the largest double, so that a few steps
+/// beyond the range stay finite.
+const LARGEST_CELL_FACTOR: f64 = 1.25;
+
 /// The rounding behind `pretty()` and axis ticks: about `count` intervals of 1, 2 or 5 times a
-/// power of ten that cover `[low, high]`.
+/// power of ten that cover `[low, high]`. The step is never below `smallest_factor` times the
+/// smallest normal double.
 #[allow(clippy::too_many_arguments)]
 pub fn pretty(
     mut low: f64,
@@ -489,10 +522,11 @@ pub fn pretty(
     count: i32,
     min_count: i32,
     shrink: f64,
-    [high_bias, five_bias]: [f64; 2],
+    [high_bias, five_bias, smallest_factor]: [f64; 3],
     eps_correction: i32,
     bounds: bool,
 ) -> Pretty {
+    let (original_low, original_high) = (low, high);
     let range = high - low;
     let scale = low.abs().max(high.abs());
     let small = if range == 0.0 && scale == 0.0 {
@@ -504,7 +538,9 @@ pub fn pretty(
             } else {
                 1.5 / (1.0 + five_bias)
             };
-        range < scale * bias * count.max(1) as f64 * f64::EPSILON * 3.0
+        // The tolerance is formed before it scales the range, so a huge range cannot overflow.
+        let tolerance = bias * count.max(1) as f64 * f64::EPSILON;
+        range < scale * tolerance * 3.0
     };
     let mut cell;
     if small {
@@ -516,16 +552,36 @@ pub fn pretty(
         if min_count > 1 {
             cell /= min_count as f64;
         }
-    } else {
+    } else if range.is_finite() {
         cell = range;
         if count > 1 {
             cell /= count as f64;
         }
+    } else {
+        // The range overflows, so each bound is divided before they are subtracted.
+        let divisor = count.max(1) as f64;
+        cell = high / divisor - low / divisor;
     }
-    if cell < 20.0 * f64::MIN_POSITIVE {
-        cell = 20.0 * f64::MIN_POSITIVE;
-    } else if cell * 10.0 > f64::MAX {
-        cell = 0.1 * f64::MAX;
+    let mut warning = None;
+    let smallest = match smallest_factor * f64::MIN_POSITIVE {
+        0.0 => f64::MIN_POSITIVE,
+        smallest => smallest,
+    };
+    let largest = f64::MAX / LARGEST_CELL_FACTOR;
+    if cell < smallest {
+        warning = Some(format!(
+            "R_pretty(): very small range 'cell'={}, corrected to {}",
+            crate::linalg::format_g(cell),
+            crate::linalg::format_g(smallest)
+        ));
+        cell = smallest;
+    } else if cell > largest {
+        warning = Some(format!(
+            "R_pretty(): very large range 'cell'={}, corrected to {}",
+            crate::linalg::format_g(cell),
+            crate::linalg::format_g(largest)
+        ));
+        cell = largest;
     }
     let base = 10f64.powf(cell.log10().floor());
     let mut unit = base;
@@ -555,14 +611,25 @@ pub fn pretty(
     while start * unit > low + 1e-10 * unit {
         start -= 1.0;
     }
+    while !(start * unit).is_finite() && start < 0.0 {
+        start += 1.0;
+    }
     while end * unit < high - 1e-10 * unit {
         end += 1.0;
+    }
+    while !(end * unit).is_finite() && end > 0.0 {
+        end -= 1.0;
     }
     let mut steps = (0.5 + end - start) as i32;
     if steps < min_count {
         let missing = min_count - steps;
         let (half, rest) = ((missing / 2) as f64, (missing % 2) as f64);
-        if start >= 0.0 {
+        // A range that starts or ends at zero keeps that end and grows away from it.
+        if original_low == 0.0 {
+            end += missing as f64;
+        } else if original_high == 0.0 {
+            start -= missing as f64;
+        } else if start >= 0.0 {
             end += half;
             start -= half + rest;
         } else {
@@ -587,6 +654,7 @@ pub fn pretty(
         high,
         count: steps,
         unit,
+        warning,
     }
 }
 
@@ -669,8 +737,8 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
 
 /// `.bincode(x, breaks, right, include.lowest)`.
 unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
-    let points = values::reals(call.arg(0)).to_vec();
-    let breaks = values::reals(call.arg(1)).to_vec();
+    let points = values::reals(coerce_vector(call.arg(0), SexpType::Real)?).to_vec();
+    let breaks = values::reals(coerce_vector(call.arg(1), SexpType::Real)?).to_vec();
     let right = values::as_logical_scalar(call.arg(2)) == 1;
     let lowest = values::as_logical_scalar(call.arg(3)) == 1;
     let count = breaks.len();
@@ -816,7 +884,7 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
 /// operand as long as the result, and other attributes are copied from both, the first taking
 /// precedence.
 pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
-    check_conformable(left, right, call)?;
+    check_conformable(left, right, call, true)?;
     let result_length = length(result);
     let left_attributes = left.attrib() != nil();
     let right_attributes = right.attrib() != nil();
@@ -835,7 +903,7 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
 /// The attributes a comparison or a binary `&` and `|` keep, which GNU R limits to the
 /// operands' names, dimensions and dimension names, plus a time series' `tsp` and class.
 pub unsafe fn relational_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
-    check_conformable(left, right, call)?;
+    check_conformable(left, right, call, false)?;
     if left.attrib() == nil() && right.attrib() == nil() {
         return Ok(());
     }
@@ -851,7 +919,7 @@ pub unsafe fn relational_attributes(left: Sexp, right: Sexp, result: Sexp, call:
     Ok(())
 }
 
-unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
+unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp, arithmetic: bool) -> R<()> {
     let left_dims = get_attr(left, symbols().dim);
     let right_dims = get_attr(right, symbols().dim);
     if left_dims != nil() && right_dims != nil() {
@@ -868,7 +936,15 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp) -> R<()> {
     for (array, dims, other) in [(left, left_dims, right), (right, right_dims, left)] {
         // A zero-length operand makes the result zero-length, so a zero-length array is never
         // too short.
-        if dims != nil() && length(array) > 1 && length(other) > length(array) {
+        // GNU R still recycles a one-element array in arithmetic, with a deprecation warning.
+        if dims != nil() && arithmetic && length(array) == 1 && length(other) > 1 {
+            crate::conditions::warning_call(
+                call,
+                "Recycling array of length 1 in array-vector arithmetic is deprecated.\n  Use c() or as.vector() instead.\n",
+            )?;
+            continue;
+        }
+        if dims != nil() && length(array) > 0 && length(other) > length(array) {
             return Err(crate::unwind::error_in(
                 call,
                 format!(
@@ -959,7 +1035,18 @@ pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> 
         || right_kind == SexpType::Real
         || matches!(op, Op::Divide | Op::Power)
     {
-        real_arithmetic(op, left, right, count)?
+        let result = real_arithmetic(op, left, right, count)?;
+        if op == Op::Modulo
+            && (0..count).any(|index| {
+                modulus_loses_accuracy(
+                    real_at(left, index % left_length),
+                    real_at(right, index % right_length),
+                )
+            })
+        {
+            conditions::warning("probable complete loss of accuracy in modulus")?;
+        }
+        result
     } else {
         integer_arithmetic(call, op, left, right, count)?
     };
@@ -1056,7 +1143,7 @@ fn real_kernel<A: Copy, B: Copy>(
         Op::Divide => recycle(a, b, output, |x, y| left(x) / right(y)),
         Op::Power => recycle(a, b, output, |x, y| power(left(x), right(y))),
         Op::Modulo => recycle(a, b, output, |x, y| real_modulo(left(x), right(y))),
-        Op::IntegerDivide => recycle(a, b, output, |x, y| (left(x) / right(y)).floor()),
+        Op::IntegerDivide => recycle(a, b, output, |x, y| real_integer_divide(left(x), right(y))),
     }
 }
 
@@ -1107,7 +1194,7 @@ pub fn real_op(op: Op, a: f64, b: f64) -> f64 {
         Op::Divide => a / b,
         Op::Power => power(a, b),
         Op::Modulo => real_modulo(a, b),
-        Op::IntegerDivide => (a / b).floor(),
+        Op::IntegerDivide => real_integer_divide(a, b),
     }
 }
 
@@ -1164,22 +1251,85 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     f64::NAN
 }
 
+/// `a %% b`. The remainder is corrected in x87 extended precision, as GNU R computes it, so
+/// `1e17 %% 7` is the exact 5 rather than the 0 a double computation gives.
 pub fn real_modulo(a: f64, b: f64) -> f64 {
-    if b == 0.0 {
-        return f64::NAN;
-    }
     if is_na_real(a) || is_na_real(b) {
         return NA_REAL;
     }
-    let quotient = (a / b).floor();
-    let remainder = a - quotient * b;
-    if remainder.abs() >= b.abs() && b.is_finite() {
-        remainder % b
-    } else if b.is_infinite() && a.is_finite() {
-        if (a >= 0.0) == (b > 0.0) { a } else { b }
+    if b == 0.0 {
+        return f64::NAN;
+    }
+    if let Some(remainder) = exact_integer_modulo(a, b) {
+        return remainder;
+    }
+    if let Some((remainder, _)) = beyond_divisor(a, b) {
+        return remainder;
+    }
+    let divisor = LongDouble::from(b);
+    let rough = LongDouble::from(a) - LongDouble::from((a / b).floor()) * divisor;
+    (rough - (rough / divisor).floor() * divisor).to_f64()
+}
+
+/// `a %/% b`, consistent with `real_modulo`: `a == (a %/% b) * b + a %% b` up to rounding.
+pub fn real_integer_divide(a: f64, b: f64) -> f64 {
+    if is_na_real(a) || is_na_real(b) {
+        return NA_REAL;
+    }
+    if b != 0.0
+        && let Some(remainder) = exact_integer_modulo(a, b)
+    {
+        return (a - remainder) / b;
+    }
+    if let Some((_, quotient)) = beyond_divisor(a, b) {
+        return quotient;
+    }
+    let quotient = a / b;
+    if b == 0.0 || !quotient.is_finite() {
+        return quotient;
+    }
+    let whole = LongDouble::from(quotient.floor());
+    let divisor = LongDouble::from(b);
+    let rough = LongDouble::from(a) - whole * divisor;
+    (whole + (rough / divisor).floor()).to_f64()
+}
+
+/// `a %% b` for whole numbers below 2^53 in magnitude, where every step is exact in doubles, so
+/// the common case skips the extended-precision model and its result is the same. `a - a %% b`
+/// is then an exact multiple of `b`, which makes `(a - a %% b) / b` the exact `a %/% b`.
+fn exact_integer_modulo(a: f64, b: f64) -> Option<f64> {
+    const LIMIT: f64 = 9_007_199_254_740_992.0;
+    if !(a.abs() < LIMIT && b.abs() < LIMIT && a == a.trunc() && b == b.trunc() && b != 0.0) {
+        return None;
+    }
+    let remainder = a % b;
+    Some(if remainder != 0.0 && (remainder < 0.0) != (b < 0.0) {
+        remainder + b
     } else {
         remainder
+    })
+}
+
+/// The remainder and quotient when `|a| <= |b|` and `b` is too large for `a / b` to carry any
+/// precision (infinite `b` included), where the result follows from the signs alone.
+fn beyond_divisor(a: f64, b: f64) -> Option<(f64, f64)> {
+    if !(b.abs() * f64::EPSILON > 1.0 && a.is_finite() && a.abs() <= b.abs()) {
+        return None;
     }
+    Some(if a.abs() == b.abs() {
+        (0.0, a / b)
+    } else if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
+        (a + b, -1.0)
+    } else {
+        (a, 0.0)
+    })
+}
+
+/// Whether `a %% b` has a quotient beyond what extended precision holds, which GNU R warns
+/// about.
+fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
+    let quotient = a / b;
+    quotient.is_finite() && quotient.abs() > 2f64.powi(63)
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
@@ -2129,6 +2279,9 @@ pub fn round_digits(x: f64, digits: i32) -> f64 {
     if digits > 308 {
         return x;
     }
+    if digits < -308 {
+        return 0.0;
+    }
     if digits == 0 {
         return x.round_ties_even();
     }
@@ -2161,9 +2314,27 @@ pub fn signif_digits(x: f64, digits: i32) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;
     }
-    let digits = digits.max(1);
+    // Seventeen significant digits already reproduce any double exactly.
+    let digits = digits.clamp(1, 17);
     let text = format!("{:.*e}", (digits - 1) as usize, x);
     text.parse().unwrap_or(x)
+}
+
+/// `signif` of a complex number counts the significant digits of its larger part, so the
+/// smaller part keeps only the decimals the larger one has.
+fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
+    let larger = z.r.abs().max(z.i.abs());
+    let decimals = digits.max(1) - 1 - larger.log10().floor() as i32;
+    if z.r == 0.0 || z.i == 0.0 || !larger.is_finite() || decimals > 308 {
+        return Rcomplex {
+            r: signif_digits(z.r, digits),
+            i: signif_digits(z.i, digits),
+        };
+    }
+    Rcomplex {
+        r: round_digits(z.r, decimals),
+        i: round_digits(z.i, decimals),
+    }
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
@@ -2172,11 +2343,16 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
     let digits = match present(matched[1]) {
         Some(digits) => {
-            let value = values::as_real_scalar(digits);
-            if value.is_nan() {
+            if length(digits) == 0 {
                 return Err(call.error("invalid second argument of length 0"));
             }
-            value.round() as i32
+            let value = values::as_real_scalar(digits);
+            // `NA` digits make every element `NA`, which `i32::MIN` stands for below.
+            if value.is_nan() {
+                i32::MIN
+            } else {
+                value.round().clamp(-1e6, 1e6) as i32
+            }
         }
         None => {
             if significant {
@@ -2188,7 +2364,9 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     };
     let operand = values::materialize(operand)?;
     match operand.kind() {
-        SexpType::Integer | SexpType::Logical if !significant || digits >= 10 => {
+        SexpType::Integer | SexpType::Logical
+            if digits != i32::MIN && (!significant || digits >= 10) =>
+        {
             if digits >= 0 || operand.kind() == SexpType::Logical {
                 let result = coerce_vector(operand, SexpType::Integer)?;
                 return Ok(result);
@@ -2205,7 +2383,9 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             let result = alloc(SexpType::Real, count)?;
             for index in 0..count {
                 let x = real_at(operand, index);
-                values::reals_mut(result)[index] = if x.is_nan() {
+                values::reals_mut(result)[index] = if digits == i32::MIN {
+                    NA_REAL
+                } else if x.is_nan() {
                     x
                 } else if significant {
                     signif_digits(x, digits)
@@ -2221,11 +2401,13 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             let result = alloc(SexpType::Complex, count)?;
             for index in 0..count {
                 let z = values::complexes(operand)[index];
-                values::complexes_mut(result)[index] = if significant {
+                values::complexes_mut(result)[index] = if digits == i32::MIN {
                     Rcomplex {
-                        r: signif_digits(z.r, digits),
-                        i: signif_digits(z.i, digits),
+                        r: NA_REAL,
+                        i: NA_REAL,
                     }
+                } else if significant {
+                    signif_complex(z, digits)
                 } else {
                     Rcomplex {
                         r: round_digits(z.r, digits),
@@ -2233,6 +2415,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
                     }
                 };
             }
+            values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
         _ => Err(call.error("non-numeric argument to mathematical function")),
@@ -2400,56 +2583,6 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
     Ok((items, na_rm))
 }
 
-/// Neumaier's compensated sum, which tracks GNU R's extended-precision accumulator.
-#[derive(Default)]
-pub struct CompensatedSum {
-    sum: f64,
-    compensation: f64,
-}
-
-impl CompensatedSum {
-    #[inline(always)]
-    pub fn add(&mut self, value: f64) {
-        let total = self.sum + value;
-        // Both corrections are computed and one is selected, which compiles to a branch-free
-        // blend instead of a mispredicted branch per element.
-        let (larger, smaller) = if self.sum.abs() >= value.abs() {
-            (self.sum, value)
-        } else {
-            (value, self.sum)
-        };
-        self.compensation += (larger - total) + smaller;
-        self.sum = total;
-    }
-
-    /// Adds every value through four interleaved accumulators, which breaks the one long
-    /// dependency chain a single accumulator has and keeps the compensation per lane.
-    pub fn add_all(&mut self, values: &[f64]) {
-        let mut lanes: [CompensatedSum; 4] = Default::default();
-        let (chunks, rest) = values.as_chunks::<4>();
-        for chunk in chunks {
-            for (lane, &value) in lanes.iter_mut().zip(chunk) {
-                lane.add(value);
-            }
-        }
-        for &value in rest {
-            self.add(value);
-        }
-        for lane in lanes {
-            self.add(lane.sum);
-            self.compensation += lane.compensation;
-        }
-    }
-
-    pub fn total(&self) -> f64 {
-        if self.sum.is_finite() {
-            self.sum + self.compensation
-        } else {
-            self.sum
-        }
-    }
-}
-
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
     let (items, na_rm) = summary_args(call)?;
     for item in &items {
@@ -2483,42 +2616,29 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 return values::scalar_complex(total);
             }
             if kind == SexpType::Real {
-                // Within one argument the first NaN or NA wins, as GNU R's double loop gives;
-                // the arguments' sums are then combined in long double, where NA outranks NaN.
-                let mut total = CompensatedSum::default();
+                // Within one argument the first NaN or NA wins, as GNU R's long double loop gives;
+                // each argument's sum is rounded to double, and across arguments NA outranks NaN.
+                let mut total = LongDouble::ZERO;
                 let mut na = false;
                 for &item in &items {
-                    let mut item_total = CompensatedSum::default();
+                    let mut item_total = LongDouble::ZERO;
                     let mut first_nan = None;
-                    if item.kind() == SexpType::Real && !na_rm {
-                        item_total.add_all(values::reals(item));
-                        if !item_total.total().is_nan() {
-                            total.add(item_total.total());
-                            continue;
-                        }
-                        // A NaN total is rare, so only then does the exact loop below find
-                        // which NaN the argument's own sum keeps.
-                        item_total = CompensatedSum::default();
-                    }
                     for index in 0..length(item) {
                         let value = real_at(item, index);
-                        if value.is_nan() && na_rm {
-                            continue;
-                        }
-                        if item_total.sum.is_nan() {
-                            break;
-                        }
                         if value.is_nan() {
+                            if na_rm {
+                                continue;
+                            }
                             first_nan = Some(value);
                             break;
                         }
-                        item_total.add(value);
+                        item_total += value;
                     }
-                    let item_sum = first_nan.unwrap_or_else(|| item_total.total());
+                    let item_sum = first_nan.unwrap_or_else(|| item_total.to_f64());
                     na |= is_na_real(item_sum);
-                    total.add(item_sum);
+                    total += item_sum;
                 }
-                return scalar_real(if na { NA_REAL } else { total.total() });
+                return scalar_real(if na { NA_REAL } else { total.to_f64() });
             }
             let mut total: i64 = 0;
             for &item in &items {
@@ -2568,6 +2688,12 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             if kind == SexpType::String {
                 let mut best: Option<String> = None;
                 for &item in &items {
+                    // GNU R turns a logical into a string through its integer value.
+                    let item = if item.kind() == SexpType::Logical {
+                        coerce_vector(item, SexpType::Integer)?
+                    } else {
+                        item
+                    };
                     let strings = coerce_vector(item, SexpType::String)?;
                     for index in 0..length(strings) {
                         match values::string_at(strings, index) {
@@ -2795,37 +2921,7 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             if data.iter().any(|&value| is_na_real(value)) {
                 return scalar_real(NA_REAL);
             }
-            let mut total = CompensatedSum::default();
-            total.add_all(data);
-            let mut mean = total.total() / count as f64;
-            // GNU R sums in long double, whose wider range keeps the mean of huge finite values
-            // finite; dividing each value first does the same in double.
-            if mean.is_infinite() && data.iter().all(|value| value.is_finite()) {
-                let mut scaled = CompensatedSum::default();
-                for &value in data {
-                    scaled.add(value / count as f64);
-                }
-                mean = scaled.total();
-            }
-            if !mean.is_finite() {
-                return scalar_real(mean);
-            }
-            // GNU R forms each deviation in long double, so it is exact; the deviation and its
-            // rounding error together are exact in double too.
-            let mut correction = CompensatedSum::default();
-            for chunk in data.chunks(128) {
-                let mut deviations = [0.0; 256];
-                for (pair, &value) in deviations.as_chunks_mut::<2>().0.iter_mut().zip(chunk) {
-                    // Knuth's two-sum of `value` and `-mean`.
-                    let deviation = value - mean;
-                    let negated_part = deviation - value;
-                    let value_part = deviation - negated_part;
-                    pair[0] = deviation;
-                    pair[1] = (value - value_part) + (-mean - negated_part);
-                }
-                correction.add_all(&deviations[..2 * chunk.len()]);
-            }
-            scalar_real(mean + correction.total() / count as f64)
+            scalar_real(long_double_mean(data.iter().copied()).to_f64())
         }
         SexpType::Complex => {
             let mut total = Rcomplex { r: 0.0, i: 0.0 };
@@ -2845,6 +2941,26 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+/// GNU R's mean of doubles: the `long double` sum divided by the count, refined by the mean of
+/// the deviations from it unless it overflowed.
+pub fn long_double_mean(data: impl Iterator<Item = f64> + Clone) -> LongDouble {
+    let mut count = 0;
+    let mut total = LongDouble::ZERO;
+    for value in data.clone() {
+        total += value;
+        count += 1;
+    }
+    let mean = total / count;
+    if !mean.is_finite() {
+        return mean;
+    }
+    let mut deviations = LongDouble::ZERO;
+    for value in data {
+        deviations = deviations + (LongDouble::from(value) - mean);
+    }
+    mean + deviations / count
+}
+
 // NA tests.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2857,6 +2973,16 @@ enum NaTest {
 
 unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
+    // GNU R tests a pairlist's elements like a list's, but drops the tags.
+    let operand = if operand.kind() == SexpType::Pairlist && test == NaTest::Na {
+        let items: Vec<Sexp> = values::pairlist_items(operand)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        values::list_vector(&items)?
+    } else {
+        operand
+    };
     let count = length(operand);
     let result = alloc(SexpType::Logical, count)?;
     match operand.kind() {
@@ -2902,6 +3028,9 @@ unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
                     _ => 0,
                 };
             }
+        }
+        SexpType::List if test != NaTest::Na => {
+            return Err(call.error("default method not implemented for type 'list'"));
         }
         SexpType::List => {
             for index in 0..count {
@@ -2974,9 +3103,16 @@ unsafe fn any_na(operand: Sexp, recursive: bool) -> R<bool> {
         SexpType::String => {
             (0..length(operand)).any(|index| operand.element(index) == values::na_string())
         }
-        SexpType::List => {
-            for index in 0..length(operand) {
-                let element = operand.element(index);
+        SexpType::List | SexpType::Pairlist => {
+            let elements = if operand.kind() == SexpType::List {
+                values::list_items(operand)
+            } else {
+                values::pairlist_items(operand)
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect()
+            };
+            for element in elements {
                 let na = if recursive || (element.kind().is_atomic() && length(element) == 1) {
                     any_na(element, recursive)?
                 } else {
@@ -2997,26 +3133,28 @@ unsafe fn any_na(operand: Sexp, recursive: bool) -> R<bool> {
 unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
     let from = call.arg(0);
     let to = call.arg(1);
+    if values::inherits(from, "factor") && values::inherits(to, "factor") {
+        return factor_interaction(call, from, to);
+    }
     if length(from) == 0 || length(to) == 0 {
         return Err(call.error("argument of length 0"));
     }
-    if length(from) > 1 {
-        conditions::warning_call(
-            call.call,
-            format!(
-                "numerical expression has {} elements: only the first used",
-                length(from)
-            ),
-        )?;
-    }
-    if length(to) > 1 {
-        conditions::warning_call(
-            call.call,
-            format!(
-                "numerical expression has {} elements: only the first used",
-                length(to)
-            ),
-        )?;
+    // GNU R reads the variable on every call, so a script can switch the check on and off.
+    let strict = std::env::var("_R_CHECK_LENGTH_COLON_")
+        .is_ok_and(|value| matches!(value.as_str(), "TRUE" | "true" | "True" | "T"));
+    for operand in [from, to] {
+        if length(operand) > 1 {
+            if strict {
+                return Err(call.error("numerical expression has length > 1"));
+            }
+            conditions::warning_call(
+                call.call,
+                format!(
+                    "numerical expression has {} elements: only the first used",
+                    length(operand)
+                ),
+            )?;
+        }
     }
     let start = values::as_real_scalar(from);
     let end = values::as_real_scalar(to);
@@ -3024,6 +3162,45 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("NA/NaN argument"));
     }
     colon(start, end)
+}
+
+/// `f:g` for two factors: the factor of their level pairs, levels ordered by `f` first.
+unsafe fn factor_interaction(call: &Call<'_>, left: Sexp, right: Sexp) -> R<Sexp> {
+    let count = length(left);
+    if length(right) != count {
+        return Err(call.error("unequal factor lengths"));
+    }
+    let left_levels = get_attr(left, symbols().levels);
+    let right_levels = get_attr(right, symbols().levels);
+    let right_count = length(right_levels);
+    let left_codes = coerce_vector(left, SexpType::Integer)?;
+    let right_codes = coerce_vector(right, SexpType::Integer)?;
+    let result = alloc(SexpType::Integer, count)?;
+    for index in 0..count {
+        let (a, b) = (
+            values::ints(left_codes)[index],
+            values::ints(right_codes)[index],
+        );
+        values::ints_mut(result)[index] = if a == NA_INTEGER || b == NA_INTEGER {
+            NA_INTEGER
+        } else {
+            (a - 1) * right_count as i32 + b
+        };
+    }
+    let mut labels = Vec::with_capacity(length(left_levels) * right_count);
+    for a in 0..length(left_levels) {
+        for b in 0..right_count {
+            labels.push(format!(
+                "{}:{}",
+                values::char_str(left_levels.element(a)),
+                values::char_str(right_levels.element(b))
+            ));
+        }
+    }
+    let levels = values::string_vector(&labels)?;
+    values::set_attr(result, symbols().levels, levels)?;
+    values::set_attr(result, symbols().class, values::scalar_string("factor")?)?;
+    Ok(result)
 }
 
 /// `from:to`: integers when `from` is a whole number and the sequence fits, doubles otherwise.
@@ -3165,14 +3342,26 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             if span / by < 0.0 {
                 return Err(call.error("wrong sign in 'by' argument"));
             }
-            let steps = (span / by + 1e-10).floor() as usize;
+            // `to - from` overflows for endpoints near the double range, while the quotient
+            // taken term by term stays finite.
+            let quotient = if span.is_finite() {
+                span / by
+            } else {
+                to / by - from / by
+            };
+            if !quotient.is_finite() || quotient > 4_503_599_627_370_496.0 {
+                return Err(call.error("'by' argument is much too small"));
+            }
+            let steps = (quotient + 1e-10).floor() as usize;
             if all_integer {
                 let values: Vec<i32> = (0..=steps)
                     .map(|index| (from + index as f64 * by) as i32)
                     .collect();
                 values::integer_vector(&values)
             } else {
-                let values: Vec<f64> = (0..=steps).map(|index| from + index as f64 * by).collect();
+                let values: Vec<f64> = (0..=steps)
+                    .map(|index| finite_term(from, index as f64, by))
+                    .collect();
                 values::real_vector(&values)
             }
         }
@@ -3183,13 +3372,18 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
                     if count == 1 {
                         return values::real_vector(&[from]);
                     }
-                    let by = (to - from) / (count as f64 - 1.0);
+                    let intervals = count as f64 - 1.0;
+                    let by = (to - from) / intervals;
+                    // When `to - from` overflows, the half-size step still exists.
+                    let half_by = to / (2.0 * intervals) - from / (2.0 * intervals);
                     let values: Vec<f64> = (0..count)
                         .map(|index| {
                             if index == count - 1 {
                                 to
-                            } else {
+                            } else if by.is_finite() {
                                 from + index as f64 * by
+                            } else {
+                                2.0 * (from / 2.0 + index as f64 * half_by)
                             }
                         })
                         .collect();
@@ -3232,11 +3426,28 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+/// `from + index * by`, which can overflow midway even when the term itself is finite, as for
+/// a sequence from `-1.5e308` to `1e308`. Halving every part keeps the arithmetic in range.
+fn finite_term(from: f64, index: f64, by: f64) -> f64 {
+    let term = from + index * by;
+    if term.is_finite() {
+        term
+    } else {
+        2.0 * (from / 2.0 + index * (by / 2.0))
+    }
+}
+
 /// `rep(x, times, each, length.out)`.
 unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "times", "length.out", "each", "..."])?;
     let object = present(matched[0]).unwrap_or(nil());
-    let times = present(matched[1]);
+    let times = match present(matched[1]) {
+        // A list of counts works like the vector of them, as in GNU R.
+        Some(times) if times.kind() == SexpType::List => {
+            Some(coerce_vector(times, SexpType::Real)?)
+        }
+        other => other,
+    };
     let length_out = present(matched[2])
         .map(|value| values::as_real_scalar(value))
         .filter(|value| !value.is_nan());
@@ -3328,7 +3539,7 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     let object = values::materialize(call.arg(0))?;
-    let times = call.arg(1);
+    let times = coerce_vector(call.arg(1), SexpType::Real)?;
     let count = length(object);
     let mut indices = Vec::new();
     if length(times) == 1 {
@@ -3348,7 +3559,19 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     } else {
         return Err(call.error("invalid 'times' value"));
     }
-    crate::subset::select_elements(object, &indices)
+    let result = crate::subset::select_elements(object, &indices)?;
+    keep_factor(object, result)?;
+    Ok(result)
+}
+
+/// `rep.int` and `rep_len` drop attributes, but a factor stays a factor.
+unsafe fn keep_factor(object: Sexp, result: Sexp) -> R<()> {
+    if values::inherits(object, "factor") {
+        for symbol in [symbols().levels, symbols().class] {
+            values::set_attr(result, symbol, get_attr(object, symbol))?;
+        }
+    }
+    Ok(())
 }
 
 unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
@@ -3367,10 +3590,69 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
             }
         })
         .collect();
-    crate::subset::select_elements(object, &indices)
+    let result = crate::subset::select_elements(object, &indices)?;
+    keep_factor(object, result)?;
+    Ok(result)
 }
 
 // Two-argument math.
+
+unsafe fn do_atan2(call: &Call<'_>) -> R<Sexp> {
+    let left = values::materialize(call.arg(0))?;
+    let right = values::materialize(call.arg(1))?;
+    if left.kind() != SexpType::Complex && right.kind() != SexpType::Complex {
+        return math2(call, f64::atan2);
+    }
+    let numeric = |kind| {
+        matches!(
+            kind,
+            SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::Complex
+        )
+    };
+    if !numeric(left.kind()) || !numeric(right.kind()) {
+        return Err(call.error("non-numeric argument to mathematical function"));
+    }
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = recycled_length(call.call, left_length, right_length)?;
+    let result = alloc(SexpType::Complex, count)?;
+    let mut undefined = false;
+    for index in 0..count {
+        let y = complex_at(left, index % left_length);
+        let x = complex_at(right, index % right_length);
+        values::complexes_mut(result)[index] = if x.r == 0.0 && x.i == 0.0 {
+            // On the imaginary axis of `x` only the sign of the real part of `y` picks the
+            // half-plane, and `atan2(0, 0)` has no value.
+            if y.r == 0.0 && y.i == 0.0 {
+                undefined = true;
+                Rcomplex {
+                    r: NA_REAL,
+                    i: NA_REAL,
+                }
+            } else {
+                let half = std::f64::consts::FRAC_PI_2;
+                Rcomplex {
+                    r: if y.r < 0.0 { -half } else { half },
+                    i: 0.0,
+                }
+            }
+        } else {
+            let mut angle = complex_atan(complex_divide(y, x));
+            if x.r < 0.0 {
+                angle.r += std::f64::consts::PI;
+            }
+            if angle.r > std::f64::consts::PI {
+                angle.r -= 2.0 * std::f64::consts::PI;
+            }
+            angle
+        };
+    }
+    binary_attributes(left, right, result, call.call)?;
+    if undefined {
+        conditions::warning_call(call.call, "NaNs produced in function \"atan2\"")?;
+    }
+    Ok(result)
+}
 
 unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;

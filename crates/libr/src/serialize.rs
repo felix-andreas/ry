@@ -154,7 +154,13 @@ unsafe fn do_serialize(call: &Call<'_>, format: Format) -> ApiResult<Sexp> {
     let bytes = serialize_to_bytes(call.arg(0), format, version, call.arg(4))?;
     let connection = call.arg(1);
     if connection != runtime().nil() {
-        interp::connections::write_binary(connection, &bytes)?;
+        // ASCII serialization prints to a text-mode connection, as GNU R's does, which is how
+        // `saveRDS(x, textConnection(...), ascii = TRUE)` works.
+        if format == Format::Ascii && interp::connections::is_text_mode(connection)? {
+            interp::connections::print(connection, &bytes)?;
+        } else {
+            interp::connections::write_binary(connection, &bytes)?;
+        }
         return Ok(runtime().nil());
     }
     let result = interp::values::alloc(SexpType::Raw, bytes.len())?;

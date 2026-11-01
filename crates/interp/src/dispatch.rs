@@ -241,7 +241,10 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
         }
         env = env.enclosure();
     }
-    Ok(None)
+    match crate::standard_library::builtins_env() {
+        Some(env) => function_in_frame(name, env),
+        None => Ok(None),
+    }
 }
 
 unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {
@@ -323,7 +326,13 @@ unsafe fn find_s3_method(
             method_name = method_symbol(group, &class)?;
             found = lookup_method(method_name, call_env, def_env)?;
         }
-        if let Some(method) = found {
+        // base's `sort.list` is a function, not the `sort` method for class "list", and
+        // GNU R's dispatch passes over it.
+        if let Some(method) = found
+            && !(symbol_name(method_name) == "sort.list"
+                && method.kind() == SexpType::Closure
+                && method.tag() == values::base_namespace())
+        {
             let suffix = class_suffix(classes, index)?;
             let method_string = values::scalar_string_charsxp(method_name.car())?;
             let vars = dispatch_vars(generic, suffix, method_string, call_env, def_env, group)?;
@@ -473,10 +482,8 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         return Ok(nil());
     }
     let value = eval::find_var_in_frame(first, env)?;
-    if value == missing_arg() {
-        return Ok(nil());
-    }
-    if value == unbound() {
+    // A generic called without its first argument dispatches as on NULL.
+    if value == unbound() || value == missing_arg() {
         return Ok(nil());
     }
     value_of(value)
@@ -819,6 +826,16 @@ pub unsafe fn try_builtin_dispatch(
             } else {
                 definition.name
             };
+            if generic == "c" {
+                // A `c` method never sees the `NULL` arguments after the first, as in GNU R.
+                let kept: Vec<Arg> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, arg)| *position == 0 || arg.value != nil())
+                    .map(|(_, arg)| *arg)
+                    .collect();
+                return internal_dispatch(generic, call, &kept, env);
+            }
             internal_dispatch(generic, call, args, env)
         }
         Generic::Ops | Generic::MatrixOps => {
@@ -1515,6 +1532,15 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     if value.kind() != SexpType::String {
         return Err(call.error("attempt to set invalid 'class' attribute"));
     }
+    // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
+    if length(value) == 2
+        && values::dims(object).is_some_and(|dims| dims.len() == 2)
+        && char_str(value.element(0)) == "matrix"
+        && char_str(value.element(1)) == "array"
+    {
+        set_class_attribute(object, nil())?;
+        return Ok(object);
+    }
     if length(value) == 1 {
         let class = char_str(value.element(0));
         // Setting an implicit class removes the attribute, or coerces.
@@ -1542,10 +1568,6 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                         "cannot set class to \"array\" unless the dimension attribute has length > 0",
                     ));
                 }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
-            }
-            "function" if values::is_function(object) => {
                 set_class_attribute(object, nil())?;
                 return Ok(object);
             }

@@ -45,6 +45,7 @@ use {
     },
     rustc_hash::{FxHashMap, FxHashSet},
     smallvec::{SmallVec, smallvec},
+    std::ops::Range,
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -207,6 +208,22 @@ pub unsafe fn closure_body(function: Sexp) -> Sexp {
         return source_of(body);
     }
     body
+}
+
+/// A closure's body compiled to byte code, compiling it now if it has not run often enough to
+/// compile yet. A body the compiler cannot handle stays an expression.
+pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode {
+        return Ok(body);
+    }
+    match compile(body, function)? {
+        Some(code) => {
+            crate::heap().set_cdr(function, code);
+            Ok(code)
+        }
+        None => Ok(body),
+    }
 }
 
 pub unsafe fn is_compiled(function: Sexp) -> bool {
@@ -1831,7 +1848,14 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     let constants = code.cdr();
     let symbol = constants.element(words[pc + 2] as usize);
     let local = crate::heap().frame_cell(env, symbol).is_some();
-    let value = lookup_variable(symbol, env, constants, code.tag(), words[pc + 3] as usize)?;
+    let value = lookup_variable(
+        symbol,
+        env,
+        constants,
+        code.tag(),
+        words[pc + 3] as usize,
+        0..0,
+    )?;
     record_feedback(constants, pc, value);
     Ok((value, local))
 }
@@ -1908,7 +1932,8 @@ unsafe fn step(
             // value invisible, as `withCallingHandlers(expr)` relies on.
             interp().visible = true;
             let symbol = constants.element(operand(1));
-            let value = lookup_variable(symbol, env, constants, caches, operand(2))?;
+            let held = machine.base..machine.base + operand(0);
+            let value = lookup_variable(symbol, env, constants, caches, operand(2), held)?;
             decoded.record(at, value);
             set(operand(0), value);
         }
@@ -2327,20 +2352,20 @@ unsafe fn lookup_variable(
     constants: Sexp,
     caches: Sexp,
     slot: usize,
+    held: Range<usize>,
 ) -> R<Sexp> {
     let heap = crate::heap();
     if let Some(cell) = heap.frame_cell(env, symbol) {
         let value = cell.cdr();
         if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
-            return eval::eval_symbol(symbol, env);
+            return holding(held, || eval::eval_symbol(symbol, env));
         }
         if value.kind() == SexpType::Promise {
             // An argument: force it here rather than repeat the frame search `eval_symbol` does.
-            let forced = if value.car() == unbound() {
-                eval::force_promise(value)?
-            } else {
-                value.car()
-            };
+            if value.car() != unbound() {
+                return Ok(value.car());
+            }
+            let forced = holding(held, || eval::force_promise(value))?;
             heap.root(forced);
             return Ok(forced);
         }
@@ -2352,7 +2377,7 @@ unsafe fn lookup_variable(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            return eval::eval_symbol(symbol, env);
+            return holding(held, || eval::eval_symbol(symbol, env));
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);
@@ -2361,7 +2386,28 @@ unsafe fn lookup_variable(
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(symbol, enclosure, cell, constants, caches, slot);
     }
-    eval::eval_symbol(symbol, env)
+    holding(held, || eval::eval_symbol(symbol, env))
+}
+
+/// Runs `run`, which forces a promise or an active binding and so runs code. The registers
+/// below the destination hold values of the expression being evaluated without counting as
+/// references, so they count as referenced while that code runs: in `x + y` where forcing `y`
+/// runs `x[] <- 1`, the assignment must copy `x` rather than change the left operand.
+unsafe fn holding(held: Range<usize>, run: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
+    let values: Vec<Sexp> = interp()
+        .bytecode
+        .registers
+        .get(held)
+        .map(<[Sexp]>::to_vec)
+        .unwrap_or_default();
+    for value in &values {
+        value.increment_refcount();
+    }
+    let result = run();
+    for value in &values {
+        value.decrement_refcount();
+    }
+    result
 }
 
 /// A function's value, with GNU R's rule that bindings to non-functions are skipped.

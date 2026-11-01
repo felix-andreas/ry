@@ -215,10 +215,7 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
         env,
         foreign,
     };
-    if routine.3 >= 0
-        && matches!(routine.1, RoutineKind::Call)
-        && routine.3 as usize != routine_args.len()
-    {
+    if routine.3 >= 0 && routine.3 as usize != routine_args.len() {
         return Err(error_in(
             call,
             format!(

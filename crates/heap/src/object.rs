@@ -771,6 +771,13 @@ impl Sexp {
         }
     }
 
+    /// An element of a vector the caller knows is not ALTREP.
+    #[inline]
+    pub(crate) unsafe fn stored_element(self, index: usize) -> Sexp {
+        unsafe { *(self.data() as *const Sexp).add(index) }
+    }
+
+    #[inline]
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {
         unsafe { *(self.data() as *mut Sexp).add(index) = value }
     }
