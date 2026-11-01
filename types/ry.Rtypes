@@ -15,6 +15,13 @@
 @type Dict<K, V>
 @type Set<T>
 
+# Conversions from a list to ry's own values. They are base builtins on ry's runtime, not part
+# of `package:ry`, so the test that keeps this file and the runtime's table equal skips them.
+
+as.record : fn(x: list[Any]) -> Any
+as.tuple : fn(x: list[Any]) -> Any
+as.tag : fn(x: list[Any]) -> Any
+
 # Result
 
 Result.is_ok : <T, E> fn(result: Result<T, E>) -> logical

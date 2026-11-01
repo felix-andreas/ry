@@ -494,3 +494,21 @@ trip itself is the problem rather than its timing.
 handles `SIGWINCH` by calling `R_SetOptionWidth`, which R does not export. The console feed is the
 only other way in, and it is the thing that just proved unsafe between prompts. It is worth
 revisiting if someone finds a third route.
+
+## The records, library and frame round
+
+A new R user wrote typed code with records, tags, `match`, the standard library and frames, made
+mistakes on purpose, and read the diagnostics. Four findings were small enough to fix on the spot.
+
+- **A misspelled payload field or tag in a `match` arm said only "can never match".** The message
+  repeated the value's type and left the user to find the difference. It now adds the cause, such as
+  `:Err` has no field `mesage`, with the nearest field, or the value has no tag `:Somee`, with the
+  nearest tag (`pattern_mismatch_hint` in `check.rs`, two fixtures in `records-and-tags.R.test`).
+- **A misspelled library function was matched to an unrelated base function.** `Str.split` suggested
+  `strsplit`, because `Str.split_on` is three edits away. A name that starts
+  with a module prefix and is the start of a longer name now suggests that name (`Str.split_on`;
+  `nearest_name`, one fixture in `scripts.R.test`).
+- **`as.record`, `as.tuple` and `as.tag` were reported `unresolved`** although the runtime binds them
+  and `records-and-tags.mdx` documents them. They are declared in `base.Rtypes` now.
+- **The docs had no page for frames.** `type-checking/frames.mdx` covers them, and says plainly that
+  they are checked but cannot run yet, because `frame()` is not wired into the interpreter.

@@ -1,0 +1,109 @@
+---
+title: Frames
+description: ry's typed table, whose columns the checker knows
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A frame is ry's built-in table. It is meant to replace `data.table`: queries use the same
+`frame[i, j, by]` syntax, and the checker knows every column, so a misspelled column or a join on a
+column that does not exist is reported before the query runs.
+
+:::caution
+Frames are checked but cannot run yet. `ry check` and the editor understand them in full, but
+neither GNU R nor `ry run` has a `frame()` that builds one. Use frames in code you are checking,
+not in code you execute today.
+:::
+
+```r
+sales <- frame(team = c("a", "b", "a"), amount = c(1, 2, 3))
+totals <- sales[, .(total = sum(amount)), by = team]
+regions <- frame(team = c("a", "b"), region = c("north", "south"))
+joined <- sales[regions, on = "team"]
+```
+
+Hover on each name to see its type:
+
+```text
+sales:  frame{team: character[], amount: double[]}
+totals: frame{team: character[], total: double[]}
+joined: frame{team: character[], amount: double[], region: character[]}
+```
+
+Every query step sees the columns the step before it produced, so the types follow the data through
+a chain of queries.
+
+## Mistakes in a query
+
+A name in a query that is neither a column nor defined anywhere is reported with the nearest column:
+
+```r
+totals <- sales[, .(total = sum(amuont)), by = team]
+```
+
+```text
+unresolved
+
+  ! the frame `sales` has no column `amuont`, and nothing else defines that name. Did you mean `amount`?
+```
+
+Columns have types too. Using one wrongly is an ordinary type error, and so is writing a value that
+a column cannot hold:
+
+```r
+bad <- totals$total + totals$team
+sales[, amount := "x"]
+```
+
+```text
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character[]`
+
+type-mismatch
+
+  x column `amount` holds `double[]`, so this `character` value is parsed as a number, and a string that is not one becomes `NA`
+```
+
+`sales[, tax := amount * 0.2]` adds a column, and the frame's type changes from that line on.
+
+## Annotating a parameter
+
+A frame type lists its columns, like a record. A column type is always a vector, so
+`frame{amount: double}` means the same as `frame{amount: double[]}`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+mean_amount <- function(sales: frame{team: character, amount: double}) -> double {
+  mean(sales$amount)
+}
+mean_amount(frame(team = "a", cost = 1))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(sales: frame{team: character, amount: double}) -> double
+mean_amount <- function(sales) {
+  mean(sales$amount)
+}
+mean_amount(frame(team = "a", cost = 1))
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `frame{team: character[], amount: double[]}`, found `frame{team: character[], cost: double[]}`
+```
+
+A bare `frame` accepts any frame and leaves its columns unknown. A frame also counts as a
+`data.frame`, so functions that expect one accept it.
+
+The [typing reference](/reference/type-system/#frames) lists every form of query ry understands,
+including joins, `.SD`, `.SDcols` and `:=` with several columns.
