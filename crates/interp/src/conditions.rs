@@ -311,18 +311,13 @@ unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
     if call == nil() {
         return format!("Warning: {message}\n");
     }
-    let call_text = first_deparse_line(call);
+    let call_text = deparse::deparse_first_line(call);
     let separator = if call_text.chars().count() + message.chars().count() + 18 > 75 {
         " :\n  "
     } else {
         " : "
     };
     format!("Warning in {call_text}{separator}{message}\n")
-}
-
-/// The first line of a call's deparse, which is all of a long call a warning shows.
-unsafe fn first_deparse_line(call: Sexp) -> String {
-    deparse::deparse_lines(call, 60, deparse::options::SIMPLE).into_iter().next().unwrap_or_default()
 }
 
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
@@ -340,7 +335,7 @@ pub unsafe fn print_warnings() {
             text.push_str(message);
             text.push(' ');
         } else {
-            let call_text = first_deparse_line(*call);
+            let call_text = deparse::deparse_first_line(*call);
             let separator = if call_text.len() + message.len() + 6 > 75 {
                 " :\n  "
             } else {
@@ -360,7 +355,7 @@ pub unsafe fn print_warnings() {
                 if *call == nil() {
                     text.push_str(&format!("{}: {message}\n", index + 1));
                 } else {
-                    let call_text = first_deparse_line(*call);
+                    let call_text = deparse::deparse_first_line(*call);
                     let separator = if call_text.len() + message.len() + 10 > 75 {
                         " :\n  "
                     } else {

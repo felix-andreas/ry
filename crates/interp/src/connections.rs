@@ -504,8 +504,8 @@ pub fn expand_path(path: &str) -> String {
 // The internals.
 
 /// `file(description, open, blocking, encoding, method, raw)`. An empty description is an
-/// anonymous file, opened `"w+"` unless `open` says otherwise, and a file opened for reading that holds gzip data reads
-/// decompressed with class `gzfile`.
+/// anonymous file, opened `"w+"` unless `open` says otherwise, and a file opened for reading
+/// that holds compressed data reads decompressed with class `gzfile`, `bzfile` or `xzfile`.
 unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
     let open = values::require_string(call.arg(1), "open")?;
@@ -520,9 +520,11 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    let gzip = !raw
-        && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write)
-        && file_compression(&path).is_ok_and(|compression| compression.is_some());
+    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write) {
+        file_compression(&path).ok().flatten()
+    } else {
+        None
+    };
     let device = Device::File(FileDevice {
         path,
         temporary,
@@ -535,10 +537,15 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         (*con).blocking = blocking as Rboolean;
     })?;
     // The object keeps the class it was created with; only the struct says what it became.
-    if gzip {
+    if let Some(compression) = compression {
+        let class: &[u8] = match compression {
+            Compressed::Gzip => b"gzfile",
+            Compressed::Bzip2 => b"bzfile",
+            Compressed::Xz => b"xzfile",
+        };
         let con = resolve_con(object)?.1;
         libc::free((*con).class.cast());
-        (*con).class = malloc_string(b"gzfile");
+        (*con).class = malloc_string(class);
     }
     Ok(object)
 }
@@ -3194,8 +3201,4 @@ mod tests {
             assert_eq!(offset, recorded, "{name}");
         }
     }
-}
-
-fn truncate(line: &str) -> &str {
-    &line[..line.floor_char_boundary(line.len().min(30))]
 }

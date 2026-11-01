@@ -474,9 +474,6 @@ pub fn justify(items: Vec<String>, right: bool) -> Vec<String> {
 /// `format(x, trim, digits, nsmall, width, justify, na.encode, scientific, decimal.mark)`.
 unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let vector = values::materialize(call.arg(0))?;
-    if vector.kind() == SexpType::Environment {
-        return values::scalar_string(&crate::print::environment_label(vector)?);
-    }
     let trim = values::as_logical_scalar(call.arg(1)) == 1;
     let digits = call.arg(2);
     let nsmall = values::as_integer_scalar(call.arg(3)).max(0) as usize;

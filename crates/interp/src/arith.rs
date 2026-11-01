@@ -1423,55 +1423,6 @@ pub fn gamma_fn(value: f64) -> f64 {
     unsafe { tgamma(value) }
 }
 
-fn digamma(mut x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    let mut result = 0.0;
-    if x <= 0.0 && x == x.floor() {
-        return f64::NAN;
-    }
-    if x < 0.0 {
-        // Reflection.
-        return digamma(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
-    }
-    while x < 6.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let inverse2 = inverse * inverse;
-    result + x.ln()
-        - 0.5 * inverse
-        - inverse2
-            * (1.0 / 12.0
-                - inverse2
-                    * (1.0 / 120.0
-                        - inverse2 * (1.0 / 252.0 - inverse2 * (1.0 / 240.0 - inverse2 / 132.0))))
-}
-
-fn trigamma(mut x: f64) -> f64 {
-    if x.is_nan() {
-        return x;
-    }
-    let mut result = 0.0;
-    if x <= 0.0 && x == x.floor() {
-        return f64::INFINITY;
-    }
-    while x < 6.0 {
-        result += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let inverse2 = inverse * inverse;
-    result
-        + inverse
-        + inverse2 / 2.0
-        + inverse
-            * inverse2
-            * (1.0 / 6.0 - inverse2 * (1.0 / 30.0 - inverse2 * (1.0 / 42.0 - inverse2 / 30.0)))
-}
-
 fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
     match function {
@@ -1530,9 +1481,19 @@ fn math_value(function: Math, x: f64) -> f64 {
             }
         }
         Math::Tanpi => {
-            let reduced = x % 1.0;
+            // Reducing into (-1/2, 1/2] is exact, so values one period apart agree exactly.
+            let mut reduced = x % 1.0;
+            if reduced > 0.5 {
+                reduced -= 1.0;
+            } else if reduced <= -0.5 {
+                reduced += 1.0;
+            }
             if reduced == 0.0 {
                 0.0
+            } else if reduced == 0.5 {
+                f64::NAN
+            } else if reduced == 0.25 || reduced == -0.25 {
+                reduced * 4.0
             } else {
                 (PI * reduced).tan()
             }

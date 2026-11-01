@@ -752,8 +752,9 @@ unsafe fn add_device(device: Device) -> R<()> {
 
 /// The next open device after slot `from`, wrapping around, or the null device.
 fn next_device(devices: &DeviceTable, from: usize) -> usize {
+    // The wrap includes `from` itself, so a lone open device is its own successor.
     (from + 1..MAX_DEVICES)
-        .chain(1..from.min(MAX_DEVICES))
+        .chain(1..(from + 1).min(MAX_DEVICES))
         .find(|slot| devices.slots[*slot].is_some())
         .unwrap_or(0)
 }
@@ -761,7 +762,7 @@ fn next_device(devices: &DeviceTable, from: usize) -> usize {
 fn previous_device(devices: &DeviceTable, from: usize) -> usize {
     (1..from.min(MAX_DEVICES))
         .rev()
-        .chain((from + 1..MAX_DEVICES).rev())
+        .chain((from.max(1)..MAX_DEVICES).rev())
         .find(|slot| devices.slots[*slot].is_some())
         .unwrap_or(0)
 }

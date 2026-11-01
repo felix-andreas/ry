@@ -656,7 +656,20 @@ unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
 unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
     require_posixlt(list)?;
     let balanced_symbol = values::install("balanced")?;
-    let result = if fill_only {
+    let mark = get_attr(list, balanced_symbol);
+    // `balanced = TRUE` covers both requests, and `NA` (filled only) satisfies a fill.
+    let already = mark.kind() == SexpType::Logical
+        && length(mark) == 1
+        && match values::ints(mark)[0] {
+            NA_LOGICAL => fill_only,
+            0 => false,
+            _ => true,
+        };
+    let result = if already {
+        let result = values::shallow_duplicate(list)?;
+        crate::heap().root(result);
+        result
+    } else if fill_only {
         let count = (0..length(list)).map(|index| length(list.element(index))).max().unwrap_or(0);
         let result = values::shallow_duplicate(list)?;
         crate::heap().root(result);
@@ -678,7 +691,9 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         let tzone = get_attr(list, values::install("tzone")?);
         let tz = values::first_string(tzone).map(|text| text.into_owned()).unwrap_or_default();
         let seconds = posixlt_seconds(list)?;
-        posixlt_from_seconds(&seconds, &tz)?
+        let result = posixlt_from_seconds(&seconds, &tz)?;
+        set_year_names(result, values::names(list.element(5)))?;
+        result
     };
     if !classed {
         values::remove_attr(result, symbols().class);

@@ -30,9 +30,9 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   would make the build ry's own.
 - **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
-- **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
-  The loader has the byte range of every definition, so a srcref could be built from it once the
-  interpreter carries srcrefs at all.
+- **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
+  name no file. The loader has the byte range of every definition, so a srcref could be built from
+  it now that the interpreter keeps srcrefs for parsed code.
 - **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
   326,000-line bench package, shared by both runtimes; the next item is the fix.
 
@@ -1831,10 +1831,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
   (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
   optimum along a slightly different path, so values agree to about seven digits only.
-- **GNU R's own `tests/*.R`** (R 4.3.3 sources, run by both engines with `TZ=UTC`): most failing
-  files stop at a missing routine: `loess_raw`, `parse_Rd`, `parseLatex`, the PORT routines behind
-  `nlminb`, `nlm`, and `qbeta` precision. `datetime3.R` fails because every time zone is computed as
-  UTC (below).
 - **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
   computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
   daylight-saving changes differ from GNU R.
@@ -1897,7 +1893,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   reg-plot-latin1 and reg-S4-examples run to the end; the rest stop at large missing pieces:
   stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
   (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
-  (reg-tests-1c, reg-tests-3, reg-examples1). Ascii `save()` is also missing.
+  (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
+  (`RDX3`, where GNU R writes `RDA3`); `load()` reads it back the same, but the file differs.
 - **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
   `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
