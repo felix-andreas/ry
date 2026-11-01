@@ -665,6 +665,23 @@ pub unsafe fn try_builtin_dispatch(
                 Generic::Summary => "Summary",
                 _ => "Complex",
             };
+            if definition.generic == Generic::Summary {
+                // GNU R's `fixup_NaRm` moves `na.rm` last, adding `na.rm = FALSE` when the call
+                // has none, so a method may declare it without a default. The method's call
+                // then holds the evaluated arguments, as `do_summary` builds it.
+                let na_rm = symbols().na_rm;
+                let mut fixed: Vec<Arg> = args.iter().filter(|arg| arg.tag != na_rm).copied().collect();
+                let value = match args.iter().rev().find(|arg| arg.tag == na_rm) {
+                    Some(arg) => arg.value,
+                    None => values::scalar_logical(0)?,
+                };
+                fixed.push(Arg { tag: na_rm, value });
+                let head = if call.kind() == SexpType::Language { call.car() } else { op };
+                let mut items = vec![(nil(), head)];
+                items.extend(fixed.iter().map(|arg| (arg.tag, arg.value)));
+                let fixed_call = values::pairlist(&items, SexpType::Language)?;
+                return group_dispatch(group, definition.name, fixed_call, &fixed, env);
+            }
             group_dispatch(group, definition.name, call, args, env)
         }
     }
