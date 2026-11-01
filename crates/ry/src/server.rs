@@ -2141,7 +2141,10 @@ impl LanguageServer for ServerState {
                 let items = result
                     .items
                     .into_iter()
-                    .map(|item| convert_completion_item(item, worker.supports_snippets))
+                    .enumerate()
+                    .map(|(rank, item)| {
+                        convert_completion_item(item, rank, worker.supports_snippets)
+                    })
                     .collect();
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete: result.is_incomplete,
@@ -2564,7 +2567,13 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     }
 }
 
-fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
+/// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
+/// label, which puts `break` ahead of the local the user is about to type.
+fn convert_completion_item(
+    item: CompletionItem,
+    rank: usize,
+    snippets: bool,
+) -> lsp_types::CompletionItem {
     let kind = match item.kind {
         CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
         CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
@@ -2575,6 +2584,7 @@ fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::C
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
         kind: Some(kind),
+        sort_text: Some(format!("{rank:04}")),
         detail: item.detail,
         documentation: item.documentation.map(|documentation| {
             lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {

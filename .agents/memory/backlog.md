@@ -287,6 +287,11 @@ type-level function the annotation language does not have.
   be `Unknown`.
 - The add-annotation code action writes a `#:` comment even in a project that uses inline
   annotations. It could offer the inline form where inline annotations are on.
+- Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
+  pins what works). `data.frame()` hovers `Unknown` and `df$` completes nothing, for the reason in
+  the `data.frame()` item above. `matrix()` hovers `Any` because ry has no array type. A local whose
+  type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
+  because a bare `T` without its binder would mislead.
 - `contributing/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point

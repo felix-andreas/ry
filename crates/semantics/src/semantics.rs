@@ -2178,6 +2178,7 @@ mod tests {
             expression_types: Default::default(),
             pattern_types: Default::default(),
             literal_expectations: Default::default(),
+            loop_variables: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
