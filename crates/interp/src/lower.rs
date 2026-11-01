@@ -15,6 +15,7 @@ use crate::{
     values::{self, alloc, install, missing_arg, nil, symbols},
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
+use heap::strings::Encoding;
 use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -886,8 +887,12 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
             })
         }
         SyntaxKind::STRING => {
-            let content = string_literal(text)?;
-            values::scalar_string(&content)
+            let inner = &text[1..text.len().saturating_sub(1).max(1)];
+            let (bytes, high_byte) = unescape_bytes(inner).map_err(error)?;
+            let encoding = if high_byte { Encoding::Native } else { Encoding::Utf8 };
+            let result = alloc(SexpType::String, 1)?;
+            values::set_elt(result, 0, values::mkchar_bytes(&bytes, encoding)?);
+            Ok(result)
         }
         SyntaxKind::RAW_STRING => values::scalar_string(&raw_string(text)),
         SyntaxKind::TRUE_KW => Ok(values::fresh_logical(1)?),
@@ -958,9 +963,21 @@ fn raw_string(text: &str) -> String {
     text.get(body_start..body_end).unwrap_or("").to_owned()
 }
 
-/// Resolves R's string escapes.
+/// Resolves R's string escapes, with invalid UTF-8 from byte escapes replaced.
 pub fn unescape(text: &str) -> Result<String, String> {
-    let mut result = String::with_capacity(text.len());
+    let (bytes, _) = unescape_bytes(text)?;
+    Ok(String::from_utf8(bytes)
+        .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned()))
+}
+
+/// Resolves R's string escapes. Octal and `\x` escapes give single bytes, so the result need
+/// not be UTF-8; the flag says whether such an escape gave a byte past ASCII, which leaves the
+/// string in the native encoding instead of marked as UTF-8, as in GNU R.
+pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut result = String::new();
+    let mut high_byte = false;
+    let mut unicode = false;
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
         if character != '\\' {
@@ -999,7 +1016,9 @@ pub fn unescape(text: &str) -> Result<String, String> {
                 if value == 0 {
                     return Err("nul character not allowed".into());
                 }
-                result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
+                bytes.push((value & 0xFF) as u8);
+                high_byte |= value >= 0x80;
             }
             'x' => {
                 let mut value = 0;
@@ -1020,7 +1039,9 @@ pub fn unescape(text: &str) -> Result<String, String> {
                 if value == 0 {
                     return Err("nul character not allowed".into());
                 }
-                result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                bytes.extend_from_slice(std::mem::take(&mut result).as_bytes());
+                bytes.push(value as u8);
+                high_byte |= value >= 0x80;
             }
             'u' | 'U' => {
                 let limit = if escape == 'u' { 4 } else { 8 };
@@ -1048,6 +1069,7 @@ pub fn unescape(text: &str) -> Result<String, String> {
                         "'\\{escape}' used without hex digits in character string"
                     ));
                 }
+                unicode |= value >= 0x80;
                 result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
             }
             other => {
@@ -1057,7 +1079,11 @@ pub fn unescape(text: &str) -> Result<String, String> {
             }
         }
     }
-    Ok(result)
+    if unicode && high_byte {
+        return Err("mixing Unicode and octal/hex escapes in a string is not allowed".into());
+    }
+    bytes.extend_from_slice(result.as_bytes());
+    Ok((bytes, high_byte))
 }
 
 // The internals.

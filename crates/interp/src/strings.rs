@@ -23,7 +23,7 @@ use crate::{
 };
 use fancy_regex::{Regex, RegexBuilder};
 use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
+    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
     strings::Encoding,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -166,14 +166,23 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
         (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
         _ => 2,
     };
+    let allow_na = values::as_logical_scalar(call.arg(2)) == 1;
     let text = character_vector(x)?;
     let count = length(text);
     let result = alloc(SexpType::Integer, count)?;
     let counts = values::ints_mut(result);
     for (index, slot) in counts.iter_mut().enumerate() {
         let charsxp = text.element(index);
+        let invalid = count_type != CountType::Bytes
+            && !charsxp.has_gp(gp::LATIN1)
+            && std::str::from_utf8(charsxp.bytes()).is_err();
         *slot = if charsxp == na_string() {
             na_count
+        } else if invalid {
+            if !allow_na {
+                return Err(error(format!("invalid multibyte string, element {}", index + 1)));
+            }
+            NA_INTEGER
         } else {
             match count_type {
                 CountType::Bytes => charsxp.bytes().len() as i32,

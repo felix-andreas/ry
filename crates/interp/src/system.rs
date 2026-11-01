@@ -11,6 +11,7 @@ use crate::{
     },
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real};
+use heap::strings::Encoding;
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -116,7 +117,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.umask", 1, |_| unsafe { scalar_integer(18) }),
     internal("Sys.getpid", 0, |_| unsafe { scalar_integer(std::process::id() as i32) }),
     internal("Sys.info", 0, do_sys_info),
-    internal("Sys.setlocale", 2, |_| unsafe { scalar_string("C.UTF-8") }),
+    internal("Sys.setlocale", 2, do_sys_setlocale),
     internal("Sys.getlocale", 1, |_| unsafe { scalar_string("LC_CTYPE=C.UTF-8;LC_NUMERIC=C;LC_TIME=C.UTF-8;LC_COLLATE=C.UTF-8;LC_MONETARY=C.UTF-8;LC_MESSAGES=C.UTF-8;LC_PAPER=C.UTF-8;LC_NAME=C;LC_ADDRESS=C;LC_TELEPHONE=C;LC_MEASUREMENT=C.UTF-8;LC_IDENTIFICATION=C") }),
     internal("l10n_info", 0, do_l10n_info),
     internal("Sys.localeconv", 0, |_| unsafe { values::named_list(&[]) }),
@@ -149,10 +150,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
-    internal("setEncoding", 2, |call| unsafe { Ok(call.arg(0)) }),
+    internal("setEncoding", 2, do_set_encoding),
     builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
     builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
-    internal("iconv", 6, |call| unsafe { Ok(call.arg(0)) }),
+    internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
     internal("validEnc", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
     internal("as.POSIXlt", 2, do_as_posixlt),
@@ -518,13 +519,18 @@ impl Zone {
     /// time reads as its first occurrence, as the C library's `mktime` does; a known `isdst`
     /// picks the matching side instead.
     fn local_to_utc(&self, local: f64, isdst: i32) -> f64 {
-        if self.unknown.is_some() || !local.is_finite() {
+        if !local.is_finite() {
             return local;
         }
+        if self.unknown.is_some() {
+            return if isdst == 1 { local - 3600.0 } else { local };
+        }
+        let shift = cycles_into_range(local) * GREGORIAN_CYCLE;
+        let local = local + shift;
         let time = broken_down(local);
         let fraction = local - local.floor();
         let datetime = jiff::civil::DateTime::new(
-            time.year.clamp(-9999, 9999) as i16,
+            time.year as i16,
             time.month as i8,
             time.day as i8,
             time.hour as i8,
@@ -533,15 +539,28 @@ impl Zone {
             0,
         );
         let Ok(datetime) = datetime else {
-            return local;
+            return local - shift;
         };
         use jiff::tz::AmbiguousOffset;
         let offset = match self.rules.to_ambiguous_timestamp(datetime).offset() {
-            AmbiguousOffset::Unambiguous { offset } => offset,
+            AmbiguousOffset::Unambiguous { offset } => {
+                // Like C's `mktime`, an `isdst` that contradicts the zone's rule at that wall
+                // time reads the clock as the other kind of time, an hour apart.
+                let seconds = offset.seconds() as f64;
+                let instant = local.floor() - seconds;
+                let dst = self.rules.to_offset_info(timestamp(instant)).dst().is_dst();
+                // glibc applies this even in a zone that never observes daylight saving time.
+                let correction = match (isdst, dst) {
+                    (0, true) => -3600.0,
+                    (1, false) => 3600.0,
+                    _ => 0.0,
+                };
+                return instant - correction + fraction - shift;
+            }
             AmbiguousOffset::Gap { before, after } => if isdst == 0 { before } else { after },
             AmbiguousOffset::Fold { before, after } => if isdst == 0 { after } else { before },
         };
-        local.floor() - offset.seconds() as f64 + fraction
+        local.floor() - offset.seconds() as f64 + fraction - shift
     }
 
     /// The standard and daylight-saving abbreviations GNU R stores after the zone's name in
@@ -580,7 +599,7 @@ fn resolve_zone(tz: &str) -> Zone {
         Ok(rules) => Zone { rules, unknown: None },
         Err(_) => {
             let letters: String = name.chars().take_while(char::is_ascii_alphabetic).collect();
-            let abbreviation = if letters.len() >= 3 { letters } else { "UTC".to_owned() };
+            let abbreviation = if letters.len() >= 3 { letters } else { String::new() };
             Zone { rules: jiff::tz::TimeZone::UTC, unknown: Some(abbreviation) }
         }
     }
@@ -592,11 +611,28 @@ fn session_zone_name() -> String {
     std::env::var("TZ").unwrap_or_default()
 }
 
-/// The instant `seconds` names, clamped into the range the tz database covers.
+/// The instant `seconds` names, moved by whole 400-year cycles into the range jiff covers.
 fn timestamp(seconds: f64) -> jiff::Timestamp {
-    let bound = jiff::Timestamp::MAX.as_second() as f64;
-    let whole = seconds.floor().clamp(-bound, bound) as i64;
-    jiff::Timestamp::from_second(whole).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+    let whole = seconds.floor() + cycles_into_range(seconds) * GREGORIAN_CYCLE;
+    jiff::Timestamp::from_second(whole as i64).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+}
+
+/// The seconds in 400 Gregorian years, after which the calendar and the weekdays repeat.
+const GREGORIAN_CYCLE: f64 = 146_097.0 * 86_400.0;
+
+/// The number of 400-year cycles to add to `seconds` to land inside jiff's range (a year
+/// within -9999..=9999), so dates far outside it read with the rules of an equivalent year.
+fn cycles_into_range(seconds: f64) -> f64 {
+    // A cycle short of each bound, so a shifted wall-clock time stays representable too.
+    let upper = jiff::Timestamp::MAX.as_second() as f64 - GREGORIAN_CYCLE;
+    let lower = jiff::Timestamp::MIN.as_second() as f64 + GREGORIAN_CYCLE;
+    if seconds > upper {
+        -((seconds - upper) / GREGORIAN_CYCLE).ceil()
+    } else if seconds < lower {
+        ((lower - seconds) / GREGORIAN_CYCLE).ceil()
+    } else {
+        0.0
+    }
 }
 
 // Calendar arithmetic, in UTC.
@@ -678,10 +714,22 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             output.push(character);
             continue;
         }
+        // The GNU extensions: a padding flag (`_` spaces, `0` zeros, `-` none) and a field width.
+        let mut pad = None;
+        while let Some(flag @ ('_' | '0' | '-')) = characters.peek().copied() {
+            characters.next();
+            pad = Some(flag);
+        }
+        let mut width = None;
+        while let Some(digit) = characters.peek().and_then(|digit| digit.to_digit(10)) {
+            characters.next();
+            width = Some(width.unwrap_or(0) * 10 + digit as usize);
+        }
         let Some(spec) = characters.next() else {
             output.push('%');
             break;
         };
+        let start = output.len();
         match spec {
             'Y' => output.push_str(&time.year.to_string()),
             'y' => output.push_str(&format!("{:02}", time.year.rem_euclid(100))),
@@ -693,6 +741,14 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             'M' => output.push_str(&format!("{:02}", time.minute)),
             'S' => output.push_str(&format!("{:02}", time.second.floor() as i64)),
             'p' => output.push_str(if time.hour < 12 { "AM" } else { "PM" }),
+            'P' => output.push_str(if time.hour < 12 { "am" } else { "pm" }),
+            's' => {
+                let local = days_from_civil(time.year, 1, 1) + time.yearday;
+                let seconds = local * 86400 + time.hour * 3600 + time.minute * 60
+                    + time.second.floor() as i64
+                    - i64::from(offset);
+                output.push_str(&seconds.to_string());
+            }
             'j' => output.push_str(&format!("{:03}", time.yearday + 1)),
             'B' => output.push_str(MONTHS[(time.month - 1) as usize]),
             'b' | 'h' => output.push_str(&MONTHS[(time.month - 1) as usize][..3]),
@@ -748,7 +804,11 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
                         Some(digits) => {
                             characters.next();
                             let width = 3 + digits as usize;
-                            output.push_str(&format!("{:0width$.digits$}", time.second, width = width, digits = digits as usize));
+                            // GNU R truncates to the digits asked for rather than rounding, so a
+                            // second never prints as 60.
+                            let scale = 10f64.powi(digits as i32);
+                            let second = (time.second * scale).floor() / scale;
+                            output.push_str(&format!("{:0width$.digits$}", second, width = width, digits = digits as usize));
                         }
                         None => output.push_str(&format!("{:02}", time.second.floor() as i64)),
                     }
@@ -757,6 +817,36 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             other => {
                 output.push('%');
                 output.push(other);
+            }
+        }
+        if (pad.is_some() || width.is_some()) && "YymdeHIMSjCGgUWVuwkls".contains(spec) {
+            let piece = output.split_off(start);
+            let trimmed = piece.trim_start();
+            let (sign, digits) = match trimmed.strip_prefix('-') {
+                Some(rest) => ("-", rest),
+                None => ("", trimmed),
+            };
+            let digits = if pad.is_some() {
+                let stripped = digits.trim_start_matches('0');
+                if stripped.is_empty() { "0" } else { stripped }
+            } else {
+                digits
+            };
+            let natural = format!("{sign}{digits}");
+            let width = match (pad, width) {
+                (Some('-'), _) => 0,
+                (_, Some(width)) => width,
+                // A flag alone keeps the conversion's usual width.
+                _ => piece.len(),
+            };
+            let fill = width.saturating_sub(natural.len());
+            if pad == Some('_') || (pad.is_none() && piece.starts_with(' ')) {
+                output.push_str(&" ".repeat(fill));
+                output.push_str(&natural);
+            } else {
+                output.push_str(sign);
+                output.push_str(&"0".repeat(fill));
+                output.push_str(digits);
             }
         }
     }
@@ -863,9 +953,12 @@ unsafe fn require_posixlt(list: Sexp) -> R<()> {
 unsafe fn posixlt_instants(list: Sexp, tz: &str) -> R<Vec<f64>> {
     let mut seconds = posixlt_seconds(list)?;
     let zone = resolve_zone(tz);
+    // GNU R converts UTC and GMT itself rather than through `mktime`, which ignores `isdst`.
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    let honors_isdst = name != "UTC" && name != "GMT";
     let isdst = if length(list) > 8 { list.element(8) } else { nil() };
     for (position, value) in seconds.iter_mut().enumerate() {
-        let flag = if length(isdst) == 0 {
+        let flag = if length(isdst) == 0 || !honors_isdst {
             -1
         } else {
             let flag = crate::subset::numeric_element(isdst, position % length(isdst));
@@ -957,12 +1050,59 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         values::set_attr(result, balanced_symbol, values::scalar_logical(NA_LOGICAL)?)?;
         result
     } else {
+        // A POSIXlt with `zone` and `gmtoff` balances through its instants, as `as.POSIXct`
+        // reads them. One without stays without them: GNU R normalizes its wall clock as plain
+        // calendar arithmetic and keeps its `isdst` and `tzone`.
         let tz = posixlt_zone(list)?;
-        let seconds = posixlt_instants(list, &tz)?;
-        let result = posixlt_from_seconds(&seconds, &tz)?;
-        set_year_names(result, values::names(list.element(5)))?;
+        let result = if length(list) >= 11 {
+            let seconds = posixlt_instants(list, &tz)?;
+            posixlt_from_seconds(&seconds, &tz)?
+        } else {
+            let wall = posixlt_seconds(list)?;
+            let full = posixlt_from_seconds(&wall, "UTC")?;
+            crate::heap().root(full);
+            let fields = length(list);
+            let result = alloc(SexpType::List, fields)?;
+            crate::heap().root(result);
+            for index in 0..fields.min(8) {
+                values::set_elt(result, index, full.element(index));
+            }
+            if fields > 8 {
+                let source = list.element(8);
+                let isdst = alloc(SexpType::Integer, wall.len())?;
+                for (position, flag) in values::ints_mut(isdst).iter_mut().enumerate() {
+                    let value = if length(source) == 0 { -1.0 } else { crate::subset::numeric_element(source, position % length(source)) };
+                    *flag = if value.is_nan() { -1 } else { value as i32 };
+                }
+                values::set_elt(result, 8, isdst);
+            }
+            let names: Vec<&str> = POSIXLT_NAMES.iter().take(fields).copied().collect();
+            values::set_attr(result, symbols().names, string_vector(&names)?)?;
+            values::set_attr(result, symbols().class, string_vector(&["POSIXlt", "POSIXt"])?)?;
+            let tzone_symbol = values::install("tzone")?;
+            let tzone = get_attr(list, tzone_symbol);
+            if tzone != nil() {
+                values::set_attr(result, tzone_symbol, tzone)?;
+            }
+            values::set_attr(result, balanced_symbol, scalar_bool(true)?)?;
+            result
+        };
         result
     };
+    if !already && length(list) > 5 && length(result) > 5 {
+        // The year's names recycle with the fields, as GNU R balances them.
+        let names = values::names(list.element(5));
+        let count = length(result.element(5));
+        if names != nil() && length(names) > 0 && length(names) != count {
+            let recycled = alloc(SexpType::String, count)?;
+            for position in 0..count {
+                values::set_elt(recycled, position, names.element(position % length(names)));
+            }
+            set_year_names(result, recycled)?;
+        } else {
+            set_year_names(result, names)?;
+        }
+    }
     if !classed {
         values::remove_attr(result, symbols().class);
     }
@@ -986,12 +1126,25 @@ unsafe fn set_year_names(list: Sexp, names: Sexp) -> R<()> {
     Ok(())
 }
 
+/// Names `result` after the POSIXlt's year names. A ragged POSIXlt's year names can be shorter
+/// than the result, and GNU R pads them with NA.
 unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
     let names = values::names(list.element(5));
-    if names != nil() && length(names) == length(result) {
-        values::set_attr(result, symbols().names, names)?;
+    if names == nil() {
+        return Ok(());
     }
-    Ok(())
+    let count = length(result);
+    let padded = if length(names) == count {
+        names
+    } else {
+        let padded = alloc(SexpType::String, count)?;
+        for position in 0..count {
+            let name = if position < length(names) { names.element(position) } else { values::na_string() };
+            values::set_elt(padded, position, name);
+        }
+        padded
+    };
+    values::set_attr(result, symbols().names, padded)
 }
 
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
@@ -1025,11 +1178,20 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             let slot = if dst > 0.0 { 2 } else { 1 };
             values::string_at(tzone, slot.min(length(tzone).saturating_sub(1))).map(|text| text.into_owned()).unwrap_or_default()
         };
-        let offset = if length(offsets) > 0 {
-            let offset = crate::subset::numeric_element(offsets, index % length(offsets));
-            if offset.is_nan() { 0 } else { offset as i32 }
+        let known = if length(offsets) > 0 {
+            Some(crate::subset::numeric_element(offsets, index % length(offsets))).filter(|offset| !offset.is_nan())
         } else {
-            0
+            Some(0.0)
+        };
+        // An unknown offset (strptime leaves it NA outside UTC) comes from the zone's rules at
+        // that wall-clock time, as C's `mktime` fills it in for GNU R.
+        let offset = match known {
+            Some(offset) => offset as i32,
+            None => {
+                let name = values::string_at(tzone, 0).map(|text| text.into_owned()).unwrap_or_default();
+                let flag = if dst.is_nan() { -1 } else { dst as i32 };
+                (value - resolve_zone(&name).local_to_utc(value, flag)) as i32
+            }
         };
         let mut text = format_broken_down(&broken_down(value), &format, &zone, offset);
         if use_tz && !zone.is_empty() {
@@ -1038,17 +1200,13 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         }
         values::set_elt(result, index, values::mkchar(&text)?);
     }
-    let names = values::names(list.element(5));
-    if names != nil() {
-        values::set_attr(result, symbols().names, names)?;
-    }
+    set_names_from_year(list, result)?;
     Ok(result)
 }
 
-/// Parses `text` with a `strptime` format, returning seconds since the epoch.
 /// The parsed time as whole seconds since the epoch and the fraction of a second apart, so
 /// that the fraction keeps every digit the text gave it.
-fn parse_time(text: &str, format: &str) -> Option<(f64, f64)> {
+fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f64, f64)> {
     let mut year = 1970i64;
     let mut month = 1i64;
     let mut day = 1i64;
@@ -1128,6 +1286,9 @@ fn parse_time(text: &str, format: &str) -> Option<(f64, f64)> {
     }
     if let Some(yearday) = yearday {
         if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
+            if yearday == 366 {
+                warnings.push(format!("day-of-year 366 in year {year} is invalid"));
+            }
             return None;
         }
         month = 1;
@@ -1153,12 +1314,13 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let mut seconds = Vec::with_capacity(count);
     let mut fractions = Vec::with_capacity(count);
     let zone = resolve_zone(&tz);
+    let mut warnings = Vec::new();
     for index in 0..count {
         let format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
         let (whole, fraction) = values::string_at(texts, index)
-            .and_then(|text| parse_time(&text, &format))
+            .and_then(|text| parse_time(&text, &format, &mut warnings))
             .unwrap_or((NA_REAL, 0.0));
         seconds.push(zone.local_to_utc(whole, -1));
         fractions.push(fraction);
@@ -1168,7 +1330,16 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     for (second, fraction) in values::reals_mut(second_field).iter_mut().zip(&fractions) {
         *second += fraction;
     }
+    // GNU R's strptime leaves the UTC offset unknown outside UTC, because it fills the fields
+    // from the text rather than from an instant.
+    let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
+    if name != "UTC" && name != "GMT" {
+        values::ints_mut(values::list_elt(result, 10)).fill(NA_INTEGER);
+    }
     set_year_names(result, values::names(texts))?;
+    for message in warnings {
+        crate::conditions::warning(message)?;
+    }
     Ok(result)
 }
 
@@ -1179,6 +1350,17 @@ unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
         .map(|&days| if days.is_finite() { days.floor() * 86400.0 } else { days })
         .collect();
     let result = posixlt_from_seconds(&seconds, "UTC")?;
+    // GNU R breaks a date down as midnight UTC whatever `tz` is, then labels every field and the
+    // `tzone` attribute with `tz`, so `as.POSIXct` later reads that wall clock in `tz`.
+    let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_else(|| "UTC".to_owned());
+    let label = values::mkchar(&tz)?;
+    let zones = result.element(9);
+    for (index, &value) in seconds.iter().enumerate() {
+        if value.is_finite() {
+            values::set_elt(zones, index, label);
+        }
+    }
+    values::set_attr(result, values::install("tzone")?, scalar_string(&tz)?)?;
     set_year_names(result, values::names(call.arg(0)))?;
     Ok(result)
 }
@@ -1507,6 +1689,17 @@ unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// The runtime always runs in the C.UTF-8 locale, so setting a locale only reports the name
+/// asked for, the way GNU R reports a locale it switched to; an empty name means the default.
+unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
+    let locale = values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
+    if locale.is_empty() {
+        scalar_string("C.UTF-8")
+    } else {
+        scalar_string(&locale)
+    }
+}
+
 unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
     let utf8 = scalar_bool(true)?;
     let latin1 = scalar_bool(false)?;
@@ -1634,6 +1827,219 @@ unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
         values::set_elt(result, index, values::mkchar(name)?);
     }
     Ok(result)
+}
+
+/// `Encoding<-`: re-declares each string's encoding without touching its bytes. ASCII strings
+/// never carry a mark.
+unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    let names = call.arg(1);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("a character vector argument expected"));
+    }
+    if names.kind() != SexpType::String || length(names) == 0 {
+        return Err(call.error("a character vector 'value' expected"));
+    }
+    let result = values::shallow_duplicate(strings)?;
+    for index in 0..length(result) {
+        let charsxp = result.element(index);
+        if charsxp == values::na_string() {
+            continue;
+        }
+        let name = values::string_at(names, index % length(names)).unwrap_or_default();
+        let encoding = match &*name {
+            "latin1" => Encoding::Latin1,
+            "UTF-8" => Encoding::Utf8,
+            "bytes" => Encoding::Bytes,
+            _ => Encoding::Native,
+        };
+        values::set_elt(result, index, values::mkchar_bytes(charsxp.bytes(), encoding)?);
+    }
+    Ok(result)
+}
+
+/// `iconv(x, from, to, sub, mark, toRaw)` through the C library's `iconv(3)`, as GNU R does on
+/// Linux, so the encoding names and conversions are the system's.
+unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
+    let input = call.arg(0);
+    let from = values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
+    let to = values::first_string(call.arg(2)).map_or_else(String::new, |name| name.into_owned());
+    let substitute = values::string_at(call.arg(3), 0).map(|text| text.into_owned());
+    let mark = values::as_logical_scalar(call.arg(4)) == 1;
+    let to_raw = values::as_logical_scalar(call.arg(5)) == 1;
+    let from_list = input.kind() == SexpType::List;
+    if !from_list && input.kind() != SexpType::String {
+        return Err(call.error("'x' must be a character vector"));
+    }
+    // The native encoding is always UTF-8 here, while the C library would read "" as the
+    // process locale's, which is ASCII until something calls setlocale.
+    let system_name = |name: &str| -> String {
+        match name {
+            "" => "UTF-8".to_string(),
+            other => other.to_string(),
+        }
+    };
+    let (from_name, to_name) = (system_name(&from), system_name(&to));
+    let from_utf8 = matches!(from_name.to_ascii_uppercase().as_str(), "UTF-8" | "UTF8");
+    let converter = Converter::open(&from_name, &to_name).ok_or_else(|| {
+        call.error(format!("unsupported conversion from '{from}' to '{to}'"))
+    })?;
+    let target = to_name.to_ascii_uppercase();
+    let encoding = if !mark {
+        Encoding::Native
+    } else if matches!(target.as_str(), "UTF-8" | "UTF8") {
+        Encoding::Utf8
+    } else if matches!(target.as_str(), "LATIN1" | "ISO-8859-1" | "ISO8859-1" | "ISO_8859-1") {
+        Encoding::Latin1
+    } else {
+        Encoding::Native
+    };
+    let count = length(input);
+    let result = alloc(if to_raw { SexpType::List } else { SexpType::String }, count)?;
+    for index in 0..count {
+        let element = input.element(index);
+        let bytes: &[u8] = if from_list {
+            if element.kind() != SexpType::Raw {
+                if !to_raw {
+                    values::set_elt(result, index, values::na_string());
+                }
+                continue;
+            }
+            values::raws(element)
+        } else {
+            if element == values::na_string() {
+                if !to_raw {
+                    values::set_elt(result, index, values::na_string());
+                }
+                continue;
+            }
+            element.bytes()
+        };
+        match converter.convert(bytes, substitute.as_deref(), from_utf8) {
+            Some(converted) if to_raw => {
+                let vector = alloc(SexpType::Raw, converted.len())?;
+                values::raws_mut(vector).copy_from_slice(&converted);
+                values::set_elt(result, index, vector);
+            }
+            Some(converted) => {
+                values::set_elt(result, index, values::mkchar_bytes(&converted, encoding)?);
+            }
+            None if to_raw => {}
+            None => values::set_elt(result, index, values::na_string()),
+        }
+    }
+    Ok(result)
+}
+
+/// An open `iconv_t` conversion descriptor, closed on drop.
+struct Converter(libc::iconv_t);
+
+impl Converter {
+    fn open(from: &str, to: &str) -> Option<Converter> {
+        let from = std::ffi::CString::new(from).ok()?;
+        let to = std::ffi::CString::new(to).ok()?;
+        // SAFETY: both names are valid NUL-terminated strings.
+        let descriptor = unsafe { libc::iconv_open(to.as_ptr(), from.as_ptr()) };
+        if descriptor as isize == -1 { None } else { Some(Converter(descriptor)) }
+    }
+
+    /// `bytes` converted, or `None` when they hold a sequence the target cannot represent and
+    /// there is no substitute. A substitute of "byte" writes `<xx>` for each offending byte,
+    /// "Unicode" and "c99" write the code point of an offending UTF-8 character, and any other
+    /// text replaces each offending byte.
+    fn convert(&self, bytes: &[u8], substitute: Option<&str>, from_utf8: bool) -> Option<Vec<u8>> {
+        let mut output = Vec::with_capacity(bytes.len() + 16);
+        let mut buffer = vec![0u8; bytes.len() * 4 + 16];
+        let mut rest = bytes;
+        // SAFETY: a null input resets the descriptor's shift state.
+        unsafe {
+            libc::iconv(self.0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+        }
+        loop {
+            let mut input_pointer = rest.as_ptr() as *mut libc::c_char;
+            let mut input_left = rest.len();
+            let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
+            let mut output_left = buffer.len();
+            // SAFETY: the pointers and lengths describe `rest` and `buffer`, which outlive the
+            // call; iconv only reads the input.
+            let status = unsafe {
+                libc::iconv(self.0, &mut input_pointer, &mut input_left, &mut output_pointer, &mut output_left)
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            output.extend_from_slice(&buffer[..buffer.len() - output_left]);
+            rest = &rest[rest.len() - input_left..];
+            if status != usize::MAX {
+                break;
+            }
+            match error {
+                Some(libc::E2BIG) => continue,
+                Some(libc::EILSEQ | libc::EINVAL) => {
+                    let substitute = substitute?;
+                    let skipped = match substitute {
+                        "Unicode" | "c99" if from_utf8 => {
+                            let length = utf8_sequence_length(rest);
+                            match std::str::from_utf8(&rest[..length]).ok().and_then(|text| text.chars().next()) {
+                                Some(character) => {
+                                    let code = u32::from(character);
+                                    let text = match (substitute, code > 0xFFFF) {
+                                        ("Unicode", false) => format!("<U+{code:04X}>"),
+                                        ("Unicode", true) => format!("<U+{code:08X}>"),
+                                        (_, false) => format!("\\u{code:04x}"),
+                                        (_, true) => format!("\\U{code:08x}"),
+                                    };
+                                    output.extend_from_slice(text.as_bytes());
+                                    length
+                                }
+                                None => {
+                                    output.extend_from_slice(format!("<{:02x}>", rest[0]).as_bytes());
+                                    1
+                                }
+                            }
+                        }
+                        "byte" | "Unicode" | "c99" => {
+                            output.extend_from_slice(format!("<{:02x}>", rest.first()?).as_bytes());
+                            1
+                        }
+                        text => {
+                            output.extend_from_slice(text.as_bytes());
+                            1
+                        }
+                    };
+                    rest = rest.get(skipped..)?;
+                }
+                _ => return None,
+            }
+        }
+        // Flush any shift sequence a stateful target needs at the end.
+        let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
+        let mut output_left = buffer.len();
+        // SAFETY: as above, with a null input asking for the final shift sequence.
+        unsafe {
+            libc::iconv(self.0, std::ptr::null_mut(), std::ptr::null_mut(), &mut output_pointer, &mut output_left);
+        }
+        output.extend_from_slice(&buffer[..buffer.len() - output_left]);
+        Some(output)
+    }
+}
+
+impl Drop for Converter {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor came from a successful iconv_open and is closed once.
+        unsafe {
+            libc::iconv_close(self.0);
+        }
+    }
+}
+
+/// How many bytes the UTF-8 sequence at the start of `bytes` claims, at least one.
+fn utf8_sequence_length(bytes: &[u8]) -> usize {
+    let length = match bytes.first() {
+        Some(byte) if *byte >= 0xF0 => 4,
+        Some(byte) if *byte >= 0xE0 => 3,
+        Some(byte) if *byte >= 0xC0 => 2,
+        _ => 1,
+    };
+    length.min(bytes.len()).max(1)
 }
 
 unsafe fn do_ngettext(call: &Call<'_>) -> R<Sexp> {

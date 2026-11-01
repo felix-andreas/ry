@@ -3554,7 +3554,8 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
     };
     let mut ticks = Vec::new();
     if count == 1 {
-        let decades = (last / first).log10().round().max(0.0) as i32;
+        // Doubles span fewer than 700 decades, so the clamp only guards against an infinite ratio.
+        let decades = (last / first).log10().round().clamp(0.0, 700.0) as i32;
         let intervals = intervals.max(1);
         // Too many decades for the wanted number of intervals: every few decades only. GNU R
         // also skips the first decades when the count is well past a multiple of the

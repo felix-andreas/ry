@@ -142,8 +142,7 @@ impl Reader<'_> {
     fn string(&mut self, length: usize) -> R<Vec<u8>> {
         if self.format == Format::Ascii {
             let word = self.ascii_word()?;
-            let unescaped = crate::lower::unescape(&word).unwrap_or(word);
-            return Ok(unescaped.into_bytes());
+            return Ok(crate::lower::unescape_bytes(&word).map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
         }
         Ok(self.take(length)?.to_vec())
     }
@@ -1127,8 +1126,9 @@ fn file_cache() -> &'static mut FxHashMap<String, Vec<u8>> {
     }
 }
 
-/// Decompresses a lazy-load database record.
-fn decompress(record: &[u8], kind: i32) -> R<Vec<u8>> {
+/// The stream inside one lazy-load database record. `kind` is `lazyLoadDBfetch`'s `compressed`:
+/// `1` is a length and a zlib stream, `2` and `3` a length, a type byte and the data.
+pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
     if record.len() < 4 {
         return Err(error("lazy-load database record is too short"));
     }
@@ -1173,6 +1173,9 @@ fn decompress(record: &[u8], kind: i32) -> R<Vec<u8>> {
                 .map_err(|failure| error(format!("lazy-load database is corrupt: {failure}")))?;
         }
     }
+    if output.len() != expected {
+        return Err(corrupt(&"its length does not match"));
+    }
     Ok(output)
 }
 
@@ -1196,7 +1199,7 @@ unsafe fn do_lazy_load_fetch(call: &Call<'_>) -> R<Sexp> {
         .ok_or_else(|| error("lazy-load database is corrupt"))?
         .to_vec();
     let data = if compressed != 0 {
-        decompress(&record, compressed)?
+        decompress_record(&record, compressed)?
     } else {
         record
     };

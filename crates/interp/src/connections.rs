@@ -32,6 +32,7 @@ use heap::{
     strings::Encoding,
 };
 use std::{
+    borrow::Cow,
     ffi::{CStr, CString, c_char, c_int, c_void},
     fs::{File, OpenOptions},
     io::{BufReader, Read, Seek, SeekFrom, Write},
@@ -415,7 +416,7 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
         let bytes = std::fs::read(&path).map_err(|failure| {
             error(format!("cannot open file '{path}': {}", os_message(&failure)))
         })?;
-        let bytes = decompress(bytes)
+        let bytes = decompress(&bytes)
             .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
@@ -2787,14 +2788,14 @@ fn file_compression(path: &PathBuf) -> std::io::Result<Option<Compressed>> {
     Ok(compression_of(magic.get(..filled).unwrap_or_default()))
 }
 
-/// `bytes` decoded when they start with a compression's magic bytes, else unchanged.
-fn decompress(bytes: Vec<u8>) -> std::io::Result<Vec<u8>> {
-    let Some(compression) = compression_of(&bytes) else {
-        return Ok(bytes);
+/// `bytes` decoded when they start with gzip's, bzip2's or xz's magic bytes, else unchanged.
+pub fn decompress(bytes: &[u8]) -> std::io::Result<Cow<'_, [u8]>> {
+    let Some(compression) = compression_of(bytes) else {
+        return Ok(Cow::Borrowed(bytes));
     };
     let mut decoded = Vec::new();
-    decoder(compression, Box::new(&bytes[..]))?.read_to_end(&mut decoded)?;
-    Ok(decoded)
+    decoder(compression, Box::new(bytes))?.read_to_end(&mut decoded)?;
+    Ok(Cow::Owned(decoded))
 }
 
 fn decoder<'a>(compression: Compressed, input: Box<dyn Read + 'a>) -> std::io::Result<Box<dyn Read + 'a>> {
