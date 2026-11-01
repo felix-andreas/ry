@@ -398,7 +398,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     for raw_line in text.lines() {
         let content = strip_comment(raw_line).trim();
         if let Some(name) = definition_line_name(content) {
-            known_nominals.insert(name.to_owned());
+            if type_definition_line(db, content).is_some() {
+                known_nominals.insert(name.to_owned());
+            }
         } else if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
             if is_nominal_name(name) {
@@ -435,7 +437,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 }
                 None => problems.push(StubProblem {
                     line,
-                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}` or `@type NAME<T>`.".to_owned(),
+                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.".to_owned(),
                 }),
             }
             continue;
@@ -715,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type_name_must_be_an_identifier() {
+    fn a_representation_must_be_a_type() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         let problems = stub_source_problems(
@@ -725,7 +727,7 @@ mod tests {
         assert_eq!(problems[0].line, 0);
         assert_eq!(
             problems[0].message,
-            "`structural { a: integer }` is not a valid type name."
+            "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`."
         );
         // The nominal is refused, so the use below reports too, and an author
         // who reads only the second error is not sent to a correct line.

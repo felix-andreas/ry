@@ -134,6 +134,15 @@ Compare.matrix : fn(e1: double, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double[]) -> logical
 Compare.matrix : fn(e1: double[], e2: matrix) -> logical
 
+# Arithmetic on a data frame works column by column and keeps the frame, while a
+# comparison gives a logical matrix. `[` keeps the frame unless it drops to one
+# column, which only the index values decide, so its result is untyped.
+Arith.data.frame : fn(e1: data.frame, e2: Any) -> data.frame
+Arith.data.frame : fn(e1: Any, e2: data.frame) -> data.frame
+Compare.data.frame : fn(e1: data.frame, e2: Any) -> matrix
+Compare.data.frame : fn(e1: Any, e2: data.frame) -> matrix
+[.data.frame : fn(x: data.frame, ...: Any) -> Any
+
 # Reserved value constants and built-in constant vectors.
 T : logical
 F : logical

@@ -1485,6 +1485,13 @@ impl<'db> Checker<'db, '_> {
         if matches!(found.kind(self.db), TyKind::Named(..) | TyKind::Unknown | TyKind::Any) {
             return false;
         }
+        // A standard-library type such as `data.frame` comes from its own constructors, so the
+        // advice to wrap a value with `@new` would be wrong there.
+        let declared = self.table.definitions.and_then(|definitions| definitions.get(name));
+        let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
+        if declared.is_some() && declared == from_stubs {
+            return false;
+        }
         let Some(representation) = self.table.representation(self.db, *name, arguments) else {
             return false;
         };
@@ -8722,7 +8729,7 @@ impl<'db> Checker<'db, '_> {
             self.query_depth -= 1;
             result
         } else {
-            self.infer_plain_index(id, range, double, target, subject, arguments)
+            self.infer_plain_index(id, range, double, target, target_ty, subject, arguments)
         };
         // Any other subject (a data.table, an unknown) keeps its type through `:=`, and the
         // write still has to land so the statement's binding carries that type forward.
@@ -8767,6 +8774,7 @@ impl<'db> Checker<'db, '_> {
         range: TextRange,
         double: bool,
         target: ExprId,
+        target_ty: Ty<'db>,
         subject: Ty<'db>,
         arguments: &[Argument],
     ) -> Ty<'db> {
@@ -8798,6 +8806,13 @@ impl<'db> Checker<'db, '_> {
         if self.naming.masked_subsets.contains(&id) {
             return unknown(self.db);
         }
+        // R dispatches `[` on the class, so a stub's `[.factor` gives the result type. The
+        // class is the declared one, before any representation projects it away.
+        if let TyKind::Named(name, _) = self.table.resolve(self.db, target_ty).kind(self.db)
+            && let Some(ty) = self.index_method_result(name.text(self.db), double)
+        {
+            return ty;
+        }
         // An `Unknown`/`Any` subject's gap was already diagnosed, so `m[i, j]` must not
         // cascade an arity error.
         match subject.kind(self.db) {
@@ -8806,12 +8821,6 @@ impl<'db> Checker<'db, '_> {
             // A shape the author never wrote down (a sealed nominal, or `m` in
             // `function(m, i, j) m[i, j]`) refuses before the index-arity check: the caller
             // knows the shape, the callee does not.
-            // R dispatches `[` on the class, so a stub's `[.factor` gives the result type.
-            TyKind::Named(name, _)
-                if let Some(ty) = self.index_method_result(name.text(self.db), double) =>
-            {
-                return ty;
-            }
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 return unknown(self.db);

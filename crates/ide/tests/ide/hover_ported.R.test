@@ -388,7 +388,7 @@ definition 56..62
 references: 56..62*
 rename: 1 edit(s)
 signature: none
-completion (126): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (127): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 
 #---- new_annotation_unknown_value_use
 #: @type Person {list{name: character}}
@@ -408,7 +408,7 @@ action: Add inferred type annotation for `touch`
   edit 80..80 -> "#: fn() -> Person\n"
 action: Add inferred type annotations for the whole file
   edit 80..80 -> "#: fn() -> Person\n"
-completion (126): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (127): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 hint @85: fn() -> Person
 
 #---- alias_declaration_tag

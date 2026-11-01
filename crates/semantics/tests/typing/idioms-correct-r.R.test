@@ -487,3 +487,33 @@ scale_rows <- function(m, weights) {
 }
 #++++
 scale_rows: <T, U> fn(m: T, [weights]: U) -> matrix
+
+#---- a_data_frame_maps_over_its_columns
+summarise <- function(path) {
+  frame <- read.csv(path)
+  numeric <- vapply(frame, is.numeric, logical(1))
+  lapply(frame[numeric], mean)
+}
+#++++
+summarise: fn(path: character | connection) -> list[named: double]
+
+#---- a_data_frame_reads_its_columns_as_untyped
+first_column <- function(path) read.csv(path)[[1L]]
+#++++
+first_column: fn(path: character | connection) -> Any
+
+#---- a_data_frame_scales_and_compares_elementwise
+normalise <- function(path) {
+  frame <- read.csv(path)
+  frame / 100 > 0.5
+}
+#++++
+normalise: fn(path: character | connection) -> matrix
+
+#---- a_data_frame_subset_by_rows_and_columns_is_untyped
+filtered <- function(path) {
+  frame <- read.csv(path)
+  frame[frame$amount > 1, c("id", "amount")]
+}
+#++++
+filtered: fn(path: character | connection) -> Any
