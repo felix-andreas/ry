@@ -226,8 +226,8 @@ apply_op <- function(op, a, b) {
 
 run <- function() apply_op("add", 3L, 4L)
 #++++
-apply_op: <T, U: numeric> fn(op: T, a: U, b: U) -> Unknown
-run: fn() -> Unknown
+apply_op: <T, U: numeric> fn(op: T, a: U, b: U) -> Any
+run: fn() -> Any
 
 #---- mutual_recursion_is_clean
 is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
