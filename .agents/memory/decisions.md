@@ -108,6 +108,41 @@ accepts `character`, which no numeric binder covers. Never say these functions h
 scheme. A gradual checker that cannot describe the standard library is not usable. A user's `#:` annotation stays pure
 Hindley-Milner, which is what keeps the user-facing promise honest.
 
+## ry has no macros
+
+This is a user directive: compile time and type-checking speed rank highest, so ry adds no macro
+system, syntactic or procedural.
+
+- **Why.** A macro makes what a file means depend on code that runs before checking. Every check
+  then pays for expansion, an item's names can no longer be read from its syntax, and an edit to a
+  macro invalidates every site that expands it, which defeats the per-item firewalls. Vx, which has
+  `macro_rules`, confines expansion to its own phase before name resolution so that it cannot break
+  parallel per-body checking, and its notes cite rustc, where macro expansion and name resolution
+  are still serial (`docs/language_rules_for_a_parallel_compiler.md` in vx-lang/Vx).
+- **R's own non-standard evaluation stays.** `quote`, `substitute`, `bquote`, `eval`, tidy
+  evaluation and data masks keep working, because existing R code must run unchanged. The checker
+  treats them as ordinary R calls (the recognized data masks read bare names as columns, and `eval()`
+  returns `Any`), and ry builds nothing on top of them.
+- **Prior art.** Roc's language reference describes no macros; it evaluates top-level constants at
+  compile time instead. Bend lists "no macros beyond compile-time templates" among its limitations.
+  goose's reference describes no macros; its `const for` copies a fragment once per field, variant
+  or type at specialization time, as its form of reflection. Vx has `macro_rules`, restricted as
+  above.
+- **What replaces common macro uses.**
+  - Derived behavior, such as Rust's `derive` for printing, equality or serialization, comes from
+    structural types: with no declaration, `print((x = 1, y = 2))` prints `(x = 1, y = 2)`, and
+    `identical()` compares two records by value.
+  - Boilerplate repeated over types is written once with generics (`<T> fn(...)`) and the standard
+    library's higher-order functions.
+  - Code generation happens outside the language, in a script that writes ordinary files the checker
+    reads, as `scripts/export-manifests.R` writes the export manifests; `.Rtypes` stubs declare what
+    R code cannot express.
+  - Values computed ahead of time are pure top-level constants, which strict mode's planned
+    definitions-only top level makes possible (`backlog.md`, "strict mode restricts what a file's
+    top level runs").
+- **Consequence.** Reject any proposal that expands or generates code before checking, including
+  generation driven by annotations inside the checker.
+
 ## An overload set is a bounded, ordered probe
 
 A function whose result type depends on the argument type gets an ordered overload set, on the stub
@@ -3007,11 +3042,17 @@ first lines R had already read, leaving R mid-command.
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
   then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
-  purple one") above the four steps as tabs. A reader has to want the features before a path to
+  purple one") beside the four steps as tabs. A reader has to want the features before a path to
   them matters, which is why the migration is the last part of the sell and not the opening.
 - **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
   people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
+- **Motion shows the story; it never decorates.** The migration section sets the Venn beside the
+  step tabs, and each step moves a "your code" marker into its region and dims the others (the
+  `data-step` attribute on `Venn.astro`; without it the diagram stays static, as on `why-ry.mdx`).
+  Runtime and migration snippets reveal code first and output after, once on first view and again
+  on each tab switch, and one neutral pill slides between tabs (no colored outline or glow). Every
+  snippet function uses a `{}` body. All motion is off under `prefers-reduced-motion`.
 - **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
   tab when the JIT benchmark table lands. The DataFrame tab shows the Polars-style API, never
   data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
@@ -3079,3 +3120,62 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+
+# Decision record: data-oriented design and explicit allocators
+
+Performance comes first (user directive, `AGENTS.md` "Goals"), so hot data is laid out for the
+cache and allocated in bulk. The open audit list is `backlog.md`, "Open: data-oriented layouts and
+explicit allocators".
+
+- **The rule.** Hot data is a set of dense arrays indexed by small `Copy` ids (`u32`), not a graph
+  of individually boxed nodes. Split a record into parallel arrays when a hot loop reads only some
+  of its fields, keep variable-length children in one flat side array addressed by ranges, and use
+  bitsets for per-element flags. Memory that lives exactly as long as one phase (one item check,
+  one parse, one JIT compilation, one query plan) comes from an arena or bump allocator that is
+  reset or dropped as a whole, so the phase pays neither per-node `malloc` nor per-node `free`.
+  Long-lived objects of one shape come from pools of that shape. A new hot structure that holds
+  `Box`, `Vec` or `String` per node needs a reason.
+- **Where it applies first.** The checker's per-item inference (types built mid-check), HIR
+  lowering, the JIT's analysis plan, and the heap's mark and sweep. The table engine already keeps
+  columns in Arrow buffers and accumulators as struct-of-arrays, so it changes only at the edges.
+- **Allocator API status (checked against the Rust docs, the tracking issue and releases.rs).**
+  `std::alloc::Allocator` was nightly-only (`allocator_api`, rust-lang/rust#32838) until
+  rust-lang/rust#156882 stabilized a subset for Rust 1.100.0: the `Allocator` trait, `Global`,
+  `System`, and the allocator parameter of `Box<T, A>` and `Vec<T, A>` with their `new_in` and
+  `with_capacity_in` families. 1.100.0 is scheduled for stable on 12 November 2026. The
+  `Store` API, `StaticAllocator`, and `Box::into_pin` with a custom allocator stay unstable, and
+  std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter. CI builds with
+  `dtolnay/rust-toolchain@stable`, the dev container has rustc 1.97.0 (which rejects
+  `Vec::new_in`), and the nix flake uses the latest nightly. The workspace has no
+  `rust-toolchain` file and no `rust-version`.
+- **The route that works on every toolchain.** `allocator-api2` is the stable polyfill of the
+  trait and of `Vec`/`Box`, and `hashbrown` (already a `heap` dependency) accepts it for its maps.
+  `bumpalo` with its `allocator-api2` feature gives a bump arena those collections can allocate
+  in, so `hashbrown::HashMap::new_in(&bump)` and `allocator_api2::vec::Vec::new_in(&bump)` build and
+  run on stable rustc 1.97.0 (bumpalo 3.20, hashbrown 0.16, allocator-api2 0.2). Move to std's `Vec<T, A>` and
+  `Box<T, A>` once every toolchain the project builds with is 1.100 or newer; maps stay on
+  `hashbrown`. Whether `bumpalo` implements the stabilized std trait without its nightly
+  `allocator_api` feature is unverified.
+- **The global allocator stays mimalloc.** The `ry` binary sets it as `#[global_allocator]`
+  (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
+  own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
+  TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
+  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+- **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
+  by value, because salsa stores them across revisions and backdates by equality. So an arena
+  never leaks into a memoized result: a query does its work in a scratch arena and copies the
+  result out into a compact owned form (boxed slices, dense tables indexed by `ExprId`). Interned
+  ids (`Ty`, `Name`) are already dense indices, but every intern goes through salsa's shared
+  table. Types an item check builds and throws away belong in a per-check store, and only
+  exported schemes and recorded expression types get interned.
+- **R's C API.** Every `SEXP` lives in `heap`'s collector, because native code holds it for an
+  unknown time, through `PROTECT`, preserved objects and external pointers, and R's semantics
+  decide when it dies. A phase arena must never back an R object that can escape to C. The heap's
+  own size-class pages are already per-shape pools, and data-oriented design applies inside it
+  (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
+  pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
+  Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
+  memory. Incremental analysis is unaffected as long as memoized results stay owned and
+  value-compared, which this rule requires. Each audit item is measured before and after, and a
+  layout change that does not pay is reverted.

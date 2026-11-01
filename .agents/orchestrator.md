@@ -84,6 +84,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Typed arrays (session_0111kWqCzWoF4Pi1fKpGsAiB, Opus): the `[...]` literal and an UpperCamelCase strict vector type (NA-free, attribute-free, JIT-unboxable), lossless R conversion, DataFrame integration, checker, IDE, docs and fuzzing. When it lands, tell positioning to switch the landing DataFrame snippet from `c()` to `[]`.
 - CLI UX (session_0111kWqEAz7wRnhs8fRLRyrM, Opus): `ry run script.R` runs on ry's runtime, bare `ry run` opens the console, `ry R` runs on GNU R, `ry repl` stays as an alias, `--runtime` leaves the docs.
 - Robustness (session_0111kWqEc21A1crSxX4mXKyF, Opus): a `contributing/robustness.md` contract, deterministic simulation seams, an LSP simulator, differential fuzzing (tier-0 vs JIT vs GNU R), a GC torture mode, cargo-fuzz targets, a scenario test format, and the AGENTS.md testing rule.
+- Docs top-down rewrite (session_0111kWqERA9qW4qw3fByw7PK, Opus): the introduction, guides/ and type-checking/ restructured so each page opens with motivation and the most common task (the console reload loop first in the package-loading and console guides), with critic subagent rounds. Excludes index.astro and reference/.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
