@@ -500,7 +500,7 @@ summarise: fn(path: character | connection) -> list[named: double]
 #---- a_data_frame_reads_its_columns_as_untyped
 first_column <- function(path) read.csv(path)[[1L]]
 #++++
-first_column: fn(path: character | connection) -> Any
+first_column: fn(path: character | connection) -> Unknown
 
 #---- a_data_frame_scales_and_compares_elementwise
 normalise <- function(path) {

@@ -62,7 +62,7 @@ An opaque nominal is compatible only with itself, and a value of it can only com
 declared to return it. So `Sys.Date()` is a `Date`, and passing it where a `factor` is expected is a
 type error. The functions that *consume* such values usually keep `Any` parameters, because R
 coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an opaque
-nominal gives `Unknown` rather than an error, so `df$amount` and `df[rows, ]` stay usable, and strict
+nominal gives `Unknown` rather than an error, so value-dependent access stays usable, and strict
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
@@ -79,9 +79,9 @@ A stub can also declare a structural alias, written exactly like a project's `#:
 The alias then works in every annotation, as `Result<integer, :NotFound>`.
 
 A stub type may also declare a representation, written `@type NAME {REPRESENTATION}` exactly like
-a project's `#: @type`. `types/base.Rtypes` declares `@type data.frame {list[named: Any]}`, so a
-data frame passes wherever a named list is expected, as `lapply(frame, f)` needs, and `$` and `[[`
-read its columns as `Any`. Unlike a project's own nominal type, a mismatch against a stub type does
+a project's `#: @type`. `types/base.Rtypes` declares `@type data.frame {list[named: Unknown]}`, so
+a data frame passes wherever a named list is expected, as `lapply(frame, f)` needs, and `$` and
+`[[` read its columns as `Unknown`, which strict mode reports at the read. Unlike a project's own nominal type, a mismatch against a stub type does
 not suggest `@new`, because its values come from their own constructors such as `read.csv()`.
 Declare the class's operator and `[` methods beside it when R keeps or changes the class, as
 `[.data.frame` and `Arith.data.frame` do: dispatch looks at the declared class before the

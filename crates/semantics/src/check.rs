@@ -10190,6 +10190,14 @@ impl<'db> Checker<'db, '_> {
             // ordinary way to read a setting that may be absent.
             TyKind::Null => Ok(subject),
             TyKind::Scalar(atomic) => Ok(scalar(self.db, *atomic)),
+            // The untyped columns of a `data.frame`: a declaration has no site to report, so
+            // the read originates the `Unknown`.
+            TyKind::List(element) | TyKind::NamedList(element)
+                if matches!(element.kind(self.db), TyKind::Unknown) =>
+            {
+                self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                Ok(*element)
+            }
             TyKind::Vector(element) | TyKind::List(element) => Ok(*element),
             // A literal name may be absent at runtime (`T | NULL`).
             TyKind::NamedVector(element) | TyKind::NamedList(element) => {
@@ -10572,6 +10580,10 @@ impl<'db> Checker<'db, '_> {
                 range,
                 kind: TypeErrorKind::DollarOnAtomicVector { found: subject },
             }),
+            TyKind::NamedList(element) if matches!(element.kind(self.db), TyKind::Unknown) => {
+                self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                Ok(*element)
+            }
             TyKind::NamedList(element) => Ok(union_of(self.db, [*element, null(self.db)])),
             // A list whose elements are not known (`as.list(environment())`, `mget(...)`)
             // says nothing about its names either.

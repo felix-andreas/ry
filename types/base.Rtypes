@@ -46,7 +46,7 @@
 #
 # A data frame is a named list of columns at run time, and `lapply(frame, f)` or `vapply` over its
 # columns is everyday R, so it declares that representation. Its columns are not typed.
-@type data.frame {list[named: Any]}
+@type data.frame {list[named: Unknown]}
 @type factor
 @type matrix
 @type formula
