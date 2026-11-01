@@ -755,6 +755,22 @@ pub unsafe fn try_builtin_dispatch(
     args: &[Arg],
     env: Sexp,
 ) -> R<Option<Sexp>> {
+    // From R 4.4 on, the matrix products count their arguments before they dispatch, so
+    // `` `%*%`(x) `` is an error even when `x` has a method.
+    if definition.generic == Generic::MatrixOps && crate::system::r_at_least(4, 4) {
+        let required = if definition.name == "%*%" { 2 } else { 1 };
+        let passed = args.len().min(2);
+        if passed < required {
+            let noun = if passed == 1 { "argument" } else { "arguments" };
+            return Err(crate::unwind::error_in(
+                call,
+                format!(
+                    "{passed} {noun} passed to '{}' which requires at least {required}",
+                    definition.name
+                ),
+            ));
+        }
+    }
     let Some(first) = args.first() else {
         return Ok(None);
     };

@@ -50,6 +50,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("array", 3, do_array),
     internal("t.default", 1, do_transpose),
     internal("aperm", 3, do_aperm),
+    internal("asplit", 8, do_asplit),
     internal("drop", 1, do_drop),
     internal_special("cbind", -1, |call| unsafe { bind(call, false) }),
     internal_special("rbind", -1, |call| unsafe { bind(call, true) }),
@@ -2279,7 +2280,9 @@ pub unsafe fn set_names(object: Sexp, names: Sexp) -> R<()> {
             );
         }
         padded
-    } else if names.attrib() != nil() {
+    } else if names.attrib() != nil() || names == object {
+        // `names(x) <- x` must not make the names attribute the vector itself, which would be a
+        // cycle that `serialize` recurses into forever (GNU R's `R_FixupRHS`).
         let copy = values::shallow_duplicate(names)?;
         values::clear_attributes(copy);
         copy
@@ -2794,6 +2797,63 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
+/// R 4.6's `asplit(x, d.ans, d.call, dn.ans, dn.call, n.call, n.ans, drop)`, where `x` is
+/// already permuted so that each piece is a contiguous run of `n.call` elements. The pieces
+/// keep the remaining dimensions unless `drop`, and the list takes the split ones.
+unsafe fn do_asplit(call: &Call<'_>) -> R<Sexp> {
+    let x = call.arg(0);
+    let (answer_dims, piece_dims) = (call.arg(1), call.arg(2));
+    let (answer_names, piece_names) = (call.arg(3), call.arg(4));
+    let piece_length = values::as_real_scalar(call.arg(5)).max(0.0) as usize;
+    let pieces = values::as_real_scalar(call.arg(6)).max(0.0) as usize;
+    let drop = values::as_logical_scalar(call.arg(7)) == 1;
+    let vector = matches!(
+        x.kind(),
+        SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex
+            | SexpType::String
+            | SexpType::Raw
+            | SexpType::List
+            | SexpType::Expression
+    );
+    if !vector || pieces.saturating_mul(piece_length) > length(x) {
+        return Err(error("invalid 'x' argument"));
+    }
+    if !drop && length(piece_dims) == 0 {
+        return Err(error("length-0 dimension vector is invalid"));
+    }
+    let named = |names: Sexp| names.kind() == SexpType::List && length(names) > 0;
+    let result = alloc(SexpType::List, pieces)?;
+    for piece in 0..pieces {
+        let element = alloc(x.kind(), piece_length)?;
+        for offset in 0..piece_length {
+            copy_element(x, piece * piece_length + offset, element, offset)?;
+        }
+        values::set_elt(result, piece, element);
+        if !drop {
+            values::set_attr(
+                element,
+                symbols().dim,
+                coerce_vector(piece_dims, SexpType::Integer)?,
+            )?;
+            if named(piece_names) {
+                values::set_attr(element, symbols().dimnames, piece_names)?;
+            }
+        }
+    }
+    values::set_attr(
+        result,
+        symbols().dim,
+        coerce_vector(answer_dims, SexpType::Integer)?,
+    )?;
+    if named(answer_names) {
+        values::set_attr(result, symbols().dimnames, answer_names)?;
+    }
+    Ok(result)
+}
+
 unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
     let object = values::materialize(call.arg(0))?;
     let permutation = call.arg(1);
@@ -2938,6 +2998,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     let Some((level, rest)) = call.args.split_first() else {
         return Err(call.error("argument \"deparse.level\" is missing"));
     };
+    let level_missing =
+        level.value.kind() == SexpType::Symbol && eval::is_missing(level.value, call.env)?;
     let level_value = eval::eval(level.value, call.env)?;
     let deparse_level = values::as_integer_scalar(level_value);
     let mut items: Vec<Arg> = Vec::with_capacity(rest.len());
@@ -2968,7 +3030,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         }
     }
     // S3 dispatch, as GNU R's `do_bind` does it: the first classed argument with a method
-    // picks it, and the method gets the `...` arguments alone, never `deparse.level`.
+    // picks it. Through R 4.3 the method gets the `...` arguments alone; from R 4.4 on, a
+    // supplied `deparse.level` comes first, tagged, and only a missing one is dropped.
     let generic = if by_row { "rbind" } else { "cbind" };
     for arg in &items {
         if !arg.value.is_object() {
@@ -2981,7 +3044,19 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             if let Some(method) =
                 crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())?
             {
-                return eval::apply(call.call, method, &items, call.env);
+                if level_missing || !crate::system::r_at_least(4, 4) {
+                    return eval::apply(call.call, method, &items, call.env);
+                }
+                let mut with_level = Vec::with_capacity(items.len() + 1);
+                with_level.push(Arg {
+                    tag: values::install("deparse.level")?,
+                    value: level_value,
+                });
+                with_level.extend(items.iter().map(|arg| Arg {
+                    tag: arg.tag,
+                    value: arg.value,
+                }));
+                return eval::apply(call.call, method, &with_level, call.env);
             }
         }
     }

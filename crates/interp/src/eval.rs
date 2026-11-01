@@ -1421,6 +1421,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("invisible", -1, do_invisible).invisible(),
     builtin("nargs", 0, do_nargs),
     special("forceAndCall", -1, do_force_and_call).keep_visibility(),
+    special("Tailcall", -1, do_tailcall).keep_visibility(),
+    special("Exec", -1, do_exec).keep_visibility(),
+    special("declare", -1, |_| Ok(nil())).invisible(),
     internal("eval", 3, do_eval).keep_visibility(),
     internal("withVisible", 1, do_with_visible),
     internal("Recall", -1, do_recall).keep_visibility(),
@@ -2071,6 +2074,68 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
         }
         _ => apply_call(inner_call, function, rest, call.env),
     }
+}
+
+/// `Tailcall(FUN, ...)`, R 4.4's request to call `FUN(...)` in place of the calling frame.
+/// GNU R only reuses the frame when the call is in tail position and no `on.exit` is pending,
+/// and otherwise evaluates the call normally, which is what this does every time: the value is
+/// the same, but deep recursion still grows the stack.
+unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
+    let Some((function, rest)) = call.args.split_first() else {
+        return Err(error("argument \"FUN\" is missing, with no default"));
+    };
+    if function.value == values::missing_arg() {
+        return Err(error("argument \"FUN\" is missing, with no default"));
+    }
+    let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
+        values::install(&values::string_at(function.value, 0).unwrap_or_default())?
+    } else {
+        function.value
+    };
+    let rest = values::pairlist(
+        &rest
+            .iter()
+            .map(|arg| (arg.tag, arg.value))
+            .collect::<Vec<_>>(),
+        SexpType::Pairlist,
+    )?;
+    eval(values::lcons(function, rest)?, call.env)
+}
+
+/// `Exec(expr, envir)`: evaluates the call `expr` in `envir`, by default the caller's frame,
+/// as a tail call in the same sense as [`do_tailcall`].
+unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
+    let mut expr = None;
+    let mut envir = None;
+    let mut positional = Vec::new();
+    for arg in call.args {
+        match arg.tag {
+            tag if tag != nil() && values::symbol_name(tag) == "expr" => expr = Some(arg.value),
+            tag if tag != nil() && values::symbol_name(tag) == "envir" => envir = Some(arg.value),
+            _ => positional.push(arg.value),
+        }
+    }
+    let mut positional = positional.into_iter();
+    let expr = expr.or_else(|| positional.next());
+    let envir = envir.or_else(|| positional.next());
+    if positional.next().is_some() {
+        return Err(error("unused argument"));
+    }
+    let Some(expr) = expr.filter(|expr| *expr != values::missing_arg()) else {
+        return Err(error("argument \"expr\" is missing, with no default"));
+    };
+    let mut expr = eval(expr, call.env)?;
+    if expr.kind() == SexpType::Expression && length(expr) == 1 {
+        expr = values::list_elt(expr, 0);
+    }
+    if expr.kind() != SexpType::Language {
+        return Err(error("\"expr\" must be a call expression"));
+    }
+    let env = match envir.filter(|envir| *envir != values::missing_arg()) {
+        Some(envir) => eval(envir, call.env)?,
+        None => call.env,
+    };
+    eval(expr, env)
 }
 
 /// `R_forceAndCall`: evaluates `call` in `env`, forcing the promises of a closure's first

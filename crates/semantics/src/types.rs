@@ -3,6 +3,7 @@ use {
     hashbrown::HashTable,
     rustc_hash::{FxBuildHasher, FxHashMap},
     std::{
+        cell::Cell,
         fmt,
         hash::{BuildHasher, Hash, Hasher},
         iter,
@@ -785,8 +786,32 @@ const TYPE_SHARDS: usize = 64;
 static TYPES: LazyLock<[Mutex<HashTable<&'static TypeEntry>>; TYPE_SHARDS]> =
     LazyLock::new(|| std::array::from_fn(|_| Mutex::new(HashTable::new())));
 
+/// Slots in each thread's cache of recently interned types.
+const RECENT_TYPES: usize = 1024;
+
+thread_local! {
+    /// A direct-mapped cache in front of the shards. A checker interns the same few types
+    /// (scalars, `Unknown`, the signature it is applying) over and over, and those all hash to
+    /// the same shards, so without it parallel checkers queue on a handful of mutexes.
+    static RECENT: [Cell<Option<&'static TypeEntry>>; RECENT_TYPES] =
+        const { [const { Cell::new(None) }; RECENT_TYPES] };
+}
+
 fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
     let hash = FxBuildHasher.hash_one(&kind);
+    let slot = (hash as usize) % RECENT_TYPES;
+    let recent = RECENT.with(|recent| recent[slot].get());
+    if let Some(entry) = recent
+        && entry.kind == kind
+    {
+        return entry;
+    }
+    let interned = intern_type_shared(kind, hash);
+    RECENT.with(|recent| recent[slot].set(Some(interned)));
+    interned
+}
+
+fn intern_type_shared(kind: TyKind<'static>, hash: u64) -> &'static TypeEntry {
     let rehash = |entry: &&'static TypeEntry| FxBuildHasher.hash_one(&entry.kind);
     // The table picks buckets from the low bits, so the shard comes from the high ones.
     let shard = &TYPES[(hash >> 58) as usize];
