@@ -142,7 +142,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 377 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 331 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -160,10 +160,16 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
-- **`lapply` or `vapply` over a `data.frame`** (9; rprojroot, nlme, rmarkdown). The opaque
-  `data.frame` fits no `list` parameter. A `data.frame` overload of `lapply` fixes the call but makes
-  an untyped argument ambiguous and coarsens the `.SD` column error, so the fix is to give
-  `data.frame` its named-list representation rather than more overloads.
+- **`character | character[]` into an atomic bound.** renv wraps `sprintf`, so its `fmt` infers as
+  `character[]`, and a caller passing `if (...) "a" else c("b", "c")` is reported. The fix is an
+  "any length of one atomic type" constraint, which touches `types.rs` and `infer.rs`.
+- **A generic's dispatch formal, forwarded, reads as optional.** `f <- function(fit) persistence(fit)`
+  over `persistence <- function(object, ...) UseMethod("persistence")` gives `f` an optional `fit`,
+  yet `f()` errors in R, because `UseMethod` reads a passed argument even though the generic may be
+  called without one. A parameter cannot express "may be omitted, but read when passed", so the
+  missed error stays until it can (`a_generic_does_not_require_the_formals_it_passes_on`).
+- **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
+  `fast_svd("a", 1)` is not reported. A missed error, not a false report.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
 - One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
