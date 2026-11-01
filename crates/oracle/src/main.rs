@@ -236,7 +236,7 @@ fn run_packages(
         }
     };
     let packages = if packages.is_empty() { everything.clone() } else { packages };
-        let settings = Settings {
+    let settings = Settings {
         corpus: corpus.clone(),
         rscript: std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_owned()),
         // Scripts run with `tests/` as the working directory, so a relative path must resolve now.

@@ -921,14 +921,8 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     }
     let left = values::materialize(comparable(call.arg(0))?)?;
     let right = values::materialize(comparable(call.arg(1))?)?;
-    let allowed = |value: Sexp| value.kind().is_atomic() || value == nil();
+    let allowed = |value: Sexp| value.kind().is_atomic() || value.kind() == SexpType::List || value == nil();
     if !allowed(left) || !allowed(right) {
-        if left.kind() == SexpType::List || right.kind() == SexpType::List {
-            return Err(call.error(format!(
-                "comparison ({}) is possible only for atomic and list types",
-                call.name()
-            )));
-        }
         return Err(call.error(format!(
             "comparison ({}) is possible only for atomic and list types",
             call.name()
@@ -938,10 +932,21 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
     let result = alloc(SexpType::Logical, count)?;
-    let kind = coerce::higher_type(
-        if left == nil() { SexpType::Logical } else { left.kind() },
-        if right == nil() { SexpType::Logical } else { right.kind() },
-    );
+    // A list operand takes the other operand's type, element by element, as GNU R's `relop`
+    // coerces it; two lists have no common type.
+    let operand_kind = |value: Sexp| if value == nil() { SexpType::Logical } else { value.kind() };
+    let kind = match (operand_kind(left), operand_kind(right)) {
+        (SexpType::List, SexpType::List) => {
+            return Err(call.error("comparison of these types is not implemented"));
+        }
+        (SexpType::List, other) | (other, SexpType::List) => other,
+        (left, right) => coerce::higher_type(left, right),
+    };
+    let (left, right) = if left.kind() == SexpType::List || right.kind() == SexpType::List {
+        (coerce_vector(left, kind)?, coerce_vector(right, kind)?)
+    } else {
+        (left, right)
+    };
     match kind {
         SexpType::String => {
             let left = coerce_vector(left, SexpType::String)?;

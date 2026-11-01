@@ -47,13 +47,17 @@ pub unsafe fn deparse_lines_with(object: Sexp, cutoff: usize, opts: u32, backtic
     deparser.finish()
 }
 
-/// The first line of a deparse, as error messages show a call.
+/// The first line of a deparse, as GNU R's `deparse1s` gives it to error and warning messages.
+pub unsafe fn deparse_first_line(object: Sexp) -> String {
+    deparse_lines(object, 60, options::SIMPLE).into_iter().next().unwrap_or_default()
+}
+
+/// A deparse joined into one line, as GNU R's `deparse1line` gives it to coercion.
 pub unsafe fn deparse_one_line(object: Sexp) -> String {
     let lines = deparse_lines(object, 60, options::SIMPLE);
     if lines.len() <= 1 {
         return lines.into_iter().next().unwrap_or_default();
     }
-    // GNU R's `deparse1s` joins the lines of a call it reports in a message.
     lines
         .iter()
         .map(|line| line.trim())

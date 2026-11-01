@@ -1198,6 +1198,11 @@ unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
         [arg] => eval(arg.value, call.env)?,
         _ => return Err(call.error("multi-argument returns are not permitted")),
     };
+    // GNU R looks for the function context before jumping, so a `return` with no function to
+    // return from is an ordinary error that `tryCatch` can catch.
+    if !interp().frames.iter().any(|frame| frame.env == call.env) {
+        return Err(error("no function to return from, jumping to top level"));
+    }
     Err(jump(Jump::Return {
         env: call.env,
         value,

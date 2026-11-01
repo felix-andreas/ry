@@ -271,7 +271,7 @@ pub unsafe fn deparse_call(call: Sexp) -> Option<String> {
     if call.kind() == SexpType::Nil {
         return None;
     }
-    Some(interp::deparse::deparse_one_line(call))
+    Some(interp::deparse::deparse_first_line(call))
 }
 
 /// An unwind as the condition object R handlers receive.
