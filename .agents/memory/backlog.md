@@ -2599,3 +2599,15 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   unresolved and the defining file reports it unused. Destructured names also lack declaration
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
+
+## Open: the data.table bridge
+
+`crates/interp/src/data_table.rs` declines these to data.table. Each one is a shape to accept once the engine can reproduce data.table's result exactly, checked by a new `datatable__*` oracle case.
+
+- Keyed subjects: accept them by carrying `sorted` through filters and selections the way data.table does, and binary-search `x[.("a")]` key joins.
+- Auto-indexing filters (`col == v`, `%in%`, `%chin%`): data.table adds an `index` attribute to the source on the first such filter. Accepting them means building that attribute (`setindexv`) after answering.
+- Reductions outside GForce form, and `:=` with `by` over doubles: base R sums in long double there. The engine would need a long double (or compensated, then verified) sum path.
+- `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
+- Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
+- Joins without `on =` (key joins) and `x[]`.
+- The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
