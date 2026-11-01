@@ -517,3 +517,39 @@ filtered <- function(path) {
 }
 #++++
 filtered: fn(path: character | connection) -> Any
+
+#---- arithmetic_accepts_a_matrix_or_a_number
+smooth <- function(x, previous) {
+  current <- if (is.null(previous)) 1 else x %*% x
+  (current + 2) / 2
+}
+#++++
+smooth: <T, U> fn([x]: T, previous: U | NULL) -> Unknown
+
+#---- arithmetic_accepts_an_open_parameter_or_a_vector
+drop_rows <- function(x, drop) {
+  if (!is.null(drop)) drop <- which(x > 1)
+  if (!is.null(drop)) x[-drop] else x
+}
+#++++
+drop_rows: <T, U: numeric> fn(x: T, drop: U | NULL) -> Unknown
+
+#---- a_numeric_bound_accepts_a_union_of_numbers
+shift <- function(n) n + 1L
+pick <- function(flag) {
+  start <- if (flag) 1 else 2L
+  shift(start)
+}
+#++++
+shift: <T: numeric> fn(n: T) -> T
+pick: fn(flag: logical) -> double | integer
+
+#---- arithmetic_rejects_a_union_with_a_string
+#: fn(flag: logical) -> double
+broken <- function(flag) {
+  value <- if (flag) 1 else "a"
+  value + 1
+}
+#++++
+broken: fn(flag: logical) -> double
+92..97 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`

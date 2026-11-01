@@ -1493,6 +1493,13 @@ fn constraint_rejects<'db>(
             .get(name)
             .is_some_and(|declared| declared.join(constraint) == *declared)
     };
+    // A union satisfies a bound when every member does: `double | integer` is a number either way.
+    if let TyKind::Union(members) = ty.kind(db) {
+        let every_member_admissible = members
+            .iter()
+            .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
+        return (!every_member_admissible).then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.

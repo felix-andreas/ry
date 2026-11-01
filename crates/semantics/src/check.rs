@@ -1052,6 +1052,10 @@ enum NumericOperand<'db> {
     /// Vector shape known, element not: a generic variable/rigid to constrain, or `None`
     /// for `Any`/`Unknown`.
     FlexibleVector(Option<Ty<'db>>),
+    /// A union of numbers and members whose arithmetic the checker does not compute: a class
+    /// with operator methods (`matrix | double`) or an open parameter (`T | integer[]`). The
+    /// open members are bound to numbers, and the result is `Unknown`.
+    OpenUnion(Vec<Ty<'db>>),
     AnyUnknown,
     Invalid,
 }
@@ -4521,6 +4525,12 @@ impl<'db> Checker<'db, '_> {
                 }
                 resolved
             }
+            NumericOperand::OpenUnion(open) => {
+                for member in open {
+                    self.constrain_numeric_flexible(operand_range, member);
+                }
+                unknown(self.db)
+            }
             NumericOperand::AnyUnknown => unknown(self.db),
             NumericOperand::Invalid if self.declares_arithmetic(resolved) => resolved,
             NumericOperand::Invalid => {
@@ -5062,6 +5072,25 @@ impl<'db> Checker<'db, '_> {
         {
             return unknown(self.db);
         }
+        if matches!(left, NumericOperand::OpenUnion(_))
+            || matches!(right, NumericOperand::OpenUnion(_))
+        {
+            for operand in [&left, &right] {
+                match operand {
+                    NumericOperand::OpenUnion(open) => {
+                        for &member in open {
+                            self.constrain_numeric_flexible(range, member);
+                        }
+                    }
+                    NumericOperand::Flexible(ty) => self.constrain_numeric_flexible(range, *ty),
+                    NumericOperand::FlexibleVector(Some(element)) => {
+                        self.constrain_numeric_flexible(range, *element)
+                    }
+                    _ => {}
+                }
+            }
+            return unknown(self.db);
+        }
 
         let mut flexible: Option<Ty<'db>> = None;
         for operand in [&left, &right] {
@@ -5402,13 +5431,26 @@ impl<'db> Checker<'db, '_> {
         match resolved.kind(self.db) {
             TyKind::Union(members) => {
                 let mut parts = Vec::with_capacity(members.len());
+                let mut open = Vec::new();
+                let mut dispatches = false;
                 for &member in members {
-                    match numeric_operand_parts(self.db, member) {
-                        Some(part) => parts.push(part),
-                        None => return NumericOperand::Invalid,
+                    if let Some(part) = numeric_operand_parts(self.db, member) {
+                        parts.push(part);
+                        continue;
+                    }
+                    match self.classify_numeric_operand(member) {
+                        NumericOperand::Flexible(ty) => open.push(ty),
+                        NumericOperand::FlexibleVector(element) => open.extend(element),
+                        NumericOperand::AnyUnknown => dispatches = true,
+                        _ if self.declares_arithmetic(member) => dispatches = true,
+                        _ => return NumericOperand::Invalid,
                     }
                 }
-                NumericOperand::ConcreteUnion(parts)
+                if open.is_empty() && !dispatches {
+                    NumericOperand::ConcreteUnion(parts)
+                } else {
+                    NumericOperand::OpenUnion(open)
+                }
             }
             TyKind::Var(_) => NumericOperand::Flexible(resolved),
             TyKind::Rigid(name) => match self.table.rigid_constraints.get(name) {
