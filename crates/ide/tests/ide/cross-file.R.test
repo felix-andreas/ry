@@ -158,8 +158,8 @@ hover 19..27: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
-parameters: f: character | [[signature]: character[]] | [definition]: Any | ...: Any
+signature: fn(f: character | (fn(...: Any) -> Any), [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: f: character | (fn(...: Any) -> Any) | [[signature]: character[]] | [definition]: Any | ...: Any
 action: Add inferred type annotations for the whole file
   edit 44..44 -> "#: fn() -> Any\n"
 completion: none
@@ -180,8 +180,8 @@ definition R/classes.R:67..72
 references: R/classes.R:67..72*, R/classes.R:104..109, R/methods.R:11..16
 rename: 3 edit(s)
 calls speak: in  | out
-signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
-parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
+signature: fn(f: character | (fn(...: Any) -> Any), [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: [f: character | (fn(...: Any) -> Any)] | [signature]: character[] | [definition]: Any | ...: Any
 action: Add inferred type annotations for the whole file
   edit 44..44 -> "#: fn() -> Any\n"
 completion: none

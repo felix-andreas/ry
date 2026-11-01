@@ -2707,8 +2707,9 @@ slot, so the slot's type reflects the update:
   - an empty `list()` becomes a dict-like `list[named: V]`;
   - a dict-like `list[named: T]` becomes `list[named: T | V]`;
   - a list-like `list[T]` becomes `list[T | V]`, and stays list-like;
-  - a record-like or tuple-like container is left unchanged, because widening a shape whose fields
-    are individually known would throw away precision the code has not given up.
+  - a record-like `list{a: A, b: B}` becomes `list[named: A | B | V]`, because the write may add a
+    field or replace any one, so `globals[[key]]` afterwards may be `v`;
+  - a tuple-like container is left unchanged.
 - A write through `[`, `x[i] <- v` or `x[i, j] <- v`, on an atomic `x` with an atomic `v` coerces
   `x` to the wider of the two atomic types, as R does. So after `prob <- rep(NA, n)`, the write
   `prob[i] <- 0.5` makes `prob` a `double[]`, and `x[1] <- "a"` makes a numeric `x` a

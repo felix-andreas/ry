@@ -576,9 +576,13 @@ sapply : Any
 # the atomic templates come first, narrowest first, because a wider template
 # would also accept a narrower one. A multi-element template makes R return a
 # matrix; the result claim stays `V[]` (scalar-claim, as elsewhere in this file).
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical, FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer | logical, FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
+# R checks the callback's result length at run time, and a length the checker
+# cannot see types as a vector (`str_c(x, collapse = " ")` is `character[]`), so
+# an atomic template accepts a callback returning that vector type.
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any

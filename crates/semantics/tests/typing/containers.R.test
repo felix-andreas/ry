@@ -331,6 +331,15 @@ f <- function(key) {
 #++++
 f: <T> fn(key: T) -> integer
 
+#---- computed_key_write_into_a_record_forgets_its_fields
+f <- function(key) {
+  globals <- list(threads = NA_integer_)
+  globals[[key]] <- "on"
+  globals[[key]]
+}
+#++++
+f: <T> fn(key: T) -> integer | character
+
 #---- replacement_call_keeps_the_type
 f <- function() {
   v <- c(1L, 2L)

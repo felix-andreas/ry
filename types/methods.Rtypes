@@ -14,6 +14,7 @@
 # - `validObject` returns its argument if valid (shape mirrors the input).
 # - `setClass`/`setGeneric`/`setMethod`/`setValidity`/`setRefClass` return S4 machinery objects (a class
 #   generator, the generic/method name, a class representation) tied to the dynamic dispatch system.
+# - `setMethod`'s `f` is the generic's name or the generic itself, as in `setMethod(show, "mpfr", ...)`.
 # - `callNextMethod` forwards to the next method (result and named arguments are dispatch-dependent).
 is : Any
 as : Any
@@ -21,7 +22,7 @@ new : fn(Class: character, ...: Any) -> Any
 validObject : Any
 setClass : fn(Class: character, ...: Any) -> fn(...: Any) -> Any
 setGeneric : fn(name: character, [def]: Any, ...: Any) -> character
-setMethod : fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+setMethod : fn(f: character | fn(...: Any) -> Any, [signature]: character[], [definition]: Any, ...: Any) -> character
 setValidity : Any
 setRefClass : Any
 representation : @pure fn(...: character) -> list[character]

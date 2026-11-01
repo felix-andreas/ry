@@ -3559,6 +3559,17 @@ impl<'db> Checker<'db, '_> {
         }
         match prior.kind(self.db) {
             TyKind::Tuple(items) if items.is_empty() => Ty::new(self.db, TyKind::NamedList(value)),
+            // `globals[[key]] <- value` under a computed key may add a field or replace any
+            // one, so the record's fields are no longer known and a later `globals[[key]]` may
+            // be `value` as much as an original field.
+            TyKind::Record(fields) if matches!(step, ReplacementStep::Element) => {
+                let members = fields
+                    .iter()
+                    .map(|field| field.ty)
+                    .chain([value])
+                    .collect::<Vec<_>>();
+                Ty::new(self.db, TyKind::NamedList(union_of(self.db, members)))
+            }
             TyKind::NamedList(element) => Ty::new(
                 self.db,
                 TyKind::NamedList(union_of(self.db, [*element, value])),
@@ -9289,8 +9300,9 @@ impl<'db> Checker<'db, '_> {
         }
 
         // Report the overload-set finding unless one answer exists: every candidate failed
-        // for the same reason, or exactly one got strictly further into the call (its first
-        // blamed argument is the deepest; a whole-call verdict blames none).
+        // for the same reason, or the candidates that got furthest into the call (their first
+        // blamed argument is the deepest; a whole-call verdict blames none) all failed for the
+        // same reason.
         // The standard library declares an Array twin before each `List` signature. When the
         // argument is not an Array at all, that twin's failure explains nothing, so the finding
         // comes from the remaining candidates.
@@ -9333,16 +9345,15 @@ impl<'db> Checker<'db, '_> {
         {
             candidate_errors.first()
         } else if let Some(deepest) = blamed.iter().copied().flatten().max()
-            && blamed
+            && let mut furthest = blamed
                 .iter()
-                .filter(|blame| **blame == Some(deepest))
-                .count()
-                == 1
+                .zip(&candidate_errors)
+                .filter(|(blame, _)| **blame == Some(deepest))
+                .map(|(_, error)| error)
+            && let Some(first) = furthest.next()
+            && furthest.all(|error| error == first)
         {
-            blamed
-                .iter()
-                .position(|blame| *blame == Some(deepest))
-                .and_then(|index| candidate_errors.get(index))
+            Some(first)
         } else {
             None
         };

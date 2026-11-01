@@ -1353,3 +1353,17 @@ quantile_of <- function(p) {
 #++++
 cdf: fn(x: double) -> double[]
 quantile_of: <T: numeric> fn(p: T) -> double
+
+#---- vapply_takes_a_callback_returning_a_vector_of_the_template_type
+# snakecase's `vapply(string, stringr::str_c, "", collapse = " ")`.
+joined <- function(words) vapply(words, function(word) paste(word, collapse = " "), "")
+flags <- function(words) vapply(words, function(word) nchar(word) > 2, logical(1))
+#++++
+joined: <T> fn(words: list[T] | T[]) -> character[]
+flags: <T> fn(words: list[T] | T[]) -> logical[]
+
+#---- vapply_still_rejects_a_callback_of_another_type
+counts <- function(words) vapply(words, function(word) paste(word, collapse = " "), numeric(1))
+#++++
+counts: Unknown
+84..94 error[type-mismatch] expected `character[] | character`, found `double[]`
