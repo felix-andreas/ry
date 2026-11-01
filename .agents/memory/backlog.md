@@ -340,6 +340,9 @@ protects construction but nothing after it.
   would let compiled loops run strict arithmetic without the generic call.
 - A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
+- An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
+  as well as the Array error, because the check runs after R's operator. Muffle the warning when the
+  result is rejected.
 
 ## Open: strict mode's top-level rule
 

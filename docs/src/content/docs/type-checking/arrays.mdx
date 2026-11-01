@@ -34,7 +34,7 @@ average(c(1, 2, 3))
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `Array<double>`, found `double[]`. Convert an R vector with `as.Array()`
@@ -55,7 +55,7 @@ Every item has the same type, and items are never converted into each other:
 prices <- [12.5, "free", 20]
 ```
 
-```text
+```text ry check typing
 type-mismatch
 
   x this item is `character`, but the Array's first item is `double`. An Array's items share one type and are never converted into each other
@@ -71,7 +71,7 @@ An Array holds no missing values. Model a value that may be missing with a tag:
 readings <- [1.5, NA, 3]
 ```
 
-```text
+```text ry check typing
 type-mismatch
 
   x an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`
@@ -85,7 +85,7 @@ counts <- [1L, 2L, 3L]
 scaled <- counts * 1.5
 ```
 
-```text
+```text ry check typing
 type-mismatch
 
   x `*` is not defined between `Array<integer>` and `double`. Both sides must have one item type, and `integer` and `double` are never converted into each other
@@ -111,16 +111,20 @@ Because an Array is an R vector underneath, it passes wherever R expects one: an
 a `double[]` parameter, and an Array of records fits a `list[...]`. The other direction needs a
 conversion, which checks the rules:
 
-```r
+```r ry run runtime=ry strict
 xs <- as.Array(c(1, 2, 3))   # Array<double>
 as.vector(xs)                # the plain double vector again
-is.Array(xs)                 # TRUE
+#> [1] 1 2 3
+is.Array(xs)
+#> [1] TRUE
+List.map(xs, function(x) x * 2)
+#> [2, 4, 6]
 ```
 
 `as.Array()` refuses a vector with an `NA` or a class, and drops names. Setting an attribute on an
 Array, such as `names(xs) <- ...`, turns it into a plain R vector, and so does R code that assigns
-an `NA` or an R vector into an Array it received, so base functions keep working on Arrays. The standard library's `List`
-functions accept an Array and return one, so `List.map([1, 2, 3], function(x) x * 2)` is
-`[2, 4, 6]`.
+an `NA` or an R vector into an Array it received, or combines one with an R vector in an operator,
+so base functions such as `ifelse()` and `str()` keep working on Arrays. The standard library's
+`List` functions accept an Array and return one, as the last line above shows.
 
 The typing contract is the reference section [Arrays](/reference/type-system/#arrays).

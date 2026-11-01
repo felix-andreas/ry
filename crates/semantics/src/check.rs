@@ -8818,6 +8818,53 @@ impl<'db> Checker<'db, '_> {
                 Some(ArgumentTarget::Rest) => function.variadic.as_ref().map(|rest| rest.element),
                 _ => None,
             };
+            // A formal is an accumulator, as `S` is in `walk(list, state: S, f: fn(S, T) -> S)`,
+            // when it shares a type variable with the callback's result and another argument is
+            // that bare variable, the initial state. The result widens such a variable, so the
+            // type the initial value gives it (an empty `list()`) is no context. A variable fixed
+            // by a collection, as `T` is in `update(list: List<T>, i, f: fn(T) -> T)`, is not
+            // widened, so its formal keeps the hint. Read before the probe binds the variables.
+            let state_vars: FxHashSet<InferenceVar> = targets
+                .iter()
+                .zip(deferred)
+                .filter(|(_, deferred)| !**deferred)
+                .filter_map(|(target, _)| target_ty(target))
+                .filter_map(
+                    |ty| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+                        TyKind::Var(var) => Some(*var),
+                        _ => None,
+                    },
+                )
+                .collect();
+            let accumulators: Vec<Vec<bool>> = targets
+                .iter()
+                .zip(deferred)
+                .map(|(target, &deferred)| {
+                    let expected = target_ty(target)
+                        .filter(|_| deferred)
+                        .map(|expected| self.table.shallow_resolve(self.db, expected));
+                    let Some(TyKind::Function(expected)) = expected.map(|ty| ty.kind(self.db))
+                    else {
+                        return Vec::new();
+                    };
+                    let mut result_vars = FxHashSet::default();
+                    self.table
+                        .collect_unbound_vars(self.db, expected.ret, &mut result_vars);
+                    result_vars.retain(|var| state_vars.contains(var));
+                    expected
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(expected.named.iter().map(|parameter| parameter.ty))
+                        .map(|formal| {
+                            let mut formal_vars = FxHashSet::default();
+                            self.table
+                                .collect_unbound_vars(self.db, formal, &mut formal_vars);
+                            !formal_vars.is_disjoint(&result_vars)
+                        })
+                        .collect()
+                })
+                .collect();
             let snapshot = self.table.snapshot();
             let accepts = arguments.iter().zip(&targets).zip(deferred).all(
                 |((argument, target), &deferred)| {
@@ -8837,7 +8884,8 @@ impl<'db> Checker<'db, '_> {
             let candidate: Vec<Option<Vec<Option<Ty<'db>>>>> = targets
                 .iter()
                 .zip(deferred)
-                .map(|(target, &deferred)| {
+                .zip(&accumulators)
+                .map(|((target, &deferred), accumulators)| {
                     if !deferred || !accepts {
                         return None;
                     }
@@ -8852,9 +8900,11 @@ impl<'db> Checker<'db, '_> {
                         .chain(expected.named.iter().map(|parameter| parameter.ty));
                     Some(
                         formals
-                            .map(|formal| {
+                            .enumerate()
+                            .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                (!self.table.contains_unbound_var(self.db, formal)
+                                (!accumulators.get(index).copied().unwrap_or(false)
+                                    && !self.table.contains_unbound_var(self.db, formal)
                                     && !matches!(
                                         formal.kind(self.db),
                                         TyKind::Any | TyKind::Unknown

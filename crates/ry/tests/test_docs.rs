@@ -910,7 +910,14 @@ fn plan_jobs(examples: &[Example]) -> Plan {
             let Expected::Chunks(chunks) = &examples[example_index].expected else {
                 continue;
             };
-            script.push_str("tryCatch(local({\n");
+            // `tryCatch` has no type, so strict mode would reject the wrapper itself. A strict
+            // batch therefore stops at its first error, which the report names.
+            let strict = toml.contains("strict = true");
+            script.push_str(if strict {
+                "local({\n"
+            } else {
+                "tryCatch(local({\n"
+            });
             for (chunk_index, chunk) in chunks.iter().enumerate() {
                 script.push_str(&format!(
                     "cat(\"\\n<<ry-docs {example_index} {chunk_index}>>\\n\")\n"
@@ -924,9 +931,11 @@ fn plan_jobs(examples: &[Example]) -> Plan {
                     ));
                 }
             }
-            script.push_str(
-                "}), error = function(error) cat(\"Error:\", conditionMessage(error), \"\\n\"))\n",
-            );
+            script.push_str(if strict {
+                "})\n"
+            } else {
+                "}), error = function(error) cat(\"Error:\", conditionMessage(error), \"\\n\"))\n"
+            });
             plan.batched.insert(example_index, plan.jobs.len());
         }
         let slug = page.replace(['/', '.'], "-");

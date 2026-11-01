@@ -673,9 +673,19 @@ unsafe fn strict(
     }
     let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
     let name = call.name();
-    arrays::check_operands(call.call, &name, class, &operands)?;
+    if arrays::check_operands(call.call, &name, class, &operands)? {
+        let result = compute(call)?;
+        return arrays::finish_result(call.call, &name, result);
+    }
     let result = compute(call)?;
-    arrays::finish_result(call.call, &name, result)
+    // R's operator may hand back an operand, which is an Array here and may still be bound to a
+    // variable, so unflag a copy rather than the operand itself.
+    if result.is_array() {
+        let copy = values::shallow_duplicate(result)?;
+        copy.set_array(false);
+        return Ok(copy);
+    }
+    Ok(result)
 }
 
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
