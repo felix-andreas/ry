@@ -987,6 +987,15 @@ impl Heap {
         (*env.frame_ptr()).find(symbol)
     }
 
+    /// The binding cells of `env`'s own frame. The global frame's bindings live on the symbols,
+    /// so it has none here.
+    pub unsafe fn local_cells(&self, env: Sexp) -> impl Iterator<Item = Sexp> + '_ {
+        let frame = (!self.is_symbol_frame(env) && env != self.known.empty_env)
+            // SAFETY: an environment other than these owns its frame for as long as it lives.
+            .then(|| unsafe { &*env.frame_ptr() });
+        frame.into_iter().flat_map(Frame::cells)
+    }
+
     /// `Rf_defineVar`: binds `symbol` in `env`'s own frame.
     pub unsafe fn define(&mut self, env: Sexp, symbol: Sexp, value: Sexp) -> HeapResult<()> {
         if let Some(cell) = self.frame_cell(env, symbol) {

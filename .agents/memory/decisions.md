@@ -2576,6 +2576,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
   a known type compile to a slot load after one layout-id comparison, and tag tests are integer
   comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+- **Field read sites** (`bytecode::Op::Field`, `records::cached_field`). `x$name` with a symbol
+  field compiles to a `Field` instruction that carries a per-site shape constant, the integer
+  pair `[layout id, slot]` (`records::NO_LAYOUT` until a record is seen). Tier 0 compares the
+  layout id and reads the slot; any other object takes `subset::dollar_value`, `$`'s own path. The
+  JIT turns a filled cache into `Intrinsic::Field`: it guards record kind, no object flag and the
+  layout id, then loads the slot unboxed when the mask bit is set and the NaN-box prefix matches
+  the site's feedback, and hands off to tier 0 otherwise. `$` had to join `base_primitive`'s list,
+  or every site compiled as a general call. 5,000,000 iterations of `s <- s + p$x * p$y + p$z`
+  take 0.074 s on a record against 1.83 s on a list (0.055 s with locals), profiling build.
+  Tuple `[[i]]` and tag payloads read through `match` still take the generic path.
 - **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
   the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
   keeps its slot count in header padding, so the collector never reads the layout table.
@@ -2916,18 +2926,35 @@ first lines R had already read, leaving R mid-command.
   `NA`-free and reports failure as a tag was taken; the full list and the renames are in
   `contributing/design/standard-library.md`.
 - **Skipped, with the reason:**
-  - `Bool`, `Box`, `Encode`, `Decode`, `Hash`, `Inspect`: R covers booleans; the rest serve Roc's
-    memory layout or abilities, which ry does not have.
-  - Bitwise operations, shifts, `add_wrap`, `pow_int`: R's 32-bit integer reserves its minimum for
-    `NA`, so wrapping has no total definition and integer `pow` overflows almost at once.
-  - Unchecked `sqrt` and `log`, `asin`, `acos`, `is_nan`: they produce `NaN`, which the library
-    never returns.
-  - `pi`, `tau`, `e`: constants are not functions and R already has `pi`.
+  - `Box`, `Encode`, `Decode`, `Hash`, `Inspect`, and the `Eq` implementations (`Dict.is_eq`):
+    they serve Roc's memory layout or abilities, which ry does not have; `Bool.is_eq` compares any
+    two values by `identical()`.
+  - Wrapping arithmetic (`add_wrap` and the rest): R's 32-bit integer reserves its minimum for
+    `NA`, so wrapping would have to stop at that one value, and the code that wants wrapping
+    (hashing) wants it total.
+  - Per-width conversions and limits (`to_i8`, `min_i32`, `int_cast`, `f64_to_parts`, `Dec`):
+    R has one integer and one double type.
+  - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
   - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
     and strings are immutable.
   - `List.range`: `seq_len` and `seq` cover it.
   - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
     first key fixes the key type.
+- **Unchecked operations error where Roc crashes or returns `NaN`.** `Num.add`, `div`, `sqrt`,
+  `log`, `asin`, `acos`, `pow_int` and the rest were first skipped because they produce `NaN` or
+  overflow for part of their domain. They are taken with an R error there that names the
+  `_checked` variant, so a step can be passed by name (`List.walk(xs, 0L, Num.add)`) and a domain
+  failure is still never a silent `NaN`. `Num.is_nan` is the one function that accepts `NaN`.
+- **Bit operations** (`bitwise_*`, shifts, bit counts) work on the 32-bit two's complement and
+  error only on the pattern `-2147483648`, which is `NA`. Shifts wrap as Roc's do.
+- **`Bool` and constants.** `Bool` was first skipped as redundant with `TRUE`, `!` and `&&`; it is
+  taken so boolean steps can be passed by name and Roc code reads the same. `Bool.true`,
+  `Bool.false`, `Num.pi`, `Num.tau` and `Num.e` are values in `standard_library::CONSTANTS`,
+  bound in `package:ry` by `standard_library::attach` and declared in the stub as plain types.
+  Under GNU R, `crates/ry/src/load.rs` reads which `ry.Rtypes` declarations are not function types
+  and binds each as an active binding that stops with the "only ry's runtime" error.
+- **UTF-16 and UTF-32** (`Str.to_utf16`, `from_utf16`, `to_utf32`, ...) follow Roc's newer `Str`
+  builtins, with `:BadUtf16` and `:BadUtf32`; NUL is bad because an R string cannot hold it.
 - **Changed:** `Num.ceiling`, `floor` and `round` keep the number type (R integers are 32-bit, so a
   rounded large double cannot become an integer); `Num.to_integer_checked` converts with
   `:Err(:OutOfBounds)`. Saturating integer arithmetic clamps to plus or minus 2147483647.
@@ -4180,8 +4207,29 @@ check` releases its trees once, and memoized records are compact" below).
   { d <- Dict.insert(d, k, k); d }` inside a function, 16.9 s before and 0.10 s after; at top
   level inside `system.time`, 16 s before the shared-start fix and 0.066 s after; with the tail
   form `add <- function(d, k) Dict.insert(d, k, k)`, 16.4 s before and 0.053 s after.
-- **Limits.** Lists are not moved, and the tail update covers only the last statement. Both are
-  in `backlog.md`.
+- **Lists.** A plain list (no attributes, not an Array) moves like a dictionary: `moves::extent`
+  gives its length as the journal's `entries`, and `List.set` and `List.swap` report replaced
+  elements to `moves::replacing`, so `original` rebuilds it. Growth past capacity copies and
+  leaves the original intact. 40,000 calls of `xs <- helper(xs, i)` with
+  `helper <- function(xs, i) List.append(xs, i)` take 0.046 s on the profiling build.
+- **Closure-creating helpers.** `movable` accepts a `function` literal whose defaults and body pass
+  the same check (`check_literal`) and returns those bodies. `eval::make_closure` reports every
+  closure to `moves::created_closure`, which marks it checked when its body is one of them, and
+  entering a checked closure no longer ends the move; its frame joins the move's tracked frames,
+  so forcing a promise made there is covered too. At return, `closures_dead` releases the
+  parameter only when no created closure is the result and each one's refcount is covered by the
+  tracked frames' own cells, which means none escaped. 40,000 calls of
+  `{ inc <- function(x) x + 1; xs <- List.append(xs, inc(i)); xs }` take 0.12 s, against 6.9 s
+  for the tail form, which still copies because `Op::CallTailUpdate` stays off for a body that
+  may capture its frame.
+- **Base replacements end the move.** `xs[[i]] <- v`, `xs$a <- v`, `xs[i] <- v` and nested forms
+  on a moved list modify it in place without reporting to the journal, so `subset::modifiable` and
+  complex assignment in `eval.rs` call `moves::modifying` first, which ends a move whose value is
+  the object being changed. It must run before the sharing check, because ending the move makes
+  the object shared again and forces the copy. A copied closure (`values` duplicate) is reported
+  to `created_closure` like a fresh one.
+- **Limits.** The tail update covers only the last statement and stays off in a body that creates
+  a closure. Both are in `backlog.md`.
 
 ## A key of the wrong type is an error, not a missing key
 

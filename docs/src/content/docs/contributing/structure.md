@@ -229,7 +229,7 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   `DataFrame` value, its readers, writers and conversions. **`data_table.rs`**: data.table queries
   answered on ry's engine when the result is guaranteed identical, and declined to data.table
   otherwise.
-- **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Dict` and `Set`, typed by
+- **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Bool`, `Dict` and `Set`, typed by
   `types/ry.Rtypes`.
 - **`testing.rs`**: the fuzz contracts of the interpreter, shared by the in-tree harness and the
   coverage-guided targets.
