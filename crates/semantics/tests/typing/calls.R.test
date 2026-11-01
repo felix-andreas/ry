@@ -151,6 +151,62 @@ f <- function() g(1)
 g: <T: numeric, U> fn(x: T, [total]: U) -> double
 f: fn() -> double
 
+#---- a_formal_assigned_on_one_branch_only_is_required
+g <- function(x, flag) {
+  if (flag) x <- 1
+  x
+}
+f <- function() g(flag = FALSE)
+#++++
+g: fn(x: double, flag: logical) -> double
+f: Unknown
+66..67 error[type-mismatch] this call leaves out `x`, which the function requires
+
+#---- a_formal_assigned_on_both_branches_may_be_omitted
+g <- function(x, flag) {
+  if (flag) x <- 1 else x <- 2
+  x
+}
+f <- function() g(flag = TRUE)
+#++++
+g: <T> fn([x]: T, flag: logical) -> double
+f: fn() -> double
+
+#---- a_formal_assigned_where_the_other_branch_returns_may_be_omitted
+g <- function(x, flag) {
+  if (flag) return(0) else x <- 2
+  x
+}
+f <- function() g(flag = TRUE)
+#++++
+g: <T> fn([x]: T, flag: logical) -> double
+f: fn() -> double
+
+#---- a_formal_assigned_in_a_loop_body_is_required
+g <- function(x, n) {
+  while (n > 0) {
+    x <- n
+    n <- n - 1
+  }
+  x
+}
+f <- function() g(n = 2)
+#++++
+g: fn(x: double, n: double) -> double
+f: Unknown
+92..93 error[type-mismatch] this call leaves out `x`, which the function requires
+
+#---- a_super_assignment_does_not_assign_the_formal
+g <- function(x) {
+  x <<- 1
+  x
+}
+f <- function() g()
+#++++
+g: <T> fn(x: T) -> T
+f: Unknown
+51..52 error[type-mismatch] this call leaves out `x`, which the function requires
+
 #---- a_formal_read_in_a_closure_is_required
 g <- function(x) function() x
 f <- function() g()

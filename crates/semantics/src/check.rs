@@ -1096,17 +1096,28 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 #[derive(Default)]
 struct FormalUses {
     missing_tested: FxHashSet<Symbol>,
-    /// Names read before the body first assigns them, on some path.
+    /// Names read where no write of them dominates the read.
     forced: FxHashSet<Symbol>,
     assigned: FxHashSet<Symbol>,
 }
 
 impl FormalUses {
-    /// A write on any branch counts as preceding every later read, so the walk can miss a
-    /// formal that some path forces but never reports one that no path forces.
     fn makes_optional(&self, name: Symbol) -> bool {
         self.missing_tested.contains(&name) || !self.forced.contains(&name)
     }
+}
+
+/// The names every non-diverging branch assigned. When every branch diverges, the code after
+/// the join is unreachable and keeps `before`.
+fn join_assigned(
+    before: FxHashSet<Symbol>,
+    branches: impl IntoIterator<Item = Option<FxHashSet<Symbol>>>,
+) -> FxHashSet<Symbol> {
+    branches
+        .into_iter()
+        .flatten()
+        .reduce(|joined, branch| joined.intersection(&branch).copied().collect())
+        .unwrap_or(before)
 }
 
 enum ArgumentTarget {
@@ -3407,6 +3418,33 @@ impl<'db> Checker<'db, '_> {
                 }
                 return;
             }
+            // `<<-` writes an enclosing frame, never the local formal, and reads its target
+            // there too.
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Super,
+                value,
+                ..
+            } => {
+                self.collect_formal_uses(*value, uses);
+                return;
+            }
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Destructure,
+                target,
+                value,
+            } => {
+                self.collect_formal_uses(*value, uses);
+                if let ExpressionKind::Call { arguments, .. } =
+                    &self.module.expression(*target).kind
+                {
+                    for value in arguments.iter().filter_map(|argument| argument.value) {
+                        if let ExpressionKind::NameRef(name) = &self.module.expression(value).kind {
+                            uses.assigned.insert(*name);
+                        }
+                    }
+                }
+                return;
+            }
             ExpressionKind::Assign { target, value, .. }
                 if let ExpressionKind::NameRef(name) = &self.module.expression(*target).kind =>
             {
@@ -3419,6 +3457,43 @@ impl<'db> Checker<'db, '_> {
                 self.collect_formal_uses(*target, uses);
                 return;
             }
+            // A write assigns a formal only where it dominates the read: on both arms of a
+            // branch, never inside a loop body that may not run or an operand that may not
+            // be evaluated.
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.collect_formal_uses(*condition, uses);
+                let before = uses.assigned.clone();
+                let then_assigned = self.collect_branch_uses(*then_branch, uses, &before);
+                let else_assigned = match else_branch {
+                    Some(else_branch) => self.collect_branch_uses(*else_branch, uses, &before),
+                    None => Some(before.clone()),
+                };
+                uses.assigned = join_assigned(before, [then_assigned, else_assigned]);
+                return;
+            }
+            ExpressionKind::Binary {
+                operator: BinaryOperator::And2 | BinaryOperator::Or2,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.collect_formal_uses(*lhs, uses);
+                let before = uses.assigned.clone();
+                self.collect_branch_uses(*rhs, uses, &before);
+                uses.assigned = before;
+                return;
+            }
+            ExpressionKind::While { condition, body } => {
+                self.collect_formal_uses(*condition, uses);
+                let before = uses.assigned.clone();
+                self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = before;
+                return;
+            }
             ExpressionKind::For {
                 variable,
                 sequence,
@@ -3427,12 +3502,63 @@ impl<'db> Checker<'db, '_> {
             } => {
                 self.collect_formal_uses(*sequence, uses);
                 uses.assigned.extend(*variable);
-                self.collect_formal_uses(*body, uses);
+                let before = uses.assigned.clone();
+                self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = before;
+                return;
+            }
+            // `local()` evaluates in a new frame, so its writes bind nothing here.
+            ExpressionKind::Local { body } => {
+                let before = uses.assigned.clone();
+                self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = before;
+                return;
+            }
+            ExpressionKind::Match { scrutinee, arms } => {
+                self.collect_formal_uses(*scrutinee, uses);
+                let before = uses.assigned.clone();
+                let mut arm_assigned = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let mut entry = before.clone();
+                    for &binding in &arm.bindings {
+                        if let ExpressionKind::NameRef(name) = &self.module.expression(binding).kind
+                        {
+                            entry.insert(*name);
+                        }
+                    }
+                    uses.assigned = entry;
+                    if let Some(guard) = arm.guard {
+                        self.collect_formal_uses(guard, uses);
+                    }
+                    let entry = mem::take(&mut uses.assigned);
+                    arm_assigned.push(self.collect_branch_uses(arm.body, uses, &entry));
+                }
+                uses.assigned = join_assigned(before, arm_assigned);
                 return;
             }
             ExpressionKind::Call { callee, arguments } => {
                 if let ExpressionKind::NameRef(callee_name) = &self.module.expression(*callee).kind
                 {
+                    // Only the first argument always runs; one arm at most runs after it, and
+                    // none when no arm matches and there is no unnamed default.
+                    if callee_name == "switch"
+                        && let Some((subject, alternatives)) = arguments.split_first()
+                    {
+                        if let Some(subject) = subject.value {
+                            self.collect_formal_uses(subject, uses);
+                        }
+                        let before = uses.assigned.clone();
+                        let mut arm_assigned: Vec<Option<FxHashSet<Symbol>>> = alternatives
+                            .iter()
+                            .filter_map(|argument| argument.value)
+                            .map(|value| self.collect_branch_uses(value, uses, &before))
+                            .collect();
+                        if alternatives.last().is_none_or(|last| last.name.is_some()) {
+                            arm_assigned.push(Some(before.clone()));
+                        }
+                        uses.assigned = join_assigned(before, arm_assigned);
+                        return;
+                    }
                     if callee_name == "missing" {
                         if let [argument] = &arguments[..]
                             && argument.name.is_none()
@@ -3456,6 +3582,20 @@ impl<'db> Checker<'db, '_> {
         for child in kind.child_ids() {
             self.collect_formal_uses(child, uses);
         }
+    }
+
+    /// Walks one branch from `before` and returns what it leaves assigned, or `None` when it
+    /// diverges, so a join ignores it.
+    fn collect_branch_uses(
+        &self,
+        id: ExprId,
+        uses: &mut FormalUses,
+        before: &FxHashSet<Symbol>,
+    ) -> Option<FxHashSet<Symbol>> {
+        uses.assigned = before.clone();
+        self.collect_formal_uses(id, uses);
+        let after = mem::take(&mut uses.assigned);
+        (!self.diverges(id)).then_some(after)
     }
 
     /// A forced formal that the call omits evaluates its default, so the default's reads

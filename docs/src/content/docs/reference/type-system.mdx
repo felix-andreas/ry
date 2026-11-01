@@ -1931,6 +1931,11 @@ exceptions and additions:
   forced.
 - A formal assigned before any read, as in `function(x) { x <- 1; x }`, is never forced. The order
   is evaluation order, so `n <- n / 2` forces `n`, and a `for` variable is assigned by the loop.
+- The write must happen on every path to the read. `if (flag) x <- 1 else x <- 2` assigns `x`, and
+  so does a branch beside one that returns or stops, but `if (flag) x <- 1` alone does not, and
+  neither does a write inside a `while` or `for` body, the right operand of `&&` or `||`, `local()`,
+  or only some arms of a `switch()` (or all of them when it has no unnamed default). So `function(x, flag) { if (flag) x <- 1; x }` requires `x`.
+- `x <<- 1` writes an enclosing frame, so it never assigns the formal `x`.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
 - When a forced formal has a default, the formals its default reads are forced too, so in
