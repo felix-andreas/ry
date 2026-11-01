@@ -312,6 +312,62 @@ protects construction but nothing after it.
 - The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
   touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
 
+## Open: strict mode restricts what a file's top level runs
+
+User direction: under strict mode, library code should not run arbitrary statements when it loads,
+either through a restricted top level or through a purity system. Today strict mode checks types
+only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\n")` checks clean.
+
+- **Option A, a definitions-only top level.** In a strict library file, every top-level statement
+  defines something: a function, a `type` or `alias`, an import (`library()`, `requireNamespace()`),
+  a class through a definition form (below), or a constant whose value calls only functions that a
+  declaration marks pure (arithmetic, `c()`, `list()`, `paste()`, the standard library, record and
+  tag constructors) and reads only other constants. Anything else, such as `cat()` or `options()`,
+  is a `strict` error that names where the statement belongs: in a function, in `.onLoad`, or in
+  the script `ry run` starts. Entry files keep an unrestricted top level: the `ry run` script, test
+  files and the console.
+- **Option B, purity inference in the Roc style.** Roc infers whether each function is effectful,
+  writes an effectful type with `=>` and an effectful name with `!`, lets only effectful functions
+  call effectful ones, and so rejects `message = greet!("Sam")` at the top level and evaluates every
+  top-level constant at compile time. Roc has no effect polymorphism by design, so a higher-order
+  function exists twice, as `Try.map_ok` and `Try.map_ok!` (Roc's `docs/langref/functions.md`).
+- **Recommendation: A, with purity as a declared bit on declarations, never inferred.**
+  - Checking speed: A is a syntactic check per top-level item plus a per-name lookup of the `pure`
+    bit. B adds an effect to every function type and solves it over the call graph, with a fixpoint
+    over each recursive group.
+  - R compatibility: `lapply`, `Map`, `Reduce`, `do.call` and `purrr::map` take pure and effectful
+    functions under one name, so B could not copy Roc's two names and would need effect
+    polymorphism, an extra variable in the types R code calls most. Every base and package
+    declaration would also need an effect, and R's effects hide everywhere (`runif` advances
+    `.Random.seed`, an assignment into an environment or R6 object mutates shared state). A needs the
+    `pure` bit only on the functions a constant may call, which is a small set.
+  - Firewalls: an inferred effect is derived from a body, so in a function's type it would let one
+    added `cat()` change the interface of every transitive caller. The runtime design keeps "free of
+    effects" as a body fact in its own query for exactly this reason (`r-runtime.md`, "The runtime
+    body facts"). Under A the top-level items stop depending on execution order, so each one stays
+    independent.
+  - R already wants this: an installed package's `R/` code runs when the package is installed, to
+    build its lazy-load database, so a top-level effect in package code is already a bug, and R's
+    convention puts load-time work in `.onLoad`. A turns that convention into a check.
+- **Object systems and wrappers.** Non-strict files are unchanged. In a strict file, `setClass`,
+  `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` and `R6Class` count as
+  definition forms: registering a class is an effect, but a declarative one. Read the list from
+  `syntax::native_values::object_system_function`, which the object-systems lint and the run-time
+  refusal already share, so the three cannot drift; the lint still warns. `f <- memoise(f)` passes
+  when `memoise`'s declaration is marked pure, since creating its cache is allocation, which Roc also
+  allows in pure code. `utils::globalVariables()` is declarative and passes; `makeActiveBinding` and
+  `delayedAssign` need a decision each.
+- **Lazy loading.** `ry load` binds each function as a promise and runs every other top-level
+  statement at load time in `Collate` order (`reference/package-loading.md`). Under A, a strict
+  package's constants are pure, so the loader can bind them as promises too: a load runs only the
+  class definition forms and `.onLoad`, a reload reruns nothing until a name is used, and a constant
+  that reads a name defined later in collation order works. Pure constants could later be evaluated
+  once and cached with the bytecode, as Roc evaluates top-level constants at compile time.
+- **Open questions.** Which files outside a package are library files (perhaps every file except
+  the `ry run` entry and test files). Whether a constant may call a project function marked
+  `#: @pure`, checked shallowly against its callees' declarations rather than inferred. Update
+  `type-checking/strict-mode.mdx` and the reference's strict mode section when it ships.
+
 ## Open: the JIT
 
 `crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
