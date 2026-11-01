@@ -294,15 +294,26 @@ pub unsafe fn run_pending_finalizers() {
     }
     state.running_finalizers = true;
     let mark = state.heap.handle_mark();
-    for &weak in &ready {
-        state.heap.root(weak);
-    }
+    root_finalizable(&ready);
     for weak in ready {
         run_finalizer(weak);
     }
     let state = runtime();
     state.heap.release_handles(mark);
     state.running_finalizers = false;
+}
+
+/// Roots what the finalizers of `weaks` need until they have run. Rooting a weak reference
+/// alone is not enough: the collector never traces a weak reference's fields, and once taken
+/// off the heap's lists nothing else keeps them alive while an earlier finalizer allocates.
+pub unsafe fn root_finalizable(weaks: &[Sexp]) {
+    let heap = &mut runtime().heap;
+    for &weak in weaks {
+        heap.root(weak);
+        heap.root(weak.weak_key());
+        heap.root(weak.weak_value());
+        heap.root(weak.weak_finalizer());
+    }
 }
 
 pub unsafe fn run_finalizer(weak: Sexp) {
@@ -335,8 +346,17 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     }
 }
 
+/// Defers a warning without a call to the end of the top-level call, as the interpreter's own
+/// warnings are, so there is one list of pending warnings.
 pub fn warn(message: impl Into<String>) {
-    runtime().warnings.push(message.into());
+    if !interp::is_installed() {
+        return;
+    }
+    let warnings = &mut interp::interp().warnings;
+    // GNU R keeps at most 50 deferred warnings.
+    if warnings.len() < 50 {
+        warnings.push((runtime().nil(), message.into()));
+    }
 }
 
 /// Prints an unwind the way R's top level does and records it for `R_curErrorBuf`.
@@ -344,7 +364,13 @@ pub fn report(unwind: &Unwind, prefix: &str) {
     let text = match unwind {
         Unwind::Error(error) => {
             let call = unsafe { interp::unwind::resolve_call(error.call) };
-            format_error(prefix, &RError { message: error.message.clone(), call })
+            format_error(
+                prefix,
+                &RError {
+                    message: error.message.clone(),
+                    call,
+                },
+            )
         }
         Unwind::Interrupt => String::new(),
         // A jump to top level was reported by the default error handler when it was signalled.
@@ -457,16 +483,18 @@ pub unsafe extern "C" fn ry_record_warning(call: Sexp, message: *const c_char, i
             None => format!("Warning: {message}\n"),
         };
         write_console(text.as_bytes(), true);
-        warn(message);
         return;
     }
-    runtime().warnings.push(message.clone());
     if !interp::is_installed() {
         return;
     }
     // A handler may leave through a jump (`tryCatch(warning = )`), which continues from the
     // native call's context, as GNU R's warning does.
-    let call = if call == runtime().nil() { runtime().heap.known().unbound } else { call };
+    let call = if call == runtime().nil() {
+        runtime().heap.known().unbound
+    } else {
+        call
+    };
     let result = interp::conditions::warning_call(call, message);
     if let Err(unwind) = result {
         raise(unwind);
@@ -523,10 +551,16 @@ pub unsafe extern "C" fn ry_discard_pending() {
 pub unsafe extern "C" fn ry_handlers_enter(classes: Sexp) -> Sexp {
     enter(|| {
         let runtime = runtime();
-        let token = runtime.heap.alloc_environment(runtime.heap.known().empty_env)?;
+        let token = runtime
+            .heap
+            .alloc_environment(runtime.heap.known().empty_env)?;
         runtime.heap.root(token);
         let state = interp::interp();
-        let saved = (state.handlers.clone(), state.restarts.clone(), state.show_error_messages);
+        let saved = (
+            state.handlers.clone(),
+            state.restarts.clone(),
+            state.show_error_messages,
+        );
         if classes.kind() == SexpType::String {
             let mut stack = state.handlers.clone();
             for index in (0..classes.length() as usize).rev() {
@@ -555,7 +589,9 @@ pub unsafe extern "C" fn ry_handlers_enter(classes: Sexp) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_handlers_leave(token: Sexp) {
     let saved = HANDLER_CONTEXTS.with_borrow_mut(|contexts| {
-        let position = contexts.iter().rposition(|(candidate, _)| *candidate == token)?;
+        let position = contexts
+            .iter()
+            .rposition(|(candidate, _)| *candidate == token)?;
         let entries = contexts.split_off(position);
         entries.into_iter().next().map(|(_, saved)| saved)
     });
@@ -568,7 +604,11 @@ pub unsafe extern "C" fn ry_handlers_leave(token: Sexp) {
     }
 }
 
-type SavedStacks = (interp::conditions::HandlerStack, interp::conditions::RestartStack, bool);
+type SavedStacks = (
+    interp::conditions::HandlerStack,
+    interp::conditions::RestartStack,
+    bool,
+);
 
 thread_local! {
     static HANDLER_CONTEXTS: std::cell::RefCell<Vec<(Sexp, SavedStacks)>> =
@@ -612,7 +652,11 @@ pub unsafe extern "C" fn ry_pending_condition(classes: Sexp, target: Sexp) -> *m
         },
         // Native code raised it directly, so no handler saw it yet.
         Unwind::Error(_) | Unwind::Interrupt => {
-            let class = if matches!(unwind, Unwind::Error(_)) { "error" } else { "interrupt" };
+            let class = if matches!(unwind, Unwind::Error(_)) {
+                "error"
+            } else {
+                "interrupt"
+            };
             let wanted = classes.kind() == SexpType::String
                 && (0..classes.length() as usize).any(|index| {
                     let element = classes.element(index);

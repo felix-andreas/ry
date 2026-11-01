@@ -6,16 +6,14 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    conditions, eval, heap, interp, print, scope,
+    conditions, eval, interp, print, scope,
     unwind::{Jump, R, Unwind, error},
     values::{self, base_env, base_namespace, global_env, length, nil},
     write_console,
 };
 use heap::object::{Sexp, SexpType};
 
-pub const BUILTINS: &[BuiltinDef] = &[
-    internal("mkUnbound", 1, do_mk_unbound).invisible(),
-];
+pub const BUILTINS: &[BuiltinDef] = &[internal("mkUnbound", 1, do_mk_unbound).invisible()];
 
 /// How a session starts.
 pub struct StartOptions {
@@ -23,11 +21,15 @@ pub struct StartOptions {
     pub command_args: Vec<String>,
     /// Skips the site and user profiles, as `--vanilla` does.
     pub vanilla: bool,
+    /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
+    /// profile sets it from `interactive()`).
+    pub interactive: bool,
 }
 
 /// Starts the session. Errors here are fatal: base R did not load.
 pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
+    interp().interactive = options.interactive;
     read_renviron();
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;
@@ -35,19 +37,29 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     let platform = crate::system::platform()?;
     eval::define(values::install(".Platform")?, platform, base_env())?;
     crate::graphics::define_device_variables()?;
-    eval::define(values::install(".BaseNamespaceEnv")?, base_namespace(), base_env())?;
-    eval::define(values::install("base")?, base_namespace(), crate::heap().known().namespace_registry)?;
+    eval::define(
+        values::install(".BaseNamespaceEnv")?,
+        base_namespace(),
+        base_env(),
+    )?;
+    eval::define(
+        values::install("base")?,
+        base_namespace(),
+        crate::heap().known().namespace_registry,
+    )?;
     let home = crate::system::r_home();
     source_file(&format!("{home}/library/base/R/base"), base_namespace())?;
     source_file(&format!("{home}/library/base/R/Rprofile"), base_env())?;
     if !options.vanilla {
-        let site = std::env::var("R_PROFILE").unwrap_or_else(|_| format!("{home}/etc/Rprofile.site"));
+        let site =
+            std::env::var("R_PROFILE").unwrap_or_else(|_| format!("{home}/etc/Rprofile.site"));
         if std::path::Path::new(&site).exists() {
             source_file(&site, base_env())?;
         }
     }
     eval_text(".OptRequireMethods()", global_env())?;
     eval_text(".First.sys()", global_env())?;
+    crate::frame::attach_package()?;
     conditions::print_warnings();
     Ok(())
 }
@@ -65,7 +77,7 @@ pub unsafe fn source_file(path: &str, env: Sexp) -> R<()> {
     Ok(())
 }
 
-unsafe fn eval_text(text: &str, env: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn eval_text(text: &str, env: Sexp) -> R<Sexp> {
     let expressions = crate::lower::parse_text(text, "<startup>")?;
     let mut value = nil();
     for index in 0..length(expressions) {
@@ -80,6 +92,7 @@ fn read_renviron() {
     let home = crate::system::r_home();
     // SAFETY: the session starts before any other thread exists.
     unsafe { std::env::set_var("R_HOME", &home) };
+    export_wrapper_directories(&home);
     for path in [format!("{home}/etc/Renviron"), "/etc/R/Renviron".to_owned()] {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -101,6 +114,33 @@ fn read_renviron() {
             unsafe { std::env::set_var(name, value) };
         }
         break;
+    }
+}
+
+/// GNU R's `bin/R` shell wrapper exports `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR`
+/// before R starts, and `R.home("share")` and `R.home("doc")` read them. Distributions that
+/// keep those directories outside `R_HOME` (Debian puts them under `/usr/share/R`) need them
+/// recovered from the wrapper's plain `NAME=value` lines; a value that is still a shell
+/// expression is left alone.
+fn export_wrapper_directories(home: &str) {
+    let Ok(wrapper) = std::fs::read_to_string(format!("{home}/bin/R")) else {
+        return;
+    };
+    for name in ["R_SHARE_DIR", "R_INCLUDE_DIR", "R_DOC_DIR"] {
+        if std::env::var_os(name).is_some() {
+            continue;
+        }
+        let value = wrapper.lines().find_map(|line| {
+            let (key, value) = line.trim().split_once('=')?;
+            (key == name).then(|| value.trim_matches(|c| c == '\'' || c == '"'))
+        });
+        if let Some(value) = value
+            && !value.is_empty()
+            && !value.contains('$')
+        {
+            // SAFETY: the session starts before any other thread exists.
+            unsafe { std::env::set_var(name, value) };
+        }
     }
 }
 
@@ -131,7 +171,11 @@ fn expand_environment(value: &str) -> String {
             return result;
         };
         let inner = &after[..end];
-        let (name, default) = match inner.find(":-").map(|position| (position, 2)).or_else(|| inner.find('-').map(|position| (position, 1))) {
+        let (name, default) = match inner
+            .find(":-")
+            .map(|position| (position, 2))
+            .or_else(|| inner.find('-').map(|position| (position, 1)))
+        {
             Some((position, width)) => (&inner[..position], Some(&inner[position + width..])),
             None => (inner, None),
         };
@@ -139,7 +183,9 @@ fn expand_environment(value: &str) -> String {
             Ok(found) if !found.is_empty() => result.push_str(&found),
             _ => {
                 if let Some(default) = default {
-                    result.push_str(&expand_environment(default.trim_matches(|c| c == '\'' || c == '"')));
+                    result.push_str(&expand_environment(
+                        default.trim_matches(|c| c == '\'' || c == '"'),
+                    ));
                 }
             }
         }
@@ -157,24 +203,45 @@ pub enum Outcome {
 
 /// Runs a script the way `Rscript` does: each top-level expression is evaluated in the global
 /// environment, a visible value is printed, and the first error stops the run.
+///
+/// Like `Rscript`, which reads the script as console input, each expression is lowered just
+/// before it runs, so `options(keep.source = TRUE)` keeps source references for the expressions
+/// after it.
 pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
-    let expressions = match crate::lower::parse_text(text, source_name) {
-        Ok(expressions) => expressions,
+    let script = match crate::lower::parse_script(text, source_name) {
+        Ok(script) => script,
         Err(Unwind::Error(failure)) => {
-            write_console(format!("Error: {}\nExecution halted\n", failure.message).as_bytes(), true);
+            write_console(
+                format!("Error: {}\nExecution halted\n", failure.message).as_bytes(),
+                true,
+            );
             return Outcome::Failed;
         }
         Err(_) => return Outcome::Failed,
     };
-    crate::heap().root(expressions);
-    for index in 0..length(expressions) {
-        let expression = expressions.element(index);
-        if !run_toplevel(expression) {
+    for node in &script.expressions {
+        let mark = crate::heap().handle_mark();
+        let succeeded = match crate::lower::lower_script_expression(&script, node, keep_source()) {
+            Ok(expression) => run_toplevel(expression),
+            Err(unwind) => {
+                report_toplevel(unwind);
+                false
+            }
+        };
+        crate::heap().release_handles(mark);
+        // A script stops at its first error unless `options(error =)` holds a handler, which
+        // GNU R runs and then carries on with the next expression.
+        if !succeeded && crate::envir::get_option("error") == nil() {
             write_console(b"Execution halted\n", true);
             return Outcome::Failed;
         }
     }
     Outcome::Completed
+}
+
+/// `getOption("keep.source")`: whether console input keeps its source references.
+unsafe fn keep_source() -> bool {
+    values::as_logical_scalar(crate::envir::get_option("keep.source")) == 1
 }
 
 /// Runs a read-eval-print loop: `read` returns the next chunk of input after showing a prompt,
@@ -196,11 +263,18 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
         }
         let text = std::mem::take(&mut buffer);
         let mark = crate::heap().handle_mark();
-        match crate::lower::parse_text(&text, "<text>") {
-            Ok(expressions) => {
-                crate::heap().root(expressions);
-                for index in 0..length(expressions) {
-                    if !run_toplevel(expressions.element(index)) {
+        match crate::lower::parse_script(&text, "<text>") {
+            Ok(script) => {
+                for node in &script.expressions {
+                    let succeeded =
+                        match crate::lower::lower_script_expression(&script, node, keep_source()) {
+                            Ok(expression) => run_toplevel(expression),
+                            Err(unwind) => {
+                                report_toplevel(unwind);
+                                false
+                            }
+                        };
+                    if !succeeded {
                         break;
                     }
                 }
@@ -219,7 +293,9 @@ pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>) {
 pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     let mark = crate::heap().handle_mark();
     interp().visible = true;
-    let result = eval::eval(expression, global_env()).and_then(|value| {
+    let mut value = nil();
+    let result = eval::eval(expression, global_env()).and_then(|result| {
+        value = result;
         crate::heap().root(value);
         let last = values::install(".Last.value")?;
         crate::heap().define(base_env(), last, value)?;
@@ -236,8 +312,19 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         }
     };
     interp().frames.clear();
-    interp().handlers = None;
+    interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
+    interp().srcref = nil();
+    conditions::print_warnings();
+    // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
+    let visible = interp().visible;
+    if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
+    {
+        report_toplevel(unwind);
+        interp().frames.clear();
+        interp().handlers = interp().global_handlers.clone();
+        interp().restarts = None;
+    }
     conditions::print_warnings();
     crate::heap().release_handles(mark);
     succeeded
@@ -257,10 +344,16 @@ pub unsafe fn report_toplevel(unwind: Unwind) {
         Unwind::Jump(jump) => match *jump {
             Jump::TopLevel => {}
             Jump::Return { .. } => {
-                write_console(b"Error: no function to return from, jumping to top level\n", true);
+                write_console(
+                    b"Error: no function to return from, jumping to top level\n",
+                    true,
+                );
             }
             Jump::Break { .. } | Jump::Next { .. } => {
-                write_console(b"Error: no loop for break/next, jumping to top level\n", true);
+                write_console(
+                    b"Error: no loop for break/next, jumping to top level\n",
+                    true,
+                );
             }
         },
     }

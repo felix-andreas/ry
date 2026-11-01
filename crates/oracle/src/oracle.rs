@@ -6,12 +6,16 @@
 //! script's own output to stdout, and must write the JSON report that `driver.R` defines.
 //! GNU R is one such engine, and ry's runtime will be another.
 
+pub mod bench;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Deserialize;
 use similar::TextDiff;
+
+pub mod packages;
 
 const DRIVER: &str = include_str!("driver.R");
 
@@ -79,6 +83,8 @@ pub struct ProcessEngine {
     /// case means. Comparing that against an engine that reads the annotations is what shows
     /// they never change what correct code does.
     erases_annotations: bool,
+    /// Variables set for the engine's process on top of the locale the oracle fixes.
+    environment: Vec<(String, String)>,
 }
 
 /// How an engine is handed `driver.R`.
@@ -100,24 +106,40 @@ impl ProcessEngine {
                 .to_vec(),
             driver: Some(Driver::GnuR),
             erases_annotations: true,
+            environment: Vec::new(),
         }
+    }
+
+    /// The engine a name stands for: `ry`, `ry-jit`, or a command line.
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "ry" => Some(ProcessEngine::ry()),
+            "ry-jit" => Some(ProcessEngine::ry_jit()),
+            command => ProcessEngine::from_command(command),
+        }
+    }
+
+    /// ry's runtime with its JIT forced on, so every body that runs twice and every loop runs
+    /// compiled. Comparing it against GNU R checks the compiled tier on every case.
+    pub fn ry_jit() -> Self {
+        let mut engine = ProcessEngine::ry();
+        engine.name = "ry-jit".to_string();
+        engine
+            .environment
+            .push(("RY_JIT".to_string(), "force".to_string()));
+        engine
     }
 
     /// ry's own runtime, `ry run --runtime ry`. The binary is `$ORACLE_RY`, or the workspace's
     /// debug build.
     pub fn ry() -> Self {
-        let program = std::env::var("ORACLE_RY").unwrap_or_else(|_| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/debug/ry")
-                .display()
-                .to_string()
-        });
         ProcessEngine {
             name: "ry".to_string(),
-            program,
+            program: ry_program(),
             arguments: ["run", "--runtime", "ry"].map(String::from).to_vec(),
             driver: Some(Driver::Script),
             erases_annotations: false,
+            environment: Vec::new(),
         }
     }
 
@@ -131,8 +153,22 @@ impl ProcessEngine {
             arguments: parts.collect(),
             driver: None,
             erases_annotations: false,
+            environment: Vec::new(),
         })
     }
+}
+
+/// The `ry` binary: `$ORACLE_RY`, else the workspace's debug build.
+/// A relative `ORACLE_RY` resolves against the current directory, because the engines run
+/// each case from the case's own directory.
+pub fn ry_program() -> String {
+    let program = std::env::var("ORACLE_RY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry"));
+    std::fs::canonicalize(&program)
+        .unwrap_or(program)
+        .display()
+        .to_string()
 }
 
 impl Engine for ProcessEngine {
@@ -176,7 +212,8 @@ impl Engine for ProcessEngine {
             .env(
                 "R_DEFAULT_PACKAGES",
                 "datasets,utils,grDevices,graphics,stats,methods",
-            );
+            )
+            .envs(self.environment.iter().map(|(name, value)| (name, value)));
 
         let output = command.output().map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => {
@@ -269,12 +306,12 @@ pub fn gnu_r_available() -> bool {
 
 /// The engine named by `ORACLE_ENGINE`, or the stub.
 pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE").ok().as_deref() {
-        Some("ry") => Box::new(ProcessEngine::ry()),
-        Some(command) => match ProcessEngine::from_command(command) {
-            Some(engine) => Box::new(engine),
-            None => Box::new(StubEngine),
-        },
+    match std::env::var("ORACLE_ENGINE")
+        .ok()
+        .as_deref()
+        .and_then(ProcessEngine::named)
+    {
+        Some(engine) => Box::new(engine),
         None => Box::new(StubEngine),
     }
 }

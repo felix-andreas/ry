@@ -1,0 +1,119 @@
+---
+title: Vectors and lists
+description: How ry tells a single value from a vector, and the four kinds of list
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Scalars and vectors
+
+R has no scalars: `1L` is an integer vector of length one. But an `if` condition, an operand of
+`&&`, and an endpoint of `:` need exactly one element, and passing a longer vector there is a bug R
+reports late or not at all. So ry tracks the length-one case as its own type:
+
+```r
+n    <- 1L                     # integer: exactly one element
+ids  <- c(1L, 2L)              # integer[]: any length
+ages <- c(ada = 36L, bo = 4L)  # integer[named]: any length, with names
+```
+
+A scalar is accepted where a vector is expected, but not the reverse, because a vector of unknown
+length may not have exactly one element:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+label <- function(flag: logical) -> character if (flag) "yes" else "no"
+
+label(c(TRUE, FALSE))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(flag: logical) -> character
+label <- function(flag) if (flag) "yes" else "no"
+
+label(c(TRUE, FALSE))
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `logical`, found `logical[]`
+```
+
+A `double` accepts an `integer` or a `logical`, which R converts without loss. A number is never
+accepted where `character` is expected: R would convert it, but a silent number-to-string conversion
+is usually a bug, so ry asks for an explicit `as.character()`.
+
+## Four kinds of list
+
+R uses one list type for four different jobs, and each job has its own mistakes, so ry gives each
+its own type. At run time all four are the same R list, so your code does not change.
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+pair   <- list(1L, "ok")                  # tuple-like:  list{integer, character}
+person <- list(name = "Ada", age = 36L)   # record-like: list{name: character, age: integer}
+sizes  <- lapply(words, nchar)            # list-like:   list[integer]
+
+counts: list[named: integer] <- list(apples = 3L)   # dict-like
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+pair   <- list(1L, "ok")                  # tuple-like:  list{integer, character}
+person <- list(name = "Ada", age = 36L)   # record-like: list{name: character, age: integer}
+sizes  <- lapply(words, nchar)            # list-like:   list[integer]
+
+#: list[named: integer]
+counts <- list(apples = 3L)               # dict-like:   list[named: integer]
+```
+
+</TabItem>
+</Tabs>
+
+## Records and tuples
+
+A tuple-like or record-like list has a fixed shape, so ry knows each position and field and its type.
+That makes `$` checkable, which matters because R answers a misspelled field with a silent `NULL`
+that fails somewhere else:
+
+```r
+person$nmae
+```
+
+```text
+type-mismatch
+
+  x field `nmae` does not exist in `list{name: character, age: integer}`. Did you mean `name`?
+   --[R/person.R:2:8]
+ 2 | person$nmae
+   |        ^^^^
+```
+
+A fixed shape is also exact, so a list with an extra field where a record is expected is an error,
+because an unexpected field is usually a misspelled one.
+
+## Lists of any length
+
+A list-like or dict-like list can have any length, so ry knows only its element type. Reading a key
+gives the element type or `NULL`, because the key may be missing:
+
+```r
+counts[["pears"]]   # integer | NULL
+```
+
+A `list(...)` literal infers as a record, so a dictionary that starts from a literal needs an
+annotation, as `counts` does. An empty `list()` filled by computed keys, as in `d[[key]] <- value`,
+needs none.

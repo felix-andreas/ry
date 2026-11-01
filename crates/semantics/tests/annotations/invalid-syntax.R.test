@@ -237,17 +237,11 @@ integer |
 integer
 syntax error: expected a type
 
-#---- leading_pipe_in_union
-| integer
-#++++
-integer
-syntax error: expected a type, found `|`
-
 #---- bare_pipe
 |
 #++++
 NULL
-syntax error: expected a type, found `|`
+syntax error: expected a type
 
 #---- double_pipe_in_union
 integer || NULL

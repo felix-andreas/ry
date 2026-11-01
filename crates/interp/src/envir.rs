@@ -2,7 +2,7 @@
 //! path, namespaces and options.
 
 use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin, internal, present},
+    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     eval::{self, define, find_var, find_var_in_frame, value_of},
     interp,
     unwind::{R, error},
@@ -68,14 +68,16 @@ pub const BUILTINS: &[BuiltinDef] = &[
         do_sys(call, SysKind::OnExit)
     }),
     internal("parent.frame", 1, do_parent_frame),
-    builtin("as.environment", 1, do_as_environment),
+    builtin("as.environment", 1, do_as_environment).generic(Generic::Internal),
     builtin("pos.to.env", 1, do_pos_to_env),
     internal("search", 0, do_search),
     internal("attach", 3, do_attach),
     internal("detach", 1, do_detach),
     internal("options", -1, do_options).keep_visibility(),
     internal("getOption", 1, do_get_option),
-    builtin("interactive", 0, |_| unsafe { scalar_bool(false) }),
+    builtin("interactive", 0, |_| unsafe {
+        scalar_bool(interp().interactive)
+    }),
     internal("getRegisteredNamespace", 1, do_get_registered_namespace),
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
@@ -103,7 +105,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     crate::builtins::special(":::", 2, |call| unsafe { namespace_value(call, false) }),
     internal("getNamespaceValue", 3, |call| unsafe {
         let name = values::require_string(call.arg(1), "name")?;
-        namespace_lookup(call.arg(0), &name, false, call.env)
+        let exported = values::as_logical_scalar(call.arg(2)) == 1;
+        namespace_lookup(call.arg(0), &name, exported, call.env)
     }),
     internal("formals", 1, do_formals),
     internal("body", 1, do_body),
@@ -183,12 +186,22 @@ unsafe fn sys_call_at(n: i32, context: Option<usize>, function: bool) -> R<Sexp>
             if function {
                 Ok(frame.function)
             } else {
-                values::duplicate(frame.call)
+                call_with_srcref(frame)
             }
         }
         _ if back == depth => Ok(nil()),
         _ => Err(error("not that many frames on the stack")),
     }
+}
+
+/// A copy of a frame's call, with the srcref current when the call was made as its `srcref`
+/// attribute, as GNU R's `sys.call` returns it.
+pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
+    let call = values::duplicate(frame.call)?;
+    if frame.srcref != nil() {
+        values::set_attr(call, symbols().srcref, values::duplicate(frame.srcref)?)?;
+    }
+    Ok(call)
 }
 
 /// `R_sysparent`: the frame number of the parent of frame `n` counted back from `context`.
@@ -378,7 +391,12 @@ unsafe fn do_new_env(call: &Call<'_>) -> R<Sexp> {
     } else {
         environment_arg(parent, "enclos")?
     };
-    new_env(parent)
+    let env = new_env(parent)?;
+    if values::as_logical_scalar(call.arg(0)) == 1 {
+        let size = values::as_integer_scalar(call.arg(2));
+        crate::heap().set_frame_hashed(env, if size == NA_INTEGER { 0 } else { size });
+    }
+    Ok(env)
 }
 
 unsafe fn do_parent_env(call: &Call<'_>) -> R<Sexp> {
@@ -405,10 +423,12 @@ unsafe fn do_set_parent_env(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
     let env = call.arg(0);
     let target = call.arg(1);
+    // A non-environment falls back to the frame `.Internal(topenv())` runs in, whose top level
+    // is base's namespace, as in GNU R (`topenv(sum)`).
     let env = if env.kind() == SexpType::Environment {
         env
     } else {
-        global_env()
+        call.env
     };
     let mut current = env;
     while current != empty_env() {
@@ -1025,6 +1045,8 @@ pub unsafe fn set_option(name: &str, value: Sexp) -> R<Sexp> {
     while cell.kind() == SexpType::Pairlist {
         if cell.tag() == symbol {
             let old = cell.car();
+            // Once replaced, the old value is reachable only from the caller.
+            heap.root(old);
             if value == nil() {
                 if previous == nil() {
                     set_options(cell.cdr())?;
@@ -1112,7 +1134,7 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
             args.push(*arg);
         }
     }
-    if args.is_empty() {
+    if call.args.is_empty() {
         interp().visible = true;
         return options_list(None);
     }
@@ -1163,8 +1185,30 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             scalar_integer(width)
         }
-        "warn" | "expressions" | "scipen" | "max.print" | "deparse.cutoff" | "warning.length"
-        | "nwarnings" => {
+        "expressions" => {
+            let depth = values::as_integer_scalar(value);
+            if !(25..=500_000).contains(&depth) {
+                return Err(error(
+                    "'expressions' parameter invalid, allowed 25...500000",
+                ));
+            }
+            scalar_integer(depth)
+        }
+        "warning.length" => {
+            let length = values::as_integer_scalar(value);
+            if !(100..=8170).contains(&length) {
+                return Err(error("invalid value for 'warning.length'"));
+            }
+            scalar_integer(length)
+        }
+        "max.print" | "nwarnings" => {
+            let count = values::as_integer_scalar(value);
+            if count < 1 {
+                return Err(error(&format!("invalid value for '{name}'")));
+            }
+            scalar_integer(count)
+        }
+        "warn" | "scipen" | "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {
@@ -1193,7 +1237,10 @@ pub unsafe fn install_default_options() -> R<()> {
         ("verbose", scalar_bool(false)?),
         ("check.bounds", scalar_bool(false)?),
         ("keep.source", scalar_bool(false)?),
-        ("keep.source.pkgs", scalar_bool(false)?),
+        (
+            "keep.source.pkgs",
+            scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?,
+        ),
         ("keep.parse.data", scalar_bool(true)?),
         ("keep.parse.data.pkgs", scalar_bool(false)?),
         ("warning.length", scalar_integer(1000)?),
@@ -1460,7 +1507,12 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
     let more = call.arg(2);
     let lists = values::list_items(dots);
     let names = values::names(dots);
-    let lengths: Vec<usize> = lists.iter().map(|&list| length(list)).collect();
+    // A classed argument may define its own `length` and `[[` methods, which mapply honours.
+    let lengths: Vec<usize> = lists
+        .iter()
+        .map(|&list| crate::subset::dispatch_length(list, call.env))
+        .collect::<R<_>>()?;
+    let subset2 = crate::builtins::primitive("[[").ok_or_else(|| call.error("no [[ primitive"))?;
     let longest = if lengths.contains(&0) {
         0
     } else {
@@ -1472,8 +1524,18 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let mut args = Vec::new();
             for (position, &list) in lists.iter().enumerate() {
-                let element =
-                    crate::subset::list_or_vector_element(list, index % lengths[position])?;
+                let element = if list.is_object() {
+                    let position_value =
+                        values::scalar_integer((index % lengths[position]) as i32 + 1)?;
+                    eval::apply(
+                        nil(),
+                        subset2,
+                        &eval::value_args(&[list, position_value]),
+                        call.env,
+                    )?
+                } else {
+                    crate::subset::list_or_vector_element(list, index % lengths[position])?
+                };
                 let tag = if names != nil() && !names.element(position).bytes().is_empty() {
                     crate::heap().install_char(names.element(position))?
                 } else {
@@ -1779,48 +1841,66 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
     namespace_lookup(package_value, &name, exported, call.env)
 }
 
-/// Looks `name` up in a package's namespace, loading it if needed. Base is looked up directly;
-/// other packages go through base R's own `getExportedValue` and `asNamespace`.
+/// Looks `name` up in a package's namespace (a namespace environment or a package name),
+/// loading it if needed. An exported name is looked up through the namespace's export table,
+/// which maps it to the internal name, from the namespace outward, because a package may export
+/// a function it imports, as graphics does with base's `plot`; lazy data comes last. An
+/// internal name (`:::`) must be bound in the namespace itself.
 unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
-    let package_name = values::first_string(package)
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
     let symbol = values::install(name)?;
-    if package_name == "base" {
-        let value = find_var_in_frame(symbol, base_namespace())?;
+    let namespace = if package.kind() == SexpType::Environment {
+        package
+    } else if values::first_string(package).is_some_and(|package_name| package_name == "base") {
+        base_namespace()
+    } else {
+        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
+        eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?
+    };
+    if namespace == base_namespace() || !exported {
+        let value = find_var_in_frame(symbol, namespace)?;
         if value == unbound() {
             return Err(error(format!("object '{name}' not found")));
         }
         return value_of(value);
     }
-    let function_name = if exported { "getExportedValue" } else { "get" };
-    let function = eval::find_fun(values::install(function_name)?, base_namespace())?;
-    let name_value = values::scalar_string(name)?;
-    if exported {
-        eval::apply(
-            nil(),
-            function,
-            &eval::value_args(&[package, name_value]),
-            env,
-        )
-    } else {
-        let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
-        let namespace = eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?;
-        let inherits = scalar_bool(false)?;
-        let args = [
-            Arg {
-                tag: nil(),
-                value: name_value,
-            },
-            Arg {
-                tag: values::install("envir")?,
-                value: namespace,
-            },
-            Arg {
-                tag: values::install("inherits")?,
-                value: inherits,
-            },
-        ];
-        eval::apply(nil(), function, &args, env)
+    let info = find_var_in_frame(values::install(".__NAMESPACE__.")?, namespace)?;
+    let table = |field: &str| -> R<Sexp> {
+        if info.kind() != SexpType::Environment {
+            return Ok(unbound());
+        }
+        let table = find_var_in_frame(values::install(field)?, info)?;
+        if table.kind() != SexpType::Environment {
+            return Ok(unbound());
+        }
+        find_var_in_frame(symbol, table)
+    };
+    let internal_name = table("exports")?;
+    if internal_name != unbound() {
+        let internal_symbol = match values::first_string(internal_name) {
+            Some(internal) => values::install(&internal)?,
+            None => symbol,
+        };
+        let value = eval::find_var(internal_symbol, namespace)?;
+        if value == unbound() {
+            return Err(error(format!("object '{name}' not found")));
+        }
+        return value_of(value);
     }
+    let data = table("lazydata")?;
+    if data != unbound() {
+        return value_of(data);
+    }
+    let package_name = if info.kind() == SexpType::Environment {
+        let spec = find_var_in_frame(values::install("spec")?, info)?;
+        values::first_string(spec)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
+    } else {
+        values::first_string(package)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
+    };
+    Err(error(format!(
+        "'{name}' is not an exported object from 'namespace:{package_name}'"
+    )))
 }

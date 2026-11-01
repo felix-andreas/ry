@@ -167,6 +167,18 @@ SEXP rytest_try_eval(SEXP call)
     return value;
 }
 
+/* A call built the way sys and others build callbacks, with LANGSXP argument cells. */
+SEXP rytest_lcons_call(SEXP fun, SEXP arg)
+{
+    SEXP call = PROTECT(LCONS(fun, LCONS(arg, R_NilValue)));
+    int failed = 0;
+    SEXP value = R_tryEval(call, R_GlobalEnv, &failed);
+    UNPROTECT(1);
+    if (failed)
+        return mkString(R_curErrorBuf());
+    return value;
+}
+
 static int cleanup_count = 0;
 static int cleanup_jumped = -1;
 
@@ -601,6 +613,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_warning", (DL_FUNC) &rytest_warning, 0},
     {"rytest_eval", (DL_FUNC) &rytest_eval, 2},
     {"rytest_try_eval", (DL_FUNC) &rytest_try_eval, 1},
+    {"rytest_lcons_call", (DL_FUNC) &rytest_lcons_call, 2},
     {"rytest_unwind_protect", (DL_FUNC) &rytest_unwind_protect, 1},
     {"rytest_cleanup_state", (DL_FUNC) &rytest_cleanup_state, 0},
     {"rytest_toplevel", (DL_FUNC) &rytest_toplevel, 1},

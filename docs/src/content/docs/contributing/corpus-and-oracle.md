@@ -61,7 +61,8 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 `.expected` file beside it holding GNU R's recorded outcome. They cover promises,
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
-colours, contour lines and axis ticks, object sizes and hash tables. `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
+device list, text metrics), object sizes and hash tables. `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()`; `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
@@ -70,9 +71,40 @@ command line: it is invoked as `<command…> <script> <report>`, must print the 
 to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defines (`messages`,
 `warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
 it runs the driver through `ry run --runtime ry` with the workspace's debug build (or the binary in
-`ORACLE_RY`), so build `ry` and `libr` first. Without `--engine` or `ORACLE_ENGINE` the second engine
-is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or any command line) makes
+`ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
+build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
+every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
+the compiled tier on every case. Without `--engine` or `ORACLE_ENGINE` the second engine
+is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
+
+## Package tests
+
+```sh
+just corpus-sources                   # source tarballs, which carry the tests binary installs lack
+just package-tests                    # every closure package, under GNU R and ry's runtime
+just package-tests --runtime ry vctrs # one package, ry only, reusing the recorded GNU R result
+```
+
+`oracle packages` runs each corpus package's own tests the way `R CMD check` runs `tests/`: every
+top-level `tests/*.R` file runs as its own script with `tests/` as the working directory, and the
+file passes when its process exits with status 0. A package passes when all of its files pass, so
+a testthat suite passes when `testthat.R` finishes without a failed expectation. The harness also
+reads testthat's summary line (`[ FAIL 0 | WARN 1 | SKIP 2 | PASS 30 ]`) to report expectation
+counts beside the status.
+
+`tools/corpus/sources.R` downloads the source tarball of every package in the closure at its
+installed version into `.corpus/sources` and writes `.corpus/closure.txt`, the package list the
+harness runs. Results go to `.corpus/tests/<package>/<runtime>/` (the copied `tests/` directory,
+one `.Rout` per file, and `result.json`), and `.corpus/tests/summary.md` tables every package.
+A GNU R result is reused while the package version is unchanged, unless you pass
+`--rerun-gnu-r`. `--jobs` (default 4) runs packages in parallel, and `--timeout` (default 600
+seconds) bounds one package's suite under one runtime, after which its whole process group is
+killed. `ORACLE_RY` picks the ry binary; copy it, with `libR.so` beside it, to another directory
+first if you rebuild while a long run is going.
+
+The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
+measures the container, not ry. `MEMORY.md` records the current rate.
 
 ## The benchmark generator
 
@@ -95,3 +127,27 @@ so the tests never touch a network. `just bench-test` runs a package's tests aga
 Because `polars` and `Rblpapi` cannot be installed, it tests a copy whose `Imports` omit the
 missing packages; the code reaches them only inside guarded or injectable branches. The three
 10,000-line packages pass all of their roughly 340 tests each under GNU R 4.3.3.
+
+## Benchmark pass rate
+
+```sh
+just bench-compare .bench/finbench .bench/dsbench .bench/biobench
+just bench-compare .bench/finbench --filter portfolio --verbose
+```
+
+`oracle bench` runs a generated package's testthat suite under GNU R and under ry's runtime and
+compares the two test by test. Both runs go through `ry load <package> --file bench.R`, once with
+`--runtime gnu-r` and once with `--runtime ry`, so the same loader plan loads the package on both
+sides and only evaluation differs. The driver (`crates/oracle/src/bench.R`) records every
+`test_that()` block: its status, the failed expectations, errors, warnings and skips it reported,
+a deparse of its value, and its run time. A test matches when everything but the time agrees.
+
+GNU R runs the suite twice. A test whose value or problems differ between those two runs (a
+fresh UUID, a timestamp in a message) is compared by status alone, so only what GNU R reproduces
+counts against ry. The table prints,
+per package, the matching tests, the rate, the tests that differ or that ry never reported, the
+tests ry passes, and both suites' run times; process wall time, which adds startup and loading
+the package, follows it. `--json` writes every comparison, and `--keep` keeps each runtime's
+report and stderr. Pass `--ry target/release/ry` for timings, with `libR.so` built beside it
+(`cargo build --release -p ry-lang -p libr`). `MEMORY.md` records the current rates.
+

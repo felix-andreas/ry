@@ -1,0 +1,195 @@
+[stdout]
+| $minimum
+| [1] 0.333333333333333
+| 
+| $objective
+| [1] 0
+| 
+| $maximum
+| [1] 1.5707942259795
+| 
+| $objective
+| [1] 0.999999999997793
+| 
+| $root
+| [1] 1.32471782512877
+| 
+| $f.root
+| [1] -5.63426088673324e-07
+| 
+| $iter
+| [1] 7
+| 
+| $init.it
+| [1] NA
+| 
+| $estim.prec
+| [1] 6.10351562506661e-05
+| 
+| [1] 0.739085133175318
+|         root       f.root         iter      init.it   estim.prec 
+| 1.609438e+00 1.509257e-07 1.000000e+01 6.000000e+00 6.103516e-05 
+| $par
+| [1] 1.000260 1.000506
+| 
+| $value
+| [1] 8.825241e-08
+| 
+| $counts
+| function gradient 
+|      195       NA 
+| 
+| $convergence
+| [1] 0
+| 
+| $message
+| NULL
+| 
+| $par
+| [1] 1 1
+| 
+| $value
+| [1] 9.594956e-18
+| 
+| $counts
+| function gradient 
+|      110       43 
+| 
+| $convergence
+| [1] 0
+| 
+| $message
+| NULL
+| 
+| $par
+| [1] 0.9998044 0.9996084
+| 
+| $value
+| [1] 3.827383e-08
+| 
+| $counts
+| function gradient 
+|      118       38 
+| 
+| $convergence
+| [1] 0
+| 
+| $message
+| NULL
+| 
+| $hessian
+|           [,1]      [,2]
+| [1,]  801.6881 -399.9218
+| [2,] -399.9218  200.0000
+| 
+| $par
+| [1] -0.7648373  0.5927588
+| 
+| $value
+| [1] 3.106579
+| 
+| $counts
+| function gradient 
+|      402      101 
+| 
+| $convergence
+| [1] 1
+| 
+| $message
+| NULL
+| 
+| $par
+| [1] 0.9944093 0.9888229
+| 
+| $value
+| [1] 3.123777e-05
+| 
+| $counts
+| function gradient 
+|      385      101 
+| 
+| $convergence
+| [1] 1
+| 
+| $message
+| NULL
+| 
+| $par
+| a b 
+| 1 5 
+| 
+| $value
+| [1] 6.202498e-26
+| 
+| $counts
+| function gradient 
+|       10        3 
+| 
+| $convergence
+| [1] 0
+| 
+| $message
+| NULL
+| 
+|           [,1] [,2]
+| [1,]  802.0004 -400
+| [2,] -400.0000  200
+|   Nelder-Mead direct search function minimizer
+| function value for initial parameters = 24.200000
+|   Scaled convergence tolerance is 3.60608e-07
+| Stepsize computed as 0.120000
+| BUILD              3 24.200000 7.095296
+| REFLECTION         5 15.080000 4.541696
+| REFLECTION         7 7.095296 4.456256
+| HI-REDUCTION       9 4.728125 4.456256
+| HI-REDUCTION      11 4.541696 4.210000
+| LO-REDUCTION      13 4.456256 4.178989
+| LO-REDUCTION      15 4.210000 4.070813
+| HI-REDUCTION      17 4.178989 4.039810
+| HI-REDUCTION      19 4.070813 4.009379
+| HI-REDUCTION      21 4.039810 4.009379
+| REFLECTION        23 4.020798 3.993600
+| HI-REDUCTION      25 4.009379 3.993115
+| EXTENSION         27 3.993600 3.971089
+| HI-REDUCTION      29 3.993115 3.971089
+| Exiting from Nelder Mead minimizer
+|     31 function evaluations used
+| initial  value 24.200000 
+| iter  10 value 1.367383
+| iter  20 value 0.134560
+| iter  30 value 0.001978
+| iter  40 value 0.000000
+| final  value 0.000000 
+| converged
+| 0.9500042 with absolute error < 1e-11
+| 1 with absolute error < 9.4e-05
+| 1 with absolute error < 5.7e-05
+| 3.141593 with absolute error < 2.7e-05
+| [1] 6.66666741501012e-01 7.73399850077345e-05 5.00000000000000e+00
+| [1] -1.00000000000000e+00  1.11022302462516e-15  6.00000000000000e+00
+| [1] 1.56222546688906e+00 3.42148081459819e-10 8.00000000000000e+00
+| [1] 2.50324458207653e+00 7.92534240612319e-05 4.00000000000000e+00
+| $par
+| [1] -0.9413785  0.9035224
+| 
+| $value
+| [1] 3.79898
+| 
+| $counts
+| function gradient 
+|      200       NA 
+| 
+| $convergence
+| [1] 0
+| 
+| $message
+| NULL
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(par = c(-0.941378471142271, 0.903522420663704), value = 3.79897977406222, 
+|     counts = c("function" = 200L, gradient = NA), convergence = 0L, 
+|     message = NULL)

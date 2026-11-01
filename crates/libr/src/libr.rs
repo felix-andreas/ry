@@ -27,6 +27,7 @@ pub mod embed;
 pub mod environments;
 pub mod eval;
 pub mod extptr;
+pub mod frame_altrep;
 pub mod globals;
 pub mod graphics;
 pub mod hashtab;
@@ -70,10 +71,8 @@ pub struct Runtime {
     pub parked: FxHashMap<Sexp, Unwind>,
     /// The last error message, as `R_curErrorBuf` returns it.
     pub error_buffer: Vec<u8>,
-    pub warnings: Vec<String>,
     pub dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
-    pub options: Sexp,
     /// `TRUELENGTH` values set on objects whose storage has no field for one: strings and
     /// vectors set to a value other than their capacity. Each key is preserved while it has an
     /// entry, so its address cannot be reused by another object.
@@ -138,12 +137,7 @@ pub fn runtime() -> &'static mut Runtime {
 
 impl Runtime {
     fn start() -> Runtime {
-        let mut heap = Heap::new();
-        let empty = heap.known().empty_env;
-        // SAFETY: the heap is fresh; the options environment is rooted before anything allocates.
-        let options = unsafe { heap.alloc_environment(empty) }
-            .unwrap_or_else(|error| panic!("cannot create the options environment: {error}"));
-        heap.add_global_root(options);
+        let heap = Heap::new();
         let mut runtime = Runtime {
             heap,
             arena: Arena::default(),
@@ -151,10 +145,8 @@ impl Runtime {
             pending: None,
             parked: FxHashMap::default(),
             error_buffer: Vec::new(),
-            warnings: Vec::new(),
             dlls: Vec::new(),
             c_callables: FxHashMap::default(),
-            options,
             truelengths: FxHashMap::default(),
             rng: arith::Rng::default(),
             console: Box::new(boundary::default_console),

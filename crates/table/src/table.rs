@@ -8,7 +8,7 @@
 //!
 //! R code and native code read a column as an R vector. The table itself holds only Arrow data:
 //! an R-layout copy, when a reader needs one, belongs to the ALTREP vector that exposes the
-//! column (see `altrep`), so there is one place that records whether a column is resident in R.
+//! column (`libr::frame_altrep`), so there is one place that records whether a column is resident in R.
 
 pub mod convert;
 pub mod ffi;
@@ -16,9 +16,6 @@ mod group;
 mod join;
 mod kernel;
 pub mod query;
-
-#[cfg(feature = "runtime")]
-pub mod altrep;
 
 use convert::RVector;
 use polars::prelude::{
@@ -132,6 +129,10 @@ impl Schema {
                 .map(|(name, kind)| (name.into(), kind))
                 .collect(),
         }
+    }
+
+    pub fn names(&self) -> Vec<&PlSmallStr> {
+        self.columns.iter().map(|(name, _)| name).collect()
     }
 
     pub fn column(&self, name: &str) -> Option<ColumnType> {

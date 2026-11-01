@@ -189,6 +189,17 @@ fn errors_unwind_through_native_frames() {
         .expect("R_tryEvalSilent stops the error");
     assert_eq!(r.strings(caught), vec![Some("Error: from stop\n".into())]);
 
+    // A call whose argument cells are LANGSXP (`LCONS(fun, LCONS(arg, R_NilValue))`) still
+    // passes its argument.
+    let identity = r
+        .eval_expression(r.symbol("identity"))
+        .expect("identity is bound");
+    let three = r.integer(3);
+    let value = r
+        .call("rytest_lcons_call", &[identity, three])
+        .expect("the LCONS call evaluates");
+    assert_eq!(r.integers(value), vec![3]);
+
     // R_ToplevelExec reports and stops the error, then returns FALSE.
     let toplevel = r
         .call("rytest_toplevel", &[inner])

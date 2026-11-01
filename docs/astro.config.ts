@@ -68,6 +68,7 @@ export default defineConfig({
 						{ slug: 'guides/formatting' },
 						{ slug: 'guides/editors' },
 						{ slug: 'guides/console' },
+						{ slug: 'guides/frames' },
 						{ slug: 'guides/loading-packages' },
 					],
 				},
@@ -91,6 +92,7 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					items: [
+						{ slug: 'reference/standard-library' },
 						{ slug: 'reference/configuration' },
 						{ slug: 'reference/cli' },
 						{ slug: 'reference/package-loading' },

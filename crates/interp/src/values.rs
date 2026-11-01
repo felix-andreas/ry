@@ -2,12 +2,13 @@
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
 use crate::{
-    interp,
+    interp, records, standard_library,
     unwind::{R, error},
 };
 use heap::{
     Heap, Marker,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    records::NativeKind,
     strings::Encoding,
 };
 use std::borrow::Cow;
@@ -202,6 +203,9 @@ pub struct Globals {
     /// Environments `attach` put on the search path are ordinary enclosures of the global
     /// environment; this keeps `Autoloads` and the like alive between `attach` and first use.
     pub keep: Vec<Sexp>,
+    /// `.cache_class`: each S4 class's S3 class vector (the class and what it extends), which
+    /// the methods package keeps current as it defines and removes classes.
+    pub s4_extends: rustc_hash::FxHashMap<Box<[u8]>, Sexp>,
 }
 
 impl Globals {
@@ -212,6 +216,7 @@ impl Globals {
             allow_primitive_methods: true,
             primitive_methods: rustc_hash::FxHashMap::default(),
             keep: Vec::new(),
+            s4_extends: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -229,6 +234,9 @@ impl Globals {
         }
         for &object in &self.keep {
             marker.mark(object);
+        }
+        for &extends in self.s4_extends.values() {
+            marker.mark(extends);
         }
     }
 }
@@ -469,7 +477,11 @@ pub unsafe fn named_list(items: &[(&str, Sexp)]) -> R<Sexp> {
 pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
     let mut list = nil();
     for (position, &(tag, value)) in items.iter().enumerate().rev() {
-        let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+        let cell_kind = if position == 0 {
+            kind
+        } else {
+            SexpType::Pairlist
+        };
         list = triple(cell_kind, value, list, tag)?;
     }
     Ok(list)
@@ -490,7 +502,10 @@ pub unsafe fn length(object: Sexp) -> usize {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => pairlist_length(object),
         SexpType::Environment => env_length(object),
-        SexpType::Record => object.record_slot_count(),
+        SexpType::Record => match records::native_kind(object) {
+            NativeKind::Dict | NativeKind::Set => standard_library::entry_count(object),
+            NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => object.record_slot_count(),
+        },
         _ if object.kind().is_vector() => {
             if object.is_altrep() {
                 altrep_length(object)
@@ -596,6 +611,9 @@ pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
 
 /// Element `index` of a character vector as text, or `None` for `NA`.
 pub unsafe fn string_at<'a>(object: Sexp, index: usize) -> Option<Cow<'a, str>> {
+    if object.kind() != SexpType::String || index >= length(object) {
+        return None;
+    }
     let charsxp = object.element(index);
     if charsxp == na_string() {
         None
@@ -632,10 +650,7 @@ pub unsafe fn is_function(object: Sexp) -> bool {
 }
 
 pub unsafe fn is_numeric_type(kind: SexpType) -> bool {
-    matches!(
-        kind,
-        SexpType::Logical | SexpType::Integer | SexpType::Real
-    )
+    matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
 }
 
 pub fn is_na_int(value: i32) -> bool {
@@ -830,8 +845,18 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
         return None;
     }
     match dim.kind() {
-        SexpType::Integer => Some(ints(dim).iter().map(|&value| value.max(0) as usize).collect()),
-        SexpType::Real => Some(reals(dim).iter().map(|&value| value.max(0.0) as usize).collect()),
+        SexpType::Integer => Some(
+            ints(dim)
+                .iter()
+                .map(|&value| value.max(0) as usize)
+                .collect(),
+        ),
+        SexpType::Real => Some(
+            reals(dim)
+                .iter()
+                .map(|&value| value.max(0.0) as usize)
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -871,27 +896,36 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 cell.kind(),
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
-                let value = if deep { duplicate(cell.car())? } else { cell.car() };
+                let value = if deep {
+                    duplicate(cell.car())?
+                } else {
+                    cell.car()
+                };
                 items.push((cell.tag(), value, cell.attrib()));
                 cell = cell.cdr();
             }
             let mut list = nil();
             for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
-                let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+                let cell_kind = if position == 0 {
+                    kind
+                } else {
+                    SexpType::Pairlist
+                };
                 list = triple(cell_kind, value, list, tag)?;
-                if attributes != nil() {
-                    let attributes = if deep { duplicate(attributes)? } else { attributes };
+                // The head cell's attributes and flags are the object's, copied below.
+                if position != 0 && attributes != nil() {
+                    let attributes = if deep {
+                        duplicate(attributes)?
+                    } else {
+                        attributes
+                    };
                     heap.set_attrib(list, attributes);
                 }
             }
-            if object.attrib() != nil() && list != nil() {
-                let attributes = duplicate(object.attrib())?;
-                heap.set_attrib(list, attributes);
+            if list == nil() {
+                return Ok(list);
             }
-            if list != nil() && object.is_object() {
-                list.set_object(true);
-            }
-            return Ok(list);
+            list
         }
         SexpType::Closure => {
             let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;

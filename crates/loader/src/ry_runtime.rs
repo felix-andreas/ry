@@ -94,9 +94,14 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
             .name("ry-loader".to_owned())
             .stack_size(ANALYSIS_STACK_SIZE)
             .spawn_scoped(threads, || plan(&root, full))
-            .map(|thread| thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+            .map(|thread| {
+                thread
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
     });
-    let value = value.map_err(|failure| error(format!("cannot start the loader's thread: {failure}")))?;
+    let value =
+        value.map_err(|failure| error(format!("cannot start the loader's thread: {failure}")))?;
     scope(|| r_value(&value))
 }
 
@@ -228,7 +233,11 @@ unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
 /// Lowers the outermost node spanning exactly `start..end` of `tree`.
 unsafe fn lower_range(tree: &Parse, start: u32, end: u32) -> R<Sexp> {
     let root = SyntaxNode::new_root(tree.green().clone());
-    if start > end || !root.text_range().contains_range(TextRange::new(start.into(), end.into())) {
+    if start > end
+        || !root
+            .text_range()
+            .contains_range(TextRange::new(start.into(), end.into()))
+    {
         return Err(error("a definition's code is not in its syntax tree"));
     }
     let range = TextRange::new(TextSize::from(start), TextSize::from(end));

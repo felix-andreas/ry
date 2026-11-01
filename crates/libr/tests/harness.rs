@@ -64,6 +64,7 @@ macro_rules! api {
 
 api! {
     ry_initialize: fn() -> c_int;
+    ry_start_session: fn() -> c_int;
     ry_set_gc_stress: fn(c_int);
     ry_collect: fn(c_int);
     ry_gc_stats: fn(*mut GcStats);
@@ -181,6 +182,18 @@ pub fn r() -> R<'static> {
         protected: std::cell::Cell::new(0),
         _lock: lock,
     }
+}
+
+/// A session with base R loaded, for tests that call R's closures, such as `file()` or
+/// `readLines()`, rather than builtins alone.
+pub fn r_with_base() -> R<'static> {
+    let r = r();
+    assert_eq!(
+        unsafe { (r.api().ry_start_session)() },
+        0,
+        "base R did not load"
+    );
+    r
 }
 
 impl Drop for R<'_> {

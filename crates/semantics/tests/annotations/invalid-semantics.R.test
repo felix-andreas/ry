@@ -15,14 +15,14 @@ error: duplicate type parameter name `T` in expanded function annotation.
 #---- unknown_constraint_in_universal_binder
 <T: frobnicate> fn(values: T) -> T
 #++++
-error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, `key`, or `scalar numeric`.
 
 #---- unknown_constraint_in_expanded_forall
 @forall T: frobnicate
 @param value {T}
 @return {T}
 #++++
-error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, or `scalar numeric`.
+error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, `key`, or `scalar numeric`.
 
 #---- consecutive_typing_comments
 integer

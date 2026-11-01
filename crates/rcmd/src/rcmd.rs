@@ -102,13 +102,21 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     copy_tree(sources.include, &root.join("include"))?;
     let libr = root.join("lib/libR.so");
     fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
-    write(&root.join("etc/Makeconf"), &makeconf(root, &sources.toolchain))?;
+    write(
+        &root.join("etc/Makeconf"),
+        &makeconf(root, &sources.toolchain),
+    )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
     let rcmd = sources.rcmd.display();
     // Each front end hands R code to GNU R, without ry's R_HOME, until the interpreter runs it.
     let delegate = |program: &str| match sources.gnu_r_bin {
-        Some(bin) => format!("unset R_HOME\nexec '{}' \"$@\"\n", bin.join(program).display()),
-        None => format!("echo '{program}: ry cannot run R code without its interpreter' >&2\nexit 1\n"),
+        Some(bin) => format!(
+            "unset R_HOME\nexec '{}' \"$@\"\n",
+            bin.join(program).display()
+        ),
+        None => {
+            format!("echo '{program}: ry cannot run R code without its interpreter' >&2\nexit 1\n")
+        }
     };
     write_script(
         &root.join("bin/R"),
@@ -371,7 +379,9 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
-        return Err(Error::Usage(format!("R CMD config: unknown variable '{variable}'")));
+        return Err(Error::Usage(format!(
+            "R CMD config: unknown variable '{variable}'"
+        )));
     }
     let makeconf = home.join("etc/Makeconf");
     let printer = format!("print-variable:\n\t@echo $({variable})\n");
@@ -490,7 +500,12 @@ pub fn install(home: &Path, package: &Path, library: &Path) -> Result<Installed>
         );
         let name = description
             .get("Package")
-            .ok_or_else(|| Error::Package(format!("{} has no Package field", description_path.display())))?
+            .ok_or_else(|| {
+                Error::Package(format!(
+                    "{} has no Package field",
+                    description_path.display()
+                ))
+            })?
             .to_owned();
         if let Some(built) = description.get("Built") {
             install_binary(&directory, &name, built, library)
@@ -563,7 +578,11 @@ fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> 
         .split('.')
         .next()
         .and_then(|major| major.parse().ok())
-        .ok_or_else(|| Error::Package(format!("package '{name}' has an invalid Built field: {built}")))?;
+        .ok_or_else(|| {
+            Error::Package(format!(
+                "package '{name}' has an invalid Built field: {built}"
+            ))
+        })?;
     if major < 3 {
         return Err(Error::Package(format!(
             "package '{name}' was built before R 3.0.0: please re-install it"
@@ -579,7 +598,9 @@ fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> 
     }
     let target = library.join(name);
     replace_directory(directory, &target)?;
-    let shared = target.join("libs").join(format!("{}.so", name.replace('.', "_")));
+    let shared = target
+        .join("libs")
+        .join(format!("{}.so", name.replace('.', "_")));
     let library_path = [target.join("libs").join(format!("{name}.so")), shared]
         .into_iter()
         .find(|path| path.exists());
@@ -636,9 +657,17 @@ fn install_source(
             Command::new("sh")
                 .arg("./configure")
                 .current_dir(&build)
-                .envs(environment.iter().map(|(key, value)| (key.as_str(), value.as_str()))),
+                .envs(
+                    environment
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                ),
         )
-        .map_err(|error| Error::Package(format!("configuration failed for package '{name}'\n{error}")))?;
+        .map_err(|error| {
+            Error::Package(format!(
+                "configuration failed for package '{name}'\n{error}"
+            ))
+        })?;
     }
     let src = build.join("src");
     let mut shared_object = None;
@@ -652,15 +681,20 @@ fn install_source(
         let library_name = format!("{}.so", name.replace('.', "_"));
         let built = if src.join("Makefile").exists() {
             run_command(
-                Command::new("make")
-                    .current_dir(&src)
-                    .envs(environment.iter().map(|(key, value)| (key.as_str(), value.as_str()))),
+                Command::new("make").current_dir(&src).envs(
+                    environment
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                ),
             )
-            .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?;
+            .map_err(|error| {
+                Error::Package(format!("compilation failed for package '{name}'\n{error}"))
+            })?;
             src.join(&library_name)
         } else {
-            shlib(home, &src, &[], Some(&library_name), &include_flags, &[])
-                .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?
+            shlib(home, &src, &[], Some(&library_name), &include_flags, &[]).map_err(|error| {
+                Error::Package(format!("compilation failed for package '{name}'\n{error}"))
+            })?
         };
         if built.exists() {
             let libs = target_staging.join("libs");
@@ -706,7 +740,9 @@ fn install_source(
         fs::remove_dir_all(&target).map_err(io_error(&target))?;
     }
     fs::rename(&target_staging, &target)
-        .or_else(|_| copy_tree(&target_staging, &target).map_err(|error| io::Error::other(error.to_string())))
+        .or_else(|_| {
+            copy_tree(&target_staging, &target).map_err(|error| io::Error::other(error.to_string()))
+        })
         .map_err(io_error(&target))?;
     Ok(Installed {
         name: name.to_owned(),
@@ -833,8 +869,11 @@ pub fn shlib(
         .iter()
         .filter_map(|source| {
             let (stem, extension) = source.rsplit_once('.')?;
-            matches!(extension, "c" | "cc" | "cpp" | "cxx" | "f" | "f90" | "f95" | "m" | "o")
-                .then(|| format!("{stem}.o"))
+            matches!(
+                extension,
+                "c" | "cc" | "cpp" | "cxx" | "f" | "f90" | "f95" | "m" | "o"
+            )
+            .then(|| format!("{stem}.o"))
         })
         .collect();
     let has = |extensions: &[&str]| {

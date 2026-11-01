@@ -157,7 +157,8 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn_scoped(scope, || {
-                let analysis = analyze_project(root, config.clone(), std::slice::from_ref(&sources))?;
+                let analysis =
+                    analyze_project(root, config.clone(), std::slice::from_ref(&sources))?;
                 let errors = strict_errors(&analysis, config);
                 Ok::<_, CommandError>((analysis, errors))
             });
@@ -238,10 +239,7 @@ fn findings(
         return (Verdict::Run, Vec::new());
     }
     let diagnostics = apply_suppressions(document_diagnostics(db, file, config), source);
-    let refuse = strict
-        && diagnostics
-            .iter()
-            .any(is_strict_error);
+    let refuse = strict && diagnostics.iter().any(is_strict_error);
     let kept = diagnostics
         .into_iter()
         .filter(|diagnostic| {

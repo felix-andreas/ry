@@ -15,7 +15,9 @@ use heap::object::{Sexp, SexpType, gp};
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| unsafe { Err(call.error("prmatrix is not supported")) }),
+    internal("prmatrix", 6, |call| unsafe {
+        Err(call.error("prmatrix is not supported"))
+    }),
 ];
 
 /// Print settings, from `print.default`'s arguments and the options.
@@ -47,7 +49,11 @@ impl PrintOptions {
             width: format::width_option(),
             na_string: "NA".into(),
             na_string_noquote: "<NA>".into(),
-            max: if max == nil() { 99999 } else { values::as_integer_scalar(max).max(1) as usize },
+            max: if max == nil() {
+                99999
+            } else {
+                values::as_integer_scalar(max).max(1) as usize
+            },
             use_source: true,
             env,
             call_args: Vec::new(),
@@ -69,7 +75,8 @@ pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
         eval::find_var(print, values::base_namespace())? != values::unbound()
     };
     if value.is_object() || values::is_function(value) || dispatches {
-        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil() {
+        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil()
+        {
             let show = values::install("show")?;
             eval::find_fun(show, interp().globals.methods_namespace)?
         } else {
@@ -90,7 +97,8 @@ pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
 /// Prints a value with dispatch, as `print.default` does for list elements that are objects.
 unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     if value.is_object() {
-        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil() {
+        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil()
+        {
             eval::find_fun(values::install("show")?, interp().globals.methods_namespace)?
         } else {
             eval::find_fun(values::install("print")?, values::base_namespace())?
@@ -130,7 +138,11 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
             }
         }
         SexpType::Expression => {
-            let lines = deparse::deparse_lines(value, 60, deparse::options::SIMPLE);
+            let opts = match options.use_source {
+                true => deparse::options::SIMPLE | deparse::options::USE_SOURCE,
+                false => deparse::options::SIMPLE,
+            };
+            let lines = deparse::deparse_lines(value, 60, opts);
             for line in lines {
                 out(&format!("{line}\n"));
             }
@@ -162,7 +174,10 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 out("<object>\n");
             }
         }
-        SexpType::Char => out(&format!("<CHARSXP: {}>\n", encode_string(&char_str(value), Some('"')))),
+        SexpType::Char => out(&format!(
+            "<CHARSXP: {}>\n",
+            encode_string(&char_str(value), Some('"'))
+        )),
         kind if kind.is_atomic() => {
             let dims = values::dims(value);
             match dims.as_deref() {
@@ -173,7 +188,9 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                     // empty one, on a line of its own, as a 1-D table does.
                     let dimnames_names = values::names(get_attr(value, symbols().dimnames));
                     if dimnames_names != nil() {
-                        let title = values::string_at(dimnames_names, 0).map(|text| text.into_owned()).unwrap_or_default();
+                        let title = values::string_at(dimnames_names, 0)
+                            .map(|text| text.into_owned())
+                            .unwrap_or_default();
                         out(&format!("{title}\n"));
                     }
                     print_vector(value, options)?
@@ -206,7 +223,12 @@ unsafe fn print_primitive(value: Sexp) -> R<()> {
             let function = value_of(function)?;
             if function.kind() == SexpType::Closure {
                 let lines = deparse::deparse_lines(
-                    values::triple(SexpType::Closure, function.car(), nil(), values::global_env())?,
+                    values::triple(
+                        SexpType::Closure,
+                        function.car(),
+                        nil(),
+                        values::global_env(),
+                    )?,
                     60,
                     deparse::options::SIMPLE,
                 );
@@ -226,8 +248,12 @@ unsafe fn print_primitive(value: Sexp) -> R<()> {
 }
 
 unsafe fn print_closure(function: Sexp, options: &PrintOptions) -> R<()> {
-    let _ = options;
-    let lines = deparse::deparse_lines(function, 60, deparse::options::SIMPLE);
+    let source = match options.use_source {
+        true => deparse::source_lines(get_attr(function, symbols().srcref)),
+        false => None,
+    };
+    let lines =
+        source.unwrap_or_else(|| deparse::deparse_lines(function, 60, deparse::options::SIMPLE));
     for line in lines {
         out(&format!("{line}\n"));
     }
@@ -300,12 +326,20 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     } else {
         vector
     };
-    let items = escape_unquoted(format::format_vector(subset, options.settings, options.quote, na)?, vector, options);
+    let items = escape_unquoted(
+        format::format_vector(subset, options.settings, options.quote, na)?,
+        vector,
+        options,
+    );
     if names != nil() {
         print_named_vector(&items, names, options);
     } else {
         let right = vector.kind() != SexpType::String || options.right;
-        let width = items.iter().map(|item| display_width(item)).max().unwrap_or(0);
+        let width = items
+            .iter()
+            .map(|item| display_width(item))
+            .max()
+            .unwrap_or(0);
         let labels = label_width(shown);
         let mut line = String::new();
         let mut used = 0;
@@ -366,7 +400,12 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptio
 }
 
 /// The text of each column of a matrix, formatted per column as GNU R does.
-unsafe fn matrix_columns(matrix: Sexp, rows: usize, cols: usize, options: &PrintOptions) -> R<Vec<Vec<String>>> {
+unsafe fn matrix_columns(
+    matrix: Sexp,
+    rows: usize,
+    cols: usize,
+    options: &PrintOptions,
+) -> R<Vec<Vec<String>>> {
     let na = if matrix.kind() == SexpType::String && !options.quote {
         &options.na_string_noquote
     } else {
@@ -376,7 +415,11 @@ unsafe fn matrix_columns(matrix: Sexp, rows: usize, cols: usize, options: &Print
     for col in 0..cols {
         let indices: Vec<usize> = (0..rows).map(|row| row + col * rows).collect();
         let column = crate::subset::select_elements(matrix, &indices)?;
-        columns.push(escape_unquoted(format::format_vector(column, options.settings, options.quote, na)?, matrix, options));
+        columns.push(escape_unquoted(
+            format::format_vector(column, options.settings, options.quote, na)?,
+            matrix,
+            options,
+        ));
     }
     Ok(columns)
 }
@@ -386,7 +429,10 @@ unsafe fn escape_unquoted(items: Vec<String>, vector: Sexp, options: &PrintOptio
     if vector.kind() != SexpType::String || options.quote {
         return items;
     }
-    items.into_iter().map(|item| encode_string(&item, None)).collect()
+    items
+        .into_iter()
+        .map(|item| encode_string(&item, None))
+        .collect()
 }
 
 pub unsafe fn print_matrix(
@@ -404,37 +450,69 @@ pub unsafe fn print_matrix(
     };
     let dimnames_names = values::names(dimnames);
     let row_title = if dimnames_names != nil() {
-        values::string_at(dimnames_names, 0).map(|text| text.into_owned()).unwrap_or_default()
+        values::string_at(dimnames_names, 0)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
     } else {
         String::new()
     };
     let col_title = if dimnames_names != nil() && length(dimnames_names) > 1 {
-        values::string_at(dimnames_names, 1).map(|text| text.into_owned()).unwrap_or_default()
+        values::string_at(dimnames_names, 1)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
     } else {
         String::new()
     };
     let row_labels: Vec<String> = (0..rows)
         .map(|row| {
             if row_names != nil() {
-                values::string_at(row_names, row).map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(row_names, row)
+                    .map_or("<NA>".to_owned(), |text| text.into_owned())
             } else {
                 format!("[{},]", row + 1)
             }
         })
         .collect();
-    let row_label_width = row_labels
+    // Row names align left, but GNU R right-aligns the `[i,]` labels that stand in for them.
+    // Named dimnames (even named "") indent the row labels by at least two columns, or enough
+    // for the row title, and always print the column title line.
+    let numbered_rows = row_names == nil();
+    let titled = dimnames_names != nil();
+    let label_width = row_labels
         .iter()
         .map(|label| display_width(label))
-        .chain(std::iter::once(display_width(&row_title)))
         .max()
         .unwrap_or(0);
+    let offset = if !titled {
+        0
+    } else if display_width(&row_title) < label_width + 2 {
+        2
+    } else {
+        display_width(&row_title) - label_width
+    };
+    let row_label_width = label_width + offset;
+    let row_labels: Vec<String> = row_labels
+        .into_iter()
+        .map(|label| {
+            if numbered_rows {
+                pad(&label, row_label_width, true)
+            } else {
+                pad(
+                    &format!("{}{label}", " ".repeat(offset)),
+                    row_label_width,
+                    false,
+                )
+            }
+        })
+        .collect();
     let columns = matrix_columns(matrix, rows, cols, options)?;
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
     let col_labels: Vec<String> = (0..cols)
         .map(|col| {
             if col_names != nil() {
-                values::string_at(col_names, col).map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(col_names, col)
+                    .map_or("<NA>".to_owned(), |text| text.into_owned())
             } else {
                 format!("[,{}]", col + 1)
             }
@@ -456,7 +534,7 @@ pub unsafe fn print_matrix(
         text.push_str(&pad(&row_title, row_label_width, false));
         text.push('\n');
         for label in &row_labels {
-            text.push_str(&pad(label, row_label_width, false));
+            text.push_str(label);
             text.push('\n');
         }
         out(&text);
@@ -471,9 +549,8 @@ pub unsafe fn print_matrix(
             end += 1;
         }
         let mut text = String::new();
-        if !col_title.is_empty() {
+        if titled {
             text.push_str(&" ".repeat(row_label_width));
-            text.push_str(&" ".repeat(options.gap));
             text.push_str(&col_title);
             text.push('\n');
         }
@@ -485,7 +562,7 @@ pub unsafe fn print_matrix(
         }
         text.push('\n');
         for row in 0..rows {
-            text.push_str(&pad(&row_labels[row], row_label_width, false));
+            text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
                 text.push_str(&pad(&columns[col][row], widths[col], right));
@@ -511,9 +588,17 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         for (dimension, &extent) in dims.iter().enumerate().skip(2) {
             let position = remainder % extent;
             remainder /= extent;
-            let names = if dimnames.kind() == SexpType::List { dimnames.element(dimension) } else { nil() };
+            let names = if dimnames.kind() == SexpType::List {
+                dimnames.element(dimension)
+            } else {
+                nil()
+            };
             if names != nil() {
-                parts.push(values::string_at(names, position).map(|text| text.into_owned()).unwrap_or_default());
+                parts.push(
+                    values::string_at(names, position)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default(),
+                );
             } else {
                 parts.push((position + 1).to_string());
             }
@@ -623,7 +708,7 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             || name == symbols.srcfile
             || (name == symbols.comment)
             || (name == symbols.row_names && values::inherits(value, "data.frame"))
-            || (matches!(value.kind(), SexpType::Pairlist | SexpType::Language));
+            || value.kind() == SexpType::Pairlist;
         if !skip {
             let saved = tag.clone();
             // An attribute's label continues the labels of the attributes it is nested in, but
@@ -655,10 +740,24 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     let value = call.arg(0);
     let args = call.arg(1);
     let mut options = PrintOptions::defaults(call.env);
+    let missings = call.arg(2);
     let mut call_args = Vec::new();
-    for (tag, argument) in values::pairlist_items(args) {
+    for (position, (tag, argument)) in values::pairlist_items(args).into_iter().enumerate() {
         let argument = value_of(argument)?;
-        let name = if tag == nil() { String::new() } else { symbol_name(tag).into_owned() };
+        // Nested `print()` calls get the arguments the caller supplied, as in GNU R, so a method
+        // that does not take `quote` never sees the default.
+        let supplied = missings.kind() != SexpType::Logical
+            || values::ints(missings)
+                .get(position)
+                .is_none_or(|missing| *missing == 0);
+        if supplied {
+            call_args.push((tag, argument));
+        }
+        let name = if tag == nil() {
+            String::new()
+        } else {
+            symbol_name(tag).into_owned()
+        };
         match name.as_str() {
             "digits" => {
                 if argument != nil() {
@@ -667,16 +766,16 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                         return Err(call.error("invalid digits parameter (1 <= digits <= 22)"));
                     }
                     options.settings.digits = digits as usize;
-                    call_args.push((tag, argument));
                 }
             }
             "quote" => {
                 options.quote = values::as_logical_scalar(argument) != 0;
-                call_args.push((tag, argument));
             }
             "na.print" => {
                 if argument != nil() {
-                    let text = values::first_string(argument).map(|text| text.into_owned()).unwrap_or_default();
+                    let text = values::first_string(argument)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default();
                     options.na_string = text.clone();
                     options.na_string_noquote = text;
                 }
@@ -698,11 +797,14 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                 }
             }
             "useSource" => options.use_source = values::as_logical_scalar(argument) != 0,
-            _ => call_args.push((tag, argument)),
+            _ => {}
         }
     }
     options.call_args = call_args;
-    if value.has_gp(gp::S4_OBJECT) && value.is_object() && interp().globals.methods_namespace != nil() {
+    if value.has_gp(gp::S4_OBJECT)
+        && value.is_object()
+        && interp().globals.methods_namespace != nil()
+    {
         print_dispatch(value, &options, &mut String::new())?;
     } else {
         print_value(value, &options, &mut String::new())?;
@@ -710,9 +812,11 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     Ok(value)
 }
 
+/// `print.function(x, useSource, ...)`.
 unsafe fn do_print_function(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
-    let options = PrintOptions::defaults(call.env);
+    let mut options = PrintOptions::defaults(call.env);
+    options.use_source = values::as_logical_scalar(call.arg(1)) != 0;
     match function.kind() {
         SexpType::Closure => print_closure(function, &options)?,
         SexpType::Builtin | SexpType::Special => print_primitive(function)?,
