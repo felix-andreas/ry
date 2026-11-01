@@ -3399,7 +3399,7 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 
 ## Smaller runtime choices
 
-- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
+- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. The page is placed on the paper as GNU R places it (centred, turned a quarter for `horizontal = TRUE` with `%%Orientation: Landscape`), `paper = "special"` writes an EPS file whose bounding box is the page, and `onefile = FALSE` writes one file per page through the `%d` name. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
 - **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports ASCII as GNU R does and utf8's formatting under `LC_ALL=C` escapes what GNU R escapes.
 
 ## libR commits mimalloc arenas lazily, and handle vectors are not zeroed before their fill

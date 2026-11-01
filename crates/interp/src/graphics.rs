@@ -893,15 +893,21 @@ unsafe fn paper_device_size(paper: Sexp, width: Sexp, height: Sexp, horizontal: 
     if given.iter().all(|size| size.is_finite() && *size > 0.0) {
         return given;
     }
+    let [paper_width, paper_height] = named_paper(paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
+    let size = [paper_width - 0.5, paper_height - 0.5];
+    if horizontal { [size[1], size[0]] } else { size }
+}
+
+/// The size of the paper a `paper` argument names, with `"default"` taken from
+/// `getOption("papersize")`, or `None` for `"special"`.
+unsafe fn named_paper(paper: Sexp) -> Option<[f64; 2]> {
     let mut paper =
         values::first_string(paper).map_or_else(String::new, |paper| paper.into_owned());
     if paper == "default" {
         paper = values::first_string(crate::envir::get_option("papersize"))
             .map_or_else(|| "a4".to_owned(), |paper| paper.into_owned());
     }
-    let [paper_width, paper_height] = paper_size(&paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
-    let size = [paper_width - 0.5, paper_height - 0.5];
-    if horizontal { [size[1], size[0]] } else { size }
+    paper_size(&paper)
 }
 
 unsafe fn colour_arg(value: Sexp, default: Colour) -> R<Colour> {
@@ -946,7 +952,11 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let spec = graphics_render::DeviceSpec {
         name: "postscript",
         file: device_file(call.arg(0)),
-        format: Some(Format::Postscript),
+        format: Some(Format::Postscript {
+            onefile: values::as_logical_scalar(call.arg(10)) != 0,
+            paper: named_paper(call.arg(1)),
+            landscape: horizontal,
+        }),
         size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -1011,7 +1021,15 @@ unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
         3 => ("jpeg", true, Some(Format::Jpeg)),
         4 => ("svg", false, Some(Format::Svg)),
         6 => ("cairo_pdf", false, Some(Format::Pdf)),
-        7 => ("cairo_ps", false, Some(Format::Postscript)),
+        7 => (
+            "cairo_ps",
+            false,
+            Some(Format::Postscript {
+                onefile: true,
+                paper: None,
+                landscape: false,
+            }),
+        ),
         8 => ("tiff", true, Some(Format::Tiff)),
         9 => ("bmp", true, Some(Format::Bmp)),
         _ => return Err(error("invalid type for cairo device")),
