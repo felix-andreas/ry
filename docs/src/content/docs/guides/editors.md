@@ -13,10 +13,11 @@ editor that speaks LSP can run `ry server` as its language server for R.
 You get:
 
 - diagnostics as you type, the same ones `ry check` reports
-- hover with the inferred type of any expression
-- completion, including the fields of a list such as `person$`
+- hover with the inferred type of any expression, parameter or loop variable
+- completion, including the fields of a list such as `person$` and the argument names a call
+  still accepts (`second = `), with your own names ranked ahead of keywords and the library
 - go-to-definition, find references, and rename
-- signature help and inlay hints
+- signature help, and inlay hints for assignments and loop variables
 - formatting with the same rules as `ry fmt`
 
 Hover, completion and inlay hints use inferred types even when type errors are switched off, so you

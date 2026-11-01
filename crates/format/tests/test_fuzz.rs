@@ -54,6 +54,7 @@ const SEEDS: &[&str] = &[
     "type UserId = integer\nalias Box<T: numeric> = list{value: T}\nid <- @UserId(5L)\n",
     "alias Shape =\n  | :Circle(radius: double)\n  | :Empty\nx: @trust Shape <- y\n",
     "#: @alias Pair<T> {Tuple{T, T}}\nalias Pair<U> = Tuple{U, U}\np <- @Pair<integer>((1L, 2L))\n",
+    "#: @pure\ntwice <- @pure function(x) x * 2\nhalve <- @pure \\(x) x / 2\n",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -116,6 +117,7 @@ const ALPHABET: &[&str] = &[
     "repeat",
     "in",
     "@type",
+    "@pure",
     "fn",
     "list[",
     "list{",

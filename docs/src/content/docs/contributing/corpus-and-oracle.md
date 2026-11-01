@@ -74,7 +74,8 @@ it runs the driver through `ry run --runtime ry` with the workspace's debug buil
 `ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
 build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
-the compiled tier on every case. Without `--engine` or `ORACLE_ENGINE` the second engine
+the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
+`RY_GC_STRESS=1`, which collects before every allocation once the script starts. Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
@@ -198,6 +199,6 @@ The two time ratios answer different questions. Suite time adds up the `test_tha
 it measures evaluation. Process wall time also counts what happens between blocks, and at the full
 benchmark size (`--lines 300000 --files 500`) that is dominated by testthat calling `gc()` after
 every test file that registered a teardown. A full collection with the whole package loaded takes
-about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still match GNU R
+about 600 ms on GNU R and about 100 ms on ry, so ry can trail on suite time and still beat GNU R
 end to end.
 

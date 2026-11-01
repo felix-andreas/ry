@@ -22,6 +22,56 @@ use {
     },
 };
 
+/// The R version ry presents: that of the base package the session runs (`library/base` of the R
+/// home), so `R.version`, `getRversion()`, `packageVersion("base")` and the `Rversion.h` that
+/// `rcmd` generates from the same file agree, and a package compiled from source takes the same
+/// version branches in its C code as in its R code.
+pub struct RVersion {
+    pub major: String,
+    pub minor: String,
+    pub year: String,
+    pub month: String,
+    pub day: String,
+    pub revision: u32,
+}
+
+/// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
+/// guard for them also checks the revision, so ry reports at least this one.
+pub const MINIMUM_SVN_REVISION: u32 = 89194;
+
+/// The version of the session's base package; see [`RVersion`].
+pub fn r_version() -> &'static RVersion {
+    static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        let path = Path::new(&r_home()).join("library/base/DESCRIPTION");
+        let description = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("cannot read the base package's {}: {error}", path.display())
+        });
+        let field = |name: &str| {
+            description.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let version =
+            field("Version").unwrap_or_else(|| panic!("{} has no Version field", path.display()));
+        let (major, minor) = version.split_once('.').unwrap_or((&version, ""));
+        let date = field("Last Changed Date").unwrap_or_default();
+        let mut date = date.splitn(3, '-').map(str::to_owned);
+        let revision = field("Revision")
+            .and_then(|revision| revision.parse().ok())
+            .unwrap_or(0);
+        RVersion {
+            major: major.to_owned(),
+            minor: minor.to_owned(),
+            year: date.next().unwrap_or_default(),
+            month: date.next().unwrap_or_default(),
+            day: date.next().unwrap_or_default(),
+            revision: revision.max(MINIMUM_SVN_REVISION),
+        }
+    })
+}
+
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
@@ -31,7 +81,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
     }),
-    internal("icuSetCollate", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("icuSetCollate", -1, |_| Ok(nil())).invisible(),
     internal("icuGetCollate", 1, |_| unsafe {
         scalar_string("ICU not in use")
     }),
@@ -42,19 +92,19 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
     }),
     internal("readRenviron", 1, do_read_renviron).invisible(),
-    internal("debug", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("undebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("debug", 3, |_| Ok(nil())).invisible(),
+    internal("undebug", 1, |_| Ok(nil())).invisible(),
+    internal("debugonce", 3, |_| Ok(nil())).invisible(),
     internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("browserText", 1, |call| unsafe {
+    internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
-    internal("browserCondition", 1, |call| unsafe {
+    internal("browserCondition", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
-    internal("browserSetDebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("browserSetDebug", 1, |_| Ok(nil())).invisible(),
     internal("memory.profile", 0, |_| unsafe {
         values::integer_vector(&[])
     }),
@@ -79,14 +129,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(nil())
     })
     .invisible(),
-    internal("file.choose", 1, |call| unsafe {
+    internal("file.choose", 1, |call| {
         Err(call.error("file.choose() needs an interactive session"))
     }),
     internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
-    internal("curlGetHeaders", 5, |call| unsafe {
+    internal("curlGetHeaders", 5, |call| {
         Err(call.error("libcurl is not available in this session"))
     }),
-    internal("curlDownload", 6, |call| unsafe {
+    internal("curlDownload", 6, |call| {
         Err(call.error("libcurl is not available in this session"))
     }),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
@@ -207,18 +257,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Cstack_info", 0, |_| unsafe {
         values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
     }),
-    internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
+    internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
     internal("traceback", 1, |call| unsafe {
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
     }),
-    internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
+    internal(".traceback", 1, |_| Ok(nil())),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
-    builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
+    builtin("enc2native", 1, |call| Ok(call.arg(0))),
+    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -251,24 +301,24 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     // ry has no interactive debugger, so `browser()` continues as it does in a
     // non-interactive GNU R session.
-    special("browser", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    special("browser", -1, |_| Ok(nil())).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
-    builtin("untracemem", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    builtin("retracemem", -1, |_| unsafe { Ok(nil()) }).invisible(),
-    builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    internal("format.Date", 2, |call| unsafe {
+    builtin("untracemem", 1, |_| Ok(nil())).invisible(),
+    builtin("retracemem", -1, |_| Ok(nil())).invisible(),
+    builtin(".primTrace", 1, |call| Ok(call.arg(0))).invisible(),
+    builtin(".primUntrace", 1, |call| Ok(call.arg(0))).invisible(),
+    internal("format.Date", 2, |call| {
         Err(call.error("format.Date is not supported"))
     }),
     internal("tzone_name", 0, |_| unsafe {
         scalar_string(&session_zone_name())
     }),
-    internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
-    internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
+    internal("bindtextdomain", 2, |_| Ok(nil())),
+    internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("enc2native", 1, |call| Ok(call.arg(0))),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -277,7 +327,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         ))
     }),
     internal("mkjunction", 2, |_| unsafe { scalar_bool(false) }),
-    internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
+    internal("pkgload", -1, |_| Ok(nil())),
 ];
 
 /// GNU R's identifier for its internals interface, which `loadNamespace` compares against the one a
@@ -1378,7 +1428,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         // reads them. One without stays without them: GNU R normalizes its wall clock as plain
         // calendar arithmetic and keeps its `isdst` and `tzone`.
         let tz = posixlt_zone(list)?;
-        let result = if length(list) >= 11 {
+        if length(list) >= 11 {
             let seconds = posixlt_instants(list, &tz)?;
             posixlt_from_seconds(&seconds, &tz)?
         } else {
@@ -1418,8 +1468,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
             }
             values::set_attr(result, balanced_symbol, scalar_bool(true)?)?;
             result
-        };
-        result
+        }
     };
     if !already && length(list) > 5 && length(result) > 5 {
         // The year's names recycle with the fields, as GNU R balances them.
@@ -2358,21 +2407,26 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
     let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
+    let version = r_version();
+    let date = format!("{}-{}-{}", version.year, version.month, version.day);
     let fields: Vec<(&str, String)> = vec![
         ("platform", platform.clone()),
         ("arch", std::env::consts::ARCH.to_owned()),
         ("os", "linux-gnu".to_owned()),
         ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
         ("status", String::new()),
-        ("major", "4".to_owned()),
-        ("minor", "3.3".to_owned()),
-        ("year", "2024".to_owned()),
-        ("month", "02".to_owned()),
-        ("day", "29".to_owned()),
-        ("svn rev", "86002".to_owned()),
+        ("major", version.major.clone()),
+        ("minor", version.minor.clone()),
+        ("year", version.year.clone()),
+        ("month", version.month.clone()),
+        ("day", version.day.clone()),
+        ("svn rev", version.revision.to_string()),
         ("language", "R".to_owned()),
-        ("version.string", "R version 4.3.3 (2024-02-29)".to_owned()),
-        ("nickname", "Angel Food Cake".to_owned()),
+        (
+            "version.string",
+            format!("R version {}.{} ({date})", version.major, version.minor),
+        ),
+        ("nickname", "ry".to_owned()),
     ];
     let items: Vec<(&str, Sexp)> = fields
         .iter()
@@ -2506,7 +2560,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
             values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
             crate::conditions::warning_call(
                 call.call,
-                &format!("running command '{command}' had status {status}"),
+                format!("running command '{command}' had status {status}"),
             )?;
         }
         return Ok(result);
@@ -2911,7 +2965,7 @@ unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         crate::conditions::warning_call(
             call.call,
-            &format!("file '{path}' cannot be opened for reading"),
+            format!("file '{path}' cannot be opened for reading"),
         )?;
         return scalar_bool(false);
     };

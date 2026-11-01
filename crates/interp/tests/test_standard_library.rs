@@ -19,6 +19,10 @@ as.list <- function(x, ...) UseMethod("as.list")
 identical <- function(x, y) .Internal(identical(x, y, TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, FALSE))
 deparse <- function(expr) .Internal(deparse(expr, 500L, TRUE, 1089L, -1L))
 typeof <- function(x) .Internal(typeof(x))
+environment <- function(fun = NULL) .Internal(environment(fun))
+parent.frame <- function(n = 1) .Internal(parent.frame(n))
+eval <- function(expr, envir) .Internal(eval(expr, envir, NULL))
+eval.parent <- function(expr, n = 1) { p <- parent.frame(n + 1); eval(expr, p) }
 xs <- list(3L, 1L, 2L)
 words <- list("pear", "fig", "apple")
 d <- Dict.from_list(list(("a", 1), ("b", 2)))
@@ -281,8 +285,62 @@ const PRINTS: &[(&str, &str)] = &[
     ("Dict.is_empty(d)", "[1] FALSE\n"),
     ("Dict.get(d, \"b\")", ":Ok(2)\n"),
     ("Dict.get(d, \"z\")", ":Err(:KeyNotFound)\n"),
-    ("Dict.get(d, 1L)", ":Err(:KeyNotFound)\n"),
+    ("Dict.get(Dict.empty(), 1L)", ":Err(:KeyNotFound)\n"),
+    (
+        "Dict.get(Dict.from_list(list((1, \"one\"))), 1L)",
+        ":Ok(\"one\")\n",
+    ),
     ("Dict.contains(d, \"a\")", "[1] TRUE\n"),
+    // Updates in place keep value semantics. Each case also runs in a body with a loop, which
+    // compiles to bytecode on its first call, so the register checks are exercised too.
+    (
+        "{ st <- list(seen = Dict.empty()); for (i in 1:5) st$seen <- Dict.insert(st$seen, i, i); Dict.len(st$seen) }",
+        "[1] 5\n",
+    ),
+    (
+        "{ a <- list(seen = Dict.empty()); b <- a; a$seen <- Dict.insert(a$seen, 1L, 1); c(Dict.len(a$seen), Dict.len(b$seen)) }",
+        "[1] 1 0\n",
+    ),
+    (
+        "{ a <- list(list(Set.empty())); b <- a[[1]]; a[[1]][[1]] <- Set.insert(a[[1]][[1]], 1L); c(Set.len(a[[1]][[1]]), Set.len(b[[1]])) }",
+        "[1] 1 0\n",
+    ),
+    (
+        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); for (i in 1:5) m <- add(m, i); Dict.len(m) }",
+        "[1] 5\n",
+    ),
+    (
+        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); keep <- m; m <- add(m, 1L); c(Dict.len(m), Dict.len(keep)) }",
+        "[1] 1 0\n",
+    ),
+    (
+        "{ add <- function(m, k) { m <- Dict.insert(m, k, k); m }; m <- Dict.empty(); n <- add(m, 1L); c(Dict.len(m), Dict.len(n)) }",
+        "[1] 0 1\n",
+    ),
+    (
+        "{ add <- function(m, k) { for (i in 1) NULL; m <- Dict.insert(m, k, k); m }; run <- function() { for (i in 1) NULL; m <- Dict.empty(); keep <- m; m <- add(m, 1L); m <- add(m, 2L); c(Dict.len(m), Dict.len(keep)) }; run() }",
+        "[1] 2 0\n",
+    ),
+    (
+        "{ kept <- NULL; add <- function(m) { m <- Dict.insert(m, 1L, 1); kept <<- environment(); m }; m <- Dict.empty(); m <- add(m); m <- Dict.insert(m, 2L, 2); c(Dict.len(m), Dict.len(kept$m)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ main <- function() { d <- Dict.single(\"z\", 0); h <- function(x, k, y) { x <- Dict.insert(x, k, 1); Dict.len(y) }; n <- 0L; d <- { n <- h(d, \"a\", d); d }; inner <- function(x) { x <- Dict.insert(x, \"b\", 1); Dict.len(d) }; c(n, inner(d)) }; main() }",
+        "[1] 1 1\n",
+    ),
+    (
+        "{ main <- function() { st <- list(seen = Dict.single(\"z\", 0)); st$seen <- Dict.insert(st$seen, \"k\", st); old <- Result.with_default(Dict.get(st$seen, \"k\"), NULL); Dict.len(old$seen) }; main() }",
+        "[1] 1\n",
+    ),
+    (
+        "{ h <- function() eval.parent(quote(x[[1]] <- 99)); f <- function() { for (i in 1) NULL; x <- list(1); r <- list(x, h()); c(r[[1]][[1]], x[[1]]) }; f() }",
+        "[1]  1 99\n",
+    ),
+    (
+        "{ h <- function() eval.parent(quote(s <- Set.insert(s, 9L))); f <- function() { for (i in 1) NULL; s <- Set.empty(); r <- list(s, h()); c(Set.len(r[[1]]), Set.len(s)) }; f() }",
+        "[1] 0 1\n",
+    ),
     (
         "Dict.insert(d, \"a\", 10)",
         "Dict.from_list(list((\"a\", 10), (\"b\", 2)))\n",
@@ -679,6 +737,14 @@ const PRINTS: &[(&str, &str)] = &[
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
+    (
+        "Dict.get(d, 1L)",
+        "the dict's keys are character, and this one is integer; a collection holds one type",
+    ),
+    (
+        "Set.contains(s, \"a\")",
+        "the set's elements are integer, and this one is character; a collection holds one type",
+    ),
     (
         "List.len(c(1, 2))",
         "`list` must be a list, not a double vector of length 2",

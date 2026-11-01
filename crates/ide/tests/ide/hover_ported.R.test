@@ -60,7 +60,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: integer\n"
   edit 24..24 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): other, result, value, break, else, FALSE, for, function
 hint @5: integer
 hint @17: integer
 hint @30: integer
@@ -81,7 +81,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 11..11 -> "#: integer\n"
   edit 23..23 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): data, index, result, break, else, FALSE, for, function
 hint @4: integer
 hint @16: integer
 hint @29: integer
@@ -102,7 +102,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 11..11 -> "#: integer\n"
   edit 23..23 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): data, index, result, break, else, FALSE, for, function
 hint @4: integer
 hint @16: integer
 hint @29: integer
@@ -149,7 +149,7 @@ action: Add inferred type annotation for `block`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): block, value, break, else, FALSE, for, function, if
 hint @5: integer
 hint @17: integer
 
@@ -167,7 +167,7 @@ action: Add inferred type annotation for `negated`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): negated, value, break, else, FALSE, for, function, if
 hint @5: integer
 hint @19: integer
 
@@ -206,6 +206,7 @@ action: Add inferred type annotations for the whole file
 completion (102): F, FALSE, for, function, factanal, factor, factor.scope, factorial
 hint @5: integer
 hint @18: NULL
+hint @31: integer
 
 #---- while_expression
 value <- 1L
@@ -301,7 +302,7 @@ action: Add inferred type annotation for `ratio`
   edit 0..0 -> "#: double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: double\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): ratio, break, else, FALSE, for, function, if, in
 hint @5: double
 
 #---- string_subscript_name
@@ -374,7 +375,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (87): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (87): trusted, TRUE, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -554,6 +555,7 @@ action: Add inferred type annotations for the whole file
 completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
 hint @1: fn() -> integer
 hint @25: integer
+hint @40: integer
 hint @60: integer
 
 #---- if_else_union_binding
@@ -582,6 +584,7 @@ references: 5..9*, 38..42
 rename: 2 edit(s)
 signature: none
 completion (1): item
+hint @9: integer | character
 
 #==== hover_schemes
 #---- one_type_variable

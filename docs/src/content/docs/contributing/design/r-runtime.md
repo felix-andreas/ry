@@ -236,6 +236,13 @@ That means `R_VERSION` and `Rversion.h`, and also `R_SVN_REVISION`: data.table's
 `R_VERSION < R_Version(4, 6, 0) || R_SVN_REVISION < 89077` (and `< 89194` for `R_mapAttrib`), so ry
 must report a revision of at least 89194 or data.table takes the backport.
 
+In practice the runtime runs the base R code of the GNU R installation its R home links, so ry
+presents that installation's version. `R.version`, `getRversion()` and the home's generated
+`Rversion.h` all come from its `library/base/DESCRIPTION`, and the revision is raised to at least
+89194. Linked to R 4.6, ry presents 4.6 as recommended here. Linked to an older R, such as the 4.3.3
+the corpus baseline runs on, it presents that version, because a package whose C code takes the 4.6
+branches while its R code runs on a 4.3 base breaks (rlang's `ns_registry_env()` is one example).
+
 A real non-API surface remains after that, unguarded: the promise accessors in `rlang`, `vctrs`,
 `lazyeval` and `magrittr` and `PRCODE`/`PRENV` in Rcpp's `Promise.h`, `ATTRIB` and `SET_ATTRIB`,
 `IS_UTF8` and `IS_ASCII` in `stringi`, `fansi` and data.table's `forder.c`, `Rf_findVarInFrame` in

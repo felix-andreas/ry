@@ -4,7 +4,7 @@ description: Every way to install ry
 ---
 
 Most people install ry through their editor, and the VS Code extension needs nothing else. Install
-the command-line binary as well if you want `ry check`, `ry fmt` and `ry R` in a terminal or in
+the command-line binary as well if you want `ry check`, `ry fmt` and `ry run` in a terminal or in
 CI.
 
 ## VS Code

@@ -33,10 +33,11 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
         records::{Fields, Layout, NativeKind},
     },
-    rustc_hash::FxHasher,
+    rustc_hash::{FxHashSet, FxHasher},
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
+        sync::LazyLock,
     },
 };
 
@@ -2378,6 +2379,19 @@ unsafe fn num_to_integer_checked(call: &Call<'_>) -> R<Sexp> {
 
 // In-place updates.
 
+/// Whether the library function `name` may update its first argument in place, which the
+/// compiler asks of every `x <- f(x, ...)` it compiles.
+pub fn reuses_first_argument(name: &str) -> bool {
+    static REUSING: LazyLock<FxHashSet<&'static str>> = LazyLock::new(|| {
+        BUILTINS
+            .iter()
+            .filter(|definition| definition.reuses_first_argument)
+            .map(|definition| definition.name)
+            .collect()
+    });
+    REUSING.contains(name)
+}
+
 /// Whether the call may update `value` in place: nothing else references it, because it is a
 /// temporary or because its only holder is the binding the result is assigned back to. This is
 /// reference counting's version of Roc's uniqueness check.
@@ -2628,6 +2642,38 @@ impl KeyKind {
     }
 }
 
+/// The key type of a collection whose keys are `stored` once it also holds a key of type `kind`,
+/// or the error for a key of another type, which inserting and looking up both raise: the
+/// checker rejects such a key, so only code it could not type reaches this.
+fn joined_key_kind(
+    call: &Call<'_>,
+    collection: NativeKind,
+    stored: Option<KeyKind>,
+    kind: KeyKind,
+) -> R<KeyKind> {
+    match stored {
+        None => Ok(kind),
+        Some(current) if current == kind => Ok(current),
+        Some(KeyKind::Integer | KeyKind::Double)
+            if matches!(kind, KeyKind::Integer | KeyKind::Double) =>
+        {
+            Ok(KeyKind::Double)
+        }
+        Some(current) => {
+            let what = if collection == NativeKind::Dict {
+                "dict's keys"
+            } else {
+                "set's elements"
+            };
+            Err(call.error(format!(
+                "the {what} are {}, and this one is {}; a collection holds one type",
+                current.name(),
+                kind.name()
+            )))
+        }
+    }
+}
+
 unsafe fn key_equal(left: Key, right: Key) -> bool {
     match (left, right) {
         (Key::Logical(left), Key::Logical(right)) => left == right,
@@ -2757,27 +2803,7 @@ impl Collection {
 
     /// Adds `key` (with `value` for a dictionary), replacing the value of an existing key.
     unsafe fn insert(&mut self, call: &Call<'_>, key: Key, kind: KeyKind, value: Sexp) -> R<()> {
-        self.key_kind = Some(match self.key_kind {
-            None => kind,
-            Some(current) if current == kind => current,
-            Some(KeyKind::Integer | KeyKind::Double)
-                if matches!(kind, KeyKind::Integer | KeyKind::Double) =>
-            {
-                KeyKind::Double
-            }
-            Some(current) => {
-                let what = if self.kind == NativeKind::Dict {
-                    "dict's keys"
-                } else {
-                    "set's elements"
-                };
-                return Err(call.error(format!(
-                    "the {what} are {}, and this one is {}; a collection holds one type",
-                    current.name(),
-                    kind.name()
-                )));
-            }
-        });
+        self.key_kind = Some(joined_key_kind(call, self.kind, self.key_kind, kind)?);
         match probe(&self.index, key, |position| self.keys[position]) {
             Ok(position) => {
                 if self.kind == NativeKind::Dict {
@@ -2911,13 +2937,15 @@ unsafe fn probe(
     }
 }
 
-/// The position of `key` in a stored collection, looked up through its index without copying it.
-unsafe fn lookup(object: Sexp, key: Key) -> R<Option<usize>> {
+/// The position of `key`, of type `key_kind`, in a stored collection, looked up through its index
+/// without copying it. A key of another type than the collection's is an error.
+unsafe fn lookup(call: &Call<'_>, object: Sexp, key: Key, key_kind: KeyKind) -> R<Option<usize>> {
     let kind = records::native_kind(object);
     let keys = records::slot_value(object, 0)?;
     if keys == nil() {
         return Ok(None);
     }
+    joined_key_kind(call, kind, key_kind_of(keys), key_kind)?;
     let index = records::slot_value(object, index_slot(kind))?;
     Ok(probe(values::ints(index), key, |position| key_at(keys, position)).ok())
 }
@@ -3097,8 +3125,8 @@ unsafe fn dict_is_empty(call: &Call<'_>) -> R<Sexp> {
 unsafe fn dict_get(call: &Call<'_>) -> R<Sexp> {
     let [object, key] = arguments(call, ["dict", "key"])?;
     let object = dict(call, object)?;
-    let (key, _) = key_of(call, "key", key)?;
-    match lookup(object, key)? {
+    let (key, kind) = key_of(call, "key", key)?;
+    match lookup(call, object, key, kind)? {
         Some(position) => ok(records::slot_value(object, 1)?.element(position)),
         None => err("KeyNotFound"),
     }
@@ -3107,8 +3135,8 @@ unsafe fn dict_get(call: &Call<'_>) -> R<Sexp> {
 unsafe fn dict_contains(call: &Call<'_>) -> R<Sexp> {
     let [object, key] = arguments(call, ["dict", "key"])?;
     let object = dict(call, object)?;
-    let (key, _) = key_of(call, "key", key)?;
-    scalar_bool(lookup(object, key)?.is_some())
+    let (key, kind) = key_of(call, "key", key)?;
+    scalar_bool(lookup(call, object, key, kind)?.is_some())
 }
 
 unsafe fn dict_insert(call: &Call<'_>) -> R<Sexp> {
@@ -3127,8 +3155,8 @@ unsafe fn dict_insert(call: &Call<'_>) -> R<Sexp> {
 unsafe fn dict_remove(call: &Call<'_>) -> R<Sexp> {
     let [object, key] = arguments(call, ["dict", "key"])?;
     let object = dict(call, object)?;
-    let (key, _) = key_of(call, "key", key)?;
-    let Some(removed) = lookup(object, key)? else {
+    let (key, kind) = key_of(call, "key", key)?;
+    let Some(removed) = lookup(call, object, key, kind)? else {
         return Ok(object);
     };
     let mut collection = Collection::read(object)?;
@@ -3140,6 +3168,7 @@ unsafe fn dict_update(call: &Call<'_>) -> R<Sexp> {
     let [object, key_argument, f] = arguments(call, ["dict", "key", "f"])?;
     let mut collection = Collection::read(dict(call, object)?)?;
     let (key, kind) = key_of(call, "key", key_argument)?;
+    joined_key_kind(call, NativeKind::Dict, collection.key_kind, kind)?;
     let f = function(call, "f", f)?;
     let found = collection.find(key);
     let current = match found {
@@ -3400,8 +3429,8 @@ unsafe fn set_is_empty(call: &Call<'_>) -> R<Sexp> {
 unsafe fn set_contains(call: &Call<'_>) -> R<Sexp> {
     let [object, element] = arguments(call, ["set", "element"])?;
     let object = set(call, object)?;
-    let (key, _) = key_of(call, "element", element)?;
-    scalar_bool(lookup(object, key)?.is_some())
+    let (key, kind) = key_of(call, "element", element)?;
+    scalar_bool(lookup(call, object, key, kind)?.is_some())
 }
 
 unsafe fn set_insert(call: &Call<'_>) -> R<Sexp> {
@@ -3420,8 +3449,8 @@ unsafe fn set_insert(call: &Call<'_>) -> R<Sexp> {
 unsafe fn set_remove(call: &Call<'_>) -> R<Sexp> {
     let [object, element] = arguments(call, ["set", "element"])?;
     let object = set(call, object)?;
-    let (key, _) = key_of(call, "element", element)?;
-    let Some(removed) = lookup(object, key)? else {
+    let (key, kind) = key_of(call, "element", element)?;
+    let Some(removed) = lookup(call, object, key, kind)? else {
         return Ok(object);
     };
     let mut collection = Collection::read(object)?;

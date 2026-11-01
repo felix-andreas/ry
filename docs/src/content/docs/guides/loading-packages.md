@@ -9,7 +9,7 @@ step, because ry reloads what you changed before each command:
 
 ```text
 $ ry run
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 5 ms.
 ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
@@ -20,7 +20,7 @@ on `"[[:space:]]+"`, save, and run the same command again:
 
 ```text
 > count_words("the  quick fox")
-Reloaded tally: 1 function rebound, in 3 ms.
+Reloaded tally: 1 definition rebound, in 3 ms.
 [1] 3
 ```
 
@@ -28,6 +28,8 @@ There is no `load_all()` to remember and no session to restart. A reload replace
 definitions you changed and reruns only the top-level code that depends on them, so it stays fast on
 a large package: about 80 ms after an edit on a 326,000-line package, where `load_all()`
 takes 8.6 s (see [Speed](#speed)).
+Under [strict mode](/type-checking/strict-mode), the package's pure constants are bound the same
+lazy way as its functions.
 
 ## Running one command or a script
 
@@ -37,7 +39,7 @@ a script in CI. Like `ry run`, it runs the package on ry's own runtime, which is
 
 ```text
 $ ry load -e 'count_words("the quick fox")'
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 6 ms.
 [1] 3
 ```
 

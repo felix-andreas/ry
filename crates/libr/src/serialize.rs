@@ -256,8 +256,16 @@ pub const DEFAULT_VERSION: c_int = 3;
 /// What a version-3 stream records as the writer's native encoding.
 const NATIVE_ENCODING: &str = "UTF-8";
 
-/// `R_Version(4, 6, 2)`: ry presents itself as R 4.6.2.
-const WRITER_VERSION: c_int = r_version(4, 6, 2);
+/// The writer's R version, which is the version ry presents (`interp::system::r_version`).
+fn writer_version() -> c_int {
+    let version = interp::system::r_version();
+    let mut minor = version
+        .minor
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0));
+    let major = version.major.parse().unwrap_or(0);
+    r_version(major, minor.next().unwrap_or(0), minor.next().unwrap_or(0))
+}
 
 const fn r_version(major: c_int, minor: c_int, patch: c_int) -> c_int {
     major * 65536 + minor * 256 + patch
@@ -525,7 +533,7 @@ impl Writer<'_, '_> {
         self.write_bytes(magic)?;
         for field in [
             self.version,
-            WRITER_VERSION,
+            writer_version(),
             min_reader_version(self.version),
         ] {
             self.write_integer(field)?;
@@ -956,6 +964,30 @@ impl Source for SliceSource<'_> {
 pub unsafe fn from_bytes(bytes: &[u8]) -> ApiResult<Sexp> {
     let mut source = SliceSource::new(bytes);
     Ok(unserialize(&mut source, None)?.0)
+}
+
+/// Any byte stream either fails to read with an error or reads into an object that writes back
+/// and reads again. Nothing panics. Shared by the in-tree corrupted-stream harness and the
+/// coverage-guided `fuzz/` target.
+///
+/// # Safety
+/// The caller has the runtime to itself, as for every API call.
+pub unsafe fn check_unserialize_input(bytes: &[u8]) {
+    unsafe {
+        let mark = runtime().heap.handle_mark();
+        if let Ok(object) = from_bytes(bytes) {
+            let written = to_bytes(object, Format::Xdr, 3);
+            let Ok(written) = written else {
+                panic!("an object read from {bytes:02x?} does not write back: {written:?}");
+            };
+            let again = from_bytes(&written);
+            assert!(
+                again.is_ok(),
+                "an object read from {bytes:02x?} wrote a stream that does not read: {again:?}"
+            );
+        }
+        runtime().heap.release_handles(mark);
+    }
 }
 
 /// Reads a stream's header only, as `R_SerializeInfo` does.

@@ -40,7 +40,7 @@ apply_discount("100")
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `double`, found `character`
@@ -48,7 +48,9 @@ type-mismatch
 
 Every typed page of this guide already shows this spelling in its Inline tab, and it shares one
 type language with `#:` comments, so this page covers only what changes when you switch. Deleting
-each inline annotation turns a file into the plain R program it means.
+each inline annotation turns a file into the plain R program it means. That includes `@pure` in
+front of `function`, the inline spelling of the `#: @pure` comment that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) reads.
 
 Definitions are spelled `type UserId = integer` and `alias Row = list{id: integer}`, and
 `@UserId(raw)` creates a value of a nominal type, as [custom types](/type-checking/custom-types)
@@ -66,7 +68,7 @@ types, ry uses the inline type and warns:
 apply_rate <- function(price: integer, rate) price * rate
 ```
 
-```text
+```text ry check typing
 annotation-mismatch
 
   ! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it `double`. ry uses the inline type; make the two agree, or delete one
@@ -89,7 +91,7 @@ written twice, so it is not a duplicate. ry uses the inline one and warns when t
 type Celsius = integer
 ```
 
-```text
+```text ry check typing
 annotation-mismatch
 
   ! the inline definition of `Celsius` says `integer`, but the `#:` comment says `double`. ry uses the inline definition; make the two agree, or delete one
@@ -106,7 +108,7 @@ scale <- function(values: double, by: double) -> double values * by
 scale("a", 1)
 ```
 
-```text
+```text ry run runtime=ry
 $ ry run scale.R
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`

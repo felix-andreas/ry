@@ -4,21 +4,9 @@ description: An R console that reloads your package as you edit it, with complet
 ---
 
 `ry run` is the R console for working on a package. Start it anywhere inside the package, and each
-time you edit a file, the next command sees the change without a `load_all()` or a restart:
-
-```text
-$ ry run
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
-ry console on ry's runtime. Type q() or Ctrl-D to quit.
-> count_words("the  quick fox")
-[1] 4
-> count_words("the  quick fox")     # after editing R/count.R
-Reloaded tally: 1 function rebound, in 3 ms.
-[1] 3
-```
-
-[Loading packages](/guides/loading-packages) covers this loop in full, including how to get the same
-`load_all()` in RStudio. Outside a package, `ry run` is a plain R console with the extras below.
+time you edit a file, the next command sees the change without a `load_all()` or a restart.
+[Loading packages](/guides/loading-packages) shows the loop and how to get the same `load_all()` in
+RStudio. Outside a package, `ry run` is a plain R console with the extras below.
 
 You can type ahead. Lines you type while the console starts or while a command runs are kept, and
 they run in order at the next prompt; an unfinished last line waits in the editor for the rest.

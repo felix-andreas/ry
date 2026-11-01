@@ -284,3 +284,72 @@ ys <- as.Array(list(c(1, 2)))
 #++++
 ys: Unknown
 6..29 error[type-mismatch] no overload of `as.Array` matches these arguments. I tried all 6 declared signatures; the first candidate fails with: expected `logical[]`, found `list{double[]}`
+
+#==== contextual_lambdas
+#---- a_lambda_takes_the_item_type
+xs <- [1, 2]
+halves <- List.map(xs, \(x) x / 2)
+pairs <- List.map(xs, \(x) c(x, x))
+#++++
+xs: Array<double>
+halves: Array<double>
+pairs: Unknown
+70..82 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `double[]`
+
+#---- a_list_types_the_lambda_too
+words <- list("a", "bb")
+sizes <- List.map(words, \(w) nchar(w))
+#++++
+words: list{character, character}
+sizes: list[integer]
+
+#---- nested_lambdas_take_their_own_context
+grid <- List.map([1, 2], \(x) List.sum(List.map([10, 20], \(y) x * y)))
+#++++
+grid: Array<double>
+
+#---- an_annotated_parameter_keeps_its_annotation
+xs <- [1, 2]
+ys <- List.map(xs, function(x: integer) x)
+#++++
+xs: Array<double>
+ys: Unknown
+32..54 error[type-mismatch] this function is passed `double`, but its parameter `x` accepts `integer`
+
+#---- a_formal_with_a_default_is_left_to_inference
+xs <- [1, 2]
+scaled <- List.map(xs, function(x, scale = 2) x * scale)
+#++++
+xs: Array<double>
+scaled: Array<double>
+
+#---- a_body_that_refuses_the_item_type_names_the_parameter
+words <- ["a", "b"]
+bad <- List.map(words, \(w) w * 2)
+#++++
+words: Array<character>
+bad: Unknown
+48..49 error[type-mismatch] `w` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
+
+#---- a_formal_after_dots_takes_no_type
+words <- ["a", "b"]
+doubled <- List.map(words, function(..., w) w * 2)
+#++++
+words: Array<character>
+doubled: Unknown
+47..69 error[type-mismatch] this function is passed `character`, but its parameter `w` is used as a numeric value (`integer` or `double`)
+
+#---- a_fold_accumulator_is_left_to_inference
+bytes <- Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
+total <- List.walk([1L, 2L], list(), function(seen, item) List.append(seen, item))
+#++++
+bytes: list{}
+total: list{}
+
+#---- an_update_callback_keeps_its_item_hint
+people <- [(name = "a", age = 1), (name = "b", age = 2)]
+renamed <- List.update(people, 1L, function(p) (name = p$nme, age = p$age))
+#++++
+people: Array<Record{age: double, name: character}>
+renamed: Unknown
+114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`

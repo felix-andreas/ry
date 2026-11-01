@@ -1,0 +1,40 @@
+# The command line finds the same problems the editor does, and the formatter fixes layout.
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file ry.toml
+| [check]
+| typing = true
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) {
+|   width * height
+| }
+file R/report.R
+| report <- function() {
+|   area(2, "wide")
+| }
+| total=1
+
+run ry check
+expect exit 1
+expect stderr "type-mismatch"
+expect stderr "R/report.R:2:11"
+expect stderr "assignment-operator"
+
+run ry fmt --check
+expect exit 1
+expect stderr "Would reformat"
+
+run ry fmt
+expect exit 0
+expect file R/report.R "total = 1"
+
+file R/report.R
+| report <- function() {
+|   area(2, 3)
+| }
+| total <- 1
+run ry check
+expect exit 0
