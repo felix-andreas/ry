@@ -1082,8 +1082,10 @@ impl Compiler {
             return Ok(None);
         }
         let definition = eval::builtin_def(function)?;
-        Ok((definition.accepts_native && definition.kind == crate::builtins::Kind::Builtin)
-            .then_some(function))
+        Ok(
+            (definition.accepts_native && definition.kind == crate::builtins::Kind::Builtin)
+                .then_some(function),
+        )
     }
 
     /// A call to a standard library builtin resolved while compiling: a guard that the name

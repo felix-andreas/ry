@@ -1104,7 +1104,9 @@ unsafe fn move_undo_failures() -> Vec<String> {
         // SAFETY: the interpreter is installed.
         let reported = unsafe { printed(failing) };
         if !reported.contains("a collection holds one type") {
-            failures.push(format!("`{failing}`\n  reported {reported:?}\n  expected a key type error"));
+            failures.push(format!(
+                "`{failing}`\n  reported {reported:?}\n  expected a key type error"
+            ));
         }
         // SAFETY: as above.
         let printed = unsafe { printed(check) };

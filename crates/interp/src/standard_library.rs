@@ -536,7 +536,9 @@ unsafe fn tag(name: &'static str, payload: &[Sexp]) -> R<Sexp> {
         }
     };
     let heap = crate::heap();
-    let object = heap.alloc_record(layout, payload).map_err(|failure| error(failure.to_string()))?;
+    let object = heap
+        .alloc_record(layout, payload)
+        .map_err(|failure| error(failure.to_string()))?;
     heap.root(object);
     Ok(object)
 }

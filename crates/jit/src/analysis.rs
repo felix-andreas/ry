@@ -270,9 +270,14 @@ pub enum Intrinsic {
     /// `%/%`
     IntegerDivide(Numeric),
     /// `Dict.len()` or `Set.len()` (when `set`), or their `is_empty` (when `empty`).
-    CollectionCount { set: bool, empty: bool },
+    CollectionCount {
+        set: bool,
+        empty: bool,
+    },
     /// `Dict.contains()` or `Set.contains()`.
-    CollectionContains { set: bool },
+    CollectionContains {
+        set: bool,
+    },
     /// `Dict.get()`.
     DictGet,
 }

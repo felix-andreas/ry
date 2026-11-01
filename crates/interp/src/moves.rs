@@ -244,9 +244,9 @@ pub unsafe fn forcing(promise: Sexp) -> R<()> {
     let code = promise.cdr();
     let covered = match code.kind() {
         SexpType::Symbol => !moves.iter().any(|entry| entry.target == code),
-        SexpType::Language => moves.iter().any(|entry| {
-            promise.tag() == entry.callee || entry.promises.contains(&promise)
-        }),
+        SexpType::Language => moves
+            .iter()
+            .any(|entry| promise.tag() == entry.callee || entry.promises.contains(&promise)),
         _ => true,
     };
     if covered { Ok(()) } else { end_all() }

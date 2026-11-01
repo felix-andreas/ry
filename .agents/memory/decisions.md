@@ -3918,13 +3918,27 @@ explicit allocators".
   binding. Without that the dead frame keeps the result shared and the next call copies. The
   heap does not count an environment's enclosure as a reference, so the environment's refcount
   cannot decide this the way GNU R's `R_CleanupEnvir` does.
+- **A shared start does not stick.** A value something else also holds, such as `.Last.value`
+  holding the dict a top-level `d <- Dict.empty()` created, cannot move, but the call still runs
+  tracked (`Move::shared`, binding untouched) so the dead frame is released and the next call
+  moves. Before this, one shared call made every later call copy, because the dead frame kept
+  each result shared.
+- **Tail update.** A helper whose body ends in `f(p, ...)`, `f` a library builtin that reuses its
+  first argument and `p` the first parameter, compiles that call to `Op::CallTailUpdate`
+  (`bytecode::tail_update`). It updates `p`'s value in place only when, after its arguments are
+  evaluated, a move into this frame still lasts (`moves::frame_private`): then nothing has
+  captured the frame, and nothing in it runs after the call, so no one sees the parameter
+  change. The AST evaluator never does this, so the first two calls, before tier 0 compiles the
+  body, copy.
 - **Why static types do not prove it.** A type says what a value is, not which frames a
   function reads or whether it captures its environment, so a typed helper needs the same body
   check as an untyped one. Effect annotations would be the typed route, and ry has none.
-- **Measured.** 40,000 calls of `d <- add(d, i)` with `add <- function(d, k) { d <-
-  Dict.insert(d, k, k); d }` inside a function: 16.9 s before, 0.10 s after.
-- **Limits.** A helper that returns `Dict.insert(d, k, v)` without reassigning `d` still copies,
-  since nothing marks the parameter's last use; lists are not moved. Both are in `backlog.md`.
+- **Measured.** 40,000 calls of `d <- add(d, i)`, profiling build: with `add <- function(d, k)
+  { d <- Dict.insert(d, k, k); d }` inside a function, 16.9 s before and 0.10 s after; at top
+  level inside `system.time`, 16 s before the shared-start fix and 0.066 s after; with the tail
+  form `add <- function(d, k) Dict.insert(d, k, k)`, 16.4 s before and 0.053 s after.
+- **Limits.** Lists are not moved, and the tail update covers only the last statement. Both are
+  in `backlog.md`.
 
 ## A key of the wrong type is an error, not a missing key
 

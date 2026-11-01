@@ -1401,11 +1401,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                     )
                     .ok_or(Refusal("a helper without a result"))?;
                 // A negative count means the argument is not a collection, so tier 0 raises.
-                let counted = self.builder.ins().icmp_imm_s(
-                    IntCC::SignedGreaterThanOrEqual,
-                    count,
-                    0,
-                );
+                let counted =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, count, 0);
                 let fits = self.builder.ins().icmp_imm_s(
                     IntCC::SignedLessThanOrEqual,
                     count,
@@ -1423,27 +1422,24 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Intrinsic::CollectionContains { set } => {
                 let position_of = self.collection_position(args, &types, set)?;
-                let usable = self.builder.ins().icmp_imm_s(
-                    IntCC::SignedGreaterThanOrEqual,
-                    position_of,
-                    -1,
-                );
+                let usable =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, position_of, -1);
                 self.hand_off_unless(position, before, usable);
-                let present = self.builder.ins().icmp_imm_s(
-                    IntCC::SignedGreaterThanOrEqual,
-                    position_of,
-                    0,
-                );
+                let present =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, position_of, 0);
                 let value = self.builder.ins().uextend(I32, present);
                 self.builder.def_var(self.integers[dst], value);
             }
             Intrinsic::DictGet => {
                 let position_of = self.collection_position(args, &types, false)?;
-                let usable = self.builder.ins().icmp_imm_s(
-                    IntCC::SignedGreaterThanOrEqual,
-                    position_of,
-                    -1,
-                );
+                let usable =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, position_of, -1);
                 self.hand_off_unless(position, before, usable);
                 let dict = self.load_register(args[0]);
                 let value = self

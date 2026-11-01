@@ -162,7 +162,8 @@ for (i in 1:100000) state$seen <- Dict.insert(state$seen, i, TRUE)
 ```
 
 A dictionary or set also updates in place through a helper function, when the call has the form
-`x <- helper(x, ...)` and the helper reassigns its own parameter:
+`x <- helper(x, ...)` and the helper either reassigns its own parameter or returns the update of
+its first parameter directly, as in `function(seen, key) Dict.insert(seen, key, TRUE)`:
 
 ```r
 remember <- function(seen, key) {
@@ -184,10 +185,9 @@ check did not cover runs during the call, such as a closure the helper calls, th
 caller's variable gets its value back first. If the helper fails, the variable keeps the value it
 had before the call, even when the helper had already updated the collection.
 
-Other helpers copy, as in GNU R. That includes a helper that returns the update directly, as in
-`function(seen, key) Dict.insert(seen, key, TRUE)`, because nothing reassigns the parameter, and a
-helper that creates a closure. A list, through `List.append`, is not moved. For those, loop inside
-the helper, or keep the update in the loop that owns the variable:
+Other helpers copy, as in GNU R. That includes a helper that creates a closure, and a call whose
+result goes to another variable, as in `y <- helper(x, k)`. A list, through `List.append`, is not
+moved. For those, loop inside the helper, or keep the update in the loop that owns the variable:
 
 ```r
 remember_all <- function(seen, keys) {
