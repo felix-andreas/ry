@@ -29,15 +29,17 @@ const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
-/// zeroing cost a cold check more time than parsing did. mimalloc reads the option when it
-/// creates its first arena, which happens before `main`, so the option is set from a constructor.
+/// zeroing cost a cold check more time than parsing did. The first arena is reserved before
+/// `main`, so the option is set from a constructor. Setting only the default leaves
+/// `MIMALLOC_ARENA_EAGER_COMMIT` in the environment in charge. `libR.so` has its own allocator
+/// and sets the same option in `crates/libr/src/libr.rs`.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static LAZY_ARENA_COMMIT: extern "C" fn() = {
     extern "C" fn lazy_arena_commit() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
     }
     lazy_arena_commit
 };

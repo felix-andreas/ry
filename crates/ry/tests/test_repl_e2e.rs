@@ -316,7 +316,8 @@ fn lines_typed_while_the_console_starts_run_once_it_prompts() {
         .expect("write");
         let mut session = ReplSession::start_with(Some(package), &[runtime_command(runtime)]);
         session.send("x <- 20\r");
-        session.send("x + 22\r");
+        // An arrow key pressed ahead of the prompt is dropped whole, not kept as `[A`.
+        session.send("x + 22\u{1b}[A\r");
         session.send("gre");
         session.expect("Loaded slowpkg");
         session.expect("[1] 42");

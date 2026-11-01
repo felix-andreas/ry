@@ -7,13 +7,16 @@ use {
         ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
         libr::{self, RApi},
     },
-    crossterm::terminal,
+    crossterm::{
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        terminal,
+    },
     nu_ansi_term::{Color, Style},
     reedline::{
         ColumnarMenu, Completer, DefaultHinter, EditCommand, EditMode, Emacs, FileBackedHistory,
-        Highlighter, HistoryItem, KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode,
-        PromptHistorySearch, PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu,
-        Signal, StyledText, Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
+        Highlighter, HistoryItem, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+        PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
+        Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
         default_vi_insert_keybindings, default_vi_normal_keybindings,
     },
     std::{
@@ -27,6 +30,7 @@ use {
         path::PathBuf,
         slice,
         sync::{Arc, Mutex, PoisonError},
+        time::Duration,
     },
     syntax::{
         SyntaxKind::{self, *},
@@ -301,13 +305,11 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             let at_top_level = console.ry_runtime || libr::at_top_level();
             if !console.piped && console.typeahead.is_empty() {
                 let text = std::mem::take(&mut console.typeahead_partial) + &take_typeahead();
+                // A pasted `\r\n` ends one line, not two.
                 let mut lines: Vec<String> = text
+                    .replace("\r\n", "\n")
                     .split(['\n', '\r'])
-                    .map(|line| {
-                        line.chars()
-                            .filter(|character| !character.is_control() || *character == '\t')
-                            .collect()
-                    })
+                    .map(str::to_owned)
                     .collect();
                 console.typeahead_partial = lines.pop().unwrap_or_default();
                 console.typeahead.extend(lines);
@@ -320,7 +322,7 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
                 terminal::disable_raw_mode().ok();
                 // The terminal echoed the line where the cursor was when it was typed; showing
                 // it again at its prompt keeps the transcript in the order things ran.
-                print!("{prompt_text}{line}\n");
+                println!("{prompt_text}{line}");
                 stdout().flush().ok();
                 // History is a convenience: a line that fails to save still runs.
                 console
@@ -397,43 +399,45 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
 /// typeahead in its cooked-mode buffer, where each Enter has already become `\n`; the editor
 /// reads in raw mode, where `\n` is Ctrl-J, so left to the editor every typed-ahead line would be
 /// lost. Raw mode also releases an unfinished line, which cooked mode withholds until Enter.
-#[cfg(unix)]
+///
+/// It reads through crossterm's event reader rather than the descriptor, because the editor
+/// leaves the keys that followed its last submitted line in that reader's queue, and they were
+/// typed before anything still in the descriptor. The reader also parses escape sequences, so an
+/// arrow key pressed ahead of the prompt is dropped whole instead of leaving `[A` in the line.
 fn take_typeahead() -> String {
     if terminal::enable_raw_mode().is_err() {
         return String::new();
     }
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let mut descriptor = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { libc::poll(&mut descriptor, 1, 0) } <= 0
-            || descriptor.revents & libc::POLLIN == 0
-        {
-            break;
-        }
-        let read =
-            unsafe { libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr().cast(), chunk.len()) };
-        let Ok(read) = usize::try_from(read) else {
+    let mut text = String::new();
+    while matches!(event::poll(Duration::ZERO), Ok(true)) {
+        let Ok(event) = event::read() else {
             break;
         };
-        if read == 0 {
-            break;
+        match event {
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            }) => match code {
+                KeyCode::Enter => text.push('\n'),
+                KeyCode::Tab => text.push('\t'),
+                KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => text.push('\n'),
+                KeyCode::Char(character) if (modifiers - KeyModifiers::SHIFT).is_empty() => {
+                    text.push(character)
+                }
+                _ => {}
+            },
+            Event::Paste(pasted) => text.extend(pasted.chars().filter(|character| {
+                !character.is_control() || matches!(character, '\t' | '\n' | '\r')
+            })),
+            _ => {}
         }
-        bytes.extend_from_slice(&chunk[..read.min(chunk.len())]);
     }
     // The terminal stays raw, as the editor needs it: in cooked mode, a line typed before the
     // editor took over would end in `\n` again, and the editor submits only the first line of
     // a batch that arrives together.
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-#[cfg(not(unix))]
-fn take_typeahead() -> String {
-    String::new()
+    text
 }
 
 /// One line of piped input, or end-of-input when the pipe closes or cannot be read.
