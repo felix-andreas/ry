@@ -7,7 +7,7 @@ use {
     crate::{
         Frame,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
-        bytecode, conditions, deparse, dispatch, interp, scope,
+        bytecode, conditions, deparse, dispatch, interp, moves, scope,
         unwind::{Jump, R, Unwind, error, error_in, jump},
         utils::{PROFILE_TICK, record_profile_sample},
         values::{
@@ -309,6 +309,7 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
             "promise already under evaluation: recursive default argument reference or earlier problems?",
         ));
     }
+    moves::forcing(promise)?;
     promise.set_gp_bits(PROMISE_SEEN, true);
     let result = eval(promise.cdr(), promise.tag());
     promise.set_gp_bits(PROMISE_SEEN, false);
@@ -871,6 +872,38 @@ pub unsafe fn apply_closure(
     run_closure(call, function, env, sys_parent, promargs)
 }
 
+/// [`apply_closure`] for a call whose first argument is a value moved out of the caller's
+/// variable (see [`moves::call_moving`]): the frame's record of the arguments does not count as
+/// a reference to it, so the parameter holds the only one.
+pub unsafe fn apply_closure_moved(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+) -> R<Sexp> {
+    let formals = function.car();
+    let heap = crate::heap();
+    let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
+    heap.root(env);
+    env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
+    let mut formal = formals;
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
+        bindings.push(formal_binding(env, formal, actual)?);
+        formal = formal.cdr();
+        index += 1;
+    }
+    heap.define_formals(env, &bindings)?;
+    heap.mark_frame_formals(env);
+    let promargs = args_pairlist(args)?;
+    heap.untrack_references(promargs);
+    // Untracking a cell stops its tail from counting too, which the rest of the list needs.
+    promargs.cdr().increment_refcount();
+    run_closure(call, function, env, sys_parent, promargs)
+}
+
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
 unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
     let mut count = 0;
@@ -929,6 +962,7 @@ pub unsafe fn run_closure(
     sys_parent: Sexp,
     promargs: Sexp,
 ) -> R<Sexp> {
+    moves::entering_closure(env)?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -2486,26 +2520,51 @@ unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
 /// update it in place instead of copying it. This is how `Dict.insert`, `Set.insert` and
 /// `List.append` grow in amortized constant time.
 ///
-/// Only a builtin that reuses its first argument is offered the value. A closure always gets
-/// the value shared, as in GNU R: once a callee updated it in place, the caller's variable, which
-/// a second argument, a nested function or `get()` can read while the callee runs and which an
-/// error leaves in place, would no longer hold the old value.
+/// A builtin that reuses its first argument is offered the value. A closure gets it moved into
+/// its parameter when [`moves::call_moving`] can show nothing reads the caller's variable while
+/// the closure runs, and shared, as in GNU R, otherwise.
 pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
     match function.kind() {
         SexpType::Builtin if builtin_def(function)?.reuses_first_argument => {
-            reuse_first_argument(target, call, function, env)
+            reuse_first_argument(target, call, function, env, false)
+        }
+        SexpType::Closure if target.kind() == SexpType::Symbol => {
+            match moves::call_moving(call, function, target, env)? {
+                Some(value) => Ok(value),
+                None => apply_call(call, function, call.cdr(), env),
+            }
         }
         _ => apply_call(call, function, call.cdr(), env),
     }
 }
 
-unsafe fn reuse_first_argument(target: Sexp, call: Sexp, function: Sexp, env: Sexp) -> R<Sexp> {
+/// Calls the builtin `function` for `call`, the last call of a closure body that passes the
+/// first parameter `target` as the first argument (`bytecode::tail_update`). Unlike
+/// [`rebind_call`], nothing assigns the result to `target`, so the parameter's value may be
+/// updated in place only when no one can see the parameter afterwards: a move into this frame
+/// still lasts once the arguments are evaluated, which shows that nothing has reached the frame
+/// (`moves::frame_private`).
+pub unsafe fn tail_update(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
+    if function.kind() != SexpType::Builtin || !builtin_def(function)?.reuses_first_argument {
+        return apply_call(call, function, call.cdr(), env);
+    }
+    reuse_first_argument(target, call, function, env, true)
+}
+
+unsafe fn reuse_first_argument(
+    target: Sexp,
+    call: Sexp,
+    function: Sexp,
+    env: Sexp,
+    private_frame: bool,
+) -> R<Sexp> {
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
     // Argument values are not counted, so another argument that is the subject, or one of the
     // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
         subject.refcount() == 1
+            && (!private_frame || moves::frame_private(env))
             && solely_held(target, subject, env)
             && !args[1..]
                 .iter()
