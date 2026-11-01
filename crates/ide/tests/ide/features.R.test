@@ -509,7 +509,7 @@ hint @5: <T> fn(x: T) -> T
 config <- list(alpha = 1, beta = "b")
 use <- function() config$al$0
 #++++
-hover 63..65: al: Unknown
+hover 63..65: al: double
 definition: none
 references: none
 rename: none
