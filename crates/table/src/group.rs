@@ -342,7 +342,9 @@ fn group(
     aggregations: &[Aggregation],
     top: Option<&Ranking>,
 ) -> Grouping {
-    if radix <= DENSE_CODES {
+    // Dense states cost memory per possible code, so a code range much wider than the rows
+    // hashes instead.
+    if radix <= DENSE_CODES && radix <= (codes.len() as u64).max(1 << 12) {
         dense(codes, radix as usize, aggregations, top)
     } else {
         hashed(codes, aggregations, top)
@@ -381,7 +383,9 @@ fn dense(
         (first_rows, states)
     };
     let threads = THREAD_POOL.current_num_threads().max(1);
-    if height < PARALLEL_ROWS || threads == 1 {
+    // Each thread holds states for every code and they merge serially, which pays off only
+    // when the rows outnumber the threads' states.
+    if height < PARALLEL_ROWS || threads == 1 || radix.saturating_mul(threads) > height {
         let (first_rows, states) = run(0, height);
         return Grouping {
             first_rows,
@@ -1872,9 +1876,15 @@ fn top_k(
     };
     // `NaN` sorts differently in R's `order` and in Polars, so the plan decides.
     if let Vector::Double {
-        values: numbers, ..
+        values: numbers,
+        validity,
     } = &values
-        && numbers.iter().any(|value| value.is_nan())
+        && numbers.iter().enumerate().any(|(row, value)| {
+            value.is_nan()
+                && validity
+                    .as_ref()
+                    .is_none_or(|validity| validity.get_bit(row))
+        })
     {
         return Ok(None);
     }

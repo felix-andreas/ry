@@ -59,6 +59,11 @@ pub(crate) fn join(
             let Some(keys) = key_codes(x_frame, i_frame, on)? else {
                 return Ok(None);
             };
+            // Buckets cost memory per possible code, so sparse keys over a wide range are left
+            // to the plan's hash join.
+            if u64::from(keys.radix) > 8 * (x_height + i_height) as u64 + (1 << 12) {
+                return Ok(None);
+            }
             if i_height <= MAX_INDEXED_I && i_height <= x_height {
                 scan_x(&keys, join.drop_unmatched)
             } else {

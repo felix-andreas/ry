@@ -2090,3 +2090,71 @@ fn a_new_column_nesting_an_overflowing_sum_is_a_double() {
         doubles(&[3_999_999_999.0, 3_999_999_999.0, NA_REAL])
     );
 }
+
+/// A comparison over an overflowing sum keeps its own type: R's `sum(v) > 0L` is a logical `TRUE`
+/// when the sum is a double, and the column must not become a double.
+#[test]
+fn a_new_column_comparing_an_overflowing_sum_stays_logical() {
+    let x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    for by in [vec![], vec![named("g", column("g"))]] {
+        let mut updated = x.fork();
+        run(
+            &mut updated,
+            Query {
+                select: Select::Assign(vec![set(
+                    "big",
+                    binary(
+                        BinaryOp::Greater,
+                        aggregate(Aggregate::Sum, column("v")),
+                        Expr::Integer(0),
+                    ),
+                )]),
+                by,
+                ..Query::default()
+            },
+        );
+        assert_eq!(read(&mut updated, "big"), RVector::Logical(vec![1, 1, 1]));
+    }
+}
+
+/// A join the kernels decline, here on a double key, still stages a nested sum over the joined
+/// rows, so `sum(v) + 1L` is a double when a total overflows, as after the join kernel.
+#[test]
+fn a_nested_sum_after_a_planned_join_widens_on_overflow() {
+    use table::query::execute_with_plans_only;
+    let x = frame(vec![
+        ("k", doubles(&[1.0, 1.0, 2.0])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    let i = frame(vec![("k", doubles(&[1.0, 2.0]))]);
+    let query = || Query {
+        rows: Rows::Join(Join {
+            other: i.clone(),
+            on: vec![(PlSmallStr::from("k"), PlSmallStr::from("k"))],
+            drop_unmatched: false,
+            roll: Roll::None,
+            mult: Mult::All,
+        }),
+        select: Select::Columns(vec![named(
+            "s",
+            binary(
+                BinaryOp::Add,
+                aggregate(Aggregate::Sum, column("v")),
+                Expr::Integer(1),
+            ),
+        )]),
+        by: vec![named("k", column("k"))],
+        ..Query::default()
+    };
+    let kernel = run_table(&mut x.fork(), query());
+    let planned = match execute_with_plans_only(&mut x.fork(), query()) {
+        Ok(Output::Table(result)) => result,
+        other => panic!("expected a table, got {other:?}"),
+    };
+    for mut result in [kernel, planned] {
+        assert_eq!(read(&mut result, "s"), doubles(&[4_000_000_001.0, 2.0]));
+    }
+}

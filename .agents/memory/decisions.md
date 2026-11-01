@@ -2153,8 +2153,11 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   so without the invariant every query copied its keys and inputs again (a third of an
   integer-keyed group-by's time).
 - **Grouping maps keys to dense codes**: factors by their codes, integers by `value - min`, logicals
-  by two values, combined as mixed-radix digits of one `u64`. Small radixes index states directly,
-  larger ones hash-partition. Each aggregate is a `State` that is updated per row, merged across
+  by two values, combined as mixed-radix digits of one `u64`. A code range no wider than the rows
+  (and at most 2^20) indexes states directly, and a wider one hash-partitions, because dense states
+  cost memory per possible code; dense runs split across threads only when the rows outnumber
+  every thread's states. The equi-join kernel bounds its buckets the same way, by the rows on
+  both sides. Each aggregate is a `State` that is updated per row, merged across
   threads, appended across partitions and finished per group in output order.
 - **Moments use Welford updates with a symmetric co-moment and merge with Chan's formula**, so
   `cor(a, b)` equals `cor(b, a)` bit for bit. They differ from Polars' two-pass result in the last
@@ -2170,8 +2173,10 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **R's integer `sum` is a double exactly when a total overflows**, as in R 4.3, and a group that
   holds an `NA` (without `na.rm`) is `NA`, not an overflow. A top-level sum keeps 64 bits until
   its totals are known (`narrow_sums`). A sum nested in a selected expression is staged: the
-  aggregates first, then the expression (`staged`). A new `:=` column nesting one is computed both
-  as written and with each sum over doubles, and hidden probe sums pick the version
+  aggregates first, then the expression (`staged`); after a join, the joined rows are built first
+  and the query reruns over them. A new `:=` column nesting one is computed both
+  as written and with each sum over doubles (keeping the expression's own type, so `sum(v) > 0L`
+  stays logical), and hidden probe sums pick the version
   (`assign` in `query.rs`). Where data.table's grouped `:=` takes the column type from the first
   group, the engine makes the column a double if any group overflows.
 

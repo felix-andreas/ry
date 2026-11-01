@@ -353,23 +353,24 @@ impl Evaluator<'_> {
                 match comparison(left_kind, right_kind).ok()? {
                     ColumnType::Character => self.compare_factor(op, left, right),
                     ColumnType::Double => {
-                        let (l, r) = (doubles(self.eval(left)?)?, doubles(self.eval(right)?)?);
-                        compare(op, l, r, len)
+                        let (lhs, rhs) = (doubles(self.eval(left)?)?, doubles(self.eval(right)?)?);
+                        compare(op, lhs, rhs, len)
                     }
                     // Logicals compare as the integers they coerce to.
                     _ => {
-                        let (l, r) = (integers(self.eval(left)?)?, integers(self.eval(right)?)?);
-                        compare(op, l, r, len)
+                        let (lhs, rhs) =
+                            (integers(self.eval(left)?)?, integers(self.eval(right)?)?);
+                        compare(op, lhs, rhs, len)
                     }
                 }
             }
             _ if kind == ColumnType::Integer => {
-                let (l, r) = (integers(self.eval(left)?)?, integers(self.eval(right)?)?);
-                integer_arithmetic(op, l, r, len)
+                let (lhs, rhs) = (integers(self.eval(left)?)?, integers(self.eval(right)?)?);
+                integer_arithmetic(op, lhs, rhs, len)
             }
             _ => {
-                let (l, r) = (doubles(self.eval(left)?)?, doubles(self.eval(right)?)?);
-                double_arithmetic(op, l, r, len)
+                let (lhs, rhs) = (doubles(self.eval(left)?)?, doubles(self.eval(right)?)?);
+                double_arithmetic(op, lhs, rhs, len)
             }
         }
     }
@@ -685,15 +686,15 @@ fn kleene(op: BinaryOp, left: Logicals, right: Logicals) -> Value {
         (None, None) => None,
         (left_validity, right_validity) => {
             let all = Bitmap::new_with_value(true, values.len());
-            let lv = left_validity.as_ref().unwrap_or(&all);
-            let rv = right_validity.as_ref().unwrap_or(&all);
+            let left_valid = left_validity.as_ref().unwrap_or(&all);
+            let right_valid = right_validity.as_ref().unwrap_or(&all);
             // A side that is known and decides the result makes the result known.
             let (left_decides, right_decides) = if and_op {
-                (lv & &!&left.values, rv & &!&right.values)
+                (left_valid & &!&left.values, right_valid & &!&right.values)
             } else {
-                (lv & &left.values, rv & &right.values)
+                (left_valid & &left.values, right_valid & &right.values)
             };
-            Some(&(&(lv & rv) | &left_decides) | &right_decides)
+            Some(&(&(left_valid & right_valid) | &left_decides) | &right_decides)
         }
     };
     Value::Vector(Vector::Logical { values, validity })
@@ -707,18 +708,18 @@ where
         return Some(Value::Vector(Vector::null(ColumnType::Logical, len)?));
     }
     let values = match op {
-        BinaryOp::Equal => pack_zip(len, &left.side, &right.side, |l, r| l == r),
-        BinaryOp::NotEqual => pack_zip(len, &left.side, &right.side, |l, r| l != r),
-        BinaryOp::Less => pack_zip(len, &left.side, &right.side, |l, r| l < r),
-        BinaryOp::LessEqual => pack_zip(len, &left.side, &right.side, |l, r| l <= r),
-        BinaryOp::Greater => pack_zip(len, &left.side, &right.side, |l, r| l > r),
-        _ => pack_zip(len, &left.side, &right.side, |l, r| l >= r),
+        BinaryOp::Equal => pack_zip(len, &left.side, &right.side, |lhs, rhs| lhs == rhs),
+        BinaryOp::NotEqual => pack_zip(len, &left.side, &right.side, |lhs, rhs| lhs != rhs),
+        BinaryOp::Less => pack_zip(len, &left.side, &right.side, |lhs, rhs| lhs < rhs),
+        BinaryOp::LessEqual => pack_zip(len, &left.side, &right.side, |lhs, rhs| lhs <= rhs),
+        BinaryOp::Greater => pack_zip(len, &left.side, &right.side, |lhs, rhs| lhs > rhs),
+        _ => pack_zip(len, &left.side, &right.side, |lhs, rhs| lhs >= rhs),
     };
     let mut validity = and(left.validity.as_ref(), right.validity.as_ref());
     // Any comparison with `NaN` is `NA` in R.
     if T::CAN_BE_NAN && (side_has_nan(&left.side) || side_has_nan(&right.side)) {
-        let nan = pack_zip(len, &left.side, &right.side, |l, r| {
-            l.is_nan() || r.is_nan()
+        let nan = pack_zip(len, &left.side, &right.side, |lhs, rhs| {
+            lhs.is_nan() || rhs.is_nan()
         });
         validity = and(validity.as_ref(), Some(&!&nan));
     }
@@ -777,24 +778,24 @@ fn integer_arithmetic(
             Value::Vector(Vector::null(ColumnType::Integer, len)?)
         });
     }
-    let apply = |l: i32, r: i32| match op {
-        BinaryOp::Add => checked(i64::from(l) + i64::from(r)),
-        BinaryOp::Subtract => checked(i64::from(l) - i64::from(r)),
-        BinaryOp::Multiply => checked(i64::from(l) * i64::from(r)),
-        BinaryOp::IntegerDivide if r == 0 => i32::MIN,
+    let apply = |lhs: i32, rhs: i32| match op {
+        BinaryOp::Add => checked(i64::from(lhs) + i64::from(rhs)),
+        BinaryOp::Subtract => checked(i64::from(lhs) - i64::from(rhs)),
+        BinaryOp::Multiply => checked(i64::from(lhs) * i64::from(rhs)),
+        BinaryOp::IntegerDivide if rhs == 0 => i32::MIN,
         BinaryOp::IntegerDivide => {
-            let quotient = l.wrapping_div(r);
-            if l.wrapping_rem(r) != 0 && ((l < 0) != (r < 0)) {
+            let quotient = lhs.wrapping_div(rhs);
+            if lhs.wrapping_rem(rhs) != 0 && ((lhs < 0) != (rhs < 0)) {
                 quotient - 1
             } else {
                 quotient
             }
         }
-        BinaryOp::Modulo if r == 0 => i32::MIN,
+        BinaryOp::Modulo if rhs == 0 => i32::MIN,
         BinaryOp::Modulo => {
-            let remainder = l.wrapping_rem(r);
-            if remainder != 0 && ((remainder < 0) != (r < 0)) {
-                remainder + r
+            let remainder = lhs.wrapping_rem(rhs);
+            if remainder != 0 && ((remainder < 0) != (rhs < 0)) {
+                remainder + rhs
             } else {
                 remainder
             }
@@ -818,14 +819,14 @@ fn integer_arithmetic(
         )));
     }
     let values = match op {
-        BinaryOp::Add => zip_map(len, &left.side, &right.side, |l, r| {
-            checked(i64::from(l) + i64::from(r))
+        BinaryOp::Add => zip_map(len, &left.side, &right.side, |lhs, rhs| {
+            checked(i64::from(lhs) + i64::from(rhs))
         }),
-        BinaryOp::Subtract => zip_map(len, &left.side, &right.side, |l, r| {
-            checked(i64::from(l) - i64::from(r))
+        BinaryOp::Subtract => zip_map(len, &left.side, &right.side, |lhs, rhs| {
+            checked(i64::from(lhs) - i64::from(rhs))
         }),
-        BinaryOp::Multiply => zip_map(len, &left.side, &right.side, |l, r| {
-            checked(i64::from(l) * i64::from(r))
+        BinaryOp::Multiply => zip_map(len, &left.side, &right.side, |lhs, rhs| {
+            checked(i64::from(lhs) * i64::from(rhs))
         }),
         _ => zip_map(len, &left.side, &right.side, apply),
     };
@@ -849,18 +850,18 @@ fn double_arithmetic(
         (&left.side, &right.side),
         (Side::Scalar(_), Side::Scalar(_))
     );
-    let apply = |l: f64, r: f64| match op {
-        BinaryOp::Add => l + r,
-        BinaryOp::Subtract => l - r,
-        BinaryOp::Multiply => l * r,
-        BinaryOp::Divide => l / r,
+    let apply = |lhs: f64, rhs: f64| match op {
+        BinaryOp::Add => lhs + rhs,
+        BinaryOp::Subtract => lhs - rhs,
+        BinaryOp::Multiply => lhs * rhs,
+        BinaryOp::Divide => lhs / rhs,
         // `1^NaN` and `NaN^0` are 1 in R. `powf` gives NaN for a signaling NaN such as the bits
         // of R's `NA_real_`, which a null slot may still hold, so both cases are decided here.
-        BinaryOp::Power if l == 1.0 || r == 0.0 => 1.0,
-        BinaryOp::Power => l.powf(r),
-        BinaryOp::IntegerDivide => (l / r).floor(),
+        BinaryOp::Power if lhs == 1.0 || rhs == 0.0 => 1.0,
+        BinaryOp::Power => lhs.powf(rhs),
+        BinaryOp::IntegerDivide => (lhs / rhs).floor(),
         // R's `%%` takes the sign of the divisor.
-        BinaryOp::Modulo => l - (l / r).floor() * r,
+        BinaryOp::Modulo => lhs - (lhs / rhs).floor() * rhs,
         _ => f64::NAN,
     };
     if !matches!(
@@ -889,14 +890,14 @@ fn double_arithmetic(
             }
         };
     if scalar {
-        let (l, r) = match (&left.side, &right.side) {
-            (Side::Scalar(l), Side::Scalar(r)) => (*l, *r),
+        let (lhs, rhs) = match (&left.side, &right.side) {
+            (Side::Scalar(lhs), Side::Scalar(rhs)) => (*lhs, *rhs),
             _ => return None,
         };
-        let value = match (l, r) {
-            (Some(l), Some(r)) => Some(apply(l, r)),
-            (Some(l), None) if op == BinaryOp::Power && l == 1.0 => Some(1.0),
-            (None, Some(r)) if op == BinaryOp::Power && r == 0.0 => Some(1.0),
+        let value = match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Some(apply(lhs, rhs)),
+            (Some(lhs), None) if op == BinaryOp::Power && lhs == 1.0 => Some(1.0),
+            (None, Some(rhs)) if op == BinaryOp::Power && rhs == 0.0 => Some(1.0),
             _ => None,
         };
         return Some(Value::Scalar(Scalar::Double(value)));
@@ -923,10 +924,10 @@ fn double_arithmetic(
         }
     };
     let values = match op {
-        BinaryOp::Add => zip_map(len, &left.side, &right.side, |l, r| l + r),
-        BinaryOp::Subtract => zip_map(len, &left.side, &right.side, |l, r| l - r),
-        BinaryOp::Multiply => zip_map(len, &left.side, &right.side, |l, r| l * r),
-        BinaryOp::Divide => zip_map(len, &left.side, &right.side, |l, r| l / r),
+        BinaryOp::Add => zip_map(len, &left.side, &right.side, |lhs, rhs| lhs + rhs),
+        BinaryOp::Subtract => zip_map(len, &left.side, &right.side, |lhs, rhs| lhs - rhs),
+        BinaryOp::Multiply => zip_map(len, &left.side, &right.side, |lhs, rhs| lhs * rhs),
+        BinaryOp::Divide => zip_map(len, &left.side, &right.side, |lhs, rhs| lhs / rhs),
         _ => zip_map(len, &left.side, &right.side, apply),
     };
     Some(Value::Vector(Vector::Double {
@@ -986,16 +987,20 @@ fn if_else(test: Logicals, yes: Vector, no: Vector, len: usize) -> Option<Value>
     let validity = &test_validity & &chosen;
     let validity = (validity.unset_bits() > 0).then_some(validity);
     Some(Value::Vector(match (yes, no) {
-        (Vector::Logical { values: y, .. }, Vector::Logical { values: n, .. }) => Vector::Logical {
-            values: test.values.select(&y, &n),
-            validity,
-        },
-        (Vector::Integer { values: y, .. }, Vector::Integer { values: n, .. }) => Vector::Integer {
-            values: Buffer::from(select_values(&test.values, &y, &n)),
-            validity,
-        },
-        (Vector::Double { values: y, .. }, Vector::Double { values: n, .. }) => Vector::Double {
-            values: Buffer::from(select_values(&test.values, &y, &n)),
+        (Vector::Logical { values: yes, .. }, Vector::Logical { values: no, .. }) => {
+            Vector::Logical {
+                values: test.values.select(&yes, &no),
+                validity,
+            }
+        }
+        (Vector::Integer { values: yes, .. }, Vector::Integer { values: no, .. }) => {
+            Vector::Integer {
+                values: Buffer::from(select_values(&test.values, &yes, &no)),
+                validity,
+            }
+        }
+        (Vector::Double { values: yes, .. }, Vector::Double { values: no, .. }) => Vector::Double {
+            values: Buffer::from(select_values(&test.values, &yes, &no)),
             validity,
         },
         _ => return None,
@@ -1221,27 +1226,28 @@ where
     fill(len, |start, out| {
         let end = start + out.len();
         match (left, right) {
-            (Side::Array(l), Side::Array(r)) => {
-                for ((slot, l), r) in out.iter_mut().zip(&l[start..end]).zip(&r[start..end]) {
-                    slot.write(apply(*l, *r));
+            (Side::Array(lhs), Side::Array(rhs)) => {
+                for ((slot, lhs), rhs) in out.iter_mut().zip(&lhs[start..end]).zip(&rhs[start..end])
+                {
+                    slot.write(apply(*lhs, *rhs));
                 }
             }
-            (Side::Array(l), Side::Scalar(r)) => {
-                let r = r.unwrap_or_default();
-                for (slot, l) in out.iter_mut().zip(&l[start..end]) {
-                    slot.write(apply(*l, r));
+            (Side::Array(lhs), Side::Scalar(rhs)) => {
+                let rhs = rhs.unwrap_or_default();
+                for (slot, lhs) in out.iter_mut().zip(&lhs[start..end]) {
+                    slot.write(apply(*lhs, rhs));
                 }
             }
-            (Side::Scalar(l), Side::Array(r)) => {
-                let l = l.unwrap_or_default();
-                for (slot, r) in out.iter_mut().zip(&r[start..end]) {
-                    slot.write(apply(l, *r));
+            (Side::Scalar(lhs), Side::Array(rhs)) => {
+                let lhs = lhs.unwrap_or_default();
+                for (slot, rhs) in out.iter_mut().zip(&rhs[start..end]) {
+                    slot.write(apply(lhs, *rhs));
                 }
             }
-            (Side::Scalar(l), Side::Scalar(r)) => {
-                let (l, r) = (l.unwrap_or_default(), r.unwrap_or_default());
+            (Side::Scalar(lhs), Side::Scalar(rhs)) => {
+                let (lhs, rhs) = (lhs.unwrap_or_default(), rhs.unwrap_or_default());
                 for slot in out.iter_mut() {
-                    slot.write(apply(l, r));
+                    slot.write(apply(lhs, rhs));
                 }
             }
         }
@@ -1290,33 +1296,33 @@ where
     pack(len, |start, out| {
         let end = (start + out.len() * 8).min(len);
         match (left, right) {
-            (Side::Array(l), Side::Array(r)) => {
-                for ((slot, l), r) in out
+            (Side::Array(lhs), Side::Array(rhs)) => {
+                for ((slot, lhs), rhs) in out
                     .iter_mut()
-                    .zip(l[start..end].chunks(8))
-                    .zip(r[start..end].chunks(8))
+                    .zip(lhs[start..end].chunks(8))
+                    .zip(rhs[start..end].chunks(8))
                 {
                     let mut byte = 0u8;
-                    for (bit, (l, r)) in l.iter().zip(r).enumerate() {
-                        byte |= u8::from(test(*l, *r)) << bit;
+                    for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
+                        byte |= u8::from(test(*lhs, *rhs)) << bit;
                     }
                     slot.write(byte);
                 }
             }
-            (Side::Array(l), Side::Scalar(r)) => {
-                let r = r.unwrap_or_default();
-                for (slot, l) in out.iter_mut().zip(l[start..end].chunks(8)) {
-                    slot.write(pack_byte(l, &|l| test(l, r)));
+            (Side::Array(lhs), Side::Scalar(rhs)) => {
+                let rhs = rhs.unwrap_or_default();
+                for (slot, lhs) in out.iter_mut().zip(lhs[start..end].chunks(8)) {
+                    slot.write(pack_byte(lhs, &|lhs| test(lhs, rhs)));
                 }
             }
-            (Side::Scalar(l), Side::Array(r)) => {
-                let l = l.unwrap_or_default();
-                for (slot, r) in out.iter_mut().zip(r[start..end].chunks(8)) {
-                    slot.write(pack_byte(r, &|r| test(l, r)));
+            (Side::Scalar(lhs), Side::Array(rhs)) => {
+                let lhs = lhs.unwrap_or_default();
+                for (slot, rhs) in out.iter_mut().zip(rhs[start..end].chunks(8)) {
+                    slot.write(pack_byte(rhs, &|rhs| test(lhs, rhs)));
                 }
             }
-            (Side::Scalar(l), Side::Scalar(r)) => {
-                let bit = test(l.unwrap_or_default(), r.unwrap_or_default());
+            (Side::Scalar(lhs), Side::Scalar(rhs)) => {
+                let bit = test(lhs.unwrap_or_default(), rhs.unwrap_or_default());
                 for (index, slot) in out.iter_mut().enumerate() {
                     let rows = (end - start).saturating_sub(index * 8).min(8);
                     slot.write(if bit { ((1u16 << rows) - 1) as u8 } else { 0 });

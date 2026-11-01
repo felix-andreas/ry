@@ -239,6 +239,23 @@ fn run(table: &mut Table, query: Query, kernels: bool) -> Result<Output> {
             return run(&mut joined, query, kernels);
         }
     }
+    if matches!(query.rows, Rows::Join(_)) && nests_integer_sum(&schema, &query.select)? {
+        // One plan would fix a nested sum's type before seeing its totals, so the join runs
+        // first and the sum is staged over the joined rows, as it is after the join kernel.
+        let joined = plan(
+            table,
+            Query {
+                rows: query.rows.clone(),
+                ..Query::default()
+            },
+        )?
+        .collect()?;
+        let query = Query {
+            rows: Rows::All,
+            ..query
+        };
+        return run(&mut Table::new(joined)?, query, kernels);
+    }
     let value = matches!(query.select, Select::Value(_)) && query.by.is_empty();
     let keyed = query.keyed;
     let key: Vec<PlSmallStr> = if keyed {
@@ -322,14 +339,7 @@ fn staged(table: &Table, schema: &Schema, query: &Query) -> Result<Option<DataFr
             .collect(),
         Select::All | Select::Assign(_) => return Ok(None),
     };
-    let typer = Typer { schema };
-    let mut nested = false;
-    for (_, expr) in &outputs {
-        if !matches!(expr, Expr::Aggregate { .. }) {
-            nested |= has_integer_sum(&typer, expr)?;
-        }
-    }
-    if !nested || matches!(query.rows, Rows::Join(_)) {
+    if !nests_integer_sum(schema, &query.select)? || matches!(query.rows, Rows::Join(_)) {
         return Ok(None);
     }
     let mut aggregates = Vec::new();
@@ -381,6 +391,22 @@ fn staged(table: &Table, schema: &Schema, query: &Query) -> Result<Option<DataFr
         exprs.push(lower.expr(expr)?.alias(name.clone()));
     }
     Ok(Some(first.lazy().select(exprs).collect()?))
+}
+
+/// Whether an output of `j` nests an integer `sum` inside an expression, as `sum(v) - 1L` does.
+fn nests_integer_sum(schema: &Schema, select: &Select) -> Result<bool> {
+    let typer = Typer { schema };
+    let outputs: Vec<&Expr> = match select {
+        Select::Value(expr) => vec![expr],
+        Select::Columns(columns) => columns.iter().map(|(_, expr)| expr).collect(),
+        Select::All | Select::Assign(_) => return Ok(false),
+    };
+    for expr in outputs {
+        if !matches!(expr, Expr::Aggregate { .. }) && has_integer_sum(&typer, expr)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `expr` sums an integer or logical vector anywhere.
@@ -1069,7 +1095,7 @@ fn assign(
         targets.push(Target {
             name: hidden_name(),
             expr: doubled,
-            kind: ColumnType::Double,
+            kind: typer.expr(doubled)?,
             levels: None,
             widens: false,
         });
