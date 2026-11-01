@@ -157,7 +157,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn_scoped(scope, || {
-                let analysis = analyze_project(root, config.clone(), &[sources.clone()])?;
+                let analysis = analyze_project(root, config.clone(), std::slice::from_ref(&sources))?;
                 let errors = strict_errors(&analysis, config);
                 Ok::<_, CommandError>((analysis, errors))
             });
@@ -176,7 +176,7 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
             OutputFormat::Human,
             MinSeverity::Warning,
             &file.path,
-            &file.source,
+            analysis.source(file),
             errors,
             &resolve_note,
         );
@@ -241,7 +241,7 @@ fn findings(
     let refuse = strict
         && diagnostics
             .iter()
-            .any(|diagnostic| is_strict_error(diagnostic));
+            .any(is_strict_error);
     let kept = diagnostics
         .into_iter()
         .filter(|diagnostic| {

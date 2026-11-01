@@ -105,14 +105,40 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
+### Syntax trees are evicted
+
+Rowan trees are the largest thing the analysis holds, and nothing past lowering needs them, so a
+cold pass does not retain them. `limit_resident_trees` gives `parse` and the per-item `item_syntax`
+and `item_annotation_syntax` salsa LRU capacities, and every query that reads a tree is a memoized
+query whose result is small: the
+item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references
+and agreement candidates in `diagnostics.rs`, and `lints::file_syntax_lints`. An evicted memo keeps
+its dependency edges, so revalidating an untouched file after an edit elsewhere never re-parses it;
+only a file whose text changed is parsed again. A finding that also needs naming or the project's
+declarations is split in two: the syntax-only half is memoized, and a cheap step joins it with the
+rest (a bare `setClass` call is reported only when the file does not bind `setClass` itself, and
+two annotations disagree only when their types differ once aliases expand).
+
+The CLI's cold check leans on this to cap its peak. It runs three passes over the files, largest
+first, in batches spread over the cores, and calls `trigger_lru_eviction` between batches:
+`diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is resident,
+then every item is named, then the diagnostics are assembled. Each file is therefore parsed exactly
+once, and at most a few batches of trees are alive at a time. `RootDatabase::one_shot` also turns
+off the splice cache, which would otherwise keep the previous tree of every file. A
+`test_incremental.rs` case pins the one-parse property.
+
+The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
+bases, because LRU bookkeeping runs on every fetch and an evicted tree must be rebuilt whenever a
+memo's value is needed, while the memory it saves matters less in a long-lived process.
+
 ### From item to scheme
 
 An item's green subtree lowers to HIR, with spans relative to the item. Its annotations lower
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
-(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names in HIR and naming are interned `Symbol`s (two words, `Copy`), lists are boxed slices, and
-the arena is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity.
-Naming
+(`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
+in HIR and naming are interned `Symbol`s (two words, `Copy`), lists are boxed slices, and the arena
+is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.
@@ -232,6 +258,11 @@ and all the documents, and the database handle deliberately never leaves it.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
+- **Only edited files change at low durability.** A workspace file enters the database at
+  `Durability::MEDIUM`, its first `didChange` lowers it to `LOW`, and closing it restores `MEDIUM`.
+  An edit then revalidates every memo that reads only other files by durability alone, without
+  walking its dependencies, which took a fifth off the settled re-check on the benchmark code
+  bases. A `test_incremental.rs` case pins that an edit never revisits the other files' trees.
 - **Positions convert only at the protocol edge**, against the target document's own text, in the
   negotiated encoding. That is UTF-16 by default, and UTF-8 when the client offers it. Signature-help
   label offsets are always UTF-16, as the LSP specification requires.

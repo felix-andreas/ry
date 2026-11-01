@@ -14,7 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct Annotation<'db> {
     pub declared: Option<TypeScheme<'db>>,
     pub definitions: Vec<NamedDefinition<'db>>,
@@ -22,6 +22,8 @@ pub struct Annotation<'db> {
     /// definitions stay position-independent.
     pub definition_sites: Vec<TextRange>,
     /// `@new Name<ARGS>`, with the range of the referenced type.
+    // Sound: `TextRange` is plain offsets, so only the `'db` handles need retaining.
+    #[salsa_value(unsafe(prove_safe_to_retain_manually))]
     pub new_nominal: Option<(Name<'db>, Vec<Ty<'db>>, TextRange)>,
     pub strict: Option<bool>,
     /// `@trust TYPE`, where the declared type applies unchecked.
@@ -37,6 +39,7 @@ pub struct Annotation<'db> {
     pub typing_errors: Vec<(String, TextRange)>,
     /// Judged by the diagnostics, not here: whether a named element resolves to an atomic alias
     /// needs the project vocabulary.
+    #[salsa_value(unsafe(prove_safe_to_retain_manually))]
     pub vector_elements: Vec<(Ty<'db>, TextRange)>,
     /// `(name, argument count, range)`; the arity check against the vocabulary lives with the
     /// diagnostics.
@@ -493,7 +496,7 @@ pub fn merge_annotations<'db>(
 
 /// A place an annotation gives a type. Parameters are keyed by formal name, so a
 /// positional comment type is resolved against the definition's formals first.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub enum Slot {
     Value,
     Parameter(String),

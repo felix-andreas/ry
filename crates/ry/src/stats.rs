@@ -308,7 +308,11 @@ fn print_memo_census(db: &RootDatabase) {
             query.size_of_metadata() as f64 / MEBIBYTE,
         );
     }
-    let mut structs: Vec<_> = info.structs.iter().filter(|entry| entry.count() > 0).collect();
+    let mut structs: Vec<_> = info
+        .structs
+        .iter()
+        .filter(|entry| entry.count() > 0)
+        .collect();
     structs.sort_by_key(|entry| Reverse(entry.size_of_metadata() + entry.size_of_fields()));
     for entry in structs.iter().take(MEMO_CENSUS_ROWS) {
         println!(

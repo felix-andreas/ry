@@ -39,6 +39,35 @@ pub struct RootDatabase {
     splice_cache: Arc<SpliceCache>,
 }
 
+impl RootDatabase {
+    /// For a single cold pass, such as `ry check`. Trees are evicted whenever the host calls
+    /// `trigger_lru_eviction`, and no file is parsed twice from an edit, so splice caching
+    /// would only hold a second copy of every text and of recent trees.
+    ///
+    /// The default database keeps every tree: an editor host pays for eviction in latency
+    /// (about 10 ms per settled re-check on the benchmark code bases) more than it gains in
+    /// memory.
+    pub fn one_shot() -> RootDatabase {
+        let mut db = RootDatabase {
+            storage: salsa::Storage::default(),
+            splice_cache: Arc::new(SpliceCache {
+                entries: Mutex::default(),
+                enabled: false,
+            }),
+        };
+        limit_resident_trees(&mut db);
+        db
+    }
+}
+
+/// Lets `trigger_lru_eviction` drop all but the most recently used syntax trees.
+pub fn limit_resident_trees(db: &mut dyn Db) {
+    parse::set_lru_capacity(db, 128);
+    file_item_annotations::set_lru_capacity(db, 128);
+    item_syntax::set_lru_capacity(db, 4096);
+    item_annotation_syntax::set_lru_capacity(db, 4096);
+}
+
 #[salsa::db]
 impl salsa::Database for RootDatabase {}
 
@@ -62,7 +91,10 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-#[salsa::tracked(returns(clone))]
+/// Trees are the largest memos and cheap to rebuild, so a cold pass keeps only recent ones
+/// resident (see [`RootDatabase::one_shot`]); everything derived from them is memoized
+/// item-relative and survives eviction.
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
@@ -70,15 +102,27 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
 /// The previous `(text, parse)` per file. At capacity, inserting an unknown file
 /// clears the map wholesale: a cold pass then costs one clear, while an editing
 /// session's open set stays resident.
-#[derive(Default)]
 pub struct SpliceCache {
     entries: Mutex<FxHashMap<SourceFile, (Arc<str>, Parse)>>,
+    enabled: bool,
+}
+
+impl Default for SpliceCache {
+    fn default() -> SpliceCache {
+        SpliceCache {
+            entries: Mutex::default(),
+            enabled: true,
+        }
+    }
 }
 
 const SPLICE_CACHE_CAPACITY: usize = 64;
 
 impl SpliceCache {
     fn parse(&self, file: SourceFile, new_text: &str) -> Parse {
+        if !self.enabled {
+            return syntax::parse(new_text);
+        }
         // Parse unlocked so parallel workers never serialize on the parse itself.
         let previous = {
             let entries = self.entries.lock().expect("splice cache lock");
@@ -167,8 +211,9 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
-/// from it stay item-relative until the rendering edge.
-#[salsa::tracked(returns(clone))]
+/// from it stay item-relative until the rendering edge. Holds part of the file's tree, so
+/// it is evicted alongside `parse`.
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
@@ -340,7 +385,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
@@ -348,7 +393,7 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 0)]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -369,13 +414,30 @@ fn file_item_annotations<'db>(
         .collect()
 }
 
-/// The annotation the checker applies to an item's root: its `#:` block merged with the
-/// root statement's inline annotation. Not tracked, for the reason
-/// [`item_expression_annotations`] gives.
-pub fn item_annotation<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-) -> Option<annotations::Annotation<'db>> {
+/// An item's lowered annotations, item-relative like `item_syntax`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ItemAnnotations<'db> {
+    /// The root's `#:` block merged with the root statement's inline annotation.
+    // Boxed: most items carry no annotation, and the memo would otherwise reserve a full
+    // `Annotation` per item.
+    pub root: Option<Box<annotations::Annotation<'db>>>,
+    /// Annotations attached below the root, keyed by HIR id: each annotated statement's
+    /// `#:` block merged with its inline annotation, plus the signature of every function
+    /// literal no statement claims, such as one passed as an argument.
+    pub expressions: Box<[(hir::ExprId, annotations::Annotation<'db>)]>,
+}
+
+/// Memoized so the checker reads lowered annotations instead of the item's tree: once
+/// lowering is done, nothing on the check path needs syntax, and trees can be evicted.
+#[salsa::tracked(returns(ref))]
+pub fn item_annotations<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemAnnotations<'db> {
+    ItemAnnotations {
+        root: root_annotation(db, item).map(Box::new),
+        expressions: expression_annotations(db, item).into_boxed_slice(),
+    }
+}
+
+fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations::Annotation<'db>> {
     let comment = item_annotation_syntax(db, item)
         .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
     let root = item_syntax(db, item)?.syntax_node();
@@ -389,11 +451,7 @@ pub fn item_annotation<'db>(
     annotations::merge_annotations(db, comment, Some(inline), Some(&site))
 }
 
-/// Annotations attached below the item root, keyed by HIR id: each annotated statement's
-/// `#:` block merged with its inline annotation, plus the signature of every function
-/// literal no statement claims, such as one passed as an argument. Not tracked:
-/// `Annotation` carries `TextRange`s, and callers already depend on `item_syntax`/`item_hir`.
-pub fn item_expression_annotations<'db>(
+fn expression_annotations<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
 ) -> Vec<(hir::ExprId, annotations::Annotation<'db>)> {
@@ -1006,13 +1064,13 @@ fn check_item_against<'db>(
 ) -> Option<check::ItemCheck<'db>> {
     let module = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let annotation = item_annotation(db, item);
+    let annotations = item_annotations(db, item);
     Some(check::check_item_with_annotation(
         db,
         module,
         naming,
-        annotation.as_ref(),
-        &item_expression_annotations(db, item),
+        annotations.root.as_deref(),
+        &annotations.expressions,
         Some(globals),
     ))
 }

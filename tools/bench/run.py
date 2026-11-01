@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Benchmark harness: generate the three synthetic code bases, check them, and print a table.
 
-For each code base it reports the cold `ry check` wall time and peak memory, the number of
+For each code base it reports the cold `ry check` wall time, CPU time (the check runs on every
+core, so a CPU regression can hide behind unchanged wall time) and peak memory, the number of
 findings by diagnostic code (the generated R is valid, so every error is a candidate false
 positive), and the language server's re-check latency after a body edit and a signature edit.
 
@@ -49,8 +50,9 @@ def count_lines(root):
 
 
 def cold_check(binary, root):
-    """Wall time, peak resident set of the child alone, and findings by code."""
-    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    """Wall time, CPU time, peak resident set of the child alone, and findings by code."""
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    before, cpu_before = usage.ru_maxrss, usage.ru_utime + usage.ru_stime
     with tempfile.TemporaryFile() as findings:
         started = time.perf_counter()
         status = subprocess.run([binary, "check", root, "--output", "json"], stdout=findings, stderr=subprocess.DEVNULL)
@@ -61,8 +63,10 @@ def cold_check(binary, root):
         codes = collections.Counter(json.loads(line)["code"] for line in findings if line.strip())
     # ru_maxrss of children is a running maximum, so a smaller child cannot lower it; each
     # code base is therefore measured in its own subprocess below when exact numbers matter.
-    peak = max(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss, before) / 1024
-    return elapsed, peak, codes
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    peak = max(usage.ru_maxrss, before) / 1024
+    cpu = usage.ru_utime + usage.ru_stime - cpu_before
+    return elapsed, cpu, peak, codes
 
 
 def lsp_latency(binary, root, runs):
@@ -80,13 +84,13 @@ def isolated_cold_check(binary, root):
     """Re-run in a fresh interpreter so the child's peak is not inherited from a larger one."""
     script = (
         "import json,sys;sys.path.insert(0,sys.argv[1]);import run;"
-        "e,p,c=run.cold_check(sys.argv[2],sys.argv[3]);print(json.dumps([e,p,c]))"
+        "e,u,p,c=run.cold_check(sys.argv[2],sys.argv[3]);print(json.dumps([e,u,p,c]))"
     )
     output = subprocess.run(
         [sys.executable, "-c", script, HERE, binary, root], capture_output=True, text=True, check=True
     ).stdout
-    elapsed, peak, codes = json.loads(output)
-    return elapsed, peak, collections.Counter(codes)
+    elapsed, cpu, peak, codes = json.loads(output)
+    return elapsed, cpu, peak, collections.Counter(codes)
 
 
 def main():
@@ -109,11 +113,12 @@ def main():
     rows = []
     for domain, package in DOMAINS.items():
         root = os.path.join(out, package)
-        elapsed, peak, codes = isolated_cold_check(binary, root)
+        elapsed, cpu, peak, codes = isolated_cold_check(binary, root)
         row = {
             "domain": domain,
             "lines": count_lines(root),
             "cold_s": elapsed,
+            "cpu_s": cpu,
             "peak_mib": peak,
             "findings": dict(codes),
         }
@@ -122,8 +127,8 @@ def main():
         rows.append(row)
 
     print(f"\ncode bases in {out}\n")
-    print("| code base | lines | cold check | peak RSS | findings | body edit | signature edit |")
-    print("|---|---:|---:|---:|---|---:|---:|")
+    print("| code base | lines | cold check | CPU | peak RSS | findings | body edit | signature edit |")
+    print("|---|---:|---:|---:|---:|---|---:|---:|")
     for row in rows:
         findings = ", ".join(f"{count} {code}" for code, count in sorted(row["findings"].items())) or "none"
         lsp = row.get("lsp")
@@ -132,7 +137,7 @@ def main():
             body = f"{lsp['body']['first_p50_ms']:.0f} / {lsp['body']['settled_p50_ms']:.0f} ms"
             signature = f"{lsp['signature']['first_p50_ms']:.0f} / {lsp['signature']['settled_p50_ms']:.0f} ms"
         print(
-            f"| {row['domain']} | {row['lines']:,} | {row['cold_s']:.1f} s | {row['peak_mib']:.0f} MiB "
+            f"| {row['domain']} | {row['lines']:,} | {row['cold_s']:.1f} s | {row['cpu_s']:.1f} s | {row['peak_mib']:.0f} MiB "
             f"| {findings} | {body} | {signature} |"
         )
     print("\nEdit columns are p50 latency to the first publish / to the settled publish.")

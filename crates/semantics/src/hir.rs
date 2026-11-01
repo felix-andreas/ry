@@ -2,8 +2,8 @@
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
 use rustc_hash::{FxHashMap, FxHasher};
-use std::num::NonZeroU32;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroU32;
 use std::sync::{LazyLock, Mutex};
 use std::{fmt, iter, ops};
 use syntax::ast::{BinaryExpr, Name, is_expression_kind};
