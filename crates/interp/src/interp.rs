@@ -41,6 +41,7 @@ pub mod format;
 pub mod frame;
 pub mod graphics;
 pub mod graphics_render;
+pub mod latex;
 pub mod linalg;
 pub mod long_double;
 pub mod lower;
