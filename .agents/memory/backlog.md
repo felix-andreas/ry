@@ -311,6 +311,20 @@ protects construction but nothing after it.
 - The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
   touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
 
+## Open: Arrays
+
+`decisions.md`, "An Array is a flagged R vector". Known gaps:
+
+- `List.map` whose function returns a value that cannot be an item (a vector, `NULL`) is caught
+  only at run time; the checker should reject the function's return type.
+- `class(xs)` is R's implicit class (`numeric`), and serialization (`saveRDS`) drops the flag, so
+  a reloaded Array is a plain vector.
+- C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
+- The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
+  would let compiled loops run strict arithmetic without the generic call.
+- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
+- The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
+
 ## Open: the JIT
 
 `crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
@@ -1862,6 +1876,19 @@ distinct-node count will not see the problem and a naive tree count is itself ex
 a memoized size where the size of a node is one plus the sum of its children's sizes, which is
 linear in the graph and yields the true tree magnitude. `types::type_size` already has that shape.
 
+## Open: a cross-file cycle panics salsa's backdate check
+
+`fuzz_multi_file` (`crates/semantics/tests/test_fuzz.rs`) panics in salsa's
+`backdate.rs` ("returned the same value, but the previous execution changed at R2 and the new
+execution changed at R1") for `global_scheme`. Minimal repro, with salsa 0.28.0 and 0.28.5 alike:
+file one is `g <- rev(g)` then `f <- g$x`, file two is `g <- g + 1L`; empty file two, render both,
+restore it, render again. `sort`, `List.reverse` and `as.Array` in place of `rev` panic too,
+`unlist` and `as.vector` do not. Every execution of the scheme is `Unknown`, so the result is
+deterministic: the panic comes from deep verification re-executing a cycle head
+(`maybe_changed_after_cold`) outside its fixpoint, where it reads only backdated cycle members.
+The Array fuzz templates reached it first; it predates Arrays. Fix the cycle shape (or report it to
+salsa with this repro), then pin the repro in `test_incremental.rs`.
+
 ## Open: neither cycle fix has end-to-end coverage
 
 Neither the non-convergence fix nor the missing cycle recovery has a fixture. The failing inputs are
@@ -2113,6 +2140,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **Arrays.** `[1, 2, 3]` parses, formats, types as `Array<T>` and runs as a flagged R vector with strict operators and indexing. `decisions.md`, "An Array is a flagged R vector".
 - **`ry load` on ry's own runtime.** Lazy bindings are promises over the analysis's syntax trees, both runtimes apply the same plan, and `test_load.rs` runs on both. `decisions.md`, "the loader on ry's runtime".
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
 - **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry repl` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
