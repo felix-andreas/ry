@@ -886,14 +886,16 @@ pub unsafe fn apply_closure_moved(
     let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
     heap.root(env);
     env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
     let mut formal = formals;
     let mut index = 0;
     while formal.kind() == SexpType::Pairlist {
         let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-        bind_formal(env, formal, actual)?;
+        bindings.push(formal_binding(env, formal, actual)?);
         formal = formal.cdr();
         index += 1;
     }
+    heap.define_formals(env, &bindings)?;
     heap.mark_frame_formals(env);
     let promargs = args_pairlist(args)?;
     heap.untrack_references(promargs);
