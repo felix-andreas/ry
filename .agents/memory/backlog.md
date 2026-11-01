@@ -121,6 +121,10 @@ Smaller gaps:
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
+- A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
+  `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
+  on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
+  the generic argument check to carry which argument fixed the type variable.
 - `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
   friendlier contract.
 - `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the

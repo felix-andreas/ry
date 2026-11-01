@@ -443,6 +443,17 @@ impl Context<'_> {
                 // ordinary call.
                 let builtin_callee =
                     callee_name.filter(|_| !self.naming.resolutions.contains_key(callee));
+                // `match.fun` looks a string up as a function name, so `vapply(xs, "g", ...)`
+                // reads `g`.
+                if builtin_callee.is_some_and(|name| MATCH_FUN_CALLERS.contains(&name)) {
+                    for value in arguments.iter().filter_map(|argument| argument.value) {
+                        if let ExpressionKind::Literal(LiteralKind::String(text)) =
+                            &module.expression(value).kind
+                        {
+                            self.resolve_function_name_string(value, text);
+                        }
+                    }
+                }
                 if builtin_callee.is_some_and(|name| NATIVE_INTERFACES.contains(&name))
                     && let Some(routine) = arguments
                         .iter()
@@ -1069,6 +1080,17 @@ impl Context<'_> {
         }
     }
 
+    /// Keeps the named binding alive without making the string a read the checker types.
+    fn resolve_function_name_string(&mut self, id: ExprId, name: &str) {
+        if self.mark_slot_read(name).is_some() || !self.emit {
+            return;
+        }
+        self.naming.quiet_reads.insert(id, Symbol::new(name));
+        if self.current_function_depth() > 0 {
+            self.naming.deferred_quiet_reads.insert(id);
+        }
+    }
+
     fn resolve_assignment_target(
         &mut self,
         assignment: ExprId,
@@ -1390,6 +1412,30 @@ fn diverges(module: &Module, id: ExprId) -> bool {
         _ => false,
     }
 }
+
+/// Base functions that pass their function argument through `match.fun`.
+pub(crate) const MATCH_FUN_CALLERS: [&str; 20] = [
+    "lapply",
+    "sapply",
+    "vapply",
+    "mapply",
+    "Map",
+    "Filter",
+    "Find",
+    "Position",
+    "Reduce",
+    "do.call",
+    "outer",
+    "apply",
+    "tapply",
+    "sweep",
+    "rapply",
+    "eapply",
+    "Vectorize",
+    "Negate",
+    "aggregate",
+    "match.fun",
+];
 
 /// The base functions that call a compiled routine named by their `.NAME` argument.
 const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];

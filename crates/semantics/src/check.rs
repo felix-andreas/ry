@@ -14,7 +14,8 @@ use crate::infer::{
 };
 use crate::metadata::is_own_package;
 use crate::naming::{
-    BindingId, BindingKind, ItemNaming, dot_dot_variable, is_column_update, query_index_arguments,
+    BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable, is_column_update,
+    query_index_arguments,
 };
 use crate::stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs};
 use crate::types::{
@@ -1150,30 +1151,6 @@ fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
         _ => return None,
     })
 }
-
-/// Base functions that pass their function argument through `match.fun`.
-const MATCH_FUN_CALLERS: [&str; 20] = [
-    "lapply",
-    "sapply",
-    "vapply",
-    "mapply",
-    "Map",
-    "Filter",
-    "Find",
-    "Position",
-    "Reduce",
-    "do.call",
-    "outer",
-    "apply",
-    "tapply",
-    "sweep",
-    "rapply",
-    "eapply",
-    "Vectorize",
-    "Negate",
-    "aggregate",
-    "match.fun",
-];
 
 fn is_character(db: &dyn Db, ty: Ty<'_>) -> bool {
     match ty.kind(db) {
