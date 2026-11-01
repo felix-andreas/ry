@@ -345,7 +345,7 @@ pub fn execute_with_plans_only(table: &mut Table, query: Query) -> Result<Execut
 }
 
 fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Executed> {
-    let sums = grouped_integer_sums(&table.schema(), &query)?;
+    let sums = grouped_integer_sums(&table.schema(), table.key(), &query)?;
     let mut warnings = Vec::new();
     let output = run(table, query, kernels, &mut warnings)?;
     let schema = match &output {
@@ -364,12 +364,23 @@ fn execute_with(table: &mut Table, query: Query, kernels: bool) -> Result<Execut
 /// The columns a grouped query computes as a `sum` of integers on its own, which data.table's
 /// grouped sum widens to doubles with a warning when a total overflows. A sum nested in an
 /// expression, or one in `by = .EACHI`, widens silently, as in data.table. A `:=` sum written into
-/// an existing column takes that column's type instead.
-fn grouped_integer_sums(schema: &Schema, query: &Query) -> Result<Vec<PlSmallStr>> {
+/// an existing column takes that column's type instead. After a join, `j` reads the joined rows,
+/// whose join columns carry `i`'s types.
+fn grouped_integer_sums(
+    schema: &Schema,
+    key: &[PlSmallStr],
+    query: &Query,
+) -> Result<Vec<PlSmallStr>> {
     if query.by.is_empty() {
         return Ok(Vec::new());
     }
-    let typer = Typer { schema };
+    let rows_schema = match &query.rows {
+        Rows::Join(join) => join_schema(schema, &join.other.schema(), &join_columns(join, key)?)?,
+        _ => schema.clone(),
+    };
+    let typer = Typer {
+        schema: &rows_schema,
+    };
     let integer_sum = |expr: &Expr| -> Result<bool> {
         Ok(match expr {
             Expr::Aggregate {
@@ -1183,6 +1194,7 @@ pub(crate) struct JoinColumn {
 /// values of `i`'s column in its first condition. A further condition on the same column of `x`
 /// adds a column `name.1`, `name.2`, ... after `x`'s columns, carrying that condition's `i`
 /// values. Then come `i`'s columns no condition uses, an `i.` prefix marking a name `x` has.
+/// A name that still repeats takes a further numeric suffix.
 pub(crate) fn join_layout(x: &[&PlSmallStr], i: &[&PlSmallStr], on: &[On]) -> Vec<JoinColumn> {
     let mut layout = Vec::with_capacity(x.len() + i.len());
     for column in x {
@@ -1231,6 +1243,22 @@ pub(crate) fn join_layout(x: &[&PlSmallStr], i: &[&PlSmallStr], on: &[On]) -> Ve
             source: (*column).clone(),
             condition: None,
         });
+    }
+    // A generated name can collide with a real column, as `t.1` does when `x` has a column
+    // `t.1`, so a repeated name takes the first free numeric suffix, as R's `make.unique` does.
+    let mut taken: HashSet<PlSmallStr> = layout.iter().map(|column| column.name.clone()).collect();
+    let mut seen = HashSet::with_capacity(layout.len());
+    for column in &mut layout {
+        if seen.insert(column.name.clone()) {
+            continue;
+        }
+        let name = (1..)
+            .map(|suffix| PlSmallStr::from(format!("{}.{suffix}", column.name)))
+            .find(|name| !taken.contains(name))
+            .unwrap_or_else(|| column.name.clone());
+        taken.insert(name.clone());
+        seen.insert(name.clone());
+        column.name = name;
     }
     layout
 }
@@ -1964,6 +1992,10 @@ impl Target<'_> {
             _ if self.widens => value.cast(DataType::Int64),
             (Some(_), _) => value.cast(DataType::String),
             (None, ColumnType::Factor) => value,
+            // Polars casts NaN to `true`, where R's `as.logical(NaN)` is `NA`.
+            (None, ColumnType::Logical) => when(value.clone().cast(DataType::Float64).is_nan())
+                .then(lit(NULL).cast(DataType::Boolean))
+                .otherwise(value.cast(DataType::Boolean)),
             (None, kind) => value.cast(dtype(kind)),
         }
     }
@@ -2000,7 +2032,8 @@ fn conversion_warning(
         .zip(stored_values.as_materialized_series().f64()?.iter())
         .position(|pair| match pair {
             (Some(value), Some(kept)) => value != kept,
-            (Some(_), None) => true,
+            // NaN has no integer or logical form, so it becomes NA without a warning, as in R.
+            (Some(value), None) => !value.is_nan(),
             (None, _) => false,
         });
     let Some(row) = changed else {

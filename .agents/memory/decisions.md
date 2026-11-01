@@ -2195,7 +2195,8 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   read by the plan, the kernel and `join_schema`: `x`'s columns with a join column taking `i`'s
   values from its first condition, then one column per further condition on the same `x` column
   (`t.1`, `t.2`), then `i`'s unused columns. data.table names those extra columns `t, t`, a
-  duplicate that ry does not reproduce. NA and NaN match only the same missing value, and only
+  duplicate that ry does not reproduce. A name that still repeats (a real column `t.1`, or `i`
+  holding both `v` and `i.v`) takes the next free numeric suffix, as `make.unique` would. NA and NaN match only the same missing value, and only
   under `<=`, `>=` or `==`, as data.table does. The kernel (`non_equi` in `join.rs`) groups the
   equality conditions, sorts each group's rows of `x` by the first ordering column and narrows
   every row of `i` by binary search, checking any other condition per candidate. `.EACHI` reruns the
@@ -2208,6 +2209,8 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   or assigns with `:=` and that overflows (one warning per column, none for an ungrouped, nested or
   `.EACHI` sum), and a `:=` into an existing column whose type loses part of the value (a double
   truncated or out of range in an integer column, a number other than 0 or 1 in a logical one).
+  NaN becomes NA silently, as in R. In a grouped join, `j` is typed against the joined rows, whose
+  join columns carry `i`'s types.
   The wording is ry's. A narrowing `:=` skips the kernel, because detecting the loss needs the
   value before the conversion; it is not a db-benchmark shape.
 

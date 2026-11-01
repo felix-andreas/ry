@@ -2530,6 +2530,12 @@ fn non_equi_joins_match_the_plan_on_random_tables() {
             rng.below(5) as i32
         }
     };
+    let key_value = |rng: &mut SplitMix64| match rng.below(10) {
+        0 => NA_REAL,
+        1 => f64::NAN,
+        2 => -0.0,
+        _ => rng.below(4) as f64,
+    };
     for iteration in 0..fuzz_iterations(200) {
         let (x_rows, i_rows) = (rng.below(40), 1 + rng.below(12));
         let x = frame(vec![
@@ -2545,9 +2551,21 @@ fn non_equi_joins_match_the_plan_on_random_tables() {
                 "b",
                 ints(&(0..x_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>()),
             ),
+            (
+                "d",
+                doubles(&(0..x_rows).map(|_| key_value(&mut rng)).collect::<Vec<_>>()),
+            ),
             ("v", ints(&(0..x_rows as i32).collect::<Vec<_>>())),
         ]);
+        // An integer key against a double one, or a double key with NaN and -0.0, takes the
+        // kernel's general grouping path rather than its dense integer codes.
+        let e = if rng.chance(1, 2) {
+            doubles(&(0..i_rows).map(|_| key_value(&mut rng)).collect::<Vec<_>>())
+        } else {
+            ints(&(0..i_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>())
+        };
         let i = frame(vec![
+            ("e", e),
             (
                 "g",
                 ints(&(0..i_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>()),
@@ -2571,6 +2589,9 @@ fn non_equi_joins_match_the_plan_on_random_tables() {
         let mut conditions = Vec::new();
         if rng.chance(1, 2) {
             conditions.push(On::equal("g", "g"));
+        }
+        if rng.chance(1, 3) {
+            conditions.push(On::equal("d", "e"));
         }
         let x_columns = ["a", "b"];
         let i_columns = ["lo", "hi"];
@@ -2740,4 +2761,99 @@ fn assigning_a_narrower_value_warns_about_the_conversion() {
         warnings(&x, assign("b", Expr::Integer(5))),
         ["column `b` holds logicals, so the assigned value 5 became TRUE"]
     );
+}
+
+#[test]
+fn a_grouped_join_reads_the_columns_of_i() {
+    let x = frame(vec![
+        ("id", ints(&[1, 2, 1])),
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[1, 2, 3])),
+    ]);
+    let i = frame(vec![
+        ("id", doubles(&[1.0, 2.0])),
+        ("w", ints(&[10, 20])),
+        ("v", ints(&[100, 200])),
+    ]);
+    let query = |sum_of: &str| Query {
+        rows: Rows::Join(Join::new(i.clone(), vec![On::equal("id", "id")])),
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column(sum_of)))]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    assert_eq!(warnings(&x, query("w")), Vec::<String>::new());
+    assert_eq!(
+        read(&mut run_table(&mut x.fork(), query("w")), "s"),
+        ints(&[30, 10])
+    );
+    assert_eq!(
+        read(&mut run_table(&mut x.fork(), query("i.v")), "s"),
+        ints(&[300, 100])
+    );
+    // The join column carries i's doubles, so the sum is a double without overflowing.
+    assert_eq!(warnings(&x, query("id")), Vec::<String>::new());
+    assert_eq!(
+        read(&mut run_table(&mut x.fork(), query("id")), "s"),
+        doubles(&[3.0, 1.0])
+    );
+}
+
+#[test]
+fn assigning_nan_stores_na_without_a_warning() {
+    let x = frame(vec![
+        ("a", ints(&[1, 2])),
+        ("f", RVector::Logical(vec![0, 0])),
+    ]);
+    let assign = |name: &str| Query {
+        rows: Rows::Filter(binary(BinaryOp::Equal, column("a"), Expr::Integer(1))),
+        select: Select::Assign(vec![set(name, Expr::Double(f64::NAN))]),
+        ..Query::default()
+    };
+    for name in ["a", "f"] {
+        assert_eq!(warnings(&x, assign(name)), Vec::<String>::new(), "{name}");
+    }
+    let mut updated = x.fork();
+    run(&mut updated, assign("f"));
+    assert_eq!(
+        read(&mut updated, "f"),
+        RVector::Logical(vec![NA_INTEGER, 0])
+    );
+    let mut updated = x.fork();
+    run(&mut updated, assign("a"));
+    assert_eq!(read(&mut updated, "a"), ints(&[NA_INTEGER, 2]));
+}
+
+#[test]
+fn a_join_keeps_its_output_names_unique() {
+    let mut x = frame(vec![("t", ints(&[1, 5])), ("t.1", ints(&[7, 8]))]);
+    let i = frame(vec![("lo", ints(&[0])), ("hi", ints(&[3]))]);
+    let join = non_equi(
+        &i,
+        &[
+            ("t", Comparison::GreaterEqual, "lo"),
+            ("t", Comparison::LessEqual, "hi"),
+        ],
+        Mult::All,
+    );
+    let query = Query {
+        rows: Rows::Join(join),
+        ..Query::default()
+    };
+    let mut result = run_both(&mut x, query);
+    assert_eq!(names(&result), ["t", "t.1", "t.1.1"]);
+    assert_eq!(read(&mut result, "t.1"), ints(&[7]));
+    assert_eq!(read(&mut result, "t.1.1"), ints(&[3]));
+
+    let mut x = frame(vec![("k", ints(&[1])), ("v", ints(&[1]))]);
+    let i = frame(vec![
+        ("k", ints(&[1])),
+        ("v", ints(&[2])),
+        ("i.v", ints(&[3])),
+    ]);
+    let query = Query {
+        rows: Rows::Join(Join::new(i, vec![On::equal("k", "k")])),
+        ..Query::default()
+    };
+    let result = run_both(&mut x, query);
+    assert_eq!(names(&result), ["k", "v", "i.v", "i.v.1"]);
 }

@@ -668,8 +668,8 @@ type. No interpreter calls it yet. The rest of this section describes the shape 
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
   filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
   `mean`, `min`, `max`, `.N`, `first`, `last`, `median`, `sd`, `var`, plus `head` and `cor`), equi,
-  keyed, rolling and non-equi joins, `by = .EACHI`, `mult =`, and `:=`. Lowering adds R's semantics where Polars differs: integer
-  overflow becomes NA, aggregates propagate NA unless `na.rm`, `%/%` and `%%` follow R's signs, and
+  keyed, rolling and non-equi joins, `by = .EACHI`, `mult =`, and `:=`. Lowering adds R's
+  semantics where Polars differs: integer overflow becomes NA, aggregates propagate NA unless `na.rm`, `%/%` and `%%` follow R's signs, and
   joins follow data.table's row and column layout. A query returns the warnings data.table would
   raise (an overflowing grouped integer sum, a lossy `:=`) as data, for the interpreter to signal.
   Not covered yet: R functions inside an aggregation, which will fall back to per-group evaluation
