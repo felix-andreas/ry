@@ -332,8 +332,17 @@ impl ServerState {
     {
         let (reply, receive) = oneshot::channel();
         let job = Job::Run(Box::new(move |worker| {
+            // An edit that lands mid-request cancels its queries; the client asks again for the
+            // new text, so the answer is `ContentModified` rather than a dead worker.
+            let response = salsa::Cancelled::catch(AssertUnwindSafe(|| build(worker)))
+                .unwrap_or_else(|_| {
+                    Err(ResponseError::new(
+                        ErrorCode::CONTENT_MODIFIED,
+                        "the document changed during the request",
+                    ))
+                });
             // The receiver is gone only when the client cancelled the request.
-            reply.send(build(worker)).ok();
+            reply.send(response).ok();
         }));
         // Queued first: a background unit cancelled before the request is queued would just
         // start the next one.
@@ -1084,10 +1093,10 @@ impl Worker {
     }
 
     fn to_text_range(&self, text: &str, range: lsp_types::Range) -> TextRange {
-        TextRange::new(
-            self.to_offset(text, range.start),
-            self.to_offset(text, range.end),
-        )
+        // A client may send a reversed range; it still names the same span.
+        let start = self.to_offset(text, range.start);
+        let end = self.to_offset(text, range.end);
+        TextRange::new(start.min(end), start.max(end))
     }
 
     fn to_range(&self, text: &str, range: TextRange) -> lsp_types::Range {

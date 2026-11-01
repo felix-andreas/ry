@@ -7,7 +7,7 @@ use {
         parse, s3_generics,
         stubs::{declaring_namespace, stubs},
     },
-    rowan::NodeOrToken,
+    rowan::{Direction, NodeOrToken},
     syntax::{
         GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
         ast::BinaryExpr,
@@ -213,6 +213,9 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 SyntaxKind::BINARY_EXPR => binary_lints(&red, config, diagnostics),
                 SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),
                 SyntaxKind::PARAMETER => parameter_name_lint(&red, config, diagnostics),
+                SyntaxKind::NAME if annotation_depth == 0 => {
+                    boolean_shorthand_lint(&red, config, diagnostics);
+                }
                 SyntaxKind::CALL_EXPR => {
                     object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
                 }
@@ -224,34 +227,72 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                 annotation_depth -= 1;
             }
         }
-        GreenEvent::Token { kind, text, range }
-            if kind == SyntaxKind::IDENT && annotation_depth == 0 =>
-        {
-            let (message, title, replacement) = match text {
-                "T" => (
-                    "Use TRUE, not T, for Boolean values",
-                    "Change to `TRUE`",
-                    "TRUE",
-                ),
-                "F" => (
-                    "Use FALSE, not F, for Boolean values",
-                    "Change to `FALSE`",
-                    "FALSE",
-                ),
-                _ => return,
-            };
-            push_lint(
-                diagnostics,
-                config.boolean_shorthand,
-                Severity::Warning,
-                "boolean-shorthand",
-                range,
-                message,
-                Some((title, replacement)),
-            );
-        }
         GreenEvent::Token { .. } => {}
     });
+}
+
+/// `T` and `F` are flagged only where they are read as values: an argument name, an assignment
+/// target, or a `$` or `@` field is a different name that happens to be spelled `T`, and
+/// rewriting it to `TRUE` would not parse.
+fn boolean_shorthand_lint(
+    name: &SyntaxNode,
+    config: &LintConfig,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(token) = name.first_token() else {
+        return;
+    };
+    if let Some(parent) = name.parent() {
+        let is_first = parent.first_child().as_ref() == Some(name);
+        let next_kind = name
+            .siblings_with_tokens(Direction::Next)
+            .skip(1)
+            .find(|element| !element.kind().is_trivia())
+            .map(|element| element.kind());
+        let is_target = match parent.kind() {
+            SyntaxKind::ARGUMENT => next_kind == Some(SyntaxKind::EQ),
+            SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR => !is_first,
+            SyntaxKind::BINARY_EXPR => match BinaryExpr::cast(parent.clone())
+                .and_then(|binary| binary.operator())
+                .map(|operator| operator.kind())
+            {
+                Some(
+                    SyntaxKind::LESS_MINUS
+                    | SyntaxKind::LESS2_MINUS
+                    | SyntaxKind::EQ
+                    | SyntaxKind::COLON_EQ,
+                ) => is_first,
+                Some(SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2) => !is_first,
+                _ => false,
+            },
+            _ => false,
+        };
+        if is_target {
+            return;
+        }
+    }
+    let (message, title, replacement) = match token.text() {
+        "T" => (
+            "Use TRUE, not T, for Boolean values",
+            "Change to `TRUE`",
+            "TRUE",
+        ),
+        "F" => (
+            "Use FALSE, not F, for Boolean values",
+            "Change to `FALSE`",
+            "FALSE",
+        ),
+        _ => return,
+    };
+    push_lint(
+        diagnostics,
+        config.boolean_shorthand,
+        Severity::Warning,
+        "boolean-shorthand",
+        token.text_range(),
+        message,
+        Some((title, replacement)),
+    );
 }
 
 /// A conservative green-tree test for whether the red lint for `node` can report anything:
@@ -273,6 +314,7 @@ fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfi
                     })
         }
         SyntaxKind::PARAMETER => config.naming_style.is_some(),
+        SyntaxKind::NAME => matches!(node.single_token_text(), Some("T" | "F")),
         SyntaxKind::CALL_EXPR => match node.child_nodes().next() {
             Some(callee) if callee.kind() == SyntaxKind::NAME => callee
                 .single_token_text()

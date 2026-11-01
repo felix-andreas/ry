@@ -146,3 +146,43 @@ fold 0..=4 Block
 fold 1..=2 Section
 fold 3..=4 Section
 token "f" Function
+
+#---- bare_separator_has_no_symbol
+a <- 1
+# ----------------------
+b <- 2
+#++++
+symbol a (Value) at "a"
+symbol b (Value) at "b"
+fold 1..=2 Section
+
+#---- section_inside_a_call
+Account <- list(
+  # Methods ----
+  deposit = function(x) x
+)
+# Reports ----
+report <- function() 1
+#++++
+symbol Account (Value fn(x)) at "Account"
+symbol Reports (Section) at "# Reports ----"
+symbol   report (Function fn()) at "report"
+fold 0..=2 Block
+fold 1..=2 Section
+fold 4..=5 Section
+token "list" Function
+token "x" Parameter
+token "x" Parameter
+token "report" Function
+
+#---- trailing_comments_do_not_fold
+x <- 1 # one
+y <- 2 # two
+# regional settings
+# follow
+z <- 3
+#++++
+symbol x (Value) at "x"
+symbol y (Value) at "y"
+symbol z (Value) at "z"
+fold 2..=3 Comment

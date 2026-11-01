@@ -1130,11 +1130,13 @@ fn show_defaults(signature: &mut SignatureData, defaults: &[(String, String)]) {
         let rewritten = part.strip_prefix('[').and_then(|rest| {
             let (name, ty) = rest.split_once("]: ")?;
             let (_, default) = defaults.iter().find(|(parameter, _)| parameter == name)?;
+            // A default written over several lines still fits the one-line label.
+            let default = default.split_whitespace().collect::<Vec<_>>().join(" ");
             let default = if default.chars().count() > DEFAULT_WIDTH {
                 let cut: String = default.chars().take(DEFAULT_WIDTH).collect();
                 format!("{cut}...")
             } else {
-                default.clone()
+                default
             };
             Some(format!("{name}: {ty} = {default}"))
         });
@@ -1811,7 +1813,8 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     let text = file.text(db);
     let lines = Lines::new(text);
     for header in section_headers(&root, text, &lines) {
-        if header.scope.is_some() {
+        // A bare `# ----` separator still ends the section above it, but a symbol needs a name.
+        if header.scope.is_some() || header.title.is_empty() {
             continue;
         }
         symbols.push(DocumentSymbol {
@@ -1970,7 +1973,8 @@ fn string_contents(token: &SyntaxToken) -> TextRange {
         let Some(open) = text.find(['(', '[', '{']) else {
             return range;
         };
-        (open + 1, text.len() - open)
+        // The closing `)"` mirrors the opening `r"`, dashes included.
+        (open + 1, open)
     } else {
         (1, 1)
     };
@@ -2071,13 +2075,22 @@ pub fn folding_ranges(db: &dyn Db, file: SourceFile) -> Vec<Fold> {
         .filter_map(SyntaxElement::into_token)
         .filter(|token| token.kind() == COMMENT)
     {
-        let line = lines.line_of(token.text_range().start());
-        let marker = token.text().trim_start_matches('#').trim_start();
-        if marker.starts_with("endregion") {
+        let start = token.text_range().start();
+        // A trailing comment belongs to its code line, not to a comment block.
+        if !lines.text_before(text, start).trim().is_empty() {
+            continue;
+        }
+        let line = lines.line_of(start);
+        let marker = token
+            .text()
+            .trim_start_matches('#')
+            .split_whitespace()
+            .next();
+        if marker == Some("endregion") {
             if let Some(start) = region_starts.pop() {
                 push(start, line, FoldKind::Region);
             }
-        } else if marker.starts_with("region") {
+        } else if marker == Some("region") {
             region_starts.push(line);
         } else if !headers.iter().any(|header| header.line == line) {
             comment_lines.push(line);
@@ -2113,7 +2126,7 @@ struct SectionHeader {
     /// The last non-blank line before the next header of the same or a higher level in the same
     /// scope, or before the scope ends.
     end_line: u32,
-    /// The enclosing block, or `None` at the top level of the file.
+    /// The enclosing block or argument list, or `None` at the top level of the file.
     scope: Option<TextRange>,
 }
 
@@ -2138,7 +2151,7 @@ fn section_headers(root: &SyntaxNode, text: &str, lines: &Lines) -> Vec<SectionH
         }
         let scope = token
             .parent_ancestors()
-            .find(|node| node.kind() == BRACE_EXPR)
+            .find(|node| matches!(node.kind(), BRACE_EXPR | ARGUMENT_LIST))
             .map(|block| block.text_range());
         headers.push(SectionHeader {
             title: title.trim().to_owned(),
@@ -2150,7 +2163,7 @@ fn section_headers(root: &SyntaxNode, text: &str, lines: &Lines) -> Vec<SectionH
         });
     }
     let last_content_line = |scope: Option<TextRange>| match scope {
-        // The closing brace's line stays visible.
+        // The closing delimiter's line stays visible.
         Some(block) => lines.line_of(block.end()).saturating_sub(1),
         None => lines.line_of(TextSize::of(text.trim_end())),
     };

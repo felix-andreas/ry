@@ -1923,9 +1923,6 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
     )
 }
 
-/// Ties break lexicographically for determinism. The budget is deliberately
-/// tight (a wrong guess is worse than none); transposition counts as one edit
-/// so `lenght` still finds `length`.
 /// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
 /// may cover a whole call or subset. The fix replaces that spelling only when it occurs exactly
 /// once as a whole name, so it never guesses between two places.
@@ -1965,7 +1962,8 @@ fn misspelling_fix(
     if whole_names.next().is_some() {
         return None;
     }
-    let quoted = covered[..at].ends_with(['"', '\'']);
+    // Inside quotes or backticks the bare spelling is what belongs there.
+    let quoted = covered[..at].ends_with(['"', '\'', '`']);
     let replacement = if quoted || is_syntactic_name(nearest) {
         nearest.clone()
     } else {
@@ -1994,6 +1992,9 @@ fn with_name_fix(diagnostic: Diagnostic, suggestion: Option<&str>) -> Diagnostic
     diagnostic.with_fix(format!("Change to `{nearest}`"), range, replacement)
 }
 
+/// Ties break lexicographically for determinism. The budget is deliberately
+/// tight (a wrong guess is worse than none); transposition counts as one edit
+/// so `lenght` still finds `length`.
 pub(crate) fn nearest_name<'a>(
     name: &str,
     candidates: impl Iterator<Item = &'a str>,

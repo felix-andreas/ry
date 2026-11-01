@@ -95,3 +95,38 @@ token "alpha" Parameter
 token "beta" Parameter
 token "f" Function
 fix Change to `alpha`: "alpah" -> "alpha"
+
+#---- boolean_shorthand_only_on_values
+x <- list(T = 1)
+T <- 3
+y <- x$T
+f(T)
+#++++
+symbol x (Value) at "x"
+symbol T (Value) at "T"
+symbol y (Value) at "y"
+token "list" Function
+token "f" Function
+fix Change to `TRUE`: "T" -> "TRUE"
+
+#---- backticked_argument
+f <- function(`my value`, beta) beta
+f(`my valeu` = 1, beta = 2)
+#++++
+symbol f (Function fn(`my value`, beta)) at "f"
+token "f" Function
+token "`my value`" Parameter
+token "beta" Parameter
+token "beta" Parameter
+token "f" Function
+fix Change to `my value`: "my valeu" -> "my value"
+
+#==== raw_strings
+#---- raw_string_contents_first
+message(r"(he$0llo)")
+#++++
+token "message" Function
+select "hello"
+select "r\"(hello)\""
+select "(r\"(hello)\")"
+select "message(r\"(hello)\")"
