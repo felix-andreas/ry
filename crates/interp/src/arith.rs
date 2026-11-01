@@ -1558,6 +1558,7 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
+        SexpType::List | SexpType::Expression if count == 0 => alloc(SexpType::Logical, 0),
         _ => Err(call.error("invalid argument type")),
     }
 }
@@ -1903,6 +1904,9 @@ pub fn round_digits(x: f64, digits: i32) -> f64 {
     if digits > 308 {
         return x;
     }
+    if digits < -308 {
+        return 0.0;
+    }
     if digits == 0 {
         return x.round_ties_even();
     }
@@ -1935,7 +1939,8 @@ pub fn signif_digits(x: f64, digits: i32) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;
     }
-    let digits = digits.max(1);
+    // Seventeen significant digits already reproduce any double exactly.
+    let digits = digits.clamp(1, 17);
     let text = format!("{:.*e}", (digits - 1) as usize, x);
     text.parse().unwrap_or(x)
 }
@@ -1963,11 +1968,16 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
         .ok_or_else(|| call.error("argument \"x\" is missing, with no default"))?;
     let digits = match present(matched[1]) {
         Some(digits) => {
-            let value = values::as_real_scalar(digits);
-            if value.is_nan() {
+            if length(digits) == 0 {
                 return Err(call.error("invalid second argument of length 0"));
             }
-            value.round() as i32
+            let value = values::as_real_scalar(digits);
+            // `NA` digits make every element `NA`, which `i32::MIN` stands for below.
+            if value.is_nan() {
+                i32::MIN
+            } else {
+                value.round().clamp(-1e6, 1e6) as i32
+            }
         }
         None => {
             if significant {
@@ -1979,7 +1989,9 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     };
     let operand = values::materialize(operand)?;
     match operand.kind() {
-        SexpType::Integer | SexpType::Logical if !significant || digits >= 10 => {
+        SexpType::Integer | SexpType::Logical
+            if digits != i32::MIN && (!significant || digits >= 10) =>
+        {
             if digits >= 0 || operand.kind() == SexpType::Logical {
                 let result = coerce_vector(operand, SexpType::Integer)?;
                 return Ok(result);
@@ -1996,7 +2008,9 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             let result = alloc(SexpType::Real, count)?;
             for index in 0..count {
                 let x = real_at(operand, index);
-                values::reals_mut(result)[index] = if x.is_nan() {
+                values::reals_mut(result)[index] = if digits == i32::MIN {
+                    NA_REAL
+                } else if x.is_nan() {
                     x
                 } else if significant {
                     signif_digits(x, digits)
@@ -2012,7 +2026,12 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             let result = alloc(SexpType::Complex, count)?;
             for index in 0..count {
                 let z = values::complexes(operand)[index];
-                values::complexes_mut(result)[index] = if significant {
+                values::complexes_mut(result)[index] = if digits == i32::MIN {
+                    Rcomplex {
+                        r: NA_REAL,
+                        i: NA_REAL,
+                    }
+                } else if significant {
                     signif_complex(z, digits)
                 } else {
                     Rcomplex {

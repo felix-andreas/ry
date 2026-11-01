@@ -771,6 +771,11 @@ unsafe fn do_gzcon(call: &Call<'_>) -> R<Sexp> {
         return Ok(object);
     }
     let inner_mode = mode_of(inner);
+    if class_of(inner) == "textConnection" && inner_mode.contains(&b'w') {
+        return Err(error(
+            "cannot create a 'gzcon' connection from a writable textConnection; maybe use rawConnection",
+        ));
+    }
     let mode: &[u8] = if inner_mode.contains(&b'w') {
         b"wb"
     } else if inner_mode.contains(&b'a') {
@@ -873,6 +878,14 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
             Device::TextOutput(output)
         }
         _ => return Err(error("unsupported mode")),
+    };
+    // An output connection is described by the variable it writes, as in GNU R.
+    let description = match &device {
+        Device::TextOutput(TextOutput {
+            target: Some(target),
+            ..
+        }) => values::symbol_name(target.symbol).into_owned(),
+        _ => description,
     };
     let open = if open.is_empty() { "r" } else { open.as_str() };
     new_builtin(
