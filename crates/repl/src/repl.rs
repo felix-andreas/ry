@@ -6,11 +6,7 @@ pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
 pub use reedline;
-
-use std::error::Error;
-use std::fmt;
-use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::{error::Error, fmt, io::IsTerminal, path::PathBuf};
 
 #[derive(Debug)]
 pub struct ReplError(pub String);

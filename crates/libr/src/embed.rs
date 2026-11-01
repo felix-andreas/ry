@@ -2,9 +2,11 @@
 //! the `ry` binary. They are not GNU R API, so they carry the `ry_` prefix and are declared in
 //! `include/ry_embed.h`.
 
-use crate::{Global, runtime};
-use heap::{Collection, GcStress, object::Sexp};
-use std::ffi::{c_char, c_int, c_void};
+use {
+    crate::{Global, runtime},
+    heap::{Collection, GcStress, object::Sexp},
+    std::ffi::{c_char, c_int, c_void},
+};
 
 type ConsoleCallback = unsafe extern "C" fn(*const c_char, usize, c_int, *mut c_void);
 

@@ -6,13 +6,15 @@
 //! Each module that implements builtins exports a `BUILTINS` table; [`install_all`] registers
 //! them, and the host adds its own with [`crate::register_builtins`].
 
-use crate::{
-    interp,
-    unwind::{R, error, error_in},
-    values::{self, nil},
+use {
+    crate::{
+        interp,
+        unwind::{R, error, error_in},
+        values::{self, nil},
+    },
+    heap::object::{Sexp, SexpType},
+    syntax::native_values::ACCEPTS_NATIVE,
 };
-use heap::object::{Sexp, SexpType};
-use syntax::native_values::ACCEPTS_NATIVE;
 
 /// How a builtin is called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

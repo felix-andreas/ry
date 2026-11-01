@@ -22,20 +22,22 @@
 //! precision) are collected while the functions run and raised by the builtin afterwards, which
 //! keeps the functions free of interpreter state.
 
-use crate::{
-    builtin_libraries::NativeFn,
-    builtins::{Arg, BuiltinDef, internal},
-    coerce::coerce_vector,
-    conditions::warning,
-    random,
-    unwind::{R, error},
-    values::{
-        alloc, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
-        ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
+use {
+    crate::{
+        builtin_libraries::NativeFn,
+        builtins::{Arg, BuiltinDef, internal},
+        coerce::coerce_vector,
+        conditions::warning,
+        random,
+        rmath::*,
+        unwind::{R, error},
+        values::{
+            alloc, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
+            ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
+        },
     },
+    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real},
 };
-use crate::rmath::*;
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real};
 
 /// Generates the `.Internal` table and the stats routine table from one list, so that both
 /// entry points vectorize every function identically.
@@ -1425,9 +1427,10 @@ pub fn rmultinom(
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use super::*;
-    use crate::rmath::*;
-    use crate::random::SeededDeviates;
+    use {
+        super::*,
+        crate::{random::SeededDeviates, rmath::*},
+    };
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
 

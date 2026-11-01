@@ -5,19 +5,26 @@
 //! `item_immediate_reads`) or from one file's own text (`file_load_index`), so an edit inside
 //! one item re-derives that item alone. `package_index` only joins those per-item results.
 
-use crate::hir::Symbol;
-use crate::metadata::{
-    Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
-    parse_namespace_spec, string_content,
+use {
+    crate::{
+        Db, Item, ItemKind, SourceFile,
+        hir::Symbol,
+        item_naming, item_spans, item_syntax,
+        metadata::{
+            Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
+            parse_namespace_spec, string_content,
+        },
+        parse,
+    },
+    rowan::{GreenNodeData, Language, NodeOrToken},
+    rustc_hash::{FxHashMap, FxHashSet},
+    serde::{Deserialize, Serialize},
+    std::{collections::BTreeSet, sync::Arc},
+    syntax::{
+        RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ast::{self, BinaryExpr},
+    },
 };
-use crate::{Db, Item, ItemKind, SourceFile, item_naming, item_spans, item_syntax, parse};
-use rowan::{GreenNodeData, Language, NodeOrToken};
-use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::sync::Arc;
-use syntax::ast::{self, BinaryExpr};
-use syntax::{RLanguage, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 /// A package as the loader sees it: its `R/` files in collation order, plus `NAMESPACE` and
 /// `DESCRIPTION`. Separate fields, so a `NAMESPACE` edit never re-derives an item.

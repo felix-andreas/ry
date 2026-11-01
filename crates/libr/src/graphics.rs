@@ -6,14 +6,16 @@
 //! point is exported: the color and text helpers work, and anything that needs a device raises
 //! an R error that says graphics devices are not supported yet.
 
-use crate::{
-    boundary::{ApiResult, enter, error, raise},
-    runtime,
-    strings::{c_bytes, utf8_text},
-    vectors::{int_elt, real_elt, xlength},
+use {
+    crate::{
+        boundary::{ApiResult, enter, error, raise},
+        runtime,
+        strings::{c_bytes, utf8_text},
+        vectors::{int_elt, real_elt, xlength},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real},
+    std::ffi::{c_char, c_int, c_uint},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real};
-use std::ffi::{c_char, c_int, c_uint};
 
 /// The graphics engine version ry presents: R 4.6's (`R_GE_fontVar`).
 pub const GE_VERSION: c_int = 17;
@@ -710,7 +712,9 @@ static GRAPHICS_SYSTEMS: std::sync::Mutex<[usize; MAX_GRAPHICS_SYSTEMS]> =
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
     let claimed = {
-        let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut systems = GRAPHICS_SYSTEMS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let free = systems.iter().position(|&slot| slot == 0);
         if let Some(free) = free {
             systems[free] = callback;
@@ -727,8 +731,13 @@ pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
 /// `GEunregisterSystem(index)`: frees a graphics system's slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
-    let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    match usize::try_from(index).ok().and_then(|index| systems.get_mut(index)) {
+    let mut systems = GRAPHICS_SYSTEMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match usize::try_from(index)
+        .ok()
+        .and_then(|index| systems.get_mut(index))
+    {
         Some(slot) if *slot != 0 => *slot = 0,
         _ => {
             drop(systems);

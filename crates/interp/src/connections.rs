@@ -17,42 +17,56 @@
 //!
 //! [`Hooks::connection_method`]: crate::Hooks
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    interp,
-    unwind::{R, Unwind, error},
-    values::{self, nil, scalar_bool, scalar_integer, symbols},
-    write_terminal,
-};
-use bzip2::{read::MultiBzDecoder, write::BzEncoder};
-use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
-use lzma_rust2::{XzOptions, XzReader, XzWriter};
-use heap::{
-    object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
-    strings::Encoding,
-};
-use std::{
-    borrow::Cow,
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    fs::{File, OpenOptions},
-    io::{BufReader, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
-    ptr::null_mut,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        interp,
+        unwind::{R, Unwind, error},
+        values::{self, nil, scalar_bool, scalar_integer, symbols},
+        write_terminal,
+    },
+    bzip2::{read::MultiBzDecoder, write::BzEncoder},
+    flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
+    heap::{
+        object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
+    },
+    lzma_rust2::{XzOptions, XzReader, XzWriter},
+    std::{
+        borrow::Cow,
+        ffi::{CStr, CString, c_char, c_int, c_void},
+        fs::{File, OpenOptions},
+        io::{BufReader, Read, Seek, SeekFrom, Write},
+        path::PathBuf,
+        ptr::null_mut,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("file", 6, do_file),
-    internal("gzfile", 4, |call| unsafe { compressed_file(call, Compressed::Gzip) }),
-    internal("bzfile", 4, |call| unsafe { compressed_file(call, Compressed::Bzip2) }),
-    internal("xzfile", 4, |call| unsafe { compressed_file(call, Compressed::Xz) }),
+    internal("gzfile", 4, |call| unsafe {
+        compressed_file(call, Compressed::Gzip)
+    }),
+    internal("bzfile", 4, |call| unsafe {
+        compressed_file(call, Compressed::Bzip2)
+    }),
+    internal("xzfile", 4, |call| unsafe {
+        compressed_file(call, Compressed::Xz)
+    }),
     internal("fifo", 4, |_| Err(unsupported("fifo"))),
-    internal("url", 6, |_| Err(error("ry does not support URL connections yet"))),
+    internal("url", 6, |_| {
+        Err(error("ry does not support URL connections yet"))
+    }),
     internal("pipe", 3, do_pipe),
     internal("rawConnection", 3, do_raw_connection),
     internal("unz", 3, do_unz),
-    internal("rawConnectionValue", 1, |call| unsafe { raw_connection_value(call.arg(0)) }),
+    internal("rawConnectionValue", 1, |call| unsafe {
+        raw_connection_value(call.arg(0))
+    }),
     internal("textConnection", 5, do_text_connection),
-    internal("textConnectionValue", 1, |call| unsafe { text_connection_value(call.arg(0)) }),
+    internal("textConnectionValue", 1, |call| unsafe {
+        text_connection_value(call.arg(0))
+    }),
     internal("open", 3, do_open).invisible(),
     internal("close", 2, |call| unsafe { close(call.arg(0)) }).invisible(),
     internal("isOpen", 2, do_is_open),
@@ -75,7 +89,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("seek", 4, do_seek),
     internal("truncate", 1, do_truncate).invisible(),
     internal("flush", 1, do_flush).invisible(),
-    internal("summary.connection", 1, |call| unsafe { summary(call.arg(0)) }),
+    internal("summary.connection", 1, |call| unsafe {
+        summary(call.arg(0))
+    }),
     internal("pushBack", 4, do_push_back).invisible(),
     internal("pushBackLength", 1, |call| unsafe {
         scalar_integer((*resolve_con(call.arg(0))?.1).nPushBack)
@@ -287,7 +303,11 @@ impl Table {
         // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
         // `sink(file(path))` is not closed as unused while output still goes to it.
         for sink in &self.sinks {
-            let id = self.entries.get(sink.slot).and_then(Option::as_ref).and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
+            let id = self
+                .entries
+                .get(sink.slot)
+                .and_then(Option::as_ref)
+                .and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
             if let Some(id) = id {
                 marker.mark(id);
             }
@@ -334,7 +354,13 @@ pub unsafe fn new_custom(description: &[u8], mode: &[u8], class: &[u8]) -> R<(Se
     if mode.len() > 4 {
         return Err(error("invalid 'mode' argument"));
     }
-    let con = allocate_rconn(class, description, mode, &CUSTOM_METHODS, default_vfprintf());
+    let con = allocate_rconn(
+        class,
+        description,
+        mode,
+        &CUSTOM_METHODS,
+        default_vfprintf(),
+    );
     (*con).blocking = 0;
     let object = register(con, false)?;
     Ok((object, con))
@@ -423,7 +449,10 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
     if file.kind() == SexpType::String {
         let path = expand_path(&values::require_string(file, "file")?);
         let bytes = std::fs::read(&path).map_err(|failure| {
-            error(format!("cannot open file '{path}': {}", os_message(&failure)))
+            error(format!(
+                "cannot open file '{path}': {}",
+                os_message(&failure)
+            ))
         })?;
         let bytes = decompress(&bytes)
             .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
@@ -487,7 +516,10 @@ pub unsafe fn write_text(file: Sexp, text: &str) -> R<()> {
             return Ok(());
         }
         return std::fs::write(expand_path(&path), text).map_err(|failure| {
-            error(format!("cannot open file '{path}': {}", os_message(&failure)))
+            error(format!(
+                "cannot open file '{path}': {}",
+                os_message(&failure)
+            ))
         });
     }
     print(file, text.as_bytes())
@@ -527,14 +559,19 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         return Err(error("ry does not support URL connections yet"));
     }
     let (path, temporary, open) = if description.is_empty() {
-        let open = if open.is_empty() { "w+".to_owned() } else { open };
+        let open = if open.is_empty() {
+            "w+".to_owned()
+        } else {
+            open
+        };
         (temporary_path(), true, open)
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
     // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
     // and the connection then becomes a `gzfile` for good.
-    let sniffs = open.is_empty() || parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary);
+    let sniffs = open.is_empty()
+        || parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary);
     let compression = if !raw && sniffs {
         file_compression(&path).ok().flatten()
     } else {
@@ -549,9 +586,16 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         stream: None,
     });
     let default_mode = if compression.is_some() { "rt" } else { "r" };
-    let object = new_builtin("file", description.as_bytes(), &open, default_mode, device, |con| {
-        (*con).blocking = blocking as Rboolean;
-    })?;
+    let object = new_builtin(
+        "file",
+        description.as_bytes(),
+        &open,
+        default_mode,
+        device,
+        |con| {
+            (*con).blocking = blocking as Rboolean;
+        },
+    )?;
     // The object keeps the class it was created with; only the struct says what it became.
     if let Some(compression) = compression {
         let class: &[u8] = match compression {
@@ -627,7 +671,11 @@ unsafe fn do_raw_connection(call: &Call<'_>) -> R<Sexp> {
         return Err(error("invalid 'raw' argument"));
     }
     let open = values::require_string(call.arg(2), "open")?;
-    let open = if open.is_empty() { "r".to_owned() } else { open };
+    let open = if open.is_empty() {
+        "r".to_owned()
+    } else {
+        open
+    };
     let mode = parse_mode(open.as_bytes()).ok_or_else(|| error("unsupported mode"))?;
     let mut data = values::raws(object).to_vec();
     if mode.truncate {
@@ -635,9 +683,16 @@ unsafe fn do_raw_connection(call: &Call<'_>) -> R<Sexp> {
     }
     let position = if mode.append { data.len() } else { 0 };
     let device = Device::Raw(RawDevice { data, position });
-    new_builtin("rawConnection", description.as_bytes(), &open, &open, device, |con| {
-        (*con).canseek = 1;
-    })
+    new_builtin(
+        "rawConnection",
+        description.as_bytes(),
+        &open,
+        &open,
+        device,
+        |con| {
+            (*con).canseek = 1;
+        },
+    )
 }
 
 /// `unz(description, open, encoding)`: reads one member of a zip archive, named
@@ -708,7 +763,14 @@ unsafe fn do_text_connection(call: &Call<'_>) -> R<Sexp> {
         _ => return Err(error("unsupported mode")),
     };
     let open = if open.is_empty() { "r" } else { open.as_str() };
-    new_builtin("textConnection", description.as_bytes(), open, open, device, |_| {})
+    new_builtin(
+        "textConnection",
+        description.as_bytes(),
+        open,
+        open,
+        device,
+        |_| {},
+    )
 }
 
 /// `open(con, open, blocking)`. Opening an open connection only warns, as in GNU R.
@@ -806,7 +868,10 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
             }
             if character == EOF {
                 if !line.is_empty() || nul {
-                    if (*con).text != 0 && (*con).blocking == 0 && !matches!(class_of(con).as_ref(), "gzfile" | "bzfile" | "xzfile") {
+                    if (*con).text != 0
+                        && (*con).blocking == 0
+                        && !matches!(class_of(con).as_ref(), "gzfile" | "bzfile" | "xzfile")
+                    {
                         push_back_bytes(con, &line);
                         (*con).incomplete = 1;
                     } else {
@@ -1011,7 +1076,11 @@ unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
             return Err(error("invalid 'nchars' argument"));
         }
         let wanted = count as usize;
-        let available = if use_bytes { text.len() } else { text.chars().count() };
+        let available = if use_bytes {
+            text.len()
+        } else {
+            text.chars().count()
+        };
         if wanted > available {
             crate::conditions::warning(
                 "writeChar: more characters requested than are in the string - will zero-pad",
@@ -1021,7 +1090,10 @@ unsafe fn do_write_char(call: &Call<'_>) -> R<Sexp> {
         } else if use_bytes {
             bytes.extend_from_slice(text.as_bytes().get(..wanted).unwrap_or_default());
         } else {
-            let end = text.char_indices().nth(wanted).map_or(text.len(), |(index, _)| index);
+            let end = text
+                .char_indices()
+                .nth(wanted)
+                .map_or(text.len(), |(index, _)| index);
             bytes.extend_from_slice(text.as_bytes().get(..end).unwrap_or_default());
         }
         if let Some(terminator) = &terminator {
@@ -1094,10 +1166,18 @@ unsafe fn do_read_bin(call: &Call<'_>) -> R<Sexp> {
             return strings_vector(&strings, Encoding::Native);
         }
         let size = binary_size(kind, size)?;
-        let total = count.checked_mul(size).ok_or_else(|| error("too many items"))?;
+        let total = count
+            .checked_mul(size)
+            .ok_or_else(|| error("too many items"))?;
         let mut bytes = vec![0u8; total];
         let got = read_all(con, &mut bytes)? / size;
-        decode_binary(bytes.get(..got * size).unwrap_or_default(), kind, size, signed, swap)
+        decode_binary(
+            bytes.get(..got * size).unwrap_or_default(),
+            kind,
+            size,
+            signed,
+            swap,
+        )
     })
 }
 
@@ -1184,7 +1264,11 @@ unsafe fn summary(con: Sexp) -> R<Sexp> {
     let class = values::scalar_string(&class_of(con))?;
     let mode = values::scalar_string(&String::from_utf8_lossy(&mode_of(con)))?;
     let text = values::scalar_string(if (*con).text != 0 { "text" } else { "binary" })?;
-    let opened = values::scalar_string(if (*con).isopen != 0 { "opened" } else { "closed" })?;
+    let opened = values::scalar_string(if (*con).isopen != 0 {
+        "opened"
+    } else {
+        "closed"
+    })?;
     let can_read = values::scalar_string(yes_no((*con).canread))?;
     let can_write = values::scalar_string(yes_no((*con).canwrite))?;
     values::named_list(&[
@@ -1254,7 +1338,10 @@ unsafe fn text_connection_value(con: Sexp) -> R<Sexp> {
 /// `getConnection(what)`.
 unsafe fn do_get_connection(call: &Call<'_>) -> R<Sexp> {
     let slot = values::as_integer_scalar(call.arg(0));
-    match usize::try_from(slot).ok().filter(|&slot| entry(slot).is_some()) {
+    match usize::try_from(slot)
+        .ok()
+        .filter(|&slot| entry(slot).is_some())
+    {
         Some(slot) => connection_object(slot),
         None => Err(error(format!("there is no connection {slot}"))),
     }
@@ -1284,7 +1371,9 @@ unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
             crate::conditions::warning_call(call.call, "no sink to remove")?;
             return Ok(nil());
         };
-        let con = entry(sink.slot).ok_or_else(|| error("invalid connection"))?.con;
+        let con = entry(sink.slot)
+            .ok_or_else(|| error("invalid connection"))?
+            .con;
         if sink.close_on_exit {
             close_slot(sink.slot)?;
         } else if sink.opened {
@@ -1378,7 +1467,8 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             SexpType::Symbol => vec![values::symbol_name(item).into_owned()],
             SexpType::String => (0..values::length(item))
                 .map(|index| {
-                    values::string_at(item, index).map_or_else(|| "NA".into(), |text| text.into_owned())
+                    values::string_at(item, index)
+                        .map_or_else(|| "NA".into(), |text| text.into_owned())
                 })
                 .collect(),
             SexpType::Logical
@@ -1387,7 +1477,9 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
             | SexpType::Complex
             | SexpType::Raw => {
                 let item = values::materialize(item)?;
-                (0..values::length(item)).map(|index| cat_element(item, index)).collect()
+                (0..values::length(item))
+                    .map(|index| cat_element(item, index))
+                    .collect()
             }
             SexpType::List
                 if (0..values::length(item)).all(|index| {
@@ -1395,7 +1487,9 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                     element.kind().is_atomic() && values::length(element) == 1
                 }) =>
             {
-                (0..values::length(item)).map(|index| cat_element(item.element(index), 0)).collect()
+                (0..values::length(item))
+                    .map(|index| cat_element(item.element(index), 0))
+                    .collect()
             }
             SexpType::Language => vec![crate::deparse::deparse_one_line(item)],
             kind => {
@@ -1465,7 +1559,9 @@ unsafe fn cat_element(vector: Sexp, index: usize) -> String {
         SexpType::String => {
             values::string_at(vector, index).map_or_else(|| "NA".into(), |text| text.into_owned())
         }
-        SexpType::Complex => crate::format::format_complex_alone(values::complexes(vector)[index], 7),
+        SexpType::Complex => {
+            crate::format::format_complex_alone(values::complexes(vector)[index], 7)
+        }
         _ => crate::coerce::element_as_charsxp(vector, index)
             .map(|charsxp| {
                 if charsxp == values::na_string() {
@@ -1668,7 +1764,10 @@ unsafe fn connection_object(slot: usize) -> R<Sexp> {
         .con;
     let object = scalar_integer(slot as c_int)?;
     let classes = values::alloc(SexpType::String, 2)?;
-    for (index, name) in [c_text((*con).class), b"connection"].into_iter().enumerate() {
+    for (index, name) in [c_text((*con).class), b"connection"]
+        .into_iter()
+        .enumerate()
+    {
         let charsxp = values::mkchar_bytes(name, Encoding::Native)?;
         crate::heap().set_element(classes, index, charsxp);
     }
@@ -1693,7 +1792,13 @@ unsafe fn register(con: Rconnection, builtin: bool) -> R<Sexp> {
     let tag = values::install("connection")?;
     let id = heap.alloc_external_ptr(con.cast(), tag, nil())?;
     heap.root(id);
-    heap.alloc_weak_ref(id, nil(), nil(), connection_finalizer as *const () as usize, false)?;
+    heap.alloc_weak_ref(
+        id,
+        nil(),
+        nil(),
+        connection_finalizer as *const () as usize,
+        false,
+    )?;
     (*con).ex_ptr = id.as_ptr().cast();
     (*con).id = con.cast();
     connection_object(slot)
@@ -1725,7 +1830,11 @@ unsafe fn close_slot(slot: usize) -> R<c_int> {
     let Some(Entry { con, builtin }) = entries().get_mut(slot).and_then(Option::take) else {
         return Err(error("invalid connection"));
     };
-    let closed = if (*con).isopen != 0 { method_close(con) } else { Ok(()) };
+    let closed = if (*con).isopen != 0 {
+        method_close(con)
+    } else {
+        Ok(())
+    };
     let status = (*con).status;
     let destroyed = method_destroy(con);
     if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
@@ -1845,7 +1954,11 @@ unsafe fn read_char(con: Rconnection) -> R<c_int> {
     if character == b'\r' as c_int {
         let next = method_fgetc(con)?;
         if next != b'\n' as c_int {
-            (*con).save = if next != b'\r' as c_int { next } else { b'\n' as c_int };
+            (*con).save = if next != b'\r' as c_int {
+                next
+            } else {
+                b'\n' as c_int
+            };
         }
         return Ok(b'\n' as c_int);
     }
@@ -2063,9 +2176,9 @@ unsafe fn read_bin_bytes(
         let mut pieces = bytes.split_inclusive(|&byte| byte == 0);
         let strings: Vec<Vec<u8>> = (0..n)
             .map(|_| {
-                pieces
-                    .next()
-                    .map_or_else(Vec::new, |piece| piece.strip_suffix(&[0]).unwrap_or(piece).to_vec())
+                pieces.next().map_or_else(Vec::new, |piece| {
+                    piece.strip_suffix(&[0]).unwrap_or(piece).to_vec()
+                })
             })
             .collect();
         return strings_vector(&strings, Encoding::Native);
@@ -2094,7 +2207,11 @@ unsafe fn decode_binary(
     match kind {
         BinaryType::Integer | BinaryType::Logical => {
             let vector = values::alloc(
-                if kind == BinaryType::Integer { SexpType::Integer } else { SexpType::Logical },
+                if kind == BinaryType::Integer {
+                    SexpType::Integer
+                } else {
+                    SexpType::Logical
+                },
                 count,
             )?;
             for (index, target) in vector.slice_mut::<i32>().iter_mut().enumerate() {
@@ -2238,12 +2355,20 @@ unsafe fn from_native<T: Default>(body: impl FnOnce() -> R<T>) -> T {
 }
 
 unsafe fn method_open(con: Rconnection) -> R<bool> {
-    let method = (*con).open.ok_or_else(|| error("open not enabled for this connection"))?;
+    let method = (*con)
+        .open
+        .ok_or_else(|| error("open not enabled for this connection"))?;
     if is_method(method, builtin_open as OpenMethod) {
         return device_open(con);
     }
     let mut result = 0;
-    call_native(con, NativeMethod::Open { method, result: &mut result })?;
+    call_native(
+        con,
+        NativeMethod::Open {
+            method,
+            result: &mut result,
+        },
+    )?;
     Ok(result != 0)
 }
 
@@ -2275,7 +2400,13 @@ unsafe fn method_fgetc(con: Rconnection) -> R<c_int> {
         return method_fgetc_internal(con);
     }
     let mut result = 0;
-    call_native(con, NativeMethod::Int { method, result: &mut result })?;
+    call_native(
+        con,
+        NativeMethod::Int {
+            method,
+            result: &mut result,
+        },
+    )?;
     Ok(result)
 }
 
@@ -2285,11 +2416,22 @@ unsafe fn method_fgetc_internal(con: Rconnection) -> R<c_int> {
         return device_fgetc(con);
     }
     let mut result = 0;
-    call_native(con, NativeMethod::Int { method, result: &mut result })?;
+    call_native(
+        con,
+        NativeMethod::Int {
+            method,
+            result: &mut result,
+        },
+    )?;
     Ok(result)
 }
 
-unsafe fn method_seek(con: Rconnection, position: f64, origin: SeekOrigin, side: SeekSide) -> R<f64> {
+unsafe fn method_seek(
+    con: Rconnection,
+    position: f64,
+    origin: SeekOrigin,
+    side: SeekSide,
+) -> R<f64> {
     let method = (*con).seek.ok_or_else(|| missing("seek"))?;
     if is_method(method, builtin_seek as SeekMethod) {
         return device_seek(con, position, origin, side);
@@ -2326,7 +2468,13 @@ unsafe fn method_fflush(con: Rconnection) -> R<c_int> {
         return device_flush(con).map(|()| 0);
     }
     let mut result = 0;
-    call_native(con, NativeMethod::Int { method, result: &mut result })?;
+    call_native(
+        con,
+        NativeMethod::Int {
+            method,
+            result: &mut result,
+        },
+    )?;
     Ok(result)
 }
 
@@ -2337,7 +2485,14 @@ unsafe fn method_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
     }
     let length = buffer.len();
     let mut result = 0;
-    call_native(con, NativeMethod::Read { method, buffer, result: &mut result })?;
+    call_native(
+        con,
+        NativeMethod::Read {
+            method,
+            buffer,
+            result: &mut result,
+        },
+    )?;
     // A method that claims more than it was given would make every caller read past the end.
     Ok(result.min(length))
 }
@@ -2348,7 +2503,14 @@ unsafe fn method_write(con: Rconnection, bytes: &[u8]) -> R<usize> {
         return device_write(con, bytes, false);
     }
     let mut result = 0;
-    call_native(con, NativeMethod::Write { method, bytes, result: &mut result })?;
+    call_native(
+        con,
+        NativeMethod::Write {
+            method,
+            bytes,
+            result: &mut result,
+        },
+    )?;
     Ok(result)
 }
 
@@ -2362,7 +2524,14 @@ unsafe fn method_print(con: Rconnection, text: &[u8]) -> R<()> {
             let text = CString::new(text)
                 .map_err(|_| error("embedded nul in a string written to a connection"))?;
             let mut result = 0;
-            call_native(con, NativeMethod::Print { method, text: &text, result: &mut result })
+            call_native(
+                con,
+                NativeMethod::Print {
+                    method,
+                    text: &text,
+                    result: &mut result,
+                },
+            )
         }
         _ => match (*con).write {
             Some(method) if is_method(method, builtin_write as WriteMethod) => {
@@ -2388,7 +2557,12 @@ unsafe extern "C" fn builtin_fgetc(con: Rconnection) -> c_int {
     from_native(|| device_fgetc(con))
 }
 
-unsafe extern "C" fn builtin_seek(con: Rconnection, position: f64, origin: c_int, rw: c_int) -> f64 {
+unsafe extern "C" fn builtin_seek(
+    con: Rconnection,
+    position: f64,
+    origin: c_int,
+    rw: c_int,
+) -> f64 {
     let origin = match origin {
         2 => SeekOrigin::Current,
         3 => SeekOrigin::End,
@@ -2412,7 +2586,9 @@ unsafe extern "C" fn builtin_read(
     con: Rconnection,
 ) -> usize {
     from_native(|| {
-        let bytes = size.checked_mul(count).ok_or_else(|| error("read request too large"))?;
+        let bytes = size
+            .checked_mul(count)
+            .ok_or_else(|| error("read request too large"))?;
         if bytes == 0 {
             return Ok(0);
         }
@@ -2428,7 +2604,9 @@ unsafe extern "C" fn builtin_write(
     con: Rconnection,
 ) -> usize {
     from_native(|| {
-        let bytes = size.checked_mul(count).ok_or_else(|| error("write request too large"))?;
+        let bytes = size
+            .checked_mul(count)
+            .ok_or_else(|| error("write request too large"))?;
         if bytes == 0 {
             return Ok(0);
         }
@@ -2463,7 +2641,12 @@ unsafe extern "C" fn null_fgetc(_con: Rconnection) -> c_int {
     from_native(|| Err::<c_int, _>(missing("getc")))
 }
 
-unsafe extern "C" fn null_seek(_con: Rconnection, _position: f64, _origin: c_int, _rw: c_int) -> f64 {
+unsafe extern "C" fn null_seek(
+    _con: Rconnection,
+    _position: f64,
+    _origin: c_int,
+    _rw: c_int,
+) -> f64 {
     from_native(|| Err::<f64, _>(missing("seek")))
 }
 
@@ -2651,9 +2834,27 @@ fn parse_mode(mode: &[u8]) -> Option<Mode> {
     let plus = mode.contains(&b'+');
     let binary = mode.contains(&b'b');
     match mode.first()? {
-        b'r' => Some(Mode { read: true, write: plus, append: false, truncate: false, binary }),
-        b'w' => Some(Mode { read: plus, write: true, append: false, truncate: true, binary }),
-        b'a' => Some(Mode { read: plus, write: true, append: true, truncate: false, binary }),
+        b'r' => Some(Mode {
+            read: true,
+            write: plus,
+            append: false,
+            truncate: false,
+            binary,
+        }),
+        b'w' => Some(Mode {
+            read: plus,
+            write: true,
+            append: false,
+            truncate: true,
+            binary,
+        }),
+        b'a' => Some(Mode {
+            read: plus,
+            write: true,
+            append: true,
+            truncate: false,
+            binary,
+        }),
         _ => None,
     }
 }
@@ -2781,12 +2982,16 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
         let level = device.compression;
         let encoder = match encoding {
             Compressed::Gzip => Encoder::Gzip(GzEncoder::new(file, Compression::new(level))),
-            Compressed::Bzip2 => {
-                Encoder::Bzip2(BzEncoder::new(file, bzip2::Compression::new(level.clamp(1, 9))))
-            }
+            Compressed::Bzip2 => Encoder::Bzip2(BzEncoder::new(
+                file,
+                bzip2::Compression::new(level.clamp(1, 9)),
+            )),
             Compressed::Xz => Encoder::Xz(XzWriter::new(file, XzOptions::with_preset(level))?),
         };
-        return Ok(Stream::Deflate { encoder, position: 0 });
+        return Ok(Stream::Deflate {
+            encoder,
+            position: 0,
+        });
     }
     // `file()` decompresses only in text mode, so `readBin()` sees a compressed file's bytes;
     // the compressed file connections decompress in either mode.
@@ -2866,7 +3071,10 @@ pub fn decompress(bytes: &[u8]) -> std::io::Result<Cow<'_, [u8]>> {
     Ok(Cow::Owned(decoded))
 }
 
-fn decoder<'a>(compression: Compressed, input: Box<dyn Read + 'a>) -> std::io::Result<Box<dyn Read + 'a>> {
+fn decoder<'a>(
+    compression: Compressed,
+    input: Box<dyn Read + 'a>,
+) -> std::io::Result<Box<dyn Read + 'a>> {
     Ok(match compression {
         Compressed::Gzip => Box::new(MultiGzDecoder::new(input)),
         Compressed::Bzip2 => Box::new(MultiBzDecoder::new(input)),
@@ -2881,7 +3089,11 @@ fn open_inflate(path: &PathBuf) -> std::io::Result<Inflate> {
         Some(compression) => decoder(compression, Box::new(file))?,
         None => Box::new(file),
     };
-    Ok(Inflate { reader, path: path.clone(), position: 0 })
+    Ok(Inflate {
+        reader,
+        path: path.clone(),
+        position: 0,
+    })
 }
 
 unsafe fn device_close(con: Rconnection) -> R<()> {
@@ -2931,7 +3143,11 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
 
 unsafe fn device_fgetc(con: Rconnection) -> R<c_int> {
     let mut byte = [0u8];
-    Ok(if device_read(con, &mut byte)? == 1 { byte[0] as c_int } else { EOF })
+    Ok(if device_read(con, &mut byte)? == 1 {
+        byte[0] as c_int
+    } else {
+        EOF
+    })
 }
 
 /// Reads up to `buffer.len()` bytes, fewer only at the end of the data.
@@ -2965,7 +3181,12 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
             if pipe.stream.is_null() {
                 return Err(error("connection is not open"));
             }
-            Ok(libc::fread(buffer.as_mut_ptr().cast(), 1, buffer.len(), pipe.stream))
+            Ok(libc::fread(
+                buffer.as_mut_ptr().cast(),
+                1,
+                buffer.len(),
+                pipe.stream,
+            ))
         }
     }
 }
@@ -3110,7 +3331,12 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             if pipe.stream.is_null() {
                 return Err(error("connection is not open"));
             }
-            Ok(libc::fwrite(bytes.as_ptr().cast(), 1, bytes.len(), pipe.stream))
+            Ok(libc::fwrite(
+                bytes.as_ptr().cast(),
+                1,
+                bytes.len(),
+                pipe.stream,
+            ))
         }
     }
 }
@@ -3123,7 +3349,12 @@ unsafe fn update_text_target(output: &TextOutput) -> R<()> {
     crate::eval::define(target.symbol, value, target.env)
 }
 
-unsafe fn device_seek(con: Rconnection, position: f64, origin: SeekOrigin, side: SeekSide) -> R<f64> {
+unsafe fn device_seek(
+    con: Rconnection,
+    position: f64,
+    origin: SeekOrigin,
+    side: SeekSide,
+) -> R<f64> {
     let query = position.is_nan();
     match device(con)? {
         Device::Standard(_) | Device::Pipe(_) | Device::Zip(_) => Err(missing("seek")),
@@ -3144,7 +3375,9 @@ unsafe fn device_seek(con: Rconnection, position: f64, origin: SeekOrigin, side:
                 SeekOrigin::End => raw.data.len() as f64 + position,
             };
             if target < 0.0 || target > raw.data.len() as f64 {
-                return Err(error("attempt to seek outside the range of the raw connection"));
+                return Err(error(
+                    "attempt to seek outside the range of the raw connection",
+                ));
             }
             raw.position = target as usize;
             Ok(current)
@@ -3157,7 +3390,11 @@ unsafe fn device_seek(con: Rconnection, position: f64, origin: SeekOrigin, side:
                     SeekSide::Write => true,
                     SeekSide::LastUsed => plain.last_was_write,
                 };
-                let current = if use_write { plain.write_position } else { plain.read_position };
+                let current = if use_write {
+                    plain.write_position
+                } else {
+                    plain.read_position
+                };
                 if query {
                     return Ok(current as f64);
                 }
@@ -3207,11 +3444,15 @@ unsafe fn device_seek(con: Rconnection, position: f64, origin: SeekOrigin, side:
                 inflate.position += skipped;
                 Ok(current)
             }
-            Some(Stream::Deflate { position: current, .. }) => {
+            Some(Stream::Deflate {
+                position: current, ..
+            }) => {
                 if query {
                     return Ok(*current as f64);
                 }
-                Err(error("seek on a gzfile connection open for writing is not supported"))
+                Err(error(
+                    "seek on a gzfile connection open for writing is not supported",
+                ))
             }
             None => Err(error("connection is not open")),
         },
@@ -3223,10 +3464,16 @@ unsafe fn device_truncate(con: Rconnection) -> R<()> {
         return Err(error("can only truncate connections open for writing"));
     }
     match device(con)? {
-        Device::File(FileDevice { stream: Some(Stream::Plain(plain)), .. }) => {
+        Device::File(FileDevice {
+            stream: Some(Stream::Plain(plain)),
+            ..
+        }) => {
             flush_writes(plain).map_err(io_error)?;
-            let position =
-                if plain.last_was_write { plain.write_position } else { plain.read_position };
+            let position = if plain.last_was_write {
+                plain.write_position
+            } else {
+                plain.read_position
+            };
             plain.file.set_len(position).map_err(io_error)?;
             plain.read_buffer.clear();
             plain.read_offset = 0;
@@ -3242,13 +3489,17 @@ unsafe fn device_truncate(con: Rconnection) -> R<()> {
 
 unsafe fn device_flush(con: Rconnection) -> R<()> {
     match device(con)? {
-        Device::File(FileDevice { stream: Some(Stream::Plain(plain)), .. }) => {
+        Device::File(FileDevice {
+            stream: Some(Stream::Plain(plain)),
+            ..
+        }) => {
             flush_writes(plain).map_err(io_error)?;
             plain.file.flush().map_err(io_error)
         }
-        Device::File(FileDevice { stream: Some(Stream::Deflate { encoder, .. }), .. }) => {
-            encoder.flush().map_err(io_error)
-        }
+        Device::File(FileDevice {
+            stream: Some(Stream::Deflate { encoder, .. }),
+            ..
+        }) => encoder.flush().map_err(io_error),
         Device::Pipe(pipe) if !pipe.stream.is_null() => {
             libc::fflush(pipe.stream);
             Ok(())
@@ -3264,8 +3515,10 @@ unsafe fn device_flush(con: Rconnection) -> R<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::mem::{offset_of, size_of};
+    use {
+        super::*,
+        std::mem::{offset_of, size_of},
+    };
 
     /// The Rust mirror of `struct Rconn` must have GNU R's layout, which the ryconn test
     /// package's `layout.expected` records from GNU R's own header.

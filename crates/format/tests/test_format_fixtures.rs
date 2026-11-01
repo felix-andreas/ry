@@ -1,6 +1,8 @@
-use format::{Config, format};
-use std::path::Path;
-use syntax::testing::run_fixture_suite;
+use {
+    format::{Config, format},
+    std::path::Path,
+    syntax::testing::run_fixture_suite,
+};
 
 fn render(source: &str) -> String {
     match format(source, Config::default()) {

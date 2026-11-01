@@ -100,7 +100,8 @@ type-mismatch
   x expected `DataFrame{region: character[], units: integer[]}`, found `DataFrame{region: character[], unit: integer[]}`
 ```
 
-The columns must match exactly: a DataFrame with an extra column is not accepted either. A bare
+The columns must match exactly, as a record's fields do, so a DataFrame with an extra column is not
+accepted either: an unexpected column is usually a misspelled one. A bare
 `DataFrame` accepts any DataFrame and leaves its columns unknown, and so do `LazyFrame`,
 `GroupBy` and `LazyGroupBy`. A DataFrame is not a `data.frame`, so a `data.frame` parameter
 rejects it: convert with `as.data.frame()` first.

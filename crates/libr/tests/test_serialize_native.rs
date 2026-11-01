@@ -4,12 +4,14 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::c_int,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::c_int,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 fn serialtest(r: &R) {

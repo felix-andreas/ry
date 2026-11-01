@@ -344,12 +344,13 @@ libFuzzer targets `parse`, `format`, and `semantics`, each a thin wrapper around
 invariant batteries. The `semantics` target derives its document kind and an incremental edit from
 the input bytes, so a single byte stream drives the full battery, the splice cache included.
 
-It needs nightly. Run `cargo install cargo-fuzz`, then from `fuzz/`:
+It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
+cargo-fuzz`, then from `fuzz/`:
 
 ```sh
-cargo +nightly -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
-cargo +nightly fuzz run format -- -max_total_time=600 -print_final_stats=1
-cargo +nightly fuzz run parse  -- -max_total_time=600
+cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
+cargo fuzz run format -- -max_total_time=600 -print_final_stats=1
+cargo fuzz run parse  -- -max_total_time=600
 ```
 
 The seeder copies every fixture case's source in the repository into
@@ -357,11 +358,11 @@ The seeder copies every fixture case's source in the repository into
 The corpus and the artifacts are gitignored, because a durable regression belongs in the
 `REGRESSIONS` battery or in a fixture case, not in the corpus.
 
-When the fuzzer finds something, minimize it with `cargo +nightly fuzz tmin format <artifact>`, fix
+When the fuzzer finds something, minimize it with `cargo fuzz tmin format <artifact>`, fix
 the bug, replay the artifact, and add the minimized input to `REGRESSIONS`, plus a golden fixture
 case when the shape deserves a pinned rendering. To judge corpus quality, you can get a coverage
-report (it needs the llvm-tools component) with
-`cargo +nightly fuzz coverage format && cargo cov -- show`, as the
+report (the pinned toolchain includes the llvm-tools component it needs) with
+`cargo fuzz coverage format && cargo cov -- show`, as the
 [cargo-fuzz coverage guide](https://rust-fuzz.github.io/book/cargo-fuzz/coverage.html) describes.
 Deep runs are manual or scheduled work; the bounded in-tree batteries remain the gate in the default
 suite.

@@ -4,8 +4,7 @@
 
 mod harness;
 
-use harness::*;
-use std::process::Command;
+use {harness::*, std::process::Command};
 
 #[test]
 fn brio_built_against_gnu_r_headers_loads_into_ry() {

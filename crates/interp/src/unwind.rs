@@ -7,9 +7,11 @@
 //! exiting handler or restart (both are returns to a closure frame), and the jump to top level
 //! after the default error handler ran.
 
-use crate::{interp};
-use heap::object::Sexp;
-use std::sync::atomic::{AtomicBool, Ordering};
+use {
+    crate::interp,
+    heap::object::Sexp,
+    std::sync::atomic::{AtomicBool, Ordering},
+};
 
 pub type R<T> = Result<T, Unwind>;
 
@@ -46,9 +48,16 @@ pub struct RError {
 pub enum Jump {
     /// Return `value` from the closure frame whose environment is `env`. Exiting handlers and
     /// restarts are returns to the frames `tryCatch` and `withRestarts` set up.
-    Return { env: Sexp, value: Sexp },
-    Break { env: Sexp },
-    Next { env: Sexp },
+    Return {
+        env: Sexp,
+        value: Sexp,
+    },
+    Break {
+        env: Sexp,
+    },
+    Next {
+        env: Sexp,
+    },
     /// The default error handler ran, so the error goes to the innermost top-level context.
     TopLevel,
 }

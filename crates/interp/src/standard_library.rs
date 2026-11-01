@@ -11,23 +11,27 @@
 //! one atomic vector, a dictionary's values as a list, and an open-addressing hash index as an
 //! integer vector. The values are immutable, so every update builds a new object.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin},
-    eval, records, scope,
-    sort::{IdenticalFlags, identical},
-    unwind::{R, error},
-    values::{
-        self, char_str, length, list_vector, missing_arg, nil, scalar_bool, scalar_integer,
-        scalar_real, scalar_string,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, builtin},
+        eval, records, scope,
+        sort::{IdenticalFlags, identical},
+        unwind::{R, error},
+        values::{
+            self, char_str, length, list_vector, missing_arg, nil, scalar_bool, scalar_integer,
+            scalar_real, scalar_string,
+        },
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
+        records::{Fields, Layout, NativeKind},
+    },
+    rustc_hash::FxHasher,
+    std::{
+        cmp::Ordering,
+        hash::{Hash, Hasher},
     },
 };
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
-    records::{Fields, Layout, NativeKind},
-};
-use rustc_hash::FxHasher;
-use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
 
 /// A builtin of the library: it takes its arguments by name or position and accepts ry values.
 const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> BuiltinDef {

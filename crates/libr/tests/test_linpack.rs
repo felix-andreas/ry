@@ -8,9 +8,11 @@
 
 mod harness;
 
-use R::linpack::{dqrcf_, dqrdc2_, dqrls_, dqrqty_, dqrqy_, dqrrsd_, dqrxb_};
-use harness::{gnu_r_available, temporary_file};
-use std::{collections::HashMap, ffi::c_int, path::Path, process::Command};
+use {
+    R::linpack::{dqrcf_, dqrdc2_, dqrls_, dqrqty_, dqrqy_, dqrrsd_, dqrxb_},
+    harness::{gnu_r_available, temporary_file},
+    std::{collections::HashMap, ffi::c_int, path::Path, process::Command},
+};
 
 /// The agreement asked of every floating-point result, relative to the largest entry of the
 /// vector it belongs to. GNU R computes norms and dot products with whatever BLAS it links

@@ -112,7 +112,10 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     // Replacing rather than overwriting keeps a running session's mapping of the old file valid.
     remove_file_if_present(&libr)?;
     fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
-    write(&root.join("etc/Makeconf"), &makeconf(root, &sources.toolchain))?;
+    write(
+        &root.join("etc/Makeconf"),
+        &makeconf(root, &sources.toolchain),
+    )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
 
     let gnu = sources.gnu_r_home;
@@ -121,7 +124,9 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
     let base_library = gnu.join("library");
     for entry in read_directory(&base_library)? {
         // A package ry installed into its own library wins over GNU R's copy.
-        let target = root.join("library").join(entry.file_name().unwrap_or_default());
+        let target = root
+            .join("library")
+            .join(entry.file_name().unwrap_or_default());
         if !target.exists() || target.is_symlink() {
             link(&entry, &target)?;
         }
@@ -131,7 +136,12 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         if name == "make" {
             for file in read_directory(&entry)? {
                 if file.file_name().is_some_and(|file| file != "shlib.mk") {
-                    link(&file, &root.join("share/make").join(file.file_name().unwrap_or_default()))?;
+                    link(
+                        &file,
+                        &root
+                            .join("share/make")
+                            .join(file.file_name().unwrap_or_default()),
+                    )?;
                 }
             }
         } else {
@@ -323,10 +333,14 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
                 ));
             }
             "-f" => {
-                file = Some(rest.next().cloned().ok_or_else(|| Error::Usage("option '-f' requires a filename argument".into()))?);
+                file = Some(rest.next().cloned().ok_or_else(|| {
+                    Error::Usage("option '-f' requires a filename argument".into())
+                })?);
             }
             "-e" => {
-                expressions.push(rest.next().cloned().ok_or_else(|| Error::Usage("option '-e' requires a non-empty argument".into()))?);
+                expressions.push(rest.next().cloned().ok_or_else(|| {
+                    Error::Usage("option '-e' requires a non-empty argument".into())
+                })?);
             }
             "-d" | "-g" | "--encoding" | "--debugger-args" => {
                 rest.next();
@@ -377,7 +391,10 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
         let file = arguments
             .get(index)
             .ok_or_else(|| Error::Usage("Usage: Rscript [options] file [args]\n   or: Rscript [options] -e expr [-e expr2 ...] [args]".into()))?;
-        (Some(file.clone()), arguments.get(index + 1..).unwrap_or(&[]))
+        (
+            Some(file.clone()),
+            arguments.get(index + 1..).unwrap_or(&[]),
+        )
     } else {
         (None, arguments.get(index..).unwrap_or(&[]))
     };
@@ -643,7 +660,9 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
-        return Err(Error::Usage(format!("R CMD config: unknown variable '{variable}'")));
+        return Err(Error::Usage(format!(
+            "R CMD config: unknown variable '{variable}'"
+        )));
     }
     let makeconf = home.join("etc/Makeconf");
     let printer = format!("print-variable:\n\t@echo $({variable})\n");
@@ -769,7 +788,12 @@ impl Default for InstallOptions {
 /// Installs a package into `library`: a source package (a directory or a `.tar.gz`), or a binary
 /// package that GNU R or ry installed before (it has a `Built:` field), which is copied as it
 /// is.
-pub fn install(home: &Path, package: &Path, library: &Path, options: &InstallOptions) -> Result<Installed> {
+pub fn install(
+    home: &Path,
+    package: &Path,
+    library: &Path,
+    options: &InstallOptions,
+) -> Result<Installed> {
     fs::create_dir_all(library).map_err(io_error(library))?;
     // Building happens outside the library, as in GNU R: a build tree inside a Cargo workspace
     // (such as a library in ry's own checkout) would make Cargo build the package as a member.
@@ -786,12 +810,25 @@ pub fn install(home: &Path, package: &Path, library: &Path, options: &InstallOpt
         );
         let name = description
             .get("Package")
-            .ok_or_else(|| Error::Package(format!("{} has no Package field", description_path.display())))?
+            .ok_or_else(|| {
+                Error::Package(format!(
+                    "{} has no Package field",
+                    description_path.display()
+                ))
+            })?
             .to_owned();
         if let Some(built) = description.get("Built") {
             install_binary(&directory, &name, built, library)
         } else {
-            install_source(home, &directory, &name, description, library, &staging, options)
+            install_source(
+                home,
+                &directory,
+                &name,
+                description,
+                library,
+                &staging,
+                options,
+            )
         }
     })();
     drop(fs::remove_dir_all(&staging));
@@ -859,7 +896,11 @@ fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> 
         .split('.')
         .next()
         .and_then(|major| major.parse().ok())
-        .ok_or_else(|| Error::Package(format!("package '{name}' has an invalid Built field: {built}")))?;
+        .ok_or_else(|| {
+            Error::Package(format!(
+                "package '{name}' has an invalid Built field: {built}"
+            ))
+        })?;
     if major < 3 {
         return Err(Error::Package(format!(
             "package '{name}' was built before R 3.0.0: please re-install it"
@@ -875,7 +916,9 @@ fn install_binary(directory: &Path, name: &str, built: &str, library: &Path) -> 
     }
     let target = library.join(name);
     replace_directory(directory, &target)?;
-    let shared = target.join("libs").join(format!("{}.so", name.replace('.', "_")));
+    let shared = target
+        .join("libs")
+        .join(format!("{}.so", name.replace('.', "_")));
     let library_path = [target.join("libs").join(format!("{name}.so")), shared]
         .into_iter()
         .find(|path| path.exists());
@@ -934,9 +977,17 @@ fn install_source(
             Command::new("sh")
                 .arg("./configure")
                 .current_dir(&build)
-                .envs(environment.iter().map(|(key, value)| (key.as_str(), value.as_str()))),
+                .envs(
+                    environment
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                ),
         )
-        .map_err(|error| Error::Package(format!("configuration failed for package '{name}'\n{error}")))?;
+        .map_err(|error| {
+            Error::Package(format!(
+                "configuration failed for package '{name}'\n{error}"
+            ))
+        })?;
     }
     let src = build.join("src");
     let mut shared_object = None;
@@ -951,15 +1002,20 @@ fn install_source(
         let library_name = format!("{}.so", name.replace('.', "_"));
         let built = if src.join("Makefile").exists() {
             run_command(
-                Command::new("make")
-                    .current_dir(&src)
-                    .envs(environment.iter().map(|(key, value)| (key.as_str(), value.as_str()))),
+                Command::new("make").current_dir(&src).envs(
+                    environment
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                ),
             )
-            .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?;
+            .map_err(|error| {
+                Error::Package(format!("compilation failed for package '{name}'\n{error}"))
+            })?;
             src.join(&library_name)
         } else {
-            shlib(home, &src, &[], Some(&library_name), &include_flags, &[])
-                .map_err(|error| Error::Package(format!("compilation failed for package '{name}'\n{error}")))?
+            shlib(home, &src, &[], Some(&library_name), &include_flags, &[]).map_err(|error| {
+                Error::Package(format!("compilation failed for package '{name}'\n{error}"))
+            })?
         };
         // A package's `src/install.libs.R` installs its own libraries, and runs as R code in
         // the driver; otherwise every shared object `src` holds is installed, as GNU R does.
@@ -970,7 +1026,9 @@ fn install_source(
             fs::create_dir_all(&libs).map_err(io_error(&libs))?;
             for entry in fs::read_dir(&src).map_err(io_error(&src))? {
                 let path = entry.map_err(io_error(&src))?.path();
-                let Some(file) = path.file_name().filter(|_| path.extension().is_some_and(|extension| extension == "so"))
+                let Some(file) = path
+                    .file_name()
+                    .filter(|_| path.extension().is_some_and(|extension| extension == "so"))
                 else {
                     continue;
                 };
@@ -1003,11 +1061,15 @@ fn install_source(
     if install_libs {
         driver_arguments.push("--install-libs".into());
     }
-    let r_libs = std::env::join_paths(std::iter::once(staged_library.clone()).chain(paths.iter().cloned()))
-        .map(|joined| joined.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    run_r(home, &build, &driver, &driver_arguments, &r_libs)
-        .map_err(|error| Error::Package(format!("installing the R code of package '{name}' failed\n{error}")))?;
+    let r_libs =
+        std::env::join_paths(std::iter::once(staged_library.clone()).chain(paths.iter().cloned()))
+            .map(|joined| joined.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    run_r(home, &build, &driver, &driver_arguments, &r_libs).map_err(|error| {
+        Error::Package(format!(
+            "installing the R code of package '{name}' failed\n{error}"
+        ))
+    })?;
     if options.test_load {
         let check = staging.join("test-load.R");
         write(
@@ -1027,18 +1089,28 @@ fn install_source(
         fs::remove_dir_all(&target).map_err(io_error(&target))?;
     }
     fs::rename(&target_staging, &target)
-        .or_else(|_| copy_tree(&target_staging, &target).map_err(|error| io::Error::other(error.to_string())))
+        .or_else(|_| {
+            copy_tree(&target_staging, &target).map_err(|error| io::Error::other(error.to_string()))
+        })
         .map_err(io_error(&target))?;
     Ok(Installed {
         name: name.to_owned(),
-        library: shared_object.map(|file| target.join("libs").join(file)).filter(|path| path.exists()),
+        library: shared_object
+            .map(|file| target.join("libs").join(file))
+            .filter(|path| path.exists()),
         directory: target,
     })
 }
 
 /// Runs an R file on ry's interpreter through the home's `bin/R`, in `directory`, with
 /// `R_LIBS` set to `r_libs`, and returns its output or the output of the failed run.
-fn run_r(home: &Path, directory: &Path, file: &Path, arguments: &[String], r_libs: &str) -> Result<String> {
+fn run_r(
+    home: &Path,
+    directory: &Path,
+    file: &Path,
+    arguments: &[String],
+    r_libs: &str,
+) -> Result<String> {
     run_command(
         Command::new(home.join("bin/R"))
             .args(["--vanilla", "--no-echo", "-f"])
@@ -1135,8 +1207,11 @@ pub fn shlib(
         .iter()
         .filter_map(|source| {
             let (stem, extension) = source.rsplit_once('.')?;
-            matches!(extension, "c" | "cc" | "cpp" | "cxx" | "f" | "f90" | "f95" | "m" | "o")
-                .then(|| format!("{stem}.o"))
+            matches!(
+                extension,
+                "c" | "cc" | "cpp" | "cxx" | "f" | "f90" | "f95" | "m" | "o"
+            )
+            .then(|| format!("{stem}.o"))
         })
         .collect();
     let has = |extensions: &[&str]| {
