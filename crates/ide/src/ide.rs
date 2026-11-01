@@ -6,7 +6,7 @@ use {
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
-        check::{CalleeTarget, ItemCheck},
+        check::{ArgumentShape, ArgumentTarget, CalleeTarget, ItemCheck, argument_targets},
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
@@ -939,7 +939,9 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                 && let TyKind::Function(function) = callee_type.kind(db)
             {
                 let offset = node.text_range().start();
-                for (value, name) in positional_parameters(db, function, &hir[*arguments], hir) {
+                for (value, name) in
+                    positional_parameters(db, function, &hir[*arguments], hir, *callee)
+                {
                     let range = hir.range(value) + offset;
                     let written = text
                         .get(usize::from(range.start())..usize::from(range.end()))
@@ -983,50 +985,52 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
     hints
 }
 
-/// Each positional argument with the named parameter it fills, by R's matching: named arguments
-/// take their parameters first, by exact name and then by unique prefix, and the positional ones
-/// fill the remaining parameters in order. Parameters after `...` match by name only, and
-/// positional arguments past the last fillable parameter go to `...`.
+/// Each positional argument with the parameter it fills, matched the way the checker matches
+/// it, up to a forwarded `...`. A piped value is left out: it is written before the call, so a hint there would sit at
+/// the head of the chain.
 fn positional_parameters<'db>(
     db: &'db dyn Db,
     function: &FunctionType<'db>,
     arguments: &[Argument],
     hir: &Module,
+    callee: ExprId,
 ) -> Vec<(ExprId, &'db str)> {
-    let names: Vec<&str> = function
-        .named
+    let names: Vec<Option<Symbol>> = arguments
         .iter()
-        .map(|parameter| parameter.name.text(db))
+        .map(|argument| hir.argument_name(argument))
         .collect();
-    let mut taken = vec![false; names.len()];
-    let written: Vec<Symbol> = arguments
+    let shapes: Vec<ArgumentShape> = arguments
         .iter()
-        .filter_map(|argument| hir.argument_name(argument))
+        .zip(&names)
+        .map(|(argument, name)| {
+            ArgumentShape {
+            name: name.as_deref(),
+            forwards_dots: name.is_none()
+                && argument.value.is_some_and(|value| {
+                    matches!(hir.kind(value), ExpressionKind::NameRef(name) if name == "...")
+                }),
+        }
+        })
         .collect();
-    for name in &written {
-        if let Some(slot) = names.iter().position(|parameter| *parameter == &**name) {
-            taken[slot] = true;
-        }
-    }
-    for name in &written {
-        let mut prefixed = names
-            .iter()
-            .enumerate()
-            .filter(|(slot, parameter)| !taken[*slot] && parameter.starts_with(&**name));
-        if let (Some((slot, _)), None) = (prefixed.next(), prefixed.next()) {
-            taken[slot] = true;
-        }
-    }
-    let fillable = function.variadic.as_ref().map_or(names.len(), |variadic| {
-        variadic.preceding_named.min(names.len())
-    });
-    let mut open = (0..fillable).filter(|slot| !taken[*slot]);
-    arguments
+    let callee_end = hir.range(callee).end();
+    // A forwarded `...` carries an unknown number of values, so later positions are guesses.
+    let known = shapes
         .iter()
-        .filter(|argument| argument.name.is_none())
-        .skip(function.positional.len())
-        .map_while(|argument| Some((argument.value, open.next()?)))
-        .filter_map(|(value, slot)| Some((value?, *names.get(slot)?)))
+        .position(|shape| shape.forwards_dots)
+        .unwrap_or(shapes.len());
+    argument_targets(db, function, &shapes)
+        .into_iter()
+        .zip(arguments)
+        .take(known)
+        .filter(|(_, argument)| argument.name.is_none())
+        .filter_map(|(target, argument)| {
+            let Some(ArgumentTarget::Named(slot)) = target else {
+                return None;
+            };
+            let value = argument.value?;
+            (hir.range(value).start() >= callee_end)
+                .then(|| Some((value, function.named.get(slot)?.name.text(db))))?
+        })
         .collect()
 }
 

@@ -4128,23 +4128,28 @@ explicit allocators".
   quick fix and the `source.fixAll` action apply only safe fixes, because nobody reviews those edits;
   `--unsafe-fixes` and a click opt into the rest. The fix lives on the diagnostic, so the CLI and the
   server share one source of truth (`applicable_fixes`, `apply_fixes`).
-- `ry check --fix` re-analyzes and repeats until no fix applies (at most `MAX_FIX_PASSES`), because
-  overlapping fixes are skipped within a pass and one fix can expose another. It refuses to write a
-  file whose length on disk no longer matches the analyzed text.
+- `ry check --fix` re-analyzes and repeats until no fix changes a file (at most `MAX_FIX_PASSES`),
+  because overlapping fixes are skipped within a pass and one fix can expose another. It refuses
+  to write a file whose text on disk no longer matches the analyzed text, and leaves a file with a
+  syntax error alone.
+- Safe means safe in context, not by syntax alone: `boolean-shorthand` holds only while the file
+  binds no `T`/`F` (it rides the lints' `unless_redefined` channel), and the `#:` comment fix is
+  withheld when the inline type names a type parameter the comment would not bind.
 - The server keeps each open document's settled fix-bearing findings with the text they were computed
   for (`published_fixes` in `server.rs`). `codeAction` reuses them while the text matches, so a
   request per cursor move costs no analysis, and the offered fixes are the findings on screen.
 
 ## Parameter hints and call hierarchy follow R's own call rules
 
-- Parameter-name inlay hints (`inlay_hints` in `ide.rs`) map arguments to parameters the way R
-  does: exact names, then unique prefixes, then positional fill, and parameters after `...` match
-  only by name. They show only in calls with at least two positional arguments, and skip one-letter
+- Parameter-name inlay hints (`inlay_hints` in `ide.rs`) map arguments to parameters with the
+  checker's own `argument_targets` (`check.rs`), so the hint and the type check never disagree on
+  where an argument goes. Hints stop at a forwarded `...` and skip a piped value. They show only in calls with at least two positional arguments, and skip one-letter
   parameters and arguments whose text already names the parameter (`years` or `x$years`), because a
   hint that repeats what is on screen is noise.
 - The call hierarchy is limited to project top-level functions (the `package_definitions` index),
   because those are the items a reader navigates between and the index is already per-name tracked.
   Only call heads count as calls, so passing `f` to `lapply` is a reference, not a call. A caller
-  that is a top-level statement is grouped as "(top level)". The server re-resolves an item from its
-  uri and selection start instead of serializing ids into `data`, so a stale item from the client
-  never names a wrong function.
+  that is a top-level statement is grouped as "(top level)". The server re-resolves a function item from
+  its uri and selection start instead of serializing ids into `data`, so a stale item never names
+  a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
+  statement calls first.

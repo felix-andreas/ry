@@ -45,7 +45,6 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
-hint @67df =
 
 #---- df_verb_completion
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))

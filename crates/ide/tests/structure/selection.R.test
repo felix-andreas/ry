@@ -111,14 +111,14 @@ fix Change to `alpha` (unsafe): "alpah" -> "alpha"
 x <- list(T = 1)
 T <- 3
 y <- x$T
-f(T)
+f(T, F)
 #++++
 symbol x (Value) at "x"
 symbol T (Value) at "T"
 symbol y (Value) at "y"
 token "list" Function
 token "f" Function
-fix Change to `TRUE`: "T" -> "TRUE"
+fix Change to `FALSE`: "F" -> "FALSE"
 
 #---- backticked_argument
 f <- function(`my value`, beta) beta

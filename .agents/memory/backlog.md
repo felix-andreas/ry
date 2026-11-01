@@ -3002,6 +3002,11 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 ## Open: editor parity
 
 - More quick fixes: a missing `library()` for a namespaced name.
+- `missing_arms_fix` takes its indent from the previous physical line, so after a continuation
+  line the new arms are misindented, and it inserts `\n` in a CRLF file.
+- A finding in a file with a syntax error still says "`ry check --fix` applies it", though
+  `--fix` skips such files.
+- `pkg::name` is always a library token, even when `pkg` is the project's own package.
 - Semantic tokens: coloring of `$` fields and frame columns.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.

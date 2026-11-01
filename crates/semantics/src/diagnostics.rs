@@ -26,8 +26,8 @@ use {
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
-            substitute_rigid, union_of,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, for_each_child_type,
+            map_child_types, substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -1042,9 +1042,9 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             message: format!("{disagreement}. {winner}; make the two agree, or delete one"),
             // Rewriting the comment keeps the program's meaning only while the inline type is
             // the one ry applies.
-            fix: pair
-                .governing
-                .is_none()
+            // The inline function's type parameters are bound on the inline signature, so a
+            // comment that copied one would name a type it never declares.
+            fix: (pair.governing.is_none() && !mentions_type_parameter(db, pair.inline))
                 .then(|| comment_agreement_fix(db, file, pair.range, pair.comment_range))
                 .flatten(),
             related: vec![RelatedLocation {
@@ -1089,6 +1089,17 @@ fn comment_agreement_fix(
         replacement: spelling.to_owned(),
         applicability: Applicability::Safe,
     })
+}
+
+fn mentions_type_parameter(db: &dyn Db, ty: Ty<'_>) -> bool {
+    if matches!(ty.kind(db), TyKind::Rigid(_)) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || mentions_type_parameter(db, child);
+    });
+    found
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]

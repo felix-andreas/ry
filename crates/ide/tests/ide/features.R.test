@@ -956,3 +956,35 @@ hint @109years =
 hint @114: double
 hint @132principal =
 hint @137years =
+#---- exact_names_do_not_also_claim_a_prefix
+g <- function(rate, rate_max, years) rate + rate_max + years
+a <- g(rate = 0.1, 0.2, 3)
+#++++
+hint @1: <T: numeric> fn(rate: T, rate_max: T, years: T) -> T
+hint @62: double
+hint @80rate_max =
+hint @85years =
+
+#---- partial_names_skip_parameters_after_dots
+f <- function(abc, ..., abd) abc
+a <- f(ab = 1, 2, 3)
+#++++
+hint @1: <T, U> fn(abc: T, ...: Any, [abd]: U) -> T
+hint @34: double
+
+#---- forwarded_dots_take_no_slot
+grow <- function(principal, rate, years) principal * rate * years
+wrap <- function(...) grow(1, ..., 3)
+#++++
+hint @4: <T: numeric> fn(principal: T, rate: T, years: T) -> T
+hint @70: fn(...: Any) -> double
+hint @93principal =
+
+#---- piped_values_get_no_hint
+scale_by <- function(values, factor, offset) values * factor + offset
+a <- c(1, 2) |> scale_by(2, 3)
+#++++
+hint @8: <T: numeric> fn(values: T, factor: T, offset: T) -> T
+hint @71: double[]
+hint @95factor =
+hint @98offset =

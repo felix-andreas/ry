@@ -1151,6 +1151,11 @@ impl Worker {
         &mut self,
         item: &lsp_types::CallHierarchyItem,
     ) -> Option<ide::CallHierarchyItem> {
+        // Only a function re-resolves from its name. A caller shown as a top-level statement
+        // starts at whatever that statement calls first, which would name a different function.
+        if item.kind != lsp_types::SymbolKind::FUNCTION {
+            return None;
+        }
         let (file, text) = self.document(&item.uri)?;
         let offset = self.to_offset(&text, item.selection_range.start);
         let files = ProjectFiles::get(&self.db);

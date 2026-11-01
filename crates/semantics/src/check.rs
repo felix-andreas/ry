@@ -1449,7 +1449,16 @@ fn join_forced(branches: impl IntoIterator<Item = FxHashSet<Symbol>>) -> FxHashS
         .unwrap_or_default()
 }
 
-enum ArgumentTarget {
+/// What argument matching needs to know about one argument of a call.
+#[derive(Debug, Clone, Copy)]
+pub struct ArgumentShape<'a> {
+    pub name: Option<&'a str>,
+    /// The enclosing function's bare `...`, which forwards an unknown number of arguments.
+    pub forwards_dots: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentTarget {
     Positional(usize),
     /// Index into `named`, whether claimed by name or filled positionally.
     Named(usize),
@@ -1458,6 +1467,109 @@ enum ArgumentTarget {
     /// already supplied.
     UnmatchedName,
     Overflow,
+}
+
+/// R matches exact names before placing positionals, so `vapply(xs, character(1),
+/// FUN = f)` sends `character(1)` to `FUN.VALUE`. Positionals then fill fixed
+/// parameters, then unclaimed named formals before `...`. `None` marks a `...` forward.
+/// The checker and the editor's parameter hints share it, so both agree on where an argument goes.
+pub fn argument_targets(
+    db: &dyn Db,
+    function: &FunctionType<'_>,
+    arguments: &[ArgumentShape<'_>],
+) -> Vec<Option<ArgumentTarget>> {
+    let mut targets: Vec<Option<ArgumentTarget>> = arguments.iter().map(|_| None).collect();
+    let mut claimed = vec![false; function.named.len()];
+
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument.forwards_dots {
+            continue;
+        }
+        let Some(name) = argument.name else { continue };
+        let formal = function
+            .named
+            .iter()
+            .enumerate()
+            .position(|(formal, field)| field.name.text(db) == name && !claimed[formal]);
+        if let Some(formal) = formal {
+            claimed[formal] = true;
+            targets[index] = Some(ArgumentTarget::Named(formal));
+        }
+    }
+
+    let pre_rest = match &function.variadic {
+        Some(rest) => rest.preceding_named.min(function.named.len()),
+        None => function.named.len(),
+    };
+    // R then matches a name that abbreviates exactly one unclaimed formal before `...`;
+    // a formal after `...` matches only exactly.
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument.forwards_dots || targets[index].is_some() {
+            continue;
+        }
+        let Some(name) = argument.name else { continue };
+        let mut candidates = function.named[..pre_rest]
+            .iter()
+            .enumerate()
+            .filter(|(formal, field)| !claimed[*formal] && field.name.text(db).starts_with(name))
+            .map(|(formal, _)| formal);
+        if let (Some(formal), None) = (candidates.next(), candidates.next()) {
+            claimed[formal] = true;
+            targets[index] = Some(ArgumentTarget::Named(formal));
+        }
+    }
+
+    let mut next_positional = 0usize;
+    let mut next_named = 0usize;
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument.forwards_dots || targets[index].is_some() {
+            continue;
+        }
+        targets[index] = Some(match argument.name {
+            // R collects unmatched keywords into `...`; a duplicate of a supplied formal, or
+            // any unmatched name on a non-variadic function, stays an error.
+            Some(name) => {
+                let duplicates_declared = function
+                    .named
+                    .iter()
+                    .any(|field| field.name.text(db) == name);
+                match (function.variadic.is_some(), duplicates_declared) {
+                    (true, false) => ArgumentTarget::Rest,
+                    _ => ArgumentTarget::UnmatchedName,
+                }
+            }
+            None => {
+                if next_positional < function.positional.len() {
+                    next_positional += 1;
+                    ArgumentTarget::Positional(next_positional - 1)
+                } else {
+                    while next_named < pre_rest && claimed[next_named] {
+                        next_named += 1;
+                    }
+                    if next_named < pre_rest {
+                        claimed[next_named] = true;
+                        next_named += 1;
+                        ArgumentTarget::Named(next_named - 1)
+                    } else if function.variadic.is_some() {
+                        ArgumentTarget::Rest
+                    } else {
+                        ArgumentTarget::Overflow
+                    }
+                }
+            }
+        });
+    }
+    targets
+}
+
+fn argument_shapes<'a>(arguments: &'a [CallArgument<'_>]) -> Vec<ArgumentShape<'a>> {
+    arguments
+        .iter()
+        .map(|argument| ArgumentShape {
+            name: argument.name.as_deref(),
+            forwards_dots: argument.forwards_dots,
+        })
+        .collect()
 }
 
 fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
@@ -9222,7 +9334,7 @@ impl<'db> Checker<'db, '_> {
                 continue;
             };
             let function = function.clone();
-            let targets = self.argument_targets(&function, arguments);
+            let targets = argument_targets(self.db, &function, &argument_shapes(arguments));
             let target_ty = |target: &Option<ArgumentTarget>| match target {
                 Some(ArgumentTarget::Positional(index)) => function.positional.get(*index).copied(),
                 Some(ArgumentTarget::Named(index)) => {
@@ -9631,7 +9743,7 @@ impl<'db> Checker<'db, '_> {
                 .filter(|field| !field.optional)
                 .count();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
-        let targets = self.argument_targets(function, arguments);
+        let targets = argument_targets(self.db, function, &argument_shapes(arguments));
 
         // A function-typed argument may be checked against arguments forwarded to it later
         // (`lapply(x, gsub, pattern = "a")`), so the rest intake must be known up front.
@@ -9918,102 +10030,6 @@ impl<'db> Checker<'db, '_> {
             true => expected,
             false => ty,
         }
-    }
-
-    /// R matches exact names before placing positionals, so `vapply(xs, character(1),
-    /// FUN = f)` sends `character(1)` to `FUN.VALUE`. Positionals then fill fixed
-    /// parameters, then unclaimed named formals before `...`. `None` marks a `...` forward.
-    fn argument_targets(
-        &self,
-        function: &FunctionType<'db>,
-        arguments: &[CallArgument<'db>],
-    ) -> Vec<Option<ArgumentTarget>> {
-        let mut targets: Vec<Option<ArgumentTarget>> = arguments.iter().map(|_| None).collect();
-        let mut claimed = vec![false; function.named.len()];
-
-        for (index, argument) in arguments.iter().enumerate() {
-            if argument.forwards_dots {
-                continue;
-            }
-            let Some(name) = &argument.name else { continue };
-            let formal = function
-                .named
-                .iter()
-                .enumerate()
-                .position(|(formal, field)| {
-                    field.name.text(self.db) == name.as_str() && !claimed[formal]
-                });
-            if let Some(formal) = formal {
-                claimed[formal] = true;
-                targets[index] = Some(ArgumentTarget::Named(formal));
-            }
-        }
-
-        let pre_rest = match &function.variadic {
-            Some(rest) => rest.preceding_named.min(function.named.len()),
-            None => function.named.len(),
-        };
-        // R then matches a name that abbreviates exactly one unclaimed formal before `...`;
-        // a formal after `...` matches only exactly.
-        for (index, argument) in arguments.iter().enumerate() {
-            if argument.forwards_dots || targets[index].is_some() {
-                continue;
-            }
-            let Some(name) = &argument.name else { continue };
-            let mut candidates = function.named[..pre_rest]
-                .iter()
-                .enumerate()
-                .filter(|(formal, field)| {
-                    !claimed[*formal] && field.name.text(self.db).starts_with(name.as_str())
-                })
-                .map(|(formal, _)| formal);
-            if let (Some(formal), None) = (candidates.next(), candidates.next()) {
-                claimed[formal] = true;
-                targets[index] = Some(ArgumentTarget::Named(formal));
-            }
-        }
-
-        let mut next_positional = 0usize;
-        let mut next_named = 0usize;
-        for (index, argument) in arguments.iter().enumerate() {
-            if argument.forwards_dots || targets[index].is_some() {
-                continue;
-            }
-            targets[index] = Some(match &argument.name {
-                // R collects unmatched keywords into `...`; a duplicate of a supplied formal, or
-                // any unmatched name on a non-variadic function, stays an error.
-                Some(name) => {
-                    let duplicates_declared = function
-                        .named
-                        .iter()
-                        .any(|field| field.name.text(self.db) == name.as_str());
-                    match (function.variadic.is_some(), duplicates_declared) {
-                        (true, false) => ArgumentTarget::Rest,
-                        _ => ArgumentTarget::UnmatchedName,
-                    }
-                }
-                None => {
-                    if next_positional < function.positional.len() {
-                        next_positional += 1;
-                        ArgumentTarget::Positional(next_positional - 1)
-                    } else {
-                        while next_named < pre_rest && claimed[next_named] {
-                            next_named += 1;
-                        }
-                        if next_named < pre_rest {
-                            claimed[next_named] = true;
-                            next_named += 1;
-                            ArgumentTarget::Named(next_named - 1)
-                        } else if function.variadic.is_some() {
-                            ArgumentTarget::Rest
-                        } else {
-                            ArgumentTarget::Overflow
-                        }
-                    }
-                }
-            });
-        }
-        targets
     }
 
     fn named_argument_mismatch(

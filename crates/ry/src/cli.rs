@@ -166,7 +166,11 @@ pub fn check(
             }
         }
         n_failures += analysis.failures;
-        for file in analysis.files.iter().filter(|file| file.requested) {
+        for file in analysis
+            .files
+            .iter()
+            .filter(|file| file.requested && fixes_apply(file))
+        {
             n_fixable += applicable_fixes(&file.diagnostics, false).len();
             n_unsafe_fixable += applicable_fixes(&file.diagnostics, true).len();
         }
@@ -205,7 +209,7 @@ pub fn check(
             println!("applied {n_fixed} {fixes}");
         }
         report_check_summary(n_files, n_diagnostics);
-        let unsafe_only = n_unsafe_fixable - n_fixable;
+        let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
         match (n_fixable, unsafe_only) {
             (0, 0) => {}
             (0, more) => println!("{more} fixable with `ry check --fix --unsafe-fixes`"),
@@ -222,15 +226,19 @@ pub fn check(
     })
 }
 
-/// Writes the fixes for every requested file back to disk and returns how many it applied. The
-/// edits apply to the file as it is on disk, which for a literate document still has its prose:
-/// the analysis blanks prose without moving any offset.
+/// Writes the fixes for every requested file back to disk and returns how many changed a file.
+/// The edits apply to the file as it is on disk, which for a literate document still has its
+/// prose: the analysis blanks prose without moving any offset.
 fn apply_check_fixes(
     analysis: &ProjectAnalysis,
     include_unsafe: bool,
 ) -> Result<usize, CommandError> {
     let mut applied = 0;
-    for file in analysis.files.iter().filter(|file| file.requested) {
+    for file in analysis
+        .files
+        .iter()
+        .filter(|file| file.requested && fixes_apply(file))
+    {
         let fixes = applicable_fixes(&file.diagnostics, include_unsafe);
         if fixes.is_empty() {
             continue;
@@ -240,16 +248,31 @@ fn apply_check_fixes(
             CommandError
         })?;
         // A file that changed on disk since the analysis would take edits at stale offsets.
-        if original.len() != analysis.source(file).len() {
+        if analysable_source(&file.path, original.clone()) != analysis.source(file) {
             continue;
         }
-        fs::write(&file.path, apply_fixes(&original, &fixes)).map_err(|err| {
+        let edited = apply_fixes(&original, &fixes);
+        // A fix whose replacement equals what is there changes nothing, and counting it would
+        // keep the fix loop going until its pass limit.
+        if edited == original {
+            continue;
+        }
+        fs::write(&file.path, edited).map_err(|err| {
             error_because(&format!("failed to write: {}", file.path.display()), &err);
             CommandError
         })?;
         applied += fixes.len();
     }
     Ok(applied)
+}
+
+/// A file with a syntax error takes no fixes, because they were computed on a recovered tree and
+/// may not mean what they say.
+fn fixes_apply(file: &AnalyzedFile) -> bool {
+    !file
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "syntax-error")
 }
 
 /// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
