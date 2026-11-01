@@ -89,8 +89,8 @@ current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits
 Unlike `ry run`, it uses ry's own runtime by default, and `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`)
 loads on GNU R instead.
 `ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
-`source(pipe("ry load --r-entry"))`. `load_all()` is available in `ry repl` and `ry run` sessions
-on GNU R too, but not yet with `--runtime ry`.
+`source(pipe("ry load --r-entry"))`. `load_all()` is also available in `ry run` on either runtime and in `ry repl` on GNU R, but not yet
+in `ry repl --runtime ry`.
 
 ## debug
 
