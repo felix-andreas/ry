@@ -333,6 +333,9 @@ pub unsafe fn call_builtin(
             ),
         ));
     }
+    if matches!(definition.kind, Kind::Builtin | Kind::Special) && args.iter().any(|arg| arg.tag != nil()) {
+        check_argument_names(definition, call, args)?;
+    }
     let function = definition.function;
     let visibility = definition.visibility;
     let context = Call {
@@ -361,6 +364,101 @@ pub unsafe fn call_builtin(
         }
         result => result,
     }
+}
+
+/// GNU R rejects a named argument to a primitive that partially matches none of the formals
+/// `.ArgsEnv` or `.GenericArgsEnv` record for it.
+unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]) -> R<()> {
+    // `trunc(x, ...)` passes its dots to methods, but GNU R still requires the first argument,
+    // if named, to be `x`.
+    if definition.name == "trunc"
+        && let Some(first) = args.first()
+        && first.tag != nil()
+        && !"x".starts_with(values::symbol_name(first.tag).as_ref())
+    {
+        let name = values::symbol_name(first.tag);
+        return Err(error_in(call, format!("supplied argument name '{name}' does not match 'x'")));
+    }
+    let state = interp();
+    let formals = match state.primitive_formals.get(definition.name) {
+        Some(formals) => formals,
+        None => {
+            let Some(formals) = recorded_formals(definition.name)? else {
+                return Ok(());
+            };
+            interp().primitive_formals.entry(definition.name).or_insert(formals)
+        }
+    };
+    let Some(formals) = formals else {
+        return Ok(());
+    };
+    for arg in args.iter().filter(|arg| arg.tag != nil()) {
+        let name = values::symbol_name(arg.tag);
+        if formals.iter().any(|formal| formal.starts_with(name.as_ref())) {
+            continue;
+        }
+        let message = match &formals[..] {
+            [] => format!(
+                "{} argument{} passed to '{}' which requires 0",
+                args.len(),
+                if args.len() == 1 { "" } else { "s" },
+                definition.name
+            ),
+            [formal] => format!("supplied argument name '{name}' does not match '{formal}'"),
+            _ => format!(
+                "unused argument ({name} = {})",
+                crate::deparse::deparse_one_line(arg.value)
+            ),
+        };
+        return Err(error_in(call, message));
+    }
+    Ok(())
+}
+
+/// The formals of `name` in `.ArgsEnv` or `.GenericArgsEnv`, or `None` while base R has not
+/// yet created both environments.
+unsafe fn recorded_formals(name: &str) -> R<Option<Option<Box<[String]>>>> {
+    let mut tables = Vec::new();
+    for table in [".ArgsEnv", ".GenericArgsEnv"] {
+        let mut env = find_var_in_frame(values::install(table)?, values::base_namespace())?;
+        // Lazy loading these bindings calls builtins itself, so a check inside that load
+        // leaves the names unchecked.
+        if env.kind() == SexpType::Promise {
+            if env.has_gp(PROMISE_SEEN) {
+                return Ok(None);
+            }
+            env = force_promise(env)?;
+        }
+        if env.kind() != SexpType::Environment {
+            return Ok(None);
+        }
+        tables.push(env);
+    }
+    let symbol = values::install(name)?;
+    for env in tables {
+        let mut function = find_var_in_frame(symbol, env)?;
+        if function.kind() == SexpType::Promise {
+            if function.has_gp(PROMISE_SEEN) {
+                return Ok(None);
+            }
+            function = force_promise(function)?;
+        }
+        if function.kind() != SexpType::Closure {
+            continue;
+        }
+        let mut formals = Vec::new();
+        let mut formal = function.car();
+        while formal != nil() {
+            let formal_name = values::symbol_name(formal.tag()).into_owned();
+            if formal_name == "..." {
+                return Ok(Some(None));
+            }
+            formals.push(formal_name);
+            formal = formal.cdr();
+        }
+        return Ok(Some(Some(formals.into_boxed_slice())));
+    }
+    Ok(Some(None))
 }
 
 /// Evaluates a builtin's arguments, expanding `...`.

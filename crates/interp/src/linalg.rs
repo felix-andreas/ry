@@ -11,7 +11,7 @@
 //! moves a column to the end once its remaining norm falls below `tol` times its original norm.
 
 use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal},
+    builtins::{BuiltinDef, Call, Generic, builtin, internal},
     coerce::coerce_vector,
     conditions,
     unwind::{R, error},
@@ -29,7 +29,8 @@ use std::{
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("%*%", 2, |call| unsafe {
         matrix_product(call, Product::Matrix)
-    }),
+    })
+    .generic(Generic::MatrixOps),
     internal("crossprod", 2, |call| unsafe {
         matrix_product(call, Product::Cross)
     }),

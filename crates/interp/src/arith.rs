@@ -160,7 +160,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(":", 2, do_colon),
     builtin("seq_len", 1, do_seq_len),
     builtin("seq_along", 1, do_seq_along),
-    builtin("seq.int", -1, do_seq_int),
+    builtin("seq.int", -1, do_seq_int).generic(Generic::Internal),
     builtin("rep", -1, do_rep).generic(Generic::Internal),
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),

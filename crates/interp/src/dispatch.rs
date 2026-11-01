@@ -692,9 +692,11 @@ pub unsafe fn try_builtin_dispatch(
             {
                 return Ok(Some(value));
             }
-            internal_dispatch(definition.name, call, args, env)
+            // `seq.int` is the primitive behind the `seq` generic, so it finds `seq` methods.
+            let generic = if definition.name == "seq.int" { "seq" } else { definition.name };
+            internal_dispatch(generic, call, args, env)
         }
-        Generic::Ops => {
+        Generic::Ops | Generic::MatrixOps => {
             let any_object = args.iter().take(2).any(|arg| arg.value.is_object());
             if !any_object {
                 return Ok(None);
@@ -704,7 +706,8 @@ pub unsafe fn try_builtin_dispatch(
             {
                 return Ok(Some(value));
             }
-            group_dispatch("Ops", definition.name, call, args, env)
+            let group = if definition.generic == Generic::Ops { "Ops" } else { "matrixOps" };
+            group_dispatch(group, definition.name, call, args, env)
         }
         Generic::Math | Generic::Summary | Generic::Complex => {
             if !first.value.is_object() {
@@ -804,7 +807,8 @@ unsafe fn group_dispatch(
     args: &[Arg],
     env: Sexp,
 ) -> R<Option<Sexp>> {
-    let operands = if group == "Ops" { args.len().min(2) } else { 1 };
+    let binary = group == "Ops" || group == "matrixOps";
+    let operands = if binary { args.len().min(2) } else { 1 };
     let mut found: Vec<Option<Found>> = Vec::new();
     for arg in args.iter().take(operands) {
         if arg.value.is_object() {
@@ -815,11 +819,15 @@ unsafe fn group_dispatch(
     }
     let (_, position) = match (found.first(), found.get(1)) {
         (Some(Some(left)), Some(Some(right))) => {
-            if left.method != right.method {
+            if left.method == right.method {
+                (0, 0)
+            } else if choose_ops_method(call, args, left, right, false)? {
+                (0, 0)
+            } else if choose_ops_method(call, args, right, left, true)? {
+                (1, 1)
+            } else {
                 let left_name = symbol_name(left.method_name).into_owned();
                 let right_name = symbol_name(right.method_name).into_owned();
-                // Different methods for the two operands: GNU R warns and uses the builtin, except
-                // that one of the two being the builtin's own group default is not a conflict.
                 crate::conditions::warning_call(
                     call,
                     format!(
@@ -828,7 +836,6 @@ unsafe fn group_dispatch(
                 )?;
                 return Ok(None);
             }
-            (0, 0)
         }
         (Some(Some(_)), _) => (0, 0),
         (_, Some(Some(_))) => (1, 1),
@@ -838,7 +845,7 @@ unsafe fn group_dispatch(
         return Ok(None);
     };
     let mut vars = found_method.vars;
-    if group == "Ops" {
+    if binary {
         // `.Method` names the method for each operand, with "" for the other.
         let method_name = symbol_name(found_method.method_name).into_owned();
         let methods: Vec<String> = (0..operands)
@@ -867,6 +874,27 @@ unsafe fn group_dispatch(
     let promised = promised_args(call, args)?;
     let new_call = renamed_call(call, found_method.method_name)?;
     apply_method(new_call, found_method.method, &promised, env, &vars).map(Some)
+}
+
+/// Asks `chooseOpsMethod(x, y, mx, my, cl, reverse)` whether `chosen`, the method found for
+/// one operand, should win over `other`, the method found for the other operand. `reverse`
+/// says that `chosen` belongs to the right operand.
+unsafe fn choose_ops_method(call: Sexp, args: &[Arg], chosen: &Found, other: &Found, reverse: bool) -> R<bool> {
+    let (Some(left), Some(right)) = (args.first(), args.get(1)) else {
+        return Ok(false);
+    };
+    let (x, y) = if reverse { (right.value, left.value) } else { (left.value, right.value) };
+    let function = eval::find_fun(values::install("chooseOpsMethod")?, values::base_namespace())?;
+    let reverse = values::scalar_bool(reverse)?;
+    crate::heap().root(reverse);
+    let chooser_call = values::lcons(values::install("chooseOpsMethod")?, nil())?;
+    crate::heap().root(chooser_call);
+    let chooser_args: Vec<Arg> = [x, y, chosen.method, other.method, call, reverse]
+        .into_iter()
+        .map(|value| Arg { tag: nil(), value })
+        .collect();
+    let answer = eval::apply(chooser_call, function, &chooser_args, values::global_env())?;
+    Ok(values::as_logical_scalar(answer) == 1)
 }
 
 unsafe fn find_group_method(

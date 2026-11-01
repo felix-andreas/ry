@@ -668,7 +668,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("as.complex", -1, |call| unsafe { as_type(call, SexpType::Complex) }).generic(Generic::Internal),
     builtin("as.raw", 1, |call| unsafe { as_type(call, SexpType::Raw) }).generic(Generic::Internal),
     internal("as.vector", 2, do_as_vector).generic(Generic::Internal),
-    builtin("as.call", 1, do_as_call),
+    builtin("as.call", 1, do_as_call).generic(Generic::Internal),
     internal("as.function.default", 2, do_as_function),
     internal("typeof", 1, |call| unsafe { scalar_string(call.arg(0).kind().name()) }),
     internal("vector", 2, do_vector),
@@ -695,8 +695,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("is.numeric", 1, do_is_numeric).generic(Generic::Internal),
     builtin("is.matrix", 1, |call| unsafe { {
         scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2))
-    } }),
-    builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }),
+    } }).generic(Generic::Internal),
+    builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }).generic(Generic::Internal),
     builtin("is.atomic", 1, |call| unsafe { {
         // GNU R 4.3, whose R code runs here, still counts NULL as atomic.
         let kind = call.arg(0).kind();

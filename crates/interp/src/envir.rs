@@ -2,7 +2,7 @@
 //! path, namespaces and options.
 
 use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin, internal, present},
+    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     eval::{self, define, find_var, find_var_in_frame, value_of},
     interp,
     unwind::{R, error},
@@ -52,7 +52,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("sys.parents", 0, |call| unsafe { do_sys(call, SysKind::Parents) }),
     internal("sys.on.exit", 0, |call| unsafe { do_sys(call, SysKind::OnExit) }),
     internal("parent.frame", 1, do_parent_frame),
-    builtin("as.environment", 1, do_as_environment),
+    builtin("as.environment", 1, do_as_environment).generic(Generic::Internal),
     builtin("pos.to.env", 1, do_pos_to_env),
     internal("search", 0, do_search),
     internal("attach", 3, do_attach),
@@ -1119,8 +1119,28 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             scalar_integer(width)
         }
-        "warn" | "expressions" | "scipen" | "max.print" | "deparse.cutoff" | "warning.length"
-        | "nwarnings" => {
+        "expressions" => {
+            let depth = values::as_integer_scalar(value);
+            if !(25..=500_000).contains(&depth) {
+                return Err(error("'expressions' parameter invalid, allowed 25...500000"));
+            }
+            scalar_integer(depth)
+        }
+        "warning.length" => {
+            let length = values::as_integer_scalar(value);
+            if !(100..=8170).contains(&length) {
+                return Err(error("invalid value for 'warning.length'"));
+            }
+            scalar_integer(length)
+        }
+        "max.print" | "nwarnings" => {
+            let count = values::as_integer_scalar(value);
+            if count < 1 {
+                return Err(error(&format!("invalid value for '{name}'")));
+            }
+            scalar_integer(count)
+        }
+        "warn" | "scipen" | "deparse.cutoff" => {
             if value.kind() == SexpType::Real || value.kind() == SexpType::Integer {
                 scalar_integer(values::as_integer_scalar(value))
             } else {

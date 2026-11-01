@@ -2,15 +2,15 @@
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
 use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal},
+    builtins::{BuiltinDef, Call, builtin, internal, special},
     interp,
     unwind::{R, error},
     values::{
-        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_real, scalar_string,
+        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, scalar_string,
         string_vector, symbols,
     },
 };
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
+use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType};
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -155,7 +155,27 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
-    internal("balancePOSIXlt", 3, |call| unsafe { Ok(call.arg(0)) }),
+    internal("balancePOSIXlt", 3, |call| unsafe {
+        balance_posixlt(call.arg(0), values::is_true(call.arg(1)), values::is_true(call.arg(2)))
+    }),
+    builtin("unCfillPOSIXlt", 1, |call| unsafe {
+        let balanced = get_attr(call.arg(0), values::install("balanced")?);
+        if balanced != nil() && values::as_logical_scalar(balanced) == 1 {
+            Ok(call.arg(0))
+        } else {
+            balance_posixlt(call.arg(0), true, true)
+        }
+    }),
+    // ry has no interactive debugger, so `browser()` continues as it does in a
+    // non-interactive GNU R session.
+    special("browser", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    builtin("tracemem", 1, |call| unsafe {
+        scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
+    }),
+    builtin("untracemem", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    builtin("retracemem", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
+    builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
     internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
     internal("tzone_name", 0, |_| unsafe { scalar_string("UTC") }),
     internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
@@ -544,7 +564,15 @@ unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     posixlt_from_seconds(&seconds, &tz)
 }
 
+unsafe fn require_posixlt(list: Sexp) -> R<()> {
+    if list.kind() != SexpType::List || length(list) < 9 {
+        return Err(error("a valid \"POSIXlt\" object is a list of at least 9 elements"));
+    }
+    Ok(())
+}
+
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
+    require_posixlt(list)?;
     let field = |index: usize| -> Sexp { if length(list) > index { list.element(index) } else { nil() } };
     let count = (0..6).map(|index| length(field(index))).max().unwrap_or(0);
     let at = |index: usize, position: usize| -> f64 {
@@ -574,6 +602,41 @@ unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
         seconds.push(days as f64 * 86400.0 + hour * 3600.0 + minute * 60.0 + second);
     }
     Ok(seconds)
+}
+
+/// Normalizes out-of-range POSIXlt fields, or with `fill_only` recycles every field to the
+/// longest one and marks the result `balanced = NA`, as GNU R's `balancePOSIXlt` does.
+unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
+    require_posixlt(list)?;
+    let balanced_symbol = values::install("balanced")?;
+    let result = if fill_only {
+        let count = (0..length(list)).map(|index| length(list.element(index))).max().unwrap_or(0);
+        let result = values::shallow_duplicate(list)?;
+        crate::heap().root(result);
+        for index in 0..length(list) {
+            let field = list.element(index);
+            let size = length(field);
+            if size == count || size == 0 {
+                continue;
+            }
+            let filled = alloc(field.kind(), count)?;
+            for position in 0..count {
+                crate::subset::copy_element(field, position % size, filled, position)?;
+            }
+            values::set_elt(result, index, filled);
+        }
+        values::set_attr(result, balanced_symbol, values::scalar_logical(NA_LOGICAL)?)?;
+        result
+    } else {
+        let tzone = get_attr(list, values::install("tzone")?);
+        let tz = values::first_string(tzone).map(|text| text.into_owned()).unwrap_or_default();
+        let seconds = posixlt_seconds(list)?;
+        posixlt_from_seconds(&seconds, &tz)?
+    };
+    if !classed {
+        values::remove_attr(result, symbols().class);
+    }
+    Ok(result)
 }
 
 unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
