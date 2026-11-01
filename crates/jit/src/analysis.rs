@@ -244,7 +244,8 @@ pub enum Action {
     Skip,
     Constant { dst: usize, value: Sexp, ty: Ty },
     /// Reads a slot; `load` when the slot may not be loaded, with the type to refine to.
-    GetVar { dst: usize, slot: usize, load: Option<Ty> },
+    /// `forcing` marks a load that may evaluate a default argument, which runs in this frame.
+    GetVar { dst: usize, slot: usize, load: Option<Ty>, forcing: bool },
     SetVar { slot: usize, src: usize },
     /// A function lookup resolved at compile time; the speculations check it still holds.
     GetFun { dst: usize, function: Sexp },
@@ -313,6 +314,20 @@ pub struct Plan {
     pub loop_headers: Vec<usize>,
 }
 
+/// The formals whose default is an expression rather than a constant or nothing.
+unsafe fn defaulted_formals(formals: Sexp) -> FxHashSet<Sexp> {
+    let mut defaulted = FxHashSet::default();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        let default = formal.car();
+        if matches!(default.kind(), SexpType::Language | SexpType::Symbol | SexpType::Promise) && default != values::missing_arg() {
+            defaulted.insert(formal.tag());
+        }
+        formal = formal.cdr();
+    }
+    defaulted
+}
+
 /// Why a body is not compiled.
 #[derive(Debug)]
 pub struct Refusal(pub &'static str);
@@ -342,6 +357,7 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         speculated: FxHashMap::default(),
         speculations: Vec::new(),
         registers,
+        defaulted: defaulted_formals(formals),
     };
     builder.collect_slots();
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
@@ -419,6 +435,9 @@ struct Builder<'a> {
     speculated: FxHashMap<Sexp, Option<Sexp>>,
     speculations: Vec<Speculation>,
     registers: usize,
+    /// Formals whose default is an expression. Their first load may evaluate it in this frame,
+    /// where it reads and may assign the body's variables.
+    defaulted: FxHashSet<Sexp>,
 }
 
 impl Builder<'_> {
@@ -636,14 +655,25 @@ impl Builder<'_> {
                 } else {
                     None
                 };
+                let forcing = load.is_some() && self.defaulted.contains(&self.slots[slot]);
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
-                    state.slots[slot] = Slot { status: status_bits, ty };
+                    let loaded = Slot { status: status_bits, ty };
+                    // Code generation writes the variables back before the load and forgets them
+                    // after it, but only when the load really happens.
+                    let mut forced = state.clone();
+                    forced.flushed();
+                    forced.forget_slots();
+                    forced.slots[slot] = loaded;
+                    state.slots[slot] = loaded;
+                    if forcing {
+                        *state = if current.may_be(status::LOADED) { state.join(&forced) } else { forced };
+                    }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
                 state.visible = Some(true);
-                Action::GetVar { dst: operand(0), slot, load }
+                Action::GetVar { dst: operand(0), slot, load, forcing }
             }
             Op::SetVar => {
                 let slot = self.slot(self.constant(operand(0)));
@@ -762,7 +792,9 @@ impl Builder<'_> {
                     Ty::LglVec => value == Ty::Lgl,
                     _ => false,
                 };
-                if fits && matches!(index, Ty::Int | Ty::Dbl) && state.slots[slot].may_be(status::LOADED) {
+                if fits && matches!(index, Ty::Int | Ty::Dbl) && state.slots[slot].may_be(status::LOADED)
+                    && !(self.defaulted.contains(&self.slots[slot]) && state.slots[slot].may_be(status::NOT_LOADED))
+                {
                     // The generic path writes the variable back, runs the assignment in tier 0
                     // and forgets the variable; the fast path may make it dirty by copying it.
                     let mut forgotten = state.slots[slot];

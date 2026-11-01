@@ -320,9 +320,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                 }
                 self.set_visible(&before, true);
             }
-            Action::GetVar { dst, slot, load } => {
+            Action::GetVar { dst, slot, load, forcing } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty)?;
+                    self.load_slot(position, &before, slot, ty, forcing)?;
                 }
                 let ty = self.after(position)?.slots[slot].ty;
                 if ty.is_unboxed() {
@@ -1128,7 +1128,9 @@ impl<'p, 'b> Translator<'p, 'b> {
     // Variables.
 
     /// Loads a slot whose runtime status may be "not loaded", checking the value has type `ty`.
-    unsafe fn load_slot(&mut self, position: usize, before: &State, slot: usize, ty: Ty) -> Result<(), Refusal> {
+    /// A `forcing` load may evaluate a default argument in this frame, so the variables are
+    /// written back before it and forgotten after it.
+    unsafe fn load_slot(&mut self, position: usize, before: &State, slot: usize, ty: Ty, forcing: bool) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         let live = self.plan.live[position].clone();
         let failed = self.deopt(pc, before.clone(), live.clone(), reason::PENDING);
@@ -1143,6 +1145,9 @@ impl<'p, 'b> Translator<'p, 'b> {
             self.builder.ins().jump(load, &[]);
         }
         self.builder.switch_to_block(load);
+        if forcing {
+            self.flush_all(before, failed);
+        }
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
         let result = self
@@ -1155,6 +1160,9 @@ impl<'p, 'b> Translator<'p, 'b> {
         let invalid = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
         let valid = self.builder.ins().bxor_imm_u(invalid, 1);
         self.guard(valid, mismatch);
+        if forcing {
+            self.forget_slots();
+        }
         let value = self.load_slot_cell(slot);
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
