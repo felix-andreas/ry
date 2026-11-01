@@ -295,6 +295,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// An environment a compiled closure body is running on. The body keeps values in registers
+    /// that do not count as references, which code running on the environment from elsewhere
+    /// must respect before it updates a value in place.
+    pub const COMPILED_FRAME: u16 = 1 << 9;
     /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
     /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
     /// compiled code revalidates its lookups only when the epoch moved.

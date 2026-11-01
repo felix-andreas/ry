@@ -59,7 +59,13 @@ checker catches: the result has to be unwrapped, with `match` or `Result.with_de
 list can be summed.
 
 The library runs only on ry's runtime, so run such a script with `ry run`, not `ry R`. GNU R does
-not have these functions, and a script that calls one fails there with "could not find function".
+not have these functions, and under `ry R` a call to one stops with an error that says so:
+
+```text
+Error: `List.map()` is part of ry's standard library, which only ry's runtime provides, and this session runs on GNU R; run the code with `ry run` or `ry load` instead
+```
+
+Plain `Rscript` knows nothing of ry, so there the call fails with "could not find function".
 
 ## Conventions
 
@@ -147,10 +153,51 @@ function copies first, so `old` never changes. The semantics are the same either
 differs. `List.reserve`, `Dict.reserve` and `Set.reserve` set aside room ahead of a known number of
 insertions.
 
+Two more shapes update in place. The first is a collection inside a list, updated through the same
+`$` or `[[` path on both sides:
+
+```r
+state <- list(seen = Dict.empty(), count = 0L)
+for (i in 1:100000) state$seen <- Dict.insert(state$seen, i, TRUE)
+```
+
+The second is a helper that takes a dictionary or set, reassigns its own parameter and returns it,
+when the caller reassigns the same variable:
+
+```r
+remember <- function(seen, key) {
+  seen <- Dict.insert(seen, key, TRUE)
+  seen
+}
+seen <- Dict.empty()
+for (i in 1:100000) seen <- remember(seen, i)
+```
+
+The caller's variable lends its value to the call, so the helper's first update needs no copy. Write
+the helper with a reassignment as above: a helper whose body is just `Dict.insert(seen, key, TRUE)`
+still copies on every call. A few cases copy where they could reuse, and none of them changes a
+result:
+
+- A helper that passes the collection on to a second helper copies at the inner call.
+- A collection that a closure or environment captured inside the helper stays shared.
+
+Because the caller's variable lends its value, a helper that updates the collection and then fails
+leaves the caller's variable holding the updated collection, and `NextMethod()` in an S3 method sees
+the update too.
+
 ## Checking
 
-A lookup with a key of another type finds nothing at run time: `Dict.get(d, 1L)` on a dictionary
-with `character` keys is `:Err(:KeyNotFound)`. With `typing = true`, the checker reports it first:
+A collection holds keys of one type, so a key of another type is an error at run time rather than a
+missing key. On a dictionary with `character` keys, `Dict.get(d, "z")` is `:Err(:KeyNotFound)`, but
+`Dict.get(d, 1L)` stops:
+
+```text
+Error in Dict.get(d, 1L) :
+  the dict's keys are character, and this one is integer; a collection holds one type
+```
+
+Integer and double keys are the one exception: they compare as numbers, so `1L` finds the key `1`.
+With `typing = true`, the checker reports a mismatched key before the code runs:
 
 ```text
 type-mismatch

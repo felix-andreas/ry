@@ -84,8 +84,30 @@ pub fn process_runtime() -> String {
 /// Installs the runtime in `tools:ry`. Its functions are byte-compiled once per runtime and R
 /// version and cached, because R would otherwise compile each one the first time it runs,
 /// which costs more than a typical reload.
+///
+/// The runtime also binds each name of ry's standard library that GNU R lacks to a function that
+/// explains the library runs only on ry's runtime, which reads better than GNU R's "could not
+/// find function". A name GNU R already has, such as `col`, keeps GNU R's meaning.
 fn runtime(transport: &str) -> String {
-    let source = format!("{transport}\n{RUNTIME_GNUR}");
+    let names: Vec<String> = include_str!("../../../types/ry.exports")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    let source = format!(
+        r#"{transport}
+{RUNTIME_GNUR}
+.ry_standard_library_name <- function(name) {{
+  force(name)
+  function(...) stop(
+    "`", name, "()` is part of ry's standard library, which only ry's runtime provides, ",
+    "and this session runs on GNU R; run the code with `ry run` or `ry load` instead",
+    call. = FALSE
+  )
+}}
+.ry_standard_library_names <- c({names})"#,
+        names = names.join(", ")
+    );
     let cache = dirs::cache_dir()
         .map(|directory| directory.join("ry").to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -98,6 +120,9 @@ fn runtime(transport: &str) -> String {
   if (!is.environment(runtime)) {{
     runtime <- new.env(parent = baseenv())
     eval(parse(text = {source}, keep.source = FALSE), runtime)
+    for (name in runtime$.ry_standard_library_names) {{
+      if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
+    }}
     for (name in ls(runtime, all.names = TRUE)) {{
       if (is.function(runtime[[name]])) runtime[[name]] <- compiler::cmpfun(runtime[[name]])
     }}

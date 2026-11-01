@@ -211,6 +211,12 @@ pub unsafe fn is_compiled(function: Sexp) -> bool {
     function.cdr().kind() == SexpType::Bytecode
 }
 
+/// Whether a register of a running compiled body may hold `value`. A register that held it
+/// for an expression that finished still matches, which only costs an update in place.
+pub fn registers_hold(value: Sexp) -> bool {
+    interp().bytecode.registers.contains(&value)
+}
+
 const COMPILE_AFTER_CALLS: u32 = 2;
 const MAX_TRACKED_BODIES: usize = 1 << 16;
 
@@ -333,9 +339,13 @@ pub enum Op {
     /// argument already evaluated to the object in `subject`, so it dispatches on that object
     /// with the other arguments as promises.
     DispatchSubject,
+    /// `dst function call target`: [`Op::CallGeneric`] for the right-hand side of
+    /// `target <- f(target, ...)`, which may update the value of `target` in place
+    /// (`eval::rebind_call`).
+    CallRebinding,
 }
 
-pub const OPS: [Op; 26] = [
+pub const OPS: [Op; 27] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -362,6 +372,7 @@ pub const OPS: [Op; 26] = [
     Op::BranchUnlessPrimitive,
     Op::BranchIfObject,
     Op::DispatchSubject,
+    Op::CallRebinding,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -448,6 +459,9 @@ struct Compiler {
     /// statement's inside a `{` with source references. A `{` makes it current again after its
     /// own statements.
     srcref: Sexp,
+    /// The call `x <- f(x, ...)` assigns to `x`, while the compiler compiles that call, so a
+    /// call of a closure becomes [`Op::CallRebinding`].
+    rebinding: Option<(Sexp, Sexp)>,
 }
 
 #[derive(Clone, Copy)]
@@ -478,6 +492,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         next_register: 0,
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
+        rebinding: None,
     };
     let result = compiler.allocate();
     compiler.expression(body, result)?;
@@ -552,7 +567,7 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         {
             return true;
         }
-        if reuses_first_argument(expression) {
+        if rebinds_first_argument(expression) {
             return true;
         }
         if matches!(
@@ -572,11 +587,10 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
     false
 }
 
-/// Whether `expression` is `x <- f(x, ...)` for a standard library function that updates its first
-/// argument in place. The AST evaluator decides at run time whether the binding owns the value
-/// (`eval::rebind`), so the compiler leaves the whole assignment to it, and an earlier argument
-/// of an enclosing call must not keep `x` in an uncounted register.
-unsafe fn reuses_first_argument(expression: Sexp) -> bool {
+/// Whether `expression` is `x <- f(x, ...)`, whose call may update the value of `x` in place
+/// (`eval::rebind_call`), so an earlier argument of an enclosing call must not keep `x` in an
+/// uncounted register.
+unsafe fn rebinds_first_argument(expression: Sexp) -> bool {
     let head = expression.car();
     if head.kind() != SexpType::Symbol || !matches!(&*symbol_name(head), "<-" | "=") {
         return false;
@@ -589,9 +603,16 @@ unsafe fn reuses_first_argument(expression: Sexp) -> bool {
         && value.cdr().kind() == SexpType::Pairlist
         && value.cdr().car() == target
         && value.cdr().tag() == nil()
-        && crate::standard_library::BUILTINS.iter().any(|definition| {
-            definition.reuses_first_argument && *symbol_name(value.car()) == *definition.name
-        })
+}
+
+/// Whether `expression` is `x <- f(x, ...)` for a standard library builtin that updates its
+/// first argument in place. The AST evaluator decides at run time whether the binding owns the
+/// value (`eval::rebind`), so the compiler leaves the whole assignment to it.
+unsafe fn reuses_first_argument(expression: Sexp) -> bool {
+    rebinds_first_argument(expression)
+        && crate::standard_library::reuses_first_argument(&symbol_name(
+            expression.cdr().cdr().car().car(),
+        ))
 }
 
 /// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
@@ -1047,7 +1068,12 @@ impl Compiler {
             }
             "<-" | "=" if reuses_first_argument(call) => self.fallback(call, dst)?,
             "<-" | "=" => {
-                self.expression(args[1].1, dst)?;
+                if rebinds_first_argument(call) {
+                    self.rebinding = Some((args[1].1, args[0].1));
+                }
+                let compiled = self.expression(args[1].1, dst);
+                self.rebinding = None;
+                compiled?;
                 let symbol = self.constant(args[0].1);
                 self.emit(Op::SetVar, &[symbol, dst]);
             }
@@ -1242,6 +1268,13 @@ impl Compiler {
     }
 
     unsafe fn general_call(&mut self, call: Sexp, head: Sexp, dst: u32) -> R<()> {
+        let rebinding = match self.rebinding {
+            Some((value, target)) if value == call => {
+                self.rebinding = None;
+                Some(self.constant(target))
+            }
+            _ => None,
+        };
         let symbol = self.constant(head);
         let call_constant = self.constant(call);
         let cache = self.cache();
@@ -1276,13 +1309,20 @@ impl Compiler {
             );
             let done = self.emit_patchable(Op::Jump, &[0]);
             self.patch(generic);
-            self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+            self.generic_call(dst, function, call_constant, rebinding);
             self.patch(done);
         } else {
-            self.emit(Op::CallGeneric, &[dst, function, call_constant]);
+            self.generic_call(dst, function, call_constant, rebinding);
         }
         self.release_to(mark);
         Ok(())
+    }
+
+    fn generic_call(&mut self, dst: u32, function: u32, call: u32, rebinding: Option<u32>) {
+        match rebinding {
+            Some(target) => self.emit(Op::CallRebinding, &[dst, function, call, target]),
+            None => self.emit(Op::CallGeneric, &[dst, function, call]),
+        };
     }
 }
 
@@ -1299,6 +1339,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::BranchUnlessBuiltin => 2,
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
+        Op::CallRebinding => 4,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -1358,6 +1399,8 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let profile = values::ints_mut(constants.element(PROFILE));
     profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
     let mut loops = vec![LoopState::default(); loop_count(code)];
+    let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
+    env.set_gp_bits(gp::COMPILED_FRAME, true);
     let mut machine = Machine {
         function,
         code,
@@ -1380,6 +1423,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         None => execute_code(&mut machine, 0),
     };
     interp().bytecode.registers.truncate(base);
+    env.set_gp_bits(gp::COMPILED_FRAME, was_compiled_frame);
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
         other => other,
@@ -1553,6 +1597,14 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let function = register(operand(1));
             let call = constants.element(operand(2));
             let value = eval::apply_call(call, function, call.cdr(), env)?;
+            record_feedback(constants, at, value);
+            set(operand(0), value);
+        }
+        Op::CallRebinding => {
+            let function = register(operand(1));
+            let call = constants.element(operand(2));
+            let target = constants.element(operand(3));
+            let value = eval::rebind_call(call, function, target, env)?;
             record_feedback(constants, at, value);
             set(operand(0), value);
         }

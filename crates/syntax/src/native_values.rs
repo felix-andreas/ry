@@ -70,6 +70,7 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     "is.expression",
     "is.recursive",
     "isS4",
+    "refcnt",
     // Store or pass a value along without looking inside it.
     "list",
     "invisible",

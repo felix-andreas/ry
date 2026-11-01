@@ -3395,3 +3395,50 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## In-place updates through nested targets and parameters
+
+- **Before.** Only `x <- f(x, ...)` with a builtin flagged `reusing_first_argument` updated in
+  place. `state$seen <- Dict.insert(state$seen, k, v)` copied because the list element was a second
+  holder, and a helper's first update of its parameter copied because the caller's binding still
+  held the value. Both made the common accumulator loops quadratic. Compiled code was a separate
+  hole: registers hold values without counting as references, so an update from outside the body
+  (`eval.parent()`, a forced promise) could change a value a register was about to use.
+- **Nested targets.** `rebind` accepts a target that is a chain of `$` or `[[` with a constant
+  name, string or number (`same_expression` compares both sides), and `solely_held` walks the chain
+  requiring a reference count of one at each plain list. `complex_assign` already writes back
+  without copying when the containers are unshared.
+- **Parameter move.** `rebind_closure` handles `x <- g(x, ...)` for a closure `g` when `x` holds a
+  dictionary or set with one reference. The caller's binding and the parameter both hold one
+  forced promise flagged `MOVED_PROMISE`, and a builtin update in the callee reuses the value when
+  that promise has at most `MOVED_PROMISE_HOLDERS` references. The move is limited to dictionaries
+  and sets because those are the values an accumulator helper grows; lists keep copying.
+- **Releasing the finished frame.** ry does not drop a dead frame's bindings, so after the call
+  the callee's binding of the returned collection would make the next call copy. Environments now
+  count their enclosure as a reference (`alloc_environment_with_capacity`, `set_enclosure`), which
+  makes "the callee env has reference count zero" a valid test that no closure or `environment()`
+  captured it. When that holds and the result is a dictionary or set, the callee's bindings of the
+  result are cleared.
+- **Bytecode.** A new op, `CallRebinding`, carries the target so compiled code takes the same
+  path; it is appended last because `OPS` is indexed by discriminant. The JIT treats it as a
+  generic call and inlines it only when the target's slot type is plain.
+- **Register rule.** `gp::COMPILED_FRAME` marks an environment while a compiled body runs on it.
+  `reuse_permitted(env, value)` allows an update when the flag is clear, when the innermost frame
+  is that environment's own compiled closure (whose updates the compiler orders with
+  `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
+  copy.
+- **Known gaps.** A failing callee leaves the caller's variable holding the updated value, and
+  `NextMethod()` sees it. A helper whose body ends in the update, or that passes the collection to
+  a second helper, still copies. Both are documented in `reference/standard-library.mdx`.
+- **Impact.** Correctness: value semantics are unchanged (pinned in
+  `crates/interp/tests/test_standard_library.rs`), and the register rule closes a real aliasing bug
+  (`list(x, h())` with `h` updating `x` via `eval.parent()`). Performance: the nested and helper
+  loops become linear. Incremental analysis is unaffected.
+
+## A key of the wrong type is an error, not a missing key
+
+- A dictionary or set holds keys of one kind. A lookup with a key of another kind used to return
+  `:Err(:KeyNotFound)`, which hid a bug the checker reports statically. It now stops with "the
+  dict's keys are character, and this one is integer; a collection holds one type", through the
+  same `joined_key_kind` check that insertion uses. Integer and double keys still join as numbers,
+  and an empty collection has no kind yet, so any key misses.
