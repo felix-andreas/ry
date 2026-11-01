@@ -160,6 +160,9 @@ pub struct Interp {
     /// environment with no loop running is an error where it is evaluated, as in GNU R, so a
     /// handler around it catches it.
     pub loops: Vec<Sexp>,
+    /// The value each function whose `on.exit` code is running returns, innermost last, or
+    /// `None` while an unwind passes through it. `returnValue` reads the innermost.
+    pub exit_values: Vec<Option<Sexp>>,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
     /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
@@ -282,6 +285,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         global_handlers: None,
         srcref: heap.known().nil,
         loops: Vec::new(),
+        exit_values: Vec::new(),
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: FxHashMap::default(),
@@ -355,11 +359,12 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
 }
 
 /// Writes to the console through the host.
-/// Writes console output: standard output goes where `sink` diverts it, errors and messages to
-/// the terminal.
+/// Writes console output: standard output goes where `sink` diverts it, and errors and messages
+/// where `sink(type = "message")` does.
 pub fn write_console(text: &[u8], is_error: bool) {
     if is_error {
-        write_terminal(text, true);
+        // SAFETY: the connection table only holds connections of this session.
+        unsafe { connections::write_message(text) }
     } else {
         // SAFETY: the sink table only holds connections of this session.
         unsafe { connections::write_output(text) }

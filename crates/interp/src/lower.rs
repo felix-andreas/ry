@@ -541,6 +541,8 @@ unsafe fn binary(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
         SyntaxKind::MINUS_GREATER => values::call(symbols().assign, &[right_value, left_value]),
         SyntaxKind::MINUS_GREATER2 => values::call(symbols().assign2, &[right_value, left_value]),
         SyntaxKind::PIPE_GREATER => pipe(left_value, right_value, placeholder_name(right)?),
+        // `**` lexes as a `^` token but keeps its own text, and GNU R's parser calls `^` for it.
+        SyntaxKind::CARET => values::call(install("^")?, &[left_value, right_value]),
         _ => {
             let symbol = install(operator.text())?;
             values::call(symbol, &[left_value, right_value])

@@ -3960,3 +3960,33 @@ explicit allocators".
   (`SYMBOL_FUNCTION_CALL`, `SYMBOL_SUB`, `SYMBOL_FORMALS`, `SYMBOL_PACKAGE`, `SLOT`). Ranges,
   token names, text and parents match GNU R; ids only keep its children-first order, because
   replaying bison's lookahead to reproduce its exact numbers is not worth the coupling.
+
+## TRE minimal repetitions over alternatives
+
+- fancy-regex has no leftmost-longest mode for lazy quantifiers, so such a TRE pattern runs
+  leftmost-first, which tries alternatives in order. GNU R's TRE, when no submatches are asked
+  for (`regexpr`, `gregexpr`, `grepl`), minimizes the lazy repetitions over all alternatives:
+  `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has length 4. `compile_extended` therefore builds
+  `Matcher::Alternatives` for a pattern with lazy quantifiers and top-level `|`: one variant
+  per alternative (the others prefixed with the empty class `[^\s\S]`, so group numbers stay),
+  and a plain find takes the shortest of the leftmost matches. Submatch queries (`sub`,
+  `regexec`) keep the whole pattern's leftmost-first rule, which agrees with TRE on the common
+  shapes; TRE's submatch results for these patterns are irregular (`regexec` can even skip the
+  leftmost match). Fancy-regex factoring a shared prefix (`A|B` with one prefix) hid the gap,
+  which cli's ANSI hyperlink regex hit with a third alternative.
+
+## The message sink and connection flush points
+
+- `sink(type = "message")` sets `Table::message_sink` (GNU R's `R_ErrorCon`). Messages,
+  warnings and writes to `stderr()` go there through `connections::write_message`, which
+  flushes after every write as `REvprintf` does. Closing that connection resets it to 2.
+- GNU R flushes a file connection after `cat`, after each message-sink write, and when an output
+  sink is removed, but not after `writeLines`; ry matches each point, so a second reader of the
+  same file sees exactly what GNU R's would. `connections__message_sink_and_flush` pins it.
+
+## `returnValue` reads the exit-value stack
+
+- `Interp::exit_values` holds, innermost last, the value of each function whose `on.exit` code
+  is running (`None` during an unwind). `returnValue()` reads the top, so a function called from
+  `on.exit` code sees the exiting function's value, as GNU R's `R_ExitContext` gives; cli's
+  `cli_process_start` auto-close picks "done" or "failed" from it.

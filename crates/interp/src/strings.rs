@@ -1947,12 +1947,22 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
     };
     let names = matcher.group_names();
     let count = length(text);
+    // TRE answers `regexpr` without submatches, which changes what minimal repetitions match.
+    let find = |element: &str, position: usize| -> R<Option<Groups>> {
+        if options.perl {
+            matcher.captures_at(element, position)
+        } else {
+            Ok(matcher
+                .find_at(element, position)?
+                .map(|span| vec![Some(span)]))
+        }
+    };
     if !global {
         let mut table = MatchTable::new(groups);
         for index in 0..count {
             match string_at(text, index) {
                 None => table.push_na(),
-                Some(element) => match matcher.captures_at(&element, 0)? {
+                Some(element) => match find(&element, 0)? {
                     Some(found) => table.push(&element, &found, report.bytes),
                     None => table.push_none(),
                 },
@@ -1969,7 +1979,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         };
         let mut position = 0;
         while position < element.len() {
-            let Some(found) = matcher.captures_at(&element, position)? else {
+            let Some(found) = find(&element, position)? else {
                 break;
             };
             let Some((start, end)) = found.first().copied().flatten() else {
@@ -2332,8 +2342,18 @@ enum Matcher {
     Literal(String),
     /// POSIX extended syntax (R's default), translated for `fancy-regex`.
     Extended(Rc<Regex>),
+    /// POSIX extended syntax with minimal repetitions and top-level alternatives (see
+    /// `compile_extended`).
+    Alternatives(Rc<MinimalAlternatives>),
     /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
     Perl(Rc<PerlRegex>),
+}
+
+struct MinimalAlternatives {
+    /// The whole pattern, which answers queries for capture groups.
+    whole: Regex,
+    /// One regex per top-level alternative, able to match only that one.
+    variants: Vec<Regex>,
 }
 
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
@@ -2378,6 +2398,23 @@ impl Matcher {
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(|failure| matching_error(&failure)),
+            Matcher::Alternatives(alternatives) => {
+                let mut best: Option<(usize, usize)> = None;
+                for regex in &alternatives.variants {
+                    let found = regex
+                        .find_from_pos(text, from)
+                        .map_err(|failure| matching_error(&failure))?;
+                    if let Some(found) = found {
+                        let span = (found.start(), found.end());
+                        if best.is_none_or(|(start, end)| {
+                            span.0 < start || (span.0 == start && span.1 < end)
+                        }) {
+                            best = Some(span);
+                        }
+                    }
+                }
+                Ok(best)
+            }
             Matcher::Perl(regex) => regex
                 .find_at(text.as_bytes(), from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
@@ -2389,22 +2426,9 @@ impl Matcher {
     fn captures_at(&self, text: &str, from: usize) -> R<Option<Groups>> {
         match self {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
-            Matcher::Extended(regex) => {
-                let Some(captures) = regex
-                    .captures_from_pos(text, from)
-                    .map_err(|failure| matching_error(&failure))?
-                else {
-                    return Ok(None);
-                };
-                Ok(Some(
-                    (0..captures.len())
-                        .map(|group| {
-                            captures
-                                .get(group)
-                                .map(|found| (found.start(), found.end()))
-                        })
-                        .collect(),
-                ))
+            Matcher::Extended(regex) => extended_captures(regex, text, from),
+            Matcher::Alternatives(alternatives) => {
+                extended_captures(&alternatives.whole, text, from)
             }
             Matcher::Perl(regex) => {
                 let mut locations = regex.capture_locations();
@@ -2425,6 +2449,9 @@ impl Matcher {
         match self {
             Matcher::Literal(_) => 0,
             Matcher::Extended(regex) => regex.captures_len().saturating_sub(1),
+            Matcher::Alternatives(alternatives) => {
+                alternatives.whole.captures_len().saturating_sub(1)
+            }
             Matcher::Perl(regex) => regex.captures_len().saturating_sub(1),
         }
     }
@@ -2434,6 +2461,12 @@ impl Matcher {
         match self {
             Matcher::Literal(_) => Vec::new(),
             Matcher::Extended(regex) => regex
+                .capture_names()
+                .skip(1)
+                .map(|name| name.unwrap_or_default().to_owned())
+                .collect(),
+            Matcher::Alternatives(alternatives) => alternatives
+                .whole
                 .capture_names()
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
@@ -2479,13 +2512,31 @@ unsafe fn compile_perl(pattern: &str, ignore_case: bool) -> R<Matcher> {
     }
 }
 
+fn extended_captures(regex: &Regex, text: &str, from: usize) -> R<Option<Groups>> {
+    let Some(captures) = regex
+        .captures_from_pos(text, from)
+        .map_err(|failure| matching_error(&failure))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        (0..captures.len())
+            .map(|group| {
+                captures
+                    .get(group)
+                    .map(|found| (found.start(), found.end()))
+            })
+            .collect(),
+    ))
+}
+
 unsafe fn compile_extended(pattern: &str, ignore_case: bool) -> R<Matcher> {
     let translated = translate(pattern);
-    let build = |longest: bool| {
+    let build_pattern = |pattern: &str, longest: bool| {
         if let Some(problem) = translated.problem {
             return Err(problem.to_owned());
         }
-        let mut builder = RegexBuilder::new(&translated.pattern);
+        let mut builder = RegexBuilder::new(pattern);
         builder.case_insensitive(ignore_case);
         // The step budget counts over a whole scan, so the default of a million fails a plain
         // `\s+` on a megabyte of text that TRE scans without complaint.
@@ -2495,8 +2546,44 @@ unsafe fn compile_extended(pattern: &str, ignore_case: bool) -> R<Matcher> {
         }
         builder.build().map_err(|failure| failure.to_string())
     };
+    let build = |longest: bool| build_pattern(&translated.pattern, longest);
     // POSIX picks the longest of the matches that start leftmost. The engine cannot do that for
-    // every pattern (lazy quantifiers, for one), and those fall back to the leftmost-first rule.
+    // a pattern with minimal repetitions, and those fall back to the leftmost-first rule. That
+    // rule tries alternatives in order, but when no submatches are asked for (`regexpr`,
+    // `gregexpr`), TRE minimizes the minimal repetitions over all of them, so `a.*?Z|a.*?Y`
+    // matches up to the earlier `Y`. Such a pattern also gets one variant per top-level
+    // alternative, with the others made unmatchable, and a plain find takes the shortest of
+    // the leftmost matches. Queries for submatches keep the leftmost-first rule, which agrees
+    // with TRE on the common shapes.
+    if translated.minimal && !translated.alternatives.is_empty() {
+        // The first alternative starts after the `(?s)` prefix.
+        let starts: Vec<usize> = std::iter::once(4)
+            .chain(translated.alternatives.iter().copied())
+            .collect();
+        let variants: Result<Vec<Regex>, String> = (0..starts.len())
+            .map(|kept| {
+                let mut pattern = translated.pattern.clone();
+                for (alternative, &start) in starts.iter().enumerate().rev() {
+                    if alternative != kept {
+                        pattern.insert_str(start, r"[^\s\S]");
+                    }
+                }
+                build_pattern(&pattern, false)
+            })
+            .collect();
+        return match variants.and_then(|variants| Ok((build(false)?, variants))) {
+            Ok((whole, variants)) => Ok(Matcher::Alternatives(Rc::new(MinimalAlternatives {
+                whole,
+                variants,
+            }))),
+            Err(reason) => {
+                warning(format!("TRE pattern compilation error '{reason}'"))?;
+                Err(error(format!(
+                    "invalid regular expression '{pattern}', reason '{reason}'"
+                )))
+            }
+        };
+    }
     match build(true).or_else(|_| build(false)) {
         Ok(regex) => Ok(Matcher::Extended(Rc::new(regex))),
         Err(reason) => {
@@ -2517,6 +2604,10 @@ fn matching_error(failure: &dyn std::fmt::Display) -> crate::unwind::Unwind {
 struct Translation {
     pattern: String,
     problem: Option<&'static str>,
+    /// Whether some repetition is minimal (`*?`, `{m,n}?`).
+    minimal: bool,
+    /// Where each top-level alternative after the first starts in `pattern`.
+    alternatives: Vec<usize>,
 }
 
 fn translate(pattern: &str) -> Translation {
@@ -2535,6 +2626,8 @@ fn translate(pattern: &str) -> Translation {
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
     let mut quantified = false;
+    let mut minimal = false;
+    let mut alternatives = Vec::new();
     let mut index = 0;
     while index < chars.len() {
         let character = chars[index];
@@ -2598,6 +2691,9 @@ fn translate(pattern: &str) -> Translation {
             }
             '|' => {
                 output.push('|');
+                if groups.is_empty() {
+                    alternatives.push(output.len());
+                }
                 atom = None;
             }
             '*' | '+' | '?' => match atom {
@@ -2614,6 +2710,7 @@ fn translate(pattern: &str) -> Translation {
                     if chars.get(index + 1) == Some(&'?') {
                         if !approximate {
                             output.push('?');
+                            minimal = true;
                         }
                         index += 1;
                     }
@@ -2644,6 +2741,7 @@ fn translate(pattern: &str) -> Translation {
                     if chars.get(index) == Some(&'?') {
                         if !approximate {
                             output.push('?');
+                            minimal = true;
                         }
                         index += 1;
                     }
@@ -2685,6 +2783,8 @@ fn translate(pattern: &str) -> Translation {
     Translation {
         pattern: output,
         problem,
+        minimal,
+        alternatives,
     }
 }
 

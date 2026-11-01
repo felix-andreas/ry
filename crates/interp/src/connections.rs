@@ -229,6 +229,9 @@ pub struct Table {
     entries: Vec<Option<Entry>>,
     /// Innermost last.
     sinks: Vec<Sink>,
+    /// The connection messages and standard error output go to, which `sink(type = "message")`
+    /// sets. It is 2, standard error itself, unless diverted.
+    message_sink: usize,
 }
 
 struct Entry {
@@ -285,6 +288,7 @@ impl Table {
         Table {
             entries,
             sinks: Vec::new(),
+            message_sink: 2,
         }
     }
 
@@ -425,6 +429,32 @@ pub unsafe fn write_output(bytes: &[u8]) {
             true,
         );
         write_terminal(bytes, false);
+    }
+}
+
+/// Writes messages and standard error output where `sink(type = "message")` diverts them, and
+/// flushes them there at once, as GNU R's `REvprintf` does.
+pub unsafe fn write_message(bytes: &[u8]) {
+    let slot = interp().connections.message_sink;
+    let con = match entry(slot) {
+        Some(entry) if slot != 2 => entry.con,
+        _ => {
+            write_terminal(bytes, true);
+            return;
+        }
+    };
+    if let Err(unwind) = method_print(con, bytes).and_then(|()| method_fflush(con).map(drop)) {
+        // A message has no caller to report a failed diversion to, so the terminal shows it.
+        interp().connections.message_sink = 2;
+        let message = match unwind {
+            Unwind::Error(failure) => failure.message,
+            _ => "the message sink connection could not be written".to_owned(),
+        };
+        write_terminal(
+            format!("Error writing to the message sink connection: {message}\n").as_bytes(),
+            true,
+        );
+        write_terminal(bytes, true);
     }
 }
 
@@ -1371,6 +1401,17 @@ unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
     let messages = values::require_flag(call.arg(2), "type")?;
     let split = values::require_flag(call.arg(3), "split")?;
     if messages {
+        let slot =
+            if values::inherits(target, "connection") || values::as_integer_scalar(target) >= 0 {
+                let (slot, con) = resolve_con(target)?;
+                if slot != 2 && (*con).isopen == 0 {
+                    return Err(error("cannot write to this connection"));
+                }
+                slot
+            } else {
+                2
+            };
+        interp().connections.message_sink = slot;
         return Ok(nil());
     }
     if !values::inherits(target, "connection") && values::as_integer_scalar(target) < 0 {
@@ -1385,6 +1426,8 @@ unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
             close_slot(sink.slot)?;
         } else if sink.opened {
             method_close(con)?;
+        } else if sink.slot > 2 {
+            method_fflush(con)?;
         }
         return Ok(nil());
     }
@@ -1417,7 +1460,7 @@ unsafe fn do_sink_number(call: &Call<'_>) -> R<Sexp> {
     if values::as_logical_scalar(call.arg(0)) == 1 {
         scalar_integer(interp().connections.sinks.len() as i32)
     } else {
-        scalar_integer(2)
+        scalar_integer(interp().connections.message_sink as i32)
     }
 }
 
@@ -1547,7 +1590,16 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
     if newline_separator || (fill_width > 0 && !output.ends_with('\n') && !output.is_empty()) {
         output.push('\n');
     }
-    print(file, output.as_bytes())?;
+    // GNU R flushes the connection after `cat`, so a reader opened on the same file sees the
+    // text at once, although `writeLines` stays buffered.
+    let con = resolve_con(file)?.1;
+    with_open(con, "wt", || {
+        if (*con).canwrite == 0 {
+            return Err(error("cannot write to this connection"));
+        }
+        method_print(con, output.as_bytes())?;
+        method_fflush(con)
+    })?;
     Ok(nil())
 }
 
@@ -1842,6 +1894,10 @@ unsafe fn close_slot(slot: usize) -> R<c_int> {
     } else {
         Ok(())
     };
+    // A later connection may reuse the slot, which must not receive the messages.
+    if interp().connections.message_sink == slot {
+        interp().connections.message_sink = 2;
+    }
     let status = (*con).status;
     let destroyed = method_destroy(con);
     if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
@@ -3298,7 +3354,7 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             Ok(bytes.len())
         }
         Device::Standard(Standard::Error) => {
-            write_terminal(bytes, true);
+            write_message(bytes);
             Ok(bytes.len())
         }
         Device::File(file) => match &mut file.stream {

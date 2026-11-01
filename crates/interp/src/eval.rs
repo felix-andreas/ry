@@ -1067,6 +1067,10 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     for &expression in &expressions {
         crate::heap().root(expression);
     }
+    if let Ok(value) = &result {
+        crate::heap().root(*value);
+    }
+    interp().exit_values.push(result.as_ref().ok().copied());
     let mut outcome = result;
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
@@ -1089,6 +1093,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             Ok(_) => {}
         }
     }
+    interp().exit_values.pop();
     crate::heap().release_handles(mark);
     match &outcome {
         Ok(value) => crate::heap().root(*value),
@@ -1433,7 +1438,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("call", -1, do_call),
     special("expression", -1, do_expression),
     internal("all.names", 4, do_all_names),
-    internal("returnValue", 1, |call| Ok(call.arg(0))),
+    internal("returnValue", 1, |call| {
+        Ok(interp()
+            .exit_values
+            .last()
+            .copied()
+            .flatten()
+            .unwrap_or(call.arg(0)))
+    }),
     internal("named", 1, |call| unsafe {
         values::scalar_integer(call.arg(0).refcount().min(2) as i32)
     }),

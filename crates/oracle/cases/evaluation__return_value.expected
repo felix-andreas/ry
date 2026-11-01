@@ -1,0 +1,15 @@
+[stdout]
+| [1] FALSE
+| [1] 42
+| [1] 42
+| [1] "none"
+| [1] "v"
+| [1] "v"
+| [1] "outer"
+| [1] "outer"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "outer"
