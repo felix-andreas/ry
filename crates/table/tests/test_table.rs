@@ -6,7 +6,7 @@ use syntax::testing::{SplitMix64, fuzz_iterations};
 use table::{
     ColumnType, Schema, Table,
     convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
-    ffi,
+    ffi, io, ops,
     polars::prelude::{IntoColumn, PlSmallStr},
     query::{
         Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query, ResultType,
@@ -2440,6 +2440,26 @@ fn each_i_runs_j_once_per_row_of_i() {
         doubles(&[1.0, 1.0, NA_REAL, f64::NAN])
     );
     assert_eq!(read(&mut result, "n"), ints(&[3, 3, 0, 0]));
+
+    // `.N` is one value per row of `i`, so an aggregate over it is that count, not the group's
+    // raw row count, which is 1 for a row of `i` that matched nothing.
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(
+                &i,
+                &[("t", LessEqual, "hi"), ("t", GreaterEqual, "lo")],
+                Mult::All,
+            )),
+            select: Select::Columns(vec![
+                named("total", aggregate(Aggregate::Sum, Expr::Count)),
+                named("average", aggregate(Aggregate::Mean, Expr::Count)),
+            ]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(read(&mut result, "total"), ints(&[3, 3, 0, 0]));
+    assert_eq!(read(&mut result, "average"), doubles(&[3.0, 3.0, 0.0, 0.0]));
 }
 
 #[test]
@@ -2986,6 +3006,24 @@ fn assigning_strings_into_a_number_column_parses_them_with_a_warning() {
             "yes",
             RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER]),
         ),
+        // R trims the spaces around a number, reads hexadecimal and exponents, and truncates
+        // toward zero for an integer; it does not trim a logical's spelling.
+        ("d", " 3 ", doubles(&[1.0, 3.0, 3.0])),
+        ("d", "0x1A", doubles(&[1.0, 26.0, 26.0])),
+        ("d", "Inf", doubles(&[1.0, f64::INFINITY, f64::INFINITY])),
+        ("d", "+4", doubles(&[1.0, 4.0, 4.0])),
+        ("d", "1,5", doubles(&[1.0, NA_REAL, NA_REAL])),
+        ("a", " 3", ints(&[1, 3, 3])),
+        ("a", "0X1a", ints(&[1, 26, 26])),
+        ("a", "1e2", ints(&[1, 100, 100])),
+        ("a", "-3.7", ints(&[1, -3, -3])),
+        ("a", ".5", ints(&[1, 0, 0])),
+        ("a", "Inf", ints(&[1, NA_INTEGER, NA_INTEGER])),
+        (
+            "b",
+            " TRUE",
+            RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER]),
+        ),
     ];
     for (name, value, expected) in cases {
         let holds = match name {
@@ -3014,4 +3052,749 @@ fn assigning_strings_into_a_number_column_parses_them_with_a_warning() {
         warnings(&x, whole),
         ["column `d` holds doubles, so the assigned strings were converted to doubles"]
     );
+}
+
+fn read_text(text: &str) -> Table {
+    io::read_csv_bytes(text.as_bytes().to_vec())
+        .unwrap_or_else(|error| panic!("cannot read the text: {error}"))
+}
+
+fn written(table: &Table) -> String {
+    let mut buffer = Vec::new();
+    io::write_csv_to(table, &mut buffer).unwrap_or_else(|error| panic!("cannot write: {error}"));
+    String::from_utf8(buffer).unwrap_or_else(|error| panic!("not UTF-8: {error}"))
+}
+
+#[test]
+fn a_csv_file_reads_into_the_column_types_fread_gives() {
+    let mut table =
+        read_text("id,price,flag,name,empty\n1,1.5,TRUE,x,NA\n2, 3,FALSE,,\n NA,NA,,\"y, z\",\n");
+    assert_eq!(
+        table.schema().to_string(),
+        "frame{id: integer[], price: double[], flag: logical[], name: character[], empty: logical[]}"
+    );
+    assert_eq!(get(&mut table, "id"), ints(&[1, 2, NA_INTEGER]));
+    assert_eq!(
+        Read(get(&mut table, "price")),
+        doubles(&[1.5, 3.0, NA_REAL])
+    );
+    assert_eq!(
+        get(&mut table, "flag"),
+        RVector::Logical(vec![1, 0, NA_INTEGER])
+    );
+    // An empty field is the empty string in a character column and `NA` everywhere else.
+    assert_eq!(get(&mut table, "name"), strings(&["x", "", "y, z"]));
+    assert_eq!(
+        get(&mut table, "empty"),
+        RVector::Logical(vec![NA_INTEGER; 3])
+    );
+}
+
+#[test]
+fn a_first_row_that_fits_the_columns_is_data() {
+    let table = read_text("1,2\n3,4\n");
+    assert_eq!(
+        table.schema().to_string(),
+        "frame{V1: integer[], V2: integer[]}"
+    );
+    assert_eq!(table.height(), 2);
+    let table = read_text("a,a,\n1,2,3\n");
+    assert_eq!(
+        table.schema().to_string(),
+        "frame{a: integer[], a.1: integer[], V3: integer[]}"
+    );
+}
+
+#[test]
+fn a_value_the_sample_missed_rereads_the_column_from_all_its_values() {
+    let rows = 200_000;
+    let build = |odd: &str| {
+        let mut text = String::from("id,value,flag\n");
+        for row in 0..rows {
+            let value = if row == 150_001 {
+                odd.to_string()
+            } else {
+                row.to_string()
+            };
+            text.push_str(&format!("{row},{value},TRUE\n"));
+        }
+        text
+    };
+    for (odd, expected) in [
+        ("2.5", "double[]"),
+        ("x", "character[]"),
+        ("3000000000", "double[]"),
+    ] {
+        let text = build(odd);
+        assert_eq!(
+            sniff::sniff(text.as_bytes()).columns[1].kind.name(),
+            "integer[]",
+            "the sample must miss {odd:?} for this test to exercise the reread"
+        );
+        let table = read_text(&text);
+        assert_eq!(
+            table.schema().to_string(),
+            format!("frame{{id: integer[], value: {expected}, flag: logical[]}}"),
+            "{odd:?}"
+        );
+        assert_eq!(table.height(), rows);
+    }
+}
+
+#[test]
+fn a_table_writes_as_fwrite_writes_it() {
+    let table = frame(vec![
+        ("a", strings(&["x", "", "NA"])),
+        ("b", doubles(&[1.0, NA_REAL, 2.5])),
+        ("l", RVector::Logical(vec![1, NA_INTEGER, 0])),
+        (
+            "f",
+            RVector::Factor {
+                codes: vec![1, NA_INTEGER, 2],
+                levels: vec!["u".into(), "v".into()],
+            },
+        ),
+        ("i", ints(&[1, NA_INTEGER, 3])),
+        ("s", strings(&["a,b", "q\"t", ""])),
+    ]);
+    // The expected text is `fwrite`'s output for the same data.table.
+    assert_eq!(
+        written(&table),
+        "a,b,l,f,i,s\nx,1,TRUE,u,1,\"a,b\"\n\"\",,,,,\"q\"\"t\"\n,2.5,FALSE,v,3,\"\"\n"
+    );
+}
+
+#[test]
+fn a_written_table_reads_back_unchanged() {
+    let mut table = frame(vec![
+        ("i", ints(&[1, NA_INTEGER, -7, 2147483647])),
+        (
+            "d",
+            doubles(&[0.1 + 0.2, 1e300, f64::NAN, f64::NEG_INFINITY]),
+        ),
+        ("c", strings(&["", "\"", "line\nbreak", " padded"])),
+        ("l", RVector::Logical(vec![0, 1, NA_INTEGER, 1])),
+        ("na", strings(&["x", "NA", "", "y"])),
+    ]);
+    let mut back = read_text(&written(&table));
+    assert_eq!(back.schema(), table.schema());
+    for name in ["i", "d", "c", "l"] {
+        assert_eq!(Read(get(&mut back, name)), get(&mut table, name), "{name}");
+    }
+    // `NA` in a character column writes as an empty field, which reads back as the empty string,
+    // exactly as `fwrite` and `fread` round-trip it.
+    assert_eq!(get(&mut back, "na"), strings(&["x", "", "", "y"]));
+}
+
+#[test]
+fn files_read_and_write_through_the_file_system() {
+    let path = std::env::temp_dir().join(format!("ry-table-io-{}.csv", std::process::id()));
+    let table = frame(vec![("k", strings(&["a", "b"])), ("v", ints(&[1, 2]))]);
+    io::write_csv(&table, &path).unwrap_or_else(|error| panic!("cannot write: {error}"));
+    let mut back = io::read_csv(&path).unwrap_or_else(|error| panic!("cannot read: {error}"));
+    std::fs::remove_file(&path).unwrap_or_else(|error| panic!("cannot remove: {error}"));
+    assert_eq!(get(&mut back, "v"), ints(&[1, 2]));
+    io::strings_as_factors(&mut back).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(back.schema().to_string(), "frame{k: factor, v: integer[]}");
+}
+
+fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {
+    to_series(PlSmallStr::from(name), vector)
+        .unwrap_or_else(|error| panic!("cannot build {name}: {error}"))
+        .into_column()
+}
+
+fn vector(column: &table::polars::prelude::Column) -> RVector {
+    to_r(column.as_materialized_series()).unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn output_table(executed: Executed) -> Table {
+    match executed.output {
+        Output::Table(table) => table,
+        other => panic!("expected a table, got {other:?}"),
+    }
+}
+
+#[test]
+fn setorder_sorts_na_first_and_keeps_ties_in_order() {
+    let mut x = frame(vec![
+        ("a", doubles(&[2.0, 1.0, NA_REAL, 1.0])),
+        ("b", strings(&["x", "y", "z", "a"])),
+    ]);
+    x.set_key(&["a"]).unwrap_or_else(|error| panic!("{error}"));
+    ops::set_order(&mut x, &[("a", false), ("b", true)]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(Read(get(&mut x, "a")), doubles(&[NA_REAL, 1.0, 1.0, 2.0]));
+    assert_eq!(get(&mut x, "b"), strings(&["z", "y", "a", "x"]));
+    assert!(x.key().is_empty());
+}
+
+#[test]
+fn setnames_and_setcolorder_rename_and_reorder_in_place() {
+    let mut x = frame(vec![
+        ("a", ints(&[2, 1])),
+        ("b", ints(&[3, 4])),
+        ("c", ints(&[5, 6])),
+    ]);
+    x.set_key(&["a"]).unwrap_or_else(|error| panic!("{error}"));
+    ops::set_names(&mut x, &[("a", "id")]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(x.key(), ["id"]);
+    ops::set_column_order(&mut x, &["c"]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        x.schema().to_string(),
+        "frame{c: integer[], id: integer[], b: integer[]}"
+    );
+    assert!(ops::set_names(&mut x, &[("b", "c")]).is_err());
+    assert!(ops::set_names(&mut x, &[("nope", "d")]).is_err());
+}
+
+#[test]
+fn rbindlist_widens_types_and_fills_by_name() {
+    let a = frame(vec![("a", ints(&[1])), ("b", strings(&["x"]))]);
+    let b = frame(vec![("a", doubles(&[2.5])), ("b", strings(&["y"]))]);
+    let mut stacked =
+        ops::rbind_list(&[&a, &b], ops::Bind::Position).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        stacked.schema().to_string(),
+        "frame{a: double[], b: character[]}"
+    );
+    assert_eq!(Read(get(&mut stacked, "a")), doubles(&[1.0, 2.5]));
+
+    let factor = |label: &str| RVector::Factor {
+        codes: vec![1],
+        levels: vec![label.to_string()],
+    };
+    let c = frame(vec![("a", ints(&[1])), ("b", factor("x"))]);
+    let d = frame(vec![("b", factor("y")), ("c", RVector::Logical(vec![1]))]);
+    let mut filled =
+        ops::rbind_list(&[&c, &d], ops::Bind::Fill).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        filled.schema().to_string(),
+        "frame{a: integer[], b: factor, c: logical[]}"
+    );
+    assert_eq!(get(&mut filled, "a"), ints(&[1, NA_INTEGER]));
+    assert_eq!(
+        get(&mut filled, "b"),
+        RVector::Factor {
+            codes: vec![1, 2],
+            levels: vec!["x".into(), "y".into()]
+        }
+    );
+    assert_eq!(get(&mut filled, "c"), RVector::Logical(vec![NA_INTEGER, 1]));
+
+    // By position, the second table's `b` lands under `a`, so both columns become character.
+    let e = frame(vec![("b", strings(&["y"])), ("a", ints(&[2]))]);
+    let mut positional =
+        ops::rbind_list(&[&a, &e], ops::Bind::Position).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut positional, "a"), strings(&["1", "y"]));
+    let mut named =
+        ops::rbind_list(&[&a, &e], ops::Bind::Name).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut named, "a"), ints(&[1, 2]));
+    assert!(ops::rbind_list(&[&a, &d], ops::Bind::Position).is_ok());
+    assert!(ops::rbind_list(&[&a, &d], ops::Bind::Name).is_err());
+}
+
+#[test]
+fn melt_stacks_measures_under_a_factor_of_their_names() {
+    let x = frame(vec![
+        ("id", ints(&[1, 2])),
+        ("v1", ints(&[1, 2])),
+        ("v2", doubles(&[1.5, 2.5])),
+    ]);
+    let executed = ops::melt(&x, &["id"], &["v1", "v2"], "variable", "value")
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        executed.warnings,
+        [table::query::Warning::MeltCoerced {
+            to: ColumnType::Double
+        }]
+    );
+    let mut long = output_table(executed);
+    assert_eq!(
+        long.schema().to_string(),
+        "frame{id: integer[], variable: factor, value: double[]}"
+    );
+    assert_eq!(get(&mut long, "id"), ints(&[1, 2, 1, 2]));
+    assert_eq!(
+        get(&mut long, "variable"),
+        RVector::Factor {
+            codes: vec![1, 1, 2, 2],
+            levels: vec!["v1".into(), "v2".into()]
+        }
+    );
+    assert_eq!(
+        Read(get(&mut long, "value")),
+        doubles(&[1.0, 2.0, 1.5, 2.5])
+    );
+}
+
+#[test]
+fn dcast_spreads_sorted_values_into_sorted_columns() {
+    let d = frame(vec![
+        ("r", strings(&["b", "a", "b", "a", "a"])),
+        ("c", strings(&["y", "x", "x", "x", "z"])),
+        ("v", ints(&[1, 2, 3, 4, 5])),
+    ]);
+    let cast = |function| {
+        ops::dcast(&d, &["r"], "c", "v", function).unwrap_or_else(|error| panic!("{error}"))
+    };
+    let mut summed = output_table(cast(Some(Aggregate::Sum)));
+    assert_eq!(
+        summed.schema().to_string(),
+        "frame{r: character[], x: integer[], y: integer[], z: integer[]}"
+    );
+    assert_eq!(summed.key(), ["r"]);
+    assert_eq!(get(&mut summed, "r"), strings(&["a", "b"]));
+    assert_eq!(get(&mut summed, "x"), ints(&[6, 3]));
+    assert_eq!(get(&mut summed, "y"), ints(&[0, 1]));
+    assert_eq!(get(&mut summed, "z"), ints(&[5, 0]));
+
+    let mut averaged = output_table(cast(Some(Aggregate::Mean)));
+    assert_eq!(Read(get(&mut averaged, "y")), doubles(&[f64::NAN, 1.0]));
+    assert_eq!(Read(get(&mut averaged, "x")), doubles(&[3.0, 3.0]));
+
+    let counted = cast(None);
+    assert_eq!(counted.warnings, [table::query::Warning::CastCounted]);
+    let mut counted = output_table(counted);
+    assert_eq!(get(&mut counted, "x"), ints(&[2, 1]));
+    assert_eq!(get(&mut counted, "y"), ints(&[0, 1]));
+
+    let unique = frame(vec![
+        ("r", strings(&["a", "b"])),
+        ("c", strings(&["x", "y"])),
+        ("v", doubles(&[1.5, 2.5])),
+    ]);
+    let executed =
+        ops::dcast(&unique, &["r"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
+    assert!(executed.warnings.is_empty());
+    let mut wide = output_table(executed);
+    assert_eq!(Read(get(&mut wide, "x")), doubles(&[1.5, NA_REAL]));
+}
+
+#[test]
+fn dcast_names_columns_as_r_spells_the_values() {
+    let numbers = frame(vec![
+        ("r", strings(&["a", "a"])),
+        ("c", doubles(&[0.5, 1.0])),
+        ("v", ints(&[1, 2])),
+    ]);
+    let cast =
+        ops::dcast(&numbers, &["r"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        output_table(cast).schema().to_string(),
+        "frame{r: character[], 0.5: integer[], 1: integer[]}"
+    );
+}
+
+#[test]
+fn nafill_fills_nan_like_na() {
+    let gaps = column_of("x", doubles(&[f64::NAN, 1.0, f64::NAN]));
+    let filled = |fill| ops::nafill(&gaps, fill).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Forward))),
+        doubles(&[NA_REAL, 1.0, 1.0])
+    );
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Value(0.0)))),
+        doubles(&[0.0, 1.0, 0.0])
+    );
+}
+
+#[test]
+fn the_vector_helpers_follow_data_table() {
+    let lagged = ops::shift(&column_of("x", ints(&[1, 2, 3])), 1);
+    assert_eq!(vector(&lagged), ints(&[NA_INTEGER, 1, 2]));
+    let led = ops::shift(&column_of("x", ints(&[1, 2, 3])), -1);
+    assert_eq!(vector(&led), ints(&[2, 3, NA_INTEGER]));
+
+    let test = column_of("t", RVector::Logical(vec![1, NA_INTEGER, 0]));
+    let picked = ops::fifelse(
+        &test,
+        &column_of("yes", ints(&[1])),
+        &column_of("no", doubles(&[2.5])),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(Read(vector(&picked)), doubles(&[1.0, NA_REAL, 2.5]));
+    let with_na = ops::fifelse(
+        &test,
+        &column_of("yes", doubles(&[1.0])),
+        &column_of("no", doubles(&[2.0])),
+        Some(&column_of("na", doubles(&[0.0]))),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(Read(vector(&with_na)), doubles(&[1.0, 0.0, 2.0]));
+    assert!(
+        ops::fifelse(
+            &test,
+            &column_of("yes", ints(&[1])),
+            &column_of("no", strings(&["a"])),
+            None
+        )
+        .is_err()
+    );
+
+    let coalesced = ops::fcoalesce(&[
+        &column_of("a", doubles(&[1.0, NA_REAL, NA_REAL])),
+        &column_of("b", doubles(&[NA_REAL, 2.0, NA_REAL])),
+        &column_of("c", doubles(&[0.0])),
+    ])
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(Read(vector(&coalesced)), doubles(&[1.0, 2.0, 0.0]));
+    assert!(
+        ops::fcoalesce(&[
+            &column_of("a", ints(&[1, NA_INTEGER])),
+            &column_of("b", doubles(&[2.5, 3.0]))
+        ])
+        .is_err()
+    );
+
+    let runs = ops::rleid(&[&column_of(
+        "x",
+        doubles(&[1.0, 1.0, NA_REAL, NA_REAL, 2.0, 1.0]),
+    )])
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(vector(&runs), ints(&[1, 1, 2, 2, 3, 4]));
+    let runs = ops::rleid(&[
+        &column_of("a", strings(&["a", "a", "b"])),
+        &column_of("b", doubles(&[1.0, 2.0, 2.0])),
+    ])
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(vector(&runs), ints(&[1, 2, 3]));
+
+    let gaps = column_of("x", doubles(&[NA_REAL, 1.0, NA_REAL, 3.0, NA_REAL]));
+    let filled = |fill| ops::nafill(&gaps, fill).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Forward))),
+        doubles(&[NA_REAL, 1.0, 1.0, 3.0, 3.0])
+    );
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Backward))),
+        doubles(&[1.0, 1.0, 3.0, 3.0, NA_REAL])
+    );
+    assert_eq!(
+        Read(vector(&filled(ops::Fill::Value(0.0)))),
+        doubles(&[0.0, 1.0, 0.0, 3.0, 0.0])
+    );
+    assert!(ops::nafill(&column_of("s", strings(&["a"])), ops::Fill::Forward).is_err());
+
+    let values = column_of("x", doubles(&[1.0, 5.0, NA_REAL, 10.0]));
+    let inside = ops::between(&values, 2.0, 10.0, true).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(vector(&inside), RVector::Logical(vec![0, 1, NA_INTEGER, 1]));
+    let strictly =
+        ops::between(&values, 2.0, 10.0, false).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        vector(&strictly),
+        RVector::Logical(vec![0, 1, NA_INTEGER, 0])
+    );
+
+    let found = ops::chin(
+        &column_of("x", strings(&["a", "b", "NA"])),
+        &[Some("a"), None],
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(vector(&found), RVector::Logical(vec![1, 0, 1]));
+
+    let parts = ops::tstrsplit(&column_of("x", strings(&["a-b", "c-d-e", "f"])), "-")
+        .unwrap_or_else(|error| panic!("{error}"));
+    let parts: Vec<RVector> = parts.iter().map(vector).collect();
+    assert_eq!(
+        parts,
+        [
+            strings(&["a", "c", "f"]),
+            strings(&["b", "d", "NA"]),
+            strings(&["NA", "e", "NA"])
+        ]
+    );
+
+    // As `strsplit`, a trailing separator adds no empty piece and an empty string has none.
+    let parts = ops::tstrsplit(&column_of("x", strings(&["a,b,", "", ","])), ",")
+        .unwrap_or_else(|error| panic!("{error}"));
+    let parts: Vec<RVector> = parts.iter().map(vector).collect();
+    assert_eq!(
+        parts,
+        [strings(&["a", "NA", ""]), strings(&["b", "NA", "NA"])]
+    );
+}
+
+#[test]
+fn unique_keeps_the_first_row_of_each_combination() {
+    let d = frame(vec![
+        ("r", strings(&["b", "a", "b", "a", "a"])),
+        ("c", strings(&["y", "x", "x", "x", "z"])),
+    ]);
+    assert_eq!(
+        ops::unique_count(&d, &["r"]).unwrap_or_else(|error| panic!("{error}")),
+        2
+    );
+    assert_eq!(
+        ops::unique_count(&d, &[]).unwrap_or_else(|error| panic!("{error}")),
+        4
+    );
+    let mut unique = ops::unique_rows(&d, &["r"]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut unique, "r"), strings(&["b", "a"]));
+    assert_eq!(get(&mut unique, "c"), strings(&["y", "x"]));
+}
+
+#[test]
+fn unique_on_keys_too_wide_to_pack_still_drops_duplicates() {
+    // Two doubles spanning almost the whole range need more key bits than one packed integer
+    // holds, so the rows take the general path.
+    let d = frame(vec![
+        ("a", doubles(&[1e-300, 1e300, 1e-300, 1e300, -1e300])),
+        ("b", doubles(&[1e300, 1e-300, 1e300, 1e-300, -1e-300])),
+    ]);
+    let mut unique = ops::unique_rows(&d, &[]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut unique, "a"), doubles(&[1e-300, 1e300, -1e300]));
+    assert_eq!(
+        ops::unique_count(&d, &[]).unwrap_or_else(|error| panic!("{error}")),
+        3
+    );
+}
+
+#[test]
+fn unique_on_a_short_table_with_a_sparse_key() {
+    let d = frame(vec![("k", ints(&[0, 9_000_000, 0, 9_000_000, 4]))]);
+    let mut unique = ops::unique_rows(&d, &["k"]).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(get(&mut unique, "k"), ints(&[0, 9_000_000, 4]));
+}
+
+/// R's order of two values of one column under `setorder`: `NA` first and `NaN` next in both
+/// directions, then the values ascending or descending, strings by their bytes.
+fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // 0 is `NA`, 1 is `NaN`, and 2 is a value.
+    let class = |row: usize| -> u8 {
+        match vector {
+            RVector::Logical(values) | RVector::Integer(values) => {
+                2 * u8::from(values[row] != NA_INTEGER)
+            }
+            RVector::Factor { codes, .. } => 2 * u8::from(codes[row] != NA_INTEGER),
+            RVector::Double(values) if is_na_real(values[row]) => 0,
+            RVector::Double(values) if values[row].is_nan() => 1,
+            RVector::Double(_) => 2,
+            RVector::Character(values) => 2 * u8::from(values[row].is_some()),
+        }
+    };
+    let (left_class, right_class) = (class(left), class(right));
+    if left_class != right_class || left_class < 2 {
+        return left_class.cmp(&right_class);
+    }
+    let ordering = match vector {
+        RVector::Logical(values) | RVector::Integer(values) => values[left].cmp(&values[right]),
+        RVector::Factor { codes, .. } => codes[left].cmp(&codes[right]),
+        RVector::Double(values) => values[left]
+            .partial_cmp(&values[right])
+            .unwrap_or(Ordering::Equal),
+        RVector::Character(values) => values[left]
+            .as_deref()
+            .map(str::as_bytes)
+            .cmp(&values[right].as_deref().map(str::as_bytes)),
+    };
+    if descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
+}
+
+/// A random column of `length` rows of one of the types the sort kernels code, with `NA`s, and
+/// `NaN`, `-0.0` and infinities among the doubles.
+fn random_column(rng: &mut SplitMix64, kind: usize, length: usize) -> RVector {
+    let distinct = 1 + rng.below(200);
+    match kind {
+        0 => RVector::Integer(
+            (0..length)
+                .map(|_| {
+                    if rng.chance(1, 10) {
+                        NA_INTEGER
+                    } else {
+                        rng.below(distinct) as i32 - 50
+                    }
+                })
+                .collect(),
+        ),
+        1 => RVector::Double(
+            (0..length)
+                .map(|_| match rng.below(12) {
+                    0 => NA_REAL,
+                    1 => f64::NAN,
+                    2 => -0.0,
+                    3 => f64::NEG_INFINITY,
+                    _ => (rng.below(distinct) as f64 - 50.0) / 4.0,
+                })
+                .collect(),
+        ),
+        2 => RVector::Logical(
+            (0..length)
+                .map(|_| [0, 1, NA_INTEGER][rng.below(3)])
+                .collect(),
+        ),
+        3 => RVector::Character(
+            (0..length)
+                .map(|_| {
+                    (!rng.chance(1, 10)).then(|| {
+                        // The long prefix puts strings out of line and makes them tie on their
+                        // first 16 bytes.
+                        let prefix = ["", "B", "a", "a_long_shared_prefix_"][rng.below(4)];
+                        format!("{prefix}k{}", rng.below(distinct))
+                    })
+                })
+                .collect(),
+        ),
+        _ => RVector::Factor {
+            codes: (0..length)
+                .map(|_| {
+                    if rng.chance(1, 10) {
+                        NA_INTEGER
+                    } else {
+                        1 + rng.below(5) as i32
+                    }
+                })
+                .collect(),
+            levels: ["z", "b", "y", "a", "x"]
+                .iter()
+                .map(|level| level.to_string())
+                .collect(),
+        },
+    }
+}
+
+fn permuted(vector: &RVector, rows: &[usize]) -> RVector {
+    match vector {
+        RVector::Logical(values) => RVector::Logical(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Integer(values) => RVector::Integer(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Double(values) => RVector::Double(rows.iter().map(|row| values[*row]).collect()),
+        RVector::Character(values) => {
+            RVector::Character(rows.iter().map(|row| values[*row].clone()).collect())
+        }
+        RVector::Factor { codes, levels } => RVector::Factor {
+            codes: rows.iter().map(|row| codes[*row]).collect(),
+            levels: levels.clone(),
+        },
+    }
+}
+
+/// The sort, unique and run kernels on tables large enough to split into parallel runs, against
+/// a reference that applies data.table's rules one row at a time.
+#[test]
+fn fuzz_sort_unique_and_runs_against_a_reference() {
+    let mut rng = SplitMix64(0x5047);
+    for _ in 0..fuzz_iterations(3) {
+        let length = 70_000 + rng.below(70_000);
+        let names = ["a", "b", "c", "row"];
+        let mut vectors: Vec<RVector> = (0..3)
+            .map(|_| {
+                let kind = rng.below(5);
+                random_column(&mut rng, kind, length)
+            })
+            .collect();
+        vectors.push(RVector::Integer((0..length as i32).collect()));
+        let by: Vec<(&str, bool)> = (0..1 + rng.below(3))
+            .map(|index| (names[index], rng.chance(1, 2)))
+            .collect();
+
+        let mut expected: Vec<usize> = (0..length).collect();
+        expected.sort_by(|left, right| {
+            by.iter()
+                .enumerate()
+                .map(|(index, (_, descending))| {
+                    r_order(&vectors[index], *left, *right, *descending)
+                })
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let columns: Vec<(&str, RVector)> =
+            names.iter().copied().zip(vectors.iter().cloned()).collect();
+        let mut x = frame(columns);
+        ops::set_order(&mut x, &by).unwrap_or_else(|error| panic!("{error}"));
+        for (name, vector) in names.iter().zip(&vectors) {
+            assert_eq!(
+                Read(get(&mut x, name)),
+                permuted(vector, &expected),
+                "column {name} sorted by {by:?}"
+            );
+        }
+
+        let x = frame(names.iter().copied().zip(vectors.iter().cloned()).collect());
+        let key_names: Vec<&str> = by.iter().map(|(name, _)| *name).collect();
+        let same = |left: usize, right: usize| {
+            (0..key_names.len()).all(|index| r_order(&vectors[index], left, right, false).is_eq())
+        };
+        // The sort above is stable, so the first row of each run of equal keys in `expected` is
+        // that combination's first row in the table. Direction does not change which rows are
+        // equal.
+        let mut firsts: Vec<usize> = expected
+            .iter()
+            .enumerate()
+            .filter(|(index, row)| *index == 0 || !same(expected[index - 1], **row))
+            .map(|(_, row)| *row)
+            .collect();
+        firsts.sort_unstable();
+        assert_eq!(
+            ops::unique_count(&x, &key_names).unwrap_or_else(|error| panic!("{error}")),
+            firsts.len(),
+            "uniqueN by {key_names:?}"
+        );
+        let mut unique = ops::unique_rows(&x, &key_names).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            get(&mut unique, "row"),
+            RVector::Integer(firsts.iter().map(|row| *row as i32).collect()),
+            "unique by {key_names:?}"
+        );
+
+        let key_columns: Vec<table::polars::prelude::Column> = key_names
+            .iter()
+            .zip(&vectors)
+            .map(|(name, vector)| column_of(name, vector.clone()))
+            .collect();
+        let runs = ops::rleid(&key_columns.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut run = 0;
+        let expected_runs: Vec<i32> = (0..length)
+            .map(|row| {
+                if row == 0 || !same(row - 1, row) {
+                    run += 1;
+                }
+                run
+            })
+            .collect();
+        assert_eq!(
+            vector(&runs),
+            RVector::Integer(expected_runs),
+            "rleid of {key_names:?}"
+        );
+
+        let gaps: Vec<f64> = (0..length)
+            .map(|row| {
+                if rng.chance(1, 3) || row < 5 || row + 5 > length {
+                    NA_REAL
+                } else {
+                    row as f64
+                }
+            })
+            .collect();
+        let gappy = column_of("g", RVector::Double(gaps.clone()));
+        for (fill, backward) in [(ops::Fill::Forward, false), (ops::Fill::Backward, true)] {
+            let mut expected = gaps.clone();
+            let mut last = NA_REAL;
+            let rows: Vec<usize> = if backward {
+                (0..length).rev().collect()
+            } else {
+                (0..length).collect()
+            };
+            for row in rows {
+                if is_na_real(expected[row]) {
+                    expected[row] = last;
+                } else {
+                    last = expected[row];
+                }
+            }
+            let filled = ops::nafill(&gappy, fill).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                Read(vector(&filled)),
+                RVector::Double(expected),
+                "nafill {fill:?}"
+            );
+        }
+    }
 }

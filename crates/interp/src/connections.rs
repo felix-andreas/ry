@@ -24,12 +24,15 @@ use crate::{
     values::{self, nil, scalar_bool, scalar_integer, symbols},
     write_terminal,
 };
+use bzip2::{read::MultiBzDecoder, write::BzEncoder};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
+use lzma_rust2::{XzOptions, XzReader, XzWriter};
 use heap::{
     object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
     strings::Encoding,
 };
 use std::{
+    borrow::Cow,
     ffi::{CStr, CString, c_char, c_int, c_void},
     fs::{File, OpenOptions},
     io::{BufReader, Read, Seek, SeekFrom, Write},
@@ -39,13 +42,14 @@ use std::{
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("file", 6, do_file),
-    internal("gzfile", 4, |call| unsafe { compressed_file(call, "gzfile") }),
-    internal("bzfile", 4, |call| unsafe { compressed_file(call, "bzfile") }),
-    internal("xzfile", 4, |call| unsafe { compressed_file(call, "xzfile") }),
+    internal("gzfile", 4, |call| unsafe { compressed_file(call, Compressed::Gzip) }),
+    internal("bzfile", 4, |call| unsafe { compressed_file(call, Compressed::Bzip2) }),
+    internal("xzfile", 4, |call| unsafe { compressed_file(call, Compressed::Xz) }),
     internal("fifo", 4, |_| Err(unsupported("fifo"))),
     internal("url", 6, |_| Err(error("ry does not support URL connections yet"))),
     internal("pipe", 3, do_pipe),
     internal("rawConnection", 3, do_raw_connection),
+    internal("unz", 3, do_unz),
     internal("rawConnectionValue", 1, |call| unsafe { raw_connection_value(call.arg(0)) }),
     internal("textConnection", 5, do_text_connection),
     internal("textConnectionValue", 1, |call| unsafe { text_connection_value(call.arg(0)) }),
@@ -421,7 +425,7 @@ pub unsafe fn read_all_text(file: Sexp) -> R<String> {
         let bytes = std::fs::read(&path).map_err(|failure| {
             error(format!("cannot open file '{path}': {}", os_message(&failure)))
         })?;
-        let bytes = decompress(bytes)
+        let bytes = decompress(&bytes)
             .map_err(|failure| error(format!("cannot read compressed file '{path}': {failure}")))?;
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
@@ -528,10 +532,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
-    // and then the connection becomes a `gzfile` for good. `readBin(path)` opens with "rb", so it
-    // sees the compressed bytes.
-    let compression = if !raw && matches!(open.as_str(), "" | "r" | "rt") {
+    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary) {
         file_compression(&path).ok().flatten()
     } else {
         None
@@ -539,7 +540,8 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let device = Device::File(FileDevice {
         path,
         temporary,
-        gzip: compression.is_some(),
+        encoding: None,
+        raw,
         compression: 6,
         stream: None,
     });
@@ -562,21 +564,32 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `gzfile`, `bzfile` and `xzfile(description, open, encoding, compression)`: reads decompress
-/// gzip, bzip2 or xz data and pass anything else through. Writes are always gzip, because ry has
-/// no bzip2 or xz encoder for streams; every reader, GNU R's included, detects the format from
-/// the magic bytes, so `save(compress = "xz")` still loads anywhere.
-unsafe fn compressed_file(call: &Call<'_>, class: &str) -> R<Sexp> {
+/// gzip, bzip2 or xz data, whichever the magic bytes announce, and pass anything else through,
+/// as GNU R's do. Writes use the connection's own format.
+unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
     let open = values::require_string(call.arg(1), "open")?;
     let compression = values::as_integer_scalar(call.arg(3));
-    if !(0..=9).contains(&compression) {
+    // xzfile's negative levels select the slower "extreme" presets, which ry treats as the
+    // matching ordinary preset.
+    let valid = match encoding {
+        Compressed::Xz => (-9..=9).contains(&compression),
+        Compressed::Gzip | Compressed::Bzip2 => (0..=9).contains(&compression),
+    };
+    if !valid {
         return Err(error("invalid 'compress' argument"));
     }
+    let class = match encoding {
+        Compressed::Gzip => "gzfile",
+        Compressed::Bzip2 => "bzfile",
+        Compressed::Xz => "xzfile",
+    };
     let device = Device::File(FileDevice {
         path: PathBuf::from(expand_path(&description)),
         temporary: false,
-        gzip: true,
-        compression: compression as u32,
+        encoding: Some(encoding),
+        raw: false,
+        compression: compression.unsigned_abs(),
         stream: None,
     });
     new_builtin(class, description.as_bytes(), &open, "rb", device, |_| {})
@@ -622,6 +635,23 @@ unsafe fn do_raw_connection(call: &Call<'_>) -> R<Sexp> {
     new_builtin("rawConnection", description.as_bytes(), &open, &open, device, |con| {
         (*con).canseek = 1;
     })
+}
+
+/// `unz(description, open, encoding)`: reads one member of a zip archive, named
+/// `"archive:member"` with the member after the last colon, as GNU R splits it.
+unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
+    let description = values::require_string(call.arg(0), "description")?;
+    let open = values::require_string(call.arg(1), "open")?;
+    let Some((archive, member)) = description.rsplit_once(':') else {
+        return Err(error("invalid 'description' argument"));
+    };
+    let device = Device::Zip(ZipDevice {
+        archive: PathBuf::from(expand_path(archive)),
+        member: member.to_owned(),
+        data: Vec::new(),
+        position: 0,
+    });
+    new_builtin("unz", description.as_bytes(), &open, "r", device, |_| {})
 }
 
 /// `textConnection(nm, object, open, env, type)`: reads the lines of a character vector, or
@@ -1337,7 +1367,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
         line_index += 1;
     };
     start_line(&mut output, &mut line_width);
-    let mut piece_index = 0usize;
+    let mut separator_index = 0usize;
     for item_index in 0..values::length(items) {
         let item = items.element(item_index);
         let texts: Vec<String> = match item.kind() {
@@ -1373,17 +1403,24 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 )));
             }
         };
-        for text in texts {
+        // Every object after the first, even an empty one, is preceded by a separator, but a
+        // NULL object is skipped without one.
+        if item_index > 0 && texts.is_empty() {
+            output.push_str(&separator_at(separator_index));
+            separator_index += 1;
+        }
+        for (position, text) in texts.into_iter().enumerate() {
             // The separator goes before the line break, and a piece only fits on the line if
             // the separator after it does too.
-            if piece_index > 0 {
-                let separator = separator_at(piece_index - 1);
+            if position > 0 || item_index > 0 {
+                let separator = separator_at(separator_index);
+                separator_index += 1;
                 output.push_str(&separator);
                 line_width += separator.len();
                 if let Some(position) = separator.rfind('\n') {
                     line_width = separator.len() - position - 1;
                 }
-                let next_separator = separator_at(piece_index).len();
+                let next_separator = separator_at(separator_index).len();
                 if fill_width > 0
                     && line_width > 0
                     && line_width + text.len() + next_separator > fill_width
@@ -1398,7 +1435,6 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 line_width = text.len() - position - 1;
             }
             output.push_str(&text);
-            piece_index += 1;
         }
     }
     // A separator holding a newline makes the separators terminators, so the output always
@@ -2463,6 +2499,7 @@ enum Device {
     TextInput(TextInput),
     TextOutput(TextOutput),
     Pipe(PipeDevice),
+    Zip(ZipDevice),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2477,9 +2514,11 @@ struct FileDevice {
     path: PathBuf,
     /// `file("")`: an anonymous file, removed when closed.
     temporary: bool,
-    /// `gzfile()`, or a `file()` that found compressed data when it was created: writes
-    /// compress, and reads decompress when the file is compressed.
-    gzip: bool,
+    /// `gzfile()`, `bzfile()` and `xzfile()`: writes compress in this format; reads decompress
+    /// whatever format the file is in.
+    encoding: Option<Compressed>,
+    /// `file(raw = TRUE)`: reads never decompress.
+    raw: bool,
     compression: u32,
     stream: Option<Stream>,
 }
@@ -2487,7 +2526,42 @@ struct FileDevice {
 enum Stream {
     Plain(PlainFile),
     Inflate(Inflate),
-    Deflate { encoder: GzEncoder<File>, position: u64 },
+    Deflate { encoder: Encoder, position: u64 },
+}
+
+/// A compressing writer for each format the compressed file connections write.
+enum Encoder {
+    Gzip(GzEncoder<File>),
+    Bzip2(BzEncoder<File>),
+    Xz(XzWriter<File>),
+}
+
+impl Encoder {
+    fn finish(self) -> std::io::Result<()> {
+        match self {
+            Encoder::Gzip(encoder) => encoder.finish().map(drop),
+            Encoder::Bzip2(encoder) => encoder.finish().map(drop),
+            Encoder::Xz(encoder) => encoder.finish().map(drop),
+        }
+    }
+}
+
+impl Write for Encoder {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Encoder::Gzip(encoder) => encoder.write(bytes),
+            Encoder::Bzip2(encoder) => encoder.write(bytes),
+            Encoder::Xz(encoder) => encoder.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Encoder::Gzip(encoder) => encoder.flush(),
+            Encoder::Bzip2(encoder) => encoder.flush(),
+            Encoder::Xz(encoder) => encoder.flush(),
+        }
+    }
 }
 
 /// A file read and written through separate positions, as GNU R's file connections are.
@@ -2514,6 +2588,14 @@ struct Inflate {
 }
 
 struct RawDevice {
+    data: Vec<u8>,
+    position: usize,
+}
+
+/// `unz()`: a member of a zip archive, decompressed whole when the connection opens.
+struct ZipDevice {
+    archive: PathBuf,
+    member: String,
     data: Vec<u8>,
     position: usize,
 }
@@ -2573,7 +2655,7 @@ fn parse_mode(mode: &[u8]) -> Option<Mode> {
     }
 }
 
-fn os_message(failure: &std::io::Error) -> String {
+pub(crate) fn os_message(failure: &std::io::Error) -> String {
     match failure.raw_os_error() {
         // SAFETY: strerror returns a valid C string for any error number.
         Some(code) => unsafe {
@@ -2647,6 +2729,31 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             (*con).save = NO_SAVE;
             return Ok(true);
         }
+        Device::Zip(zip) => {
+            if mode.write {
+                return Err(error("can only open zip file connections for reading"));
+            }
+            let archive_name = zip.archive.to_string_lossy().into_owned();
+            let Ok(archive) = std::fs::read(&zip.archive) else {
+                crate::conditions::warning(format!("cannot open zip file '{archive_name}'"))?;
+                return Ok(false);
+            };
+            let Some(data) = crate::utils::zip_member_named(&archive, &zip.member) else {
+                crate::conditions::warning(format!(
+                    "cannot locate file '{}' in zip file '{archive_name}'",
+                    zip.member
+                ))?;
+                return Ok(false);
+            };
+            zip.data = data;
+            zip.position = 0;
+            (*con).canseek = 0;
+            (*con).isopen = 1;
+            (*con).canread = 1;
+            (*con).canwrite = 0;
+            (*con).text = (!mode.binary) as Rboolean;
+            return Ok(true);
+        }
         Device::Standard(_) | Device::TextInput(_) | Device::TextOutput(_) => {}
     }
     (*con).isopen = 1;
@@ -2658,7 +2765,7 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
 }
 
 fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
-    if device.gzip && mode.write {
+    if let Some(encoding) = device.encoding.filter(|_| mode.write) {
         if mode.read {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
@@ -2668,10 +2775,20 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
             .truncate(!mode.append)
             .append(mode.append)
             .open(&device.path)?;
-        let encoder = GzEncoder::new(file, Compression::new(device.compression));
+        let level = device.compression;
+        let encoder = match encoding {
+            Compressed::Gzip => Encoder::Gzip(GzEncoder::new(file, Compression::new(level))),
+            Compressed::Bzip2 => {
+                Encoder::Bzip2(BzEncoder::new(file, bzip2::Compression::new(level.clamp(1, 9))))
+            }
+            Compressed::Xz => Encoder::Xz(XzWriter::new(file, XzOptions::with_preset(level))?),
+        };
         return Ok(Stream::Deflate { encoder, position: 0 });
     }
-    if mode.read && !mode.write && device.gzip {
+    // `file()` decompresses only in text mode, so `readBin()` sees a compressed file's bytes;
+    // the compressed file connections decompress in either mode.
+    let decodes = device.encoding.is_some() || !(mode.binary || device.raw);
+    if mode.read && !mode.write && decodes && file_compression(&device.path)?.is_some() {
         return Ok(Stream::Inflate(open_inflate(&device.path)?));
     }
     let file = OpenOptions::new()
@@ -2736,27 +2853,21 @@ fn file_compression(path: &PathBuf) -> std::io::Result<Option<Compressed>> {
     Ok(compression_of(magic.get(..filled).unwrap_or_default()))
 }
 
-/// `bytes` decoded when they start with a compression's magic bytes, else unchanged.
-fn decompress(bytes: Vec<u8>) -> std::io::Result<Vec<u8>> {
-    let Some(compression) = compression_of(&bytes) else {
-        return Ok(bytes);
+/// `bytes` decoded when they start with gzip's, bzip2's or xz's magic bytes, else unchanged.
+pub fn decompress(bytes: &[u8]) -> std::io::Result<Cow<'_, [u8]>> {
+    let Some(compression) = compression_of(bytes) else {
+        return Ok(Cow::Borrowed(bytes));
     };
     let mut decoded = Vec::new();
-    decoder(compression, Box::new(&bytes[..]))?.read_to_end(&mut decoded)?;
-    Ok(decoded)
+    decoder(compression, Box::new(bytes))?.read_to_end(&mut decoded)?;
+    Ok(Cow::Owned(decoded))
 }
 
 fn decoder<'a>(compression: Compressed, input: Box<dyn Read + 'a>) -> std::io::Result<Box<dyn Read + 'a>> {
     Ok(match compression {
         Compressed::Gzip => Box::new(MultiGzDecoder::new(input)),
-        Compressed::Bzip2 => Box::new(bzip2_rs::DecoderReader::new(input)),
-        // lzma-rs decodes xz only into a writer, so the whole stream is decoded up front.
-        Compressed::Xz => {
-            let mut decoded = Vec::new();
-            lzma_rs::xz_decompress(&mut BufReader::new(input), &mut decoded)
-                .map_err(|failure| std::io::Error::other(failure.to_string()))?;
-            Box::new(std::io::Cursor::new(decoded))
-        }
+        Compressed::Bzip2 => Box::new(MultiBzDecoder::new(input)),
+        Compressed::Xz => Box::new(XzReader::new(input, true)),
     })
 }
 
@@ -2781,7 +2892,7 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
                     (*con).status = 0;
                     flush_writes(&mut plain)
                 }
-                Some(Stream::Deflate { encoder, .. }) => encoder.finish().map(drop),
+                Some(Stream::Deflate { encoder, .. }) => encoder.finish(),
                 Some(Stream::Inflate(_)) | None => Ok(()),
             };
             if file.temporary {
@@ -2804,6 +2915,11 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
                 output.lines.push(line);
                 update_text_target(output)?;
             }
+            Ok(())
+        }
+        Device::Zip(zip) => {
+            zip.data = Vec::new();
+            zip.position = 0;
             Ok(())
         }
         Device::Standard(_) | Device::Raw(_) | Device::TextInput(_) => Ok(()),
@@ -2832,7 +2948,9 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
             Some(Stream::Deflate { .. }) => Err(error("cannot read from this connection")),
             None => Err(error("connection is not open")),
         },
-        Device::Raw(RawDevice { data, position }) | Device::TextInput(TextInput { data, position }) => {
+        Device::Raw(RawDevice { data, position })
+        | Device::TextInput(TextInput { data, position })
+        | Device::Zip(ZipDevice { data, position, .. }) => {
             let available = data.get(*position..).unwrap_or_default();
             let count = available.len().min(buffer.len());
             buffer[..count].copy_from_slice(&available[..count]);
@@ -2967,7 +3085,7 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             raw.position = end;
             Ok(bytes.len())
         }
-        Device::TextInput(_) => Err(error("cannot write to this connection")),
+        Device::TextInput(_) | Device::Zip(_) => Err(error("cannot write to this connection")),
         Device::TextOutput(_) if !printing => Err(missing("write")),
         Device::TextOutput(output) => {
             let mut completed = false;
@@ -3005,7 +3123,7 @@ unsafe fn update_text_target(output: &TextOutput) -> R<()> {
 unsafe fn device_seek(con: Rconnection, position: f64, origin: SeekOrigin, side: SeekSide) -> R<f64> {
     let query = position.is_nan();
     match device(con)? {
-        Device::Standard(_) | Device::Pipe(_) => Err(missing("seek")),
+        Device::Standard(_) | Device::Pipe(_) | Device::Zip(_) => Err(missing("seek")),
         Device::TextInput(_) | Device::TextOutput(_) => {
             if !query && position >= 0.0 {
                 return Err(error("seek is not relevant for text connection"));

@@ -383,6 +383,10 @@ fn declarations() -> Vec<(String, Vec<String>)> {
     text.lines()
         .filter_map(|line| {
             let (name, signature) = line.split_once(" : ")?;
+            // The list conversions are base builtins, declared here only for the checker.
+            if name.starts_with("as.") {
+                return None;
+            }
             let parameters = &signature[signature.find("fn(")? + 3..];
             let mut depth = 0usize;
             let mut names = Vec::new();
@@ -417,8 +421,12 @@ fn declarations_and_runtime_bind_the_same_names() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.exports");
     let manifest = fs::read_to_string(&manifest)
         .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", manifest.display()));
-    let exported: BTreeSet<String> =
-        manifest.lines().filter(|line| !line.starts_with('#')).map(str::to_owned).collect();
+    // The list conversions are base builtins, listed in the manifest only for the checker.
+    let exported: BTreeSet<String> = manifest
+        .lines()
+        .filter(|line| !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag"))
+        .map(str::to_owned)
+        .collect();
     let declared: BTreeSet<String> = declarations().into_iter().map(|(name, _)| name).collect();
     let mut bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
     bound.extend(frame::package_functions().map(str::to_owned));

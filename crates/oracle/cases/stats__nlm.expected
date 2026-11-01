@@ -1,0 +1,26 @@
+[stdout]
+| [1] 1 1
+| [1] 1
+| [1] 23
+|        [,1] [,2]
+| [1,]  802.2 -400
+| [2,] -400.0  200
+| [1] 1 1
+| [1] 1
+| [1] 24
+| [1] 1 1
+| [1] 1
+| [1] 3 5
+| [1] 2
+| [1] "minimum"    "estimate"   "gradient"   "code"       "iterations"
+| [1] 2
+| [1] 1
+| [1] 25
+| [1]  TRUE FALSE FALSE  TRUE
+| [1] "invalid function value in 'nlm' optimizer"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "invalid function value in 'nlm' optimizer"

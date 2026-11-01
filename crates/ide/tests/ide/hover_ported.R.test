@@ -688,16 +688,20 @@ completion (20): undebug, undebugcall, packageNotFoundError, unique.data.frame, 
 total <- s$0um(1L, 2L)
 #++++
 hover 9..12: sum: fn(...: integer[] | logical[], [na.rm]: logical) -> integer
-hover-definition: package base (3 declaration(s), declared in stub source 0 at `sum`)
+hover-definition: package base (5 declaration(s), declared in stub source 0 at `sum`)
 definition: stub source 0 at `sum`
 references: none
 rename: none
 signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
 parameters: [...: integer[] | logical[]] | [na.rm]: logical
-signature: fn(...: double[], [na.rm]: logical) -> double
-parameters: [...: double[]] | [na.rm]: logical
-signature: fn(...: Any, [na.rm]: logical) -> Any
-parameters: [...: Any] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: difftime, [na.rm]: logical) -> difftime
+parameters: [...: difftime] | [na.rm]: logical
+signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
+parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `total`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file

@@ -64,6 +64,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("sub", 7, |call| unsafe { substitute(call, false) }),
     internal("gsub", 7, |call| unsafe { substitute(call, true) }),
     internal("regexpr", 6, |call| unsafe { regexpr(call, false) }),
+    internal("grepRaw", 8, do_grep_raw),
     internal("gregexpr", 6, |call| unsafe { regexpr(call, true) }),
     internal("regexec", 5, do_regexec),
 ];
@@ -192,14 +193,23 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
         (1, _) | (NA_LOGICAL, CountType::Bytes | CountType::Chars) => NA_INTEGER,
         _ => 2,
     };
+    let allow_na = values::as_logical_scalar(call.arg(2)) == 1;
     let text = character_vector(x)?;
     let count = length(text);
     let result = alloc(SexpType::Integer, count)?;
     let counts = values::ints_mut(result);
     for (index, slot) in counts.iter_mut().enumerate() {
         let charsxp = text.element(index);
+        let invalid = count_type != CountType::Bytes
+            && !charsxp.has_gp(gp::LATIN1)
+            && std::str::from_utf8(charsxp.bytes()).is_err();
         *slot = if charsxp == na_string() {
             na_count
+        } else if invalid {
+            if !allow_na {
+                return Err(error(format!("invalid multibyte string, element {}", index + 1)));
+            }
+            NA_INTEGER
         } else {
             match count_type {
                 CountType::Bytes => charsxp.bytes().len() as i32,
@@ -1950,6 +1960,97 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         set_elt(result, index, table.finish(&report, &names)?);
     }
     Ok(result)
+}
+
+/// `grepRaw(pattern, x, offset, ignore.case, fixed, value, all, invert)`, matching bytes. The
+/// matches are non-overlapping and start at the 1-based `offset`; `value` returns the matched
+/// bytes, or with `invert` the bytes around them.
+unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
+    let (pattern, x) = (call.arg(0), call.arg(1));
+    if pattern.kind() != SexpType::Raw || x.kind() != SexpType::Raw {
+        return Err(call.error("invalid 'pattern' or 'x' argument"));
+    }
+    let offset = values::as_integer_scalar(call.arg(2));
+    if offset == NA_INTEGER || offset < 1 {
+        return Err(call.error("invalid 'offset' argument"));
+    }
+    let flag = |index: usize| values::as_logical_scalar(call.arg(index)) == 1;
+    let (ignore_case, fixed, value, all, mut invert) = (flag(3), flag(4), flag(5), flag(6), flag(7));
+    if invert && !value {
+        warning("argument 'invert = TRUE' will be ignored")?;
+        invert = false;
+    }
+    let needle = values::raws(pattern).to_vec();
+    let haystack = values::raws(x).to_vec();
+    let start = offset as usize - 1;
+    let regex = if fixed {
+        if ignore_case {
+            warning("argument 'ignore.case = TRUE' will be ignored")?;
+        }
+        None
+    } else {
+        let text = translate_regex(&String::from_utf8_lossy(&needle), true);
+        let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
+        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}"))
+            .map_err(|failure| call.error(format!("invalid regular expression '{}': {failure}", String::from_utf8_lossy(&needle))))?;
+        Some(compiled)
+    };
+    let find = |from: usize| -> Option<(usize, usize)> {
+        if from > haystack.len() {
+            return None;
+        }
+        match &regex {
+            Some(regex) => regex.find_at(&haystack, from).map(|found| (found.start(), found.end())),
+            None if needle.is_empty() => Some((from, from)),
+            None => haystack[from..]
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+                .map(|position| (from + position, from + position + needle.len())),
+        }
+    };
+    let mut matches = Vec::new();
+    let mut from = start;
+    while let Some((begin, end)) = find(from) {
+        matches.push((begin, end));
+        if !all {
+            break;
+        }
+        // An empty match moves on by one byte, or the search would never advance.
+        from = if end > begin { end } else { end + 1 };
+    }
+    let raw = |bytes: &[u8]| -> R<Sexp> {
+        let result = alloc(SexpType::Raw, bytes.len())?;
+        values::raws_mut(result).copy_from_slice(bytes);
+        Ok(result)
+    };
+    if !value {
+        let positions: Vec<i32> = matches.iter().map(|&(begin, _)| begin as i32 + 1).collect();
+        return values::integer_vector(&positions);
+    }
+    match (all, invert) {
+        (false, false) => match matches.first() {
+            Some(&(begin, end)) => raw(&haystack[begin..end]),
+            None => raw(&[]),
+        },
+        (false, true) => match matches.first() {
+            Some(&(begin, end)) => raw(&[&haystack[..begin], &haystack[end..]].concat()),
+            None => raw(&haystack),
+        },
+        (true, false) => {
+            let pieces = matches.iter().map(|&(begin, end)| raw(&haystack[begin..end])).collect::<R<Vec<_>>>()?;
+            values::list_vector(&pieces)
+        }
+        (true, true) => {
+            let mut pieces = Vec::with_capacity(matches.len() + 1);
+            let mut previous = 0;
+            for &(begin, end) in &matches {
+                pieces.push(raw(&haystack[previous..begin])?);
+                previous = end;
+            }
+            pieces.push(raw(&haystack[previous..])?);
+            values::list_vector(&pieces)
+        }
+    }
 }
 
 unsafe fn do_regexec(call: &Call<'_>) -> R<Sexp> {

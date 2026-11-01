@@ -9,6 +9,7 @@ pub use reedline;
 
 use std::error::Error;
 use std::fmt;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -141,11 +142,14 @@ pub fn run_on_ry_runtime(
 pub struct RuntimeFlags {
     /// Inline annotations become checks at function boundaries.
     pub annotation_checks: bool,
+    /// S4, R6 and Reference Class definitions in user code are allowed.
+    pub object_systems: bool,
 }
 
 impl RuntimeFlags {
     fn bits(self) -> std::ffi::c_int {
         std::ffi::c_int::from(self.annotation_checks)
+            | (std::ffi::c_int::from(self.object_systems) << 1)
     }
 }
 
@@ -162,7 +166,9 @@ pub fn run_console_on_ry_runtime(
     type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
     console::install_for_ry_runtime(options)?;
-    eprintln!("ry console on ry's runtime. Type q() or Ctrl-D to quit.");
+    if std::io::stdin().is_terminal() {
+        eprintln!("ry console on ry's runtime. Type q() or Ctrl-D to quit.");
+    }
     Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
 }
 

@@ -6,12 +6,10 @@ use crate::{
     interp,
     unwind::{R, error},
     values::{
-        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
-        scalar_string, string_vector, symbols,
+        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, scalar_string,
+        string_vector, symbols,
     },
 };
-use chrono::{DateTime, LocalResult, Offset, TimeZone};
-use chrono_tz::{OffsetComponents, Tz};
 use heap::{
     GcStress,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
@@ -30,9 +28,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(result)
     }),
     internal("icuSetCollate", -1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("icuGetCollate", 1, |_| unsafe {
-        scalar_string("ICU not in use")
-    }),
+    internal("icuGetCollate", 1, |_| unsafe { scalar_string("ICU not in use") }),
     internal("setNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
     internal("setMaxNumMathThreads", 1, |_| unsafe { scalar_integer(1) }),
     internal("isatty", 1, |call| unsafe {
@@ -46,142 +42,88 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("browserText", 1, |call| unsafe {
-        Err(call.error("no browser context to query"))
-    }),
-    internal("browserCondition", 1, |call| unsafe {
-        Err(call.error("no browser context to query"))
-    }),
+    internal("browserText", 1, |call| unsafe { Err(call.error("no browser context to query")) }),
+    internal("browserCondition", 1, |call| unsafe { Err(call.error("no browser context to query")) }),
     internal("browserSetDebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("memory.profile", 0, |_| unsafe {
-        values::integer_vector(&[])
-    }),
-    internal("file.symlink", 2, |call| unsafe {
-        link_paths(call, |from, to| {
-            std::os::unix::fs::symlink(from, to).is_ok()
-        })
-    }),
-    internal("file.link", 2, |call| unsafe {
-        link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok())
-    }),
+    internal("memory.profile", 0, |_| unsafe { values::integer_vector(&[]) }),
+    internal("file.symlink", 2, |call| unsafe { link_paths(call, |from, to| std::os::unix::fs::symlink(from, to).is_ok()) }),
+    internal("file.link", 2, |call| unsafe { link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok()) }),
+    internal("setFileTime", 2, do_sys_set_file_time).invisible(),
     internal("file.show", 5, |call| unsafe {
         for index in 0..length(call.arg(0)) {
             if let Some(path) = values::string_at(call.arg(0), index) {
-                let text = std::fs::read_to_string(&*path).map_err(|failure| {
-                    call.error(format!("cannot open file '{path}': {failure}"))
-                })?;
+                let text = std::fs::read_to_string(&*path).map_err(|failure| call.error(format!("cannot open file '{path}': {failure}")))?;
                 crate::write_console(text.as_bytes(), false);
             }
         }
         Ok(nil())
-    })
-    .invisible(),
-    internal("file.choose", 1, |call| unsafe {
-        Err(call.error("file.choose() needs an interactive session"))
-    }),
+    }).invisible(),
+    internal("file.choose", 1, |call| unsafe { Err(call.error("file.choose() needs an interactive session")) }),
     internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
-    internal("curlGetHeaders", 5, |call| unsafe {
-        Err(call.error("libcurl is not available in this session"))
-    }),
-    internal("curlDownload", 6, |call| unsafe {
-        Err(call.error("libcurl is not available in this session"))
-    }),
+    internal("curlGetHeaders", 5, |call| unsafe { Err(call.error("libcurl is not available in this session")) }),
+    internal("curlDownload", 6, |call| unsafe { Err(call.error("libcurl is not available in this session")) }),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
     internal("R.home", 0, |_| unsafe { scalar_string(&r_home()) }),
     internal("Sys.getenv", 2, do_sys_getenv),
     internal("Sys.setenv", 2, do_sys_setenv).invisible(),
     internal("Sys.unsetenv", 1, do_sys_unsetenv).invisible(),
-    internal("commandArgs", 0, |_| unsafe {
-        string_vector(&interp().command_args)
-    }),
+    internal("commandArgs", 0, |_| unsafe { string_vector(&interp().command_args) }),
     builtin("proc.time", 0, do_proc_time),
     internal("Sys.time", 0, do_sys_time),
     internal("date", 0, |_| unsafe {
-        scalar_string(&format_now("%a %b %d %H:%M:%S %Y"))
+        let now = now_seconds();
+        let (offset, _, zone) = resolve_zone("").offset_at(now);
+        scalar_string(&format_broken_down(&broken_down(now + offset as f64), "%a %b %d %H:%M:%S %Y", &zone, offset))
     }),
-    internal("file.exists", 1, |call| unsafe {
-        map_paths(call, |path| Path::new(path).exists())
-    }),
-    internal("dir.exists", 1, |call| unsafe {
-        map_paths(call, |path| Path::new(path).is_dir())
-    }),
+    internal("file.exists", 1, |call| unsafe { map_paths(call, |path| Path::new(path).exists()) }),
+    internal("dir.exists", 1, |call| unsafe { map_paths(call, |path| Path::new(path).is_dir()) }),
     internal("file.info", 2, do_file_info),
     internal("list.files", 8, do_list_files),
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
-    internal("path.expand", 1, |call| unsafe {
-        map_strings(call, crate::connections::expand_path)
-    }),
-    internal("basename", 1, |call| unsafe {
-        map_strings(call, |path| {
-            let trimmed = path.trim_end_matches('/');
-            trimmed.rsplit('/').next().unwrap_or("").to_owned()
-        })
-    }),
-    internal("dirname", 1, |call| unsafe {
-        map_strings(call, |path| {
-            let trimmed = path.trim_end_matches('/');
-            match trimmed.rfind('/') {
-                Some(0) => "/".to_owned(),
-                Some(position) => trimmed[..position].to_owned(),
-                None => ".".to_owned(),
-            }
-        })
-    }),
+    internal("path.expand", 1, |call| unsafe { map_strings(call, crate::connections::expand_path) }),
+    internal("basename", 1, |call| unsafe { map_strings(call, |path| {
+        let trimmed = path.trim_end_matches('/');
+        trimmed.rsplit('/').next().unwrap_or("").to_owned()
+    }) }),
+    internal("dirname", 1, |call| unsafe { map_strings(call, |path| {
+        let trimmed = path.trim_end_matches('/');
+        match trimmed.rfind('/') {
+            Some(0) => "/".to_owned(),
+            Some(position) => trimmed[..position].to_owned(),
+            None => ".".to_owned(),
+        }
+    }) }),
     internal("file.path", 2, do_file_path),
     internal("tempfile", 3, do_tempfile),
     internal("tempdir", 1, |_| unsafe { scalar_string(&temp_dir()) }),
     internal("unlink", 4, do_unlink).invisible(),
-    internal("file.remove", 1, |call| unsafe {
-        map_paths(call, |path| std::fs::remove_file(path).is_ok())
-    }),
+    internal("file.remove", 1, |call| unsafe { map_paths(call, |path| std::fs::remove_file(path).is_ok()) }),
     internal("file.rename", 2, do_file_rename),
-    internal("file.create", 2, |call| unsafe {
-        map_paths(call, |path| std::fs::write(path, b"").is_ok())
-    }),
+    internal("file.create", 2, |call| unsafe { map_paths(call, |path| std::fs::write(path, b"").is_ok()) }),
     internal("file.append", 2, do_file_append),
     internal("file.copy", 6, do_file_copy),
     internal("dir.create", 4, do_dir_create).invisible(),
     internal("file.access", 2, do_file_access),
-    internal("getwd", 0, |_| unsafe {
-        scalar_string(
-            &std::env::current_dir()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-        )
-    }),
+    internal("getwd", 0, |_| unsafe { scalar_string(&std::env::current_dir().map(|path| path.display().to_string()).unwrap_or_default()) }),
     internal("setwd", 1, do_setwd).invisible(),
     internal("Sys.glob", 2, do_sys_glob),
-    internal("Sys.readlink", 1, |call| unsafe {
-        map_strings(call, |path| {
-            std::fs::read_link(path)
-                .map(|target| target.display().to_string())
-                .unwrap_or_default()
-        })
-    }),
+    internal("Sys.readlink", 1, |call| unsafe { map_strings(call, |path| std::fs::read_link(path).map(|target| target.display().to_string()).unwrap_or_default()) }),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
     internal("Sys.umask", 1, |_| unsafe { scalar_integer(18) }),
-    internal("Sys.getpid", 0, |_| unsafe {
-        scalar_integer(std::process::id() as i32)
-    }),
+    internal("Sys.getpid", 0, |_| unsafe { scalar_integer(std::process::id() as i32) }),
     internal("Sys.info", 0, do_sys_info),
     internal("Sys.setlocale", 2, do_sys_setlocale),
     internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
     internal("Sys.localeconv", 0, |_| unsafe { values::named_list(&[]) }),
-    internal("Sys.sleep", 1, |call| unsafe {
-        {
-            let seconds = values::as_real_scalar(call.arg(0));
-            if seconds.is_finite() && seconds > 0.0 {
-                std::thread::sleep(
-                    std::time::Duration::try_from_secs_f64(seconds)
-                        .unwrap_or(std::time::Duration::MAX),
-                );
-            }
-            Ok(nil())
+    internal("Sys.sleep", 1, |call| unsafe { {
+        let seconds = values::as_real_scalar(call.arg(0));
+        if seconds.is_finite() && seconds > 0.0 {
+            std::thread::sleep(std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX));
         }
-    })
-    .invisible(),
+        Ok(nil())
+    } }).invisible(),
     internal("Version", 0, do_version),
     internal("capabilities", 0, do_capabilities),
     internal("capabilitiesX11", 0, |_| unsafe { scalar_bool(false) }),
@@ -194,9 +136,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
     internal("system", 3, do_system),
-    internal("Cstack_info", 0, |_| unsafe {
-        values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
-    }),
+    internal("Cstack_info", 0, |_| unsafe { values::integer_vector(&[7969177, 0, 1, NA_INTEGER]) }),
     internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
@@ -204,16 +144,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
     }),
     internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
-    internal("setFileTime", 2, do_sys_set_file_time).invisible(),
+    internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
     builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
     builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
-    internal("validEnc", 1, |call| unsafe {
-        map_strings_bool(call, |_| true)
-    }),
+    internal("validEnc", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
     internal("format.POSIXlt", 3, do_format_posixlt),
@@ -221,11 +159,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
     internal("balancePOSIXlt", 3, |call| unsafe {
-        balance_posixlt(
-            call.arg(0),
-            values::is_true(call.arg(1)),
-            values::is_true(call.arg(2)),
-        )
+        balance_posixlt(call.arg(0), values::is_true(call.arg(1)), values::is_true(call.arg(2)))
     }),
     builtin("unCfillPOSIXlt", 1, |call| unsafe {
         let balanced = get_attr(call.arg(0), values::install("balanced")?);
@@ -249,23 +183,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("retracemem", -1, |_| unsafe { Ok(nil()) }).invisible(),
     builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
     builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    internal("format.Date", 2, |call| unsafe {
-        Err(call.error("format.Date is not supported"))
-    }),
-    internal("tzone_name", 0, |_| unsafe {
-        scalar_string(&session_zone_name())
-    }),
+    internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
+    internal("tzone_name", 0, |_| unsafe { scalar_string(&session_zone_name()) }),
     internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
     internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
     internal("ngettext", 4, do_ngettext),
     internal("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
-    internal("crc64", 1, |call| unsafe {
-        scalar_string(&crc64_hex(
-            values::first_string(call.arg(0))
-                .unwrap_or_default()
-                .as_bytes(),
-        ))
-    }),
+    internal("crc64", 1, |call| unsafe { scalar_string(&crc64_hex(values::first_string(call.arg(0)).unwrap_or_default().as_bytes())) }),
     internal("mkjunction", 2, |_| unsafe { scalar_bool(false) }),
     internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
 ];
@@ -291,12 +215,7 @@ fn find_r_home() -> String {
     {
         return home;
     }
-    for candidate in [
-        "/usr/lib/R",
-        "/usr/local/lib/R",
-        "/opt/R/lib/R",
-        "/usr/lib64/R",
-    ] {
+    for candidate in ["/usr/lib/R", "/usr/local/lib/R", "/opt/R/lib/R", "/usr/lib64/R"] {
         if Path::new(candidate).join("library/base").exists() {
             return candidate.to_owned();
         }
@@ -346,8 +265,7 @@ unsafe fn map_strings_bool(call: &Call<'_>, function: impl Fn(&str) -> bool) -> 
     let count = length(strings);
     let result = alloc(SexpType::Logical, count)?;
     for index in 0..count {
-        values::ints_mut(result)[index] =
-            values::string_at(strings, index).is_some_and(|text| function(&text)) as i32;
+        values::ints_mut(result)[index] = values::string_at(strings, index).is_some_and(|text| function(&text)) as i32;
     }
     Ok(result)
 }
@@ -375,21 +293,13 @@ unsafe fn do_file_append(call: &Call<'_>) -> R<Sexp> {
     if length(targets) == 0 {
         return Err(call.error("nothing to append to"));
     }
-    let count = if length(sources) == 0 {
-        0
-    } else {
-        length(targets).max(length(sources))
-    };
+    let count = if length(sources) == 0 { 0 } else { length(targets).max(length(sources)) };
     let result = alloc(SexpType::Logical, count)?;
     for index in 0..count {
         let target = values::string_at(targets, index % length(targets));
         let source = values::string_at(sources, index % length(sources));
         let appended = match (target, source) {
-            (Some(target), Some(source)) => append_file(
-                &crate::connections::expand_path(&target),
-                &crate::connections::expand_path(&source),
-            )
-            .is_ok(),
+            (Some(target), Some(source)) => append_file(&crate::connections::expand_path(&target), &crate::connections::expand_path(&source)).is_ok(),
             _ => false,
         };
         values::ints_mut(result)[index] = appended as i32;
@@ -397,53 +307,42 @@ unsafe fn do_file_append(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `.Internal(file.copy(from, to, ...))`, which the R closure calls only when `to` is one existing
-/// directory: each source is copied into it under its own base name.
+/// `file.copy(from, to, overwrite, recursive, copy.mode, copy.date)`. The R closure handles copies
+/// to file names itself and calls this only when `to` is one existing directory, so each `from`
+/// lands at `to/basename(from)`. A directory is copied only when `recursive` is TRUE.
 unsafe fn do_file_copy(call: &Call<'_>) -> R<Sexp> {
-    let sources = call.arg(0);
-    let directory = values::require_string(call.arg(1), "to")?;
-    let overwrite = values::as_logical_scalar(call.arg(2)) == 1;
-    let recursive = values::as_logical_scalar(call.arg(3)) == 1;
+    let (sources, target) = (call.arg(0), call.arg(1));
+    if sources.kind() != SexpType::String {
+        return Err(call.error("invalid 'from' argument"));
+    }
+    let Some(target) = values::first_string(target) else {
+        return Err(call.error("invalid 'to' argument"));
+    };
     let options = CopyOptions {
-        overwrite,
+        overwrite: values::as_logical_scalar(call.arg(2)) == 1,
+        recursive: values::as_logical_scalar(call.arg(3)) == 1,
         mode: values::as_logical_scalar(call.arg(4)) == 1,
         date: values::as_logical_scalar(call.arg(5)) == 1,
     };
-    let directory = PathBuf::from(crate::connections::expand_path(&directory));
+    let directory = Path::new(&crate::connections::expand_path(&target)).to_path_buf();
     let result = alloc(SexpType::Logical, length(sources))?;
     for index in 0..length(sources) {
-        let copied = match values::string_at(sources, index) {
-            Some(source) => {
-                let source = PathBuf::from(crate::connections::expand_path(&source));
-                match source.file_name() {
-                    Some(name) if recursive || !source.is_dir() => {
-                        let target = directory.join(name);
-                        match copy_entry(&source, &target, &options) {
-                            Ok(()) => true,
-                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                                false
-                            }
-                            Err(error) => {
-                                let reason = match error.raw_os_error() {
-                                    Some(code) => std::ffi::CStr::from_ptr(libc::strerror(code))
-                                        .to_string_lossy()
-                                        .into_owned(),
-                                    None => error.to_string(),
-                                };
-                                crate::conditions::warning(format!(
-                                    "problem copying {} to {}: {reason}",
-                                    source.display(),
-                                    target.display()
-                                ))?;
-                                false
-                            }
-                        }
-                    }
-                    _ => false,
+        let mut copied = false;
+        if let Some(source) = values::string_at(sources, index) {
+            let source = Path::new(&crate::connections::expand_path(&source)).to_path_buf();
+            if let Some(name) = source.file_name() {
+                let destination = directory.join(name);
+                match copy_entry(&source, &destination, &options) {
+                    Ok(outcome) => copied = outcome,
+                    Err(failure) => crate::conditions::warning(format!(
+                        "problem copying {} to {}: {}",
+                        source.display(),
+                        destination.display(),
+                        crate::connections::os_message(&failure)
+                    ))?,
                 }
             }
-            None => false,
-        };
+        }
         values::ints_mut(result)[index] = copied as i32;
     }
     Ok(result)
@@ -451,53 +350,1984 @@ unsafe fn do_file_copy(call: &Call<'_>) -> R<Sexp> {
 
 struct CopyOptions {
     overwrite: bool,
+    recursive: bool,
     mode: bool,
     date: bool,
 }
 
-/// Copies a file, or a directory with everything below it. Like GNU R, an existing target file is
-/// an error unless `overwrite` is set, while an existing target directory is merged into.
-fn copy_entry(source: &Path, target: &Path, options: &CopyOptions) -> std::io::Result<()> {
+/// Copies one file or directory tree, reporting FALSE for anything skipped: a directory without
+/// `recursive`, or an existing file without `overwrite`.
+fn copy_entry(source: &Path, target: &Path, options: &CopyOptions) -> std::io::Result<bool> {
     let metadata = std::fs::metadata(source)?;
     if metadata.is_dir() {
+        if !options.recursive {
+            return Ok(false);
+        }
         if !target.is_dir() {
             std::fs::create_dir(target)?;
         }
-        let mut failure = None;
+        let mut copied = true;
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
-            if let Err(error) = copy_entry(&entry.path(), &target.join(entry.file_name()), options)
-            {
-                failure = Some(error);
-            }
+            copied &= copy_entry(&entry.path(), &target.join(entry.file_name()), options)?;
         }
-        if let Some(error) = failure {
-            return Err(error);
+        if options.mode {
+            std::fs::set_permissions(target, metadata.permissions())?;
         }
-    } else {
-        if target.exists() && !options.overwrite {
-            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-        }
-        std::fs::copy(source, target)?;
-        if !options.mode {
-            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o666 & !UMASK))?;
-        }
+        return Ok(copied);
     }
-    if options.mode && metadata.is_dir() {
+    if target.exists() && !options.overwrite {
+        return Ok(false);
+    }
+    std::fs::copy(source, target)?;
+    if options.mode {
         std::fs::set_permissions(target, metadata.permissions())?;
     }
     if options.date {
-        let file = std::fs::File::options()
-            .write(!metadata.is_dir())
-            .read(metadata.is_dir())
-            .open(target)?;
-        file.set_modified(metadata.modified()?)?;
+        std::fs::File::options().write(true).open(target)?.set_modified(metadata.modified()?)?;
+    }
+    Ok(true)
+}
+
+fn append_file(target: &str, source: &str) -> std::io::Result<()> {
+    let bytes = std::fs::read(source)?;
+    let mut file = std::fs::OpenOptions::new().append(true).create(true).open(target)?;
+    std::io::Write::write_all(&mut file, &bytes)
+}
+
+unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let unset = values::first_string(call.arg(1)).map(|text| text.into_owned());
+    if length(names) == 0 {
+        let mut entries: Vec<String> = std::env::vars().map(|(name, value)| format!("{name}={value}")).collect();
+        entries.sort();
+        return string_vector(&entries);
+    }
+    let count = length(names);
+    let result = alloc(SexpType::String, count)?;
+    for index in 0..count {
+        let name = values::string_at(names, index).map(|text| text.into_owned()).unwrap_or_default();
+        let charsxp = match std::env::var(&name) {
+            Ok(value) => values::mkchar(&value)?,
+            Err(_) => match &unset {
+                Some(unset) => values::mkchar(unset)?,
+                None => values::na_string(),
+            },
+        };
+        values::set_elt(result, index, charsxp);
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let new_values = call.arg(1);
+    let count = length(names);
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        let name = values::string_at(names, index).map(|text| text.into_owned()).unwrap_or_default();
+        let value = values::string_at(new_values, index).map(|text| text.into_owned()).unwrap_or_default();
+        // SAFETY: the interpreter is single-threaded.
+        std::env::set_var(&name, &value);
+        values::ints_mut(result)[index] = 1;
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
+    let names = call.arg(0);
+    let count = length(names);
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        if let Some(name) = values::string_at(names, index) {
+            // SAFETY: the interpreter is single-threaded.
+            std::env::remove_var(name.as_ref());
+        }
+        values::ints_mut(result)[index] = 1;
+    }
+    Ok(result)
+}
+
+unsafe fn do_proc_time(_call: &Call<'_>) -> R<Sexp> {
+    // GNU R reports whole milliseconds, which is what keeps printed timings short.
+    let milliseconds = |seconds: f64| (seconds * 1000.0).round() / 1000.0;
+    let times = |who: libc::c_int| {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(who, &mut usage);
+        let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+        (milliseconds(seconds(usage.ru_utime)), milliseconds(seconds(usage.ru_stime)))
+    };
+    let (user, system) = times(libc::RUSAGE_SELF);
+    let (child_user, child_system) = times(libc::RUSAGE_CHILDREN);
+    let elapsed = milliseconds(interp().started.elapsed().as_secs_f64());
+    let result = values::real_vector(&[user, system, elapsed, child_user, child_system])?;
+    let names = string_vector(&["user.self", "sys.self", "elapsed", "user.child", "sys.child"])?;
+    values::set_attr(result, symbols().names, names)?;
+    let class = scalar_string("proc_time")?;
+    values::set_attr(result, symbols().class, class)?;
+    Ok(result)
+}
+
+fn now_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64())
+}
+
+unsafe fn posixct(value: f64, tz: &str) -> R<Sexp> {
+    let result = scalar_real(value)?;
+    let class = string_vector(&["POSIXct", "POSIXt"])?;
+    values::set_attr(result, symbols().class, class)?;
+    if !tz.is_empty() {
+        let tzone = values::install("tzone")?;
+        values::set_attr(result, tzone, scalar_string(tz)?)?;
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_time(_call: &Call<'_>) -> R<Sexp> {
+    posixct(now_seconds(), "")
+}
+
+// Time zones.
+
+/// A time zone as R names it, with its rules from the system's tz database.
+struct Zone {
+    rules: jiff::tz::TimeZone,
+    /// The abbreviation of a name the database does not know. GNU R, through the C library,
+    /// treats such a zone as UTC under an abbreviation taken from the name's leading letters.
+    unknown: Option<String>,
+}
+
+impl Zone {
+    /// The UTC offset in seconds, whether daylight saving time is in effect, and the zone
+    /// abbreviation at `seconds` since the epoch.
+    fn offset_at(&self, seconds: f64) -> (i32, bool, String) {
+        if let Some(abbreviation) = &self.unknown {
+            return (0, false, abbreviation.clone());
+        }
+        let info = self.rules.to_offset_info(timestamp(seconds));
+        (info.offset().seconds(), info.dst().is_dst(), info.abbreviation().to_owned())
+    }
+
+    /// The instant a wall-clock time names, given as seconds since the epoch read as UTC.
+    /// A time skipped by a forward transition reads with the offset after it, and a repeated
+    /// time reads as its first occurrence, as the C library's `mktime` does; a known `isdst`
+    /// picks the matching side instead.
+    fn local_to_utc(&self, local: f64, isdst: i32) -> f64 {
+        if !local.is_finite() {
+            return local;
+        }
+        if self.unknown.is_some() {
+            return if isdst == 1 { local - 3600.0 } else { local };
+        }
+        let shift = cycles_into_range(local) * GREGORIAN_CYCLE;
+        let local = local + shift;
+        let time = broken_down(local);
+        let fraction = local - local.floor();
+        let datetime = jiff::civil::DateTime::new(
+            time.year as i16,
+            time.month as i8,
+            time.day as i8,
+            time.hour as i8,
+            time.minute as i8,
+            time.second.floor() as i8,
+            0,
+        );
+        let Ok(datetime) = datetime else {
+            return local - shift;
+        };
+        use jiff::tz::AmbiguousOffset;
+        let offset = match self.rules.to_ambiguous_timestamp(datetime).offset() {
+            AmbiguousOffset::Unambiguous { offset } => {
+                // Like C's `mktime`, an `isdst` that contradicts the zone's rule at that wall
+                // time reads the clock as the other kind of time, an hour apart.
+                let seconds = offset.seconds() as f64;
+                let instant = local.floor() - seconds;
+                let dst = self.rules.to_offset_info(timestamp(instant)).dst().is_dst();
+                // glibc applies this even in a zone that never observes daylight saving time.
+                let correction = match (isdst, dst) {
+                    (0, true) => -3600.0,
+                    (1, false) => 3600.0,
+                    _ => 0.0,
+                };
+                return instant - correction + fraction - shift;
+            }
+            AmbiguousOffset::Gap { before, after } => if isdst == 0 { before } else { after },
+            AmbiguousOffset::Fold { before, after } => if isdst == 0 { after } else { before },
+        };
+        local.floor() - offset.seconds() as f64 + fraction - shift
+    }
+
+    /// The standard and daylight-saving abbreviations GNU R stores after the zone's name in
+    /// a POSIXlt's `tzone`: the most recent of each kind the zone has used.
+    fn abbreviations(&self) -> (String, String) {
+        if let Some(abbreviation) = &self.unknown {
+            return (abbreviation.clone(), abbreviation.clone());
+        }
+        let now = jiff::Timestamp::now();
+        let current = self.rules.to_offset_info(now);
+        let mut standard = (!current.dst().is_dst()).then(|| current.abbreviation().to_owned());
+        let mut daylight = current.dst().is_dst().then(|| current.abbreviation().to_owned());
+        for transition in self.rules.preceding(now) {
+            if standard.is_some() && daylight.is_some() {
+                break;
+            }
+            let slot = if transition.dst().is_dst() { &mut daylight } else { &mut standard };
+            if slot.is_none() {
+                *slot = Some(transition.abbreviation().to_owned());
+            }
+        }
+        let standard = standard.unwrap_or_else(|| current.abbreviation().to_owned());
+        let daylight = daylight.unwrap_or_else(|| standard.clone());
+        (standard, daylight)
+    }
+}
+
+/// The zone `tz` names, where the empty name is the session's zone: `TZ`, or else the system's.
+fn resolve_zone(tz: &str) -> Zone {
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    // glibc reads `TZ=":Europe/Berlin"` as the zone file name after the colon.
+    let name = name.strip_prefix(':').map_or(name.clone(), str::to_owned);
+    if name.is_empty() {
+        return Zone { rules: jiff::tz::TimeZone::system(), unknown: None };
+    }
+    let found = jiff::tz::TimeZone::get(&name).or_else(|_| jiff::tz::TimeZone::posix(&name));
+    match found {
+        Ok(rules) => Zone { rules, unknown: None },
+        Err(_) => {
+            let letters: String = name.chars().take_while(char::is_ascii_alphabetic).collect();
+            let abbreviation = if letters.len() >= 3 { letters } else { String::new() };
+            Zone { rules: jiff::tz::TimeZone::UTC, unknown: Some(abbreviation) }
+        }
+    }
+}
+
+/// The session's zone name as GNU R reports it: the value of `TZ`, or the empty name when
+/// `TZ` is unset and the system's zone applies.
+fn session_zone_name() -> String {
+    std::env::var("TZ").unwrap_or_default()
+}
+
+/// The instant `seconds` names, moved by whole 400-year cycles into the range jiff covers.
+fn timestamp(seconds: f64) -> jiff::Timestamp {
+    let whole = seconds.floor() + cycles_into_range(seconds) * GREGORIAN_CYCLE;
+    jiff::Timestamp::from_second(whole as i64).unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+}
+
+/// The seconds in 400 Gregorian years, after which the calendar and the weekdays repeat.
+const GREGORIAN_CYCLE: f64 = 146_097.0 * 86_400.0;
+
+/// The number of 400-year cycles to add to `seconds` to land inside jiff's range (a year
+/// within -9999..=9999), so dates far outside it read with the rules of an equivalent year.
+fn cycles_into_range(seconds: f64) -> f64 {
+    // A cycle short of each bound, so a shifted wall-clock time stays representable too.
+    let upper = jiff::Timestamp::MAX.as_second() as f64 - GREGORIAN_CYCLE;
+    let lower = jiff::Timestamp::MIN.as_second() as f64 + GREGORIAN_CYCLE;
+    if seconds > upper {
+        -((seconds - upper) / GREGORIAN_CYCLE).ceil()
+    } else if seconds < lower {
+        ((lower - seconds) / GREGORIAN_CYCLE).ceil()
+    } else {
+        0.0
+    }
+}
+
+// Calendar arithmetic, in UTC.
+
+/// Days since 1970-01-01 for a civil date.
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146097 + day_of_era - 719468
+}
+
+/// The civil date of a day count since 1970-01-01: year, month (1-12), day.
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719468;
+    let era = if shifted >= 0 { shifted } else { shifted - 146096 } / 146097;
+    let day_of_era = shifted - era * 146097;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+struct BrokenDown {
+    second: f64,
+    minute: i64,
+    hour: i64,
+    day: i64,
+    month: i64,
+    year: i64,
+    weekday: i64,
+    yearday: i64,
+}
+
+fn broken_down(seconds: f64) -> BrokenDown {
+    let days = (seconds / 86400.0).floor() as i64;
+    let rest = seconds - days as f64 * 86400.0;
+    let (year, month, day) = civil_from_days(days);
+    let hour = (rest / 3600.0).floor() as i64;
+    let minute = ((rest - hour as f64 * 3600.0) / 60.0).floor() as i64;
+    let second = rest - hour as f64 * 3600.0 - minute as f64 * 60.0;
+    let weekday = (days + 4).rem_euclid(7);
+    let yearday = days - days_from_civil(year, 1, 1);
+    BrokenDown {
+        second,
+        minute,
+        hour,
+        day,
+        month,
+        year,
+        weekday,
+        yearday,
+    }
+}
+
+const MONTHS: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September",
+    "October", "November", "December",
+];
+const WEEKDAYS: [&str; 7] = [
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+];
+
+fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) -> String {
+    let mut output = String::new();
+    let mut characters = format.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            output.push(character);
+            continue;
+        }
+        // The GNU extensions: a padding flag (`_` spaces, `0` zeros, `-` none) and a field width.
+        let mut pad = None;
+        while let Some(flag @ ('_' | '0' | '-')) = characters.peek().copied() {
+            characters.next();
+            pad = Some(flag);
+        }
+        let mut width = None;
+        while let Some(digit) = characters.peek().and_then(|digit| digit.to_digit(10)) {
+            characters.next();
+            width = Some(width.unwrap_or(0) * 10 + digit as usize);
+        }
+        let Some(spec) = characters.next() else {
+            output.push('%');
+            break;
+        };
+        let start = output.len();
+        match spec {
+            'Y' => output.push_str(&time.year.to_string()),
+            'y' => output.push_str(&format!("{:02}", time.year.rem_euclid(100))),
+            'm' => output.push_str(&format!("{:02}", time.month)),
+            'd' => output.push_str(&format!("{:02}", time.day)),
+            'e' => output.push_str(&format!("{:2}", time.day)),
+            'H' => output.push_str(&format!("{:02}", time.hour)),
+            'I' => output.push_str(&format!("{:02}", if time.hour % 12 == 0 { 12 } else { time.hour % 12 })),
+            'M' => output.push_str(&format!("{:02}", time.minute)),
+            'S' => output.push_str(&format!("{:02}", time.second.floor() as i64)),
+            'p' => output.push_str(if time.hour < 12 { "AM" } else { "PM" }),
+            'P' => output.push_str(if time.hour < 12 { "am" } else { "pm" }),
+            's' => {
+                let local = days_from_civil(time.year, 1, 1) + time.yearday;
+                let seconds = local * 86400 + time.hour * 3600 + time.minute * 60
+                    + time.second.floor() as i64
+                    - i64::from(offset);
+                output.push_str(&seconds.to_string());
+            }
+            'j' => output.push_str(&format!("{:03}", time.yearday + 1)),
+            'B' => output.push_str(MONTHS[(time.month - 1) as usize]),
+            'b' | 'h' => output.push_str(&MONTHS[(time.month - 1) as usize][..3]),
+            'A' => output.push_str(WEEKDAYS[time.weekday as usize]),
+            'a' => output.push_str(&WEEKDAYS[time.weekday as usize][..3]),
+            'u' => output.push_str(&(if time.weekday == 0 { 7 } else { time.weekday }).to_string()),
+            'w' => output.push_str(&time.weekday.to_string()),
+            'U' => output.push_str(&format!("{:02}", (time.yearday + 7 - time.weekday) / 7)),
+            'W' => output.push_str(&format!("{:02}", (time.yearday + 7 - (time.weekday + 6) % 7) / 7)),
+            'V' => output.push_str(&format!("{:02}", iso_week(time).1)),
+            'G' => output.push_str(&iso_week(time).0.to_string()),
+            'g' => output.push_str(&format!("{:02}", iso_week(time).0.rem_euclid(100))),
+            'C' => output.push_str(&format!("{:02}", time.year.div_euclid(100))),
+            'k' => output.push_str(&format!("{:2}", time.hour)),
+            'l' => output.push_str(&format!("{:2}", if time.hour % 12 == 0 { 12 } else { time.hour % 12 })),
+            'x' => output.push_str(&format!("{:02}/{:02}/{:02}", time.month, time.day, time.year.rem_euclid(100))),
+            'X' => output.push_str(&format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second.floor() as i64)),
+            'r' => output.push_str(&format!(
+                "{:02}:{:02}:{:02} {}",
+                if time.hour % 12 == 0 { 12 } else { time.hour % 12 },
+                time.minute,
+                time.second.floor() as i64,
+                if time.hour < 12 { "AM" } else { "PM" }
+            )),
+            'c' => output.push_str(&format!(
+                "{} {} {:2} {:02}:{:02}:{:02} {}",
+                &WEEKDAYS[time.weekday as usize][..3],
+                &MONTHS[(time.month - 1) as usize][..3],
+                time.day,
+                time.hour,
+                time.minute,
+                time.second.floor() as i64,
+                time.year
+            )),
+            'Z' => output.push_str(zone),
+            'z' => {
+                let sign = if offset < 0 { '-' } else { '+' };
+                let minutes = offset.unsigned_abs() / 60;
+                output.push_str(&format!("{sign}{:02}{:02}", minutes / 60, minutes % 60));
+            }
+            'F' => output.push_str(&format!("{}-{:02}-{:02}", time.year, time.month, time.day)),
+            'T' => output.push_str(&format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second.floor() as i64)),
+            'D' => output.push_str(&format!("{:02}/{:02}/{:02}", time.month, time.day, time.year.rem_euclid(100))),
+            'R' => output.push_str(&format!("{:02}:{:02}", time.hour, time.minute)),
+            'n' => output.push('\n'),
+            't' => output.push('\t'),
+            '%' => output.push('%'),
+            'O' => {
+                if characters.peek() == Some(&'S') {
+                    characters.next();
+                    let digits = characters.peek().and_then(|digit| digit.to_digit(10));
+                    match digits {
+                        Some(digits) => {
+                            characters.next();
+                            let width = 3 + digits as usize;
+                            // GNU R truncates to the digits asked for rather than rounding, so a
+                            // second never prints as 60.
+                            let scale = 10f64.powi(digits as i32);
+                            let second = (time.second * scale).floor() / scale;
+                            output.push_str(&format!("{:0width$.digits$}", second, width = width, digits = digits as usize));
+                        }
+                        None => output.push_str(&format!("{:02}", time.second.floor() as i64)),
+                    }
+                }
+            }
+            other => {
+                output.push('%');
+                output.push(other);
+            }
+        }
+        if (pad.is_some() || width.is_some()) && "YymdeHIMSjCGgUWVuwkls".contains(spec) {
+            let piece = output.split_off(start);
+            let trimmed = piece.trim_start();
+            let (sign, digits) = match trimmed.strip_prefix('-') {
+                Some(rest) => ("-", rest),
+                None => ("", trimmed),
+            };
+            let digits = if pad.is_some() {
+                let stripped = digits.trim_start_matches('0');
+                if stripped.is_empty() { "0" } else { stripped }
+            } else {
+                digits
+            };
+            let natural = format!("{sign}{digits}");
+            let width = match (pad, width) {
+                (Some('-'), _) => 0,
+                (_, Some(width)) => width,
+                // A flag alone keeps the conversion's usual width.
+                _ => piece.len(),
+            };
+            let fill = width.saturating_sub(natural.len());
+            if pad == Some('_') || (pad.is_none() && piece.starts_with(' ')) {
+                output.push_str(&" ".repeat(fill));
+                output.push_str(&natural);
+            } else {
+                output.push_str(sign);
+                output.push_str(&"0".repeat(fill));
+                output.push_str(digits);
+            }
+        }
+    }
+    output
+}
+
+/// The ISO 8601 week-numbering year and week: weeks start on Monday, and week 1 is the one
+/// that holds the year's first Thursday.
+fn iso_week(time: &BrokenDown) -> (i64, i64) {
+    let weeks_in = |year: i64| {
+        let starts = |year: i64| (year + year.div_euclid(4) - year.div_euclid(100) + year.div_euclid(400)).rem_euclid(7);
+        if starts(year) == 4 || starts(year - 1) == 3 { 53 } else { 52 }
+    };
+    let iso_weekday = if time.weekday == 0 { 7 } else { time.weekday };
+    let week = (time.yearday + 1 - iso_weekday + 10).div_euclid(7);
+    if week < 1 {
+        (time.year - 1, weeks_in(time.year - 1))
+    } else if week > weeks_in(time.year) {
+        (time.year + 1, 1)
+    } else {
+        (time.year, week)
+    }
+}
+
+const POSIXLT_NAMES: [&str; 11] = [
+    "sec", "min", "hour", "mday", "mon", "year", "wday", "yday", "isdst", "zone", "gmtoff",
+];
+
+/// A POSIXlt list for `seconds` since the epoch.
+unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
+    let count = seconds.len();
+    let fields: Vec<Sexp> = (0..11)
+        .map(|field| match field {
+            0 => alloc(SexpType::Real, count),
+            9 => alloc(SexpType::String, count),
+            _ => alloc(SexpType::Integer, count),
+        })
+        .collect::<R<_>>()?;
+    let zone = resolve_zone(tz);
+    for (index, &value) in seconds.iter().enumerate() {
+        if !value.is_finite() {
+            // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
+            values::reals_mut(fields[0])[index] = value;
+            for field in 1..8 {
+                values::ints_mut(fields[field])[index] = NA_INTEGER;
+            }
+            values::ints_mut(fields[8])[index] = -1;
+            values::set_elt(fields[9], index, values::mkchar("")?);
+            values::ints_mut(fields[10])[index] = NA_INTEGER;
+            continue;
+        }
+        let (offset, dst, abbreviation) = zone.offset_at(value);
+        let time = broken_down(value + offset as f64);
+        values::reals_mut(fields[0])[index] = time.second;
+        values::ints_mut(fields[1])[index] = time.minute as i32;
+        values::ints_mut(fields[2])[index] = time.hour as i32;
+        values::ints_mut(fields[3])[index] = time.day as i32;
+        values::ints_mut(fields[4])[index] = time.month as i32 - 1;
+        values::ints_mut(fields[5])[index] = time.year as i32 - 1900;
+        values::ints_mut(fields[6])[index] = time.weekday as i32;
+        values::ints_mut(fields[7])[index] = time.yearday as i32;
+        values::ints_mut(fields[8])[index] = dst as i32;
+        values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+        values::ints_mut(fields[10])[index] = offset;
+    }
+    let list = values::list_vector(&fields)?;
+    let field_names = string_vector(&POSIXLT_NAMES)?;
+    values::set_attr(list, symbols().names, field_names)?;
+    let class = string_vector(&["POSIXlt", "POSIXt"])?;
+    values::set_attr(list, symbols().class, class)?;
+    // UTC and GMT keep their bare name; every other zone, the session's included, adds its
+    // standard and daylight-saving abbreviations.
+    let tzone = values::install("tzone")?;
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    let names = if name == "UTC" || name == "GMT" {
+        scalar_string(&name)?
+    } else {
+        let (standard, daylight) = zone.abbreviations();
+        string_vector(&[name.as_str(), standard.as_str(), daylight.as_str()])?
+    };
+    values::set_attr(list, tzone, names)?;
+    let balanced = values::install("balanced")?;
+    values::set_attr(list, balanced, scalar_bool(true)?)?;
+    Ok(list)
+}
+
+unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
+    let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
+    let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
+    let seconds: Vec<f64> = values::reals(times).to_vec();
+    let result = posixlt_from_seconds(&seconds, &tz)?;
+    set_year_names(result, values::names(call.arg(0)))?;
+    Ok(result)
+}
+
+unsafe fn require_posixlt(list: Sexp) -> R<()> {
+    if list.kind() != SexpType::List || length(list) < 9 {
+        return Err(error("a valid \"POSIXlt\" object is a list of at least 9 elements"));
     }
     Ok(())
 }
 
-/// The umask `Sys.umask()` reports, applied wherever GNU R applies the process umask.
-const UMASK: u32 = 0o022;
+/// The instants a POSIXlt's wall-clock fields name in the zone `tz`.
+unsafe fn posixlt_instants(list: Sexp, tz: &str) -> R<Vec<f64>> {
+    let mut seconds = posixlt_seconds(list)?;
+    let zone = resolve_zone(tz);
+    // GNU R converts UTC and GMT itself rather than through `mktime`, which ignores `isdst`.
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    let honors_isdst = name != "UTC" && name != "GMT";
+    let isdst = if length(list) > 8 { list.element(8) } else { nil() };
+    for (position, value) in seconds.iter_mut().enumerate() {
+        let flag = if length(isdst) == 0 || !honors_isdst {
+            -1
+        } else {
+            let flag = crate::subset::numeric_element(isdst, position % length(isdst));
+            if flag.is_nan() { -1 } else { flag as i32 }
+        };
+        *value = zone.local_to_utc(*value, flag);
+    }
+    Ok(seconds)
+}
+
+/// The zone a POSIXlt's `tzone` attribute names, or the session's zone.
+unsafe fn posixlt_zone(list: Sexp) -> R<String> {
+    let tzone = get_attr(list, values::install("tzone")?);
+    Ok(values::first_string(tzone).map(|text| text.into_owned()).unwrap_or_default())
+}
+
+/// A POSIXlt's wall-clock fields as seconds since the epoch read as UTC.
+unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
+    require_posixlt(list)?;
+    let field = |index: usize| -> Sexp { if length(list) > index { list.element(index) } else { nil() } };
+    let count = (0..6).map(|index| length(field(index))).max().unwrap_or(0);
+    let at = |index: usize, position: usize| -> f64 {
+        let vector = field(index);
+        let size = length(vector);
+        if size == 0 {
+            return NA_REAL;
+        }
+        crate::subset::numeric_element(vector, position % size)
+    };
+    let mut seconds = Vec::with_capacity(count);
+    for position in 0..count {
+        let second = at(0, position);
+        let minute = at(1, position);
+        let hour = at(2, position);
+        let day = at(3, position);
+        let month = at(4, position);
+        let year = at(5, position);
+        if !second.is_finite() {
+            seconds.push(second);
+            continue;
+        }
+        if [minute, hour, day, month, year].iter().any(|value| value.is_nan()) {
+            seconds.push(NA_REAL);
+            continue;
+        }
+        let total_months = year as i64 * 12 + month as i64;
+        let year = 1900 + total_months.div_euclid(12);
+        let month = total_months.rem_euclid(12) + 1;
+        let days = days_from_civil(year, month, 1) + day as i64 - 1;
+        seconds.push(days as f64 * 86400.0 + hour * 3600.0 + minute * 60.0 + second);
+    }
+    Ok(seconds)
+}
+
+/// Normalizes out-of-range POSIXlt fields, or with `fill_only` recycles every field to the
+/// longest one and marks the result `balanced = NA`, as GNU R's `balancePOSIXlt` does.
+unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
+    require_posixlt(list)?;
+    let balanced_symbol = values::install("balanced")?;
+    let mark = get_attr(list, balanced_symbol);
+    // `balanced = TRUE` covers both requests, and `NA` (filled only) satisfies a fill.
+    let already = mark.kind() == SexpType::Logical
+        && length(mark) == 1
+        && match values::ints(mark)[0] {
+            NA_LOGICAL => fill_only,
+            0 => false,
+            _ => true,
+        };
+    let result = if already {
+        let result = values::shallow_duplicate(list)?;
+        crate::heap().root(result);
+        result
+    } else if fill_only {
+        let count = (0..length(list)).map(|index| length(list.element(index))).max().unwrap_or(0);
+        let result = values::shallow_duplicate(list)?;
+        crate::heap().root(result);
+        for index in 0..length(list) {
+            let field = list.element(index);
+            let size = length(field);
+            if size == count || size == 0 {
+                continue;
+            }
+            let filled = alloc(field.kind(), count)?;
+            for position in 0..count {
+                crate::subset::copy_element(field, position % size, filled, position)?;
+            }
+            values::set_elt(result, index, filled);
+        }
+        values::set_attr(result, balanced_symbol, values::scalar_logical(NA_LOGICAL)?)?;
+        result
+    } else {
+        // A POSIXlt with `zone` and `gmtoff` balances through its instants, as `as.POSIXct`
+        // reads them. One without stays without them: GNU R normalizes its wall clock as plain
+        // calendar arithmetic and keeps its `isdst` and `tzone`.
+        let tz = posixlt_zone(list)?;
+        let result = if length(list) >= 11 {
+            let seconds = posixlt_instants(list, &tz)?;
+            posixlt_from_seconds(&seconds, &tz)?
+        } else {
+            let wall = posixlt_seconds(list)?;
+            let full = posixlt_from_seconds(&wall, "UTC")?;
+            crate::heap().root(full);
+            let fields = length(list);
+            let result = alloc(SexpType::List, fields)?;
+            crate::heap().root(result);
+            for index in 0..fields.min(8) {
+                values::set_elt(result, index, full.element(index));
+            }
+            if fields > 8 {
+                let source = list.element(8);
+                let isdst = alloc(SexpType::Integer, wall.len())?;
+                for (position, flag) in values::ints_mut(isdst).iter_mut().enumerate() {
+                    let value = if length(source) == 0 { -1.0 } else { crate::subset::numeric_element(source, position % length(source)) };
+                    *flag = if value.is_nan() { -1 } else { value as i32 };
+                }
+                values::set_elt(result, 8, isdst);
+            }
+            let names: Vec<&str> = POSIXLT_NAMES.iter().take(fields).copied().collect();
+            values::set_attr(result, symbols().names, string_vector(&names)?)?;
+            values::set_attr(result, symbols().class, string_vector(&["POSIXlt", "POSIXt"])?)?;
+            let tzone_symbol = values::install("tzone")?;
+            let tzone = get_attr(list, tzone_symbol);
+            if tzone != nil() {
+                values::set_attr(result, tzone_symbol, tzone)?;
+            }
+            values::set_attr(result, balanced_symbol, scalar_bool(true)?)?;
+            result
+        };
+        result
+    };
+    if !already && length(list) > 5 && length(result) > 5 {
+        // The year's names recycle with the fields, as GNU R balances them.
+        let names = values::names(list.element(5));
+        let count = length(result.element(5));
+        if names != nil() && length(names) > 0 && length(names) != count {
+            let recycled = alloc(SexpType::String, count)?;
+            for position in 0..count {
+                values::set_elt(recycled, position, names.element(position % length(names)));
+            }
+            set_year_names(result, recycled)?;
+        } else {
+            set_year_names(result, names)?;
+        }
+    }
+    if !classed {
+        values::remove_attr(result, symbols().class);
+    }
+    Ok(result)
+}
+
+/// `as.POSIXct(x, tz)`: the instants a POSIXlt names in the zone `tz`.
+unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
+    let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
+    let seconds = posixlt_instants(call.arg(0), &tz)?;
+    let result = values::real_vector(&seconds)?;
+    set_names_from_year(call.arg(0), result)?;
+    Ok(result)
+}
+
+/// A POSIXlt keeps its element names on the `year` field.
+unsafe fn set_year_names(list: Sexp, names: Sexp) -> R<()> {
+    if names != nil() && length(list) > 5 && length(list.element(5)) == length(names) {
+        values::set_attr(list.element(5), symbols().names, names)?;
+    }
+    Ok(())
+}
+
+/// Names `result` after the POSIXlt's year names. A ragged POSIXlt's year names can be shorter
+/// than the result, and GNU R pads them with NA.
+unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
+    let names = values::names(list.element(5));
+    if names == nil() {
+        return Ok(());
+    }
+    let count = length(result);
+    let padded = if length(names) == count {
+        names
+    } else {
+        let padded = alloc(SexpType::String, count)?;
+        for position in 0..count {
+            let name = if position < length(names) { names.element(position) } else { values::na_string() };
+            values::set_elt(padded, position, name);
+        }
+        padded
+    };
+    values::set_attr(result, symbols().names, padded)
+}
+
+unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
+    let list = call.arg(0);
+    let formats = call.arg(1);
+    let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
+    let seconds = posixlt_seconds(list)?;
+    let count = seconds.len();
+    let result = alloc(SexpType::String, count)?;
+    let tzone = get_attr(list, values::install("tzone")?);
+    let field = |index: usize| if length(list) > index { list.element(index) } else { nil() };
+    let (isdst, zones, offsets) = (field(8), field(9), field(10));
+    for (index, &value) in seconds.iter().enumerate() {
+        if is_na_real(value) {
+            values::set_elt(result, index, values::na_string());
+            continue;
+        }
+        if !value.is_finite() {
+            let text = if value.is_nan() { "NaN" } else if value > 0.0 { "Inf" } else { "-Inf" };
+            values::set_elt(result, index, values::mkchar(text)?);
+            continue;
+        }
+        let format = values::string_at(formats, index % length(formats).max(1))
+            .map(|text| text.into_owned())
+            .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+        // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
+        let dst = if length(isdst) > 0 { crate::subset::numeric_element(isdst, index % length(isdst)) } else { 0.0 };
+        let zone = if zones.kind() == SexpType::String && length(zones) > 0 {
+            values::string_at(zones, index % length(zones)).map(|text| text.into_owned()).unwrap_or_default()
+        } else {
+            let slot = if dst > 0.0 { 2 } else { 1 };
+            values::string_at(tzone, slot.min(length(tzone).saturating_sub(1))).map(|text| text.into_owned()).unwrap_or_default()
+        };
+        let known = if length(offsets) > 0 {
+            Some(crate::subset::numeric_element(offsets, index % length(offsets))).filter(|offset| !offset.is_nan())
+        } else {
+            Some(0.0)
+        };
+        // An unknown offset (strptime leaves it NA outside UTC) comes from the zone's rules at
+        // that wall-clock time, as C's `mktime` fills it in for GNU R.
+        let offset = match known {
+            Some(offset) => offset as i32,
+            None => {
+                let name = values::string_at(tzone, 0).map(|text| text.into_owned()).unwrap_or_default();
+                let flag = if dst.is_nan() { -1 } else { dst as i32 };
+                (value - resolve_zone(&name).local_to_utc(value, flag)) as i32
+            }
+        };
+        let mut text = format_broken_down(&broken_down(value), &format, &zone, offset);
+        if use_tz && !zone.is_empty() {
+            text.push(' ');
+            text.push_str(&zone);
+        }
+        values::set_elt(result, index, values::mkchar(&text)?);
+    }
+    set_names_from_year(list, result)?;
+    Ok(result)
+}
+
+/// The parsed time as whole seconds since the epoch and the fraction of a second apart, so
+/// that the fraction keeps every digit the text gave it.
+fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f64, f64)> {
+    let mut year = 1970i64;
+    let mut month = 1i64;
+    let mut day = 1i64;
+    let mut hour = 0i64;
+    let mut minute = 0i64;
+    let mut second = 0f64;
+    let mut yearday = None;
+    let mut input = text.trim_start();
+    let mut format_characters = format.chars();
+    let number = |input: &mut &str, max_digits: usize| -> Option<i64> {
+        let trimmed = input.trim_start();
+        let (sign, rest) = match trimmed.strip_prefix('-') {
+            Some(rest) => (-1, rest),
+            None => (1, trimmed),
+        };
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).take(max_digits).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        *input = &rest[digits.len()..];
+        digits.parse::<i64>().ok().map(|value| sign * value)
+    };
+    while let Some(character) = format_characters.next() {
+        if character != '%' {
+            if character.is_whitespace() {
+                input = input.trim_start();
+                continue;
+            }
+            input = input.strip_prefix(character)?;
+            continue;
+        }
+        match format_characters.next()? {
+            'Y' => year = number(&mut input, 4)?,
+            'y' => {
+                let value = number(&mut input, 2)?;
+                year = if value < 69 { 2000 + value } else { 1900 + value };
+            }
+            'm' => month = number(&mut input, 2)?,
+            'd' | 'e' => day = number(&mut input, 2)?,
+            'H' => hour = number(&mut input, 2)?,
+            'M' => minute = number(&mut input, 2)?,
+            'S' => second = number(&mut input, 2)? as f64,
+            'O' => {
+                if format_characters.next()? == 'S' {
+                    let trimmed = input.trim_start();
+                    let length = trimmed.chars().take_while(|c| c.is_ascii_digit() || *c == '.').count();
+                    second = trimmed[..length].parse().ok()?;
+                    input = &trimmed[length..];
+                }
+            }
+            'j' => yearday = Some(number(&mut input, 3)?),
+            'B' | 'b' | 'h' => {
+                let lower = input.to_lowercase();
+                let found = MONTHS.iter().position(|name| lower.starts_with(&name.to_lowercase()))
+                    .map(|position| (position, MONTHS[position].len()))
+                    .or_else(|| MONTHS.iter().position(|name| lower.starts_with(&name[..3].to_lowercase())).map(|position| (position, 3)))?;
+                month = found.0 as i64 + 1;
+                input = &input[found.1..];
+            }
+            'F' => {
+                year = number(&mut input, 4)?;
+                input = input.strip_prefix('-')?;
+                month = number(&mut input, 2)?;
+                input = input.strip_prefix('-')?;
+                day = number(&mut input, 2)?;
+            }
+            'T' => {
+                hour = number(&mut input, 2)?;
+                input = input.strip_prefix(':')?;
+                minute = number(&mut input, 2)?;
+                input = input.strip_prefix(':')?;
+                second = number(&mut input, 2)? as f64;
+            }
+            '%' => input = input.strip_prefix('%')?,
+            _ => {}
+        }
+    }
+    if let Some(yearday) = yearday {
+        if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
+            if yearday == 366 {
+                warnings.push(format!("day-of-year 366 in year {year} is invalid"));
+            }
+            return None;
+        }
+        month = 1;
+        day = yearday;
+    }
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let month_days = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if day < 1 || day > month_days[(month - 1) as usize] && format.contains("%d") {
+        return None;
+    }
+    let days = days_from_civil(year, month, 1) + day - 1;
+    let whole = second.floor();
+    Some((days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + whole, second - whole))
+}
+
+unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
+    let texts = call.arg(0);
+    let formats = call.arg(1);
+    let tz = values::first_string(call.arg(2)).map(|text| text.into_owned()).unwrap_or_default();
+    let count = length(texts);
+    let mut seconds = Vec::with_capacity(count);
+    let mut fractions = Vec::with_capacity(count);
+    let zone = resolve_zone(&tz);
+    let mut warnings = Vec::new();
+    for index in 0..count {
+        let format = values::string_at(formats, index % length(formats).max(1))
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
+        let (whole, fraction) = values::string_at(texts, index)
+            .and_then(|text| parse_time(&text, &format, &mut warnings))
+            .unwrap_or((NA_REAL, 0.0));
+        seconds.push(zone.local_to_utc(whole, -1));
+        fractions.push(fraction);
+    }
+    let result = posixlt_from_seconds(&seconds, &tz)?;
+    let second_field = values::list_elt(result, 0);
+    for (second, fraction) in values::reals_mut(second_field).iter_mut().zip(&fractions) {
+        *second += fraction;
+    }
+    // GNU R's strptime leaves the UTC offset unknown outside UTC, because it fills the fields
+    // from the text rather than from an instant.
+    let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
+    if name != "UTC" && name != "GMT" {
+        values::ints_mut(values::list_elt(result, 10)).fill(NA_INTEGER);
+    }
+    set_year_names(result, values::names(texts))?;
+    for message in warnings {
+        crate::conditions::warning(message)?;
+    }
+    Ok(result)
+}
+
+unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
+    let dates = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
+    let seconds: Vec<f64> = values::reals(dates)
+        .iter()
+        .map(|&days| if days.is_finite() { days.floor() * 86400.0 } else { days })
+        .collect();
+    let result = posixlt_from_seconds(&seconds, "UTC")?;
+    // GNU R breaks a date down as midnight UTC whatever `tz` is, then labels every field and the
+    // `tzone` attribute with `tz`, so `as.POSIXct` later reads that wall clock in `tz`.
+    let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_else(|| "UTC".to_owned());
+    let label = values::mkchar(&tz)?;
+    let zones = result.element(9);
+    for (index, &value) in seconds.iter().enumerate() {
+        if value.is_finite() {
+            values::set_elt(zones, index, label);
+        }
+    }
+    values::set_attr(result, values::install("tzone")?, scalar_string(&tz)?)?;
+    set_year_names(result, values::names(call.arg(0)))?;
+    Ok(result)
+}
+
+unsafe fn do_posixlt_to_date(call: &Call<'_>) -> R<Sexp> {
+    let seconds = posixlt_seconds(call.arg(0))?;
+    let days: Vec<f64> = seconds
+        .iter()
+        .map(|&value| if value.is_finite() { (value / 86400.0).floor() } else { value })
+        .collect();
+    let result = values::real_vector(&days)?;
+    set_names_from_year(call.arg(0), result)?;
+    let class = scalar_string("Date")?;
+    values::set_attr(result, symbols().class, class)?;
+    Ok(result)
+}
+
+unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    let count = length(paths);
+    let size = alloc(SexpType::Real, count)?;
+    let is_dir = alloc(SexpType::Logical, count)?;
+    let mode = alloc(SexpType::Integer, count)?;
+    let mtime = alloc(SexpType::Real, count)?;
+    for index in 0..count {
+        let path = values::string_at(paths, index).map(|text| crate::connections::expand_path(&text)).unwrap_or_default();
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                values::reals_mut(size)[index] = metadata.len() as f64;
+                values::ints_mut(is_dir)[index] = metadata.is_dir() as i32;
+                values::ints_mut(mode)[index] = (metadata.permissions().mode() & 0o777) as i32;
+                values::reals_mut(mtime)[index] = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(NA_REAL, |duration| duration.as_secs_f64());
+            }
+            Err(_) => {
+                values::reals_mut(size)[index] = NA_REAL;
+                values::ints_mut(is_dir)[index] = NA_INTEGER;
+                values::ints_mut(mode)[index] = NA_INTEGER;
+                values::reals_mut(mtime)[index] = NA_REAL;
+            }
+        }
+    }
+    let octmode = scalar_string("octmode")?;
+    values::set_attr(mode, symbols().class, octmode)?;
+    let times = string_vector(&["POSIXct", "POSIXt"])?;
+    values::set_attr(mtime, symbols().class, times)?;
+    values::named_list(&[("size", size), ("isdir", is_dir), ("mode", mode), ("mtime", mtime), ("ctime", mtime), ("atime", mtime)])
+}
+
+fn walk(directory: &Path, recursive: bool, include_dirs: bool, output: &mut Vec<PathBuf>, all: bool) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !all && name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() && recursive {
+            if include_dirs {
+                output.push(path.clone());
+            }
+            walk(&path, recursive, include_dirs, output, all);
+        } else {
+            output.push(path);
+        }
+    }
+}
+
+unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
+    let directories = call.arg(0);
+    let pattern = values::first_string(call.arg(1)).map(|text| text.into_owned());
+    let all = values::as_logical_scalar(call.arg(2)) == 1;
+    let full = values::as_logical_scalar(call.arg(3)) == 1;
+    let recursive = values::as_logical_scalar(call.arg(4)) == 1;
+    let ignore_case = values::as_logical_scalar(call.arg(5)) == 1;
+    let include_dirs = values::as_logical_scalar(call.arg(6)) == 1;
+    let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
+    let regex = match &pattern {
+        Some(pattern) => Some(
+            regex::RegexBuilder::new(&crate::strings::translate_regex(pattern, true))
+                .case_insensitive(ignore_case)
+                .build()
+                .map_err(|failure| error(format!("invalid 'pattern' regular expression: {failure}")))?,
+        ),
+        None => None,
+    };
+    let mut names = Vec::new();
+    for index in 0..length(directories) {
+        let Some(directory) = values::string_at(directories, index) else {
+            continue;
+        };
+        let directory = crate::connections::expand_path(&directory);
+        let mut paths = Vec::new();
+        walk(Path::new(&directory), recursive, include_dirs, &mut paths, all);
+        if all && !recursive && !no_dots {
+            names.push(if full { format!("{directory}/.") } else { ".".into() });
+            names.push(if full { format!("{directory}/..") } else { "..".into() });
+        }
+        for path in paths {
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Some(regex) = &regex
+                && !regex.is_match(&name)
+            {
+                continue;
+            }
+            let shown = if full {
+                path.display().to_string()
+            } else {
+                path.strip_prefix(&directory).map(|relative| relative.display().to_string()).unwrap_or(name)
+            };
+            names.push(shown);
+        }
+    }
+    crate::sort::sort_strings(&mut names);
+    string_vector(&names)
+}
+
+unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
+    let directories = call.arg(0);
+    let full = values::as_logical_scalar(call.arg(1)) == 1;
+    let recursive = values::as_logical_scalar(call.arg(2)) == 1;
+    let mut names = Vec::new();
+    for index in 0..length(directories) {
+        let Some(directory) = values::string_at(directories, index) else {
+            continue;
+        };
+        let directory = crate::connections::expand_path(&directory);
+        names.push(if full { directory.clone() } else { String::new() });
+        let mut paths = Vec::new();
+        walk(Path::new(&directory), recursive, true, &mut paths, true);
+        for path in paths.into_iter().filter(|path| path.is_dir()) {
+            names.push(if full {
+                path.display().to_string()
+            } else {
+                path.strip_prefix(&directory).map(|relative| relative.display().to_string()).unwrap_or_default()
+            });
+        }
+    }
+    crate::sort::sort_strings(&mut names);
+    string_vector(&names)
+}
+
+unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    let must_work = values::as_logical_scalar(call.arg(2));
+    let count = length(paths);
+    let result = alloc(SexpType::String, count)?;
+    for index in 0..count {
+        let Some(path) = values::string_at(paths, index) else {
+            values::set_elt(result, index, values::na_string());
+            continue;
+        };
+        let expanded = crate::connections::expand_path(&path);
+        let normalized = match std::fs::canonicalize(&expanded) {
+            Ok(canonical) => canonical.display().to_string(),
+            Err(_) => {
+                if must_work == 1 {
+                    return Err(call.error(format!("path[{}]=\"{path}\": No such file or directory", index + 1)));
+                }
+                if must_work == NA_INTEGER {
+                    crate::conditions::warning_call(call.call, format!("path[{}]=\"{path}\": No such file or directory", index + 1))?;
+                }
+                expanded
+            }
+        };
+        values::set_elt(result, index, values::mkchar(&normalized)?);
+    }
+    Ok(result)
+}
+
+unsafe fn do_file_path(call: &Call<'_>) -> R<Sexp> {
+    let parts = call.arg(0);
+    let separator = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_else(|| "/".into());
+    let count = parts.length() as usize;
+    let pieces: Vec<Sexp> = (0..count)
+        .map(|index| crate::coerce::coerce_vector(parts.element(index), SexpType::String))
+        .collect::<R<_>>()?;
+    if pieces.iter().any(|piece| length(*piece) == 0) {
+        return alloc(SexpType::String, 0);
+    }
+    let longest = pieces.iter().map(|piece| length(*piece)).max().unwrap_or(0);
+    let mut paths = Vec::with_capacity(longest);
+    for index in 0..longest {
+        let parts: Vec<String> = pieces
+            .iter()
+            .map(|piece| values::string_at(*piece, index % length(*piece)).map_or_else(|| "NA".into(), |text| text.into_owned()))
+            .collect();
+        paths.push(parts.join(&separator));
+    }
+    string_vector(&paths)
+}
+
+unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
+    let patterns = call.arg(0);
+    let directories = call.arg(1);
+    let extensions = call.arg(2);
+    let count = length(patterns).max(length(directories)).max(length(extensions));
+    let mut paths = Vec::new();
+    static mut COUNTER: u64 = 0;
+    for index in 0..count {
+        let pattern = values::string_at(patterns, index % length(patterns).max(1)).map(|text| text.into_owned()).unwrap_or_default();
+        let directory = values::string_at(directories, index % length(directories).max(1)).map(|text| text.into_owned()).unwrap_or_else(temp_dir);
+        let extension = values::string_at(extensions, index % length(extensions).max(1)).map(|text| text.into_owned()).unwrap_or_default();
+        COUNTER += 1;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.subsec_nanos() as u64)
+            ^ COUNTER.wrapping_mul(0x9e3779b97f4a7c15);
+        paths.push(format!("{directory}/{pattern}{unique:x}{extension}"));
+    }
+    string_vector(&paths)
+}
+
+unsafe fn do_unlink(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    let recursive = values::as_logical_scalar(call.arg(1)) == 1;
+    let mut failed = 0;
+    for index in 0..length(paths) {
+        let Some(path) = values::string_at(paths, index) else {
+            continue;
+        };
+        let path = crate::connections::expand_path(&path);
+        let target = Path::new(&path);
+        let outcome = if target.is_dir() {
+            if recursive { std::fs::remove_dir_all(target) } else { std::fs::remove_dir(target) }
+        } else if target.exists() {
+            std::fs::remove_file(target)
+        } else {
+            Ok(())
+        };
+        if outcome.is_err() {
+            failed = 1;
+        }
+    }
+    scalar_integer(failed)
+}
+
+unsafe fn do_file_rename(call: &Call<'_>) -> R<Sexp> {
+    let from = call.arg(0);
+    let to = call.arg(1);
+    let count = length(from);
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        let source = values::string_at(from, index).map(|text| text.into_owned()).unwrap_or_default();
+        let target = values::string_at(to, index).map(|text| text.into_owned()).unwrap_or_default();
+        values::ints_mut(result)[index] = std::fs::rename(source, target).is_ok() as i32;
+    }
+    Ok(result)
+}
+
+unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
+    let path = values::require_string(call.arg(0), "path")?;
+    let recursive = values::as_logical_scalar(call.arg(2)) == 1;
+    let path = crate::connections::expand_path(&path);
+    let outcome = if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) };
+    scalar_bool(outcome.is_ok())
+}
+
+unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
+    let path = values::require_string(call.arg(0), "dir")?;
+    let previous = std::env::current_dir().map(|path| path.display().to_string()).unwrap_or_default();
+    std::env::set_current_dir(crate::connections::expand_path(&path))
+        .map_err(|_| call.error("cannot change working directory"))?;
+    scalar_string(&previous)
+}
+
+unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
+    let mut name: libc::utsname = std::mem::zeroed();
+    libc::uname(&mut name);
+    let field = |raw: &[libc::c_char]| -> String {
+        let bytes: Vec<u8> = raw.iter().take_while(|&&byte| byte != 0).map(|&byte| byte as u8).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let values_list = [
+        field(&name.sysname),
+        field(&name.release),
+        field(&name.version),
+        field(&name.nodename),
+        field(&name.machine),
+        user.clone(),
+        user.clone(),
+        user,
+    ];
+    let result = string_vector(&values_list)?;
+    let names = string_vector(&["sysname", "release", "version", "nodename", "machine", "login", "user", "effective_user"])?;
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
+}
+
+unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
+    let utf8 = scalar_bool(true)?;
+    let latin1 = scalar_bool(false)?;
+    let mbcs = scalar_bool(true)?;
+    let codeset = scalar_string("UTF-8")?;
+    values::named_list(&[("MBCS", mbcs), ("UTF-8", utf8), ("Latin-1", latin1), ("codeset", codeset)])
+}
+
+unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
+    let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
+    let fields: Vec<(&str, String)> = vec![
+        ("platform", platform.clone()),
+        ("arch", std::env::consts::ARCH.to_owned()),
+        ("os", "linux-gnu".to_owned()),
+        ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
+        ("status", String::new()),
+        ("major", "4".to_owned()),
+        ("minor", "3.3".to_owned()),
+        ("year", "2024".to_owned()),
+        ("month", "02".to_owned()),
+        ("day", "29".to_owned()),
+        ("svn rev", "86002".to_owned()),
+        ("language", "R".to_owned()),
+        ("version.string", "R version 4.3.3 (2024-02-29)".to_owned()),
+        ("nickname", "Angel Food Cake".to_owned()),
+    ];
+    let items: Vec<(&str, Sexp)> = fields
+        .iter()
+        .map(|(name, value)| Ok((*name, scalar_string(value)?)))
+        .collect::<R<_>>()?;
+    values::named_list(&items)
+}
+
+unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
+    let names = [
+        "jpeg", "png", "tiff", "tcltk", "X11", "aqua", "http/ftp", "sockets", "libxml", "fifo",
+        "cledit", "iconv", "NLS", "Rprof", "profmem", "cairo", "ICU", "long.double", "libcurl",
+    ];
+    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0];
+    let result = values::logical_vector(&flags)?;
+    let names = string_vector(&names)?;
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
+}
+
+unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
+    crate::heap().collect(heap::Collection::Major);
+    (interp().hooks.run_finalizers)();
+    let stats = crate::heap().stats();
+    let result = values::real_vector(&[
+        stats.live_objects as f64,
+        0.0,
+        (stats.live_bytes as f64) / 1048576.0,
+        0.0,
+        NA_REAL,
+        NA_REAL,
+        NA_REAL,
+        NA_REAL,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ])?;
+    Ok(result)
+}
+
+/// `gctorture(on)`: with `on`, every allocation collects first, which turns a missing root into
+/// a crash where it happens. Returns the previous setting.
+unsafe fn do_gctorture(call: &Call<'_>) -> R<Sexp> {
+    let previous = set_gc_stress(values::as_logical_scalar(call.arg(0)) == 1);
+    scalar_bool(previous)
+}
+
+/// `gctorture2(step, wait, inhibit_release)`: any positive `step` turns the stress on, since the
+/// heap collects either before every allocation or by its normal policy.
+unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
+    let step = values::as_integer_scalar(call.arg(0));
+    let previous = set_gc_stress(step != NA_INTEGER && step > 0);
+    scalar_integer(i32::from(previous))
+}
+
+unsafe fn set_gc_stress(on: bool) -> bool {
+    let policy = crate::heap().policy_mut();
+    let previous = matches!(policy.stress, GcStress::EveryAllocation);
+    policy.stress = if on { GcStress::EveryAllocation } else { GcStress::Off };
+    previous
+}
+
+unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
+    let key = call.arg(0);
+    let finalizer = call.arg(1);
+    if !matches!(key.kind(), SexpType::Environment | SexpType::ExternalPtr) {
+        return Err(call.error("first argument must be environment or external pointer"));
+    }
+    if !matches!(finalizer.kind(), SexpType::Closure | SexpType::Builtin | SexpType::Special) {
+        return Err(call.error("second argument must be a function"));
+    }
+    let on_exit = values::as_logical_scalar(call.arg(2));
+    if on_exit == NA_LOGICAL {
+        return Err(call.error("third argument must be 'TRUE' or 'FALSE'"));
+    }
+    crate::heap().alloc_weak_ref(key, nil(), finalizer, 0, on_exit != 0)?;
+    Ok(nil())
+}
+
+unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
+    let status = values::as_integer_scalar(call.arg(1));
+    crate::session::finish();
+    use std::io::Write;
+    drop(std::io::stdout().flush());
+    std::process::exit(if status == NA_INTEGER { 0 } else { status });
+}
+
+unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
+    use std::io::Write;
+    let command = values::require_string(call.arg(0), "command")?;
+    let intern = values::as_logical_scalar(call.arg(1)) == 1;
+    let mut process = std::process::Command::new("sh");
+    process.arg("-c").arg(&command);
+    if intern {
+        process.stderr(std::process::Stdio::inherit());
+        let output = process
+            .output()
+            .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        let result = string_vector(&lines)?;
+        let status = output.status.code().unwrap_or(127);
+        if status != 0 {
+            values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
+            crate::conditions::warning_call(
+                call.call,
+                &format!("running command '{command}' had status {status}"),
+            )?;
+        }
+        return Ok(result);
+    }
+    // The child writes straight to the terminal, as GNU R's does, so earlier output must be out
+    // first to keep the order.
+    std::io::stdout().flush().map_err(|failure| call.error(format!("cannot flush stdout: {failure}")))?;
+    let status = process
+        .status()
+        .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
+    interp().visible = false;
+    scalar_integer(status.code().unwrap_or(127))
+}
+
+unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    let count = length(strings);
+    let result = alloc(SexpType::String, count)?;
+    for index in 0..count {
+        let charsxp = strings.element(index);
+        let name = if charsxp.has_gp(heap::object::gp::UTF8) {
+            "UTF-8"
+        } else if charsxp.has_gp(heap::object::gp::LATIN1) {
+            "latin1"
+        } else if charsxp.has_gp(heap::object::gp::BYTES) {
+            "bytes"
+        } else {
+            "unknown"
+        };
+        values::set_elt(result, index, values::mkchar(name)?);
+    }
+    Ok(result)
+}
+
+/// `Encoding<-`: re-declares each string's encoding without touching its bytes. ASCII strings
+/// never carry a mark.
+unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    let names = call.arg(1);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("a character vector argument expected"));
+    }
+    if names.kind() != SexpType::String || length(names) == 0 {
+        return Err(call.error("a character vector 'value' expected"));
+    }
+    let result = values::shallow_duplicate(strings)?;
+    for index in 0..length(result) {
+        let charsxp = result.element(index);
+        if charsxp == values::na_string() {
+            continue;
+        }
+        let name = values::string_at(names, index % length(names)).unwrap_or_default();
+        let encoding = match &*name {
+            "latin1" => Encoding::Latin1,
+            "UTF-8" => Encoding::Utf8,
+            "bytes" => Encoding::Bytes,
+            _ => Encoding::Native,
+        };
+        values::set_elt(result, index, values::mkchar_bytes(charsxp.bytes(), encoding)?);
+    }
+    Ok(result)
+}
+
+/// `iconv(x, from, to, sub, mark, toRaw)` through the C library's `iconv(3)`, as GNU R does on
+/// Linux, so the encoding names and conversions are the system's.
+unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
+    let input = call.arg(0);
+    let from = values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
+    let to = values::first_string(call.arg(2)).map_or_else(String::new, |name| name.into_owned());
+    let substitute = values::string_at(call.arg(3), 0).map(|text| text.into_owned());
+    let mark = values::as_logical_scalar(call.arg(4)) == 1;
+    let to_raw = values::as_logical_scalar(call.arg(5)) == 1;
+    let from_list = input.kind() == SexpType::List;
+    if !from_list && input.kind() != SexpType::String {
+        return Err(call.error("'x' must be a character vector"));
+    }
+    // The native encoding is always UTF-8 here, while the C library would read "" as the
+    // process locale's, which is ASCII until something calls setlocale.
+    let system_name = |name: &str| -> String {
+        match name {
+            "" => "UTF-8".to_string(),
+            other => other.to_string(),
+        }
+    };
+    let (from_name, to_name) = (system_name(&from), system_name(&to));
+    let from_utf8 = matches!(from_name.to_ascii_uppercase().as_str(), "UTF-8" | "UTF8");
+    let converter = Converter::open(&from_name, &to_name).ok_or_else(|| {
+        call.error(format!("unsupported conversion from '{from}' to '{to}'"))
+    })?;
+    let target = to_name.to_ascii_uppercase();
+    let encoding = if !mark {
+        Encoding::Native
+    } else if matches!(target.as_str(), "UTF-8" | "UTF8") {
+        Encoding::Utf8
+    } else if matches!(target.as_str(), "LATIN1" | "ISO-8859-1" | "ISO8859-1" | "ISO_8859-1") {
+        Encoding::Latin1
+    } else {
+        Encoding::Native
+    };
+    let count = length(input);
+    let result = alloc(if to_raw { SexpType::List } else { SexpType::String }, count)?;
+    for index in 0..count {
+        let element = input.element(index);
+        let bytes: &[u8] = if from_list {
+            if element.kind() != SexpType::Raw {
+                if !to_raw {
+                    values::set_elt(result, index, values::na_string());
+                }
+                continue;
+            }
+            values::raws(element)
+        } else {
+            if element == values::na_string() {
+                if !to_raw {
+                    values::set_elt(result, index, values::na_string());
+                }
+                continue;
+            }
+            element.bytes()
+        };
+        match converter.convert(bytes, substitute.as_deref(), from_utf8) {
+            Some(converted) if to_raw => {
+                let vector = alloc(SexpType::Raw, converted.len())?;
+                values::raws_mut(vector).copy_from_slice(&converted);
+                values::set_elt(result, index, vector);
+            }
+            Some(converted) => {
+                values::set_elt(result, index, values::mkchar_bytes(&converted, encoding)?);
+            }
+            None if to_raw => {}
+            None => values::set_elt(result, index, values::na_string()),
+        }
+    }
+    Ok(result)
+}
+
+/// An open `iconv_t` conversion descriptor, closed on drop.
+struct Converter(libc::iconv_t);
+
+impl Converter {
+    fn open(from: &str, to: &str) -> Option<Converter> {
+        let from = std::ffi::CString::new(from).ok()?;
+        let to = std::ffi::CString::new(to).ok()?;
+        // SAFETY: both names are valid NUL-terminated strings.
+        let descriptor = unsafe { libc::iconv_open(to.as_ptr(), from.as_ptr()) };
+        if descriptor as isize == -1 { None } else { Some(Converter(descriptor)) }
+    }
+
+    /// `bytes` converted, or `None` when they hold a sequence the target cannot represent and
+    /// there is no substitute. A substitute of "byte" writes `<xx>` for each offending byte,
+    /// "Unicode" and "c99" write the code point of an offending UTF-8 character, and any other
+    /// text replaces each offending byte.
+    fn convert(&self, bytes: &[u8], substitute: Option<&str>, from_utf8: bool) -> Option<Vec<u8>> {
+        let mut output = Vec::with_capacity(bytes.len() + 16);
+        let mut buffer = vec![0u8; bytes.len() * 4 + 16];
+        let mut rest = bytes;
+        // SAFETY: a null input resets the descriptor's shift state.
+        unsafe {
+            libc::iconv(self.0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+        }
+        loop {
+            let mut input_pointer = rest.as_ptr() as *mut libc::c_char;
+            let mut input_left = rest.len();
+            let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
+            let mut output_left = buffer.len();
+            // SAFETY: the pointers and lengths describe `rest` and `buffer`, which outlive the
+            // call; iconv only reads the input.
+            let status = unsafe {
+                libc::iconv(self.0, &mut input_pointer, &mut input_left, &mut output_pointer, &mut output_left)
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            output.extend_from_slice(&buffer[..buffer.len() - output_left]);
+            rest = &rest[rest.len() - input_left..];
+            if status != usize::MAX {
+                break;
+            }
+            match error {
+                Some(libc::E2BIG) => continue,
+                Some(libc::EILSEQ | libc::EINVAL) => {
+                    let substitute = substitute?;
+                    let skipped = match substitute {
+                        "Unicode" | "c99" if from_utf8 => {
+                            let length = utf8_sequence_length(rest);
+                            match std::str::from_utf8(&rest[..length]).ok().and_then(|text| text.chars().next()) {
+                                Some(character) => {
+                                    let code = u32::from(character);
+                                    let text = match (substitute, code > 0xFFFF) {
+                                        ("Unicode", false) => format!("<U+{code:04X}>"),
+                                        ("Unicode", true) => format!("<U+{code:08X}>"),
+                                        (_, false) => format!("\\u{code:04x}"),
+                                        (_, true) => format!("\\U{code:08x}"),
+                                    };
+                                    output.extend_from_slice(text.as_bytes());
+                                    length
+                                }
+                                None => {
+                                    output.extend_from_slice(format!("<{:02x}>", rest[0]).as_bytes());
+                                    1
+                                }
+                            }
+                        }
+                        "byte" | "Unicode" | "c99" => {
+                            output.extend_from_slice(format!("<{:02x}>", rest.first()?).as_bytes());
+                            1
+                        }
+                        text => {
+                            output.extend_from_slice(text.as_bytes());
+                            1
+                        }
+                    };
+                    rest = rest.get(skipped..)?;
+                }
+                _ => return None,
+            }
+        }
+        // Flush any shift sequence a stateful target needs at the end.
+        let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
+        let mut output_left = buffer.len();
+        // SAFETY: as above, with a null input asking for the final shift sequence.
+        unsafe {
+            libc::iconv(self.0, std::ptr::null_mut(), std::ptr::null_mut(), &mut output_pointer, &mut output_left);
+        }
+        output.extend_from_slice(&buffer[..buffer.len() - output_left]);
+        Some(output)
+    }
+}
+
+impl Drop for Converter {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor came from a successful iconv_open and is closed once.
+        unsafe {
+            libc::iconv_close(self.0);
+        }
+    }
+}
+
+/// How many bytes the UTF-8 sequence at the start of `bytes` claims, at least one.
+fn utf8_sequence_length(bytes: &[u8]) -> usize {
+    let length = match bytes.first() {
+        Some(byte) if *byte >= 0xF0 => 4,
+        Some(byte) if *byte >= 0xE0 => 3,
+        Some(byte) if *byte >= 0xC0 => 2,
+        _ => 1,
+    };
+    length.min(bytes.len()).max(1)
+}
+
+unsafe fn do_ngettext(call: &Call<'_>) -> R<Sexp> {
+    let count = values::as_integer_scalar(call.arg(0));
+    Ok(if count == 1 { call.arg(1) } else { call.arg(2) })
+}
+
+/// The CRC-64 (ECMA-182, reflected) of `bytes` in lower-case hexadecimal without leading
+/// zeros, as `crc64()` reports it.
+pub fn crc64_hex(bytes: &[u8]) -> String {
+    format!("{:x}", crc64(bytes))
+}
+
+fn crc64(bytes: &[u8]) -> u64 {
+    let mut crc: u64 = !0;
+    for &byte in bytes {
+        crc ^= byte as u64;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xC96C5795D7870F42 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// `.Machine`, as GNU R computes it on a 64-bit IEEE platform.
+pub unsafe fn machine() -> R<Sexp> {
+    let double = |value: f64| scalar_real(value);
+    let integer = |value: i32| scalar_integer(value);
+    values::named_list(&[
+        ("double.eps", double(f64::EPSILON)?),
+        ("double.neg.eps", double(f64::EPSILON / 2.0)?),
+        ("double.xmin", double(f64::MIN_POSITIVE)?),
+        ("double.xmax", double(f64::MAX)?),
+        ("double.base", integer(2)?),
+        ("double.digits", integer(53)?),
+        ("double.rounding", integer(5)?),
+        ("double.guard", integer(0)?),
+        ("double.ulp.digits", integer(-52)?),
+        ("double.neg.ulp.digits", integer(-53)?),
+        ("double.exponent", integer(11)?),
+        ("double.min.exp", integer(-1022)?),
+        ("double.max.exp", integer(1024)?),
+        ("integer.max", integer(i32::MAX)?),
+        ("sizeof.long", integer(8)?),
+        ("sizeof.longlong", integer(8)?),
+        ("sizeof.longdouble", integer(16)?),
+        ("sizeof.pointer", integer(8)?),
+        ("sizeof.time_t", integer(8)?),
+        ("longdouble.eps", double(1.0842021724855044e-19)?),
+        ("longdouble.neg.eps", double(5.421010862427522e-20)?),
+        ("longdouble.digits", integer(64)?),
+        ("longdouble.rounding", integer(5)?),
+        ("longdouble.guard", integer(0)?),
+        ("longdouble.ulp.digits", integer(-63)?),
+        ("longdouble.neg.ulp.digits", integer(-64)?),
+        ("longdouble.exponent", integer(15)?),
+        ("longdouble.min.exp", integer(-16382)?),
+        ("longdouble.max.exp", integer(16384)?),
+    ])
+}
+
+/// `.Platform`.
+pub unsafe fn platform() -> R<Sexp> {
+    let string = |text: &str| scalar_string(text);
+    values::named_list(&[
+        ("OS.type", string("unix")?),
+        ("file.sep", string("/")?),
+        ("dynlib.ext", string(".so")?),
+        ("GUI", string("X11")?),
+        ("endian", string("little")?),
+        ("pkgType", string("source")?),
+        ("path.sep", string(":")?),
+        ("r_arch", string("")?),
+    ])
+}
+
+unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
+    let entries = [
+        ("zlib", "1.3"),
+        ("bzlib", ""),
+        ("xz", ""),
+        ("PCRE", "10.42 2022-12-11"),
+        ("ICU", ""),
+        ("TRE", ""),
+        ("iconv", "glibc"),
+        ("readline", ""),
+        ("BLAS", ""),
+    ];
+    let result = string_vector(&entries.iter().map(|(_, version)| *version).collect::<Vec<_>>())?;
+    let names = string_vector(&entries.iter().map(|(name, _)| *name).collect::<Vec<_>>())?;
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
+}
+
+unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
+    let path = values::require_string(call.arg(0), "x")?;
+    let path = crate::connections::expand_path(&path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        crate::conditions::warning_call(call.call, &format!("file '{path}' cannot be opened for reading"))?;
+        return scalar_bool(false);
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(|quote| quote == '"' || quote == '\'');
+        let value = expand_renviron_value(value);
+        // SAFETY: the interpreter is single-threaded.
+        std::env::set_var(name.trim(), value);
+    }
+    scalar_bool(true)
+}
+
+/// Expands `${NAME}` and `${NAME-default}` references, the forms `.Renviron` files use.
+fn expand_renviron_value(value: &str) -> String {
+    let mut result = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        result.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('}') else {
+            result.push_str(&rest[start..]);
+            return result;
+        };
+        let reference = &rest[start + 2..start + end];
+        let (name, default) = reference.split_once('-').unwrap_or((reference, ""));
+        match std::env::var(name) {
+            Ok(found) if !found.is_empty() => result.push_str(&found),
+            _ => result.push_str(&expand_renviron_value(default)),
+        }
+        rest = &rest[start + end + 1..];
+    }
+    result.push_str(rest);
+    result
+}
+
+unsafe fn link_paths(call: &Call<'_>, function: impl Fn(&str, &str) -> bool) -> R<Sexp> {
+    let from = call.arg(0);
+    let to = call.arg(1);
+    let count = length(from).max(length(to));
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        let source = values::string_at(from, index % length(from).max(1));
+        let target = values::string_at(to, index % length(to).max(1));
+        values::ints_mut(result)[index] = match (source, target) {
+            (Some(source), Some(target)) => function(&source, &target) as i32,
+            _ => 0,
+        };
+    }
+    Ok(result)
+}
+
+/// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
+/// component and each pattern's matches stay in pattern order, sorted only among themselves.
+unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
+    let patterns = call.arg(0);
+    if patterns.kind() != SexpType::String {
+        return Err(error("invalid 'paths' argument"));
+    }
+    let dirmark = values::as_logical_scalar(call.arg(1));
+    if dirmark == NA_LOGICAL {
+        return Err(error("invalid 'dirmark' argument"));
+    }
+    let mut buffer: libc::glob_t = std::mem::zeroed();
+    let mut appended = false;
+    for index in 0..length(patterns) {
+        let Some(pattern) = values::string_at(patterns, index) else {
+            continue;
+        };
+        let Ok(pattern) = std::ffi::CString::new(crate::connections::expand_path(&pattern)) else {
+            continue;
+        };
+        let mut flags = if dirmark != 0 { libc::GLOB_MARK } else { 0 };
+        if appended {
+            flags |= libc::GLOB_APPEND;
+        }
+        match libc::glob(pattern.as_ptr(), flags, None, &mut buffer) {
+            0 => appended = true,
+            libc::GLOB_NOMATCH => {}
+            libc::GLOB_NOSPACE => {
+                libc::globfree(&mut buffer);
+                return Err(error("internal out-of-memory condition"));
+            }
+            libc::GLOB_ABORTED => crate::conditions::warning("read error on directory")?,
+            _ => {}
+        }
+    }
+    let matches: Vec<String> = if appended {
+        (0..buffer.gl_pathc)
+            .map(|index| {
+                std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    libc::globfree(&mut buffer);
+    string_vector(&matches)
+}
+
+unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
+    let number = values::as_integer_scalar(call.arg(0));
+    let category = locale_category(number).ok_or_else(|| error("invalid 'category' argument"))?;
+    let locale = call.arg(1);
+    let Some(name) = (locale.kind() == SexpType::String && length(locale) == 1)
+        .then(|| values::string_at(locale, 0))
+        .flatten()
+    else {
+        return Err(error("invalid 'locale' argument"));
+    };
+    let Ok(text) = std::ffi::CString::new(name.as_bytes()) else {
+        return Err(error("invalid 'locale' argument"));
+    };
+    let honoured = if category == libc::LC_ALL {
+        // As in GNU R, LC_ALL sets the categories R uses but leaves LC_NUMERIC at C.
+        let honoured = !libc::setlocale(libc::LC_CTYPE, text.as_ptr()).is_null();
+        if honoured {
+            for category in [libc::LC_COLLATE, libc::LC_MONETARY, libc::LC_TIME] {
+                libc::setlocale(category, text.as_ptr());
+            }
+        }
+        honoured
+    } else {
+        if category == libc::LC_NUMERIC {
+            crate::conditions::warning("setting 'LC_NUMERIC' may cause R to function strangely")?;
+        }
+        !libc::setlocale(category, text.as_ptr()).is_null()
+    };
+    crate::sort::refresh_collation();
+    if !honoured {
+        crate::conditions::warning(format!(
+            "OS reports request to set locale to \"{name}\" cannot be honored"
+        ))?;
+        return scalar_string("");
+    }
+    scalar_string(&current_locale(category))
+}
+
+unsafe fn do_sys_getlocale(call: &Call<'_>) -> R<Sexp> {
+    let category = locale_category(values::as_integer_scalar(call.arg(0)))
+        .ok_or_else(|| error("invalid 'category' argument"))?;
+    scalar_string(&current_locale(category))
+}
+
+/// Takes the locale of the categories GNU R uses from the environment, as it does at startup;
+/// numbers and the rest stay in the C locale.
+pub unsafe fn init_locale() {
+    for category in [
+        libc::LC_CTYPE,
+        libc::LC_COLLATE,
+        libc::LC_TIME,
+        libc::LC_MONETARY,
+        libc::LC_MESSAGES,
+        libc::LC_PAPER,
+        libc::LC_MEASUREMENT,
+    ] {
+        libc::setlocale(category, c"".as_ptr());
+    }
+    crate::sort::refresh_collation();
+}
+
+/// The C library category for `Sys.setlocale`'s category number, which indexes
+/// `c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+/// "LC_MESSAGES", "LC_PAPER", "LC_MEASUREMENT")`.
+fn locale_category(number: i32) -> Option<libc::c_int> {
+    Some(match number {
+        1 => libc::LC_ALL,
+        2 => libc::LC_COLLATE,
+        3 => libc::LC_CTYPE,
+        4 => libc::LC_MONETARY,
+        5 => libc::LC_NUMERIC,
+        6 => libc::LC_TIME,
+        7 => libc::LC_MESSAGES,
+        8 => libc::LC_PAPER,
+        9 => libc::LC_MEASUREMENT,
+        _ => return None,
+    })
+}
+
+unsafe fn current_locale(category: libc::c_int) -> String {
+    let current = libc::setlocale(category, std::ptr::null());
+    if current.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(current)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
 
 unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
@@ -588,1986 +2418,6 @@ fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
     )
 }
 
-fn append_file(target: &str, source: &str) -> std::io::Result<()> {
-    let bytes = std::fs::read(source)?;
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(target)?;
-    std::io::Write::write_all(&mut file, &bytes)
-}
-
-unsafe fn do_sys_getenv(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    let unset = values::first_string(call.arg(1)).map(|text| text.into_owned());
-    if length(names) == 0 {
-        let mut entries: Vec<String> = std::env::vars()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect();
-        entries.sort();
-        return string_vector(&entries);
-    }
-    let count = length(names);
-    let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let name = values::string_at(names, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let charsxp = match std::env::var(&name) {
-            Ok(value) => values::mkchar(&value)?,
-            Err(_) => match &unset {
-                Some(unset) => values::mkchar(unset)?,
-                None => values::na_string(),
-            },
-        };
-        values::set_elt(result, index, charsxp);
-    }
-    Ok(result)
-}
-
-unsafe fn do_sys_setenv(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    let new_values = call.arg(1);
-    let count = length(names);
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        let name = values::string_at(names, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let value = values::string_at(new_values, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        // SAFETY: the interpreter is single-threaded.
-        std::env::set_var(&name, &value);
-        values::ints_mut(result)[index] = 1;
-    }
-    Ok(result)
-}
-
-unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    let count = length(names);
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        if let Some(name) = values::string_at(names, index) {
-            // SAFETY: the interpreter is single-threaded.
-            std::env::remove_var(name.as_ref());
-        }
-        values::ints_mut(result)[index] = 1;
-    }
-    Ok(result)
-}
-
-unsafe fn do_proc_time(_call: &Call<'_>) -> R<Sexp> {
-    // GNU R reports whole milliseconds, which is what keeps printed timings short.
-    let milliseconds = |seconds: f64| (seconds * 1000.0).round() / 1000.0;
-    let times = |who: libc::c_int| {
-        let mut usage: libc::rusage = std::mem::zeroed();
-        libc::getrusage(who, &mut usage);
-        let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-        (
-            milliseconds(seconds(usage.ru_utime)),
-            milliseconds(seconds(usage.ru_stime)),
-        )
-    };
-    let (user, system) = times(libc::RUSAGE_SELF);
-    let (child_user, child_system) = times(libc::RUSAGE_CHILDREN);
-    let elapsed = milliseconds(interp().started.elapsed().as_secs_f64());
-    let result = values::real_vector(&[user, system, elapsed, child_user, child_system])?;
-    let names = string_vector(&[
-        "user.self",
-        "sys.self",
-        "elapsed",
-        "user.child",
-        "sys.child",
-    ])?;
-    values::set_attr(result, symbols().names, names)?;
-    let class = scalar_string("proc_time")?;
-    values::set_attr(result, symbols().class, class)?;
-    Ok(result)
-}
-
-fn now_seconds() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |duration| duration.as_secs_f64())
-}
-
-unsafe fn posixct(value: f64, tz: &str) -> R<Sexp> {
-    let result = scalar_real(value)?;
-    let class = string_vector(&["POSIXct", "POSIXt"])?;
-    values::set_attr(result, symbols().class, class)?;
-    if !tz.is_empty() {
-        let tzone = values::install("tzone")?;
-        values::set_attr(result, tzone, scalar_string(tz)?)?;
-    }
-    Ok(result)
-}
-
-unsafe fn do_sys_time(_call: &Call<'_>) -> R<Sexp> {
-    posixct(now_seconds(), "")
-}
-
-// Calendar arithmetic, in UTC.
-
-/// Days since 1970-01-01 for a civil date.
-pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_index = (month + 9) % 12;
-    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146097 + day_of_era - 719468
-}
-
-/// The civil date of a day count since 1970-01-01: year, month (1-12), day.
-pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let shifted = days + 719468;
-    let era = if shifted >= 0 {
-        shifted
-    } else {
-        shifted - 146096
-    } / 146097;
-    let day_of_era = shifted - era * 146097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
-
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-struct BrokenDown {
-    second: f64,
-    minute: i64,
-    hour: i64,
-    day: i64,
-    month: i64,
-    year: i64,
-    weekday: i64,
-    yearday: i64,
-}
-
-fn broken_down(seconds: f64) -> BrokenDown {
-    let days = (seconds / 86400.0).floor() as i64;
-    let rest = seconds - days as f64 * 86400.0;
-    let (year, month, day) = civil_from_days(days);
-    let hour = (rest / 3600.0).floor() as i64;
-    let minute = ((rest - hour as f64 * 3600.0) / 60.0).floor() as i64;
-    let second = rest - hour as f64 * 3600.0 - minute as f64 * 60.0;
-    let weekday = (days + 4).rem_euclid(7);
-    let yearday = days - days_from_civil(year, 1, 1);
-    BrokenDown {
-        second,
-        minute,
-        hour,
-        day,
-        month,
-        year,
-        weekday,
-        yearday,
-    }
-}
-
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-const WEEKDAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-
-fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i64) -> String {
-    let mut output = String::new();
-    let mut characters = format.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character != '%' {
-            output.push(character);
-            continue;
-        }
-        let Some(mut spec) = characters.next() else {
-            output.push('%');
-            break;
-        };
-        // The E and O modifiers select a locale's alternative representation,
-        // which every locale R supports spells like the plain directive. Only
-        // `%OSn`, R's own fractional-seconds extension, means something else.
-        if spec == 'E' || spec == 'O' {
-            let modifier = spec;
-            match characters.next() {
-                Some('S') if modifier == 'O' => {
-                    match characters.peek().and_then(|digit| digit.to_digit(10)) {
-                        Some(digits) => {
-                            characters.next();
-                            let width = 3 + digits as usize;
-                            output.push_str(&format!(
-                                "{:0width$.digits$}",
-                                time.second,
-                                width = width,
-                                digits = digits as usize
-                            ));
-                        }
-                        None => output.push_str(&format!("{:02}", time.second.floor() as i64)),
-                    }
-                    continue;
-                }
-                Some(base) => spec = base,
-                None => {
-                    output.push('%');
-                    output.push(modifier);
-                    break;
-                }
-            }
-        }
-        push_directive(&mut output, spec, time, zone, offset);
-    }
-    output
-}
-
-fn push_directive(output: &mut String, spec: char, time: &BrokenDown, zone: &str, offset: i64) {
-    let hour12 = if time.hour % 12 == 0 {
-        12
-    } else {
-        time.hour % 12
-    };
-    let seconds = time.second.floor() as i64;
-    let text = match spec {
-        'Y' => time.year.to_string(),
-        'y' => format!("{:02}", time.year.rem_euclid(100)),
-        'C' => format!("{:02}", time.year.div_euclid(100)),
-        'm' => format!("{:02}", time.month),
-        'd' => format!("{:02}", time.day),
-        'e' => format!("{:2}", time.day),
-        'H' => format!("{:02}", time.hour),
-        'k' => format!("{:2}", time.hour),
-        'I' => format!("{:02}", hour12),
-        'l' => format!("{:2}", hour12),
-        'M' => format!("{:02}", time.minute),
-        'S' => format!("{:02}", seconds),
-        'p' => (if time.hour < 12 { "AM" } else { "PM" }).to_string(),
-        'P' => (if time.hour < 12 { "am" } else { "pm" }).to_string(),
-        'j' => format!("{:03}", time.yearday + 1),
-        'B' => MONTHS[(time.month - 1) as usize].to_string(),
-        'b' | 'h' => MONTHS[(time.month - 1) as usize][..3].to_string(),
-        'A' => WEEKDAYS[time.weekday as usize].to_string(),
-        'a' => WEEKDAYS[time.weekday as usize][..3].to_string(),
-        'u' => (if time.weekday == 0 { 7 } else { time.weekday }).to_string(),
-        'w' => time.weekday.to_string(),
-        'U' => format!("{:02}", (time.yearday + 7 - time.weekday) / 7),
-        'W' => format!("{:02}", (time.yearday + 7 - (time.weekday + 6) % 7) / 7),
-        'V' => format!("{:02}", iso_week(time).1),
-        'G' => iso_week(time).0.to_string(),
-        'g' => format!("{:02}", iso_week(time).0.rem_euclid(100)),
-        's' => {
-            let days = days_from_civil(time.year, time.month, time.day);
-            (days * 86400 + time.hour * 3600 + time.minute * 60 + seconds - offset).to_string()
-        }
-        'Z' => zone.to_string(),
-        'z' => {
-            let minutes = offset.abs() / 60;
-            format!(
-                "{}{:02}{:02}",
-                if offset < 0 { '-' } else { '+' },
-                minutes / 60,
-                minutes % 60
-            )
-        }
-        'F' => format!("{}-{:02}-{:02}", time.year, time.month, time.day),
-        'T' | 'X' => format!("{:02}:{:02}:{:02}", time.hour, time.minute, seconds),
-        'D' | 'x' => format!(
-            "{:02}/{:02}/{:02}",
-            time.month,
-            time.day,
-            time.year.rem_euclid(100)
-        ),
-        'R' => format!("{:02}:{:02}", time.hour, time.minute),
-        'r' => format!(
-            "{:02}:{:02}:{:02} {}",
-            hour12,
-            time.minute,
-            seconds,
-            if time.hour < 12 { "AM" } else { "PM" }
-        ),
-        'c' => format!(
-            "{} {} {:2} {:02}:{:02}:{:02} {}",
-            &WEEKDAYS[time.weekday as usize][..3],
-            &MONTHS[(time.month - 1) as usize][..3],
-            time.day,
-            time.hour,
-            time.minute,
-            seconds,
-            time.year
-        ),
-        'n' => "\n".to_string(),
-        't' => "\t".to_string(),
-        '%' => "%".to_string(),
-        other => format!("%{other}"),
-    };
-    output.push_str(&text);
-}
-
-/// The ISO 8601 week-based year and week number: weeks start on Monday, and
-/// week 1 is the one holding the year's first Thursday.
-fn iso_week(time: &BrokenDown) -> (i64, i64) {
-    let monday_based = (time.weekday + 6) % 7;
-    let thursday = time.yearday - monday_based + 3;
-    let year_length = |year: i64| {
-        if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
-            366
-        } else {
-            365
-        }
-    };
-    if thursday < 0 {
-        let previous = time.year - 1;
-        (previous, (thursday + year_length(previous)) / 7 + 1)
-    } else if thursday >= year_length(time.year) {
-        (time.year + 1, 1)
-    } else {
-        (time.year, thursday / 7 + 1)
-    }
-}
-
-fn format_now(format: &str) -> String {
-    let zone = resolve_zone("");
-    let now = now_seconds();
-    let state = zone_state(&zone, now.floor() as i64);
-    format_broken_down(
-        &broken_down(now + state.offset as f64),
-        format,
-        &state.abbreviation,
-        state.offset,
-    )
-}
-
-// Time zones. A POSIXlt holds wall-clock fields, which the functions below read as if they were
-// a UTC time ("wall seconds"), so calendar arithmetic stays in UTC and only the conversion to and
-// from an instant consults the zone.
-
-/// A time zone as R code names it. A name the zone database does not know is UTC under the
-/// abbreviation the name starts with, which is how glibc reads it as a POSIX `TZ` rule.
-enum Zone {
-    Known(Tz),
-    Unknown(String),
-}
-
-/// The zone the empty name stands for: `TZ`, else the system's `/etc/localtime`, else UTC.
-fn session_zone_name() -> String {
-    if let Some(name) = std::env::var("TZ").ok().filter(|name| !name.is_empty()) {
-        return name.trim_start_matches(':').to_string();
-    }
-    std::fs::read_link("/etc/localtime")
-        .ok()
-        .and_then(|target| {
-            target.to_str().and_then(|text| {
-                text.split_once("zoneinfo/")
-                    .map(|(_, name)| name.to_string())
-            })
-        })
-        .unwrap_or_else(|| "UTC".to_string())
-}
-
-/// The name a `tz` argument stands for. GNU R reads an empty name as `TZ` when that is set, so
-/// only an unset `TZ` leaves the session zone nameless.
-fn effective_zone_name(tz: &str) -> String {
-    match std::env::var("TZ") {
-        Ok(name) if tz.is_empty() => name.trim_start_matches(':').to_string(),
-        _ => tz.trim_start_matches(':').to_string(),
-    }
-}
-
-fn is_utc_name(tz: &str) -> bool {
-    tz == "UTC" || tz == "GMT"
-}
-
-fn resolve_zone(tz: &str) -> Zone {
-    let name = if tz.is_empty() {
-        session_zone_name()
-    } else {
-        tz.to_string()
-    };
-    match name.parse::<Tz>() {
-        Ok(zone) => Zone::Known(zone),
-        Err(_) => {
-            let abbreviation: String = name.chars().take_while(char::is_ascii_alphabetic).collect();
-            Zone::Unknown(if abbreviation.len() >= 3 {
-                abbreviation
-            } else {
-                "UTC".to_string()
-            })
-        }
-    }
-}
-
-/// The offset from UTC in seconds, the daylight-saving flag and the abbreviation in force at an
-/// instant.
-struct ZoneState {
-    offset: i64,
-    dst: bool,
-    abbreviation: String,
-}
-
-fn zone_state(zone: &Zone, seconds: i64) -> ZoneState {
-    let instant = DateTime::from_timestamp(seconds, 0);
-    match (zone, instant) {
-        (Zone::Known(tz), Some(instant)) => {
-            let offset = tz.offset_from_utc_datetime(&instant.naive_utc());
-            ZoneState {
-                offset: offset.fix().local_minus_utc() as i64,
-                dst: !offset.dst_offset().is_zero(),
-                abbreviation: offset.to_string(),
-            }
-        }
-        (Zone::Unknown(abbreviation), _) => ZoneState {
-            offset: 0,
-            dst: false,
-            abbreviation: abbreviation.clone(),
-        },
-        (Zone::Known(_), None) => ZoneState {
-            offset: 0,
-            dst: false,
-            abbreviation: "UTC".to_string(),
-        },
-    }
-}
-
-/// The instant a wall-clock time names, as `mktime` finds it. `isdst` picks between the two
-/// readings of a time the clocks pass twice, defaulting to the earlier one; a time inside a
-/// spring-forward gap takes the offset in force after the gap, so 02:30 on that night in New York
-/// becomes 01:30 standard time, as in GNU R.
-fn utc_from_wall(zone: &Zone, wall: f64, isdst: i32) -> f64 {
-    let Zone::Known(tz) = zone else { return wall };
-    let whole = wall.floor() as i64;
-    let Some(local) = DateTime::from_timestamp(whole, 0).map(|instant| instant.naive_utc()) else {
-        return wall;
-    };
-    let offset = match tz.offset_from_local_datetime(&local) {
-        LocalResult::Single(offset) => offset.fix().local_minus_utc() as i64,
-        LocalResult::Ambiguous(earlier, later) => {
-            let earlier_dst = !earlier.dst_offset().is_zero();
-            let chosen = if (isdst == 0 && earlier_dst) || (isdst > 0 && !earlier_dst) {
-                later
-            } else {
-                earlier
-            };
-            chosen.fix().local_minus_utc() as i64
-        }
-        LocalResult::None => {
-            let before = zone_state(zone, whole - 86400).offset;
-            zone_state(zone, whole - before).offset
-        }
-    };
-    wall - offset as f64
-}
-
-/// The standard and daylight-saving abbreviations GNU R lists in a POSIXlt's `tzone`, which are
-/// glibc's `tzname`: the current standard name, and the most recent daylight-saving name in the
-/// zone's history, or the standard name again when it never had one.
-fn zone_names(zone: &Zone) -> (String, String) {
-    let year = civil_from_days((now_seconds() / 86400.0).floor() as i64).0;
-    let samples = |year: i64| {
-        [
-            days_from_civil(year, 1, 1) * 86400,
-            days_from_civil(year, 7, 1) * 86400,
-        ]
-    };
-    let standard = samples(year)
-        .into_iter()
-        .map(|seconds| zone_state(zone, seconds))
-        .find(|state| !state.dst)
-        .map_or_else(|| "UTC".to_string(), |state| state.abbreviation);
-    let daylight = (1900..=year + 1)
-        .rev()
-        .flat_map(samples)
-        .map(|seconds| zone_state(zone, seconds))
-        .find(|state| state.dst)
-        .map_or_else(|| standard.clone(), |state| state.abbreviation);
-    (standard, daylight)
-}
-
-const POSIXLT_NAMES: [&str; 11] = [
-    "sec", "min", "hour", "mday", "mon", "year", "wday", "yday", "isdst", "zone", "gmtoff",
-];
-
-/// One element of a POSIXlt: a non-finite time kept in `sec`, or wall-clock seconds with the
-/// zone fields that go with them.
-enum Moment {
-    Missing(f64),
-    Local {
-        wall: f64,
-        isdst: i32,
-        zone: String,
-        gmtoff: i32,
-    },
-}
-
-/// The element of a POSIXlt in `zone` for an instant.
-fn local_moment(zone: &Zone, utc: bool, seconds: f64) -> Moment {
-    if !seconds.is_finite() {
-        return Moment::Missing(seconds);
-    }
-    let state = zone_state(zone, seconds.floor() as i64);
-    Moment::Local {
-        wall: seconds + state.offset as f64,
-        isdst: if utc { 0 } else { state.dst as i32 },
-        zone: state.abbreviation,
-        gmtoff: state.offset as i32,
-    }
-}
-
-/// A POSIXlt list for `seconds` since the epoch.
-unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
-    let tz = effective_zone_name(tz);
-    let zone = resolve_zone(&tz);
-    let utc = is_utc_name(&tz);
-    let moments: Vec<Moment> = seconds
-        .iter()
-        .map(|&value| local_moment(&zone, utc, value))
-        .collect();
-    posixlt_vector(&moments, &tz, &zone)
-}
-
-unsafe fn posixlt_vector(moments: &[Moment], tz: &str, zone: &Zone) -> R<Sexp> {
-    let count = moments.len();
-    let utc = is_utc_name(tz);
-    let fields: Vec<Sexp> = (0..11)
-        .map(|field| match field {
-            0 => alloc(SexpType::Real, count),
-            9 => alloc(SexpType::String, count),
-            _ => alloc(SexpType::Integer, count),
-        })
-        .collect::<R<_>>()?;
-    for (index, moment) in moments.iter().enumerate() {
-        match moment {
-            Moment::Missing(value) => {
-                // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
-                values::reals_mut(fields[0])[index] = *value;
-                for field in 1..8 {
-                    values::ints_mut(fields[field])[index] = NA_INTEGER;
-                }
-                values::ints_mut(fields[8])[index] = -1;
-                values::set_elt(fields[9], index, values::mkchar(if utc { tz } else { "" })?);
-                values::ints_mut(fields[10])[index] = if utc { 0 } else { NA_INTEGER };
-            }
-            Moment::Local {
-                wall,
-                isdst,
-                zone,
-                gmtoff,
-            } => {
-                let time = broken_down(*wall);
-                values::reals_mut(fields[0])[index] = time.second;
-                values::ints_mut(fields[1])[index] = time.minute as i32;
-                values::ints_mut(fields[2])[index] = time.hour as i32;
-                values::ints_mut(fields[3])[index] = time.day as i32;
-                values::ints_mut(fields[4])[index] = time.month as i32 - 1;
-                values::ints_mut(fields[5])[index] = time.year as i32 - 1900;
-                values::ints_mut(fields[6])[index] = time.weekday as i32;
-                values::ints_mut(fields[7])[index] = time.yearday as i32;
-                values::ints_mut(fields[8])[index] = *isdst;
-                values::set_elt(fields[9], index, values::mkchar(zone)?);
-                values::ints_mut(fields[10])[index] = *gmtoff;
-            }
-        }
-    }
-    let list = values::list_vector(&fields)?;
-    let field_names = string_vector(&POSIXLT_NAMES)?;
-    values::set_attr(list, symbols().names, field_names)?;
-    let class = string_vector(&["POSIXlt", "POSIXt"])?;
-    values::set_attr(list, symbols().class, class)?;
-    let tzone = values::install("tzone")?;
-    let names = if utc {
-        scalar_string(tz)?
-    } else {
-        let (standard, daylight) = zone_names(zone);
-        string_vector(&[tz, &standard, &daylight])?
-    };
-    values::set_attr(list, tzone, names)?;
-    let balanced = values::install("balanced")?;
-    values::set_attr(list, balanced, scalar_bool(true)?)?;
-    Ok(list)
-}
-
-/// The zone a POSIXlt's `tzone` attribute names.
-unsafe fn posixlt_zone_name(list: Sexp) -> R<String> {
-    let tzone = get_attr(list, values::install("tzone")?);
-    Ok(values::first_string(tzone)
-        .map(|text| text.into_owned())
-        .unwrap_or_default())
-}
-
-/// The integer zone field `index` of a POSIXlt at `position`, recycled, or `default` when the
-/// list has no such field.
-unsafe fn posixlt_int(list: Sexp, index: usize, position: usize, default: i32) -> i32 {
-    if length(list) <= index {
-        return default;
-    }
-    let field = list.element(index);
-    let size = length(field);
-    if size == 0 {
-        return default;
-    }
-    let value = crate::subset::numeric_element(field, position % size);
-    if value.is_nan() {
-        NA_INTEGER
-    } else {
-        value as i32
-    }
-}
-
-unsafe fn posixlt_zone_abbreviation(list: Sexp, position: usize) -> Option<String> {
-    if length(list) <= 9
-        || list.element(9).kind() != SexpType::String
-        || length(list.element(9)) == 0
-    {
-        return None;
-    }
-    let field = list.element(9);
-    values::string_at(field, position % length(field)).map(|text| text.into_owned())
-}
-
-unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
-    let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
-    let tz = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let seconds: Vec<f64> = values::reals(times).to_vec();
-    let result = posixlt_from_seconds(&seconds, &tz)?;
-    set_year_names(result, values::names(call.arg(0)))?;
-    Ok(result)
-}
-
-unsafe fn require_posixlt(list: Sexp) -> R<()> {
-    if list.kind() != SexpType::List || length(list) < 9 {
-        return Err(error(
-            "a valid \"POSIXlt\" object is a list of at least 9 elements",
-        ));
-    }
-    Ok(())
-}
-
-unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
-    require_posixlt(list)?;
-    let field = |index: usize| -> Sexp {
-        if length(list) > index {
-            list.element(index)
-        } else {
-            nil()
-        }
-    };
-    let count = (0..6).map(|index| length(field(index))).max().unwrap_or(0);
-    let at = |index: usize, position: usize| -> f64 {
-        let vector = field(index);
-        let size = length(vector);
-        if size == 0 {
-            return NA_REAL;
-        }
-        crate::subset::numeric_element(vector, position % size)
-    };
-    let mut seconds = Vec::with_capacity(count);
-    for position in 0..count {
-        let second = at(0, position);
-        let minute = at(1, position);
-        let hour = at(2, position);
-        let day = at(3, position);
-        let month = at(4, position);
-        let year = at(5, position);
-        if !second.is_finite() {
-            seconds.push(second);
-            continue;
-        }
-        if [minute, hour, day, month, year]
-            .iter()
-            .any(|value| value.is_nan())
-        {
-            seconds.push(NA_REAL);
-            continue;
-        }
-        let total_months = year as i64 * 12 + month as i64;
-        let year = 1900 + total_months.div_euclid(12);
-        let month = total_months.rem_euclid(12) + 1;
-        let days = days_from_civil(year, month, 1) + day as i64 - 1;
-        seconds.push(days as f64 * 86400.0 + hour * 3600.0 + minute * 60.0 + second);
-    }
-    Ok(seconds)
-}
-
-/// Normalizes out-of-range POSIXlt fields, or with `fill_only` recycles every field to the
-/// longest one and marks the result `balanced = NA`, as GNU R's `balancePOSIXlt` does.
-unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
-    require_posixlt(list)?;
-    let balanced_symbol = values::install("balanced")?;
-    let mark = get_attr(list, balanced_symbol);
-    // `balanced = TRUE` covers both requests, and `NA` (filled only) satisfies a fill.
-    let already = mark.kind() == SexpType::Logical
-        && length(mark) == 1
-        && match values::ints(mark)[0] {
-            NA_LOGICAL => fill_only,
-            0 => false,
-            _ => true,
-        };
-    let result = if already {
-        let result = values::shallow_duplicate(list)?;
-        crate::heap().root(result);
-        result
-    } else if fill_only {
-        let count = (0..length(list))
-            .map(|index| length(list.element(index)))
-            .max()
-            .unwrap_or(0);
-        let result = values::shallow_duplicate(list)?;
-        crate::heap().root(result);
-        for index in 0..length(list) {
-            let field = list.element(index);
-            let size = length(field);
-            if size == count || size == 0 {
-                continue;
-            }
-            let filled = alloc(field.kind(), count)?;
-            for position in 0..count {
-                crate::subset::copy_element(field, position % size, filled, position)?;
-            }
-            values::set_elt(result, index, filled);
-        }
-        values::set_attr(result, balanced_symbol, values::scalar_logical(NA_LOGICAL)?)?;
-        result
-    } else {
-        let tz = posixlt_zone_name(list)?;
-        let walls = posixlt_seconds(list)?;
-        let moments: Vec<Moment> = walls
-            .iter()
-            .enumerate()
-            .map(|(position, &wall)| {
-                if !wall.is_finite() {
-                    return Moment::Missing(wall);
-                }
-                Moment::Local {
-                    wall,
-                    isdst: posixlt_int(list, 8, position, -1),
-                    zone: posixlt_zone_abbreviation(list, position).unwrap_or_default(),
-                    gmtoff: posixlt_int(list, 10, position, NA_INTEGER),
-                }
-            })
-            .collect();
-        let result = posixlt_vector(&moments, &tz, &resolve_zone(&effective_zone_name(&tz)))?;
-        set_year_names(result, values::names(list.element(5)))?;
-        result
-    };
-    if !classed {
-        values::remove_attr(result, symbols().class);
-    }
-    Ok(result)
-}
-
-unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
-    let list = call.arg(0);
-    let tz = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let zone = resolve_zone(&effective_zone_name(&tz));
-    let seconds: Vec<f64> = posixlt_seconds(list)?
-        .iter()
-        .enumerate()
-        .map(|(position, &wall)| {
-            if wall.is_finite() {
-                utc_from_wall(&zone, wall, posixlt_int(list, 8, position, -1))
-            } else {
-                wall
-            }
-        })
-        .collect();
-    let result = values::real_vector(&seconds)?;
-    set_names_from_year(call.arg(0), result)?;
-    Ok(result)
-}
-
-/// A POSIXlt keeps its element names on the `year` field.
-unsafe fn set_year_names(list: Sexp, names: Sexp) -> R<()> {
-    if names != nil() && length(list) > 5 && length(list.element(5)) == length(names) {
-        values::set_attr(list.element(5), symbols().names, names)?;
-    }
-    Ok(())
-}
-
-unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
-    let names = values::names(list.element(5));
-    if names != nil() && length(names) == length(result) {
-        values::set_attr(result, symbols().names, names)?;
-    }
-    Ok(())
-}
-
-unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
-    let list = call.arg(0);
-    let formats = call.arg(1);
-    let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
-    let zone = resolve_zone(&effective_zone_name(&posixlt_zone_name(list)?));
-    let seconds = posixlt_seconds(list)?;
-    let count = seconds.len();
-    let result = alloc(SexpType::String, count)?;
-    for (index, &value) in seconds.iter().enumerate() {
-        if is_na_real(value) {
-            values::set_elt(result, index, values::na_string());
-            continue;
-        }
-        if !value.is_finite() {
-            let text = if value.is_nan() {
-                "NaN"
-            } else if value > 0.0 {
-                "Inf"
-            } else {
-                "-Inf"
-            };
-            values::set_elt(result, index, values::mkchar(text)?);
-            continue;
-        }
-        let format = values::string_at(formats, index % length(formats).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
-        let abbreviation = posixlt_zone_abbreviation(list, index).unwrap_or_else(|| {
-            let (standard, daylight) = zone_names(&zone);
-            if posixlt_int(list, 8, index, 0) > 0 {
-                daylight
-            } else {
-                standard
-            }
-        });
-        let offset = match posixlt_int(list, 10, index, NA_INTEGER) {
-            NA_INTEGER => {
-                (value - utc_from_wall(&zone, value, posixlt_int(list, 8, index, -1))) as i64
-            }
-            offset => offset as i64,
-        };
-        let mut text = format_broken_down(&broken_down(value), &format, &abbreviation, offset);
-        if use_tz && !abbreviation.is_empty() {
-            text.push(' ');
-            text.push_str(&abbreviation);
-        }
-        values::set_elt(result, index, values::mkchar(&text)?);
-    }
-    let names = values::names(list.element(5));
-    if names != nil() {
-        values::set_attr(result, symbols().names, names)?;
-    }
-    Ok(result)
-}
-
-/// Parses `text` with a `strptime` format into wall seconds, with the UTC offset a `%z` gave.
-fn parse_time(text: &str, format: &str) -> Option<(f64, Option<i64>)> {
-    let mut fields = Parsed::default();
-    let mut input = text;
-    parse_with(&mut fields, &mut input, format)?;
-    // GNU R fills an unspecified year, month or day from today's date, except that a month
-    // without a day is invalid, since today's day need not exist in that month.
-    if fields.month.is_some() && fields.day.is_none() && fields.yearday.is_none() {
-        return None;
-    }
-    let (this_year, this_month, this_day) =
-        if fields.year.is_some() && fields.month.is_some() && fields.day.is_some() {
-            (0, 0, 0)
-        } else {
-            let now = now_seconds().floor() as i64;
-            let state = zone_state(&resolve_zone(""), now);
-            civil_from_days((now + state.offset).div_euclid(86400))
-        };
-    let mut year = fields.year.unwrap_or(this_year);
-    if let Some(century) = fields.century {
-        year = century * 100 + year.rem_euclid(100);
-    }
-    let mut hour = fields.hour;
-    if let Some(afternoon) = fields.afternoon {
-        hour = hour % 12 + if afternoon { 12 } else { 0 };
-    }
-    let (mut month, mut day) = (
-        fields.month.unwrap_or(this_month),
-        fields.day.unwrap_or(this_day),
-    );
-    if let Some(yearday) = fields.yearday {
-        if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
-            return None;
-        }
-        month = 1;
-        day = yearday;
-    } else {
-        if !(1..=12).contains(&month) {
-            return None;
-        }
-        let month_days = [
-            31,
-            if is_leap(year) { 29 } else { 28 },
-            31,
-            30,
-            31,
-            30,
-            31,
-            31,
-            30,
-            31,
-            30,
-            31,
-        ];
-        if day < 1 || day > month_days[(month - 1) as usize] {
-            return None;
-        }
-    }
-    if hour > 24 || fields.minute > 59 || fields.second > 61.0 {
-        return None;
-    }
-    let days = days_from_civil(year, month, 1) + day - 1;
-    let wall =
-        days as f64 * 86400.0 + hour as f64 * 3600.0 + fields.minute as f64 * 60.0 + fields.second;
-    Some((wall, fields.offset))
-}
-
-#[derive(Default)]
-struct Parsed {
-    year: Option<i64>,
-    century: Option<i64>,
-    month: Option<i64>,
-    day: Option<i64>,
-    hour: i64,
-    minute: i64,
-    second: f64,
-    yearday: Option<i64>,
-    afternoon: Option<bool>,
-    offset: Option<i64>,
-}
-
-/// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
-/// format matches any run of whitespace, including none, and numeric fields skip leading blanks,
-/// as in glibc's `strptime`.
-fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()> {
-    let mut characters = format.chars();
-    while let Some(character) = characters.next() {
-        if character.is_whitespace() {
-            *input = input.trim_start();
-            continue;
-        }
-        if character != '%' {
-            *input = input.strip_prefix(character)?;
-            continue;
-        }
-        let mut spec = characters.next()?;
-        if spec == 'E' || spec == 'O' {
-            let base = characters.next()?;
-            if spec == 'O' && base == 'S' {
-                // `%OS` reads seconds with an optional fraction, and `%OSn` reads the same.
-                if characters
-                    .as_str()
-                    .starts_with(|digit: char| digit.is_ascii_digit())
-                {
-                    characters.next();
-                }
-                let trimmed = input.trim_start();
-                let integer = trimmed
-                    .chars()
-                    .take(2)
-                    .take_while(char::is_ascii_digit)
-                    .count();
-                if integer == 0 {
-                    return None;
-                }
-                let fraction = match trimmed[integer..].strip_prefix(['.', ',']) {
-                    Some(rest) => 1 + rest.chars().take_while(char::is_ascii_digit).count(),
-                    None => 0,
-                };
-                fields.second = trimmed[..integer + fraction]
-                    .replace(',', ".")
-                    .parse()
-                    .ok()?;
-                *input = &trimmed[integer + fraction..];
-                continue;
-            }
-            spec = base;
-        }
-        match spec {
-            'Y' => {
-                fields.year = Some(signed_number(input, 4)?);
-                fields.century = None;
-            }
-            'y' => {
-                let value = number(input, 2)?;
-                fields.year = Some(if value < 69 {
-                    2000 + value
-                } else {
-                    1900 + value
-                });
-            }
-            'C' => fields.century = Some(number(input, 2)?),
-            'm' => fields.month = Some(number(input, 2)?),
-            'd' | 'e' => fields.day = Some(number(input, 2)?),
-            'H' | 'k' => fields.hour = number(input, 2)?,
-            'I' | 'l' => {
-                fields.hour = number(input, 2)?;
-                if !(1..=12).contains(&fields.hour) {
-                    return None;
-                }
-            }
-            'M' => fields.minute = number(input, 2)?,
-            'S' => fields.second = number(input, 2)? as f64,
-            'j' => fields.yearday = Some(number(input, 3)?),
-            'p' | 'P' => {
-                let lower = input.trim_start().to_ascii_lowercase();
-                fields.afternoon = Some(match lower.get(..2) {
-                    Some("am") => false,
-                    Some("pm") => true,
-                    _ => return None,
-                });
-                *input = &input.trim_start()[2..];
-            }
-            'B' | 'b' | 'h' => {
-                let found = match_name(input, &MONTHS)?;
-                fields.month = Some(found as i64 + 1);
-            }
-            'A' | 'a' => {
-                match_name(input, &WEEKDAYS)?;
-            }
-            'u' | 'w' => {
-                number(input, 1)?;
-            }
-            'U' | 'V' | 'W' => {
-                number(input, 2)?;
-            }
-            'z' => fields.offset = Some(parse_offset(input)?),
-            'Z' => return None,
-            'n' | 't' => *input = input.trim_start(),
-            '%' => *input = input.trim_start().strip_prefix('%')?,
-            'F' => parse_with(fields, input, "%Y-%m-%d")?,
-            'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
-            'D' | 'x' => parse_with(fields, input, "%m/%d/%y")?,
-            'R' => parse_with(fields, input, "%H:%M")?,
-            'r' => parse_with(fields, input, "%I:%M:%S %p")?,
-            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
-            _ => return None,
-        }
-    }
-    Some(())
-}
-
-/// A field of at most `max_digits` digits, after leading blanks.
-fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
-    let trimmed = input.trim_start();
-    let digits = trimmed
-        .chars()
-        .take(max_digits)
-        .take_while(char::is_ascii_digit)
-        .count();
-    if digits == 0 {
-        return None;
-    }
-    *input = &trimmed[digits..];
-    trimmed[..digits].parse().ok()
-}
-
-fn signed_number(input: &mut &str, max_digits: usize) -> Option<i64> {
-    let trimmed = input.trim_start();
-    match trimmed.strip_prefix('-') {
-        Some(mut rest) => {
-            let value = number(&mut rest, max_digits)?;
-            *input = rest;
-            Some(-value)
-        }
-        None => number(input, max_digits),
-    }
-}
-
-/// A month or weekday name, in full or abbreviated to three letters, ignoring case. Returns its
-/// position in `names`.
-fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
-    let trimmed = input.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    let full = names
-        .iter()
-        .position(|name| lower.starts_with(&name.to_ascii_lowercase()));
-    let (position, consumed) = match full {
-        Some(position) => (position, names[position].len()),
-        None => (
-            names
-                .iter()
-                .position(|name| lower.starts_with(&name[..3].to_ascii_lowercase()))?,
-            3,
-        ),
-    };
-    *input = &trimmed[consumed..];
-    Some(position)
-}
-
-/// A `%z` offset in seconds: `Z`, or a sign and `hh`, `hhmm` or `hh:mm`.
-// GNU R accepts only the `+hhmm` form here: no `Z`, no colon, and nothing beyond +/-1400.
-fn parse_offset(input: &mut &str) -> Option<i64> {
-    let trimmed = input.trim_start();
-    let sign = match trimmed.chars().next()? {
-        '+' => 1,
-        '-' => -1,
-        _ => return None,
-    };
-    let digits = trimmed
-        .get(1..5)
-        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))?;
-    let value = digits.parse::<i64>().ok()?;
-    let (hours, minutes) = (value / 100, value % 100);
-    if value > 1400 || minutes > 59 {
-        return None;
-    }
-    *input = &trimmed[5..];
-    Some(sign * (hours * 3600 + minutes * 60))
-}
-
-unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
-    let texts = call.arg(0);
-    let formats = call.arg(1);
-    let tz = effective_zone_name(
-        &values::first_string(call.arg(2))
-            .map(|text| text.into_owned())
-            .unwrap_or_default(),
-    );
-    let zone = resolve_zone(&tz);
-    let utc = is_utc_name(&tz);
-    let count = length(texts);
-    let mut moments = Vec::with_capacity(count);
-    for index in 0..count {
-        let format = values::string_at(formats, index % length(formats).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let parsed = values::string_at(texts, index).and_then(|text| parse_time(&text, &format));
-        moments.push(match parsed {
-            None => Moment::Missing(NA_REAL),
-            Some((wall, Some(offset))) => match local_moment(&zone, utc, wall - offset as f64) {
-                // A time with an explicit offset converts to the zone, but GNU R leaves its
-                // abbreviation and offset fields unset.
-                Moment::Local { wall, isdst, .. } if !utc => Moment::Local {
-                    wall,
-                    isdst,
-                    zone: String::new(),
-                    gmtoff: NA_INTEGER,
-                },
-                moment => moment,
-            },
-            Some((wall, None)) if utc => Moment::Local {
-                wall,
-                isdst: 0,
-                zone: tz.clone(),
-                gmtoff: 0,
-            },
-            Some((wall, None)) => {
-                let instant = utc_from_wall(&zone, wall, -1).floor() as i64;
-                let mut state = zone_state(&zone, instant);
-                if instant + state.offset != wall.floor() as i64 {
-                    // A time in a spring-forward gap reports the zone in force after the gap,
-                    // where the wall clock read with the offset before the gap lands.
-                    state = zone_state(&zone, wall.floor() as i64 - state.offset);
-                }
-                Moment::Local {
-                    wall,
-                    isdst: state.dst as i32,
-                    zone: state.abbreviation,
-                    gmtoff: NA_INTEGER,
-                }
-            }
-        });
-    }
-    let result = posixlt_vector(&moments, &tz, &zone)?;
-    set_year_names(result, values::names(texts))?;
-    Ok(result)
-}
-
-unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
-    let dates = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
-    let seconds: Vec<f64> = values::reals(dates)
-        .iter()
-        .map(|&days| {
-            if days.is_finite() {
-                days.floor() * 86400.0
-            } else {
-                days
-            }
-        })
-        .collect();
-    let result = posixlt_from_seconds(&seconds, "UTC")?;
-    set_year_names(result, values::names(call.arg(0)))?;
-    Ok(result)
-}
-
-unsafe fn do_posixlt_to_date(call: &Call<'_>) -> R<Sexp> {
-    let seconds = posixlt_seconds(call.arg(0))?;
-    let days: Vec<f64> = seconds
-        .iter()
-        .map(|&value| {
-            if value.is_finite() {
-                (value / 86400.0).floor()
-            } else {
-                value
-            }
-        })
-        .collect();
-    let result = values::real_vector(&days)?;
-    set_names_from_year(call.arg(0), result)?;
-    let class = scalar_string("Date")?;
-    values::set_attr(result, symbols().class, class)?;
-    Ok(result)
-}
-
-unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
-    let paths = call.arg(0);
-    let count = length(paths);
-    let size = alloc(SexpType::Real, count)?;
-    let is_dir = alloc(SexpType::Logical, count)?;
-    let mode = alloc(SexpType::Integer, count)?;
-    let mtime = alloc(SexpType::Real, count)?;
-    for index in 0..count {
-        let path = values::string_at(paths, index)
-            .map(|text| crate::connections::expand_path(&text))
-            .unwrap_or_default();
-        match std::fs::metadata(&path) {
-            Ok(metadata) => {
-                values::reals_mut(size)[index] = metadata.len() as f64;
-                values::ints_mut(is_dir)[index] = metadata.is_dir() as i32;
-                values::ints_mut(mode)[index] = (metadata.permissions().mode() & 0o777) as i32;
-                values::reals_mut(mtime)[index] = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(NA_REAL, |duration| duration.as_secs_f64());
-            }
-            Err(_) => {
-                values::reals_mut(size)[index] = NA_REAL;
-                values::ints_mut(is_dir)[index] = NA_INTEGER;
-                values::ints_mut(mode)[index] = NA_INTEGER;
-                values::reals_mut(mtime)[index] = NA_REAL;
-            }
-        }
-    }
-    let octmode = scalar_string("octmode")?;
-    values::set_attr(mode, symbols().class, octmode)?;
-    let times = string_vector(&["POSIXct", "POSIXt"])?;
-    values::set_attr(mtime, symbols().class, times)?;
-    values::named_list(&[
-        ("size", size),
-        ("isdir", is_dir),
-        ("mode", mode),
-        ("mtime", mtime),
-        ("ctime", mtime),
-        ("atime", mtime),
-    ])
-}
-
-fn walk(
-    directory: &Path,
-    recursive: bool,
-    include_dirs: bool,
-    output: &mut Vec<PathBuf>,
-    all: bool,
-) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !all && name.starts_with('.') {
-            continue;
-        }
-        if path.is_dir() && recursive {
-            if include_dirs {
-                output.push(path.clone());
-            }
-            walk(&path, recursive, include_dirs, output, all);
-        } else {
-            output.push(path);
-        }
-    }
-}
-
-unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
-    let directories = call.arg(0);
-    let pattern = values::first_string(call.arg(1)).map(|text| text.into_owned());
-    let all = values::as_logical_scalar(call.arg(2)) == 1;
-    let full = values::as_logical_scalar(call.arg(3)) == 1;
-    let recursive = values::as_logical_scalar(call.arg(4)) == 1;
-    let ignore_case = values::as_logical_scalar(call.arg(5)) == 1;
-    let include_dirs = values::as_logical_scalar(call.arg(6)) == 1;
-    let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
-    let regex = match &pattern {
-        Some(pattern) => Some(
-            regex::RegexBuilder::new(&crate::strings::translate_regex(pattern, true))
-                .case_insensitive(ignore_case)
-                .build()
-                .map_err(|failure| {
-                    error(format!("invalid 'pattern' regular expression: {failure}"))
-                })?,
-        ),
-        None => None,
-    };
-    let mut names = Vec::new();
-    for index in 0..length(directories) {
-        let Some(directory) = values::string_at(directories, index) else {
-            continue;
-        };
-        let directory = crate::connections::expand_path(&directory);
-        let mut paths = Vec::new();
-        walk(
-            Path::new(&directory),
-            recursive,
-            include_dirs,
-            &mut paths,
-            all,
-        );
-        if all && !recursive && !no_dots {
-            names.push(if full {
-                format!("{directory}/.")
-            } else {
-                ".".into()
-            });
-            names.push(if full {
-                format!("{directory}/..")
-            } else {
-                "..".into()
-            });
-        }
-        for path in paths {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if let Some(regex) = &regex
-                && !regex.is_match(&name)
-            {
-                continue;
-            }
-            let shown = if full {
-                path.display().to_string()
-            } else {
-                path.strip_prefix(&directory)
-                    .map(|relative| relative.display().to_string())
-                    .unwrap_or(name)
-            };
-            names.push(shown);
-        }
-    }
-    crate::sort::sort_strings(&mut names);
-    string_vector(&names)
-}
-
-unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
-    let directories = call.arg(0);
-    let full = values::as_logical_scalar(call.arg(1)) == 1;
-    let recursive = values::as_logical_scalar(call.arg(2)) == 1;
-    let mut names = Vec::new();
-    for index in 0..length(directories) {
-        let Some(directory) = values::string_at(directories, index) else {
-            continue;
-        };
-        let directory = crate::connections::expand_path(&directory);
-        names.push(if full {
-            directory.clone()
-        } else {
-            String::new()
-        });
-        let mut paths = Vec::new();
-        walk(Path::new(&directory), recursive, true, &mut paths, true);
-        for path in paths.into_iter().filter(|path| path.is_dir()) {
-            names.push(if full {
-                path.display().to_string()
-            } else {
-                path.strip_prefix(&directory)
-                    .map(|relative| relative.display().to_string())
-                    .unwrap_or_default()
-            });
-        }
-    }
-    crate::sort::sort_strings(&mut names);
-    string_vector(&names)
-}
-
-unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
-    let paths = call.arg(0);
-    let must_work = values::as_logical_scalar(call.arg(2));
-    let count = length(paths);
-    let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let Some(path) = values::string_at(paths, index) else {
-            values::set_elt(result, index, values::na_string());
-            continue;
-        };
-        let expanded = crate::connections::expand_path(&path);
-        let normalized = match std::fs::canonicalize(&expanded) {
-            Ok(canonical) => canonical.display().to_string(),
-            Err(_) => {
-                if must_work == 1 {
-                    return Err(call.error(format!(
-                        "path[{}]=\"{path}\": No such file or directory",
-                        index + 1
-                    )));
-                }
-                if must_work == NA_INTEGER {
-                    crate::conditions::warning_call(
-                        call.call,
-                        format!("path[{}]=\"{path}\": No such file or directory", index + 1),
-                    )?;
-                }
-                expanded
-            }
-        };
-        values::set_elt(result, index, values::mkchar(&normalized)?);
-    }
-    Ok(result)
-}
-
-unsafe fn do_file_path(call: &Call<'_>) -> R<Sexp> {
-    let parts = call.arg(0);
-    let separator = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_else(|| "/".into());
-    let count = parts.length() as usize;
-    let pieces: Vec<Sexp> = (0..count)
-        .map(|index| crate::coerce::coerce_vector(parts.element(index), SexpType::String))
-        .collect::<R<_>>()?;
-    if pieces.iter().any(|piece| length(*piece) == 0) {
-        return alloc(SexpType::String, 0);
-    }
-    let longest = pieces.iter().map(|piece| length(*piece)).max().unwrap_or(0);
-    let mut paths = Vec::with_capacity(longest);
-    for index in 0..longest {
-        let parts: Vec<String> = pieces
-            .iter()
-            .map(|piece| {
-                values::string_at(*piece, index % length(*piece))
-                    .map_or_else(|| "NA".into(), |text| text.into_owned())
-            })
-            .collect();
-        paths.push(parts.join(&separator));
-    }
-    string_vector(&paths)
-}
-
-unsafe fn do_tempfile(call: &Call<'_>) -> R<Sexp> {
-    let patterns = call.arg(0);
-    let directories = call.arg(1);
-    let extensions = call.arg(2);
-    let count = length(patterns)
-        .max(length(directories))
-        .max(length(extensions));
-    let mut paths = Vec::new();
-    static mut COUNTER: u64 = 0;
-    for index in 0..count {
-        let pattern = values::string_at(patterns, index % length(patterns).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let directory = values::string_at(directories, index % length(directories).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_else(temp_dir);
-        let extension = values::string_at(extensions, index % length(extensions).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        COUNTER += 1;
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.subsec_nanos() as u64)
-            ^ COUNTER.wrapping_mul(0x9e3779b97f4a7c15);
-        paths.push(format!("{directory}/{pattern}{unique:x}{extension}"));
-    }
-    string_vector(&paths)
-}
-
-unsafe fn do_unlink(call: &Call<'_>) -> R<Sexp> {
-    let paths = call.arg(0);
-    let recursive = values::as_logical_scalar(call.arg(1)) == 1;
-    let mut failed = 0;
-    for index in 0..length(paths) {
-        let Some(path) = values::string_at(paths, index) else {
-            continue;
-        };
-        let path = crate::connections::expand_path(&path);
-        let target = Path::new(&path);
-        let outcome = if target.is_dir() {
-            if recursive {
-                std::fs::remove_dir_all(target)
-            } else {
-                std::fs::remove_dir(target)
-            }
-        } else if target.exists() {
-            std::fs::remove_file(target)
-        } else {
-            Ok(())
-        };
-        if outcome.is_err() {
-            failed = 1;
-        }
-    }
-    scalar_integer(failed)
-}
-
-unsafe fn do_file_rename(call: &Call<'_>) -> R<Sexp> {
-    let from = call.arg(0);
-    let to = call.arg(1);
-    let count = length(from);
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        let source = values::string_at(from, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let target = values::string_at(to, index)
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        values::ints_mut(result)[index] = std::fs::rename(source, target).is_ok() as i32;
-    }
-    Ok(result)
-}
-
-unsafe fn do_dir_create(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "path")?;
-    let recursive = values::as_logical_scalar(call.arg(2)) == 1;
-    let path = crate::connections::expand_path(&path);
-    let outcome = if recursive {
-        std::fs::create_dir_all(&path)
-    } else {
-        std::fs::create_dir(&path)
-    };
-    scalar_bool(outcome.is_ok())
-}
-
-unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "dir")?;
-    let previous = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    std::env::set_current_dir(crate::connections::expand_path(&path))
-        .map_err(|_| call.error("cannot change working directory"))?;
-    scalar_string(&previous)
-}
-
-/// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
-/// component and each pattern's matches stay in pattern order, sorted only among themselves.
-unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
-    let patterns = call.arg(0);
-    if patterns.kind() != SexpType::String {
-        return Err(error("invalid 'paths' argument"));
-    }
-    let dirmark = values::as_logical_scalar(call.arg(1));
-    if dirmark == NA_LOGICAL {
-        return Err(error("invalid 'dirmark' argument"));
-    }
-    let mut buffer: libc::glob_t = std::mem::zeroed();
-    let mut appended = false;
-    for index in 0..length(patterns) {
-        let Some(pattern) = values::string_at(patterns, index) else {
-            continue;
-        };
-        let Ok(pattern) = std::ffi::CString::new(crate::connections::expand_path(&pattern)) else {
-            continue;
-        };
-        let mut flags = if dirmark != 0 { libc::GLOB_MARK } else { 0 };
-        if appended {
-            flags |= libc::GLOB_APPEND;
-        }
-        match libc::glob(pattern.as_ptr(), flags, None, &mut buffer) {
-            0 => appended = true,
-            libc::GLOB_NOMATCH => {}
-            libc::GLOB_NOSPACE => {
-                libc::globfree(&mut buffer);
-                return Err(error("internal out-of-memory condition"));
-            }
-            libc::GLOB_ABORTED => crate::conditions::warning("read error on directory")?,
-            _ => {}
-        }
-    }
-    let matches: Vec<String> = if appended {
-        (0..buffer.gl_pathc)
-            .map(|index| {
-                std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    libc::globfree(&mut buffer);
-    string_vector(&matches)
-}
-
-/// Takes the locale of the categories GNU R uses from the environment, as it does at startup;
-/// numbers and the rest stay in the C locale.
-pub unsafe fn init_locale() {
-    for category in [
-        libc::LC_CTYPE,
-        libc::LC_COLLATE,
-        libc::LC_TIME,
-        libc::LC_MONETARY,
-        libc::LC_MESSAGES,
-        libc::LC_PAPER,
-        libc::LC_MEASUREMENT,
-    ] {
-        libc::setlocale(category, c"".as_ptr());
-    }
-    crate::sort::refresh_collation();
-}
-
-/// The C library category for `Sys.setlocale`'s category number, which indexes
-/// `c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
-/// "LC_MESSAGES", "LC_PAPER", "LC_MEASUREMENT")`.
-fn locale_category(number: i32) -> Option<libc::c_int> {
-    Some(match number {
-        1 => libc::LC_ALL,
-        2 => libc::LC_COLLATE,
-        3 => libc::LC_CTYPE,
-        4 => libc::LC_MONETARY,
-        5 => libc::LC_NUMERIC,
-        6 => libc::LC_TIME,
-        7 => libc::LC_MESSAGES,
-        8 => libc::LC_PAPER,
-        9 => libc::LC_MEASUREMENT,
-        _ => return None,
-    })
-}
-
-unsafe fn current_locale(category: libc::c_int) -> String {
-    let current = libc::setlocale(category, std::ptr::null());
-    if current.is_null() {
-        String::new()
-    } else {
-        std::ffi::CStr::from_ptr(current)
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
-unsafe fn do_sys_getlocale(call: &Call<'_>) -> R<Sexp> {
-    let category = locale_category(values::as_integer_scalar(call.arg(0)))
-        .ok_or_else(|| error("invalid 'category' argument"))?;
-    scalar_string(&current_locale(category))
-}
-
-unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
-    let number = values::as_integer_scalar(call.arg(0));
-    let category = locale_category(number).ok_or_else(|| error("invalid 'category' argument"))?;
-    let locale = call.arg(1);
-    let Some(name) = (locale.kind() == SexpType::String && length(locale) == 1)
-        .then(|| values::string_at(locale, 0))
-        .flatten()
-    else {
-        return Err(error("invalid 'locale' argument"));
-    };
-    let Ok(text) = std::ffi::CString::new(name.as_bytes()) else {
-        return Err(error("invalid 'locale' argument"));
-    };
-    let honoured = if category == libc::LC_ALL {
-        // As in GNU R, LC_ALL sets the categories R uses but leaves LC_NUMERIC at C.
-        let honoured = !libc::setlocale(libc::LC_CTYPE, text.as_ptr()).is_null();
-        if honoured {
-            for category in [libc::LC_COLLATE, libc::LC_MONETARY, libc::LC_TIME] {
-                libc::setlocale(category, text.as_ptr());
-            }
-        }
-        honoured
-    } else {
-        if category == libc::LC_NUMERIC {
-            crate::conditions::warning("setting 'LC_NUMERIC' may cause R to function strangely")?;
-        }
-        !libc::setlocale(category, text.as_ptr()).is_null()
-    };
-    crate::sort::refresh_collation();
-    if !honoured {
-        crate::conditions::warning(format!(
-            "OS reports request to set locale to \"{name}\" cannot be honored"
-        ))?;
-        return scalar_string("");
-    }
-    scalar_string(&current_locale(category))
-}
-
-unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
-    let mut name: libc::utsname = std::mem::zeroed();
-    libc::uname(&mut name);
-    let field = |raw: &[libc::c_char]| -> String {
-        let bytes: Vec<u8> = raw
-            .iter()
-            .take_while(|&&byte| byte != 0)
-            .map(|&byte| byte as u8)
-            .collect();
-        String::from_utf8_lossy(&bytes).into_owned()
-    };
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    let values_list = [
-        field(&name.sysname),
-        field(&name.release),
-        field(&name.version),
-        field(&name.nodename),
-        field(&name.machine),
-        user.clone(),
-        user.clone(),
-        user,
-    ];
-    let result = string_vector(&values_list)?;
-    let names = string_vector(&[
-        "sysname",
-        "release",
-        "version",
-        "nodename",
-        "machine",
-        "login",
-        "user",
-        "effective_user",
-    ])?;
-    values::set_attr(result, symbols().names, names)?;
-    Ok(result)
-}
-
-unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
-    let utf8 = scalar_bool(true)?;
-    let latin1 = scalar_bool(false)?;
-    let mbcs = scalar_bool(true)?;
-    let codeset = scalar_string("UTF-8")?;
-    values::named_list(&[
-        ("MBCS", mbcs),
-        ("UTF-8", utf8),
-        ("Latin-1", latin1),
-        ("codeset", codeset),
-    ])
-}
-
-unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
-    let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
-    let fields: Vec<(&str, String)> = vec![
-        ("platform", platform.clone()),
-        ("arch", std::env::consts::ARCH.to_owned()),
-        ("os", "linux-gnu".to_owned()),
-        ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
-        ("status", String::new()),
-        ("major", "4".to_owned()),
-        ("minor", "3.3".to_owned()),
-        ("year", "2024".to_owned()),
-        ("month", "02".to_owned()),
-        ("day", "29".to_owned()),
-        ("svn rev", "86002".to_owned()),
-        ("language", "R".to_owned()),
-        ("version.string", "R version 4.3.3 (2024-02-29)".to_owned()),
-        ("nickname", "Angel Food Cake".to_owned()),
-    ];
-    let items: Vec<(&str, Sexp)> = fields
-        .iter()
-        .map(|(name, value)| Ok((*name, scalar_string(value)?)))
-        .collect::<R<_>>()?;
-    values::named_list(&items)
-}
-
-unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
-    let names = [
-        "jpeg",
-        "png",
-        "tiff",
-        "tcltk",
-        "X11",
-        "aqua",
-        "http/ftp",
-        "sockets",
-        "libxml",
-        "fifo",
-        "cledit",
-        "iconv",
-        "NLS",
-        "Rprof",
-        "profmem",
-        "cairo",
-        "ICU",
-        "long.double",
-        "libcurl",
-    ];
-    let flags = [1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0];
-    let result = values::logical_vector(&flags)?;
-    let names = string_vector(&names)?;
-    values::set_attr(result, symbols().names, names)?;
-    Ok(result)
-}
-
-unsafe fn do_gc(_call: &Call<'_>) -> R<Sexp> {
-    crate::heap().collect(heap::Collection::Major);
-    (interp().hooks.run_finalizers)();
-    let stats = crate::heap().stats();
-    let result = values::real_vector(&[
-        stats.live_objects as f64,
-        0.0,
-        (stats.live_bytes as f64) / 1048576.0,
-        0.0,
-        NA_REAL,
-        NA_REAL,
-        NA_REAL,
-        NA_REAL,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    ])?;
-    Ok(result)
-}
-
-/// `gctorture(on)`: with `on`, every allocation collects first, which turns a missing root into
-/// a crash where it happens. Returns the previous setting.
-unsafe fn do_gctorture(call: &Call<'_>) -> R<Sexp> {
-    let previous = set_gc_stress(values::as_logical_scalar(call.arg(0)) == 1);
-    scalar_bool(previous)
-}
-
-/// `gctorture2(step, wait, inhibit_release)`: any positive `step` turns the stress on, since the
-/// heap collects either before every allocation or by its normal policy.
-unsafe fn do_gctorture2(call: &Call<'_>) -> R<Sexp> {
-    let step = values::as_integer_scalar(call.arg(0));
-    let previous = set_gc_stress(step != NA_INTEGER && step > 0);
-    scalar_integer(i32::from(previous))
-}
-
-unsafe fn set_gc_stress(on: bool) -> bool {
-    let policy = crate::heap().policy_mut();
-    let previous = matches!(policy.stress, GcStress::EveryAllocation);
-    policy.stress = if on {
-        GcStress::EveryAllocation
-    } else {
-        GcStress::Off
-    };
-    previous
-}
-
-unsafe fn do_reg_finalizer(call: &Call<'_>) -> R<Sexp> {
-    let key = call.arg(0);
-    let finalizer = call.arg(1);
-    if !matches!(key.kind(), SexpType::Environment | SexpType::ExternalPtr) {
-        return Err(call.error("first argument must be environment or external pointer"));
-    }
-    if !matches!(
-        finalizer.kind(),
-        SexpType::Closure | SexpType::Builtin | SexpType::Special
-    ) {
-        return Err(call.error("second argument must be a function"));
-    }
-    let on_exit = values::as_logical_scalar(call.arg(2));
-    if on_exit == NA_LOGICAL {
-        return Err(call.error("third argument must be 'TRUE' or 'FALSE'"));
-    }
-    crate::heap().alloc_weak_ref(key, nil(), finalizer, 0, on_exit != 0)?;
-    Ok(nil())
-}
-
-unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
-    let status = values::as_integer_scalar(call.arg(1));
-    use std::io::Write;
-    drop(std::io::stdout().flush());
-    std::process::exit(if status == NA_INTEGER { 0 } else { status });
-}
-
-unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
-    use std::io::Write;
-    let command = values::require_string(call.arg(0), "command")?;
-    let intern = values::as_logical_scalar(call.arg(1)) == 1;
-    let mut process = std::process::Command::new("sh");
-    process.arg("-c").arg(&command);
-    if intern {
-        process.stderr(std::process::Stdio::inherit());
-        let output = process
-            .output()
-            .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = text.lines().collect();
-        let result = string_vector(&lines)?;
-        let status = output.status.code().unwrap_or(127);
-        if status != 0 {
-            values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
-            crate::conditions::warning_call(
-                call.call,
-                &format!("running command '{command}' had status {status}"),
-            )?;
-        }
-        return Ok(result);
-    }
-    // The child writes straight to the terminal, as GNU R's does, so earlier output must be out
-    // first to keep the order.
-    std::io::stdout()
-        .flush()
-        .map_err(|failure| call.error(format!("cannot flush stdout: {failure}")))?;
-    let status = process
-        .status()
-        .map_err(|failure| call.error(format!("error in running command: {failure}")))?;
-    interp().visible = false;
-    scalar_integer(status.code().unwrap_or(127))
-}
-
-unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
-    let strings = call.arg(0);
-    let count = length(strings);
-    let result = alloc(SexpType::String, count)?;
-    for index in 0..count {
-        let charsxp = strings.element(index);
-        let name = if charsxp.has_gp(heap::object::gp::UTF8) {
-            "UTF-8"
-        } else if charsxp.has_gp(heap::object::gp::LATIN1) {
-            "latin1"
-        } else if charsxp.has_gp(heap::object::gp::BYTES) {
-            "bytes"
-        } else {
-            "unknown"
-        };
-        values::set_elt(result, index, values::mkchar(name)?);
-    }
-    Ok(result)
-}
-
-unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
-    let (strings, encodings) = (call.arg(0), call.arg(1));
-    if strings.kind() != SexpType::String {
-        return Err(call.error("a character vector argument expected"));
-    }
-    if encodings.kind() != SexpType::String || length(encodings) == 0 {
-        return Err(call.error("a character vector 'value' expected"));
-    }
-    let result = values::shallow_duplicate(strings)?;
-    for index in 0..length(strings) {
-        let charsxp = strings.element(index);
-        if charsxp == values::na_string() {
-            continue;
-        }
-        let encoding = match values::string_at(encodings, index % length(encodings)).as_deref() {
-            Some("latin1") => Encoding::Latin1,
-            Some("UTF-8") => Encoding::Utf8,
-            Some("bytes") => Encoding::Bytes,
-            _ => native_encoding(charsxp.bytes()),
-        };
-        values::set_elt(
-            result,
-            index,
-            values::mkchar_bytes(charsxp.bytes(), encoding)?,
-        );
-    }
-    Ok(result)
-}
-
 unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
     let strings = call.arg(0);
     if strings.kind() != SexpType::String {
@@ -2582,377 +2432,4 @@ unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `.Internal(iconv(x, from, to, sub, mark, toRaw))`, on top of the C library's `iconv`.
-unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
-    let input = call.arg(0);
-    let from = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let to = values::first_string(call.arg(2))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
-    let substitute = values::first_string(call.arg(3)).map(|text| text.into_owned());
-    let mark = values::as_logical_scalar(call.arg(4)) == 1;
-    let to_raw = values::as_logical_scalar(call.arg(5)) == 1;
-    let is_list = input.kind() == SexpType::List;
-    if !is_list && input.kind() != SexpType::String {
-        return Err(call.error("'x' must be a character vector"));
-    }
-    let native = |name: &str| {
-        if name.is_empty() {
-            "UTF-8".to_owned()
-        } else {
-            name.to_owned()
-        }
-    };
-    let (from, to) = (native(&from), native(&to));
-    let converter = Converter::open(&from, &to)
-        .ok_or_else(|| error(format!("unsupported conversion from '{from}' to '{to}'")))?;
-    let target = to.split("//").next().unwrap_or("").to_ascii_uppercase();
-    let encoding = match target.as_str() {
-        _ if !mark => Encoding::Native,
-        "UTF-8" | "UTF8" => Encoding::Utf8,
-        "LATIN1" | "ISO-8859-1" | "ISO8859-1" | "ISO_8859-1" => Encoding::Latin1,
-        _ => Encoding::Native,
-    };
-    let from_utf8 = matches!(from.to_ascii_uppercase().as_str(), "UTF-8" | "UTF8");
-    let count = length(input);
-    let result = if to_raw {
-        alloc(SexpType::List, count)?
-    } else if is_list {
-        alloc(SexpType::String, count)?
-    } else {
-        values::shallow_duplicate(input)?
-    };
-    for index in 0..count {
-        let element = input.element(index);
-        let bytes: Option<&[u8]> = if is_list {
-            match element.kind() {
-                SexpType::Raw => Some(values::raws(element)),
-                SexpType::Nil => None,
-                _ => {
-                    return Err(call
-                        .error("'x' must be a character vector or a list of NULL or raw vectors"));
-                }
-            }
-        } else if element == values::na_string() {
-            None
-        } else {
-            Some(element.bytes())
-        };
-        let converted =
-            bytes.and_then(|bytes| converter.convert(bytes, substitute.as_deref(), from_utf8));
-        let value = match (converted, to_raw) {
-            (None, true) => nil(),
-            (None, false) => values::na_string(),
-            (Some(bytes), true) => {
-                let raw = alloc(SexpType::Raw, bytes.len())?;
-                values::raws_mut(raw).copy_from_slice(&bytes);
-                raw
-            }
-            (Some(bytes), false) => {
-                let encoding = if encoding == Encoding::Native {
-                    native_encoding(&bytes)
-                } else {
-                    encoding
-                };
-                values::mkchar_bytes(&bytes, encoding)?
-            }
-        };
-        values::set_elt(result, index, value);
-    }
-    Ok(result)
-}
-
-/// The mark for text in the native encoding. The native encoding is always UTF-8, and ry marks
-/// valid UTF-8 as such everywhere, so that equal text is one interned string; GNU R instead keeps
-/// it unmarked and translates when it compares.
-fn native_encoding(bytes: &[u8]) -> Encoding {
-    if std::str::from_utf8(bytes).is_ok() {
-        Encoding::Utf8
-    } else {
-        Encoding::Native
-    }
-}
-
-/// An open `iconv_t` descriptor, closed on drop.
-struct Converter(libc::iconv_t);
-
-impl Converter {
-    fn open(from: &str, to: &str) -> Option<Converter> {
-        let (from, to) = (
-            std::ffi::CString::new(from).ok()?,
-            std::ffi::CString::new(to).ok()?,
-        );
-        let descriptor = unsafe { libc::iconv_open(to.as_ptr(), from.as_ptr()) };
-        (descriptor as isize != -1).then_some(Converter(descriptor))
-    }
-
-    /// Converts `input`, or returns `None` for input the target cannot represent when there is no
-    /// substitute. `substitute` follows `iconv(sub = )`: `"byte"` writes `<xx>`, `"Unicode"` writes
-    /// `<U+xxxx>` for a UTF-8 character, `"c99"` writes `\uxxxx`, and anything else is written as
-    /// given, once per unconvertible byte.
-    fn convert(&self, input: &[u8], substitute: Option<&str>, from_utf8: bool) -> Option<Vec<u8>> {
-        let mut output = Vec::with_capacity(input.len() + 16);
-        let mut buffer = [0u8; 4096];
-        let mut position = 0;
-        // Resets the shift state, so a descriptor reused across elements starts clean.
-        unsafe {
-            libc::iconv(
-                self.0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        loop {
-            let mut in_pointer = input[position..].as_ptr() as *mut libc::c_char;
-            let mut in_left = input.len() - position;
-            let mut out_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
-            let mut out_left = buffer.len();
-            let finished = in_left == 0;
-            let status = unsafe {
-                if finished {
-                    libc::iconv(
-                        self.0,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        &mut out_pointer,
-                        &mut out_left,
-                    )
-                } else {
-                    libc::iconv(
-                        self.0,
-                        &mut in_pointer,
-                        &mut in_left,
-                        &mut out_pointer,
-                        &mut out_left,
-                    )
-                }
-            };
-            let error = std::io::Error::last_os_error().raw_os_error();
-            output.extend_from_slice(&buffer[..buffer.len() - out_left]);
-            position = input.len() - in_left;
-            if status != usize::MAX {
-                if finished {
-                    return Some(output);
-                }
-                continue;
-            }
-            match error {
-                Some(libc::E2BIG) => continue,
-                Some(libc::EILSEQ) | Some(libc::EINVAL) => {
-                    let rest = &input[position..];
-                    let first = *rest.first()?;
-                    let character = from_utf8.then(|| utf8_character(rest)).flatten();
-                    let (text, consumed) = match (substitute?, character) {
-                        ("byte", _) => (format!("<{first:02x}>"), 1),
-                        ("Unicode", Some((code, width))) => (format!("<U+{code:04X}>"), width),
-                        ("c99", Some((code, width))) if code > 0xFFFF => {
-                            (format!("\\U{code:08x}"), width)
-                        }
-                        ("c99", Some((code, width))) => (format!("\\u{code:04x}"), width),
-                        ("Unicode" | "c99", None) => (format!("<{first:02x}>"), 1),
-                        (text, _) => (text.to_owned(), 1),
-                    };
-                    output.extend_from_slice(text.as_bytes());
-                    position += consumed;
-                    if position >= input.len() {
-                        return Some(output);
-                    }
-                }
-                _ => return None,
-            }
-        }
-    }
-}
-
-impl Drop for Converter {
-    fn drop(&mut self) {
-        unsafe { libc::iconv_close(self.0) };
-    }
-}
-
-/// The code point and byte width of the UTF-8 character `bytes` starts with.
-fn utf8_character(bytes: &[u8]) -> Option<(u32, usize)> {
-    let width = match *bytes.first()? {
-        byte if byte < 0x80 => 1,
-        byte if byte >> 5 == 0b110 => 2,
-        byte if byte >> 4 == 0b1110 => 3,
-        byte if byte >> 3 == 0b11110 => 4,
-        _ => return None,
-    };
-    let character = std::str::from_utf8(bytes.get(..width)?)
-        .ok()?
-        .chars()
-        .next()?;
-    Some((character as u32, width))
-}
-
-unsafe fn do_ngettext(call: &Call<'_>) -> R<Sexp> {
-    let count = values::as_integer_scalar(call.arg(0));
-    Ok(if count == 1 { call.arg(1) } else { call.arg(2) })
-}
-
-/// The CRC-64 (ECMA-182, reflected) of `bytes` in lower-case hexadecimal without leading
-/// zeros, as `crc64()` reports it.
-pub fn crc64_hex(bytes: &[u8]) -> String {
-    format!("{:x}", crc64(bytes))
-}
-
-fn crc64(bytes: &[u8]) -> u64 {
-    let mut crc: u64 = !0;
-    for &byte in bytes {
-        crc ^= byte as u64;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xC96C5795D7870F42
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
-/// `.Machine`, as GNU R computes it on a 64-bit IEEE platform.
-pub unsafe fn machine() -> R<Sexp> {
-    let double = |value: f64| scalar_real(value);
-    let integer = |value: i32| scalar_integer(value);
-    values::named_list(&[
-        ("double.eps", double(f64::EPSILON)?),
-        ("double.neg.eps", double(f64::EPSILON / 2.0)?),
-        ("double.xmin", double(f64::MIN_POSITIVE)?),
-        ("double.xmax", double(f64::MAX)?),
-        ("double.base", integer(2)?),
-        ("double.digits", integer(53)?),
-        ("double.rounding", integer(5)?),
-        ("double.guard", integer(0)?),
-        ("double.ulp.digits", integer(-52)?),
-        ("double.neg.ulp.digits", integer(-53)?),
-        ("double.exponent", integer(11)?),
-        ("double.min.exp", integer(-1022)?),
-        ("double.max.exp", integer(1024)?),
-        ("integer.max", integer(i32::MAX)?),
-        ("sizeof.long", integer(8)?),
-        ("sizeof.longlong", integer(8)?),
-        ("sizeof.longdouble", integer(16)?),
-        ("sizeof.pointer", integer(8)?),
-        ("sizeof.time_t", integer(8)?),
-        ("longdouble.eps", double(1.0842021724855044e-19)?),
-        ("longdouble.neg.eps", double(5.421010862427522e-20)?),
-        ("longdouble.digits", integer(64)?),
-        ("longdouble.rounding", integer(5)?),
-        ("longdouble.guard", integer(0)?),
-        ("longdouble.ulp.digits", integer(-63)?),
-        ("longdouble.neg.ulp.digits", integer(-64)?),
-        ("longdouble.exponent", integer(15)?),
-        ("longdouble.min.exp", integer(-16382)?),
-        ("longdouble.max.exp", integer(16384)?),
-    ])
-}
-
-/// `.Platform`.
-pub unsafe fn platform() -> R<Sexp> {
-    let string = |text: &str| scalar_string(text);
-    values::named_list(&[
-        ("OS.type", string("unix")?),
-        ("file.sep", string("/")?),
-        ("dynlib.ext", string(".so")?),
-        ("GUI", string("X11")?),
-        ("endian", string("little")?),
-        ("pkgType", string("source")?),
-        ("path.sep", string(":")?),
-        ("r_arch", string("")?),
-    ])
-}
-
-unsafe fn do_esoft_version(_: &Call<'_>) -> R<Sexp> {
-    let entries = [
-        ("zlib", "1.3"),
-        ("bzlib", ""),
-        ("xz", ""),
-        ("PCRE", "10.42 2022-12-11"),
-        ("ICU", ""),
-        ("TRE", ""),
-        ("iconv", "glibc"),
-        ("readline", ""),
-        ("BLAS", ""),
-    ];
-    let result = string_vector(
-        &entries
-            .iter()
-            .map(|(_, version)| *version)
-            .collect::<Vec<_>>(),
-    )?;
-    let names = string_vector(&entries.iter().map(|(name, _)| *name).collect::<Vec<_>>())?;
-    values::set_attr(result, symbols().names, names)?;
-    Ok(result)
-}
-
-unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
-    let path = values::require_string(call.arg(0), "x")?;
-    let path = crate::connections::expand_path(&path);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        crate::conditions::warning_call(
-            call.call,
-            &format!("file '{path}' cannot be opened for reading"),
-        )?;
-        return scalar_bool(false);
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value
-            .trim()
-            .trim_matches(|quote| quote == '"' || quote == '\'');
-        let value = expand_renviron_value(value);
-        // SAFETY: the interpreter is single-threaded.
-        std::env::set_var(name.trim(), value);
-    }
-    scalar_bool(true)
-}
-
-/// Expands `${NAME}` and `${NAME-default}` references, the forms `.Renviron` files use.
-fn expand_renviron_value(value: &str) -> String {
-    let mut result = String::new();
-    let mut rest = value;
-    while let Some(start) = rest.find("${") {
-        result.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find('}') else {
-            result.push_str(&rest[start..]);
-            return result;
-        };
-        let reference = &rest[start + 2..start + end];
-        let (name, default) = reference.split_once('-').unwrap_or((reference, ""));
-        match std::env::var(name) {
-            Ok(found) if !found.is_empty() => result.push_str(&found),
-            _ => result.push_str(&expand_renviron_value(default)),
-        }
-        rest = &rest[start + end + 1..];
-    }
-    result.push_str(rest);
-    result
-}
-
-unsafe fn link_paths(call: &Call<'_>, function: impl Fn(&str, &str) -> bool) -> R<Sexp> {
-    let from = call.arg(0);
-    let to = call.arg(1);
-    let count = length(from).max(length(to));
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        let source = values::string_at(from, index % length(from).max(1));
-        let target = values::string_at(to, index % length(to).max(1));
-        values::ints_mut(result)[index] = match (source, target) {
-            (Some(source), Some(target)) => function(&source, &target) as i32,
-            _ => 0,
-        };
-    }
-    Ok(result)
-}
+const UMASK: u32 = 0o022;
