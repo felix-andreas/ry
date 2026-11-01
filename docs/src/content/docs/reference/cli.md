@@ -55,6 +55,22 @@ guesses what you meant, such as changing a misspelled `totl` to `total`, is unsa
 error is left unchanged, because its fixes were worked out on a guess at what the broken code means.
 The editor offers the same fixes as quick fixes.
 
+### The check cache
+
+`ry check` records its findings in `.ry_cache/check.json` at the project root, and the next run
+reuses them for every file whose findings cannot have changed. On a 300,000-line package, a repeat
+check of an unchanged project takes about 0.1 s instead of 1.5 s. After an edit inside a function
+body, only the edited file and the files whose check read it are checked again, which takes about
+0.45 s. Any other change checks every file again: an edit outside a function body (a new top-level
+name, a changed signature, a class definition), an added or removed file, a different `ry.toml`,
+`NAMESPACE`, `DESCRIPTION` or stub, or a different ry binary. A function body that can write
+outside its own frame, through `<<-`, `assign`, `library`, `setClass` and similar calls, counts as
+outside a body.
+
+The output is the same with or without the cache. `--no-cache` checks every file without reading or
+writing the record, and deleting `.ry_cache/` is always safe. ry writes a `.gitignore` into the
+directory, so the record stays out of version control.
+
 ## fmt
 
 ```sh

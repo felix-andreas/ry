@@ -1,3 +1,4 @@
+pub mod check_cache;
 pub mod cli;
 pub mod command_line;
 pub mod config;

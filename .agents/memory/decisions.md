@@ -4442,3 +4442,37 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
+
+## `ry check` keeps an on-disk record of its findings
+
+- **Measured first.** On 4 cores, a cold check of the 300,000-line finance bench takes about 1.45 s
+  wall and 5 CPU seconds. Every pass already spreads over the cores: deriving the syntax facts used
+  3.8 cores, naming 3.6, and the item check 3.7. Releasing the trees (0.05 s) and setup (0.05 s) are
+  the only serial parts. More parallelism therefore has no headroom on this machine, and a cold run
+  under 1 s needs about a third less CPU work, not more threads.
+- **Previous shape.** Each run started from nothing. The salsa memos live only in memory, and
+  salsa 0.28 neither exposes its dependency graph nor persists memos without serde on every value,
+  including the global `Ty` table.
+- **Target shape.** `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`) records the findings,
+  not the memos. Each file's record holds its content fingerprint, its surface fingerprint (the
+  text without top-level function bodies, unless a body can write or declare outside its frame),
+  the files its check read through interface edges, and the `NAMESPACE` imports it uses. The whole
+  record is keyed by the ry binary, the configuration, `NAMESPACE`, `DESCRIPTION`, the data files
+  and the stubs. With no changed file, every finding replays. When every changed file keeps its
+  surface, only the changed files and their dependents are checked. Anything else checks all files.
+  The architecture page's "The check cache" section has the details.
+- **Why the surface rule is sound.** Every name-keyed map that one file's check reads from other
+  files is built from top-level declarations, and the bodies that the surface leaves out declare
+  nothing. Inferred schemes are the exception, because a body changes what its function returns,
+  and the recorded interface dependencies cover them. On all three benches, a file's dependency
+  closure has a median size of 0, a 90th percentile of 1 and a maximum of 1.
+- **Measured.** On the finance bench, a replay takes 0.10 s (57 MB peak), a body edit 0.45 s, and a
+  cold run with the record written 0.1 s more than `--no-cache`. The data-science and biostatistics
+  benches replay in 0.09 s and 0.07 s. The output is byte-identical to a run with `--no-cache`.
+- **Floor of a partial run.** It still parses every file, because the project-wide folds read every
+  file's item tree. It warms those folds on all cores, and keeps its trees instead of releasing
+  them: releasing walks every item serially and cost more than it saved.
+- **Checked.** With invariants on, every run that reuses findings is compared against a fresh run
+  and panics on a difference. A seeded simulation of body, signature, `<<-`, `library`, `assign`,
+  `setClass`, file-add and file-remove edits drives that comparison
+  (`cached_checks_match_fresh_checks_across_seeded_edits` in `cli.rs`).

@@ -183,6 +183,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | Table engine | `table` property tests; `cargo fuzz` `csv` | the eager implementation; the sniffer's promised columns |
 | Package install | the `install-package` scenario; `test_install` | the package's own results |
 | CLI | scenarios run the real binary | expected output and exit status |
+| Check cache | seeded edits to a generated package (`ry` `cli::tests::cached_checks_match_fresh_checks_across_seeded_edits`, `CACHE_SEED`, `FUZZ_ITERS`) | a fresh check of the same files |
 | Docs examples | every marked output block in the docs, and the landing page samples (`test_docs`) | the output the page shows |
 
 The PROTECT balance check runs on every `.Call` and `.C` in every build: when a routine returns with a

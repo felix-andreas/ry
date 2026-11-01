@@ -4,6 +4,7 @@
 
 use {
     crate::{
+        check_cache::CacheUse,
         cli::{
             CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
             render_findings, report, warn_config,
@@ -170,8 +171,12 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
             .spawn_scoped(scope, || {
-                let analysis =
-                    analyze_project(root, config.clone(), std::slice::from_ref(&sources))?;
+                let analysis = analyze_project(
+                    root,
+                    config.clone(),
+                    std::slice::from_ref(&sources),
+                    CacheUse::Off,
+                )?;
                 let errors = strict_errors(&analysis);
                 Ok::<_, CommandError>((analysis, errors))
             });

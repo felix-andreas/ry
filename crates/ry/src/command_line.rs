@@ -50,6 +50,10 @@ pub enum Command {
         /// the nearest spelling of a misspelled name
         #[arg(long, default_value_t = false, requires = "fix")]
         unsafe_fixes: bool,
+        /// Check every file again instead of reusing the findings recorded in `.ry_cache/`
+        /// for files that did not change
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
     },
     /// Run the formatter on the given files or directories
     #[command(alias = "format")]

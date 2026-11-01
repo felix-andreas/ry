@@ -1547,6 +1547,28 @@ fn write_tokens(node: &SyntaxNode) -> usize {
 /// A strongly connected component lies inside the reachable set of each of its members, so
 /// the walk visits only what the item can read, transitively. One file's check therefore
 /// names only the items it can reach, not the whole project.
+/// Every other file whose items a check of `file` can read exports from, transitively through
+/// the interface edges, sorted by project position. A file's checked findings can change only
+/// when its own text, one of these files, or the project's top-level declarations change.
+pub fn file_dependency_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
+    let mut seen: FxHashSet<Item<'_>> = FxHashSet::default();
+    let mut stack: Vec<Item<'_>> = item_tree(db, file).clone();
+    let mut files: FxHashSet<SourceFile> = FxHashSet::default();
+    while let Some(item) = stack.pop() {
+        if !seen.insert(item) {
+            continue;
+        }
+        let owner = *item.file(db);
+        if owner != file {
+            files.insert(owner);
+        }
+        stack.extend(item_interface_edges(db, item).iter().copied());
+    }
+    let mut files: Vec<SourceFile> = files.into_iter().collect();
+    files.sort_by_key(|file| salsa::plumbing::AsId::as_id(file));
+    files
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn interface_group<'db>(
     db: &'db dyn Db,
