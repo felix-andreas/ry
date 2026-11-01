@@ -553,3 +553,18 @@ broken <- function(flag) {
 #++++
 broken: fn(flag: logical) -> double
 92..97 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+
+#---- forwarding_a_formal_positionally_leaves_it_to_the_callee
+fast_svd <- function(m, tol) {
+  if (missing(tol)) tol <- 1e-8
+  m * tol
+}
+pseudoinverse <- function(m, tol) fast_svd(m, tol)
+inverse <- function(m) pseudoinverse(m)
+#++++
+
+#---- forwarding_a_formal_to_a_required_parameter_still_requires_it
+scale_by <- function(m, factor) m * factor
+rescale <- function(m, factor) scale_by(m, factor)
+broken <- function(m) rescale(m)
+#++++

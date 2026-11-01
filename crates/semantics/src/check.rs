@@ -3960,24 +3960,32 @@ impl<'db> Checker<'db, '_> {
                 }
                 // `f(x = x)` hands the promise on unforced, and a closure the project defines
                 // decides for itself whether to read it, so forwarding a formal under its own
-                // name does not force it. A library function such as `list` forces every
-                // argument.
+                // name does not force it. A bare formal passed to a project function's optional
+                // parameter, as `fast.svd(m, tol)` passes `tol` to a callee that tests
+                // `missing(tol)`, is not forced either. A library function such as `list`
+                // forces every argument.
                 self.collect_formal_uses(*callee, uses);
-                let forwards = match &self.module.expression(*callee).kind {
-                    ExpressionKind::NameRef(name) => self
-                        .globals
-                        .is_none_or(|globals| globals.library_candidates(name).is_none()),
-                    _ => false,
+                let (forwards, optional_targets) = match &self.module.expression(*callee).kind {
+                    ExpressionKind::NameRef(name) => {
+                        let forwards = self
+                            .globals
+                            .is_none_or(|globals| globals.library_candidates(name).is_none());
+                        let optional_targets = match forwards {
+                            true => self.optional_argument_targets(name, arguments),
+                            false => Vec::new(),
+                        };
+                        (forwards, optional_targets)
+                    }
+                    _ => (false, Vec::new()),
                 };
-                for argument in arguments {
+                for (index, argument) in arguments.iter().enumerate() {
                     let Some(value) = argument.value else {
                         continue;
                     };
-                    if forwards
-                        && let Some(name) = argument.name
-                        && let ExpressionKind::NameRef(value_name) =
-                            &self.module.expression(value).kind
-                        && *value_name == name
+                    if let ExpressionKind::NameRef(value_name) = &self.module.expression(value).kind
+                        && forwards
+                        && (argument.name == Some(*value_name)
+                            || optional_targets.get(index).copied().unwrap_or(false))
                     {
                         continue;
                     }
@@ -3990,6 +3998,45 @@ impl<'db> Checker<'db, '_> {
         for child in kind.child_ids() {
             self.collect_formal_uses(child, uses);
         }
+    }
+
+    /// For each argument of a call to the project function `name`, whether it binds a
+    /// parameter that the callee treats as optional. Names match exactly, and the remaining
+    /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
+    /// optional targets, so its arguments stay forced.
+    fn optional_argument_targets(&self, name: &str, arguments: &[Argument]) -> Vec<bool> {
+        let Some(scheme) = self.globals.and_then(|globals| globals.scheme(name, true)) else {
+            return Vec::new();
+        };
+        let TyKind::Function(function) = scheme.body.kind(self.db) else {
+            return Vec::new();
+        };
+        let mut claimed = vec![false; function.named.len()];
+        let mut targets = vec![false; arguments.len()];
+        for (index, argument) in arguments.iter().enumerate() {
+            let Some(argument_name) = argument.name else { continue };
+            if let Some(formal) = function
+                .named
+                .iter()
+                .position(|parameter| parameter.name.text(self.db) == argument_name.as_str())
+            {
+                claimed[formal] = true;
+                targets[index] = function.named[formal].optional;
+            }
+        }
+        let pre_rest = function
+            .variadic
+            .as_ref()
+            .map_or(function.named.len(), |rest| rest.preceding_named.min(function.named.len()));
+        let mut unclaimed = (0..pre_rest).filter(|formal| !claimed[*formal]);
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument.name.is_some() {
+                continue;
+            }
+            let Some(formal) = unclaimed.next() else { break };
+            targets[index] = function.named[formal].optional;
+        }
+        targets
     }
 
     /// Walks one branch from `before` and returns what it leaves assigned, or `None` when it
