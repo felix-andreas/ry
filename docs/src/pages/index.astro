@@ -678,7 +678,7 @@ const year = new Date().getFullYear();
                         runtimeTabs.map((tab, index) => (
                             <div
                                 class="stage split stage-hero"
-                                style="--split: 1.4fr"
+                                style="--split: 1.5fr"
                                 role="tabpanel"
                                 id={`panel-${tab.key}`}
                                 aria-labelledby={`tab-${tab.key}`}
@@ -735,6 +735,7 @@ const year = new Date().getFullYear();
                         migrationTabs.map((tab, index) => (
                             <div
                                 class="stage split"
+                                style="--split: 0.8fr"
                                 role="tabpanel"
                                 id={`panel-${tab.key}`}
                                 aria-labelledby={`tab-${tab.key}`}
@@ -3159,8 +3160,7 @@ ry check .</code></pre>
                 background: oklch(1 0 0 / 0.04);
             }
             .seg [role="tab"]:focus-visible {
-                outline: 2px solid
-                    color-mix(in oklch, var(--cap) 65%, transparent);
+                outline: 2px solid oklch(1 0 0 / 0.6);
                 outline-offset: 1px;
             }
 
@@ -3778,8 +3778,11 @@ ry check .</code></pre>
             .tl {
                 white-space: pre;
             }
+            /* A wrapped message continues under its own text, not under the severity marker. */
             .tl.msg {
                 white-space: pre-wrap;
+                padding-left: 4ch;
+                text-indent: -4ch;
             }
             .tl.gap {
                 height: calc(var(--lh) * 1em);
@@ -3929,7 +3932,7 @@ ry check .</code></pre>
 
             /* The runtime band: centered, taller, with a slow aura behind the stage. */
             #runtime.showband {
-                padding-block: clamp(5.5rem, 12vw, 10rem);
+                padding-block: clamp(4.5rem, 9vw, 7.5rem);
             }
             #runtime .band-head {
                 margin-inline: auto;
