@@ -109,7 +109,7 @@ lookup(5L)
 ```text
 type-mismatch
 
-  x expected `UserId`, found `integer`
+  x expected `UserId`, found `integer`. The value has the right shape, but `UserId` is a nominal type, so only `@UserId(...)` or `#: @new UserId` creates one
 ```
 
 A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
@@ -131,8 +131,14 @@ annotation-mismatch
 
   ! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it `double`. ry uses the inline type; make the two agree, or delete one
    --[R/both.R:2:31]
+ 1 | #: fn(price: double, rate: double) -> double
  2 | apply_rate <- function(price: integer, rate) price * rate
    |                               ^^^^^^^
+  `->   > the `#:` comment's type is here
+         --[R/both.R:1:14]
+       1 | #: fn(price: double, rate: double) -> double
+         |              ^^^^^^
+       2 | apply_rate <- function(price: integer, rate) price * rate
 ```
 
 A `#:` definition directly above an inline definition of the same name is the same definition
@@ -163,8 +169,10 @@ scale("a", 1)
 ```
 
 ```text
+$ ry run --runtime ry scale.R
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`
+Execution halted
 ```
 
 A check runs when the argument is first used, so lazy arguments stay lazy, and it tests only the
@@ -172,7 +180,7 @@ kind of value (`double`, `character`, a list, a function), not its length or cla
 also print the warnings above before the code runs. The
 [type system reference](/reference/type-system#inline-annotations-at-run-time) has the full rules.
 
-## Keeping files runnable by R
+## Turning inline annotations off
 
 `Rscript` and other R tools cannot run code with inline annotations. Inline annotations are on by
 default, so if your project must also run under them, turn inline annotations off:
@@ -182,9 +190,12 @@ default, so if your project must also run under them, turn inline annotations of
 inline-annotations = false
 ```
 
-ry then warns at every inline annotation it finds, and keeps warning while the setting is off:
+ry then warns once for the project and again at every inline annotation it finds, and keeps
+warning while the setting is off:
 
 ```text
+  ! inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds
+
 inline-annotation
 
   ! inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on

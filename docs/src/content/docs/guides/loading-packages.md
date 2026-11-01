@@ -60,6 +60,10 @@ In `ry repl`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds t
 scratch when you want a clean slate, and `ry repl --no-load` starts the console without loading the
 package at all.
 
+Two things `devtools::load_all()` does are missing: `system.file()` does not find files under the
+package's `inst/`, and datasets in `data/` are not loaded.
+[Package loading](/reference/package-loading#limits) lists every difference.
+
 ## Which R runs your package
 
 `ry repl` and `load_all()` in an R session run your package on GNU R. `ry load` runs it on ry's own
@@ -72,16 +76,13 @@ on ry's runtime, because GNU R's parser rejects it.
 ## Speed
 
 A load parses a function only when something first calls it, and a reload touches only the
-definitions you changed. `tools/loader-bench` times `devtools::load_all()`, `loadfast::load_fast()`
-and ry on generated packages of 80 files (14,000 lines) and 500 files (326,000 lines):
+definitions you changed. On a generated package of 500 files, against `devtools::load_all()` and
+[loadfast](https://github.com/finccam/loadfast):
 
 | 326,000 lines | `load_all()` | `load_fast()` | ry |
 | --- | --- | --- | --- |
 | cold load | about 7 s | about 3 s | about 1 s |
 | reload after a body edit | 6.6 s | 81 ms | about 50 ms |
-
-Keeping source references, as an interactive session does by default, adds 10 to 20% to a cold
-load.
 
 [Package loading](/reference/package-loading) lists exactly what a load and a reload do, and what
 devtools' `load_all()` does that ry does not yet.

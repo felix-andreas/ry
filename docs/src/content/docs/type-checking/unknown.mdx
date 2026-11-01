@@ -17,18 +17,18 @@ The cost is that a clean run does not say how much was checked.
 An annotation gives an `Unknown` value a type, so every later use is checked against it:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-amount: double <- df$amount
-```
-
-</TabItem>
 <TabItem label="Comments">
 
 ```r
 #: double
 amount <- df$amount
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+amount: double <- df$amount
 ```
 
 </TabItem>

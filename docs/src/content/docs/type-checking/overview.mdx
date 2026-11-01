@@ -38,24 +38,24 @@ switched off, because hover, completion, and inlay hints in your editor are buil
 
 ## Annotations where they help
 
-You can write a type inline, after a name, and a function's return type after its parameters. Or you
-can put the same types in a `#:` comment, which keeps the file plain R that every other tool can
-read. The two spellings mean the same, and the tab you pick is remembered across this site:
+You can state a type in a `#:` comment above the code, which keeps the file plain R that every other
+tool can read. Or you can write it inline, after a name, with a function's return type after its
+parameters. The two spellings mean the same, and the tab you pick is remembered across this site:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-apply_discount <- function(price: double, rate: double) -> double price * (1 - rate)
-apply_discount(100, "0.2")
-```
-
-</TabItem>
 <TabItem label="Comments">
 
 ```r
 #: fn(price: double, rate: double) -> double
 apply_discount <- function(price, rate) price * (1 - rate)
+apply_discount(100, "0.2")
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+apply_discount <- function(price: double, rate: double) -> double price * (1 - rate)
 apply_discount(100, "0.2")
 ```
 
@@ -90,6 +90,6 @@ it on for the project and switch it off where a file is not ready.
 
 What ry cannot model, such as `data.frame` columns and R6 objects, becomes `Unknown`, which is
 compatible with everything. That way an unmodeled construct never causes a false error, but a clean
-run also proves less than it seems. [Strict mode](/type-checking/strict-mode) finds these places, and
+run also proves less than it seems. [Strict mode](/type-checking/strict-mode) finds most of these places, and
 [limitations](/type-checking/limitations) lists them. ry's own [DataFrames](/type-checking/dataframes)
 are the exception: their columns are typed.

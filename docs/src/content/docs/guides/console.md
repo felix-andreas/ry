@@ -45,9 +45,9 @@ a strict-mode error does not run.
 
 ## Which R it runs
 
-The console runs the GNU R installed on your machine, which it finds on its own. It and `ry load`
-are the only parts of ry that need R; checking, formatting and the editor read the source and never
-run it.
+The console runs the GNU R installed on your machine, which it finds on its own. Only the commands
+that run code (`ry repl`, `ry run` and `ry load`) need R installed, and even ry's own runtime still
+takes base R from it. Checking, formatting and the editor read the source and never run it.
 
 `--runtime ry` runs the console or a script on ry's own interpreter instead, which is still
 incomplete and is needed for records, tags and `DataFrame`. The console then loads no package. The

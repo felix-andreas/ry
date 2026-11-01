@@ -68,10 +68,10 @@ export default defineConfig({
 					label: '1. Check the code you have',
 					items: [
 						{ slug: 'guides/checking' },
-						{ slug: 'guides/formatting' },
 						{ slug: 'guides/editors' },
-						{ slug: 'guides/console' },
 						{ slug: 'guides/loading-packages' },
+						{ slug: 'guides/console' },
+						{ slug: 'guides/formatting' },
 					],
 				},
 				{

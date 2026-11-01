@@ -51,6 +51,25 @@ shares a namespace, as R loads them, and every other `.R` file is a script read 
 `ry check` exits with status 1 when it finds anything, so the same command works in CI.
 [Checking code](/guides/checking) shows everything it finds without configuration.
 
+## Reload your package as you edit
+
+When you work on a package, start `ry repl` anywhere inside it. Each time you save a file, the next
+command runs the new code, with no `load_all()` to call and no session to restart:
+
+```text
+$ ry repl
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+> count_words("the  quick fox")
+[1] 4
+> count_words("the  quick fox")     # after editing R/count.R
+Reloaded tally: 1 function rebound, in 3 ms.
+[1] 3
+```
+
+In RStudio, put `source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as
+you do today.
+[Loading packages](/guides/loading-packages) has the details.
+
 ## Step 2: turn on type checking
 
 Type errors are opt-in, because an existing code base can have many and you should choose when to
@@ -81,12 +100,8 @@ type-mismatch
 1 problem in 1 file
 ```
 
-## Every day: the editor and the console
-
-In VS Code, the extension shows the same findings as you type, plus hover, completion and rename
-([Editors](/guides/editors)). When you work on a package, start `ry repl` inside it: each time you
-save a file, the next command runs the new code, with no `load_all()` and no restart
-([Loading packages](/guides/loading-packages)).
+In VS Code, the extension shows the same findings as you type, plus hover with each value's
+inferred type ([Editors](/guides/editors)).
 
 ## Next
 

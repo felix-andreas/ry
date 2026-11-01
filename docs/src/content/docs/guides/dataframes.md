@@ -31,6 +31,7 @@ sales |>
 ```
 
 ```text
+$ ry run --runtime ry sales.R
    region revenue orders
    <char>   <num>  <int>
 1:     eu    10.5      2

@@ -14,20 +14,20 @@ checks when the call runs, if at all.
 A function annotation lists each parameter with its type, then the return type:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") paste(greeting, name)
+```
+
+</TabItem>
 <TabItem label="Inline">
 
 ```r
 greet <- function(name: character, greeting: character = "hello") -> character {
   paste(greeting, name)
 }
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: fn(name: character, [greeting]: character) -> character
-greet <- function(name, greeting = "hello") paste(greeting, name)
 ```
 
 </TabItem>
@@ -41,21 +41,21 @@ Calls are checked for types, names, and the number of arguments. Parameter names
 type, because R matches arguments by name as often as by position:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
+<TabItem label="Comments">
 
 ```r
-greet <- function(name: character, greeting: character = "hello") -> character {
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") {
   paste(greeting, name)
 }
 greet("Ada", greting = "hi")
 ```
 
 </TabItem>
-<TabItem label="Comments">
+<TabItem label="Inline">
 
 ```r
-#: fn(name: character, [greeting]: character) -> character
-greet <- function(name, greeting = "hello") {
+greet <- function(name: character, greeting: character = "hello") -> character {
   paste(greeting, name)
 }
 greet("Ada", greting = "hi")
@@ -95,20 +95,20 @@ increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
 `double` and `increment("a")` is an error. You can write the same yourself:
 
 <Tabs syncKey="annotation-style">
+<TabItem label="Comments">
+
+```r
+#: <T> fn(condition: logical, value: T) -> T | NULL
+pick <- function(condition, value) if (condition) value else NULL
+```
+
+</TabItem>
 <TabItem label="Inline">
 
 ```r
 pick <- function<T>(condition: logical, value: T) -> T | NULL {
   if (condition) value else NULL
 }
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: <T> fn(condition: logical, value: T) -> T | NULL
-pick <- function(condition, value) if (condition) value else NULL
 ```
 
 </TabItem>

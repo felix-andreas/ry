@@ -36,6 +36,10 @@ reports an assignment that nothing reads, a top-level name defined twice in a pa
 keeps one of them), `pkg::name` where the package does not export `name`, and a `NAMESPACE` that
 imports or exports a name that does not exist.
 
+One gap matters from the start: after `library()` of a package ry knows nothing about, any bare name
+might be one of its exports, so ry stops reporting unresolved names in the whole project.
+[Package stubs](/type-checking/stubs) shows how to turn the check back on.
+
 Inside data-masking functions such as dplyr's `filter()` and `mutate()`, `data.table`'s `[`, and
 base `with()`, `subset()`, and `transform()`, a bare name refers to a column, so this code reports
 nothing:

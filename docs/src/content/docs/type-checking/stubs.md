@@ -1,5 +1,5 @@
 ---
-title: Packages
+title: Package stubs
 description: How ry knows about packages without running R, and how to describe one it does not know
 ---
 

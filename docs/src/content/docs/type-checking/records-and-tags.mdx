@@ -50,8 +50,19 @@ non-exhaustive-match
 `match` and the tag, record and tuple syntax exist only in ry, so they have a single spelling.
 Only the annotations around them, including the definition of `Shape`, come in two styles.
 
-These are ry values, not R lists. R cannot run code that uses them, so they belong in code that only
-ry runs.
+These are ry values, not R lists. GNU R cannot parse code that uses them, so run it on ry's own
+runtime:
+
+```r
+# points.R
+point <- (x = 1, y = 2)
+point$x + point$y
+```
+
+```text
+$ ry run --runtime ry points.R
+[1] 3
+```
 
 ## Records and tuples
 
@@ -225,6 +236,54 @@ unreachable-pattern
 ry checks coverage only when it knows the type of the matched value, and not while inline annotations
 are turned off.
 
+A long union can put each case on its own line, each starting with `|`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+alias Event =
+  | :Click(x: double, y: double)
+  | :Key(code: integer)
+  | :Quit
+
+handle <- function(e: Event) -> character {
+  match (e) {
+    :Click(x = x, y = y) => "click"
+    :Key(code = code) => "key"
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @alias Event {
+#:   | :Click(x: double, y: double)
+#:   | :Key(code: integer)
+#:   | :Quit
+#: }
+
+#: fn(e: Event) -> character
+handle <- function(e) {
+  match (e) {
+    :Click(x = x, y = y) => "click"
+    :Key(code = code) => "key"
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Quit`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+
 ## Passing them to R
 
 R functions and C code do not know these values, so passing one to an R function is an error:
@@ -247,6 +306,7 @@ still stops when it runs, with the same fix in the message:
 ```text
 Error in sum(point) :
   `point` is a ry record, not an R object; convert it with `as.list()`
+Execution halted
 ```
 
 Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and

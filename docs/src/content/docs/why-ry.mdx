@@ -25,7 +25,8 @@ code whose types are known, which we call R--.
 
 Your code moves from the blue circle toward the purple one, one step at a time. Each step is
 optional, and you can stop after any of them, so you can adopt ry on a large code base without a
-rewrite.
+rewrite. Steps 1 and 2 work with GNU R as it is. Steps 3 and 4 use what ry adds, and ry's own data
+types run only on ry's runtime, which is still incomplete (see [Status](#status)).
 
 ### 1. Check the code you have
 
@@ -165,7 +166,7 @@ left out on purpose:
 
 Some things it cannot model yet. S4 and R6 objects and data frame columns get a type that is
 compatible with everything, so they never cause a false error, but they are not checked either.
-Strict mode shows where that happens, and [limitations](/type-checking/limitations) lists the rest.
+Strict mode shows most of the places where that happens, and [limitations](/type-checking/limitations) lists the rest.
 
 ## Status
 
