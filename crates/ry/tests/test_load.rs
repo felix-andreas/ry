@@ -189,6 +189,43 @@ fn a_syntax_error_refuses_the_load_with_its_location() {
 }
 
 #[test]
+fn strict_mode_refuses_an_untyped_package_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: strictpkg\nVersion: 1.0\n"),
+        ("ry.toml", "[check]\ntyping = true\nstrict = true\n"),
+        ("R/a.R", "describe <- function(x) cat(\"a value\\n\")\n"),
+        // A name another file defines resolves, so only `describe` is reported.
+        ("R/b.R", "helper <- function(x: double) -> double x + 1\n"),
+        ("R/c.R", "uses <- function(y: double) -> double helper(y)\n"),
+    ]);
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &["cat(\"ran\\n\")"]);
+        let printed = text(&output);
+        assert_eq!(output.status.code(), Some(1), "{runtime}: {printed}");
+        assert!(printed.contains("R/a.R:1:22"), "{runtime}: {printed}");
+        assert!(
+            printed.contains("strict mode found 1 error, so this code does not run"),
+            "{runtime}: {printed}"
+        );
+        assert!(!printed.contains("ran"), "{runtime}: {printed}");
+    }
+    fs::write(
+        root.path().join("R/a.R"),
+        "describe <- function(x: double) cat(\"a value\\n\")\n",
+    )
+    .expect("write file");
+    for runtime in RUNTIMES {
+        let output = ry_load_on(runtime, root.path(), &["describe(1)"]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(printed.contains("a value"), "{runtime}: {printed}");
+    }
+}
+
+#[test]
 fn a_failing_statement_names_its_file_and_line() {
     if !r_available() {
         return;
