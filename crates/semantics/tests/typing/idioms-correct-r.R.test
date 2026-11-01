@@ -697,3 +697,28 @@ fifo_mode <- function(read = NULL, write = NULL) {
 }
 #++++
 fifo_mode: fn([read]: logical | NULL, [write]: logical | NULL) -> logical
+
+#---- a_formal_passed_to_a_parameter_base_r_tests_with_missing_is_optional
+reduce <- function(.x, .f, ..., .init) {
+  f <- function(x, y) .f(x, y, ...)
+  Reduce(f, .x, init = .init)
+}
+total <- function(values) reduce(values, `+`)
+guarded <- function(expr, ..., finally) {
+  base::tryCatch(expr, ..., finally = finally)
+}
+run <- function() guarded(1 + 1)
+#++++
+reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
+total: <T, U> fn(values: list[T] | T[]) -> U
+guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> Unknown
+run: fn() -> Unknown
+
+#---- a_formal_captured_by_a_defuser_is_optional
+enquo <- function(arg) substitute(arg)
+quo <- function(expr) enquo(expr)
+empty <- function() quo()
+#++++
+enquo: <T> fn([arg]: T) -> Any
+quo: <T> fn([expr]: T) -> Any
+empty: fn() -> Any

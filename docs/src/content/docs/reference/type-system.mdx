@@ -2137,13 +2137,17 @@ exceptions and additions:
   they force nothing either.
 - Passing the formal on under its own name to a project function, as in `inner(x, finally = finally)`,
   does not force it, because the callee decides whether it is needed. A call to a library function
-  still forces it.
+  still forces it, except for a base R parameter that has no default and that the function tests
+  with `missing()`: `Reduce(f, x, init = .init)` and `base::tryCatch(expr, finally = finally)` leave
+  the formal unforced.
 - A body that dispatches with `UseMethod()` forces none of its formals, because it hands them to a
   method unevaluated, and the method decides what it needs. So
   `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`.
 - A read guarded by `missing(name)` does not make the formal required; see below.
 - An argument of `substitute()` or `quote()` is not evaluated, so a formal named only there is not
-  forced.
+  forced. The same holds for rlang's `enquo()`, `enquos()`, `enexpr()`, `enexprs()`, `ensym()`,
+  `ensyms()`, and `maybe_missing()`, so `quo <- function(expr) enquo(expr)` may be called as
+  `quo()`.
 - A formal assigned before any read, as in `function(x) { x <- 1; x }`, is never forced. The order
   is evaluation order, so `n <- n / 2` forces `n`, and a `for` variable is assigned by the loop.
 - The write must happen on every path to the read. `if (flag) x <- 1 else x <- 2` assigns `x`, and

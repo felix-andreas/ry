@@ -1254,6 +1254,18 @@ impl FormalUses {
     }
 }
 
+/// Whether base R's `function` reads its parameter `parameter` only after testing it with
+/// `missing()`, and gives it no default, so a missing formal passed to it by name stays
+/// unforced: `Reduce(f, x, init = .init)` and `tryCatch(expr, finally = finally)`. Stubs
+/// record only that a parameter is optional, which a default also makes it, and passing a
+/// missing formal to a defaulted parameter that the callee reads is still an error.
+fn tests_missing_without_default(function: &str, parameter: &str) -> bool {
+    matches!(
+        (function, parameter),
+        ("Reduce", "init") | ("tryCatch", "finally")
+    )
+}
+
 /// The names every non-diverging branch assigned. When every branch diverges, the code after
 /// the join is unreachable and keeps `before`.
 fn join_assigned(
@@ -4053,8 +4065,21 @@ impl<'db> Checker<'db, '_> {
                         return;
                     }
                     // These read their argument's expression, never its value, so a missing
-                    // formal passed to them is not forced.
-                    if callee_name == "substitute" || callee_name == "quote" {
+                    // formal passed to them is not forced. rlang's defusers capture the promise
+                    // (`quo <- function(expr) enquo(expr)`), and `maybe_missing()` exists to
+                    // pass a missing argument on.
+                    if matches!(
+                        callee_name.as_str(),
+                        "substitute"
+                            | "quote"
+                            | "enquo"
+                            | "enquos"
+                            | "enexpr"
+                            | "enexprs"
+                            | "ensym"
+                            | "ensyms"
+                            | "maybe_missing"
+                    ) {
                         return;
                     }
                 }
@@ -4078,14 +4103,26 @@ impl<'db> Checker<'db, '_> {
                     }
                     _ => (false, Vec::new()),
                 };
+                let library_name = match &self.module.expression(*callee).kind {
+                    ExpressionKind::NameRef(name) if !forwards => Some(name.as_str()),
+                    ExpressionKind::Namespace {
+                        package: Some(package),
+                        name: Some(name),
+                        ..
+                    } if package == "base" => Some(name.as_str()),
+                    _ => None,
+                };
                 for (index, argument) in arguments.iter().enumerate() {
                     let Some(value) = argument.value else {
                         continue;
                     };
                     if let ExpressionKind::NameRef(value_name) = &self.module.expression(value).kind
-                        && forwards
-                        && (argument.name == Some(*value_name)
-                            || optional_targets.get(index).copied().unwrap_or(false))
+                        && ((forwards
+                            && (argument.name == Some(*value_name)
+                                || optional_targets.get(index).copied().unwrap_or(false)))
+                            || library_name.zip(argument.name).is_some_and(|(function, parameter)| {
+                                tests_missing_without_default(function, parameter.as_str())
+                            }))
                     {
                         continue;
                     }
@@ -4791,7 +4828,10 @@ impl<'db> Checker<'db, '_> {
         let mut vector = false;
         for &member in &members {
             match member.kind(self.db) {
-                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {}
+                // An unannotated parameter keeps its open variable beside the shape a test gave it
+                // (`write` is `T | NULL` under `if (is.null(read)) read <- !write`), and the
+                // variable is no evidence of a wrong operand.
+                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) | TyKind::Var(_) => {}
                 TyKind::Null => vector = true,
                 TyKind::Vector(element) | TyKind::NamedVector(element)
                     if matches!(
