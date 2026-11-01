@@ -20,10 +20,10 @@ discount <- function(price, rate) price * (1 - rate)
 discount("a", 0.2)   # expected a numeric value (`integer` or `double`), found `character`
 ```
 
-The annotations you do write are `#:` comments, so the file stays plain R that every other tool can
-read. If you would rather put types in the code, [inline annotations](/type-checking/inline-annotations)
-such as `function(x: integer) -> integer` are on by default, at the price that R itself cannot run
-the file unless it goes through `ry run`.
+You write annotations inline, such as `function(x: integer) -> integer`, or as `#:` comments, and
+every example in the docs offers both. Inline annotations are on by default, at the price that plain
+`Rscript` cannot run the file unless it goes through `ry run`. Comments keep the file plain R that
+every other tool can read.
 
 ## Fast enough for every keystroke
 

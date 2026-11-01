@@ -3,6 +3,8 @@ title: Type system
 description: The precise static-typing semantics contract for ry's R type checker
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Two principles explain most of the rules on this page. First, the checker prefers skipping a check
 to giving a wrong answer: a construct it cannot describe becomes `Unknown`, which is compatible with
 everything, so a gap means a skipped check rather than a false error, and [strict mode](#strict-mode)
@@ -14,7 +16,9 @@ through examples.
 ## Typing comment syntax
 
 Annotations are written in two ways that share one type grammar: in `#:` comments, described here,
-and [inline](#inline-annotation-syntax), in the code itself. A `#:` comment sits directly above the
+and [inline](#inline-annotation-syntax), in the code itself. An example that has both spellings shows
+them in tabs, and the tab you choose is remembered on every page of this site. A form that exists in
+only one spelling shows a single block and says so. A `#:` comment sits directly above the
 binding or expression it describes. Consecutive `#:` lines with no blank line between them form one
 *annotation block*. Each annotation takes one of these forms:
 
@@ -27,6 +31,18 @@ A block is one of three kinds, which cannot be mixed: a single line in one of th
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
 lines, or a definition block of `@type` and `@alias` lines.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+value: integer <- 1L
+
+double_count <- function(count: integer) -> integer count + count
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: integer
 value <- 1L
@@ -35,9 +51,27 @@ value <- 1L
 double_count <- function(count) count + count
 ```
 
+</TabItem>
+</Tabs>
+
 A block can attach at any statement depth. Inside a function body it annotates the assignment or the
 block-final expression that follows it, which is how a function that builds a value of a named type
 is written:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Person {list{name: character}}
+
+make_person <- function(name: character) -> Person {
+  #: @new Person
+  list(name = name)
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: @type Person {list{name: character}}
@@ -48,6 +82,9 @@ make_person <- function(name) {
   list(name = name)
 }
 ```
+
+</TabItem>
+</Tabs>
 
 ### Attachment
 
@@ -78,6 +115,9 @@ already said what was wrong.
 
 An inline annotation writes a type into the code instead of a comment above it:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
 count: integer <- 0L
 
@@ -87,6 +127,27 @@ add <- function(x: integer, y: integer = 1L) -> integer {
 
 first <- function<T>(items: list[T]) -> T items[[1L]]
 ```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: integer
+count <- 0L
+
+#: fn(x: integer, [y]: integer) -> integer
+add <- function(x, y = 1L) {
+  x + y
+}
+
+#: <T> fn(items: list[T]) -> T
+first <- function(items) items[[1L]]
+```
+
+</TabItem>
+</Tabs>
+
+The tabs above show each form beside the comment it lowers to.
 
 - `name: TYPE <- value` declares a binding's type. The `=` spelling, `name: TYPE = value`, works too.
 - `name: TYPE` in a parameter list declares a parameter's type, before its default if it has one.
@@ -167,6 +228,8 @@ the code agree, and a binder whose constraint differs is reported the same way, 
 constraint winning. A positional parameter type in a compact `#:` annotation is compared with
 the formal it pairs with.
 
+This example mixes both spellings on purpose.
+
 ```r
 #: fn(price: double, rate: double) -> double
 apply_discount <- function(price: integer, rate) price * (1 - rate)
@@ -192,6 +255,8 @@ erase the annotations, but ry's runtime registers no checks for them.
 reads the annotations themselves and checks a function's parameter and return types at its
 boundary, so a function called with the wrong kind of value fails where it was called instead of
 somewhere inside it:
+
+Run-time checks come from the inline spelling, so this example has a single block.
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
@@ -462,12 +527,27 @@ creates no new identity, and may appear anywhere a type may, including inside a 
 an alias that expands in a cycle is an error, reported where it is used; a cycle no annotation uses
 is not reported.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @alias Box<T> {list{ value: T }}
+
+value: Box<integer> <- list(value = 1L)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @alias Box<T> {list{ value: T }}
 
 #: Box<integer>
 value <- list(value = 1L)
 ```
+
+</TabItem>
+</Tabs>
 
 #### Nominal types
 
@@ -489,6 +569,26 @@ In this example, `Person` and `Pet` are distinct and incompatible. The annotatio
 because a nominal value satisfies its representation, and the final call is an error because a
 structural value does not satisfy the nominal type:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Person {list{ name: character, age: double }}
+#: @type Pet {list{ name: character, age: double }}
+
+#: @new Person
+person <- list(name = "bob", age = 20)
+
+shape: list{ name: character, age: double } <- person
+
+get_name <- function(value: Person) -> character value$name
+
+get_name(list(name = "bob", age = 20))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @type Person {list{ name: character, age: double }}
 #: @type Pet {list{ name: character, age: double }}
@@ -504,6 +604,9 @@ get_name <- function(value) value$name
 
 get_name(list(name = "bob", age = 20))
 ```
+
+</TabItem>
+</Tabs>
 
 Projection is what makes field access and arithmetic work on a nominal value. In `get_name`,
 `value$name` is `character` because `$` sees the representation. With `@type Meters {double}`,
@@ -729,6 +832,22 @@ The expanded form puts one directive on each line: `@forall` to declare type par
 `@return {TYPE}` or `@returns {TYPE}` for the result. A constrained binder is written
 `@forall T: numeric`, with the same meaning as the compact `<T: numeric>`.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+double_count <- function(count: integer, label: character | NULL = NULL) -> integer {
+  count + count
+}
+
+then_some <- function<T>(condition: logical, value: T) -> T | NULL {
+  if (condition) value
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @param count {integer}
 #: @param [label] {character | NULL}
@@ -743,6 +862,9 @@ then_some <- function(condition, value) {
   if (condition) value
 }
 ```
+
+</TabItem>
+</Tabs>
 
 - Directives come in order: every `@forall` before any `@param`, and every `@param` before `@return`
   or `@returns`.
@@ -774,6 +896,20 @@ at the same range: as a signature mismatch and as a parameter the function does 
 come after the fixed parameters, as in `fn(prefix: TYPE, ...: TYPE) -> RETURN_TYPE`, or before named
 ones, as in `fn(...: TYPE, [option]: TYPE) -> RETURN_TYPE`:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+join <- function(...: character) -> character paste0(...)
+
+wrap <- function(x: character, ...: character) -> character {
+  paste0(x, ": ", paste(...))
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(...: character) -> character
 join <- function(...) paste0(...)
@@ -781,6 +917,9 @@ join <- function(...) paste0(...)
 #: fn(x: character, ...: character) -> character
 wrap <- function(x, ...) paste0(x, ": ", paste(...))
 ```
+
+</TabItem>
+</Tabs>
 
 The position of the rest parameter, counted as the number of parameters declared before it, is part
 of the signature. It must match the position of `...` in the function's formals, and it decides which
@@ -962,10 +1101,23 @@ allows widening wherever the rules on this page define it. When the check succee
 accepted (through a coercion if one is needed), and the annotated binding or expression has the type
 `TYPE` from then on.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+value: list[integer] <- list(1L, 2L, 3L)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: list[integer]
 value <- list(1L, 2L, 3L)
 ```
+
+</TabItem>
+</Tabs>
 
 This is valid, because `list{integer, integer, integer}` is compatible with `list[integer]`.
 
@@ -979,6 +1131,8 @@ representation. Use [`@new`](#nominal-introduction) instead.
 `Unknown`, and it then gives the annotated binding or expression the type `TYPE`. When the checker
 already knows the type, `@if-unknown` is an error, even if the requested type matches the known one,
 so it can never override information the checker has.
+
+These coercions exist only as `#:` comments.
 
 ```r
 #: @if-unknown integer
@@ -1017,6 +1171,8 @@ expression has the nominal type from then on.
 - When the value already has the nominal type, `@new` is allowed and does nothing further.
 - `@new` is an annotation form, not a type expression, so it cannot appear inside a compact type or
   an expanded function annotation.
+
+Type definitions and `@new` exist only as `#:` comments.
 
 ```r
 #: @type Person<T> {list{ value: T }}
@@ -1530,6 +1686,21 @@ a local variable or parameter, the recognized guards are:
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists
 after the `if`, which is the idiomatic early-exit guard:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+f <- function(x: integer | NULL) -> integer {
+  if (is.null(x)) {
+    return(0L)
+  }
+  x + 1L   # x : integer here
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(x: integer | NULL) -> integer
 f <- function(x) {
@@ -1539,6 +1710,9 @@ f <- function(x) {
   x + 1L   # x : integer here
 }
 ```
+
+</TabItem>
+</Tabs>
 
 The details:
 
@@ -2028,10 +2202,23 @@ three.
 A frame is ry's built-in table. Its type is a record of column vectors, written like a `list{...}`
 record with `frame` in front:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+price_of <- function(prices: frame{id: integer[], price: double[]}) -> double[] prices$price
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(prices: frame{id: integer[], price: double[]}) -> double[]
 price_of <- function(prices) prices$price
 ```
+
+</TabItem>
+</Tabs>
 
 A column is always a vector, so a scalar column type broadens: `frame{id: integer}` is
 `frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
@@ -2237,6 +2424,28 @@ out of the parts decided at run time from a value's class attribute:
 A class is a [nominal type](#nominal-types) with a representation. Wrapping the constructor is
 enough to get slot types, constructor arity, and field access checked on an S4 or R6 class:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Point {list{x: double, y: double}}
+
+setClass("Point", representation(x = "numeric", y = "numeric"))
+
+make_point <- function(x: double, y: double) -> Point {
+  #: @new Point
+  new("Point", x = x, y = y)
+}
+
+norm2 <- function(p: Point) -> double sqrt(p$x^2 + p$y^2)
+
+norm2("nope")   # type-mismatch: the argument is not a `Point`
+make_point(1)   # type-mismatch: a required argument is missing
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @type Point {list{x: double, y: double}}
 
@@ -2254,6 +2463,9 @@ norm2 <- function(p) sqrt(p$x^2 + p$y^2)
 norm2("nope")   # type-mismatch: the argument is not a `Point`
 make_point(1)   # type-mismatch: a required argument is missing
 ```
+
+</TabItem>
+</Tabs>
 
 The `setClass` call stays opaque, and the annotation is what the checker reads. Operators on the
 class work the same way: declare `Arith.Point`, and `p1 + p2` is checked. Method dispatch, on the

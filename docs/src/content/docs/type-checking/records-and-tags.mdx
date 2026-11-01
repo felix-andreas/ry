@@ -3,9 +3,28 @@ title: Records and tags
 description: ry's own records, tuples and tagged unions, and the match that checks every case
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 R models data with lists, S4 classes, R6 classes or Reference Classes, and ry can check none of them
 very far. ry adds its own records, tuples and tagged unions instead. They have a fixed shape that the
 checker knows exactly, and `match` reports the case you forgot:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @alias Shape {:Circle(radius: double) | :Rect(width: double, height: double) | :Empty}
+
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: @alias Shape {:Circle(radius: double) | :Rect(width: double, height: double) | :Empty}
@@ -19,15 +38,18 @@ area <- function(s) {
 }
 ```
 
+</TabItem>
+</Tabs>
+
 ```text
 non-exhaustive-match
 
   x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
-   --[R/shapes.R:5:3]
- 4 | area <- function(s) {
- 5 |   match (s) {
-   |   ^^^^^^^^^
 ```
+
+`match` and the tag, record and tuple syntax exist only in ry, so they have a single spelling.
+Only the annotations around them come in two styles. `@alias` and `@type` definitions exist only as
+`#:` comments, which is why both tabs above define `Shape` that way.
 
 These are ry values, not R lists. R cannot run code that uses them, so they belong in code that only
 ry runs.
@@ -46,18 +68,29 @@ empty <- ()                 # tuple{}
 
 Fields are exact. `$` never matches a prefix, and a field that does not exist is an error:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
 origin: record{x: double, y: double} <- (x = 0, y = 0)
 moved <- origin$xx
 ```
 
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: record{x: double, y: double}
+origin <- (x = 0, y = 0)
+moved <- origin$xx
+```
+
+</TabItem>
+</Tabs>
 ```text
 type-mismatch
 
   x field `xx` does not exist in `record{x: double, y: double}`
-    --[R/shapes.R:16:17]
- 16 | moved <- origin$xx
-    |                 ^^
 ```
 
 A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The new value must fit
@@ -70,11 +103,23 @@ A tag is a name that starts with `:`, with an optional payload that hugs it: `:N
 `:Rect(width = 2, height = 3)`. A union of tags lists the cases a value can be, and a value outside
 the union is an error:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+bad: :Ok(integer) | :Err(character) <- :Ok("five")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: :Ok(integer) | :Err(character)
 bad <- :Ok("five")
 ```
 
+</TabItem>
+</Tabs>
 ```text
 type-mismatch
 
@@ -83,6 +128,9 @@ type-mismatch
 
 A union that ends in `..` is open: it accepts any other tag as well, so a `match` on it needs a
 catch-all arm.
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
 
 ```r
 on_event <- function(event: :Click | :Key | ..) -> character {
@@ -94,7 +142,22 @@ on_event <- function(event: :Click | :Key | ..) -> character {
 on_event(:Scroll)   # fine
 ```
 
-## `match`
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(event: :Click | :Key | ..) -> character
+on_event <- function(event) {
+  match (event) {
+    :Click => "click"
+    _ => "other"
+  }
+}
+on_event(:Scroll)   # fine
+```
+
+</TabItem>
+</Tabs>
 
 `match (value) { pattern => result }` tries each arm in order and runs the first that matches. Put
 each arm on its own line, or separate arms with `;` or `,`. The `{` must be on the same line as the
@@ -113,6 +176,9 @@ each arm on its own line, or separate arms with `;` or `,`. The `{` must be on t
 An arm may add a guard, `pattern if (condition) => result`. A guarded arm never counts toward
 covering a case, because its condition can be false:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
 ```r
 describe <- function(result: :Ok(integer) | :Err(character)) -> character {
   match (result) {
@@ -121,6 +187,22 @@ describe <- function(result: :Ok(integer) | :Err(character)) -> character {
   }
 }
 ```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(result: :Ok(integer) | :Err(character)) -> character
+describe <- function(result) {
+  match (result) {
+    :Ok(n) if (n > 100L) => "big"
+    :Err(message) => message
+  }
+}
+```
+
+</TabItem>
+</Tabs>
 
 ```text
 non-exhaustive-match

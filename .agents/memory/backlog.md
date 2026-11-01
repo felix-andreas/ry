@@ -1696,7 +1696,7 @@ tagging fences `r` for Zed if that proves distant.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
   rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation.** `reference/type-system.md` runs about 2,700 lines.
+- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 2,700 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 
