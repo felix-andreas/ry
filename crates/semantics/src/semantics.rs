@@ -11,6 +11,7 @@ pub mod naming;
 pub mod sorted;
 pub mod stubs;
 pub mod testing;
+pub mod top_level;
 pub mod types;
 
 use crate::hir::Symbol;

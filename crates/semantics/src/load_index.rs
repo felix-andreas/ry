@@ -577,16 +577,7 @@ impl Eraser {
         let kind = RLanguage::kind_from_raw(green.kind());
         self.record(start);
         let end = start + green.text_len();
-        // Mirrors `syntax::is_inline_annotation`, on kinds.
-        let annotation = match kind {
-            SyntaxKind::TYPE_ASCRIPTION
-            | SyntaxKind::RETURN_TYPE
-            | SyntaxKind::TYPE_DEFINITION
-            | SyntaxKind::NEW_TYPE => true,
-            SyntaxKind::TYPE_BINDER_LIST => parent == Some(SyntaxKind::FUNCTION_DEF),
-            _ => false,
-        };
-        if annotation {
+        if syntax::is_green_inline_annotation(kind, parent) {
             let breaks = count_breaks(green);
             self.out.extend(std::iter::repeat_n('\n', breaks));
             self.record(end);

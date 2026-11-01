@@ -857,6 +857,8 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
         }
         let form = match child.kind() {
             SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
+                // A flag on the function, not a type, so it fits beside any form.
+                "pure" => continue,
                 "type" | "alias" => BlockForm::Definition,
                 "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
                 _ => BlockForm::Compact,
@@ -935,6 +937,14 @@ fn frame_kind(node: &SyntaxNode) -> Option<FrameKind> {
 }
 
 /// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
+/// Whether a `#:` block carries `@pure`. Read apart from the lowered annotation, so a block
+/// refused for its type still declares purity and the fact stays a per-item `bool`.
+pub fn declares_pure(annotation: &SyntaxNode) -> bool {
+    annotation.children().any(|child| {
+        child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE && directive_name(&child) == "pure"
+    })
+}
+
 fn directive_name(node: &SyntaxNode) -> String {
     let mut name = String::new();
     let mut cursor: Option<TextSize> = None;

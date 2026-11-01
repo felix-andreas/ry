@@ -137,6 +137,7 @@ const ALPHABET: &[&str] = &[
     "**",
     ":=",
     "@type",
+    "@pure",
     "@param",
     "fn",
     "list[",

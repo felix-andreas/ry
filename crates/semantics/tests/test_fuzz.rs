@@ -70,6 +70,17 @@ const TEMPLATES: &[&str] = &[
     "#: fn(o: :Some(integer) | :None) -> integer\n{n} <- function(o) match (o) {\n  :Some(v) => v\n}",
     "#: fn(r: :Ok(integer) | ..) -> integer\n{n} <- function(r) match (r) {\n  :Ok(v) => v\n  _ => {m}\n}",
     "#: @alias Shape {:Circle(radius: double) | :Empty}\n\n#: Shape\n{n} <- :Circle(radius = {m})",
+    "#: @pure\n{n} <- function(p) {m}(p)",
+    "#: @pure fn(p: integer) -> integer\n{n} <- function(p) p",
+    "{n} <- @pure function(p) {m}(p)",
+    "{n} <- @pure \\(q) q + {m}",
+    "{n} <- {m}(1L)",
+    "{n} <<- {m}",
+    "names({n}) <- {m}",
+    "{n} <- ({m} <- 1L) + 1L",
+    "{n} <- memoise::memoise({m})",
+    "if ({m}) {n} <- @pure function() 1L",
+    "{n} <- local({\n  for (i in 1:2) {m} <- i\n  {m}\n})",
 ];
 
 const DIRECTIVES: &[&str] = &[
@@ -82,7 +93,7 @@ const DIRECTIVES: &[&str] = &[
 const SOUP: &[&str] = &[
     "x", "f", "(", ")", "{", "}", "[", "[[", "]", ",", "\n", " ", "<-", "+", "if", "else",
     "function", "1L", "\"s\"", "%in%", "|>", "~", "$", "::", "#:", "@type", "fn", "list{", "NULL",
-    "...", ":=", "<<-", "\\", "@new", "match", "=>", ":Some", ":None", "_", "..", "|",
+    "...", ":=", "<<-", "\\", "@new", "match", "=>", ":Some", ":None", "_", "..", "|", "@pure",
 ];
 
 fn iterations() -> usize {

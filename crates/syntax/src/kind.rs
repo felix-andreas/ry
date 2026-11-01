@@ -169,6 +169,8 @@ pub enum SyntaxKind {
     TYPE_DEFINITION,
     /// The `@Name` or `@Name<Args>` head of a [`NEW_EXPR`].
     NEW_TYPE,
+    /// `@pure` before a function's keyword, declaring that calling it has no effect.
+    PURE_MARKER,
 
     ERROR,
 }
@@ -356,6 +358,7 @@ impl SyntaxKind {
             TYPE_OTHER_TAGS => "`..`",
             TYPE_DEFINITION => "type definition",
             NEW_TYPE => "nominal type",
+            PURE_MARKER => "purity marker",
             ERROR => "error",
         }
     }

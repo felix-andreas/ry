@@ -1,0 +1,112 @@
+#==== refused
+#---- a_call_to_a_function_not_declared_pure
+#~~~~ R/main.R
+cat("loading\n")
+home <- Sys.getenv("HOME")
+options(digits = 3)
+#++++
+== R/main.R
+effect: cat("loading\n")
+effect: home <- Sys.getenv("HOME")
+effect: options(digits = 3)
+0..16 error[strict] strict mode: this calls `cat`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+25..43 error[strict] strict mode: this calls `Sys.getenv`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+44..63 error[strict] strict mode: this calls `options`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- a_project_function_not_marked_pure
+#~~~~ R/main.R
+make_config <- function() list(debug = FALSE)
+config <- make_config()
+#++++
+== R/main.R
+definition: make_config <- function() list(debug = FALSE)
+effect: config <- make_config()
+56..69 error[strict] strict mode: this calls `make_config`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts, or mark `make_config` `@pure` if calling it has no effect
+
+#---- the_first_effect_in_a_statement_is_reported
+#~~~~ R/main.R
+both <- paste(Sys.time(), Sys.getenv("USER"))
+#++++
+== R/main.R
+effect: both <- paste(Sys.time(), Sys.getenv("USER"))
+14..24 error[strict] strict mode: this calls `Sys.time`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- a_computed_function
+#~~~~ R/main.R
+handlers <- list(identity)
+result <- handlers[[1]](1)
+#++++
+== R/main.R
+constant: handlers <- list(identity)
+effect: result <- handlers[[1]](1)
+37..53 error[strict] strict mode: this calls a computed function, so ry cannot tell whether loading the package runs code. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- loops_outside_local
+#~~~~ R/main.R
+total <- 0
+for (i in 1:3) total <- total + i
+while (FALSE) NULL
+#++++
+== R/main.R
+constant: total <- 0
+effect: for (i in 1:3) total <- total + i
+effect: while (FALSE) NULL
+11..44 error[strict] strict mode: this loop runs every time the package loads. A file in `R/` may only define things at its top level: move it into a function, `.onLoad`, or the script `ry run` starts, or compute the value inside `local()`
+45..63 error[strict] strict mode: this loop runs every time the package loads. A file in `R/` may only define things at its top level: move it into a function, `.onLoad`, or the script `ry run` starts, or compute the value inside `local()`
+
+#---- changing_a_value_after_its_definition
+#~~~~ R/main.R
+settings <- list(a = 1)
+settings$b <- 2
+names(settings) <- c("x", "y")
+#++++
+== R/main.R
+constant: settings <- list(a = 1)
+effect: settings$b <- 2
+effect: names(settings) <- c("x", "y")
+24..39 error[strict] strict mode: this changes `settings` after its definition, every time the package loads. A file in `R/` may only define things at its top level: build the whole value where it is defined (`local()` can hold the steps), or move the change into a function, `.onLoad`, or the script `ry run` starts
+40..70 error[strict] strict mode: this changes `settings` after its definition, every time the package loads. A file in `R/` may only define things at its top level: build the whole value where it is defined (`local()` can hold the steps), or move the change into a function, `.onLoad`, or the script `ry run` starts
+
+#---- super_and_nested_assignment
+#~~~~ R/main.R
+counter <<- 0
+value <- (inner <- 3) + 1
+#++++
+== R/main.R
+effect: counter <<- 0
+effect: value <- (inner <- 3) + 1
+0..13 error[strict] strict mode: `<<-` here assigns outside the package every time it loads. A file in `R/` may only define things at its top level: bind the name with `<-`, or move the assignment into a function, `.onLoad`, or the script `ry run` starts
+24..34 error[strict] strict mode: this assignment binds `inner` in the middle of an expression. A file in `R/` may only define things at its top level: give `inner` its own top-level definition, or build the value inside `local()`
+
+#---- a_call_inside_local_to_a_local_function
+#~~~~ R/main.R
+built <- local({
+  step <- function(x) x + 1
+  step(1)
+})
+#++++
+== R/main.R
+effect: built <- local({
+47..54 error[strict] strict mode: this calls `step`, a function defined inside `local()`, so it may run code every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- a_conditional_definition_is_not_pure
+#~~~~ R/main.R
+if (TRUE) {
+  helper <- @pure function(x) x
+} else {
+  helper <- @pure function(x) x + 1
+}
+answer <- helper(1)
+#++++
+== R/main.R
+definition: if (TRUE) {
+effect: answer <- helper(1)
+101..110 error[strict] strict mode: this calls `helper`, which is defined inside a condition, so ry cannot tell which definition runs when the package loads. A file in `R/` may only define things at its top level: give `helper` one unconditional definition, or move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- a_dynamic_condition
+#~~~~ R/main.R
+if (interactive()) message("hello")
+#++++
+== R/main.R
+effect: if (interactive()) message("hello")
+4..17 error[strict] strict mode: this calls `interactive`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts

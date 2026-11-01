@@ -2,7 +2,9 @@
 
 use salsa::Setter;
 use semantics::annotations::lower_annotation;
-use semantics::diagnostics::{Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics};
+use semantics::diagnostics::{
+    Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics, top_level_diagnostics,
+};
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
     parse_description_package, parse_namespace,
@@ -11,8 +13,9 @@ use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_so
 use semantics::testing::with_fixture_project;
 use semantics::{
     AnalysisSettings, DataFiles, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
-    file_typing_mode, item_check, item_hir, item_tree, test_document_kind,
+    file_typing_mode, item_check, item_hir, item_spans, item_tree, test_document_kind,
 };
+use semantics::top_level::{TopLevel, item_declared_pure, item_top_level};
 use std::collections::BTreeMap;
 use std::path::Path;
 use syntax::SyntaxKind;
@@ -28,16 +31,7 @@ fn render_case(
         Some(files) => files
             .into_iter()
             .map(|(path, text)| {
-                let kind = if path.starts_with("R/") {
-                    DocumentKind::Package
-                } else if let Some(file_name) = path
-                    .strip_prefix("tests/testthat/")
-                    .filter(|rest| !rest.contains('/'))
-                {
-                    test_document_kind(file_name)
-                } else {
-                    DocumentKind::Script
-                };
+                let kind = fixture_document_kind(&path);
                 (Some(path), text, kind)
             })
             .collect(),
@@ -56,6 +50,20 @@ fn render_case(
         }
         output
     })
+}
+
+/// Classified by path as the hosts classify a project's files.
+fn fixture_document_kind(path: &str) -> DocumentKind {
+    if path.starts_with("R/") {
+        DocumentKind::Package
+    } else if let Some(file_name) = path
+        .strip_prefix("tests/testthat/")
+        .filter(|rest| !rest.contains('/'))
+    {
+        test_document_kind(file_name)
+    } else {
+        DocumentKind::Script
+    }
 }
 
 /// The `#namespace `/`#description ` lines stay in the analyzed text, so ranges stay honest.
@@ -222,6 +230,67 @@ fn typing_strict_fixtures() {
     run_fixture_suite(&suite, &render_with_strict);
 }
 
+/// Each top-level statement's first line, how it behaves when the package loads, and whether
+/// it declares a pure function, then the top-level errors alone, so typing findings stay out.
+fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
+    let text = file.text(db);
+    let mut output = String::new();
+    for span in item_spans(db, file) {
+        let line = text[span.range].lines().next().unwrap_or_default();
+        let behavior = match item_top_level(db, span.item) {
+            TopLevel::Definition => "definition",
+            TopLevel::Constant => "constant",
+            TopLevel::Effect { .. } => "effect",
+        };
+        let pure = if *item_declared_pure(db, span.item) {
+            " (pure)"
+        } else {
+            ""
+        };
+        output.push_str(&format!("{behavior}{pure}: {line}\n"));
+    }
+    render_diagnostics(&mut output, &top_level_diagnostics(db, file));
+    output
+}
+
+/// A fresh database per case, with the packages the files attach made active, so a
+/// conditional stub such as memoise's joins resolution as it does in a real project.
+fn render_top_level_case(source: &str) -> String {
+    let files = split_files(source).unwrap_or_else(|| vec![("R/main.R".to_owned(), source.to_owned())]);
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let sources: Vec<(String, SourceFile)> = files
+        .into_iter()
+        .map(|(path, text)| {
+            let kind = fixture_document_kind(&path);
+            (path, SourceFile::new(&db, text, kind))
+        })
+        .collect();
+    ProjectFiles::new(&db, sources.iter().map(|(_, file)| *file).collect());
+    let metadata = PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        Default::default(),
+        None,
+        Default::default(),
+    );
+    let attached = attached_union(&db, sources.iter().map(|(_, file)| *file));
+    metadata.set_attached(&mut db).to(attached);
+    let mut output = String::new();
+    for (path, file) in &sources {
+        output.push_str(&format!("== {path}\n"));
+        output.push_str(&render_top_level(&db, *file));
+    }
+    output
+}
+
+#[test]
+fn top_level_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/top-level");
+    run_fixture_suite(&suite, &render_top_level_case);
+}
+
 /// A fresh database, because the shared fixture database keeps its settings input.
 fn render_with_inline_annotations_off(source: &str) -> String {
     let db = RootDatabase::default();
@@ -257,12 +326,17 @@ fn render_stub_source(source: &str) -> String {
     for (name, _) in names {
         for scheme in library.schemes.get(name).into_iter().flatten() {
             let rendered = TypeRenderer::default().render_scheme(&db, scheme);
+            let pure = if library.pure.contains(name.as_str()) {
+                "@pure "
+            } else {
+                ""
+            };
             let masked = if library.masked.contains_key(name) {
                 "@masked "
             } else {
                 ""
             };
-            output.push_str(&format!("{name} : {masked}{rendered}\n"));
+            output.push_str(&format!("{name} : {pure}{masked}{rendered}\n"));
         }
     }
     for problem in stub_source_problems(&db, source) {
