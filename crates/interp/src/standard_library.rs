@@ -19,6 +19,7 @@
 
 use {
     crate::{
+        arith::CompensatedSum,
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval, records, scope,
@@ -1472,48 +1473,59 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     Ok(numbers)
 }
 
-/// Folds the list's numbers with `integer` (checked) or `double`, starting at `start`.
+/// Folds the list's numbers with `integer` (checked), or totals them with `double` once any is a
+/// double, starting at `start`.
 unsafe fn fold_numbers(
     call: &Call<'_>,
     start: i32,
     integer: fn(i32, i32) -> Option<i32>,
-    double: fn(f64, f64) -> f64,
+    double: fn(f64, &[f64]) -> f64,
 ) -> R<Sexp> {
-    // A double Array folds straight over its storage, which skips building a million boxed
+    // A double Array is totaled straight from its storage, which skips building a million boxed
     // numbers for a million-item Array.
     let [list] = arguments(call, ["list"])?;
     if list.is_array() && list.kind() == SexpType::Real {
-        let total = values::reals(list)
-            .iter()
-            .fold(f64::from(start), |total, &item| double(total, item));
-        return scalar_real(total);
+        return scalar_real(double(f64::from(start), values::reals(list)));
     }
     let numbers = list_numbers(call)?;
-    let mut total = Number::Integer(start);
+    if numbers
+        .iter()
+        .any(|number| matches!(number, Number::Double(_)))
+    {
+        let doubles: Vec<f64> = numbers.iter().map(|number| number.as_double()).collect();
+        return scalar_real(double(f64::from(start), &doubles));
+    }
+    let mut total = start;
     for number in numbers {
-        total = match (total, number) {
-            (Number::Integer(left), Number::Integer(right)) => {
-                match integer(left, right).filter(|value| *value != NA_INTEGER) {
-                    Some(value) => Number::Integer(value),
-                    None => {
-                        return Err(call.error(
-                            "the integer result overflows; convert the elements to doubles first",
-                        ));
-                    }
-                }
+        let Number::Integer(item) = number else {
+            continue;
+        };
+        total = match integer(total, item).filter(|value| *value != NA_INTEGER) {
+            Some(value) => value,
+            None => {
+                return Err(call
+                    .error("the integer result overflows; convert the elements to doubles first"));
             }
-            (left, right) => Number::Double(double(left.as_double(), right.as_double())),
         };
     }
-    number_value(total)
+    number_value(Number::Integer(total))
 }
 
+// R's `sum()` accumulates doubles in extended precision, and `CompensatedSum` tracks that, so
+// `List.sum(xs)` and `sum(xs)` agree to the last bit on ordinary input.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
-    fold_numbers(call, 0, i32::checked_add, |left, right| left + right)
+    fold_numbers(call, 0, i32::checked_add, |start, items| {
+        let mut sum = CompensatedSum::default();
+        sum.add(start);
+        sum.add_all(items);
+        sum.total()
+    })
 }
 
 unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
-    fold_numbers(call, 1, i32::checked_mul, |left, right| left * right)
+    fold_numbers(call, 1, i32::checked_mul, |start, items| {
+        items.iter().fold(start, |total, &item| total * item)
+    })
 }
 
 unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
