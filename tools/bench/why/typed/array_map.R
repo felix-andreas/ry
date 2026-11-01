@@ -10,6 +10,8 @@ array_map <- function(x: Array<double>, y: Array<double>, times: integer) -> dou
   }
   total
 }
-x <- as.Array(seq(0, 1, length.out = 1000000L))
-y <- as.Array(rev(seq(0, 1, length.out = 1000000L)))
+values: double[] <- seq(0, 1, length.out = 1000000L)
+reversed: double[] <- rev(values)
+x <- as.Array(values)
+y <- as.Array(reversed)
 measure("array_map", function() array_map(x, y, 5L))

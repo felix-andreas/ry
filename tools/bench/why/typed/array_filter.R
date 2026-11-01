@@ -8,6 +8,8 @@ array_filter <- function(x: Array<double>, y: Array<double>, times: integer) -> 
   }
   total
 }
-x <- as.Array(seq(0, 1, length.out = 1000000L))
-y <- as.Array(rev(seq(0, 1, length.out = 1000000L)))
+values: double[] <- seq(0, 1, length.out = 1000000L)
+reversed: double[] <- rev(values)
+x <- as.Array(values)
+y <- as.Array(reversed)
 measure("array_filter", function() array_filter(x, y, 5L))
