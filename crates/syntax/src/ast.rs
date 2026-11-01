@@ -77,6 +77,7 @@ pub fn is_expression_kind(kind: SyntaxKind) -> bool {
             | NEXT_EXPR
             | TUPLE_EXPR
             | RECORD_EXPR
+            | ARRAY_EXPR
             | TAG_EXPR
             | MATCH_EXPR
             | NEW_EXPR
