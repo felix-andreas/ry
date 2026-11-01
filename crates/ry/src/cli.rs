@@ -264,28 +264,6 @@ pub(crate) fn analyze_project(
         .durability(Durability::HIGH)
         .new(&db);
 
-    // A broken override stub silently changes what every file checks against, so
-    // its dropped declarations are reported as findings.
-    let mut stub_problems = Vec::new();
-    for stub in &project_stubs {
-        let stub_text = &stub.text;
-        let stub_index = LineIndex::new(stub_text);
-        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
-            .into_iter()
-            .map(|problem| {
-                let start = stub_index.line_start(problem.line as u32);
-                let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                Diagnostic::new(
-                    TextRange::new(start.into(), end.into()),
-                    Severity::Error,
-                    "stub",
-                    problem.message,
-                )
-            })
-            .collect();
-        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
-    }
-
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
     let namespace_file = namespace_source
@@ -313,6 +291,30 @@ pub(crate) fn analyze_project(
     .durability(Durability::HIGH)
     .attached_durability(Durability::LOW)
     .new(&db);
+
+    // A broken override stub silently changes what every file checks against, so
+    // its dropped declarations are reported as findings. This reads the stub library, so it
+    // must follow the metadata input: a high-durability memo computed before that input
+    // existed is never re-verified, and would keep every conditional namespace inactive.
+    let mut stub_problems = Vec::new();
+    for stub in &project_stubs {
+        let stub_text = &stub.text;
+        let stub_index = LineIndex::new(stub_text);
+        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
+            .into_iter()
+            .map(|problem| {
+                let start = stub_index.line_start(problem.line as u32);
+                let end = start + stub_index.line_length(problem.line as u32, stub_text);
+                Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    Severity::Error,
+                    "stub",
+                    problem.message,
+                )
+            })
+            .collect();
+        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
+    }
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());

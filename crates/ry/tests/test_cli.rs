@@ -433,6 +433,21 @@ fn check_loads_valid_override_stubs_silently() {
     assert_eq!(output.code, 0, "stderr: {}", output.stderr);
 }
 
+#[test]
+fn check_keeps_declared_packages_active_beside_override_stubs() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: demo\nVersion: 0.1\nImports: testthat\n"),
+        ("R/f.R", "f <- function() 1\n"),
+        (
+            "tests/testthat/test-f.R",
+            "test_that(\"f\", { expect_equal(f(), 1) })\n",
+        ),
+        ("stubs/zoo.Rtypes", "zoo_helper : fn(x: double) -> double\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+}
+
 // Every shipped overload set ends in an `Any` catch-all, so only an override reaches this.
 #[test]
 fn check_reports_no_matching_overload() {
