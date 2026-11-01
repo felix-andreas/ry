@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod command_line;
 pub mod config;
 pub mod diagnostics;
 pub mod load;

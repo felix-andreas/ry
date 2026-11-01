@@ -1,35 +1,43 @@
 //! Expression inference walk: Hindley–Milner over one item's HIR. Branches roll
 //! back through an undo log instead of cloning the environment.
 
-use crate::annotations::{Annotation, NamedDefinition};
-use crate::diagnostics::nearest_name;
-use crate::exhaustiveness::{MatchFinding, match_findings};
-use crate::hir::{
-    Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, MatchArm,
-    Module, NaAtom, Parameter as Formal, PatId, PatternKind, Symbol, UnaryOperator,
-    destructure_leaves, integer_literal_position, is_whole_number_double,
+use {
+    crate::{
+        DataPath, Db,
+        annotations::{Annotation, NamedDefinition},
+        data_file_layout,
+        diagnostics::nearest_name,
+        exhaustiveness::{MatchFinding, match_findings},
+        hir::{
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
+            MatchArm, Module, NaAtom, Parameter as Formal, PatId, PatternKind, Symbol,
+            UnaryOperator, destructure_leaves, integer_literal_position, is_whole_number_double,
+        },
+        infer::{
+            Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
+        },
+        metadata::{imported_by_name, imports_every_name, is_own_package},
+        naming::{
+            BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
+            is_column_update, query_index_arguments,
+        },
+        stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
+            Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any,
+            column_type, conflicting_tags, contains_inference_var, erase_vars, for_each_child_type,
+            map_child_types, native_record, null, scalar, substitute_rigid, type_size, union_of,
+            unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        mem,
+        ops::Range,
+        sync::atomic::{AtomicUsize, Ordering},
+    },
+    syntax::{TextRange, TextSize, native_values::accepts_native},
 };
-use crate::infer::{
-    Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
-};
-use crate::metadata::{imported_by_name, imports_every_name, is_own_package};
-use crate::naming::{
-    BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable, is_column_update,
-    query_index_arguments,
-};
-use crate::stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs};
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, Parameter,
-    RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, column_type,
-    conflicting_tags, contains_inference_var, erase_vars, for_each_child_type, map_child_types,
-    native_record, null, scalar, substitute_rigid, type_size, union_of, unknown,
-};
-use crate::{DataPath, Db, data_file_layout};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use syntax::native_values::accepts_native;
-use syntax::{TextRange, TextSize};
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct TypeError<'db> {
@@ -261,6 +269,11 @@ pub struct ItemCheck<'db> {
     /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
     /// a pattern that cannot match records nothing.
     pub pattern_types: PatternTypes<'db>,
+    /// The declared type each native record, tuple or tag literal was checked against, at an
+    /// annotated binding, a call argument or a nominal constructor, so completion can offer
+    /// the fields a literal still lacks. Nested literals record nothing: their expectation is
+    /// the enclosing one's field or payload.
+    pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -457,6 +470,7 @@ pub fn check_item_with_annotation<'db>(
         scheme_arena: Vec::new(),
         recorded: FxHashMap::default(),
         recorded_patterns: FxHashMap::default(),
+        recorded_expectations: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
@@ -578,6 +592,7 @@ pub fn check_item_with_annotation<'db>(
                             for (name, constraint) in &declared.binders {
                                 context.table.rigid_constraints.insert(*name, *constraint);
                             }
+                            context.record_expectation(*value, declared.body);
                             if annotation.is_some_and(|a| !a.trusted)
                                 && !matches!(declared.body.kind(db), TyKind::Unknown | TyKind::Any)
                             {
@@ -624,6 +639,11 @@ pub fn check_item_with_annotation<'db>(
         }
     }
     let pattern_types = PatternTypes(pattern_types.into_boxed_slice());
+    let literal_expectations = context
+        .recorded_expectations
+        .iter()
+        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+        .collect();
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -662,6 +682,7 @@ pub fn check_item_with_annotation<'db>(
         match_findings,
         expression_types,
         pattern_types,
+        literal_expectations,
         errors,
         strict_origins: context.strict_origins,
         scheme,
@@ -865,6 +886,7 @@ struct Checker<'db, 'a> {
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: FxHashMap<ExprId, Ty<'db>>,
     recorded_patterns: FxHashMap<PatId, Ty<'db>>,
+    recorded_expectations: FxHashMap<ExprId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
@@ -1058,6 +1080,17 @@ enum ReplacementStep {
 enum VectorIndexShape {
     ScalarLike,
     VectorLike,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogicalOperand {
+    Scalar,
+    Vector,
+    /// `Any`, the deliberate opt-out, which the result inherits.
+    Any,
+    /// `Unknown`: the result is undetermined too, with no origin of its own, because the
+    /// operand's type was lost where it was computed.
+    Unknown,
 }
 
 enum NumericOperand<'db> {
@@ -1524,6 +1557,29 @@ impl<'db> Checker<'db, '_> {
         let fits = self.table.compatible(self.db, found, representation);
         self.table.rollback(snapshot);
         fits
+    }
+
+    /// A losing overload candidate's parameter is not what the literal is checked against, so
+    /// probes record nothing. A parenthesized value records too, because `(amount` is how a
+    /// record literal starts before its first `=`.
+    fn record_expectation(&mut self, value: ExprId, expected: Ty<'db>) {
+        if self.overload_probe_depth > 0 {
+            return;
+        }
+        let module = self.module;
+        let mut inner = value;
+        while let ExpressionKind::Paren(next) = &module.expression(inner).kind {
+            inner = *next;
+        }
+        let is_literal = matches!(
+            module.expression(inner).kind,
+            ExpressionKind::Record(_) | ExpressionKind::Tuple(_) | ExpressionKind::Tag { .. }
+        );
+        if is_literal {
+            self.recorded_expectations.insert(inner, expected);
+        } else if inner != value {
+            self.recorded_expectations.insert(value, expected);
+        }
     }
 
     /// Follows a native record, tuple or tag literal down to the one component whose type
@@ -2172,6 +2228,7 @@ impl<'db> Checker<'db, '_> {
         for (name, constraint) in &declared.binders {
             self.table.rigid_constraints.insert(*name, *constraint);
         }
+        self.record_expectation(value, declared.body);
         let resolved_value = self.table.resolve(self.db, value_ty);
         if !self
             .table
@@ -4177,6 +4234,17 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// `stop()` never returns, so no value of its result can be misused: it types as `Any`, the
+    /// one type that fits every context, which also keeps strict mode from reporting it.
+    fn infer_stop(&mut self, arguments: &[Argument]) -> Ty<'db> {
+        for argument in arguments {
+            if let Some(value) = argument.value {
+                self.infer(value);
+            }
+        }
+        any(self.db)
+    }
+
     /// Whether a `break` in `id` leaves the loop enclosing it; an inner loop or function
     /// owns its own `break`s.
     fn breaks_out(&self, id: ExprId) -> bool {
@@ -4827,17 +4895,73 @@ impl<'db> Checker<'db, '_> {
                 scalar(self.db, Atomic::Logical)
             }
             // Opaque constructs: operands still infer for the IDE, but their diagnostics are
-            // discarded because nothing inside the construct is judged.
+            // discarded because nothing inside the construct is judged. Elementwise `&` and `|`
+            // over logical or numeric operands are typed; any other operand (raw, a classed
+            // object with its own method) leaves them opaque.
             And | Or | Special | Pipe | Tilde | Help => {
                 let errors_mark = self.errors.len();
                 let origins_mark = self.strict_origins.len();
-                self.infer(lhs);
-                self.infer(rhs);
+                let left = self.infer(lhs);
+                let right = self.infer(rhs);
+                if matches!(operator, And | Or) {
+                    // An operand whose type is still a variable is not constrained: it may be a
+                    // scalar or a vector, which no single type expresses, so the operator stays
+                    // opaque for it.
+                    match (
+                        self.elementwise_logical_operand(left),
+                        self.elementwise_logical_operand(right),
+                    ) {
+                        (Some(LogicalOperand::Scalar), Some(LogicalOperand::Scalar)) => {
+                            return scalar(self.db, Atomic::Logical);
+                        }
+                        (Some(LogicalOperand::Unknown), Some(_))
+                        | (Some(_), Some(LogicalOperand::Unknown)) => {
+                            // The operand that could not be typed is already an origin.
+                            return unknown(self.db);
+                        }
+                        (Some(LogicalOperand::Any), Some(_))
+                        | (Some(_), Some(LogicalOperand::Any)) => {
+                            return any(self.db);
+                        }
+                        (Some(_), Some(_)) => {
+                            let logical = scalar(self.db, Atomic::Logical);
+                            return Ty::new(self.db, TyKind::Vector(logical));
+                        }
+                        _ => {}
+                    }
+                }
                 self.errors.truncate(errors_mark);
                 self.strict_origins.truncate(origins_mark);
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
             }
+        }
+    }
+
+    /// The shape of an operand of elementwise `&` or `|`; `None` when it is not a plain logical
+    /// or numeric value, or when its type is still a variable.
+    fn elementwise_logical_operand(&self, ty: Ty<'db>) -> Option<LogicalOperand> {
+        let element_fits = |ty: Ty<'db>| {
+            matches!(
+                ty.kind(self.db),
+                TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+            )
+        };
+        let resolved = self.table.resolve(self.db, ty);
+        match resolved.kind(self.db) {
+            TyKind::Any => Some(LogicalOperand::Any),
+            TyKind::Unknown => Some(LogicalOperand::Unknown),
+            _ if element_fits(resolved) => Some(LogicalOperand::Scalar),
+            TyKind::Vector(element) | TyKind::NamedVector(element)
+                if element_fits(*element)
+                    || matches!(
+                        element.kind(self.db),
+                        TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_)
+                    ) =>
+            {
+                Some(LogicalOperand::Vector)
+            }
+            _ => None,
         }
     }
 
@@ -5994,6 +6118,7 @@ impl<'db> Checker<'db, '_> {
                 "switch" => Some(self.infer_switch(range, arguments)),
                 "structure" => self.infer_structure(id, arguments),
                 "return" => Some(self.infer_return(range, arguments)),
+                "stop" => Some(self.infer_stop(arguments)),
                 "DataFrame" => self.infer_frame_constructor(callee, arguments),
                 family @ ("lapply" | "sapply" | "vapply" | "Reduce") => {
                     self.infer_apply(id, callee, family, arguments)
@@ -6019,6 +6144,8 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         arguments: &[Argument],
     ) -> Ty<'db> {
+        // The variables typing a named callee creates are its scheme's instantiated parameters.
+        let first_var = self.table.next_var().0;
         let looked_up = match self.function_lookup(callee) {
             FunctionLookup::Ordinary => None,
             FunctionLookup::Found(ty) => Some(ty),
@@ -6057,6 +6184,15 @@ impl<'db> Checker<'db, '_> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        let named_callee = matches!(
+            self.module.expression(callee).kind,
+            ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
+        );
+        let callback_outputs = if named_callee {
+            self.callback_outputs(callee_ty, first_var..self.table.next_var().0)
+        } else {
+            Vec::new()
+        };
         if self.is_null_placeholder(self.table.resolve(self.db, callee_ty)) {
             self.infer_call_arguments(range, arguments);
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -6081,7 +6217,126 @@ impl<'db> Checker<'db, '_> {
         };
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        if callback_outputs.is_empty() {
+            return result;
+        }
+        self.drop_unconstrained_members(result, &callback_outputs, first_var)
+    }
+
+    /// The callee's freshly instantiated type parameters (`instantiated`) that its parameter
+    /// types mention only as what a callback returns, such as `F` in `Result.and_then`'s
+    /// `f: fn(A) -> Result<B, F>`. Only those can stand for no value after the call: a
+    /// parameter an argument fills directly, or one that appears only in the result, means
+    /// "any value" when it stays open.
+    fn callback_outputs(&self, callee_ty: Ty<'db>, instantiated: Range<u32>) -> Vec<InferenceVar> {
+        let db = self.db;
+        if instantiated.is_empty() {
+            return Vec::new();
+        }
+        let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
+            return Vec::new();
+        };
+        let mut direct = FxHashSet::default();
+        let mut outputs = FxHashSet::default();
+        let parameter_types = function
+            .positional
+            .iter()
+            .copied()
+            .chain(function.named.iter().map(|parameter| parameter.ty))
+            .chain(function.variadic.iter().map(|rest| rest.element));
+        for ty in parameter_types {
+            match ty.kind(db) {
+                TyKind::Function(callback) => {
+                    collect_vars(db, callback.ret, &mut outputs);
+                    let inputs = callback
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(callback.named.iter().map(|parameter| parameter.ty))
+                        .chain(callback.variadic.iter().map(|rest| rest.element));
+                    for input in inputs {
+                        collect_vars(db, input, &mut direct);
+                    }
+                }
+                _ => collect_vars(db, ty, &mut direct),
+            }
+        }
+        outputs
+            .into_iter()
+            .filter(|var| instantiated.contains(&var.0) && !direct.contains(var))
+            .collect()
+    }
+
+    /// A callback output that no argument constrained stands for no value, so as a member of a
+    /// union in the result it adds nothing: `Result.and_then`'s `Result<B, E | F>` is `:Err(E)`
+    /// when the step never fails. A union of nothing but such parameters stays as it is, and a
+    /// parameter that a variable from before the call reaches (an unannotated outer parameter
+    /// passed as the callback) stays too, because its value is decided by that outer code.
+    fn drop_unconstrained_members(
+        &mut self,
+        result: Ty<'db>,
+        callback_outputs: &[InferenceVar],
+        first_var: u32,
+    ) -> Ty<'db> {
+        let db = self.db;
+        let mut open: FxHashSet<InferenceVar> = callback_outputs
+            .iter()
+            .map(|&var| self.table.find(var))
+            .filter(|&root| matches!(self.table.entry(root), Entry::Unbound { .. }))
+            .collect();
+        if open.is_empty() {
+            return result;
+        }
+        let resolved = self.table.resolve(db, result);
+        let mut in_result = FxHashSet::default();
+        collect_vars(db, resolved, &mut in_result);
+        open.retain(|var| in_result.contains(var));
+        if open.is_empty() {
+            return resolved;
+        }
+        for outer in 0..first_var {
+            let outer = InferenceVar(outer);
+            let mut reached = FxHashSet::default();
+            match self.table.entry(outer) {
+                Entry::Unbound { .. } => {
+                    reached.insert(self.table.find(outer));
+                }
+                Entry::Bound { ty, .. } => {
+                    let ty = self.table.resolve(db, *ty);
+                    collect_vars(db, ty, &mut reached);
+                }
+                Entry::Redirect(_) => {}
+            }
+            open.retain(|var| !reached.contains(var));
+            if open.is_empty() {
+                return resolved;
+            }
+        }
+        let unconstrained = |member: Ty<'db>| match member.kind(db) {
+            TyKind::Var(var) => open.contains(var),
+            _ => false,
+        };
+        fn walk<'db>(
+            db: &'db dyn Db,
+            ty: Ty<'db>,
+            unconstrained: &dyn Fn(Ty<'db>) -> bool,
+        ) -> Ty<'db> {
+            let ty = map_child_types(db, ty, &mut |child| walk(db, child, unconstrained));
+            match ty.kind(db) {
+                TyKind::Union(members) if members.iter().any(|&member| !unconstrained(member)) => {
+                    union_of(
+                        db,
+                        members
+                            .iter()
+                            .copied()
+                            .filter(|&member| !unconstrained(member)),
+                    )
+                }
+                _ => ty,
+            }
+        }
+        walk(db, resolved, &unconstrained)
     }
 
     fn binds_parameter(&self, callee: ExprId) -> bool {
@@ -8966,6 +9221,9 @@ impl<'db> Checker<'db, '_> {
         whole_double: bool,
         value: Option<ExprId>,
     ) -> Result<(), TypeError<'db>> {
+        if let Some(value) = value {
+            self.record_expectation(value, expected);
+        }
         let resolved_found = self.table.resolve(self.db, found);
         if matches!(resolved_found.kind(self.db), TyKind::Unknown) {
             return Ok(());
@@ -9061,6 +9319,7 @@ impl<'db> Checker<'db, '_> {
         let nominal = Ty::new(self.db, TyKind::Named(name, arguments.clone()));
         if !matches!(definition.body.kind(self.db), TyKind::Unknown) {
             let representation = apply_definition(self.db, &definition, &arguments);
+            self.record_expectation(value, representation);
             let resolved_value = self.table.resolve(self.db, value_ty);
             if !self
                 .table
@@ -11646,10 +11905,7 @@ fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 }
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
-    Ty::new(
-        db,
-        TyKind::Named(Name::new(db, "factor".to_owned()), Vec::new()),
-    )
+    Ty::new(db, TyKind::Named(Name::new(db, "factor"), Vec::new()))
 }
 
 /// The column type data.table gives values of several column types stacked together: the
@@ -12080,13 +12336,13 @@ fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
-    use crate::annotations::lower_annotation;
-    use crate::hir::lower_item;
-    use crate::naming::resolve_item;
-    use syntax::SyntaxKind;
-    use syntax::ast::is_expression_kind;
+    use {
+        super::*,
+        crate::{
+            RootDatabase, annotations::lower_annotation, hir::lower_item, naming::resolve_item,
+        },
+        syntax::{SyntaxKind, ast::is_expression_kind},
+    };
 
     fn check_source<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
         let parse = syntax::parse(source);
@@ -12778,4 +13034,12 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
     }
+}
+
+/// The inference variables `ty` mentions, as the table resolved them when `ty` was read.
+fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<InferenceVar>) {
+    if let TyKind::Var(var) = ty.kind(db) {
+        into.insert(*var);
+    }
+    for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
 }

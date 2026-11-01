@@ -2,17 +2,23 @@
 //! the member-wise `T | NULL` vs `U | NULL` case. Directional member-wise logic
 //! belongs in compatibility checking, never here.
 
-use crate::Db;
-use crate::annotations::NamedDefinition;
-use crate::diagnostics::nearest_name;
-use crate::stubs::stubs;
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
-    for_each_child_type, map_child_types, scalar, substitute_rigid, union_of, unknown,
+use {
+    crate::{
+        Db,
+        annotations::NamedDefinition,
+        diagnostics::nearest_name,
+        stubs::stubs,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
+            for_each_child_type, map_child_types, scalar, substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{Cell, RefCell},
+        mem,
+    },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{Cell, RefCell};
-use std::mem;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -89,6 +95,12 @@ impl<'db> InferenceTable<'db> {
     pub fn fresh_ty(&mut self, db: &'db dyn Db, constraint: Constraint) -> Ty<'db> {
         let var = self.fresh(constraint);
         Ty::new(db, TyKind::Var(var))
+    }
+
+    /// The id the next fresh variable gets, so a caller can tell the variables it creates
+    /// from here on.
+    pub fn next_var(&self) -> InferenceVar {
+        InferenceVar(self.entries.len() as u32)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1550,9 +1562,13 @@ fn constraint_rejects<'db>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
-    use crate::types::{Parameter, null, scalar};
+    use {
+        super::*,
+        crate::{
+            RootDatabase,
+            types::{Parameter, null, scalar},
+        },
+    };
 
     #[test]
     fn unify_binds_and_resolves() {
@@ -1688,7 +1704,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: int,
                     optional: false,
                     default: None,

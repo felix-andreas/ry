@@ -41,8 +41,8 @@ illegal dependency unrepresentable.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It depends on nothing else in the
   workspace.
-- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
-  `repl` included, needs R to build. With `--runtime ry` it loads ry's `libR.so` instead of GNU R's,
+- **`repl`** is the R console behind `ry run` and `ry R`. It loads R at run time, so no crate,
+  `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
   allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
@@ -153,10 +153,16 @@ wall time. Several of them are worth knowing:
   memo. So one item check resolves all its frame binders in one query (`item_frame_binders`) and
   caches the package names and schemes it looks up in `SalsaGlobals`. `package_name` and
   `test_name` take only the name and read `ProjectFiles` themselves.
-- Salsa's interning takes a shard lock, and the atomics that track an interned value's last use
-  bounce between cores. `Name` and `Ty` are interned with `revisions = usize::MAX`, so they are never
-  collected and skip that bookkeeping, and `Symbol::new` checks a thread-local table before the
-  shared one.
+- `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
+  64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
+  compare and reading the kind is a field load. The entry stores the type's size, which the
+  inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
+  one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
+  heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
+  salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
+  only before a line that opens a call and follows a line that is exactly one complete top-level
+  call, so no directive straddles a boundary.
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
@@ -224,6 +230,13 @@ slots. Both are tiny tracked queries whose values survive an edit that only shif
 typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
 instead of running again.
 
+The walks reach those projections through one tracked memo per file (`file_definitions`,
+`file_interface_reads`, `file_conditional_writers`), never directly. After a keystroke salsa must
+confirm that a project-wide map is still valid, and it does so by checking the map's dependencies.
+Read per file, that is about 500 memos on a 300,000-line project, and every one outside the edited
+file passes on durability alone (see "The language server"). Read per item, it was about 56,000
+memos, which cost every editor request about 35 ms right after a keystroke.
+
 A check never reads a project-wide map either. Each lookup it makes across items goes through a
 firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
 writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
@@ -231,7 +244,7 @@ binder that an immediate or script read sees. A structural edit re-runs each fir
 read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
 its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 
-Types are interned, so type equality is id equality and nothing is ever deep-cloned. Deep resolution
+Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
 decision log records that design.
 
@@ -285,21 +298,45 @@ and all the documents, and the database handle deliberately never leaves it.
   authoritative answer never degrades: pull diagnostics return a retryable `SERVER_CANCELLED` with
   `retriggerRequest: true`, and rename returns `CONTENT_MODIFIED`.
 - **Diagnostics are pushed in two waves.** On every sync the server immediately publishes the
-  parse-stage classes and the lints, tagged with the document version. At idle time it publishes the
-  settled full set, without a version. The settled set is a faithful superset of the first, so the
+  parse-stage classes and the lints, tagged with the document version. Until the startup warm-up
+  (below) ends, the first wave holds only the parse-stage classes, because the lints read the
+  project-wide name maps. At idle time it publishes the settled full set, without a version. The settled set is a faithful superset of the first, so the
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
-- **Idle work has an order.** The worker first serves any settled publish it owes for the most
-  recently edited file. With nothing owed, it warms up the rest of the workspace one file at a time
-  and never publishes that work. Idle work that gets cancelled is requeued.
+- **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
+  scans every file's `library()` and `require()` calls and applies the attached set once, then
+  derives every item's naming and the per-file folds behind the project-wide maps. Every semantic
+  wave reads those maps, and one thread would take seconds to derive them, so settled publishes
+  wait for it. After the warm-up the worker serves any settled publish it owes, most recently
+  edited file first. Next it lowers the durability of documents opened since (see below). With
+  nothing else to do, it checks the rest of the workspace in parallel batches and never publishes
+  that work. Idle work that gets cancelled is requeued.
+- **Parallel idle work stops between files.** It runs on one cloned database handle per core, and
+  each thread checks before every file whether a job is queued. Cancelling the threads' salsa
+  tokens is not enough on its own, because salsa clears a handle's cancellation flag whenever a
+  top-level query returns, so a flip that lands at the end of a query is lost.
+- **A request preempts idle work.** A request is queued first and then cancels the idle unit in
+  flight, if any, so a hover never waits for a background file to finish. A request never cancels
+  another request or a sync.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
 - **Only edited files change at low durability.** A workspace file enters the database at
-  `Durability::MEDIUM`, its first `didChange` lowers it to `LOW`, and closing it restores `MEDIUM`.
-  An edit then revalidates every memo that reads only other files by durability alone, without
-  walking its dependencies, which took a fifth off the settled re-check on the benchmark code
-  bases. A `test_incremental.rs` case pins that an edit never revisits the other files' trees.
+  `Durability::MEDIUM`, an open document is lowered to `LOW`, and closing it restores `MEDIUM`. The
+  stubs, settings, package metadata and data-file inputs are `MEDIUM` too, because a memo is only
+  as durable as its least durable input and nearly every memo reads the stubs. An edit then
+  revalidates every memo that reads only other files by durability alone, without walking its
+  dependencies. `test_incremental.rs` pins that an edit never revisits the other files' trees or
+  items.
+- **The project file list is `LOW` from the start.** Salsa never backdates a memo whose durability
+  drops, so if the project-wide maps started at `MEDIUM`, a file's first `LOW` write would change
+  them, then every `package_name`, then every item check in the project (about 2 s on a
+  300,000-line project). They read `ProjectFiles`, so a `LOW` list keeps them `LOW` throughout, and
+  the first edit re-derives only the edited file's own memos. `didOpen` leaves text that matches
+  the disk untouched, which would otherwise be a `MEDIUM` write that invalidates the whole project,
+  and idle time rewrites it at `LOW` so that the first keystroke does not pay for that file's share.
+  A setter that names no durability keeps the field's current one, so every write to a source file
+  names it.
 - **Positions convert only at the protocol edge**, against the target document's own text, in the
   negotiated encoding. That is UTF-16 by default, and UTF-8 when the client offers it. Signature-help
   label offsets are always UTF-16, as the LSP specification requires.

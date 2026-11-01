@@ -28,7 +28,15 @@ name : <type-expr>
 The type expression uses exactly the `#:` annotation grammar, read by the same parser, so there is
 no second notation to keep in sync. A stub file has nowhere to write a function body, which makes
 "declaration-only" a structural fact, as it is for TypeScript's `.d.ts` and Python's `.pyi` files.
-Blank lines and `#` comments, whole-line or trailing, are ignored.
+Blank lines and `#` comments, whole-line or trailing, are ignored, with one exception: consecutive
+`#'` lines directly above a declaration are its documentation, which hover and completion show
+before the signature. A later source that declares the same name replaces that documentation, or
+clears it when its own declaration has none.
+
+```
+#' Applies `f` to each element.
+List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
+```
 
 A declared `name` can be an R identifier, an infix operator such as `%in%` (or a project's own
 `%||%`), or an S3 operator method such as `+.Date`, `-.POSIXct`, `Arith.difftime`, `Compare.Date`,

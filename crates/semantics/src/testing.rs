@@ -1,18 +1,21 @@
 //! Shared test support, including the fuzz invariant battery: no panics, deterministic output
 //! across fresh databases, in-bounds ranges, and incremental equivalence with a fresh build.
 
-use crate::diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics};
-use crate::lints::{LintConfig, LintLevel, NameStyle, lint_file};
-use crate::stubs::install_shipped_stubs;
-use crate::{
-    Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, SpliceCache, item_check,
-    item_tree,
+use {
+    crate::{
+        Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, SpliceCache,
+        diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
+        item_check, item_tree,
+        lints::{LintConfig, LintLevel, NameStyle, lint_file},
+        stubs::install_shipped_stubs,
+    },
+    salsa::{Setter as _, plumbing::AsId as _},
+    std::{
+        cell::RefCell,
+        mem,
+        sync::{Arc, Mutex},
+    },
 };
-use salsa::Setter as _;
-use salsa::plumbing::AsId as _;
-use std::cell::RefCell;
-use std::mem;
-use std::sync::{Arc, Mutex};
 
 /// Renders schemes, diagnostics, and every lint (all enabled) for a file, asserting each range
 /// stays within the file.

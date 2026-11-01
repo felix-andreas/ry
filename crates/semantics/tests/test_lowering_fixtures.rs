@@ -2,11 +2,16 @@
 //! happens to type the same.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind};
-use semantics::testing::with_fixture_project;
-use semantics::{DocumentKind, item_hir, item_tree};
-use std::path::PathBuf;
-use syntax::testing::run_fixture_suite;
+use {
+    semantics::{
+        DocumentKind,
+        hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind},
+        item_hir, item_tree,
+        testing::with_fixture_project,
+    },
+    std::path::PathBuf,
+    syntax::testing::run_fixture_suite,
+};
 
 #[test]
 fn lowering_fixtures() {

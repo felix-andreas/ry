@@ -2,13 +2,15 @@
 //! are `interp::rmath`, shared with the interpreter's builtins; this module converts C's `int`
 //! flags, draws random variates from the session's generator, and exports the symbols.
 
-use crate::{
-    arith::Rng,
-    boundary::{self, ApiResult, enter, error},
-    runtime,
+use {
+    crate::{
+        arith::Rng,
+        boundary::{self, ApiResult, enter, error},
+        runtime,
+    },
+    interp::rmath::*,
+    std::ffi::c_int,
 };
-use interp::rmath::*;
-use std::ffi::c_int;
 
 /// Hands the warnings the last Rmath call collected to R's warning machinery.
 fn raise_warnings() {
@@ -310,7 +312,6 @@ pub extern "C" fn wilcox_free() {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn signrank_free() {}
-
 
 // Random variates. Each generator consumes uniforms in the order of the published algorithm
 // GNU R implements, so a seed gives GNU R's stream.
@@ -1314,4 +1315,3 @@ fn format_g(value: f64) -> String {
     }
     format!("{value:e}")
 }
-

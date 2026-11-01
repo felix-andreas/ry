@@ -52,82 +52,137 @@ const lspFeatures = [
     },
 ];
 
-// Every snippet below was run through the real binary (`ry check`, `ry run --runtime ry`), and
+// Every snippet below was run through the real binary (`ry check`, `ry run`), and
 // its output is pasted verbatim; re-run rather than hand-edit.
-type Sample = { key: string; label: string; code: string; command: string; output: string };
+type Sample = {
+    key: string;
+    label: string;
+    file: string;
+    code: string;
+    command: string;
+    output: string;
+    note?: string;
+    caption?: string;
+};
 
 const runtimeTabs: Sample[] = [
     {
         key: "unions",
         label: "Tagged unions",
-        code: `alias Shape = :Circle(radius: double) | :Rect(width: double, height: double)
+        file: "R/shapes.R",
+        code: `type Shape =
+  | :Circle(radius: double)
+  | :Square(side: double)
 
 area <- function(shape: Shape) -> double {
   match (shape) {
-    :Circle(radius = r) => pi * r^2
-    :Rect(width = w, height = h) => w * h
+    :Circle(radius = r) => {
+      pi * r^2
+    }
   }
-}
+}`,
+        command: "ry check",
+        output: `non-exhaustive-match
 
-area(:Rect(width = 3, height = 4))`,
-        command: "ry run --runtime ry shapes.R",
-        output: `[1] 12`,
+  x this \`match\` does not handle \`:Square(side = _)\`: add an arm for it, or a catch-all \`_ => ...\` arm
+   --[R/shapes.R:6:3]
+ 5 | area <- function(shape: Shape) -> double {
+ 6 |   match (shape) {
+   |   ^^^^^^^^^^^^^
+ 7 |     :Circle(radius = r) => {`,
     },
     {
         key: "nominal",
         label: "Nominal types",
-        code: `type UserId = integer
-type OrderId = integer
+        file: "R/holes.R",
+        code: `type Shape =
+  | :Circle(radius: double)
+  | :Square(side: double)
 
-cancel <- function(order: OrderId) -> character "cancelled"
+type Hole =
+  | :Circle(radius: double)
+  | :Square(side: double)
 
-user <- @UserId(7L)
-cancel(user)`,
+hole: Hole <- @Shape(:Circle(radius = 1))`,
         command: "ry check",
         output: `type-mismatch
 
-  x expected \`OrderId\`, found \`UserId\`
-   --[orders.R:7:8]
- 6 | user <- @UserId(7L)
- 7 | cancel(user)
-   |        ^^^^`,
+  x expected \`Hole\`, found \`Shape\`
+   --[R/holes.R:9:15]
+ 8 |
+ 9 | hole: Hole <- @Shape(:Circle(radius = 1))
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^`,
     },
     {
         key: "records",
         label: "Records",
-        code: `alias Person = Record{name: character, age: integer}
+        file: "people.R",
+        code: `ada <- (name = "ada", age = 36L)
 
-greet <- function(person: Person) -> character paste("hi", person$name)
-
-ada <- (name = "ada", age = 36L)
-greet(ada)
+ada$name
 ada$email`,
-        command: "ry run --runtime ry people.R",
-        output: `[1] "hi ada"
+        command: "ry run people.R",
+        output: `[1] "ada"
 Error in ada$email :
   the record has no field \`email\`; its fields are \`age\`, \`name\``,
     },
     {
+        key: "dataframe",
+        label: "DataFrame",
+        file: "sales.R",
+        code: `sales <- DataFrame(
+  region = c("eu", "us", "eu", "us"),
+  units = c(3L, 5L, 2L, 1L),
+  price = c(1.5, 2, 4, 3)
+)
+sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(revenue = (col("units") * col("price")) |> Expr.sum())`,
+        command: "ry run sales.R",
+        output: `   region revenue
+   <char>   <num>
+1:     eu    12.5
+2:     us    10.0`,
+        note: "5 times faster than data.table across 19 benchmark queries on 10 million rows, 4 cores.",
+    },
+    {
         key: "stdlib",
         label: "Standard library",
-        code: `ids <- List.map_try(Str.split_on("3,1,x", ","), Str.to_integer)
+        file: "words.R",
+        code: `words <- Str.split_on("ry checks R", " ")
+loud <- List.map(words, Str.with_ascii_uppercased)
 
-match (ids) {
-  :Ok(values) => List.sum(values)
-  :Err(reason) => reason
-}`,
-        command: "ry run --runtime ry ids.R",
-        output: `:InvalidNumStr`,
+Str.join_with(loud, " ")`,
+        command: "ry run words.R",
+        output: `[1] "RY CHECKS R"`,
     },
 ];
+
+// Copied from the Speed table in why-ry.mdx, which `just bench-why` regenerates; keep the two in
+// sync. Sorted by speedup so the strongest real results lead, and the slowdown stays visible.
+const benchmarks = [
+    { program: "drawdown", gnuR: 0.314, ry: 0.024 },
+    { program: "loop_sum", gnuR: 0.265, ry: 0.042 },
+    { program: "closures", gnuR: 0.818, ry: 0.395 },
+    { program: "log_rank", gnuR: 0.101, ry: 0.073 },
+    { program: "vector_arith", gnuR: 0.176, ry: 0.14 },
+    { program: "vasicek", gnuR: 0.042, ry: 0.041 },
+    { program: "fib", gnuR: 0.08, ry: 0.094 },
+].map((row) => ({ ...row, speedup: row.gnuR / row.ry }));
+const benchmarkScale = Math.ceil(Math.max(...benchmarks.map((row) => row.speedup)));
 
 const migrationTabs: Sample[] = [
     {
         key: "step-check",
+        caption: "Works with the code you have today",
         label: "1. Check the code you have",
+        file: "R/pricing.R",
         code: `net_price <- function(price, rate) {
   price * (1 - ratee)
-}`,
+}
+
+net_price(100, 0.2)`,
         command: "ry check",
         output: `unresolved
 
@@ -135,11 +190,14 @@ const migrationTabs: Sample[] = [
    --[R/pricing.R:2:16]
  1 | net_price <- function(price, rate) {
  2 |   price * (1 - ratee)
-   |                ^^^^^`,
+   |                ^^^^^
+ 3 | }`,
     },
     {
         key: "step-comments",
+        caption: "Adjust your code, still backwards compatible",
         label: "2. Type your code",
+        file: "R/pricing.R",
         code: `#: fn(price: double, rate: double) -> double
 net_price <- function(price, rate) {
   price * (1 - rate)
@@ -157,37 +215,41 @@ net_price(100, "0.2")`,
     },
     {
         key: "step-inline",
+        caption: "Use what ry adds, no longer runs on GNU R",
         label: "3. Switch to inline types",
+        file: "R/pricing.R",
         code: `net_price <- function(
   price: double,
   rate: double
-) -> double {
+) {
   price * (1 - rate)
 }
-rate <- eval(parse(text = '"0.2"'))
-net_price(100, rate)`,
-        command: "ry run --runtime ry pricing.R",
-        output: `Error in net_price(100, rate) :
+
+net_price(100, 0.2)
+net_price(100, "0.2")`,
+        command: "ry run R/pricing.R",
+        output: `[1] 80
+Error in net_price(100, "0.2") :
   argument \`rate\` must be \`double\`, not \`character\``,
     },
     {
         key: "step-ry",
+        caption: "Strict mode (R--): only this circle",
         label: "4. Go fully typed",
-        code: `alias Payment = :Paid(amount: double) | :Pending
-
-balance <- function(payment: Payment) -> double {
-  match (payment) {
-    :Paid(amount = a) => a
-  }
+        file: "R/pricing.R",
+        code: `# typing: strict
+show_price <- function(price: double, label) {
+  message(label, ": ", price)
 }`,
         command: "ry check",
-        output: `non-exhaustive-match
+        output: `strict
 
-  x this \`match\` does not handle \`:Pending\`: add an arm for it, or a catch-all \`_ => ...\` arm
-   --[R/payments.R:4:3]
- 3 | balance <- function(payment: Payment) -> double {
- 4 |   match (payment) {
-   |   ^^^^^^^^^^^^^^^`,
+  x strict mode: parameter \`label\` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in \`label: TYPE\`
+   --[R/pricing.R:2:39]
+ 1 | # typing: strict
+ 2 | show_price <- function(price: double, label) {
+   |                                       ^^^^^
+ 3 |   message(label, ": ", price)`,
     },
 ];
 
@@ -195,12 +257,11 @@ const escapeHtml = (text: string) =>
     text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 const KEYWORDS = new Set([
-    "function", "if", "else", "for", "while", "in", "return", "match", "alias", "type",
+    "function", "if", "else", "for", "while", "in", "return", "match", "type",
     "TRUE", "FALSE", "NULL", "NA",
 ]);
 const TYPE_NAMES = new Set([
-    "double", "integer", "character", "logical", "record", "Result", "Shape", "Person",
-    "Payment", "UserId", "OrderId",
+    "double", "integer", "character", "logical", "Record", "Shape", "Hole",
 ]);
 
 // A small R tokenizer that emits the same `t-*` classes as the captured editor mocks.
@@ -215,6 +276,13 @@ function highlightR(source: string): string {
                 const [text, comment, string, number, tag, word] = match;
                 const escaped = escapeHtml(text);
                 let cls = "t-op";
+                if (comment?.startsWith("#:")) {
+                    // An annotation is code to read, not a remark to skip, so its types keep their colour.
+                    for (const part of comment.split(/(\b[A-Za-z_]\w*\b)/)) {
+                        if (part) html += `<span class="${TYPE_NAMES.has(part) ? "t-type" : "t-com"}">${escapeHtml(part)}</span>`;
+                    }
+                    continue;
+                }
                 if (comment) cls = "t-com";
                 else if (string) cls = "t-str";
                 else if (number) cls = "t-num";
@@ -233,98 +301,127 @@ function highlightR(source: string): string {
                 }
                 html += `<span class="${cls}">${escaped}</span>`;
             }
-            return `<div class="cl"><span class="ln" aria-hidden="true">${index + 1}</span><span class="cx">${html}</span></div>`;
+            return `<div class="cl" style="--i:${index}"><span class="ln" aria-hidden="true">${index + 1}</span><span class="cx">${html}</span></div>`;
         })
         .join("\n");
 }
 
-// Colors raw `ry` output the way the terminal shows it.
+// Colors raw `ry` output the way the terminal shows it. `--j` orders the lines for the reveal.
 function terminal(command: string, output: string): string {
-    const lines = output.split("\n").map((line, index) => {
+    const rows = output.split("\n");
+    const lines = rows.map((line, index) => {
+        const order = `style="--j:${index + 1}"`;
         const escaped = escapeHtml(line);
         if (line === "") return `<div class="tl gap"></div>`;
-        if (index === 0 && /^[a-z-]+$/.test(line)) {
-            const severity = output.includes("\n  ! ") ? "dwarn" : "derr";
-            return `<div class="tl"><span class="${severity}">${escaped}</span></div>`;
+        if ((index === 0 || rows[index - 1] === "") && /^[a-z-]+$/.test(line)) {
+            const severity = rows[index + 2]?.startsWith("  ! ") ? "dwarn" : "derr";
+            return `<div class="tl" ${order}><span class="${severity}">${escaped}</span></div>`;
         }
         const message = line.match(/^  ([x!]) (.*)$/);
         if (message) {
             const severity = message[1] === "x" ? "derr" : "dwarn";
-            return `<div class="tl msg"><span class="${severity}">  ${message[1]} </span><span class="dmsg">${escapeHtml(message[2])}</span></div>`;
+            return `<div class="tl msg" ${order}><span class="${severity}">  ${message[1]} </span><span class="dmsg">${escapeHtml(message[2])}</span></div>`;
         }
-        if (line.startsWith("   --[")) return `<div class="tl"><span class="darrow">${escaped}</span></div>`;
+        if (/^ +--\[/.test(line)) return `<div class="tl" ${order}><span class="darrow">${escaped}</span></div>`;
         const gutter = line.match(/^( *\d* \|)(.*)$/);
         if (gutter) {
             const rest = gutter[2];
             const body = /^ *\^+$/.test(rest)
                 ? rest.replace(/\^+/, (carets) => `<span class="dcaret-err">${carets}</span>`)
                 : escapeHtml(rest);
-            return `<div class="tl"><span class="dgutter">${escapeHtml(gutter[1])}</span>${body}</div>`;
+            return `<div class="tl" ${order}><span class="dgutter">${escapeHtml(gutter[1])}</span>${body}</div>`;
         }
-        if (line.startsWith("Error")) return `<div class="tl msg"><span class="derr">${escaped}</span></div>`;
-        return `<div class="tl msg">${escaped}</div>`;
+        if (line.startsWith("Error")) return `<div class="tl msg" ${order}><span class="derr">${escaped}</span></div>`;
+        return `<div class="tl msg" ${order}>${escaped}</div>`;
     });
-    return [`<div class="tl"><span class="sh">$</span> ${escapeHtml(command)}</div>`, ...lines].join("\n");
+    return [`<div class="tl tl-cmd" style="--j:0"><span class="sh">$</span> ${escapeHtml(command)}</div>`, ...lines].join("\n");
 }
 
 const ideCode = `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com"># one sale, and what is left of it after fees</span></span></div>
 <div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">sale</span><span class="inlay" data-for="inlay">: list{region: character, amount: double, closed: logical}</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">, </span><span class="t-id">closed</span><span class="t-op"> = </span><span class="t-kw">TRUE</span><span class="t-op">)</span></span></div>
 <div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="tok" data-mark="def-target references rename"><span class="t-id">margin</span></span><span class="inlay" data-for="inlay">: &lt;T: numeric, U: numeric&gt; fn(gross: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span><span class="renamebadge" data-for="rename" aria-hidden="true">3 edits · 2 files</span></span></div>
+<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="tok" data-mark="def-target references rename"><span class="t-id">margin</span></span><span class="inlay" data-for="inlay">: &lt;T: numeric, U: numeric&gt; fn(gross: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) { </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">) }</span><span class="renamebadge" data-for="rename" aria-hidden="true">3 edits · 2 files</span></span></div>
 <div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"></span></div>
 <div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-id">net</span><span class="inlay" data-for="inlay">: double</span><span class="t-op"> &lt;- </span><span class="tok t-fn" data-mark="def-source references rename-ghost"><span class="t-id">margin</span></span><span class="t-op">(</span><span class="t-id" data-mark="hover-anchor"><span class="t-id">sale</span></span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">, </span><span class="t-num">0.18</span><span class="t-op">)</span><span class="card hovercard" data-for="hover" aria-hidden="true"><code class="card-code"><span class="t-id">sale</span>: <span class="t-type">list{region: character, amount: double, closed: logical}</span></code><span class="card-meta">Package global, defined at <code>R/sales.R:2:1</code></span><span class="card-notch"></span></span><span class="caretbar" data-for="completion" aria-hidden="true"></span><span class="card comp" data-for="completion" aria-hidden="true"><span class="comp-row is-active"><span class="ckind">field</span><span class="cname">amount</span><span class="cdetail">double</span></span><span class="comp-row"><span class="ckind">field</span><span class="cname">closed</span><span class="cdetail">logical</span></span><span class="comp-row"><span class="ckind">field</span><span class="cname">region</span><span class="cdetail">character</span></span></span></span></div>
 <div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-id">label</span><span class="inlay" data-for="inlay">: character</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-id">sale</span><span class="t-op">$</span><span class="t-id">region</span><span class="t-op">, </span><span class="t-str">": "</span><span class="t-op">, </span><span class="t-fn">round</span><span class="t-op">(</span><span class="t-id">net</span><span class="t-op">, </span><span class="t-num">2</span><span class="t-op">))</span></span></div>
 <div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"></span></div>
 <div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-id">label</span><span class="t-op">)</span></span></div>`;
 
-const analysisCode = {
-    types: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#: fn(gross: </span><span class="t-type">double</span><span class="t-com">, rate: </span><span class="t-type">double</span><span class="t-com">) -&gt; </span><span class="t-type">double</span></span></div>
-<div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">net_of_fees</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">  </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"></span></div>
-<div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-com">#: fn(region: </span><span class="t-type">character</span><span class="t-com">) -&gt; </span><span class="t-type">double</span></span></div>
-<div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-id">fee_rate</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"><span class="t-op">  </span><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-id">region</span><span class="t-op"> == </span><span class="t-str">"north"</span><span class="t-op">) </span><span class="t-num">0.18</span><span class="t-op"> </span><span class="t-kw">else</span><span class="t-op"> </span><span class="t-num">0.22</span></span></div>
-<div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="10"><span class="ln" aria-hidden="true">10</span><span class="cx"></span></div>
-<div class="cl" data-line="11"><span class="ln" aria-hidden="true">11</span><span class="cx"><span class="t-com">#: fn(rows: list{region: </span><span class="t-type">character</span><span class="t-com">, amount: </span><span class="t-type">double</span><span class="t-com">}) -&gt; </span><span class="t-type">double</span></span></div>
-<div class="cl" data-line="12"><span class="ln" aria-hidden="true">12</span><span class="cx"><span class="t-id">book_total</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">rows</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="13"><span class="ln" aria-hidden="true">13</span><span class="cx"><span class="t-op">  </span><span class="t-fn">net_of_fees</span><span class="t-op">(</span><span class="t-id">rows</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">, </span><span class="t-fn">fee_rate</span><span class="t-op">(</span><span class="squig err"><span class="t-id">rows</span><span class="t-op">$</span><span class="t-id">amount</span></span><span class="t-op">))</span></span></div>
-<div class="cl" data-line="14"><span class="ln" aria-hidden="true">14</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="15"><span class="ln" aria-hidden="true">15</span><span class="cx"></span></div>
-<div class="cl" data-line="16"><span class="ln" aria-hidden="true">16</span><span class="cx"><span class="t-id">quote</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="17"><span class="ln" aria-hidden="true">17</span><span class="cx"><span class="t-id">total</span><span class="t-op"> &lt;- </span><span class="t-fn">book_total</span><span class="t-op">(</span><span class="t-id">quote</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="18"><span class="ln" aria-hidden="true">18</span><span class="cx"><span class="t-id">label</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"total: "</span><span class="t-op">, </span><span class="t-id">total</span><span class="t-op">)</span></span></div>`,
-};
+// The same file twice: plain R with one bug, then that bug fixed and one `#:` annotation, which finds
+// a second. Each mode shows one diagnostic, so the two outputs are the same height.
+const checkerCode = `fee_rate <- function(region) {
+  if (region == "north") 0.18 else 0.22
+}
 
-const analysisOutput = {
-    types: `<div class="tl"><span class="sh">$</span> ry check</div>
-<div class="tl"><span class="derr">type-mismatch</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="derr">  x </span><span class="dmsg">expected \`character\`, found \`double\`</span></div>
-<div class="tl"><span class="darrow">    --[R/pricing.R:13:37]</span></div>
-<div class="tl"><span class="dgutter"> 12 |</span> book_total &lt;- function(rows) {</div>
-<div class="tl"><span class="dgutter"> 13 |</span>   net_of_fees(rows$amount, fee_rate(rows$amount))</div>
-<div class="tl"><span class="dgutter">    |</span>                                     <span class="dcaret-err">^^^^^^^^^^^</span></div>
-<div class="tl"><span class="dgutter"> 14 |</span> }</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dsum">1 problem in 1 file</span></div>`,
-};
+quote <- list(region = "north", amount = 1240.5)
+fee <- quote$amount * fee_rate(quote$amount)
+message("fee: " + fee)`;
+const checkerModes = [
+    {
+        key: "untyped",
+        label: "Untyped",
+        code: checkerCode,
+        output: `type-mismatch
 
-const formatterCode = {
-    braces: {
-        before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-kw">for</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> </span><span class="t-kw">in</span><span class="t-op"> </span><span class="t-id">regions</span><span class="t-op">) </span><span class="t-fn">accumulate</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-kw">if</span><span class="t-op">(</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">)==</span><span class="t-num">0</span><span class="t-op">)</span></span></div>
-<div class="cl" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="ws">··</span><span class="t-fn">warning</span><span class="t-op">(</span><span class="t-str">"no rows"</span><span class="t-op">)</span></span></div>`,
-        after: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-kw">for</span><span class="t-op"> (</span><span class="t-id">region</span><span class="t-op"> </span><span class="t-kw">in</span><span class="t-op"> </span><span class="t-id">regions</span><span class="t-op">) {</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="ws">··</span><span class="t-fn">accumulate</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">) == </span><span class="t-num">0</span><span class="t-op">) {</span></span></div>
-<div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="ws">··</span><span class="t-fn">warning</span><span class="t-op">(</span><span class="t-str">"no rows"</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:5"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">}</span></span></div>`,
+  x expected a numeric value (\`integer\` or \`double\`), found \`character\`
+   --[R/pricing.R:7:9]
+ 6 | fee <- quote$amount * fee_rate(quote$amount)
+ 7 | message("fee: " + fee)
+   |         ^^^^^^^
+
+1 problem in 1 file`,
+        caption: "Plain R with no annotations: types are inferred, and the bug is found anyway.",
+        link: { href: "/guides/checking", label: "Checking guide" },
     },
+    {
+        key: "typed",
+        label: "Typed",
+        code: `#: fn(region: character) -> double
+${checkerCode.replace('message("fee: " + fee)', 'message("fee: ", fee)')}`,
+        output: `type-mismatch
+
+  x expected \`character\`, found \`double\`
+   --[R/pricing.R:7:32]
+ 6 | quote <- list(region = "north", amount = 1240.5)
+ 7 | fee <- quote$amount * fee_rate(quote$amount)
+   |                                ^^^^^^^^^^^^
+ 8 | message("fee: ", fee)
+
+1 problem in 1 file`,
+        caption: "With that bug fixed, one `#:` comment finds the next. R reads it as a comment, so the file still runs on GNU R.",
+        link: { href: "/type-checking/annotations", label: "Annotations" },
+    },
+];
+
+// Captured from `ry fmt --diff`; `changed` lists the lines the diff marks on each side.
+const formatterSample = {
+    before: `summarise <- function(sales, min_units = 1) {
+  big<-sales[sales$units>=min_units,]
+  if(nrow(big)==0){
+  warning("no rows")
+  return(NULL)}
+  for(region in unique(big$region)) report(big,region)
+  invisible(big)
+}`,
+    beforeChanged: [2, 3, 4, 5, 6],
+    after: `summarise <- function(sales, min_units = 1) {
+  big <- sales[sales$units >= min_units, ]
+  if (nrow(big) == 0) {
+    warning("no rows")
+    return(NULL)
+  }
+  for (region in unique(big$region)) {
+    report(big, region)
+  }
+  invisible(big)
+}`,
+    afterChanged: [2, 3, 4, 5, 6, 7, 8, 9],
 };
+const markChanged = (html: string, changed: number[]) =>
+    html
+        .split("\n")
+        .map((line, index) => (changed.includes(index + 1) ? line.replace('class="cl"', 'class="cl is-changed"') : line))
+        .join("\n");
 
 const year = new Date().getFullYear();
 ---
@@ -500,25 +597,68 @@ const year = new Date().getFullYear();
                             <button role="tab" id="tab-formatter" aria-controls="panel-formatter" aria-selected="false" tabindex="-1">Formatter</button>
                             <button role="tab" id="tab-lsp" aria-controls="panel-lsp" aria-selected="false" tabindex="-1">Language server</button>
                         </div>
-                        <div class="stage split" role="tabpanel" id="panel-checker" aria-labelledby="tab-checker" tabindex="0" style="--split: 1.3fr">
-                            <div class="stage-body">
-                                <div class="pane pane-src">
-                                    <div class="code" set:html={analysisCode.types} />
+                        <div class="lsp-panel" role="tabpanel" id="panel-checker" aria-labelledby="tab-checker" tabindex="0">
+                            <div class="showcase checker" data-tabs="checker">
+                                <div class="seg seg-mini" role="tablist" aria-label="Annotations">
+                                    {
+                                        checkerModes.map((mode, index) => (
+                                            <button
+                                                role="tab"
+                                                id={`tab-check-${mode.key}`}
+                                                data-key={mode.key}
+                                                aria-controls={`panel-check-${mode.key}`}
+                                                aria-selected={index === 0 ? "true" : "false"}
+                                                tabindex={index === 0 ? 0 : -1}
+                                            >
+                                                {mode.label}
+                                            </button>
+                                        ))
+                                    }
                                 </div>
-                                <div class="pane pane-out">
-                                    <div class="term" set:html={analysisOutput.types} />
-                                </div>
+                                {
+                                    checkerModes.map((mode, index) => (
+                                        <div
+                                            class="stage split"
+                                            style="--split: 1.15fr"
+                                            role="tabpanel"
+                                            id={`panel-check-${mode.key}`}
+                                            aria-labelledby={`tab-check-${mode.key}`}
+                                            tabindex="0"
+                                            hidden={index !== 0}
+                                        >
+                                            <div class="stage-head">
+                                                <span class="ftabs"><span class="ftab is-active">R/pricing.R</span></span>
+                                            </div>
+                                            <div class="stage-body">
+                                                <div class="pane pane-src">
+                                                    <div class="code" set:html={highlightR(mode.code)} />
+                                                </div>
+                                                <div class="pane pane-out">
+                                                    <div class="term" set:html={terminal("ry check", mode.output)} />
+                                                </div>
+                                            </div>
+                                            <p class="stage-foot">
+                                                <span set:html={escapeHtml(mode.caption).replace(/`([^`]+)`/g, "<code>$1</code>")} />
+                                                <a href={mode.link.href}>{mode.link.label}</a>
+                                            </p>
+                                        </div>
+                                    ))
+                                }
                             </div>
                         </div>
                         <div class="stage split fmt" role="tabpanel" id="panel-formatter" aria-labelledby="tab-formatter" tabindex="0" hidden>
+                            <div class="stage-head">
+                                <span class="ftabs"><span class="ftab is-active">R/summarise.R</span></span>
+                            </div>
                             <div class="stage-body">
                                 <div class="pane pane-src">
-                                    <div class="code" set:html={formatterCode.braces.before} />
+                                    <div class="code" set:html={markChanged(highlightR(formatterSample.before), formatterSample.beforeChanged)} />
                                 </div>
                                 <div class="pane pane-out">
-                                    <div class="code" set:html={formatterCode.braces.after} />
+                                    <div class="code" set:html={markChanged(highlightR(formatterSample.after), formatterSample.afterChanged)} />
                                 </div>
                             </div>
+                            <p class="stage-foot"><span></span><a href="/guides/formatting">Formatting guide</a></p>
                         </div>
                         <div class="lsp-panel" role="tabpanel" id="panel-lsp" aria-labelledby="tab-lsp" tabindex="0" hidden>
                         <div
@@ -561,10 +701,6 @@ const year = new Date().getFullYear();
                                         <span class="ftab is-active">sales.R</span>
                                         <span class="ftab">report.R</span>
                                     </span>
-                                    <span class="stage-meta"
-                                        ><span class="dot" aria-hidden="true"
-                                        ></span>ry</span
-                                    >
                                 </div>
 
                                 <div class="stage-body ide-body">
@@ -580,7 +716,7 @@ const year = new Date().getFullYear();
                                             ><span class="peek-pos">4:1</span><span
                                                 class="peek-src"
                                                 ><mark>margin</mark> &lt;- function(gross,
-                                                rate) gross * (1 - rate)</span
+                                                rate) &#123; gross * (1 - rate) &#125;</span
                                             >
                                         </div>
                                         <div class="peek-row">
@@ -602,7 +738,7 @@ const year = new Date().getFullYear();
                                         </div>
                                     </div>
                                 </div>
-
+                                <p class="stage-foot"><span></span><a href="/guides/editors">Editor setup</a></p>
                             </div>
                         </div>
 
@@ -617,7 +753,7 @@ const year = new Date().getFullYear();
                         <h2>A backwards-compatible R runtime</h2>
                         <p class="lede">Runs your R unchanged, and adds the types R is missing.</p>
                     </header>
-                    <div class="showcase" data-tabs="runtime">
+                    <div class="showcase reveal" data-tabs="runtime">
                     <div class="seg" role="tablist" aria-label="Runtime features">
                         {
                             runtimeTabs.map((tab, index) => (
@@ -633,18 +769,24 @@ const year = new Date().getFullYear();
                                 </button>
                             ))
                         }
+                        <button role="tab" id="tab-speed" data-key="speed" aria-controls="panel-speed" aria-selected="false" tabindex="-1">
+                            Speed
+                        </button>
                     </div>
                     {
                         runtimeTabs.map((tab, index) => (
                             <div
-                                class="stage split"
-                                style="--split: 1.4fr"
+                                class="stage split stage-hero"
+                                style="--split: 1.5fr"
                                 role="tabpanel"
                                 id={`panel-${tab.key}`}
                                 aria-labelledby={`tab-${tab.key}`}
                                 tabindex="0"
                                 hidden={index !== 0}
                             >
+                                <div class="stage-head">
+                                    <span class="ftabs"><span class="ftab is-active">{tab.file}</span></span>
+                                </div>
                                 <div class="stage-body">
                                     <div class="pane pane-src">
                                         <div class="code" set:html={highlightR(tab.code)} />
@@ -653,9 +795,49 @@ const year = new Date().getFullYear();
                                         <div class="term" set:html={terminal(tab.command, tab.output)} />
                                     </div>
                                 </div>
+                                {tab.note && <p class="stage-note">{tab.note}</p>}
                             </div>
                         ))
                     }
+                    <div class="stage stage-hero bench" role="tabpanel" id="panel-speed" aria-labelledby="tab-speed" tabindex="0" hidden>
+                        <div class="stage-head">
+                            <span class="ftabs"><span class="ftab is-active">benchmarks</span></span>
+                        </div>
+                        <table class="bench-table" style={`--one: ${1 / benchmarkScale}`}>
+                            <caption class="visually-hidden">Run time of each program on GNU R and on ry, untyped, and how many times faster ry is.</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">program</th>
+                                    <th scope="col" class="bench-axis">
+                                        <span class="visually-hidden">ry vs GNU R</span>
+                                        <span class="bench-tick" aria-hidden="true">1x</span>
+                                    </th>
+                                    <th scope="col" class="num">speedup</th>
+                                    <th scope="col" class="num bench-time">GNU R</th>
+                                    <th scope="col" class="num bench-time">ry</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {
+                                    benchmarks.map((row, index) => (
+                                        <tr class={row.speedup < 1 ? "is-slower" : undefined} style={`--x: ${row.speedup / benchmarkScale}; --k: ${index}`}>
+                                            <th scope="row">{row.program}</th>
+                                            <td class="bench-axis" aria-hidden="true">
+                                                <span class="bench-bar" />
+                                            </td>
+                                            <td class="num bench-ratio">{row.speedup.toFixed(1)}x</td>
+                                            <td class="num bench-time">{row.gnuR.toFixed(3)} s</td>
+                                            <td class="num bench-time">{row.ry.toFixed(3)} s</td>
+                                        </tr>
+                                    ))
+                                }
+                            </tbody>
+                        </table>
+                        <p class="bench-foot">
+                            Untyped code on ry and on GNU R 4.3.3 with its bytecode compiler, best of three runs.{" "}
+                            <a href="/why-ry#speed">Full table and method</a>
+                        </p>
+                    </div>
                     </div>
                 </div>
             </section>
@@ -666,9 +848,23 @@ const year = new Date().getFullYear();
                         <h2>Take your R code into the future</h2>
                         <p class="lede">Use ry today on the code you have, and move it to typed code one step at a time.</p>
                     </header>
-                    <div class="venn"><Venn id="ry-venn-home" /></div>
-                    <div class="showcase" data-tabs="migrate">
-                    <div class="seg" role="tablist" aria-label="Steps">
+                    <div class="showcase reveal path" data-tabs="migrate">
+                    <div class="venn">
+                        <Venn id="ry-venn-home" step={1} />
+                        <div class="venn-foot">
+                            <div class="venn-dots" aria-hidden="true">
+                                {migrationTabs.map((tab, index) => (
+                                    <button type="button" tabindex="-1" class:list={["venn-dot", { "is-on": index === 0 }]} data-index={index} />
+                                ))}
+                            </div>
+                            <p class="venn-captions" aria-live="polite">
+                                {migrationTabs.map((tab, index) => (
+                                    <span class:list={["venn-caption", { "is-on": index === 0 }]}>{tab.caption}</span>
+                                ))}
+                            </p>
+                        </div>
+                    </div>
+                    <div class="seg seg-steps" role="tablist" aria-label="Steps">
                         {
                             migrationTabs.map((tab, index) => (
                                 <button
@@ -679,7 +875,9 @@ const year = new Date().getFullYear();
                                     aria-selected={index === 0 ? "true" : "false"}
                                     tabindex={index === 0 ? 0 : -1}
                                 >
-                                    {tab.label}
+                                    <span class="step-label">{tab.label}</span>
+                                    <span class="visually-hidden">, </span>
+                                    <span class="step-where">{index < 2 ? "runs on GNU R" : "needs ry"}</span>
                                 </button>
                             ))
                         }
@@ -694,6 +892,9 @@ const year = new Date().getFullYear();
                                 tabindex="0"
                                 hidden={index !== 0}
                             >
+                                <div class="stage-head">
+                                    <span class="ftabs"><span class="ftab is-active">{tab.file}</span></span>
+                                </div>
                                 <div class="stage-body">
                                     <div class="pane pane-src">
                                         <div class="code" set:html={highlightR(tab.code)} />
@@ -1719,6 +1920,34 @@ ry check .</code></pre>
                     root.querySelectorAll(".foot-methods > .foot-method"),
                 ) as HTMLElement[];
                 let renameTimer = 0;
+                const reveal = root.classList.contains("reveal") && !reduce;
+                // Lines stay hidden until the showcase first scrolls into view, then animate in once.
+                let revealed = !reveal || typeof IntersectionObserver === "undefined";
+                if (!revealed) root.classList.add("is-waiting");
+                const venn = root.querySelector(":scope > .venn .venn-svg");
+                const vennDots = Array.from(root.querySelectorAll(":scope > .venn .venn-dot")) as HTMLElement[];
+                const vennCaptions = Array.from(root.querySelectorAll(":scope > .venn .venn-caption"));
+                // The dots repeat the step tabs for pointer users, so they act through the tabs.
+                vennDots.forEach((dot, i) => dot.addEventListener("click", () => tabs[i]?.click()));
+                const indicator = document.createElement("span");
+                indicator.className = "seg-ind";
+                indicator.setAttribute("aria-hidden", "true");
+                tablist?.prepend(indicator);
+                tablist?.classList.add("has-ind");
+                function placeIndicator() {
+                    const tab = tabs[selectedIndex()];
+                    if (!tab) return;
+                    // A pill that has no size yet would otherwise grow in from the tablist's corner.
+                    const snap = !tab.offsetWidth || !parseFloat(indicator.style.width || "0");
+                    if (snap) indicator.classList.remove("is-ready");
+                    indicator.style.width = `${tab.offsetWidth}px`;
+                    indicator.style.height = `${tab.offsetHeight}px`;
+                    indicator.style.transform = `translate(${tab.offsetLeft}px, ${tab.offsetTop}px)`;
+                    if (snap && tab.offsetWidth)
+                        requestAnimationFrame(() => indicator.classList.add("is-ready"));
+                }
+                if (tablist && typeof ResizeObserver !== "undefined")
+                    new ResizeObserver(placeIndicator).observe(tablist);
 
                 function selectedIndex() {
                     const found = tabs.findIndex(
@@ -1728,6 +1957,11 @@ ry check .</code></pre>
                 }
 
                 function activate(index: number, focusTab: boolean) {
+                    // A tab chosen before the reveal fired must never show blank lines.
+                    if (focusTab && !revealed) {
+                        revealed = true;
+                        root.classList.remove("is-waiting");
+                    }
                     const key = tabs[index]?.dataset.key ?? "";
                     tabs.forEach((tab, i) => {
                         const selected = i === index;
@@ -1751,8 +1985,26 @@ ry check .</code></pre>
                         if (key === "rename") playRename();
                     } else {
                         const panel = panels[index];
-                        if (panel) playFormat(panel);
+                        if (panel) {
+                            if (focusTab && !reduce) {
+                                panel.classList.remove("is-switching");
+                                void panel.offsetWidth;
+                                panel.classList.add("is-switching");
+                            }
+                            playPanel(panel);
+                        }
                     }
+                    if (venn) venn.setAttribute("data-step", String(index + 1));
+                    vennDots.forEach((dot, i) => dot.classList.toggle("is-on", i === index));
+                    vennCaptions.forEach((caption, i) => caption.classList.toggle("is-on", i === index));
+                    if (tablist && tablist.scrollWidth > tablist.clientWidth) {
+                        const tab = tabs[index];
+                        tablist.scrollTo({
+                            left: tab.offsetLeft - (tablist.clientWidth - tab.offsetWidth) / 2,
+                            behavior: reduce ? "auto" : "smooth",
+                        });
+                    }
+                    placeIndicator();
                     for (const note of footNotes)
                         note.classList.toggle(
                             "is-on",
@@ -1766,11 +2018,17 @@ ry check .</code></pre>
                     if (focusTab) tabs[index].focus();
                 }
 
-                function playFormat(panel: HTMLElement) {
-                    if (reduce || !root.classList.contains("fmt")) return;
-                    panel.classList.remove("is-playing");
+                function playPanel(panel: HTMLElement) {
+                    if (reduce) return;
+                    const playing = root.classList.contains("fmt")
+                        ? "is-playing"
+                        : reveal && revealed
+                          ? "is-entering"
+                          : "";
+                    if (!playing) return;
+                    panel.classList.remove(playing);
                     void panel.offsetWidth;
-                    panel.classList.add("is-playing");
+                    panel.classList.add(playing);
                 }
 
                 function renameTargets() {
@@ -1850,13 +2108,26 @@ ry check .</code></pre>
                 );
                 // Through the click path, so the footer note and shared stage state are never blank.
                 activate(selectedIndex(), false);
+                tablist?.addEventListener(
+                    "scroll",
+                    () => tablist.classList.toggle("is-scrolled", tablist.scrollLeft > 0),
+                    { passive: true },
+                );
 
                 if (typeof IntersectionObserver !== "undefined" && !reduce) {
                     let wasVisible = false;
                     const observer = new IntersectionObserver(
                         (entries) => {
                             for (const entry of entries) {
-                                const visible = entry.intersectionRatio >= 0.3;
+                                // A showcase taller than the viewport never reaches a whole-element ratio.
+                                const visible =
+                                    entry.isIntersecting &&
+                                    entry.intersectionRect.height >=
+                                        0.3 *
+                                            Math.min(
+                                                entry.boundingClientRect.height,
+                                                window.innerHeight,
+                                            );
                                 if (visible && !wasVisible) {
                                     const index = selectedIndex();
                                     if (sharedPanel) {
@@ -1866,9 +2137,14 @@ ry check .</code></pre>
                                             "rename"
                                         )
                                             playRename();
-                                    } else {
+                                    } else if (!revealed) {
+                                        revealed = true;
+                                        root.classList.remove("is-waiting");
                                         const panel = panels[index];
-                                        if (panel) playFormat(panel);
+                                        if (panel) playPanel(panel);
+                                    } else if (!reveal) {
+                                        const panel = panels[index];
+                                        if (panel) playPanel(panel);
                                     }
                                 }
                                 wasVisible = visible;
@@ -2404,6 +2680,9 @@ ry check .</code></pre>
         <style is:global>
             :root {
                 color-scheme: dark;
+                /* Every tab and toggle switch shares one symmetric curve, so the pill and the content move as one motion. */
+                --switch-duration: 380ms;
+                --switch-ease: cubic-bezier(0.65, 0, 0.35, 1);
                 --background: oklch(0.145 0 0);
                 --foreground: oklch(0.985 0 0);
                 --card: oklch(0.205 0 0);
@@ -2956,6 +3235,13 @@ ry check .</code></pre>
                 visibility: hidden;
                 pointer-events: none;
             }
+            /* Once code and output stack, panel heights differ by hundreds of pixels, and the tallest
+               would leave empty frame under the rest, so each frame fits its own panel there. */
+            @media (max-width: 900px) {
+                .showcase > [role="tabpanel"][hidden] {
+                    display: none;
+                }
+            }
             [role="tabpanel"]:focus-visible {
                 outline: 2px solid
                     color-mix(in oklch, var(--cap) 55%, transparent);
@@ -2963,24 +3249,50 @@ ry check .</code></pre>
             }
 
             .seg {
+                position: relative;
                 display: flex;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;
                 gap: 2px;
-                padding: 3px;
+                padding: 4px;
                 width: fit-content;
                 max-width: 100%;
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                background: color-mix(
-                    in oklab,
-                    var(--code-bg) 72%,
-                    transparent
-                );
+                border: 1px solid oklch(1 0 0 / 0.07);
+                border-radius: 11px;
+                background: oklch(1 0 0 / 0.025);
             }
-            /* Below this width the pills wrap rather than hide behind a scroll. */
-            @media (min-width: 700px) {
-                .seg {
-                    flex-wrap: nowrap;
+            /* One pill slides to the selected tab; the script sizes it from the tab's own box. */
+            .seg-ind {
+                position: absolute;
+                top: 0;
+                left: 0;
+                z-index: 0;
+                border-radius: 7px;
+                pointer-events: none;
+                background: oklch(0.27 0.004 286);
+                box-shadow:
+                    0 1px 2px oklch(0 0 0 / 0.45),
+                    inset 0 1px 0 oklch(1 0 0 / 0.07);
+            }
+            .seg-ind.is-ready {
+                transition:
+                    transform var(--switch-duration) var(--switch-ease),
+                    width var(--switch-duration) var(--switch-ease),
+                    height var(--switch-duration) var(--switch-ease);
+            }
+            /* On narrow screens the pills scroll sideways in one row; wrapping would break the track. */
+            @media (max-width: 699px) {
+                .seg:not(.seg-steps) {
+                    overflow-x: auto;
+                    scrollbar-width: none;
+                    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+                    mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+                }
+                .seg.is-scrolled:not(.seg-steps) {
+                    -webkit-mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+                    mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+                }
+                .seg:not(.seg-steps)::-webkit-scrollbar {
+                    display: none;
                 }
             }
             .seg [role="tab"] {
@@ -2991,37 +3303,41 @@ ry check .</code></pre>
                 letter-spacing: -0.005em;
                 color: var(--muted);
                 background: transparent;
+                position: relative;
+                z-index: 1;
                 border: none;
-                border-radius: 5px;
-                padding: 0.44rem 0.8rem;
+                border-radius: 7px;
+                padding: 0.46rem 0.85rem;
                 cursor: pointer;
                 white-space: nowrap;
                 transition:
-                    color 0.15s ease,
-                    background 0.15s ease;
+                    color var(--switch-duration) var(--switch-ease),
+                    background var(--switch-duration) var(--switch-ease);
             }
             .seg [role="tab"]:hover {
                 color: var(--foreground);
-                background: oklch(1 0 0 / 0.05);
             }
             .seg [role="tab"][aria-selected="true"] {
                 color: var(--foreground);
-                font-weight: 550;
-                background: color-mix(
-                    in oklch,
-                    var(--cap) 15%,
-                    oklch(1 0 0 / 0.03)
-                );
-                box-shadow: inset 0 0 0 1px
-                    color-mix(in oklch, var(--cap) 40%, transparent);
+                background: oklch(1 0 0 / 0.09);
+                box-shadow:
+                    0 1px 2px oklch(0 0 0 / 0.5),
+                    inset 0 1px 0 oklch(1 0 0 / 0.07);
+            }
+            .seg.has-ind [role="tab"][aria-selected="true"] {
+                background: transparent;
+                box-shadow: none;
+            }
+            .seg.has-ind [role="tab"]:hover:not([aria-selected="true"]) {
+                background: oklch(1 0 0 / 0.04);
             }
             .seg [role="tab"]:focus-visible {
-                outline: 2px solid
-                    color-mix(in oklch, var(--cap) 65%, transparent);
+                outline: 2px solid oklch(1 0 0 / 0.6);
                 outline-offset: 1px;
             }
 
             .stage {
+                position: relative;
                 --pane-bg: var(--code-bg);
                 /* Unitless: an `em` would resolve against the frame's font size, not the code's. */
                 --lh: 1.62;
@@ -3083,21 +3399,6 @@ ry check .</code></pre>
                 background: var(--pane-bg);
                 box-shadow: inset 0 1px 0
                     color-mix(in oklch, var(--cap) 55%, transparent);
-            }
-            .stage-meta {
-                display: inline-flex;
-                align-items: center;
-                gap: 0.45rem;
-                flex: none;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-            .stage-meta .dot {
-                width: 6px;
-                height: 6px;
-                border-radius: 50%;
-                background: color-mix(in oklch, var(--cap) 85%, transparent);
             }
             /* One shared grid cell, so swapping notes never changes the frame's height. */
             .foot-notes,
@@ -3251,7 +3552,8 @@ ry check .</code></pre>
                 position: relative;
                 display: grid;
                 grid-template-rows: 1fr;
-                min-height: 322px;
+                /* Tall enough for the completion popup under line 6, and level with the other toolchain tabs. */
+                min-height: 249px;
             }
             .ide-body [data-for] {
                 display: none;
@@ -3553,6 +3855,13 @@ ry check .</code></pre>
             .stage.split .pane + .pane {
                 border-left: 1px solid var(--border);
             }
+            .stage-note {
+                margin: 0;
+                padding: 0.6rem 1rem;
+                border-top: 1px solid var(--border);
+                color: var(--muted);
+                font-size: 0.85rem;
+            }
             .stage.split .pane-out {
                 background: color-mix(in oklab, var(--pane-bg) 88%, #000);
             }
@@ -3562,9 +3871,8 @@ ry check .</code></pre>
             @media (max-width: 900px) {
                 .stage.split .stage-body {
                     grid-template-columns: minmax(0, 1fr);
-                    /* Leftover cell height collects once at the bottom instead of twice. */
-                    grid-auto-rows: min-content;
-                    align-content: start;
+                    /* The shared cell is as tall as the tallest panel; the output pane absorbs the rest. */
+                    grid-template-rows: auto 1fr;
                 }
                 .stage.split .pane + .pane {
                     border-left: 0;
@@ -3628,8 +3936,11 @@ ry check .</code></pre>
             .tl {
                 white-space: pre;
             }
+            /* A wrapped message continues under its own text, not under the severity marker. */
             .tl.msg {
                 white-space: pre-wrap;
+                padding-left: 4ch;
+                text-indent: -4ch;
             }
             .tl.gap {
                 height: calc(var(--lh) * 1em);
@@ -3745,7 +4056,7 @@ ry check .</code></pre>
                     --code-size: 12px;
                 }
                 .ide-body {
-                    min-height: 314px;
+                    min-height: 240px;
                 }
             }
             @media (max-width: 640px) {
@@ -3765,7 +4076,7 @@ ry check .</code></pre>
                     left: 14px;
                 }
                 .ide-body {
-                    min-height: 296px;
+                    min-height: 214px;
                 }
                 .stage-head,
                 .stage-foot {
@@ -3775,6 +4086,531 @@ ry check .</code></pre>
                     width: 10ch;
                 }
             }
+
+
+            /* The runtime band: centered, taller, with a slow aura behind the stage. */
+            #runtime.showband {
+                padding-block: clamp(4.5rem, 9vw, 7.5rem);
+            }
+            #runtime .band-head {
+                margin-inline: auto;
+                text-align: center;
+            }
+            #runtime .lede {
+                margin-inline: auto;
+            }
+            #runtime .showcase > .seg {
+                justify-self: center;
+            }
+            #runtime::after {
+                content: "";
+                position: absolute;
+                inset: 0;
+                z-index: 0;
+                pointer-events: none;
+                background-image:
+                    linear-gradient(oklch(1 0 0 / 0.05) 1px, transparent 1px),
+                    linear-gradient(90deg, oklch(1 0 0 / 0.05) 1px, transparent 1px);
+                background-size: 56px 56px;
+                background-position: center top;
+                -webkit-mask-image: radial-gradient(60% 55% at 50% 45%, #000 20%, transparent 75%);
+                mask-image: radial-gradient(60% 55% at 50% 45%, #000 20%, transparent 75%);
+            }
+            #runtime .band-inner::before {
+                content: "";
+                position: absolute;
+                inset: 30% 4% -6%;
+                z-index: -1;
+                pointer-events: none;
+                background:
+                    radial-gradient(45% 55% at 28% 50%, color-mix(in oklch, var(--cap-violet) 34%, transparent), transparent 70%),
+                    radial-gradient(40% 55% at 74% 55%, color-mix(in oklch, oklch(0.68 0.16 255) 26%, transparent), transparent 70%);
+                filter: blur(48px);
+                animation: aura 16s ease-in-out infinite alternate;
+            }
+            @keyframes aura {
+                from {
+                    transform: translate3d(-2%, 0, 0) scale(1);
+                }
+                to {
+                    transform: translate3d(2%, -3%, 0) scale(1.06);
+                }
+            }
+            .stage-hero {
+                --code-size: 14px;
+                border-color: color-mix(in oklch, var(--cap) 10%, var(--border));
+                box-shadow:
+                    0 50px 120px -50px color-mix(in oklch, var(--cap) 50%, transparent),
+                    0 30px 70px -50px oklch(0 0 0 / 0.9);
+            }
+            .stage-hero::before {
+                content: "";
+                position: absolute;
+                top: 0;
+                left: 12%;
+                right: 12%;
+                z-index: 3;
+                height: 1px;
+                background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--cap) 80%, transparent), transparent);
+            }
+            .stage-hero .code {
+                padding-block: 20px;
+            }
+            .stage-hero .term {
+                padding: 20px 22px;
+            }
+            .stage-hero .stage-note {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.7rem 1.1rem;
+                color: color-mix(in oklch, var(--cap) 55%, var(--foreground));
+                background: color-mix(in oklch, var(--cap) 6%, transparent);
+            }
+            .stage-hero .stage-note::before {
+                content: "";
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: var(--cap);
+                box-shadow: 0 0 10px var(--cap);
+            }
+            @media (max-width: 1100px) {
+                .stage-hero {
+                    --code-size: 13px;
+                }
+            }
+            @media (max-width: 640px) {
+                .stage-hero {
+                    --code-size: 11.5px;
+                }
+                .stage-hero .term {
+                    padding: 14px;
+                }
+            }
+
+            /* The untyped/typed toggle sits in the frame's header row, so the two views share one frame. */
+            .checker {
+                gap: 0;
+            }
+            .checker > .seg {
+                grid-row: 1;
+                grid-column: 1;
+                justify-self: end;
+                align-self: start;
+                z-index: 3;
+                margin: 4px 6px 0 0;
+            }
+            .checker > .stage {
+                grid-row: 1;
+            }
+            .checker .stage-body {
+                flex: 1;
+            }
+            /* On wide frames the feature tabs join the header row too, as the checker's toggle does. */
+            @media (min-width: 1024px) {
+                .ide {
+                    gap: 0;
+                }
+                .ide > .seg {
+                    grid-row: 1;
+                    grid-column: 1;
+                    justify-self: end;
+                    align-self: start;
+                    z-index: 3;
+                    margin: 4px 6px 0 0;
+                    padding: 2px;
+                    border-radius: 8px;
+                }
+                .ide > .seg [role="tab"] {
+                    font-size: 12px;
+                    padding: 0.2rem 0.65rem;
+                    border-radius: 6px;
+                }
+                .ide > .seg .seg-ind {
+                    border-radius: 6px;
+                }
+                .ide > .stage {
+                    grid-row: 1;
+                }
+            }
+            .seg-mini {
+                padding: 2px;
+                border-radius: 8px;
+            }
+            .seg-mini [role="tab"] {
+                font-size: 12px;
+                padding: 0.2rem 0.65rem;
+                border-radius: 6px;
+            }
+            .seg-mini .seg-ind {
+                border-radius: 6px;
+            }
+            p.stage-foot {
+                margin: 0;
+            }
+            .stage-foot a {
+                flex: none;
+                font-family: "Geist Sans", system-ui, sans-serif;
+                font-size: 12.5px;
+                color: oklch(0.86 0 0);
+                text-decoration: underline;
+                text-decoration-color: oklch(1 0 0 / 0.3);
+                text-underline-offset: 3px;
+            }
+            .stage-foot a:hover {
+                color: var(--foreground);
+                text-decoration-color: currentColor;
+            }
+            .stage-foot > span {
+                font-family: "Geist Sans", system-ui, sans-serif;
+                font-size: 12.5px;
+                line-height: 1.45;
+                color: oklch(0.74 0 0);
+            }
+            .stage-foot code {
+                font-family: "Geist Mono", ui-monospace, monospace;
+                color: oklch(0.9 0 0);
+            }
+
+            /* Speedup over GNU R on one linear axis from zero, so the 1x tick shows where ry is slower. */
+            /* Every panel shares one grid cell, so the table grows into the height the tallest code tab sets. */
+            .bench-table {
+                flex: 1;
+                width: 100%;
+                border-collapse: collapse;
+                font-family: "Geist Mono", ui-monospace, monospace;
+                font-size: var(--code-size);
+                font-variant-numeric: tabular-nums;
+            }
+            .bench-table th,
+            .bench-table td {
+                padding: 0.55rem 0.9rem;
+                text-align: left;
+                font-weight: 400;
+                white-space: nowrap;
+            }
+            .bench-table thead th {
+                padding-top: 1rem;
+                color: var(--muted);
+                font-size: 0.85em;
+            }
+            .bench-table tbody th {
+                color: var(--foreground);
+            }
+            .bench-table td {
+                color: var(--muted);
+            }
+            .bench-table .num {
+                text-align: right;
+            }
+            .bench-table .bench-ratio {
+                color: var(--foreground);
+                font-weight: 500;
+            }
+            .bench-axis {
+                position: relative;
+                width: 100%;
+            }
+            .bench-tick {
+                position: absolute;
+                bottom: 0;
+                padding-bottom: 0.55rem;
+                left: calc(0.9rem + (100% - 1.8rem) * var(--one));
+                transform: translateX(-50%);
+            }
+            .bench-table thead .bench-axis::before,
+            .bench-table tbody .bench-axis::before {
+                content: "";
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                left: calc(0.9rem + (100% - 1.8rem) * var(--one));
+                z-index: 1;
+                width: 1px;
+                background: color-mix(in oklch, var(--foreground) 40%, transparent);
+            }
+            .bench-table thead .bench-axis::before {
+                top: auto;
+                height: 0.35rem;
+            }
+            /* The zero baseline, so the bars stand on something. */
+            .bench-table tbody .bench-axis::after {
+                content: "";
+                position: absolute;
+                top: 0;
+                bottom: 0;
+                left: 0.9rem;
+                width: 1px;
+                background: color-mix(in oklch, var(--foreground) 18%, transparent);
+            }
+            .bench-table .is-slower .bench-bar {
+                background: var(--muted);
+                border-radius: 0;
+            }
+            .bench-table .is-slower .bench-ratio {
+                color: var(--muted);
+            }
+            .bench-bar {
+                display: block;
+                width: calc(100% * var(--x));
+                height: 10px;
+                border-radius: 0 4px 4px 0;
+                background: var(--cap);
+                transform-origin: left;
+            }
+            .bench-foot {
+                margin: auto 0 0;
+                padding: 0.8rem 0.9rem 1rem;
+                border-top: 1px solid var(--border);
+                color: var(--muted);
+                font-size: 13px;
+            }
+            .bench-foot a {
+                white-space: nowrap;
+                color: var(--foreground);
+                text-decoration: underline;
+                text-decoration-color: oklch(1 0 0 / 0.35);
+                text-underline-offset: 3px;
+            }
+            .bench-foot a:hover {
+                text-decoration-color: currentColor;
+            }
+            .reveal.is-waiting > .stage .bench-bar {
+                transform: scaleX(0);
+            }
+            .reveal > .stage.is-entering .bench-bar {
+                animation: barIn calc(var(--switch-duration) * 2) var(--switch-ease) both;
+                animation-delay: calc(120ms + var(--k, 0) * 60ms);
+            }
+            @keyframes barIn {
+                from {
+                    transform: scaleX(0);
+                }
+            }
+            @media (max-width: 640px) {
+                .bench-table th,
+                .bench-table td {
+                    padding-inline: 0.45rem;
+                }
+                /* The code tabs make the shared cell tall on phones, and rows stretched that far stop reading as one chart. */
+                .bench-table {
+                    flex: none;
+                }
+                /* The bars need the width more than the times do, and the linked table has them. */
+                .bench-table .bench-time {
+                    display: none;
+                }
+                .bench-tick,
+                .bench-table thead .bench-axis::before,
+                .bench-table tbody .bench-axis::before {
+                    left: calc(0.45rem + (100% - 0.9rem) * var(--one));
+                }
+                .bench-table tbody .bench-axis::after {
+                    left: 0.45rem;
+                }
+            }
+
+            /* The typing path: steps and their code on the left, the diagram beside them, so the marker moves next to the tab you click. */
+            .path > .venn {
+                margin: 0;
+                max-width: none;
+                container-type: inline-size;
+            }
+            .path > .seg-steps {
+                flex-direction: column;
+                flex-wrap: nowrap;
+                width: 100%;
+                padding: 6px;
+            }
+            .seg-steps [role="tab"] {
+                display: flex;
+                justify-content: space-between;
+                gap: 1rem;
+                width: 100%;
+                align-items: center;
+                padding: 1rem 1.1rem;
+                font-size: 15px;
+                text-align: left;
+                white-space: normal;
+            }
+            /* The caption below names strict mode on step 4, so the diagram's own label would repeat it. */
+            .path .v-strict {
+                display: none;
+            }
+            .venn-foot {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 0.35rem;
+                margin-top: 0.25rem;
+            }
+            .venn-dots {
+                display: flex;
+            }
+            /* The bar is 4px tall, so the padding gives it a finger-sized hit area. */
+            .venn-dot {
+                width: 38px;
+                height: 20px;
+                padding: 8px 3px;
+                border: 0;
+                background: oklch(1 0 0 / 0.16);
+                background-clip: content-box;
+                border-radius: 4px;
+                cursor: pointer;
+                transition: background-color var(--switch-duration) var(--switch-ease);
+            }
+            .venn-dot:hover {
+                background-color: oklch(1 0 0 / 0.3);
+            }
+            .venn-dot.is-on {
+                background-color: color-mix(in oklch, var(--cap) 85%, white);
+            }
+            .venn-captions {
+                display: grid;
+                margin: 0;
+                text-align: center;
+                font-size: 15px;
+                color: var(--foreground);
+            }
+            .venn-caption {
+                grid-area: 1 / 1;
+                opacity: 0;
+                transform: translateY(6px);
+                transition:
+                    opacity var(--switch-duration) var(--switch-ease),
+                    transform var(--switch-duration) var(--switch-ease);
+            }
+            .venn-caption.is-on {
+                opacity: 1;
+                transform: none;
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .venn-caption,
+                .venn-dot {
+                    transition: none;
+                }
+            }
+            .step-where {
+                flex: none;
+                padding: 0.12rem 0.5rem;
+                border-radius: 999px;
+                font-family: "Geist Mono", ui-monospace, monospace;
+                font-size: 11px;
+                color: oklch(0.72 0 0);
+                background: oklch(1 0 0 / 0.06);
+                transition:
+                    color var(--switch-duration) var(--switch-ease),
+                    background var(--switch-duration) var(--switch-ease);
+            }
+            .visually-hidden {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip-path: inset(50%);
+                white-space: nowrap;
+            }
+            [aria-selected="true"] > .step-where {
+                color: color-mix(in oklch, var(--cap) 85%, white);
+                background: color-mix(in oklch, var(--cap) 16%, transparent);
+            }
+            @media (min-width: 900px) {
+                .path {
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                    column-gap: clamp(1.5rem, 3.5vw, 3rem);
+                    row-gap: 1rem;
+                }
+                .path > .seg-steps {
+                    grid-row: 1;
+                    grid-column: 1;
+                }
+                .path .seg-steps [role="tab"] {
+                    padding: 0.6rem 1rem;
+                }
+                .showcase.path > .stage {
+                    grid-row: 2;
+                    grid-column: 1;
+                }
+                .path > .venn {
+                    grid-row: 1 / 3;
+                    grid-column: 2;
+                    align-self: center;
+                }
+                /* Half the frame is too narrow for code beside output, so the output sits below the code. */
+                .path > .stage .stage-body {
+                    grid-template-columns: minmax(0, 1fr);
+                    grid-template-rows: auto 1fr;
+                }
+                .path > .stage .pane + .pane {
+                    border-left: 0;
+                    border-top: 1px solid var(--border);
+                }
+            }
+            @media (max-width: 420px) {
+                .seg-steps [role="tab"] {
+                    font-size: 14px;
+                    gap: 0.6rem;
+                }
+            }
+            @media (max-width: 899px) {
+                .path > .venn {
+                    grid-row: 1;
+                    width: 100%;
+                    max-width: 520px;
+                    margin: 0 auto;
+                }
+                .path > .seg-steps {
+                    grid-row: 2;
+                }
+                .showcase.path > .stage {
+                    grid-row: 3;
+                }
+            }
+
+            /* The output waits until the code has landed, so the eye reads source first, then result. */
+            .reveal.is-waiting > .stage .pane-src .cl,
+            .reveal.is-waiting > .stage .tl {
+                opacity: 0;
+            }
+            .reveal > .stage.is-entering .pane-src .cl {
+                animation: lineIn var(--switch-duration) var(--switch-ease) both;
+                animation-delay: calc(var(--i, 0) * 34ms);
+            }
+            .reveal > .stage.is-entering .tl {
+                animation: lineIn var(--switch-duration) var(--switch-ease) both;
+                animation-delay: calc(640ms + var(--j, 0) * 55ms);
+            }
+            .reveal > .stage.is-entering .tl-cmd {
+                animation: typeIn 0.5s steps(24, end) 160ms both;
+            }
+            .showcase > .is-switching {
+                animation: panelIn var(--switch-duration) var(--switch-ease) both;
+            }
+            @keyframes panelIn {
+                from {
+                    opacity: 0;
+                }
+            }
+            @keyframes lineIn {
+                from {
+                    opacity: 0;
+                    transform: translateY(6px);
+                }
+                to {
+                    opacity: 1;
+                    transform: none;
+                }
+            }
+            @keyframes typeIn {
+                from {
+                    clip-path: inset(0 100% 0 0);
+                }
+                to {
+                    clip-path: inset(0 0 0 0);
+                }
+            }
+
 
             .band-closer {
                 position: relative;
@@ -3862,6 +4698,15 @@ ry check .</code></pre>
                 .doclink span {
                     transition: none;
                 }
+                .seg-ind.is-ready,
+                .step-where {
+                    transition: none;
+                }
+                #runtime .band-inner::before,
+                .reveal > .stage.is-entering .pane-src .cl,
+                .reveal > .stage.is-entering .tl,
+                .reveal > .stage.is-entering .bench-bar,
+                .showcase > .is-switching,
                 .caretbar,
                 .ide[data-feature="rename"] [data-mark~="rename"]::after,
                 .ide[data-feature="definition"] .cl[data-line="4"],

@@ -6,18 +6,20 @@
 // Every helper here works on runtime handles, as the crate's own code does.
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use R::{
-    altrep::{self, AltrepClass, InspectSubtree},
-    boundary::ApiResult,
-    runtime, vectors,
-};
-use heap::{
-    GcStress,
-    object::{Header, Sexp, SexpType},
-};
-use std::{
-    ffi::{c_int, c_void},
-    sync::{Mutex, MutexGuard},
+use {
+    R::{
+        altrep::{self, AltrepClass, InspectSubtree},
+        boundary::ApiResult,
+        runtime, vectors,
+    },
+    heap::{
+        GcStress,
+        object::{Header, Sexp, SexpType},
+    },
+    std::{
+        ffi::{c_int, c_void},
+        sync::{Mutex, MutexGuard},
+    },
 };
 
 static LOCK: Mutex<()> = Mutex::new(());

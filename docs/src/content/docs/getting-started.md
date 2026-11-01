@@ -1,14 +1,47 @@
 ---
 title: Getting started
-description: What ry is, how to install it, and your first check
+description: Install ry, check the R code you have, and turn on type checking
 ---
 
-ry finds the mistakes R reports only when a line runs (a misspelled name, a wrong argument, a
-`NULL` you forgot) while you type, in the R code you already have. It checks, formats, loads and
-runs R from one tool configured by one `ry.toml`, and it adds a type system on top of R that takes
-your code, one step at a time, to typed code that is safe to change.
+R reports a misspelled name, a wrong argument or a forgotten `NULL` only when the line runs, which
+may be in production. ry reports them as you type, in the R code you already have, with nothing to
+annotate. Run it in any R project:
 
-This page covers the first two of the
+```r
+# R/discount.R
+apply_discount <- function(price, rate) {
+  price * ratee
+}
+```
+
+```text
+$ ry check
+unresolved
+
+  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+   --[R/discount.R:2:11]
+ 1 | apply_discount <- function(price, rate) {
+ 2 |   price * ratee
+   |           ^^^^^
+ 3 | }
+
+1 problem in 1 file
+```
+
+When you work on a package, `ry R` started inside it reloads what you changed before each
+command, so you never call `load_all()` or restart R:
+
+```text
+$ ry R
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+> count_words("the  quick fox")
+[1] 4
+> count_words("the  quick fox")     # after editing R/count.R
+Reloaded tally: 1 function rebound, in 3 ms.
+[1] 3
+```
+
+The same tool formats your code and powers your editor, all configured by one `ry.toml`. This page takes you through the first two of the
 [four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,
 then turning on types.
 
@@ -25,41 +58,30 @@ then turning on types.
 
 ## Step 1: check the code you have
 
-Run `ry check` in a project directory. Files under `R/` are read as a package that shares one
-namespace, as R loads them, and every other `.R` file is a script read from top to bottom:
+Run `ry check` in the project directory, as above. Files under `R/` are read as one package that
+shares a namespace, as R loads them, and every other `.R` file is a script read from top to bottom.
+`ry check` exits with status 1 when it finds anything, so the same command works in CI.
+[Checking code](/guides/checking) shows everything it finds without configuration.
 
-```r
-# R/discount.R
-apply_discount <- function(price, rate) {
-  price * ratee
-}
-```
-
-```text
-unresolved
-
-  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
-   --[R/discount.R:2:11]
- 1 | apply_discount <- function(price, rate) {
- 2 |   price * ratee
-   |           ^^^^^
- 3 | }
-
-1 problem in 1 file
-```
-
-R itself would report this only when the line runs.
+The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry R`
+anywhere inside it, as in the transcript above. The console runs the GNU R
+installed on your machine, so it needs R; checking does not. `ry R script.R` runs a script on GNU R
+(call `load_all()` in it to load the package), and `ry run script.R` runs it on ry's own, still incomplete runtime ([Console](/guides/console)). In RStudio, put
+`source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as you do today.
+[Loading packages](/guides/loading-packages) has the details.
 
 ## Step 2: turn on type checking
 
-Type errors are opt-in. Add a `ry.toml` to the project root:
+Type errors are opt-in, because an existing code base can have many and you should choose when to
+face them. Add a `ry.toml` to the project root:
 
 ```toml
 [check]
 typing = true
 ```
 
-ry already infers types from how values are used. Now it also reports the mismatches:
+ry infers types from how values are used, so it now reports a call that passes the wrong kind of
+value, still without a single annotation:
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
@@ -78,10 +100,13 @@ type-mismatch
 1 problem in 1 file
 ```
 
+In VS Code, the extension shows the same findings as you type, plus hover with each value's
+inferred type ([Editors](/guides/editors)).
+
 ## Next
 
-- [Checking code](/guides/checking): every kind of finding, and how to silence one
 - [Type checking](/type-checking/overview): how inference and `#:` annotations work
 - [Inline annotations](/type-checking/inline-annotations): step 3, types written in the code itself
+- [DataFrames](/guides/dataframes): ry's typed table, which also runs existing data.table code
 - [Records and tags](/type-checking/records-and-tags) and [strict mode](/type-checking/strict-mode):
   step 4, ry's own types and code that is typed throughout
