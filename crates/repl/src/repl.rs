@@ -9,7 +9,13 @@ pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
 pub use reedline;
-use std::{error::Error, fmt, io::IsTerminal, path::PathBuf};
+use std::{
+    error::Error,
+    ffi::{CString, c_char, c_int},
+    fmt,
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug)]
 pub struct ReplError(pub String);
@@ -102,12 +108,12 @@ pub fn run_on_ry_runtime(
     input: Option<&str>,
     arguments: &[String],
     flags: RuntimeFlags,
-    package: Option<&std::path::Path>,
+    package: Option<&Path>,
 ) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
     let library = ry_runtime()?;
     if let Some(package) = package {
-        prepare_package(library, package, flags)?;
+        prepare_package(library, package, flags);
     }
     type Run = unsafe extern "C" fn(
         *const c_char,
@@ -180,7 +186,7 @@ pub fn run_console_on_ry_runtime(
     }
     let library = ry_runtime()?;
     if let Some(package) = &options.package {
-        prepare_package(library, package, flags)?;
+        prepare_package(library, package, flags);
     }
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
     type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
@@ -209,19 +215,18 @@ pub fn run_console_on_ry_runtime(
     })
 }
 
-/// Has ry's runtime start analyzing the package at `package` in the background.
-fn prepare_package(
-    library: &'static RuntimeLibrary,
-    package: &std::path::Path,
-    flags: RuntimeFlags,
-) -> Result<(), ReplError> {
-    use std::ffi::{CString, c_char, c_int};
-    let prepare =
-        runtime_entry::<unsafe extern "C" fn(*const c_char, c_int)>(library, "ry_loader_prepare")?;
-    let path = CString::new(package.to_string_lossy().as_bytes())
-        .map_err(|_| ReplError("the package path contains a NUL byte".into()))?;
+/// Has ry's runtime start analyzing the package at `package` in the background. Preparing
+/// only saves time, so a runtime without the entry point, or a path with a NUL byte, loads the
+/// package without it.
+fn prepare_package(library: &'static RuntimeLibrary, package: &Path, flags: RuntimeFlags) {
+    type Prepare = unsafe extern "C" fn(*const c_char, c_int);
+    let (Ok(prepare), Ok(path)) = (
+        runtime_entry::<Prepare>(library, "ry_loader_prepare"),
+        CString::new(package.to_string_lossy().as_bytes()),
+    ) else {
+        return;
+    };
     unsafe { prepare(path.as_ptr(), flags.bits()) };
-    Ok(())
 }
 
 /// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.

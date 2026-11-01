@@ -453,6 +453,11 @@ fn take_typed_line() -> Option<String> {
     let mut line = Vec::new();
     let mut escape = Escape::None;
     while let Some(byte) = read_ready_byte() {
+        // A control byte cannot be part of a sequence, so a stray ESC never swallows a line end
+        // or a Ctrl-C.
+        if matches!(escape, Escape::Csi) && byte < 0x20 {
+            escape = Escape::None;
+        }
         escape = match (escape, byte) {
             // An arrow or function key pressed ahead of the prompt is dropped whole instead of
             // leaving `[A` in the line.
