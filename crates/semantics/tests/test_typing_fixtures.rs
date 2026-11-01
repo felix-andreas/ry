@@ -11,11 +11,11 @@ use semantics::metadata::{
 };
 use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
+use semantics::top_level::{TopLevel, item_declared_pure, item_top_level};
 use semantics::{
     AnalysisSettings, DataFiles, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
     file_typing_mode, item_check, item_hir, item_spans, item_tree, test_document_kind,
 };
-use semantics::top_level::{TopLevel, item_declared_pure, item_top_level};
 use std::collections::BTreeMap;
 use std::path::Path;
 use syntax::SyntaxKind;
@@ -256,7 +256,8 @@ fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
 /// A fresh database per case, with the packages the files attach made active, so a
 /// conditional stub such as memoise's joins resolution as it does in a real project.
 fn render_top_level_case(source: &str) -> String {
-    let files = split_files(source).unwrap_or_else(|| vec![("R/main.R".to_owned(), source.to_owned())]);
+    let files =
+        split_files(source).unwrap_or_else(|| vec![("R/main.R".to_owned(), source.to_owned())]);
     let mut db = RootDatabase::default();
     install_shipped_stubs(&db);
     let sources: Vec<(String, SourceFile)> = files

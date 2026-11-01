@@ -98,8 +98,8 @@ pub enum Command {
     },
     /// Load an R package from source, lazily, and run code against it
     ///
-    /// Function definitions are bound lazily, so each is parsed and evaluated on first use,
-    /// and other top-level code runs in collation order. The exit status is 0 when the
+    /// Function definitions, and in strict mode pure constants, are bound lazily, so each is
+    /// parsed and evaluated on first use, and other top-level code runs in collation order. The exit status is 0 when the
     /// package loaded and the code ran without a top-level error.
     Load {
         /// The package, or any path inside it

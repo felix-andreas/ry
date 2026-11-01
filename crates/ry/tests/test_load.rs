@@ -103,7 +103,7 @@ fn a_package_loads_with_collate_imports_s3_and_s4() {
         let printed = text(&output);
         assert!(output.status.success(), "{printed}");
         assert!(
-            printed.contains("Loaded demo: 5 functions bound lazily, 5 top-level statements run"),
+            printed.contains("Loaded demo: 5 definitions bound lazily, 5 top-level statements run"),
             "{printed}"
         );
         assert!(printed.contains("hello ry !"), "{printed}");
@@ -296,7 +296,7 @@ fn plain_r_gets_load_all_from_the_entry_point() {
     assert!(output.status.success(), "{printed}");
     assert!(printed.contains("hello a !"), "{printed}");
     assert!(
-        printed.contains("Reloaded demo: 1 function rebound"),
+        printed.contains("Reloaded demo: 1 definition rebound"),
         "{printed}"
     );
     assert!(printed.contains("hi b !"), "{printed}");

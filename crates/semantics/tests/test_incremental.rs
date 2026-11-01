@@ -518,6 +518,7 @@ fn package(
         files,
         namespace.to_owned(),
         "Package: demo\nVersion: 1.0\n".to_owned(),
+        false,
     );
     (sources, handles)
 }

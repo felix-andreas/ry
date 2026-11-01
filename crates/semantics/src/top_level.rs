@@ -34,7 +34,10 @@ pub enum TopLevel {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub enum Effect {
     /// A call to a function that is not declared pure.
-    Call { callee: String, origin: CalleeOrigin },
+    Call {
+        callee: String,
+        origin: CalleeOrigin,
+    },
     /// A call whose function is computed, so nothing can say whether it is pure.
     DynamicCall,
     Loop,
@@ -42,9 +45,13 @@ pub enum Effect {
     SuperAssignment,
     /// `names(x) <- value` or `x$field <- value`: the statement changes `x` after its
     /// definition.
-    Replacement { target: Option<String> },
+    Replacement {
+        target: Option<String>,
+    },
     /// An assignment nested in an expression, which binds a name as a side effect.
-    NestedAssignment { target: Option<String> },
+    NestedAssignment {
+        target: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
@@ -186,9 +193,7 @@ impl Classifier<'_> {
                 }
                 TopLevel::Definition
             }
-            _ => self
-                .effect(id, &mut None)
-                .unwrap_or(TopLevel::Definition),
+            _ => self.effect(id, &mut None).unwrap_or(TopLevel::Definition),
         }
     }
 

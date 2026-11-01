@@ -10,7 +10,11 @@ use crate::metadata::{
     Call, NamespaceSpec, call_parts, description_field, parse_description_depends,
     parse_namespace_spec, string_content,
 };
-use crate::{Db, Item, ItemKind, SourceFile, item_naming, item_spans, item_syntax, parse};
+use crate::top_level::{TopLevel, item_top_level};
+use crate::{
+    Db, Item, ItemKind, SourceFile, TypingMode, file_typing_mode, item_naming, item_spans,
+    item_syntax, parse,
+};
 use rowan::{GreenNodeData, Language, NodeOrToken};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -29,6 +33,8 @@ pub struct PackageSources {
     pub namespace: String,
     #[returns(ref)]
     pub description: String,
+    /// `[check] strict`, which holds for each file without its own `# typing:` directive.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,10 +50,12 @@ pub struct ItemLoad {
     /// Of the text R evaluates (inline annotations erased), so an annotation-only edit
     /// still counts as a change while a shift in position does not.
     pub hash: u64,
-    /// `Some(name)` for `name <- function(...) ...`, the shape a loader may bind lazily.
-    pub function: Option<String>,
-    /// For a function definition, every name its body mentions: a superset of what calling
-    /// it reads, found without name resolution.
+    /// `Some(name)` for `name <- value`, the shape a loader may bind lazily.
+    pub binding: Option<String>,
+    /// Whether the bound value is a function literal.
+    pub function: bool,
+    /// For a binding, every name its value mentions: a superset of what evaluating it, or
+    /// calling the function it defines, reads, found without name resolution.
     pub mentions: Vec<String>,
     pub registrations: Vec<Registration>,
 }
@@ -80,14 +88,15 @@ pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
     let Some(syntax) = item_syntax(db, item) else {
         return ItemLoad {
             hash: 0,
-            function: None,
+            binding: None,
+            function: false,
             mentions: Vec::new(),
             registrations: Vec::new(),
         };
     };
     let node = syntax.syntax_node();
     let (text, _) = erase_for_r(&node, &[]);
-    let definition = function_definition(&node);
+    let definition = binding_definition(&node);
     let mentions = definition.as_ref().map_or_else(Vec::new, |(_, value)| {
         let mut names = BTreeSet::new();
         collect_identifiers(value.green().as_ref(), &mut names);
@@ -95,7 +104,10 @@ pub fn item_load<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemLoad {
     });
     ItemLoad {
         hash: fnv1a(text.as_bytes()),
-        function: definition.map(|(name, _)| name),
+        function: definition
+            .as_ref()
+            .is_some_and(|(_, value)| value.kind() == SyntaxKind::FUNCTION_DEF),
+        binding: definition.map(|(name, _)| name),
         mentions,
         registrations: registrations(&node),
     }
@@ -131,8 +143,8 @@ pub struct FileLoadIndex<'db> {
 pub struct LoadedItem<'db> {
     pub item: Item<'db>,
     pub span: SourceSpan,
-    /// The function literal of a function definition, which is what a lazy binding evaluates.
-    pub function: Option<SourceSpan>,
+    /// The value of `name <- value`, which is what a lazy binding evaluates.
+    pub value: Option<SourceSpan>,
 }
 
 /// A range of [`FileLoadIndex::text`] with the position R's source references need.
@@ -169,20 +181,20 @@ pub fn file_load_index<'db>(db: &'db dyn Db, file: SourceFile) -> FileLoadIndex<
     let root = parse.syntax_node();
     let spans = item_spans(db, file);
     let mut marks: Vec<TextSize> = Vec::with_capacity(spans.len() * 4);
-    let mut function_ranges: Vec<Option<TextRange>> = Vec::with_capacity(spans.len());
+    let mut value_ranges: Vec<Option<TextRange>> = Vec::with_capacity(spans.len());
     for span in spans {
         marks.push(span.range.start());
         marks.push(span.range.end());
-        let function = root
+        let value = root
             .child_or_token_at_range(span.range)
             .and_then(NodeOrToken::into_node)
             .filter(|node| node.text_range() == span.range)
-            .and_then(|node| function_definition(&node).map(|(_, value)| value.text_range()));
-        if let Some(range) = function {
+            .and_then(|node| binding_definition(&node).map(|(_, value)| value.text_range()));
+        if let Some(range) = value {
             marks.push(range.start());
             marks.push(range.end());
         }
-        function_ranges.push(function);
+        value_ranges.push(value);
     }
     let (text, offsets) = erase_for_r(&root, &marks);
     let lines = LineStarts::new(&text);
@@ -200,11 +212,11 @@ pub fn file_load_index<'db>(db: &'db dyn Db, file: SourceFile) -> FileLoadIndex<
     };
     let items = spans
         .iter()
-        .zip(function_ranges)
-        .map(|(span, function)| LoadedItem {
+        .zip(value_ranges)
+        .map(|(span, value)| LoadedItem {
             item: span.item,
             span: span_of(span.range),
-            function: function.map(span_of),
+            value: value.map(span_of),
         })
         .collect();
     let original = LineStarts::new(file.text(db));
@@ -236,7 +248,8 @@ pub struct PackageIndex {
     /// Collation order, which is the order R runs top-level code in.
     pub files: Vec<IndexedFile>,
     /// Every top-level name the package binds, mapped to whether it is bound lazily: a name is
-    /// lazy when its one writer defines a function. Any other writer, including conditional or
+    /// lazy when its one writer defines a function or, in a strict file, a constant whose value
+    /// calls only functions declared pure. Any other writer, including conditional or
     /// replacement code (`f <- memoise(f)`), makes every writer of the name run eagerly.
     pub names: FxHashMap<String, bool>,
 }
@@ -265,18 +278,28 @@ pub struct IndexedItem {
     pub key: ItemKey,
     pub hash: u64,
     pub span: SourceSpan,
-    /// For `name <- function(...) ...`, the name and the function literal. Such an item is
-    /// bound lazily unless another item writes the name too ([`PackageIndex::names`]).
-    pub function: Option<(String, SourceSpan)>,
+    /// For `name <- value`, the name and the value. A function definition is bound lazily
+    /// unless another item writes the name too, and so is a pure constant in a strict file
+    /// ([`PackageIndex::names`]).
+    pub binding: Option<Binding>,
     /// Top-level names it writes.
     pub binds: Vec<String>,
     /// Names it reads while running (see [`item_immediate_reads`]). A function definition
     /// reads nothing until it is called.
     pub reads: Vec<String>,
-    /// For a function definition, the names its body mentions, which is what a call to it
-    /// may read.
+    /// For a binding, the names its value mentions, which is what forcing a lazy constant, or
+    /// calling a lazy function, may read.
     pub mentions: Vec<String>,
     pub registrations: Vec<Registration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub name: String,
+    pub value: SourceSpan,
+    /// Whether `value` is a function literal. Otherwise the binding is a constant, lazy only
+    /// when the package index says so.
+    pub function: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -287,11 +310,11 @@ pub struct ItemKey {
 }
 
 impl PackageIndex {
-    /// The name `item` binds lazily, if it is a definition no other item writes.
+    /// The name `item` binds lazily, if it is a lazy definition no other item writes.
     pub fn lazy_name<'a>(&self, item: &'a IndexedItem) -> Option<&'a str> {
-        item.function
+        item.binding
             .as_ref()
-            .map(|(name, _)| name.as_str())
+            .map(|binding| binding.name.as_str())
             .filter(|name| self.is_lazy(name))
     }
 
@@ -336,10 +359,18 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
         .map(|loaded| {
             let item = loaded.item;
             let load = item_load(db, item);
-            let function = load.function.clone().zip(loaded.function);
-            let (binds, reads) = match &function {
-                Some((name, _)) => (vec![name.clone()], Vec::new()),
-                None => (
+            let binding = load
+                .binding
+                .clone()
+                .zip(loaded.value)
+                .map(|(name, value)| Binding {
+                    name,
+                    value,
+                    function: load.function,
+                });
+            let (binds, reads) = match &binding {
+                Some(binding) if binding.function => (vec![binding.name.clone()], Vec::new()),
+                _ => (
                     top_level_writes(db, item)
                         .into_iter()
                         .map(str::to_owned)
@@ -358,7 +389,7 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                 },
                 hash: load.hash,
                 span: loaded.span,
-                function,
+                binding,
                 binds,
                 reads,
                 mentions: load.mentions.clone(),
@@ -385,15 +416,28 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
             items: file_items(db, package_file.file),
         })
         .collect();
-    // Seen once and from a function definition: lazy. Seen again: eager.
+    // Seen once and from a lazy definition: lazy. Seen again: eager.
     let mut names: FxHashMap<String, bool> = FxHashMap::default();
-    for file in &files {
-        for item in &file.items.items {
+    for (package_file, file) in sources.files(db).iter().zip(&files) {
+        let strict = file_is_strict(db, sources, package_file.file);
+        let loaded = &file_load_index(db, package_file.file).items;
+        for (position, item) in file.items.items.iter().enumerate() {
+            // Strict mode refuses a top-level statement with an effect, so evaluating a
+            // constant's value later, at first use, observes the same thing as evaluating
+            // it at load.
+            let lazy = item.binding.as_ref().is_some_and(|binding| {
+                binding.function
+                    || (strict
+                        && is_constant_candidate(item)
+                        && loaded.get(position).is_some_and(|loaded| {
+                            *item_top_level(db, loaded.item) == TopLevel::Constant
+                        }))
+            });
             for name in &item.binds {
                 match names.get_mut(name.as_str()) {
                     Some(lazy) => *lazy = false,
                     None => {
-                        names.insert(name.clone(), item.function.is_some());
+                        names.insert(name.clone(), lazy);
                     }
                 }
             }
@@ -407,6 +451,37 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         names,
         files,
     })
+}
+
+/// Whether `file` follows strict mode: its own typing directive, else the package default.
+pub fn file_is_strict(db: &dyn Db, sources: PackageSources, file: SourceFile) -> bool {
+    match file_typing_mode(db, file) {
+        Some(TypingMode::Strict) => true,
+        Some(TypingMode::On | TypingMode::Off) => false,
+        None => *sources.strict(db),
+    }
+}
+
+/// Classifies the items of a strict `file` that `package_index` may bind as lazy constants,
+/// so a host can derive those facts across cores before it joins them.
+pub fn classify_constants(db: &dyn Db, sources: PackageSources, file: SourceFile) {
+    if !file_is_strict(db, sources, file) {
+        return;
+    }
+    let loaded = &file_load_index(db, file).items;
+    for (item, loaded) in file_items(db, file).items.iter().zip(loaded) {
+        if is_constant_candidate(item) {
+            item_top_level(db, loaded.item);
+        }
+    }
+}
+
+fn is_constant_candidate(item: &IndexedItem) -> bool {
+    item.binds.len() == 1
+        && item
+            .binding
+            .as_ref()
+            .is_some_and(|binding| !binding.function)
 }
 
 /// The names a statement writes at top level. A `setGeneric` item counts its generic, which
@@ -425,18 +500,15 @@ fn top_level_writes<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<&'db str> {
     names
 }
 
-/// `name <- function(...) ...` (also `=`, `->`, and a quoted name), with the function literal.
-/// `<<-` is excluded: at a namespace's top level it assigns outside the namespace.
-pub fn function_definition(node: &SyntaxNode) -> Option<(String, SyntaxNode)> {
+/// `name <- value` (also `=`, `->`, and a quoted name), with the value. `<<-` is excluded: at
+/// a namespace's top level it assigns outside the namespace.
+pub fn binding_definition(node: &SyntaxNode) -> Option<(String, SyntaxNode)> {
     let binary = BinaryExpr::cast(node.clone())?;
     let (target, value) = match binary.operator()?.kind() {
         SyntaxKind::LESS_MINUS | SyntaxKind::EQ => (binary.lhs()?, binary.rhs()?),
         SyntaxKind::MINUS_GREATER => (binary.rhs()?, binary.lhs()?),
         _ => return None,
     };
-    if value.kind() != SyntaxKind::FUNCTION_DEF {
-        return None;
-    }
     Some((target_name(&target)?, value))
 }
 

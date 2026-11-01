@@ -252,7 +252,7 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
     )
     .expect("write");
     session.send("greet()\r");
-    session.expect("Reloaded replpkg: 1 function rebound");
+    session.expect("Reloaded replpkg: 1 definition rebound");
     session.expect("second, edited version");
     session.quit();
     fs::remove_dir_all(&package).ok();

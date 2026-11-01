@@ -15,11 +15,11 @@ use crate::metadata::{
     declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
 };
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::top_level::{CalleeOrigin, Effect, TopLevel, item_top_level};
 use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
+use crate::top_level::{CalleeOrigin, Effect, TopLevel, item_top_level};
 use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
-    TypeScheme, map_child_types, substitute_rigid, union_of,
+    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty,
+    TyKind, TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,

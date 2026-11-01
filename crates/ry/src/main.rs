@@ -47,6 +47,12 @@ fn main() -> ExitCode {
         )
         .init();
 
+    // The loader binds a strict package's pure constants lazily, and strictness defaults to the
+    // package's `ry.toml`. A broken config counts as not strict here because the preflight
+    // that runs before every load reports it.
+    loader::set_strict_default(|root| {
+        Config::discover(root).is_ok_and(|config| config.check.strict)
+    });
     let cli = Cli::parse();
     let experimental_features =
         cli::parse_experimental_flags(cli.experimental_features.as_deref().unwrap_or_default());

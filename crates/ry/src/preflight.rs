@@ -7,14 +7,12 @@ use crate::cli::{
     render_findings, report, warn_config,
 };
 use crate::config::Config;
-use crate::diagnostics::{apply_suppressions, document_diagnostics};
+use crate::diagnostics::{apply_suppressions, document_diagnostics, file_is_strict};
 use repl::{Filtered, InputFilter};
 use salsa::Setter;
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
 use semantics::stubs::install_shipped_stubs;
-use semantics::{
-    DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode, file_typing_mode,
-};
+use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
 use std::path::{Path, PathBuf};
 use std::{fs, thread};
 use syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation};
@@ -202,12 +200,7 @@ fn strict_errors(analysis: &ProjectAnalysis, config: &Config) -> Vec<Vec<Diagnos
         .files
         .iter()
         .map(|file| {
-            let strict = match file_typing_mode(&analysis.db, file.file) {
-                Some(TypingMode::Strict) => true,
-                Some(TypingMode::On | TypingMode::Off) => false,
-                None => config.check.strict,
-            };
-            if !file.requested || !strict {
+            if !file.requested || !file_is_strict(&analysis.db, file.file, config) {
                 return Vec::new();
             }
             file.diagnostics
@@ -235,11 +228,7 @@ fn findings(
     config: &Config,
     source: &str,
 ) -> (Verdict, Vec<Diagnostic>) {
-    let strict = match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => config.check.strict,
-    };
+    let strict = file_is_strict(db, file, config);
     // Plain R without strict mode has nothing to report, so it skips analysis entirely.
     if !strict && !has_inline_annotation(&semantics::parse(db, file).syntax_node()) {
         return (Verdict::Run, Vec::new());

@@ -311,7 +311,9 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             let Some(scheme) = lower_type_text(db, type_text) else {
                 continue;
             };
-            if markers.masked && let Some(leading) = masked_leading_formals(db, &scheme) {
+            if markers.masked
+                && let Some(leading) = masked_leading_formals(db, &scheme)
+            {
                 library.masked.insert(name.to_owned(), leading);
             }
             namespace_exports.insert(name.to_owned());

@@ -8,6 +8,15 @@ use semantics::diagnostics::{
 use semantics::lints::lint_file;
 use semantics::{Db, SourceFile, TypingMode, file_typing_mode};
 
+/// A file's `# typing:` directive wins over `[check] strict`.
+pub fn file_is_strict(db: &dyn Db, file: SourceFile, config: &Config) -> bool {
+    match file_typing_mode(db, file) {
+        Some(TypingMode::Strict) => true,
+        Some(TypingMode::On | TypingMode::Off) => false,
+        None => config.check.strict,
+    }
+}
+
 /// In position order. Suppression comments are the caller's step.
 pub fn document_diagnostics(db: &dyn Db, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
     let (typing_enabled, strict_enabled) = match file_typing_mode(db, file) {
