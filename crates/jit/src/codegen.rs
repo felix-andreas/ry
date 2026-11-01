@@ -1380,8 +1380,130 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let result = self.builder.ins().floor(quotient);
                 self.builder.def_var(self.doubles[dst], result);
             }
+            Intrinsic::CollectionCount { set, empty } => {
+                let collection = self.load_register(args[0]);
+                let set = self.builder.ins().iconst(I32, i64::from(set));
+                let count = self
+                    .call(
+                        runtime::jit_collection_count as *const () as usize,
+                        &[I64, I32],
+                        Some(I64),
+                        &[collection, set],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                // A negative count means the argument is not a collection, so tier 0 raises.
+                let counted = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedGreaterThanOrEqual,
+                    count,
+                    0,
+                );
+                let fits = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedLessThanOrEqual,
+                    count,
+                    i32::MAX as i64,
+                );
+                let usable = self.builder.ins().band(counted, fits);
+                self.hand_off_unless(position, before, usable);
+                let value = if empty {
+                    let none = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 0);
+                    self.builder.ins().uextend(I32, none)
+                } else {
+                    self.builder.ins().ireduce(I32, count)
+                };
+                self.builder.def_var(self.integers[dst], value);
+            }
+            Intrinsic::CollectionContains { set } => {
+                let position_of = self.collection_position(args, &types, set)?;
+                let usable = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedGreaterThanOrEqual,
+                    position_of,
+                    -1,
+                );
+                self.hand_off_unless(position, before, usable);
+                let present = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedGreaterThanOrEqual,
+                    position_of,
+                    0,
+                );
+                let value = self.builder.ins().uextend(I32, present);
+                self.builder.def_var(self.integers[dst], value);
+            }
+            Intrinsic::DictGet => {
+                let position_of = self.collection_position(args, &types, false)?;
+                let usable = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedGreaterThanOrEqual,
+                    position_of,
+                    -1,
+                );
+                self.hand_off_unless(position, before, usable);
+                let dict = self.load_register(args[0]);
+                let value = self
+                    .call(
+                        runtime::jit_dict_get as *const () as usize,
+                        &[I64, I64, I64],
+                        Some(I64),
+                        &[self.activation, dict, position_of],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                self.store_register(dst, value);
+            }
         }
         Ok(())
+    }
+
+    /// Continues when `condition` holds and otherwise hands the instruction to tier 0, which
+    /// raises whatever error the compiled fast path declined to.
+    fn hand_off_unless(&mut self, position: usize, before: &State, condition: Value) {
+        let fast = self.builder.create_block();
+        let slow = self.builder.create_block();
+        self.builder.ins().brif(condition, fast, &[], slow, &[]);
+        self.builder.switch_to_block(slow);
+        self.builder.set_cold_block(slow);
+        self.hand_off(position, before);
+        self.builder.switch_to_block(fast);
+    }
+
+    /// The key's position in the collection in `args[0]`, as [`runtime::jit_collection_position`]
+    /// reports it. An unboxed key travels unboxed, so the probe allocates nothing.
+    fn collection_position(
+        &mut self,
+        args: &[usize],
+        types: &[Ty],
+        set: bool,
+    ) -> Result<Value, Refusal> {
+        let collection = self.load_register(args[0]);
+        let set = self.builder.ins().iconst(I32, i64::from(set));
+        let no_integer = self.builder.ins().iconst(I32, 0);
+        let no_double = self.builder.ins().f64const(0.0);
+        let no_value = self.builder.ins().iconst(I64, 0);
+        let (kind, integer, double, value) = match types[1] {
+            Ty::Int => (
+                runtime::key::INTEGER,
+                self.use_register(args[1], Ty::Int),
+                no_double,
+                no_value,
+            ),
+            Ty::Dbl => (
+                runtime::key::DOUBLE,
+                no_integer,
+                self.use_register(args[1], Ty::Dbl),
+                no_value,
+            ),
+            _ => (
+                runtime::key::VALUE,
+                no_integer,
+                no_double,
+                self.load_register(args[1]),
+            ),
+        };
+        let kind = self.builder.ins().iconst(I32, i64::from(kind));
+        self.call(
+            runtime::jit_collection_position as *const () as usize,
+            &[I64, I32, I32, I32, F64, I64],
+            Some(I64),
+            &[collection, set, kind, integer, double, value],
+        )
+        .ok_or(Refusal("a helper without a result"))
     }
 
     // Conditions.

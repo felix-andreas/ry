@@ -605,7 +605,8 @@ fn collection_kind(set: i32) -> NativeKind {
 /// `Dict.len()` or `Set.len()`: the entry count, or -1 when tier 0 must run the call.
 pub unsafe extern "C" fn jit_collection_count(value: *mut Header, set: i32) -> i64 {
     unsafe {
-        standard_library::compiled_count(Sexp::from_raw(value), collection_kind(set))
+        Sexp::from_raw(value)
+            .and_then(|value| standard_library::compiled_count(value, collection_kind(set)))
             .map_or(-1, |count| count as i64)
     }
 }
@@ -624,13 +625,15 @@ pub unsafe extern "C" fn jit_collection_position(
         let key = match kind {
             key::INTEGER => CompiledKey::Integer(integer),
             key::DOUBLE => CompiledKey::Double(double),
-            _ => CompiledKey::Value(Sexp::from_raw(value)),
+            _ => match Sexp::from_raw(value) {
+                Some(value) => CompiledKey::Value(value),
+                None => return -2,
+            },
         };
-        match standard_library::compiled_position(
-            Sexp::from_raw(collection),
-            collection_kind(set),
-            key,
-        ) {
+        let Some(collection) = Sexp::from_raw(collection) else {
+            return -2;
+        };
+        match standard_library::compiled_position(collection, collection_kind(set), key) {
             Some(Some(position)) => position as i64,
             Some(None) => -1,
             None => -2,
@@ -645,11 +648,11 @@ pub unsafe extern "C" fn jit_dict_get(
     position: i64,
 ) -> *mut Header {
     unsafe {
-        boxed(activation, || {
-            standard_library::compiled_get_result(
-                Sexp::from_raw(dict),
-                usize::try_from(position).ok(),
-            )
+        boxed(activation, || match Sexp::from_raw(dict) {
+            Some(dict) => {
+                standard_library::compiled_get_result(dict, usize::try_from(position).ok())
+            }
+            None => Err(error("Dict.get() reached compiled code without a dict")),
         })
     }
 }
