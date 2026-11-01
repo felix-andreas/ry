@@ -4,8 +4,10 @@
 use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
 use crate::{Db, SiteRole, SourceFile, file_syntax_sites, parse};
 use std::collections::BTreeSet;
+use std::num::NonZero;
+use std::thread;
 use syntax::ast::is_expression_kind;
-use syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange};
+use syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
 #[salsa::input(singleton, debug)]
@@ -52,19 +54,145 @@ pub struct NamespaceFile {
     pub native_symbols: NativeSymbols,
 }
 
+/// A large file parses in chunks on separate threads. Every directive is self-contained, so
+/// the chunks' facts concatenate in order to exactly what one parse would give.
 pub fn parse_namespace(source: &str) -> NamespaceFile {
+    let workers = thread::available_parallelism().map_or(1, NonZero::get);
+    if source.len() < PARALLEL_NAMESPACE_BYTES || workers == 1 {
+        return parse_namespace_chunk(source, TextSize::from(0));
+    }
+    parse_namespace_in_chunks(source, &call_boundaries(source, workers))
+}
+
+/// Below this, one parse is faster than starting threads.
+const PARALLEL_NAMESPACE_BYTES: usize = 64 * 1024;
+
+fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
+    if chunks.len() == 1 {
+        return parse_namespace_chunk(source, TextSize::from(0));
+    }
+    let ends = chunks.iter().skip(1).copied().chain([source.len()]);
+    let parts: Vec<NamespaceFile> = thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .zip(ends)
+            .map(|(&start, end)| {
+                let offset = TextSize::from(start as u32);
+                scope.spawn(move || parse_namespace_chunk(&source[start..end], offset))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(part) => part,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    });
+    let mut file = NamespaceFile::default();
+    for part in parts {
+        file.imports.extend(part.imports);
+        file.exports.extend(part.exports);
+        let symbols = part.native_symbols;
+        file.native_symbols.names.extend(symbols.names);
+        file.native_symbols
+            .registered_prefixes
+            .extend(symbols.registered_prefixes);
+        file.native_symbols.registers |= symbols.registers;
+    }
+    file
+}
+
+fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
     let root = syntax::parse(source).syntax_node();
     let directives = namespace_directives(&root);
+    let mut imports = namespace_imports(&directives);
+    for import in &mut imports {
+        import.range += offset;
+    }
     NamespaceFile {
-        imports: namespace_imports(&directives),
+        imports,
         exports: directives
             .iter()
             .filter(|(directive, _)| directive == "export")
             .flat_map(|(_, values)| values)
             .filter_map(name_argument)
+            .map(|(name, range)| (name, range + offset))
             .collect(),
         native_symbols: native_symbols(namespace_spec_of(&root)),
     }
+}
+
+/// Start offsets of up to `parts` chunks, the first at 0. A chunk may start only on a line
+/// that opens with `name(` right after a line holding nothing but a complete top-level
+/// `name(...)` call. The parser ends a top-level expression at such a newline whatever came
+/// before it, while a looser rule would split an `if (cond)` from its body on the next line.
+fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
+    use SyntaxKind::*;
+    let (tokens, _) = syntax::lex(source);
+    let significant: Vec<(SyntaxKind, usize)> = tokens
+        .iter()
+        .scan(0usize, |offset, token| {
+            let start = *offset;
+            *offset += usize::from(token.len);
+            Some((token.kind, start))
+        })
+        .filter(|(kind, _)| !matches!(kind, WHITESPACE | COMMENT))
+        .collect();
+    let target = source.len() / parts;
+    let mut boundaries = vec![0];
+    // `simple` holds while the current line is exactly one call: a name, then a parenthesis
+    // that `open` follows back to empty.
+    let mut open: Vec<SyntaxKind> = Vec::new();
+    let mut simple = true;
+    let mut closed = false;
+    for (index, &(kind, _)) in significant.iter().enumerate() {
+        let at_line_start = index == 0 || significant[index - 1].0 == NEWLINE;
+        match kind {
+            NEWLINE if open.is_empty() => {
+                let next = significant.get(index + 1..index + 3);
+                if let (true, Some([(IDENT, start), (L_PAREN, _)])) = (simple && closed, next) {
+                    let due = boundaries.len() * target;
+                    if *start >= due && boundaries.len() < parts {
+                        boundaries.push(*start);
+                    }
+                }
+                simple = true;
+                closed = false;
+                continue;
+            }
+            NEWLINE => continue,
+            L_PAREN | L_BRACE | L_BRACKET => open.push(kind),
+            L_BRACKET2 => open.extend([L_BRACKET, L_BRACKET]),
+            R_PAREN | R_BRACE | R_BRACKET => {
+                let opener = match kind {
+                    R_PAREN => L_PAREN,
+                    R_BRACE => L_BRACE,
+                    _ => L_BRACKET,
+                };
+                // A stray or mismatched closer leaves the parser's recovery, not bracket
+                // matching, to decide where a call ends, so only one parse is exact.
+                if open.pop() != Some(opener) {
+                    return vec![0];
+                }
+            }
+            _ => {}
+        }
+        let depth = open.len();
+        let call_start = at_line_start && kind == IDENT;
+        let call_open = index > 0
+            && kind == L_PAREN
+            && depth == 1
+            && significant[index - 1].0 == IDENT
+            && (index == 1 || significant[index - 2].0 == NEWLINE);
+        if closed || !(call_start || call_open || depth > 0 || kind == R_PAREN) {
+            simple = false;
+        }
+        if kind == R_PAREN && depth == 0 {
+            closed = true;
+        }
+    }
+    boundaries
 }
 
 fn native_symbols(spec: NamespaceSpec) -> NativeSymbols {
@@ -725,6 +853,54 @@ pub fn string_content(literal: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn namespace_facts(file: &NamespaceFile) -> String {
+        let imports: Vec<_> = file
+            .imports
+            .iter()
+            .map(|import| (&import.namespace, &import.name, import.range))
+            .collect();
+        format!("{imports:?} {:?} {:?}", file.exports, file.native_symbols)
+    }
+
+    #[test]
+    fn chunked_namespace_parse_matches_one_parse() {
+        let mut source = String::from("# generated\nimport(stats)\n");
+        for index in 0..200 {
+            source.push_str(&format!("export(f{index})\n"));
+            match index % 25 {
+                3 => {
+                    source.push_str("if (getRversion() >= \"4.0\")\nexport(late)\nexport(after)\n")
+                }
+                7 => source.push_str("importFrom(utils,\n  head, tail)\n"),
+                11 => source.push_str("x <- function()\nexport(body)\n"),
+                13 => source.push_str("useDynLib(pkg, foo, .fixes = \"C_\")\n"),
+                17 => source.push_str("export(\"quoted\n name\")\n\n# note\n"),
+                19 => source.push_str("f(a)(b)\nexport(g)\n"),
+                _ => {}
+            }
+        }
+        let whole = namespace_facts(&parse_namespace_chunk(&source, TextSize::from(0)));
+        for parts in [2, 3, 7, 50] {
+            let chunks = call_boundaries(&source, parts);
+            assert!(chunks.len() > 1, "{parts} parts found no boundary");
+            assert_eq!(
+                namespace_facts(&parse_namespace_in_chunks(&source, &chunks)),
+                whole
+            );
+        }
+    }
+
+    #[test]
+    fn unbalanced_namespace_parses_in_one_chunk() {
+        for prefix in ["}\nf(\n", "f(]\n", "g(a))\nf(\n"] {
+            let mut source = String::from(prefix);
+            for index in 0..200 {
+                source.push_str(&format!("export(f{index})\n"));
+            }
+            assert_eq!(call_boundaries(&source, 4), [0], "{prefix:?}");
+        }
+    }
 
     #[test]
     fn description_dependencies_parse_dcf_fields() {

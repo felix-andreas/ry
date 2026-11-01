@@ -8,6 +8,7 @@ use miette::{
     GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
     Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
 };
+use rustc_hash::FxHashSet;
 use salsa::{Database, Durability};
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
 use semantics::metadata::{
@@ -357,12 +358,12 @@ pub(crate) fn analyze_project(
     // derived while they are resident.
     let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
-    let mut used_tokens = BTreeSet::new();
+    let mut used_tokens = FxHashSet::default();
     let tree_batch = workers * FILES_PER_WORKER_BATCH;
     for (_, tokens) in in_batches(&mut db, workers, &by_size, tree_batch, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
-        let mut tokens = BTreeSet::new();
+        let mut tokens = FxHashSet::default();
         if want_tokens {
             namespace::collect_used_tokens(
                 &semantics::parse(db, file).syntax_node(),
@@ -462,7 +463,8 @@ pub(crate) fn analyze_project(
 
 /// Runs `work` for every index in `order` across `workers` threads, `batch_len` indices at
 /// a time. Between batches the least recently used trees are evicted, so a cold pass holds
-/// about a batch of them instead of the whole project's.
+/// about a batch of them instead of the whole project's. Nothing is evicted after the last
+/// batch: the next call evicts before its second batch, and the check exits after the last.
 fn in_batches<T: Send>(
     db: &mut RootDatabase,
     workers: usize,
@@ -471,7 +473,10 @@ fn in_batches<T: Send>(
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for batch in order.chunks(batch_len.max(1)) {
+    for (number, batch) in order.chunks(batch_len.max(1)).enumerate() {
+        if number > 0 {
+            db.trigger_lru_eviction();
+        }
         // Shared rather than dealt out: check times vary by orders of magnitude per file.
         let next = AtomicUsize::new(0);
         thread::scope(|scope| {
@@ -496,7 +501,6 @@ fn in_batches<T: Send>(
                 results.extend(handle.join().expect("check worker should not panic"));
             }
         });
-        db.trigger_lru_eviction();
     }
     results
 }

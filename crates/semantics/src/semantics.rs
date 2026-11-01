@@ -910,11 +910,11 @@ pub struct PackageName<'db> {
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn package_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName<'db> {
+pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageName<'db> {
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = name.text(db);
+    let text = name.name(db).text(db);
     PackageName {
         winner: package_definitions(db, files).get(text).copied(),
         conditional_writers: conditional_slot_items(db, files)
@@ -926,11 +926,11 @@ pub fn package_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName
 
 /// The test files' counterpart of [`package_name`].
 #[salsa::tracked(returns(ref))]
-pub fn test_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName<'db> {
+pub fn test_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageName<'db> {
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = name.text(db);
+    let text = name.name(db).text(db);
     PackageName {
         winner: test_definitions(db, files).get(text).copied(),
         conditional_writers: test_conditional_slot_items(db, files)
@@ -1509,7 +1509,6 @@ struct SalsaGlobals<'db> {
     file: SourceFile,
     // A body reads the same few globals many times, and each salsa read pays for interning
     // its key and verifying the memo, so a check looks each one up once.
-    names: RefCell<FxHashMap<Box<str>, types::Name<'db>>>,
     schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
     item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
@@ -1674,22 +1673,12 @@ impl<'db> SalsaGlobals<'db> {
             item,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
-            names: RefCell::default(),
             schemes: RefCell::default(),
             item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
             package_names: RefCell::default(),
             test_names: RefCell::default(),
         }
-    }
-
-    fn intern(&self, name: &str) -> types::Name<'db> {
-        if let Some(&interned) = self.names.borrow().get(name) {
-            return interned;
-        }
-        let interned = types::Name::new(self.db, name);
-        self.names.borrow_mut().insert(name.into(), interned);
-        interned
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
@@ -1727,14 +1716,14 @@ impl<'db> SalsaGlobals<'db> {
                     .test_names
                     .borrow_mut()
                     .entry(name)
-                    .or_insert_with(|| test_name(self.db, name))
+                    .or_insert_with(|| test_name(self.db, types::QueryName::new(self.db, name)))
             });
         let package = files.map(|_| {
             *self
                 .package_names
                 .borrow_mut()
                 .entry(name)
-                .or_insert_with(|| package_name(self.db, name))
+                .or_insert_with(|| package_name(self.db, types::QueryName::new(self.db, name)))
         });
         test.into_iter().chain(package)
     }
@@ -1808,7 +1797,7 @@ impl<'db> SalsaGlobals<'db> {
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
             return scheme.clone();
         }
@@ -1820,7 +1809,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
             || self
                 .layers(interned)
@@ -1828,7 +1817,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
@@ -1839,8 +1828,11 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return self.scheme(name, false);
         }
-        let interned = self.intern(name);
-        if let Some(layer) = self.files.map(|_| package_name(self.db, interned)) {
+        let interned = types::Name::new(self.db, name);
+        if let Some(layer) = self
+            .files
+            .map(|_| package_name(self.db, types::QueryName::new(self.db, interned)))
+        {
             if let Some(item) = layer.winner {
                 return Some(global_scheme(self.db, item));
             }
@@ -1855,7 +1847,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         self.layers(interned).find_map(|layer| {
             layer
                 .winner
@@ -1878,7 +1870,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return None;
         }
         // A project definition shadows the stub set, disabling per-call overload selection.
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
