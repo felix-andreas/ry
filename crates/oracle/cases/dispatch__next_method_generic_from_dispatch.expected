@@ -1,0 +1,14 @@
+[stdout]
+| [1] "def"
+| [1] "def"
+| $extra
+| [1] 1
+| 
+| [1] "b"
+| [1] "kdef"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "kdef"

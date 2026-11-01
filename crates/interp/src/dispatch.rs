@@ -544,18 +544,15 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             value_of(value)?
         })
     };
-    // The generic: the argument, else `.Generic`, else the called function's name.
-    let mut generic = call.arg(0);
-    if generic == nil() || generic == missing_arg() {
-        generic = read(symbols.dot_generic)?;
+    // The generic: `.Generic` of the dispatch, else the argument. GNU R ignores the argument
+    // inside a dispatched method, so `NextMethod(x)` and `NextMethod("other")` both continue
+    // the current generic.
+    let mut generic = read(symbols.dot_generic)?;
+    if generic == unbound() {
+        generic = call.arg(0);
     }
-    if generic == unbound() || generic == nil() {
-        let head = frame_call.car();
-        if head.kind() == SexpType::Symbol {
-            generic = scalar_string(&symbol_name(head))?;
-        } else {
-            return Err(call.error("generic function not specified"));
-        }
+    if generic == nil() || generic == missing_arg() {
+        return Err(call.error("generic function not specified"));
     }
     if generic.kind() != SexpType::String || length(generic) != 1 {
         return Err(call.error("invalid generic argument to 'NextMethod'"));

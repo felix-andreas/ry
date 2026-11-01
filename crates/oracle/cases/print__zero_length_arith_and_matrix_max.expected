@@ -1,0 +1,51 @@
+[stdout]
+| NULL
+| NULL
+| NULL
+| NULL
+| NULL
+| NULL
+| NULL
+| NULL
+| $foo
+| [1] 1
+| 
+| NULL
+| NULL
+| NULL
+| $dim
+| [1] 0 2
+| 
+| NULL
+| NULL
+| NULL
+|       [,1] [,2]
+|  [1,]    1   11
+|  [2,]    2   12
+|  [ reached getOption("max.print") -- omitted 8 rows ]
+| [1] 1 2 3
+|  [ reached getOption("max.print") -- omitted 7 entries ]
+|         [,1]
+|  [1,]      1
+|  [2,]      2
+|  [3,]      3
+|  [4,]      4
+|  [5,]      5
+|  [ reached getOption("max.print") -- omitted 5 rows ]
+|      [,1] [,2] [,3]
+|  [ reached getOption("max.print") -- omitted 2 rows ]
+|      [,1] [,2] [,3] [,4]
+| [1,]    1    6   11   16
+|  [ reached getOption("max.print") -- omitted 4 rows ]
+|   a b
+| 1 1 a
+| 2 2 b
+| 3 3 c
+|  [ reached 'max' / getOption("max.print") -- omitted 2 rows ]
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(a = 1:5, b = c("a", "b", "c", "d", "e")), class = "data.frame", row.names = c(NA, 
+| -5L))

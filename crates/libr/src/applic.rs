@@ -24,7 +24,6 @@ use {
         runtime,
         utils::format_real_vector,
     },
-    heap::object::NA_INTEGER,
     interp::random,
     std::ffi::{c_char, c_int, c_void},
 };

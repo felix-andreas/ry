@@ -1,0 +1,10 @@
+# A zero-length operand drops the attributes arithmetic would copy; max.print cuts matrices by whole rows.
+e <- structure(numeric(0), foo = 1, class = "bar")
+ei <- structure(integer(0), foo = 1)
+for (r in list(unclass(e) + 1, 1 - unclass(e), unclass(e) %/% 2, unclass(e) * 1L, ei + 1L, ei %% 2L, ei / 2L, 2 ^ ei, -unclass(e), ei > 1, ei & TRUE, unclass(e) == 1, structure(numeric(0), dim = c(0L, 2L)) + 1, unclass(e) + numeric(0), structure(1, foo = 2) + numeric(0), structure(complex(0), foo=1) + 1i))
+  print(attributes(r))
+m <- matrix(1:20, 10); print(m, max = 4)
+print(1:10, max = 3)
+m <- matrix(c(1:9, 123456), 10); print(m, max = 5)
+print(matrix(1:6, 2), max = 1)
+options(max.print = 6); print(matrix(1:20, 5)); print(data.frame(a = 1:5, b = letters[1:5]))

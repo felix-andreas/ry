@@ -813,7 +813,8 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
 
 /// The result attributes of a binary arithmetic operation: dims must agree, names come from the
 /// operand as long as the result, and other attributes are copied from both, the first taking
-/// precedence.
+/// precedence. A zero-length operand makes GNU R return a fresh empty vector before copying, so
+/// then only the dims and names survive.
 pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
     check_conformable(left, right, call)?;
     let result_length = length(result);
@@ -821,6 +822,9 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
     let right_attributes = right.attrib() != nil();
     if !left_attributes && !right_attributes {
         return Ok(());
+    }
+    if length(left) == 0 || length(right) == 0 {
+        return copy_array_structure(left, right, result);
     }
     if right_attributes && length(right) == result_length {
         values::copy_most_attributes(right, result, false)?;

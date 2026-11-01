@@ -524,6 +524,13 @@ pub unsafe fn print_matrix(
             }
         })
         .collect();
+    // `max.print` limits the entries, so it keeps whole rows. Columns are still formatted over
+    // every row, as in GNU R, so the cut rows can widen them.
+    let shown_rows = if cols > 0 {
+        rows.min(options.max / cols)
+    } else {
+        rows
+    };
     let columns = matrix_columns(matrix, rows, cols, options)?;
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
@@ -582,7 +589,7 @@ pub unsafe fn print_matrix(
             text.push_str(&pad(&col_labels[col], widths[col], right));
         }
         text.push('\n');
-        for row in 0..rows {
+        for row in 0..shown_rows {
             text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
@@ -592,6 +599,12 @@ pub unsafe fn print_matrix(
         }
         out(&text);
         start = end;
+    }
+    if shown_rows < rows {
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted {} rows ]\n",
+            rows - shown_rows
+        ));
     }
     Ok(())
 }
