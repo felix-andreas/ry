@@ -23,11 +23,12 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **Stats natives and binary connections.** `cov`, `termsform`, `zeroin2`, `kmns` and `do_fmin`, plus `writeBin`, `readBin` of character and `rawConnection`, cause all but 8 of the remaining differences.
+- **`unz` connections** are missing (`.Internal(unz)`), which fails every openxlsx and readxl round trip.
 - **`grepRaw`** is missing, so renv's `.onLoad` fails.
-- **parallel cannot fork.** `mc_fork` and the other fork routines error, so `mclapply` with more than one core fails (`decisions.md`, "parallel's natives without fork").
-- **Small output differences seen while fixing:** a 0-row matrix header pads differently from GNU R, and the call in `$<-`'s warning deparses an argument as `<promise>`.
-- **Time and scale.** ry's suites run 1.07x to 1.5x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
+- **parallel cannot fork or open sockets.** `mc_fork` and the other fork routines error, so `mclapply` and `registerDoParallel(cores = 2)` fail, and `makeCluster` needs `.Internal(serverSocket)` (`decisions.md`, "parallel's natives without fork").
+- **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
+- **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
+- **Time and scale.** ry's suites run 1.6x to 2x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
 
 ## Open: the package loader
 

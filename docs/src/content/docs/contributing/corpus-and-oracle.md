@@ -142,8 +142,9 @@ sides and only evaluation differs. The driver (`crates/oracle/src/bench.R`) reco
 `test_that()` block: its status, the failed expectations, errors, warnings and skips it reported,
 a deparse of its value, and its run time. A test matches when everything but the time agrees.
 
-GNU R runs the suite twice. A value that differs between those two runs (a fresh UUID, a
-timestamp) is not compared, so only what GNU R reproduces counts against ry. The table prints,
+GNU R runs the suite twice. A test whose value or problems differ between those two runs (a
+fresh UUID, a timestamp in a message) is compared by status alone, so only what GNU R reproduces
+counts against ry. The table prints,
 per package, the matching tests, the rate, the tests that differ or that ry never reported, the
 tests ry passes, and both suites' run times; process wall time, which adds startup and loading
 the package, follows it. `--json` writes every comparison, and `--keep` keeps each runtime's

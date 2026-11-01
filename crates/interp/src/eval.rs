@@ -544,7 +544,11 @@ unsafe fn collect_evaluated_args(
             });
             counted_push(args);
         } else {
-            let value = eval(expression, env)?;
+            let value = if keep_missing && argument_is_missing(expression, env)? {
+                missing
+            } else {
+                eval(expression, env)?
+            };
             args.push(Arg {
                 tag: arguments.tag(),
                 value,
@@ -1019,6 +1023,21 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
     symbol_is_missing(symbol, env, true)
+}
+
+/// Whether an argument expression is a symbol bound in `env`'s own frame to a missing argument,
+/// as GNU R's `R_isMissing` asks for the subset primitives: `f <- function(m, i) m[i, 1]` called
+/// as `f(m, )` passes an empty `i`, which selects everything. A defaulted formal is not missing,
+/// and an unbound symbol is left to evaluation to report.
+pub unsafe fn argument_is_missing(expression: Sexp, env: Sexp) -> R<bool> {
+    if expression.kind() != SexpType::Symbol || expression == symbols().dots {
+        return Ok(false);
+    }
+    let symbol = if dot_dot_index(expression).is_some() { symbols().dots } else { expression };
+    if crate::heap().frame_cell(env, symbol).is_none() {
+        return Ok(false);
+    }
+    symbol_is_missing(expression, env, false)
 }
 
 /// `missing()` of `symbol` in `env`. `defaults_count` says whether a formal that got its default

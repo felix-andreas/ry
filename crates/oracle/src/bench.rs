@@ -5,7 +5,8 @@
 //! with `--runtime ry`, so the package is loaded by the same loader plan on both sides and only
 //! evaluation differs. `bench.R` writes one JSON line per `test_that()` block: its status, the
 //! problems it reported (failed expectations, errors, warnings, skips), a deparse of its value
-//! and its run time. A test matches when all of those but the time agree.
+//! and its run time. A test matches when all of those but the time agree. GNU R runs twice, and
+//! a test whose value or problems differ between those runs is compared by status alone.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -196,7 +197,7 @@ pub fn compare_runs(package: &str, gnu_r: &Run, gnu_r_again: &Run, ry: Option<&R
             }
         }
     }
-    let count = |verdict| comparisons.iter().filter(|c| c.verdict == verdict).count();
+    let count = |verdict| comparisons.iter().filter(|comparison| comparison.verdict == verdict).count();
     let passing = |run: &Run| {
         run.results
             .iter()
@@ -234,9 +235,9 @@ pub fn render_summary(summary: &Summary, verbose: bool) -> String {
     for (file, comparisons) in &by_file {
         let matching = comparisons
             .iter()
-            .filter(|c| match summary.ry_ran {
-                true => c.verdict == Verdict::Match,
-                false => c.gnu_r_status == "pass",
+            .filter(|comparison| match summary.ry_ran {
+                true => comparison.verdict == Verdict::Match,
+                false => comparison.gnu_r_status == "pass",
             })
             .count();
         text.push_str(&format!(
@@ -408,7 +409,7 @@ fn run_suite(
         }
     };
     let wall = started.elapsed();
-    let text = std::fs::read_to_string(&report).unwrap_or_default();
+    let text = read_output(&report, runtime);
     let mut results = Vec::new();
     for line in text.lines() {
         match serde_json::from_str::<TestResult>(line) {
@@ -420,7 +421,7 @@ fn run_suite(
         .iter()
         .find(|result| result.test == "<total>")
         .map(|result| result.seconds);
-    let stderr_text = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    let stderr_text = read_output(&stderr_path, runtime);
     let stderr_tail = stderr_text
         .lines()
         .rev()
@@ -475,18 +476,39 @@ fn drop_missing_imports(package: &Path) -> Result<(), BenchError> {
         }
         if in_imports {
             in_imports = false;
-            if output.ends_with(",\n") {
-                output.truncate(output.len() - 2);
-                output.push('\n');
-            }
+            trim_trailing_comma(&mut output);
         }
         output.push_str(line);
         output.push('\n');
+    }
+    if in_imports {
+        trim_trailing_comma(&mut output);
     }
     if !dropped.is_empty() {
         eprintln!("not installed, left out of Imports: {}", dropped.join(", "));
     }
     std::fs::write(&path, output).map_err(setup_error(&path))
+}
+
+/// Drops the comma after the last kept import, wherever the field ends.
+fn trim_trailing_comma(output: &mut String) {
+    if output.ends_with(",\n") {
+        output.truncate(output.len() - 2);
+        output.push('\n');
+    }
+}
+
+/// A runtime's report or stderr. A runtime that died before writing has no file, which reads as
+/// empty; invalid UTF-8 is replaced rather than losing the whole report.
+fn read_output(path: &Path, runtime: &str) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            eprintln!("{runtime}: could not read {}: {error}", path.display());
+            String::new()
+        }
+    }
 }
 
 fn keep_import(entries: &str, installed: &HashSet<String>, output: &mut String, dropped: &mut Vec<String>) {

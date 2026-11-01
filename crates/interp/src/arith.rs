@@ -2752,6 +2752,17 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
         .max(0) as usize;
     let object = values::materialize(object)?;
     let count = length(object);
+    // An empty `x` returns before `times` is checked, as in GNU R, so `rep(NULL, c(1, 1))` is
+    // NULL; only `length.out` can lengthen a non-NULL empty vector, with NAs.
+    if object == nil() {
+        if length_out.is_some_and(|out| out > 0.0) {
+            crate::conditions::warning_call(call.call, "'x' is NULL so the result will be NULL")?;
+        }
+        return Ok(nil());
+    }
+    if count == 0 && length_out.is_none() {
+        return values::duplicate(object);
+    }
     // Expand `each` first.
     let mut indices: Vec<usize> = Vec::with_capacity(count * each);
     for index in 0..count {

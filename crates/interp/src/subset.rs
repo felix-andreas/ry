@@ -412,7 +412,7 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
         let data = s4_data_part(object);
         if data == nil() {
-            return Err(crate::unwind::error_in(call, "this S4 class is not subsettable"));
+            return Err(crate::unwind::error_in(call, "object of type 'S4' is not subsettable"));
         }
         return subset(data, indices, drop, call);
     }
@@ -711,7 +711,7 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         return Ok(nil());
     }
     if indices.is_empty() || indices[0] == missing_arg() {
-        return Err(crate::unwind::error_in(call, "subscript out of bounds"));
+        return Err(crate::unwind::error_in(call, "missing subscript"));
     }
     if object.kind() == SexpType::Environment {
         let index = indices[0];
@@ -1456,7 +1456,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         if data.kind() != SexpType::Environment {
             return Err(crate::unwind::error_in(
                 call,
-                "no method for assigning subsets of this S4 class",
+                "[[<- defined for objects of type \"S4\" only for subclasses of environment",
             ));
         }
         subassign2(data, indices, value, call)?;

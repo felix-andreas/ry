@@ -2009,11 +2009,15 @@ unsafe fn read_bin_bytes(
     swap: bool,
 ) -> R<Sexp> {
     if kind == BinaryType::Character {
-        let strings: Vec<Vec<u8>> = bytes
-            .split_inclusive(|&byte| byte == 0)
-            .filter(|piece| piece.last() == Some(&0))
-            .take(n)
-            .map(|piece| piece[..piece.len() - 1].to_vec())
+        // Unlike a connection, a raw vector always yields `n` strings, as GNU R's `rawOneString`
+        // does: an unterminated tail is the last string, and reading past the end gives "".
+        let mut pieces = bytes.split_inclusive(|&byte| byte == 0);
+        let strings: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                pieces
+                    .next()
+                    .map_or_else(Vec::new, |piece| piece.strip_suffix(&[0]).unwrap_or(piece).to_vec())
+            })
             .collect();
         return strings_vector(&strings, Encoding::Native);
     }

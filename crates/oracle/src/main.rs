@@ -370,7 +370,7 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
         "package", "tests", "match", "rate", "differs", "missing", "ry pass", "GNU R s", "ry s", "ry/R"
     );
     for summary in &summaries {
-        let suite = |seconds: Option<f64>| seconds.map_or_else(|| "-".to_string(), |s| format!("{s:.2}"));
+        let suite = |seconds: Option<f64>| seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"));
         let ratio = match (summary.gnu_r_suite_seconds, summary.ry_suite_seconds) {
             (Some(gnu_r), Some(ry)) if gnu_r > 0.0 => format!("{:.2}x", ry / gnu_r),
             _ => "-".to_string(),

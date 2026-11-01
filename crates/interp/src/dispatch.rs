@@ -777,7 +777,7 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
             .map(|(_, expression)| *expression)
             .filter(|expression| *expression != symbols().dots)
             .unwrap_or(arg.value);
-        let value = if arg.value == missing_arg() {
+        let value = if arg.value == missing_arg() || arg.value.kind() == SexpType::Promise {
             arg.value
         } else {
             forced_promise(code, arg.value)?
@@ -823,15 +823,18 @@ pub unsafe fn dispatch_or_eval(
     if arguments.kind() != SexpType::Pairlist || first == missing_arg() {
         return Ok(Err(eval::evaluate_args(arguments, env, true, call)?));
     }
-    // `x[...]` takes its object from the dots, so every argument becomes a promise up front.
-    let mut promised = if first == symbols().dots {
-        let mut promised = eval::promise_args(arguments, env)?;
-        let Some(head) = promised.first_mut() else {
+    // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
+    // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
+    let promised = if first == symbols().dots {
+        let promised = eval::promise_args(arguments, env)?;
+        let Some(head) = promised.first() else {
             return Ok(Err(promised));
         };
-        if head.value != missing_arg() {
-            head.value = value_of(head.value)?;
+        if head.value == missing_arg() {
+            return Ok(Err(promised));
         }
+        let object = value_of(head.value)?;
+        crate::heap().root(object);
         promised
     } else {
         let object = eval::eval(first, env)?;
@@ -845,31 +848,57 @@ pub unsafe fn dispatch_or_eval(
             args.extend(eval::evaluate_args(arguments.cdr(), env, true, call)?);
             return Ok(Err(args));
         }
-        let mut promised = vec![head];
+        let mut promised = vec![Arg {
+            tag: head.tag,
+            value: forced_promise(first, object)?,
+        }];
         promised.extend(eval::promise_args(arguments.cdr(), env)?);
         promised
     };
-    let object = promised[0].value;
-    if object.is_object() && !object.has_gp(gp::S4_OBJECT) {
-        let code = if first == symbols().dots { object } else { first };
-        promised[0].value = forced_promise(code, object)?;
-        if let Some(found) = find_s3_method(definition.name, object, env, values::base_namespace(), None)? {
-            return apply_internal_method(call, found, &promised, env).map(Ok);
+    let object = value_of(promised[0].value)?;
+    if object.is_object() {
+        // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4
+        // object without one falls back to S3 methods of its class.
+        let value = if object.has_gp(gp::S4_OBJECT)
+            && let Some(value) = s4_dispatch(op, call, &promised, env)?
+        {
+            Some(value)
+        } else if let Some(found) =
+            find_s3_method(definition.name, object, env, values::base_namespace(), None)?
+        {
+            Some(apply_internal_method(call, found, &promised, env)?)
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            interp().visible = true;
+            return Ok(Ok(value));
         }
-        promised[0].value = object;
     }
     let mut forced = Vec::with_capacity(promised.len());
     for arg in &promised {
-        let value = if arg.value == missing_arg() { arg.value } else { value_of(arg.value)? };
+        let value = if arg.value == missing_arg() || promise_of_missing(arg.value)? {
+            missing_arg()
+        } else {
+            value_of(arg.value)?
+        };
         crate::heap().root(value);
         forced.push(Arg { tag: arg.tag, value });
     }
-    if object.has_gp(gp::S4_OBJECT)
-        && let Some(value) = try_builtin_dispatch(definition, call, op, &forced, env)?
-    {
-        return Ok(Ok(value));
-    }
     Ok(Err(forced))
+}
+
+/// Whether `value` is an unforced promise of a symbol that is a missing argument where the
+/// promise was made, which the primitive takes as an empty subscript.
+unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
+    if value.kind() != SexpType::Promise || value.car() != unbound() {
+        return Ok(false);
+    }
+    let environment = value.tag();
+    if environment.kind() != SexpType::Environment {
+        return Ok(false);
+    }
+    eval::argument_is_missing(value.cdr(), environment)
 }
 
 unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
