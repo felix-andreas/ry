@@ -4,7 +4,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
-use libr::{
+use R::{
     frame_altrep::{expose_column, expose_table, import_column},
     altrep::{dataptr, dataptr_or_null, int_elt, length, no_na, real_elt, sexp_elt},
     attributes::get_attrib,
@@ -221,7 +221,7 @@ fn a_write_through_a_writable_pointer_changes_the_vector_not_the_frame() {
 fn a_plain_r_vector_imports_with_na_as_validity() {
     let _session = session();
     unsafe {
-        let vector = libr::memory::alloc_vector(SexpType::Integer, 3)
+        let vector = R::memory::alloc_vector(SexpType::Integer, 3)
             .unwrap_or_else(|error| panic!("{error:?}"));
         vector
             .slice_mut::<i32>()

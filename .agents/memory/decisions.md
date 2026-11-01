@@ -2497,17 +2497,15 @@ first lines R had already read, leaving R mid-command.
   class was `c("frame", "data.frame")`), because nothing about a data.frame's list layout or row
   names holds for it, and the checker agrees: a frame fails a `data.frame` parameter but passes a
   `list` one, because `as.list` gives its columns.
-- **`x[i, j, by]` on a frame never reaches the `[` primitive.** The evaluator's builtin branch and
-  the bytecode's `SubsetDispatch` op evaluate only the subject, and when it is a frame hand the
-  unevaluated call to `frame::run`. Dispatching through `[.frame` would be too late, because a
-  builtin's arguments are evaluated before dispatch and `i`, `j` and `by` name columns. `[.frame`
-  still exists for calls that arrive with evaluated arguments (`do.call`, `Map`).
-- **`[` dispatches to S3 methods lazily, as GNU R's `DispatchOrEval` does.** For any other object
-  subject, `dispatch::dispatch_subset` passes the remaining arguments to the method as promises
-  (`...` expanded from its `DOTSXP`). Evaluating every argument before dispatch would hand
-  `[.data.table` values instead of expressions, so `DT[, sum(x), by = g]` would fail with
-  "object 'x' not found". Builtins other than `[` still evaluate first; `[[` and `$` methods that
-  need unevaluated arguments would take the same path.
+- **`x[i, j, by]` on a frame never reaches the `[` primitive.** `[` is a `DispatchOrEval`
+  special, so `dispatch::dispatch_or_eval` evaluates only the subject, and when it is a frame
+  hands the unevaluated call to `frame::run`. Dispatching through `[.frame` would be too late,
+  because `i`, `j` and `by` name columns. `[.frame` still exists for calls that arrive with
+  evaluated arguments (`do.call`, `Map`). The bytecode compiles `[` as a generic call, so loops
+  that subset run the same path.
+- **Any other object subject of `[` dispatches lazily, as GNU R's `DispatchOrEval` does.** The
+  method receives the remaining arguments as promises, so `DT[, sum(x), by = g]` reaches
+  `[.data.table` with expressions instead of failing with "object 'x' not found".
 - **libr's option reads (`Rf_GetOption1`, `Rf_GetOptionWidth`, `Rf_GetOptionDigits`) go to the
   interpreter's `options()` when the interpreter is installed.** The `.Options` pairlist in base
   is the one source of truth; libr's own options environment serves only standalone use without
