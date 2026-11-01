@@ -797,10 +797,10 @@ unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
     let [lists] = arguments(call, ["lists"])?;
     let mut items = Vec::new();
     for inner in list_elements(call, "lists", lists)? {
-        if inner.kind() != SexpType::List {
+        if inner.kind() != SexpType::List && !inner.is_array() {
             return Err(wrong(call, "lists", "a list of lists", inner));
         }
-        items.extend((0..length(inner)).map(|index| inner.element(index)));
+        items.extend(list_elements(call, "lists", inner)?);
     }
     sequence(call, lists, &items)
 }
@@ -880,10 +880,10 @@ unsafe fn list_join_map(call: &Call<'_>) -> R<Sexp> {
     let mut joined = Vec::new();
     for item in items {
         let inner = scope(|| invoke(call, f, &[item]))?;
-        if inner.kind() != SexpType::List {
+        if inner.kind() != SexpType::List && !inner.is_array() {
             return Err(wrong(call, "f()", "a list", inner));
         }
-        joined.extend((0..length(inner)).map(|index| inner.element(index)));
+        joined.extend(list_elements(call, "f()", inner)?);
     }
     sequence(call, list, &joined)
 }
