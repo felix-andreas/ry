@@ -118,6 +118,22 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
 /// How many times a body may be compiled before the JIT gives up on it.
 pub const MAX_COMPILES: i32 = 4;
 
+/// How many times a body may be refused as cold before it compiles without the types it is
+/// missing.
+pub const MAX_COLD_REFUSALS: i32 = 3;
+
+/// The profile's tier state counts compilations in its low byte and cold refusals above it,
+/// because a cold refusal compiles nothing and so must not use up a compilation.
+pub const COLD_REFUSAL: i32 = 1 << 8;
+
+pub fn compiles(state: i32) -> i32 {
+    state & (COLD_REFUSAL - 1)
+}
+
+pub fn cold_refusals(state: i32) -> i32 {
+    state / COLD_REFUSAL
+}
+
 /// Discards `code`'s compiled code after a speculation failed. Activations still running it
 /// keep running, so the objects it embeds stay rooted for the rest of the session.
 pub unsafe fn invalidate(code: Sexp) {
@@ -132,7 +148,7 @@ pub unsafe fn invalidate(code: Sexp) {
     let counters = values::ints_mut(constants.element(PROFILE));
     counters[profile::ENTRIES] = 0;
     counters[profile::BACK_EDGES] = 0;
-    if counters[profile::TIER_STATE] >= MAX_COMPILES {
+    if compiles(counters[profile::TIER_STATE]) >= MAX_COMPILES {
         counters[profile::TIER_STATE] = -1;
     }
 }
@@ -314,8 +330,9 @@ pub unsafe extern "C" fn jit_closure_matches(activation: *mut Activation, value:
 
 /// Calls the closure `function` for `call` with arguments compiled code evaluated, and puts the
 /// result in register `dst`. `arguments` holds a representation and its bits for each argument
-/// (see [`representation`]); an argument whose expression is code is bound to a promise that
-/// already holds its value, so the callee cannot tell it was evaluated early.
+/// (see [`representation`]). Each argument is bound to its value rather than to a promise: the
+/// callee is frame-safe, so it never calls `substitute` or `missing`, and compiled code makes
+/// the call only while no handler is established, so no other R code can look at its frame.
 pub unsafe extern "C" fn jit_call(
     activation: *mut Activation,
     function: *mut Header,
@@ -335,7 +352,6 @@ pub unsafe extern "C" fn jit_call(
             let result = scoped(|| -> R<Sexp> {
                 let heap = heap();
                 let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
-                let mut expressions = call.cdr();
                 for pair in arguments.chunks_exact(2) {
                     let (kind, bits) = (pair[0] as i32, pair[1]);
                     let value = match kind {
@@ -345,16 +361,12 @@ pub unsafe extern "C" fn jit_call(
                         _ => Sexp::from_raw(bits as *mut Header).ok_or_else(|| error("compiled code passed a null argument"))?,
                     };
                     heap.root(value);
-                    let expression = expressions.car();
-                    let value = match expression.kind() {
-                        SexpType::Symbol | SexpType::Language => eval::forced_promise(expression, value)?,
-                        _ => value,
-                    };
-                    heap.root(value);
                     args.push(Arg { tag: values::nil(), value });
-                    expressions = expressions.cdr();
                 }
-                eval::apply_closure(call, function, &args, machine.env, None)
+                // The frame records no argument list: only `nargs`, method dispatch and
+                // `standardGeneric` read it, and a frame-safe callee calls none of them.
+                let env = eval::bind_arguments(call, function, &args, None)?;
+                eval::run_closure(call, function, env, machine.env, values::nil())
             });
             match result {
                 Err(unwind) => {

@@ -24,7 +24,7 @@ use interp::{
     unwind::{R, error},
     values,
 };
-use runtime::{Activation, Compiled, MAX_COMPILES};
+use runtime::{Activation, Compiled, MAX_COLD_REFUSALS, MAX_COMPILES};
 use bumpalo::Bump;
 use std::{
     cell::{Cell, RefCell},
@@ -114,22 +114,35 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
             return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
         }
         let counters = values::ints_mut(constants.element(PROFILE));
-        if !hot || counters[profile::TIER_STATE] < 0 {
+        let state = counters[profile::TIER_STATE];
+        if !hot || state < 0 {
             return None;
         }
-        counters[profile::TIER_STATE] += 1;
-        if counters[profile::TIER_STATE] > MAX_COMPILES {
+        if runtime::compiles(state) >= MAX_COMPILES {
             counters[profile::TIER_STATE] = -1;
             return None;
         }
-        match compile(machine) {
-            Ok(compiled) => Some(compiled),
+        let patient = runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
+        let result = compile(machine, patient);
+        // Compiling reads the profile too, so the counters are borrowed again afterwards.
+        let counters = values::ints_mut(constants.element(PROFILE));
+        match result {
+            Ok(compiled) => {
+                counters[profile::TIER_STATE] = state + 1;
+                Some(compiled)
+            }
             Err(Refusal(reason)) => {
                 if std::env::var_os("RY_JIT_LOG").is_some() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
-                if reason != analysis::COLD {
-                    values::ints_mut(constants.element(PROFILE))[profile::TIER_STATE] = -1;
+                if reason == analysis::COLD {
+                    // The next attempt waits for as many entries or backward jumps as this one did,
+                    // so the body runs long enough to record the types it is missing.
+                    counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
+                    counters[profile::ENTRIES] = 0;
+                    counters[profile::BACK_EDGES] = 0;
+                } else {
+                    counters[profile::TIER_STATE] = -1;
                 }
                 None
             }
@@ -144,24 +157,24 @@ unsafe fn describe(code: Sexp) -> String {
     }
 }
 
-unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
+unsafe fn compile<'a>(machine: &Machine<'_>, patient: bool) -> Result<&'a Compiled, Refusal> {
     ARENA.with(|arena| match arena.try_borrow_mut() {
         Ok(mut arena) => {
-            let compiled = compile_in(&arena, machine);
+            let compiled = compile_in(&arena, machine, patient);
             arena.reset();
             compiled
         }
         // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
         // that ever changes.
-        Err(_) => compile_in(&Bump::new(), machine),
+        Err(_) => compile_in(&Bump::new(), machine, patient),
     })
 }
 
-unsafe fn compile_in<'a>(arena: &Bump, machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
+unsafe fn compile_in<'a>(arena: &Bump, machine: &Machine<'_>, patient: bool) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
         let started = Instant::now();
-        let plan = analysis::plan(arena, machine.code, machine.function.car(), enclosure)?;
+        let plan = analysis::plan(arena, machine.code, machine.function.car(), enclosure, patient)?;
         let planned = started.elapsed();
         let entry = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;

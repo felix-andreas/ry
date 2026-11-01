@@ -599,8 +599,10 @@ pub struct Refusal(pub &'static str);
 pub const COLD: &str = "the body has no type feedback yet";
 
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
-/// `arena`.
-pub unsafe fn plan<'a>(arena: &'a Bump, code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan<'a>, Refusal> {
+/// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
+/// has never run, because code compiled without that type runs the instruction in tier 0 for
+/// as long as it lives.
+pub unsafe fn plan<'a>(arena: &'a Bump, code: Sexp, formals: Sexp, enclosure: Sexp, patient: bool) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
     // A body that reflects on its frame can bind any symbol, which slots cannot model.
@@ -627,6 +629,7 @@ pub unsafe fn plan<'a>(arena: &'a Bump, code: Sexp, formals: Sexp, enclosure: Se
         frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
         states: States::new_in(arena, registers + TEMPORARIES, 0),
         edges: List::new_in(arena),
+        patient,
     };
     builder.collect_slots();
     builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
@@ -729,6 +732,7 @@ struct Builder<'a> {
     hints: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
     frame_safe: Map<'a, Sexp, bool>,
+    patient: bool,
     /// Every state the plan keeps, and the scratch rows of the fixpoint.
     states: States<'a>,
     /// The edges leaving the instruction [`Builder::transfer`] last ran, by target pc.
@@ -772,6 +776,25 @@ impl<'a> Builder<'a> {
 
     fn feedback_at(&self, pc: usize) -> Ty {
         from_feedback(self.feedback.get(pc).copied().unwrap_or(0))
+    }
+
+    /// Whether the instruction at `pc` has never recorded a value.
+    fn never_ran(&self, pc: usize) -> bool {
+        self.feedback.get(pc).copied().unwrap_or(0) == 0
+    }
+
+    /// The type a call of `function` at `pc` is expected to return: what the call site has
+    /// returned so far, or before it has ever returned, the type the callee declares.
+    unsafe fn call_result_at(&self, pc: usize, function: Sexp) -> Ty {
+        if !self.never_ran(pc) {
+            return self.feedback_at(pc);
+        }
+        match interp::annotations::declared_return_type(function) {
+            Some(SexpType::Real) => Ty::Dbl,
+            Some(SexpType::Integer) => Ty::Int,
+            Some(SexpType::Logical) => Ty::Lgl,
+            _ => Ty::Boxed,
+        }
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -1041,7 +1064,7 @@ impl<'a> Builder<'a> {
                     Ty::Closure(formals, body) => self.inline(state, call, formals, body, None, operand(0)),
                     Ty::Fun(function) if function.kind() == SexpType::Closure => self
                         .inline(state, call, function.car(), bytecode::closure_body(function), Some(function.tag()), operand(0))
-                        .or_else(|| self.direct_call(state, call, function, (operand(0), self.feedback_at(inst.pc)))),
+                        .or_else(|| self.direct_call(state, call, function, (operand(0), self.call_result_at(inst.pc, function)))),
                     _ => None,
                 };
                 match inlined {
@@ -1069,7 +1092,7 @@ impl<'a> Builder<'a> {
                 self.push_edge(operand(2), state);
                 Action::JumpUnless { src: operand(0) }
             }
-            Op::Arithmetic => self.arithmetic(&inst, state),
+            Op::Arithmetic => self.arithmetic(&inst, state)?,
             Op::Return => Action::Return { src: operand(0) },
             Op::ForInit => {
                 let src = operand(1);
@@ -1078,8 +1101,8 @@ impl<'a> Builder<'a> {
                     // Code generation boxes an unboxed scalar sequence before the loop.
                     Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::List | Ty::Int | Ty::Dbl | Ty::Lgl => None,
                     _ => {
-                        if self.feedback.get(inst.pc).copied().unwrap_or(0) == 0 {
-                            return Err(Refusal(COLD));
+                        if self.never_ran(inst.pc) {
+                            return Err(Refusal(if self.patient { COLD } else { "a for loop that has never run" }));
                         }
                         let speculated = self.feedback_at(inst.pc);
                         if !matches!(speculated, Ty::IntVec | Ty::DblVec | Ty::LglVec | Ty::List | Ty::Int | Ty::Dbl | Ty::Lgl) {
@@ -1452,7 +1475,7 @@ impl<'a> Builder<'a> {
         Action::Step { effect, objects, dst }
     }
 
-    unsafe fn arithmetic(&mut self, inst: &Inst<'a>, state: &mut State<'a>) -> Action<'a> {
+    unsafe fn arithmetic(&mut self, inst: &Inst<'a>, state: &mut State<'a>) -> Result<Action<'a>, Refusal> {
         let operand = |index: usize| inst.operand(index);
         let arith = ARITHS[operand(0)].0;
         let (dst, left, right) = (operand(1), operand(2), operand(3));
@@ -1467,20 +1490,25 @@ impl<'a> Builder<'a> {
             if comparison {
                 state.registers[dst] = Ty::Lgl;
                 let numeric = if integers { Numeric::Int } else { Numeric::Dbl };
-                return Action::Comparison { arith, numeric, dst, left, right };
+                return Ok(Action::Comparison { arith, numeric, dst, left, right });
             }
             let numeric = match arith {
                 Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
                 _ => Numeric::Dbl,
             };
             state.registers[dst] = if numeric == Numeric::Int { Ty::Int } else { Ty::Dbl };
-            return Action::Arithmetic { arith, numeric, dst, left, right };
+            return Ok(Action::Arithmetic { arith, numeric, dst, left, right });
+        }
+        // An operand of unknown type is typically the result of a call that has not returned
+        // yet, as in a recursive function compiled on its way down.
+        if self.patient && (a == Ty::Boxed || b == Ty::Boxed) && self.never_ran(inst.pc) {
+            return Err(Refusal(COLD));
         }
         let effect = if a.is_plain() && b.is_plain() { Effect::PureUnlessObserved } else { Effect::Opaque };
         let ty = self.feedback_at(inst.pc);
         let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
         state.visible = Some(true);
-        action
+        Ok(action)
     }
 
     unsafe fn call_builtin(&mut self, inst: &Inst<'a>, state: &mut State<'a>) -> Result<Action<'a>, Refusal> {

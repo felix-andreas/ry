@@ -278,6 +278,20 @@ pub unsafe fn check_forced(promise: Sexp, value: Sexp) -> R<()> {
     Ok(())
 }
 
+/// The vector type a typed closure declares it returns, when its return annotation admits
+/// exactly one of `logical`, `integer` or `double` (each of which also admits the narrower ones,
+/// as R's coercions do). The JIT takes it as the expected type of a call's result before the
+/// call has ever returned.
+pub unsafe fn declared_return_type(function: Sexp) -> Option<SexpType> {
+    let signature = signature_of(function)?;
+    match mask_at(signature.element(MASKS), RETURN_SLOT) {
+        LOGICAL => Some(SexpType::Logical),
+        INTEGER => Some(SexpType::Integer),
+        DOUBLE => Some(SexpType::Real),
+        _ => None,
+    }
+}
+
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
     let formals = function.car();
     let key = if formals.kind() == SexpType::Pairlist {

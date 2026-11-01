@@ -710,6 +710,19 @@ pub unsafe fn apply_closure(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    let env = bind_arguments(call, function, args, supplied)?;
+    let promargs = args_pairlist(args)?;
+    run_closure(call, function, env, sys_parent, promargs)
+}
+
+/// A fresh environment for a call of the closure `function`, with `args` matched to its formals
+/// and bound, and rooted.
+pub unsafe fn bind_arguments(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Sexp> {
     let formals = function.car();
     let heap = crate::heap();
     let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
@@ -743,8 +756,7 @@ pub unsafe fn apply_closure(
             }
         }
     }
-    let promargs = args_pairlist(args)?;
-    run_closure(call, function, env, sys_parent, promargs)
+    Ok(env)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
