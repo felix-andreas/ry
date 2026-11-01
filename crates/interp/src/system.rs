@@ -700,6 +700,33 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             'a' => output.push_str(&WEEKDAYS[time.weekday as usize][..3]),
             'u' => output.push_str(&(if time.weekday == 0 { 7 } else { time.weekday }).to_string()),
             'w' => output.push_str(&time.weekday.to_string()),
+            'U' => output.push_str(&format!("{:02}", (time.yearday + 7 - time.weekday) / 7)),
+            'W' => output.push_str(&format!("{:02}", (time.yearday + 7 - (time.weekday + 6) % 7) / 7)),
+            'V' => output.push_str(&format!("{:02}", iso_week(time).1)),
+            'G' => output.push_str(&iso_week(time).0.to_string()),
+            'g' => output.push_str(&format!("{:02}", iso_week(time).0.rem_euclid(100))),
+            'C' => output.push_str(&format!("{:02}", time.year.div_euclid(100))),
+            'k' => output.push_str(&format!("{:2}", time.hour)),
+            'l' => output.push_str(&format!("{:2}", if time.hour % 12 == 0 { 12 } else { time.hour % 12 })),
+            'x' => output.push_str(&format!("{:02}/{:02}/{:02}", time.month, time.day, time.year.rem_euclid(100))),
+            'X' => output.push_str(&format!("{:02}:{:02}:{:02}", time.hour, time.minute, time.second.floor() as i64)),
+            'r' => output.push_str(&format!(
+                "{:02}:{:02}:{:02} {}",
+                if time.hour % 12 == 0 { 12 } else { time.hour % 12 },
+                time.minute,
+                time.second.floor() as i64,
+                if time.hour < 12 { "AM" } else { "PM" }
+            )),
+            'c' => output.push_str(&format!(
+                "{} {} {:2} {:02}:{:02}:{:02} {}",
+                &WEEKDAYS[time.weekday as usize][..3],
+                &MONTHS[(time.month - 1) as usize][..3],
+                time.day,
+                time.hour,
+                time.minute,
+                time.second.floor() as i64,
+                time.year
+            )),
             'Z' => output.push_str(zone),
             'z' => {
                 let sign = if offset < 0 { '-' } else { '+' };
@@ -734,6 +761,24 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
         }
     }
     output
+}
+
+/// The ISO 8601 week-numbering year and week: weeks start on Monday, and week 1 is the one
+/// that holds the year's first Thursday.
+fn iso_week(time: &BrokenDown) -> (i64, i64) {
+    let weeks_in = |year: i64| {
+        let starts = |year: i64| (year + year.div_euclid(4) - year.div_euclid(100) + year.div_euclid(400)).rem_euclid(7);
+        if starts(year) == 4 || starts(year - 1) == 3 { 53 } else { 52 }
+    };
+    let iso_weekday = if time.weekday == 0 { 7 } else { time.weekday };
+    let week = (time.yearday + 1 - iso_weekday + 10).div_euclid(7);
+    if week < 1 {
+        (time.year - 1, weeks_in(time.year - 1))
+    } else if week > weeks_in(time.year) {
+        (time.year + 1, 1)
+    } else {
+        (time.year, week)
+    }
 }
 
 const POSIXLT_NAMES: [&str; 11] = [
@@ -1001,7 +1046,9 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// Parses `text` with a `strptime` format, returning seconds since the epoch.
-fn parse_time(text: &str, format: &str) -> Option<f64> {
+/// The parsed time as whole seconds since the epoch and the fraction of a second apart, so
+/// that the fraction keeps every digit the text gave it.
+fn parse_time(text: &str, format: &str) -> Option<(f64, f64)> {
     let mut year = 1970i64;
     let mut month = 1i64;
     let mut day = 1i64;
@@ -1094,7 +1141,8 @@ fn parse_time(text: &str, format: &str) -> Option<f64> {
         return None;
     }
     let days = days_from_civil(year, month, 1) + day - 1;
-    Some(days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + second)
+    let whole = second.floor();
+    Some((days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + whole, second - whole))
 }
 
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
@@ -1103,20 +1151,23 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let tz = values::first_string(call.arg(2)).map(|text| text.into_owned()).unwrap_or_default();
     let count = length(texts);
     let mut seconds = Vec::with_capacity(count);
+    let mut fractions = Vec::with_capacity(count);
+    let zone = resolve_zone(&tz);
     for index in 0..count {
         let format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let value = values::string_at(texts, index)
+        let (whole, fraction) = values::string_at(texts, index)
             .and_then(|text| parse_time(&text, &format))
-            .unwrap_or(NA_REAL);
-        seconds.push(value);
-    }
-    let zone = resolve_zone(&tz);
-    for value in &mut seconds {
-        *value = zone.local_to_utc(*value, -1);
+            .unwrap_or((NA_REAL, 0.0));
+        seconds.push(zone.local_to_utc(whole, -1));
+        fractions.push(fraction);
     }
     let result = posixlt_from_seconds(&seconds, &tz)?;
+    let second_field = values::list_elt(result, 0);
+    for (second, fraction) in values::reals_mut(second_field).iter_mut().zip(&fractions) {
+        *second += fraction;
+    }
     set_year_names(result, values::names(texts))?;
     Ok(result)
 }
