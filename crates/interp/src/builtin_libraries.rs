@@ -65,7 +65,11 @@ pub fn builtin_library(path: &str) -> Option<&'static str> {
     let path = std::path::Path::new(path);
     let file = path.file_stem()?.to_str()?;
     let package = PACKAGES.iter().find(|package| **package == file)?;
-    let libs = path.parent()?;
+    let mut libs = path.parent()?;
+    // GNU R for Windows keeps a package's DLL under `libs/x64`.
+    if cfg!(windows) && libs.file_name()? == "x64" {
+        libs = libs.parent()?;
+    }
     let package_dir = libs.parent()?;
     let matches = libs.file_name()? == "libs" && package_dir.file_name()?.to_str()? == *package;
     matches.then_some(*package)
@@ -111,8 +115,7 @@ pub unsafe fn registered_routines(info: Sexp) -> R<Option<Sexp>> {
         (RoutineKind::Fortran, "FortranRoutine"),
         (RoutineKind::External, "ExternalRoutine"),
     ] {
-        let routines: Vec<&(&str, RoutineKind, &str, i32)> = ROUTINES
-            .iter()
+        let routines: Vec<&(&str, RoutineKind, &str, i32)> = routines()
             .filter(|routine| routine.0 == package && routine.1 == kind)
             .collect();
         let mut entries = Vec::with_capacity(routines.len());
@@ -188,7 +191,7 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
                     .iter()
                     .any(|(name, _)| *name == routine.0)
             };
-            match ROUTINES.iter().filter(loaded).find(|routine| {
+            match routines().filter(loaded).find(|routine| {
                 routine.2 == &*name && package.is_none_or(|package| package == routine.0)
             }) {
                 Some(routine) => routine,
@@ -291,8 +294,7 @@ fn find(
     name: &str,
     package: Option<&str>,
 ) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
-    ROUTINES
-        .iter()
+    routines()
         .find(|routine| routine.2 == name && package.is_none_or(|package| package == routine.0))
 }
 
@@ -367,11 +369,54 @@ unsafe fn native_symbol(
     Ok(entry)
 }
 
+type Routine = (&'static str, RoutineKind, &'static str, i32);
+
+/// The routines the default packages register on this platform.
+fn routines() -> impl Iterator<Item = &'static Routine> {
+    let windows: &'static [Routine] = if cfg!(windows) { WINDOWS_ROUTINES } else { &[] };
+    ROUTINES.iter().chain(windows)
+}
+
+/// The routines only GNU R for Windows registers. Its `utils` and `grDevices` R code refers to
+/// them, so they must exist for those namespaces to load there; the ones without an
+/// implementation fail when called.
+const WINDOWS_ROUTINES: &[Routine] = &[
+    ("utils", RoutineKind::Call, "dllversion", 1),
+    ("utils", RoutineKind::Call, "chooseDir", 2),
+    ("utils", RoutineKind::Call, "chooseFiles", 5),
+    ("utils", RoutineKind::Call, "getClipboardFormats", 0),
+    ("utils", RoutineKind::Call, "getIdentification", 0),
+    ("utils", RoutineKind::Call, "getWindowTitle", 0),
+    ("utils", RoutineKind::Call, "getWindowsHandle", 1),
+    ("utils", RoutineKind::Call, "getWindowsHandles", 2),
+    ("utils", RoutineKind::Call, "loadRconsole", 1),
+    ("utils", RoutineKind::Call, "readClipboard", 2),
+    ("utils", RoutineKind::Call, "setStatusBar", 1),
+    ("utils", RoutineKind::Call, "setWindowTitle", 1),
+    ("utils", RoutineKind::Call, "shortpath", 1),
+    ("utils", RoutineKind::Call, "winver", 0),
+    ("utils", RoutineKind::Call, "writeClipboard", 2),
+    ("utils", RoutineKind::External, "arrangeWindows", 4),
+    ("utils", RoutineKind::External, "closeWinProgressBar", 1),
+    ("utils", RoutineKind::External, "readRegistry", 4),
+    ("utils", RoutineKind::External, "setWinProgressBar", 4),
+    ("utils", RoutineKind::External, "winDialog", 2),
+    ("utils", RoutineKind::External, "winDialogString", 2),
+    ("utils", RoutineKind::External, "winMenuAdd", 3),
+    ("utils", RoutineKind::External, "winMenuDel", 2),
+    ("utils", RoutineKind::External, "winMenuItems", 1),
+    ("utils", RoutineKind::External, "winMenuNames", 0),
+    ("utils", RoutineKind::External, "winProgressBar", 6),
+    ("grDevices", RoutineKind::Call, "bringToTop", 2),
+    ("grDevices", RoutineKind::Call, "msgWindow", 2),
+    ("grDevices", RoutineKind::External, "devga", 21),
+];
+
 /// The registered routines of these packages: package, interface, name and arity. It is the
 /// union over every supported GNU R (4.3 on), because each release's namespace refers only to
 /// the routines it knows; an arity of -1 marks a routine whose argument list changed between
 /// releases, whose implementation accepts each.
-const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
+const ROUTINES: &[Routine] = &[
     ("parallel", RoutineKind::Call, "nextStream", 1),
     ("parallel", RoutineKind::Call, "nextSubStream", 1),
     ("parallel", RoutineKind::Call, "mc_children", 0),

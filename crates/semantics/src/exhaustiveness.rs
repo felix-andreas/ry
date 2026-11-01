@@ -31,8 +31,13 @@ pub enum MatchFindingKind {
     NonExhaustive {
         missing: Vec<String>,
         more: bool,
+        /// The whole `match` expression, whose closing brace new arms go before.
+        expression: TextRange,
     },
-    Unreachable,
+    Unreachable {
+        /// The whole arm, from its pattern to the end of its body.
+        arm: TextRange,
+    },
 }
 
 pub const WITNESS_LIMIT: usize = 3;
@@ -63,9 +68,15 @@ pub fn match_findings<'db>(
         for arm in module[arms].iter() {
             let row = vec![lower(db, definitions, module, arm.pattern, subject)];
             if checker.useful(&rows, &row, &[subject], 1).is_empty() {
+                let pattern = module.pattern(arm.pattern).range;
                 findings.push(MatchFinding {
-                    range: module.pattern(arm.pattern).range,
-                    kind: MatchFindingKind::Unreachable,
+                    range: pattern,
+                    kind: MatchFindingKind::Unreachable {
+                        arm: TextRange::new(
+                            pattern.start(),
+                            module.range(arm.body).end().max(pattern.end()),
+                        ),
+                    },
                 });
             }
             // A guard can fail, so its arm covers nothing.
@@ -89,7 +100,11 @@ pub fn match_findings<'db>(
         let scrutinee_range = module.range(scrutinee);
         findings.push(MatchFinding {
             range: TextRange::new(module.range(expression).start(), scrutinee_range.end()),
-            kind: MatchFindingKind::NonExhaustive { missing, more },
+            kind: MatchFindingKind::NonExhaustive {
+                missing,
+                more,
+                expression: module.range(expression),
+            },
         });
     }
     findings

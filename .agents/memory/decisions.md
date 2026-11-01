@@ -3165,6 +3165,19 @@ first lines R had already read, leaving R mid-command.
 - **Semantic tokens are an `ide` query** (`semantic_tokens`, `classify_type_token`), and the server
   only maps `SemanticClass` to its legend. Before this the classification lived in the server and
   covered annotations only, which left `match`, `=>` and tags uncolored.
+- **Semantic tokens also color R names an R grammar cannot classify**: parameters (declarations and
+  reads that resolve to a parameter binding), call heads as functions, the package of `pkg::name` as a
+  namespace, and the left side of a function assignment. Everything else stays with the editor's R
+  grammar, so tokens add facts rather than replace the grammar. The server also answers range
+  requests, so a large file only pays for the viewport.
+- **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
+  `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
+  finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics
+  it publishes, after suppressions, so a suppressed finding offers no fix. `ry check --fix` can reuse
+  the same field.
+- **Outline sections and folds come from RStudio section comments** (a comment alone on its line
+  ending in four or more `-`, `=` or `#`). A section ends at the next header of the same or a higher
+  level in the same block, which matches RStudio's outline, so files written there look the same.
 - **An inlay hint states what the code does not.** A payload-free tag or an `@Name(...)` constructor
   already spells its type, so it gets no hint and no "add annotation" action, and a vector of
   records, tuples or tags (`Position[]`) is dropped from a hinted union because no such value exists.
@@ -3982,6 +3995,13 @@ explicit allocators".
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
 
+## Character group keys get first-appearance codes during import, and the bridge widens to `dcast`
+
+- **Previous shape.** The grouping kernels (`crates/table/src/group.rs`) built mixed-radix digits for factors, integers and logicals only, so `by` on a character column went through Polars' general grouping, and at 1e6 rows the `[` bridge lost to data.table's C on string keys (`by = id3` 0.021 s against 0.017 s). Ranking the distinct strings with `ops::string_ranks` to make a digit was tried and was slower, because it sorts them. The bridge also declined every query from data.table's own namespace, any `j = eval(e)`, and any call whose head is a primitive object, so `dcast`'s aggregation `dat[, eval(fun.call), by = c(varnames)]`, with `fun.call` being `list(v1 = .Primitive("sum")(v1))`, always ran on data.table.
+- **Target shape.** Importing a character column into the engine (`import_column` in `crates/interp/src/data_table.rs`) already visits every CHARSXP, so it numbers each distinct string by first appearance through the CHARSXP's truelength, as data.table does, and restores the truelengths afterwards. The column is built from the distinct strings and the codes (`convert::strings_from_codes`, a parallel gather of views), and `Table::set_string_codes` stores the codes beside it (`StringCodes`). Any change to that column drops them (`forget_column`), and `set_key` drops all of them, so they cannot drift from the data. A code is a digit with radix `distinct + 1` (0 is `NA`). `keyby` ranks only the distinct strings, by byte order, so it sorts `k` strings, not `n` rows. In the bridge, `Piece::expand_eval` replaces `j = eval(e)` with the call `e` evaluates to, as `[.data.table` does, `frame::call_head` reads a primitive head by its name, and data.table's own namespace qualifies for grouped queries without `:=`.
+- **Exactness guards.** Outside GForce, base `sum` accumulates in `long double`, so the bridge still declines it, except `sum` of one integer or logical column (`sums_exactly`), which is exact in any order. GForce's integer `sum` widens to doubles with a warning as soon as a group's running total leaves the integer range, while the engine widens on the final total. The bridge therefore declines a GForce `sum` unless the absolute values of every integer column the query reads add up to at most `INT_MAX` (`running_sums_fit`), which rules out any running overflow. The same bound guards every grouped query that mentions `sum`, because outside GForce base `sum` widens only the overflowing group's total and data.table then rejects the mixed column types. `expand_eval` follows `[.data.table` exactly: it leaves `eval(e)` alone when a variable of `e` names a column, and declines when the expansion reads no column, since data.table decides `with = FALSE` before expanding (`eval(quote(1:2))` is `1:2` there, not columns 1 and 2). An evaluated `by` that names no column (`by = character()`, which `rollup` and `groupingsets` pass for the grand total) declines, because data.table answers it as one group. Strings intern by encoding, so when the distinct non-ASCII strings of a column carry different encoding marks, the column gets no codes and groups by its text, as data.table does. A negative truelength the import loop did not set (one left behind by C code that stopped midway) declines rather than aliasing two strings. An unnamed `by` expression is named as data.table names it (`by_expression_name`: the first suitable variable of `all.vars(key, functions = TRUE)`), and the case where data.table falls back to `deparse(key)` declines. A `j` that picks whole columns of every row also declines, because data.table copies those vectors while the engine would convert each string column in and back out (0.048 s against 0.006 s at 1e6 rows).
+- **Impact.** At 1e6 rows, best of 15: `by = c("id1", "id4")` takes 0.007 s against 0.011 s on GNU R, `by = id3` 0.007 s against 0.013 s, `keyby = id3` 0.015 s against 0.016 s, and `dcast(x, id1 ~ id4, value.var = "v1", fun.aggregate = sum)` 0.018 s against 0.027 s. All `tools/bench/table/ops.R` checksums match GNU R at 1e6 and 1e7. `fuzz_kernels_agree_with_the_polars_plans` covers string keys with `NA`s and up to 5,000 distinct values, and `crates/oracle/cases/datatable__dynamic.R` pins `eval`, spliced primitives, `dcast` and the running-overflow rule against GNU R.
+
 # Decision record: what typing finbench in strict mode settled
 
 ## Shipped stubs are whatever `types/` holds
@@ -4073,15 +4093,78 @@ explicit allocators".
 - **ry-built packages.** `rcmd` links with `-undefined dynamic_lookup` and an empty `LIBR`, so the
   binary records no libR and resolves R's API in the flat lookup that falls back to every loaded
   image. The same build then loads under ry and under GNU R, and needs no rewriting.
-- **Known gaps.** A package that loads a sibling dylib through `@loader_path` breaks in the
-  rebound copy, because the copy lives outside the package's `libs/`. A failed load of a rebound copy says so in its error. CRAN's own `libRblas.dylib`
-  could pull in GNU R's libR if a package links it directly; unobserved. The install-name match is
-  reasoned from dyld's source and verified only once the release smoke test runs on a Mac.
-- **Windows (designed, not built).** Name the library `R.dll`: the loader reuses an already loaded
-  module with the same base name, so Rtools-built package DLLs bind to ry's copy with no
-  rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
-  `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
-  The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).
+- **Relative dependencies.** The copy lives in the cache, outside the package's `libs/`, so the
+  cache mirrors the original's surroundings with links (`mirror_surroundings` in `dynload.rs`):
+  the copy's directory links every file beside the original, and `macho::Rebound::climb`, the
+  most `..` components any `@loader_path` load command or rpath starts with, decides how many
+  ancestor directories are mirrored too. Rewriting `@loader_path` to the original's absolute
+  directory was rejected: the longer string does not fit in the load command in place, and
+  growing load commands needs header padding and moves offsets. `.target` in the cache entry
+  records where the copy sits in the mirror.
+- **Known gaps.** CRAN's own `libRblas.dylib` could pull in GNU R's libR if a package links it
+  directly; unobserved. An `@rpath/../x` name combined with an `@loader_path` rpath is not counted
+  in the climb. The install-name match is reasoned from dyld's source and verified only once the
+  release smoke test runs on a Mac.
+
+## Windows runtime: `R.dll` for windows-gnu, linked with lld
+
+- **Before.** The runtime called libc directly (`dlopen`, `umask`, `utimensat`, `nl_langinfo`,
+  `iconv`, `kill` and signal numbers, process priorities, `getpwnam`), so it built only on Unix, and the Windows archive
+  carried `ry.exe` alone.
+- **Target.** `x86_64-pc-windows-gnu`, the mingw-w64 ABI Rtools builds packages with. Package DLLs
+  import from `R.dll` by module name, and the loader reuses an already loaded module with the same
+  base name, so naming ry's library `R.dll` binds them with no rewriting. Exports come from
+  `__declspec(dllexport)` in `native.c` plus rustc's own exports, so there is no `.def` file to
+  drift from the code; the linker writes `libR.dll.a` for `rcmd`. `LibExtern` is
+  `__declspec(dllimport) extern` under `_WIN32`.
+- **One platform seam.** Every operating-system call the interpreter makes goes through
+  `crates/interp/src/platform.rs`, which has a Unix and a Windows `imp` with the same functions.
+  Operating-system *calls* never happen outside it, so a new libc use shows up as a Windows build
+  error in one file; platform *conventions* (`.Platform`, the platform string, `libs/x64`, the
+  routine table) still branch on `cfg!` where they are used. The heap's address-space
+  reservation has its own small seam (`virtual_memory` in `crates/heap/src/space.rs`: `mmap` or
+  `VirtualAlloc`). Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
+  same interface `Riconv` exports.
+- **lld is required.** GNU ld 2.41 (Ubuntu's mingw-w64) emits a `HIGHLOW` base relocation for
+  each `SECREL32` thread-local offset, so a relocated `R.dll` (ASLR, or a base-address collision)
+  computes a garbage address on every `thread_local` access. lld emits none. mingw's `gcc` is
+  configured `--with-ld` and ignores `-fuse-ld=lld`, so `clang --target=x86_64-w64-mingw32
+  -fuse-ld=lld` is the linker driver (`contributing/design/r-runtime.md`, section 11, has the
+  command).
+- **A 64 MiB main-thread stack** for `ry.exe` (`crates/ry/build.rs`): the session evaluates on the
+  main thread, and base R's startup overflows Windows' 1 MiB default.
+- **Windows-only routines** that `utils` and `grDevices` reference at load time are registered in
+  `WINDOWS_ROUTINES` (`builtin_libraries.rs`), chained in only on Windows so Unix sessions keep
+  GNU R's Unix routine table.
+- **Impact.** `ry run` runs base R under Wine with no GNU R binary executed. Open: BLAS through
+  `Rblas.dll`, the msvcrt versus UCRT mismatch with Rtools-built packages (the `gnullvm` target
+  closes it), and building `R.dll` in the release workflow.
+
+# Decision record: a new top-level name costs one project fold
+
+- **Before.** A name being typed is a new top-level definition on every keystroke. That re-ran
+  `package_definitions` and `duplicate_binding_map`, two folds over every package file's
+  definitions keyed by `String`; `item_interface_edges` read the project-wide maps directly, so
+  every item whose check was demanded afterwards re-derived its edges; and the unresolved-name
+  typo suggestion collected the characters of every project name before checking its length.
+  `examples/keystroke_probe.rs` measured 23 to 27 ms per new-name edit on dsbench and finbench.
+- **What was structurally weak.** Two folds of the same data, and a per-item query reading
+  project-wide maps despite the per-name firewall (`package_name`) built for exactly that.
+- **Shape.** `package_definition_index` folds once into the winners and the duplicated names;
+  `package_definitions` is a plain borrow of its winners, and `duplicate_binding_map` a tracked copy
+  of its duplicates, empty in a healthy project, which keeps the per-file duplicate check firewalled.
+  `item_interface_edges` reads `package_name` and `test_name`. Map keys are `Symbol`, whose hash
+  is the spelling's FxHash computed once at interning (not the index, so iteration order does not
+  depend on which thread interned a spelling first, which the robustness contract forbids from
+  reaching output; this replaces an earlier index hash, which saved only the read of the stored
+  hash from the symbol table); `Symbol` therefore no longer implements
+  `Borrow<str>`, and a lookup by text interns first (`Symbol::new`). The symbol table also stores
+  each spelling's character count, which the typo scan filters on before reading any spelling.
+- **Impact.** New-name edits take about 4 to 6 ms on dsbench and finbench, body edits about 2 ms
+  (unchanged). Pinned by `a_new_definition_rebuilds_no_other_files_interface_edges` in
+  `crates/semantics/tests/test_incremental.rs`. The probe's earlier 60 to 74 ms figure was an
+  artifact: it edited a digit inside an identifier, which renamed an item, and it entered the
+  stubs at `LOW` durability, which made every keystroke deep-verify about 51,000 memos.
 
 ## The runtime emulates the GNU R version it loads base R from
 
@@ -4109,3 +4192,38 @@ explicit allocators".
   be reinstalled when the linked base version changes.
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
+
+## A fix says whether it may be applied unseen
+
+- `Fix.applicability` (`diagnostics.rs`) is `Safe` when the edit keeps what the code means (the lint
+  rewrites, syncing a `#:` comment to the inline type that governs, removing an unreachable arm) and
+  `Unsafe` when it guesses intent or silences a finding without handling it (spelling suggestions,
+  `stop()` arms for missing cases). It follows ruff's model. `ry check --fix`, the editor's preferred
+  quick fix and the `source.fixAll` action apply only safe fixes, because nobody reviews those edits;
+  `--unsafe-fixes` and a click opt into the rest. The fix lives on the diagnostic, so the CLI and the
+  server share one source of truth (`applicable_fixes`, `apply_fixes`).
+- `ry check --fix` re-analyzes and repeats until no fix changes a file (at most `MAX_FIX_PASSES`),
+  because overlapping fixes are skipped within a pass and one fix can expose another. It refuses
+  to write a file whose text on disk no longer matches the analyzed text, and leaves a file with a
+  syntax error alone.
+- Safe means safe in context, not by syntax alone: `boolean-shorthand` holds only while the file
+  binds no `T`/`F` (it rides the lints' `unless_redefined` channel), and the `#:` comment fix is
+  withheld when the inline type names a type parameter the comment would not bind.
+- The server keeps each open document's settled fix-bearing findings with the text they were computed
+  for (`published_fixes` in `server.rs`). `codeAction` reuses them while the text matches, so a
+  request per cursor move costs no analysis, and the offered fixes are the findings on screen.
+
+## Parameter hints and call hierarchy follow R's own call rules
+
+- Parameter-name inlay hints (`inlay_hints` in `ide.rs`) map arguments to parameters with the
+  checker's own `argument_targets` (`check.rs`), so the hint and the type check never disagree on
+  where an argument goes. Hints stop at a forwarded `...` and skip a piped value. They show only in calls with at least two positional arguments, and skip one-letter
+  parameters and arguments whose text already names the parameter (`years` or `x$years`), because a
+  hint that repeats what is on screen is noise.
+- The call hierarchy is limited to project top-level functions (the `package_definitions` index),
+  because those are the items a reader navigates between and the index is already per-name tracked.
+  Only call heads count as calls, so passing `f` to `lapply` is a reference, not a call. A caller
+  that is a top-level statement is grouped as "(top level)". The server re-resolves a function item from
+  its uri and selection start instead of serializing ids into `data`, so a stale item never names
+  a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
+  statement calls first.

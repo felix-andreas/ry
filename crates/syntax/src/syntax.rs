@@ -16,7 +16,7 @@ pub use {
     kind::SyntaxKind,
     lexer::{Token, is_syntactic_name, lex},
     parser::parse,
-    rowan::{TextRange, TextSize},
+    rowan::{TextRange, TextSize, TokenAtOffset},
 };
 use {
     rowan::{GreenNode, GreenNodeData, GreenTokenData, Language, NodeOrToken, WalkEvent},

@@ -50,6 +50,7 @@ pub mod methods;
 pub mod moves;
 pub mod native;
 pub mod parallel;
+pub mod platform;
 pub mod print;
 pub mod random;
 pub mod rd;

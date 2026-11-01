@@ -1938,8 +1938,10 @@ async fn ry_syntax_gets_semantic_tokens() {
         classified.push((text.to_owned(), token.token_type));
     }
     // Legend indices: type 0, typeParameter 1, parameter 2, operator 3, decorator 4,
-    // keyword 5, enumMember 6.
+    // keyword 5, enumMember 6, function 7, namespace 8.
     for expected in [
+        ("area", 7),
+        ("s", 2),
         ("type", 5),
         ("Shape", 0),
         ("T", 1),
@@ -1957,10 +1959,8 @@ async fn ry_syntax_gets_semantic_tokens() {
         );
     }
     assert!(
-        !classified
-            .iter()
-            .any(|(text, _)| text == "area" || text == "s"),
-        "plain R names stay with the R grammar: {classified:?}"
+        !classified.iter().any(|(text, _)| text == "r"),
+        "a local that is neither a function nor a parameter stays with the R grammar: {classified:?}"
     );
     context.shutdown().await;
 }

@@ -83,9 +83,9 @@ If none holds base R, `ry run` and `ry load` stop with exit status 2 and name th
 searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
 
 On Linux and macOS the release archive holds `ry` and ry's runtime (`libR.so` or `libR.dylib`).
-Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. On Windows,
-ry's runtime is not built yet, so `ry run` and `ry load` are Linux and macOS only, while `ry R`
-works everywhere.
+Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. The Windows
+archive does not carry the runtime (`R.dll`) yet, so `ry run` and `ry load` are Linux and macOS
+only there, while `ry R` works everywhere.
 
 On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged. Those binaries
 name GNU R's `libR`, so ry loads a copy of each package library, cached under

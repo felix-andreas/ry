@@ -60,6 +60,8 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> Error + '_ {
 /// The file name of ry's libR in an R home's `lib/`: the name compiled packages link against.
 pub const LIBR_FILE: &str = if cfg!(target_os = "macos") {
     "libR.dylib"
+} else if cfg!(windows) {
+    "R.dll"
 } else {
     "libR.so"
 };
@@ -493,6 +495,14 @@ fn link(target: &Path, link_path: &Path) -> Result<()> {
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link_path).map_err(io_error(link_path))?;
+    // Windows creates symbolic links only with Developer Mode or administrator rights; a
+    // failure says so through the error.
+    #[cfg(windows)]
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link_path).map_err(io_error(link_path))?;
+    } else {
+        std::os::windows::fs::symlink_file(target, link_path).map_err(io_error(link_path))?;
+    }
     Ok(())
 }
 

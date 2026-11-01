@@ -150,6 +150,12 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect definition PATH "anchor" TARGET "text"` | Goto-definition lands at the text in the target file. |
 | `expect completion PATH after "anchor" LABEL` | Completion after the anchor offers the label. |
 | `expect buffer PATH [lacks] "needle"` / `expect file PATH "needle"` | Buffer or disk content. |
+| `expect signature PATH after "anchor" "needle"` | Signature help after the anchor contains the needle, with the active parameter in brackets. |
+| `expect symbol PATH "a/b/c"` | The outline has that path of nested symbols. |
+| `expect workspace-symbol QUERY PATH NAME` | The workspace symbol query finds the name in the file. |
+| `expect fold PATH "from" "to"` | A fold spans the lines of the first occurrences of both needles. |
+| `expect selection PATH "anchor" "text"` | Expanding the selection from the anchor reaches exactly the text. |
+| `fix PATH "anchor" TITLE` | Apply the quick fix with that title at the anchor. |
 | `run ry ARGS...` | Run the `ry` binary in the workspace. |
 | `install DIR` | Install a source package through ry's `R CMD INSTALL` into `library/`. |
 | `expect exit N` / `expect stdout\|stderr [lacks] "needle"` | Check the last `run` or `install`. |

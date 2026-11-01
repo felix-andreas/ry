@@ -274,9 +274,17 @@ memos, which cost every editor request about 35 ms right after a keystroke.
 A check never reads a project-wide map either. Each lookup it makes across items goes through a
 firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
 writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
-binder that an immediate or script read sees. A structural edit re-runs each firewall that a check
-read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
-its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+binder that an immediate or script read sees. The interface edges an item contributes to the group
+walk (`item_interface_edges`) go through `package_name` too. A structural edit re-runs each firewall
+that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
+items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+
+A name being typed is a new top-level definition on every keystroke, so the folds that a new name
+changes are kept to one pass: `package_definition_index` folds each package file's definitions
+into the winners and, in the same loop, the names defined more than once. The duplicate check reads
+those through `duplicate_binding_map`, a copy that is empty in a healthy project and so backdates.
+Names in these maps are interned `Symbol`s whose hash was computed once at interning, so a fold
+hashes four bytes per name and never rereads the spelling.
 
 Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
