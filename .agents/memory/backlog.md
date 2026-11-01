@@ -369,10 +369,13 @@ protects construction but nothing after it.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
-- A helper that updates a collection it receives copies on every call, so `d <- helper(d, k)` in a
-  loop is quadratic (`decisions.md`, "In-place updates through nested targets", the rejected
-  move). A sound version needs escape analysis showing nothing reads the caller's variable while
-  the callee runs, plus restoring the old value on error.
+- List values (`List.append`) are not moved into a helper's parameter, so `xs <- helper(xs, x)`
+  copies (`decisions.md`, "Moving a collection into a helper's parameter").
+- A helper that calls a closure on every call ends every move early, so each call copies. Ending
+  only when the closure can reach the moved value (it is not handed the frame or the value) would
+  need an escape check on the closure's body.
+- The tail update covers only a body's last statement; `if (c) Dict.insert(d, k, 1) else d` and
+  `return(Dict.insert(d, ...))` still copy.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
   signalling) for the reuse path. Fold it into `eval_call`.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says

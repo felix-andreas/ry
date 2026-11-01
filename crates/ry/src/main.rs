@@ -178,6 +178,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
             None,
             &arguments,
             runtime_flags(preflight.config()),
+            None,
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
@@ -243,10 +244,10 @@ fn run_console(
     let filter: Box<dyn repl::InputFilter> =
         Box::new(ConsoleFilter::new(preflight, runtime == Runtime::GnuR));
     let completer = Some(Box::new(AnalysisCompleter::new()) as Box<dyn repl::SessionCompleter>);
-    let load = load_package
-        .then(load::current_package)
-        .flatten()
-        .map(|root| load::load_statement(&root, true));
+    let package = load_package.then(load::current_package).flatten();
+    let load = package
+        .as_ref()
+        .map(|root| load::load_statement(root, true));
     match runtime {
         // ry's runtime carries its own loader, so it needs only the load statement.
         Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
@@ -256,11 +257,15 @@ fn run_console(
                 input,
                 filter: Some(filter),
                 completer,
+                package,
                 ..repl::RunOptions::default()
             },
             flags,
         )),
         Runtime::GnuR => {
+            if let Some(root) = package {
+                load::prepare(root);
+            }
             let mut startup = vec![load::embedded_runtime()];
             startup.extend(load);
             gnu_r_exit(repl::run(repl::RunOptions {
@@ -313,6 +318,7 @@ fn run_load(
             Some(&input),
             &[],
             runtime_flags(preflight.config()),
+            Some(&root),
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),

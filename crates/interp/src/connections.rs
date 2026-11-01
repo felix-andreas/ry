@@ -632,13 +632,19 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
             open
         };
         (temporary_path(), true, open)
+    } else if description == "stdin" {
+        // `file("stdin")` is the process's standard input, unlike `stdin()`, which is the console.
+        (PathBuf::from("/dev/stdin"), false, open)
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
     // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
-    // and the connection then becomes a `gzfile` for good.
-    let sniffs = open.is_empty()
-        || parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary);
+    // and the connection then becomes a `gzfile` for good. Standard input is never sniffed,
+    // here or when it opens, because the bytes sniffed would be gone from it.
+    let sniffs = description != "stdin"
+        && (open.is_empty()
+            || parse_mode(open.as_bytes())
+                .is_some_and(|mode| mode.read && !mode.write && !mode.binary));
     let compression = if !raw && sniffs {
         file_compression(&path).ok().flatten()
     } else {
@@ -650,7 +656,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         encoding: None,
         text_encoding,
         invalid_input: false,
-        raw,
+        raw: raw || description == "stdin",
         compression: 6,
         stream: None,
     });
@@ -3670,7 +3676,14 @@ fn plain_read(plain: &mut PlainFile, buffer: &mut [u8]) -> std::io::Result<usize
                 break;
             }
             plain.read_buffer.resize(READ_CHUNK, 0);
-            let count = read_fully(&mut plain.file, &mut plain.read_buffer)?;
+            // One read, not a full chunk: a terminal or pipe has only what was written so far,
+            // and a reader waiting for one line must not wait for the chunk to fill.
+            let count = loop {
+                match plain.file.read(&mut plain.read_buffer) {
+                    Err(failure) if failure.kind() == std::io::ErrorKind::Interrupted => {}
+                    result => break result?,
+                }
+            };
             plain.read_buffer.truncate(count);
             plain.os_position += count as u64;
             if count == 0 {

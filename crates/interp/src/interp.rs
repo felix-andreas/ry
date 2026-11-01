@@ -51,6 +51,7 @@ pub mod linalg;
 pub mod long_double;
 pub mod lower;
 pub mod methods;
+pub mod moves;
 pub mod native;
 pub mod parallel;
 pub mod parse_data;
@@ -217,6 +218,9 @@ pub struct Interp {
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// Values moved out of a caller's variable into a closure's parameter.
+    pub moves: moves::State,
+    pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
@@ -322,6 +326,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
+        moves: moves::State::default(),
+        library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
     });
@@ -462,6 +468,8 @@ impl RootSource for InterpRoots {
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
+            interp.moves.trace(marker);
+            interp.library_tags.trace(marker);
         }
     }
 }

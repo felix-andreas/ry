@@ -197,6 +197,9 @@ pub unsafe fn classed_error(
 
 /// GNU R's default error handler: prints the message, then goes to top level.
 pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
+    if let Err(unwind) = crate::moves::handling_error() {
+        return unwind;
+    }
     let state = interp();
     // GNU R formats the message into a buffer of `warning.length` bytes after the
     // `Error in ` (or `Error: `) head, so a longer one loses its tail.
