@@ -76,7 +76,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Tier-0 interpreter speed (session_0111kWqEYviXMfUZx1qCaLE1, Opus): closure call overhead, cached lookups, per-call allocation, match_args, slow builtins; goal suite time at or below GNU R without the JIT, 100% match kept. Coordinates directly with the JIT session. PR #137 (full-size code bases at 100% test match, suites 1.7 to 2.0x GNU R) merged as 2383a7d.
 - Analysis performance round 4 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): performance only, halve per-file CPU toward a cold check under 1 s on 4 cores, findings byte-identical, memory at or below 520 MiB. PR #135 (cold check about 2.5 s, peak RSS about 520 MiB, CRAN false errors 669 to 175) merged as eebed45; #129 as 0cee236.
 - Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): sole owner of false reports. Dedupe against #135, then the backlog false reports, the 175 remaining CRAN errors, and `ry check` on the corpus packages' R sources with every finding triaged.
-- Editor tooling for ry's features (session_0111kWqC2nSdtiQTHBsJihsP, Opus): hover, completion, goto, references, rename and inlay hints for inline types, records/tags/match, frames and the stdlib; precise diagnostic ranges.
+- Editor tooling round 2 (session_0111kWqC2nSdtiQTHBsJihsP, Opus): remaining IDE gaps, then LSP latency (p50/p99 hover, completion, goto, references, rename, diagnostics) on the full-size code bases at rust-analyzer level. PR #138 (editor features for ry's syntax, precise blame on records/tags) merged as 54d0ca0.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
