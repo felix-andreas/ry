@@ -346,7 +346,11 @@ unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Col
             format!("column `{name}` is a {}, which a DataFrame cannot hold", value.kind().name()),
         ));
     };
-    let contents = recycle(contents, height).ok_or_else(|| {
+    // An Array is never recycled, so only an R vector stretches to the frame's height.
+    let contents = (!value.is_array() || length(value) == height)
+        .then(|| recycle(contents, height))
+        .flatten()
+        .ok_or_else(|| {
         error_in(
             call,
             format!("column `{name}` has {} rows, but the DataFrame has {height}", length(value)),

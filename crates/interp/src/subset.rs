@@ -410,6 +410,9 @@ unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
 }
 
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {
+    if object.is_array() {
+        return crate::arrays::subset(object, indices, call);
+    }
     let object = values::materialize(object)?;
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
         let data = s4_data_part(object);
@@ -703,6 +706,9 @@ unsafe fn match_name(names: Sexp, name: &[u8], exact: Option<bool>) -> R<Option<
 pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call: Sexp) -> R<Sexp> {
     if object.kind() == SexpType::Record {
         return crate::records::subset2(object, indices, call);
+    }
+    if object.is_array() {
+        return crate::arrays::subset2(object, indices, call);
     }
     let object = values::materialize(object)?;
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
@@ -1193,6 +1199,9 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    if object.is_array() {
+        return crate::arrays::subassign(object, indices, value, call);
+    }
     let object = values::materialize(object)?;
     let value = values::materialize(value)?;
     // A pairlist value assigns its elements, as a list would.
@@ -1467,6 +1476,9 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
 pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
     if object.kind() == SexpType::Record {
         return crate::records::subassign2(object, indices, value, call);
+    }
+    if object.is_array() {
+        return crate::arrays::subassign2(object, indices, value, call);
     }
     let object = values::materialize(object)?;
     // A reference class object assigns into its environment and stays itself.

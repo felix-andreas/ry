@@ -50,6 +50,7 @@ pub mod print;
 pub mod random;
 pub mod rd;
 pub mod rmath;
+pub mod arrays;
 pub mod records;
 pub mod serialize;
 pub mod session;

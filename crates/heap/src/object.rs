@@ -317,6 +317,9 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
+    /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
+    pub const ARRAY: u8 = 1 << 4;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.
@@ -555,6 +558,14 @@ impl Sexp {
 
     pub unsafe fn set_object(self, on: bool) {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
+    }
+
+    pub unsafe fn is_array(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::ARRAY != 0 }
+    }
+
+    pub unsafe fn set_array(self, on: bool) {
+        unsafe { self.set_flag(flag_bits::ARRAY, on) }
     }
 
     pub unsafe fn is_altrep(self) -> bool {

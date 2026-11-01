@@ -55,6 +55,9 @@ const ATTRIB: i32 = 8;
 const LENGTH: i32 = 16;
 const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
+/// ry's `Array<T>`: strict operator and indexing rules that the specialized paths do not apply,
+/// so an Array fails every type guard and runs on the generic path.
+const ARRAY_FLAG: i64 = 1 << 4;
 const OBJECT_FLAG: i64 = 1 << 0;
 
 pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
@@ -1468,7 +1471,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, attributes, self.nil);
         fits = self.builder.ins().band(fits, plain);
         let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
-        let altrep = self.builder.ins().band_imm_u(bits, ALTREP_FLAG);
+        let altrep = self.builder.ins().band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
         let ordinary = self.builder.ins().icmp_imm_s(IntCC::Equal, altrep, 0);
         fits = self.builder.ins().band(fits, ordinary);
         if scalar {

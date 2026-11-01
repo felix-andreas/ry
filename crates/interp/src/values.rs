@@ -958,7 +958,20 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
         heap.set_attrib(copy, attributes);
     }
     copy.set_object(object.is_object());
+    copy.set_array(object.is_array());
     copy.set_gp(object.gp() & (gp::S4_OBJECT));
+    Ok(copy)
+}
+
+/// `object` as a plain R vector: an Array becomes a copy without the Array bit, and anything else
+/// is returned as is. R's own conversions (`as.double`, `as.vector`, `as.list`) go through here,
+/// so they hand back an ordinary vector that `identical()` equates with `c(...)`.
+pub unsafe fn plain(object: Sexp) -> R<Sexp> {
+    if !object.is_array() {
+        return Ok(object);
+    }
+    let copy = shallow_duplicate(object)?;
+    copy.set_array(false);
     Ok(copy)
 }
 

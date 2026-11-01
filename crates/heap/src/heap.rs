@@ -738,9 +738,14 @@ impl Heap {
         vector.set_element_unbarriered(index, value);
     }
 
+    /// Giving an Array any attribute turns it back into a plain R vector, because an Array is
+    /// attribute-free by definition.
     pub unsafe fn set_attrib(&mut self, object: Sexp, value: Sexp) {
         self.store(object, object.attrib(), value);
         object.set_attrib_unbarriered(value);
+        if value != self.known.nil && object.is_array() {
+            object.set_array(false);
+        }
     }
 
     pub unsafe fn set_enclosure(&mut self, env: Sexp, value: Sexp) {
