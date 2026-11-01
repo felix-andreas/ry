@@ -98,8 +98,12 @@ The analysis of a project has five inputs:
   from `DESCRIPTION`.
 - `StubSources` is a set-once singleton carrying the `.Rtypes` corpus.
 - `AnalysisSettings` is a singleton carrying the configuration that changes what analysis means
-  rather than which findings a host publishes, today only `[check] inline-annotations`. It is read
-  only where an inline annotation exists, so toggling it re-checks only the items that have one.
+  rather than which findings a host publishes: `[check] inline-annotations` and `[check] strict`.
+  The first is read only where an inline annotation exists, so toggling it re-checks only the
+  items that have one. The second is the project default behind `semantics::file_is_strict`, the
+  one place that decides a file's mode (its `# typing:` directive wins). A check records the
+  origins strict mode reports only for an item in a strict file, so a project that is not strict
+  never builds that table.
 
 The package loader adds a sixth, `PackageSources`, described [below](#the-package-load-index).
 
@@ -120,13 +124,20 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident
+### Syntax trees stay resident in the server, and `ry check` releases them once
 
-Every host keeps every rowan tree. Salsa's LRU would bound memory, but each read of an LRU query
-records its use under one mutex per query, and the cold check reads `item_syntax` often enough
-on all cores that the lock cost about a sixth of its wall time, for about 80 MB saved on a
-300,000-line package. Every query that reads a tree is still a memoized query whose result is
-small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
+The server keeps every rowan tree, because an edit reparses one file and every other tree stays
+valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
+has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
+off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
+zero, and salsa records nothing on a read at capacity zero. `release_trees` raises the capacity
+to one, touches every tree on one thread, evicts, and lowers it again, so the parallel passes
+never pay the per-read mutex that a nonzero capacity takes (it cost about a sixth of the cold
+check's wall time when the capacities stayed set). The released file trees come back to the
+caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
+all cores. A tree read after the release still works, by reparsing that file.
+
+Every query that reads a tree is a memoized query whose result is small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
 annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
 `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
