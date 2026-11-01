@@ -953,7 +953,8 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
         pointsize: values::as_real_scalar(call.arg(9)),
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
-        title: String::new(),
+        title: values::first_string(call.arg(14))
+            .map_or_else(String::new, |title| title.into_owned()),
         quality: 75,
     };
     graphics_render::open_device(spec)?;
@@ -1471,7 +1472,13 @@ unsafe fn do_par(call: &NativeCall<'_>) -> R<Sexp> {
                             }
                             entries.push((name, found.unwrap_or(ParValue::Null)));
                         }
-                        None => entries.push((String::new(), ParValue::Null)),
+                        None => {
+                            warnings.push(format!(
+                                "argument {} does not name a graphical parameter",
+                                index + 1
+                            ));
+                            entries.push((String::new(), ParValue::Null));
+                        }
                     }
                 }
             }
@@ -5338,6 +5345,21 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
     let (col, lty, lwd) = (call.arg(9), call.arg(10), call.arg(11));
     if x.len() < 2 || y.len() < 2 || z.len() != x.len() * y.len() {
         return Err(error("invalid x / y values or limits"));
+    }
+    if let Some(index) = levels.iter().position(|level| !level.is_finite()) {
+        // GNU R formats the level with C's `%g`, which spells it `-inf`, `inf` or `nan`.
+        let level = levels[index];
+        let text = if level.is_nan() {
+            "nan"
+        } else if level > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        };
+        return Err(error(format!(
+            "non-finite level values: levels[{}] = {text}",
+            index + 1
+        )));
     }
     with_inline_pars(call, 12, |device| {
         let pars = device.pars.clone();
