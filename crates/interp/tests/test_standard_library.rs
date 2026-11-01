@@ -346,6 +346,18 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 4 3\n",
     ),
     (
+        "{ h <- function(p, k) { g <- function() Dict.len(p); Dict.insert(p, k, g) }; f <- function() { for (i in 1) NULL; out <- NULL; for (i in 1:4) { d <- Dict.insert(Dict.empty(), \"a\", 0L); d <- h(d, \"z\"); out <- c(out, Result.with_default(Dict.get(d, \"z\"), NULL)()) }; out }; f() }",
+        "[1] 1 1 1 1\n",
+    ),
+    (
+        "{ f <- function() { me <- environment(); d <- Dict.insert(Dict.empty(), 0L, 1); h <- function(p, k, env) Dict.insert(p, k, length(env[[\"d\"]])); d <- h(d, 1L, me); Dict.get(d, 1L) }; f() }",
+        ":Ok(1L)\n",
+    ),
+    (
+        "{ moved_d <- Dict.single(0L, 1); h <- function(p, k) { n <- is.null(moved_d); moved_d <- 0; Dict.insert(p, k, n) }; for (i in 1:3) moved_d <- h(moved_d, i); Result.with_default(Dict.get(moved_d, 3L), NA) }",
+        "[1] FALSE\n",
+    ),
+    (
         "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
         "[1] 4 5\n",
     ),

@@ -149,64 +149,23 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         shared,
     });
     let result = eval::apply_closure_moved(call, function, &args, env);
+    // The original is rebuilt while the record still lies on the traced stack, because
+    // rebuilding allocates and the record holds the only references to the replaced values.
+    let restored = match interp().moves.moves.last() {
+        Some(entry) if result.is_err() && !entry.ended && !entry.shared => Some(original(entry)?),
+        Some(_) => None,
+        None => panic!("a moved argument's record disappeared during the call"),
+    };
     let Some(finished) = interp().moves.moves.pop() else {
         panic!("a moved argument's record disappeared during the call");
     };
-    if result.is_err() && !finished.ended && !finished.shared {
-        let original = original(&finished)?;
+    if let Some(original) = restored {
         heap.set_binding_value(finished.cell, original)?;
     }
     if result.is_ok() && !finished.ended && finished.callee != nil() {
         release_parameter(&finished, function)?;
     }
     result.map(Some)
-}
-
-/// Drops the finished callee frame's reference to the moved value, or to whatever an update
-/// put in its place, so the caller's next `d <- helper(d, k)` finds it unshared again. Without
-/// this the dead frame would keep the result shared, and every later call would copy it.
-///
-/// The frame is unreachable once the call returns: while the move lasted only inert builtins
-/// ran (any closure would have ended it), none of which keeps a frame, and the body creates no
-/// closure that could have captured it. The heap does not count an environment's enclosure as
-/// a reference, so the environment's own refcount cannot show this, as GNU R's
-/// `R_CleanupEnvir` uses it to.
-unsafe fn release_parameter(finished: &Move, function: Sexp) -> R<()> {
-    let formals = function.car();
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        if creates_closure(formal.car()) {
-            return Ok(());
-        }
-        formal = formal.cdr();
-    }
-    if creates_closure(crate::bytecode::source_body(function)) {
-        return Ok(());
-    }
-    let heap = crate::heap();
-    if let Some(cell) = heap.frame_cell(finished.callee, formals.tag()) {
-        heap.set_binding_value(cell, nil())?;
-    }
-    Ok(())
-}
-
-/// Whether evaluating `expression` may create a closure, which would capture its frame.
-unsafe fn creates_closure(expression: Sexp) -> bool {
-    if expression.kind() != SexpType::Language {
-        return false;
-    }
-    let head = expression.car();
-    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "function" {
-        return true;
-    }
-    let mut cell = expression;
-    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
-        if creates_closure(cell.car()) {
-            return true;
-        }
-        cell = cell.cdr();
-    }
-    false
 }
 
 /// Whether the innermost move is into the frame `env` and still lasts, which shows that no code
@@ -217,6 +176,29 @@ pub unsafe fn frame_private(env: Sexp) -> bool {
         .moves
         .last()
         .is_some_and(|entry| !entry.ended && !entry.shared && entry.callee == env)
+}
+
+/// Whether a call of `function` may create a closure, from its body or a default, which would
+/// capture the call's frame without entering a closure, so without ending a move.
+pub unsafe fn may_capture_frame(function: Sexp) -> bool {
+    let mut formal = function.car();
+    while formal.kind() == SexpType::Pairlist {
+        if creates_closure(formal.car()) {
+            return true;
+        }
+        formal = formal.cdr();
+    }
+    creates_closure(crate::bytecode::source_body(function))
+}
+
+/// Called before code reads or writes a variable through an environment value, as `e$x`,
+/// `e[["x"]]` and their assignments do. The static checks cannot tell which variable holds an
+/// environment, so such an access may reach a moved variable's frame, and it ends every move.
+pub unsafe fn reaching_environment() -> R<()> {
+    if interp().moves.moves.iter().all(|entry| entry.ended) {
+        return Ok(());
+    }
+    end_all()
 }
 
 /// Called as a closure starts running on `env`. The callee of the innermost move records its
@@ -314,6 +296,45 @@ unsafe fn original(entry: &Move) -> R<Sexp> {
     standard_library::collection_prefix(entry.value, entry.entries, &entry.replaced)
 }
 
+/// Drops the finished callee frame's reference to the moved value, or to whatever an update
+/// put in its place, so the caller's next `d <- helper(d, k)` finds it unshared again. Without
+/// this the dead frame would keep the result shared, and every later call would copy it.
+///
+/// The frame is unreachable once the call returns: while the move lasted only inert builtins
+/// ran (any closure would have ended it), none of which keeps a frame, and the body creates no
+/// closure that could have captured it. The heap does not count an environment's enclosure as
+/// a reference, so the environment's own refcount cannot show this, as GNU R's
+/// `R_CleanupEnvir` uses it to.
+unsafe fn release_parameter(finished: &Move, function: Sexp) -> R<()> {
+    if may_capture_frame(function) {
+        return Ok(());
+    }
+    let heap = crate::heap();
+    if let Some(cell) = heap.frame_cell(finished.callee, function.car().tag()) {
+        heap.set_binding_value(cell, nil())?;
+    }
+    Ok(())
+}
+
+/// Whether evaluating `expression` may create a closure, which would capture its frame.
+unsafe fn creates_closure(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "function" {
+        return true;
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+        if creates_closure(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
+}
+
 /// Whether moving into `function` for `call` is invisible, as far as the code can tell before
 /// it runs (see the module documentation).
 unsafe fn movable(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> bool {
@@ -370,15 +391,24 @@ unsafe fn movable(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> bool {
         locals.push(formal.tag());
         formal = formal.cdr();
     }
+    let parameters = locals.len();
     if !assigned_symbols(body, &mut locals) {
         return false;
     }
     // A free reference to the caller's variable reads the cleared binding; the callee's own
-    // parameter or local of that name is another variable.
+    // parameter of that name is another variable. A local assignment of that name does not
+    // hide it, because a read before the assignment runs, or on a path that skips it, finds
+    // the caller's variable.
+    if locals[parameters..]
+        .iter()
+        .any(|symbol| forbidden.contains(symbol))
+    {
+        return false;
+    }
     let shadowed: Vec<Sexp> = forbidden
         .iter()
         .copied()
-        .filter(|symbol| !locals.contains(symbol))
+        .filter(|symbol| !locals[..parameters].contains(symbol))
         .collect();
     let callee = Scope {
         heads: function.tag(),

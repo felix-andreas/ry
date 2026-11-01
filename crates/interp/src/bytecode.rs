@@ -519,7 +519,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
-        tail_update: tail_update(body, function.car()),
+        tail_update: tail_update(body, function),
     };
     let result = compiler.allocate();
     compiler.expression(body, result)?;
@@ -669,10 +669,11 @@ unsafe fn rebinds_first_argument(expression: Sexp) -> bool {
 
 /// The last call of `body`, the body itself or the last statement of a `{`, when it is
 /// `f(p, ...)` for a standard library builtin that updates its first argument in place and `p`
-/// is the first of `formals`, with `p`. A move into the frame leaves the parameter holding the
+/// is the first parameter of `function`, with `p`. A move into the frame leaves the parameter holding the
 /// only reference to the caller's value, and nothing runs in the frame after this call, so
 /// updating the parameter's value in place is invisible while the move lasts.
-unsafe fn tail_update(body: Sexp, formals: Sexp) -> Option<(Sexp, Sexp)> {
+unsafe fn tail_update(body: Sexp, function: Sexp) -> Option<(Sexp, Sexp)> {
+    let formals = function.car();
     let mut last = body;
     if last.kind() == SexpType::Language
         && last.car().kind() == SexpType::Symbol
@@ -687,15 +688,19 @@ unsafe fn tail_update(body: Sexp, formals: Sexp) -> Option<(Sexp, Sexp)> {
         }
         last = statement.car();
     }
+    if formals.kind() != SexpType::Pairlist
+        || last.kind() != SexpType::Language
+        || last.car().kind() != SexpType::Symbol
+        || !crate::standard_library::reuses_first_argument(&symbol_name(last.car()))
+    {
+        return None;
+    }
     let parameter = formals.tag();
     let arguments = last.cdr();
-    let matches = formals.kind() == SexpType::Pairlist
-        && last.kind() == SexpType::Language
-        && last.car().kind() == SexpType::Symbol
-        && crate::standard_library::reuses_first_argument(&symbol_name(last.car()))
-        && arguments.kind() == SexpType::Pairlist
+    let matches = arguments.kind() == SexpType::Pairlist
         && arguments.tag() == nil()
-        && arguments.car() == parameter;
+        && arguments.car() == parameter
+        && !crate::moves::may_capture_frame(function);
     matches.then_some((last, parameter))
 }
 
