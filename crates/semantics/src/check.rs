@@ -8241,6 +8241,32 @@ impl<'db> Checker<'db, '_> {
                 }
                 union_of(self.db, returns)
             }
+            // A function joined with plain values comes from code whose result kind depends on
+            // an argument the checker does not follow, such as shiny's `NS(namespace)`, which
+            // returns a function exactly when `id` is missing. A call presumes the function, so
+            // only the functions are checked and the result is unchecked.
+            TyKind::Union(members)
+                if members.iter().any(|&member| {
+                    matches!(
+                        self.table.shallow_resolve(self.db, member).kind(self.db),
+                        TyKind::Function(_)
+                    )
+                }) =>
+            {
+                let functions: Vec<Ty<'db>> = members
+                    .iter()
+                    .copied()
+                    .filter(|&member| {
+                        matches!(
+                            self.table.shallow_resolve(self.db, member).kind(self.db),
+                            TyKind::Function(_)
+                        )
+                    })
+                    .collect();
+                let functions = union_of(self.db, functions);
+                self.dispatch_call(range, callee_range, functions, arguments);
+                unknown(self.db)
+            }
             _ => {
                 self.errors.push(TypeError {
                     range: callee_range,

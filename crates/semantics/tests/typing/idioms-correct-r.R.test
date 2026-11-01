@@ -575,3 +575,16 @@ scale_by: <T: numeric> fn(m: T, factor: T) -> T
 rescale: <T: numeric> fn(m: T, factor: T) -> T
 broken: Unknown
 116..123 error[type-mismatch] this call leaves out `factor`, which the function requires
+
+#---- a_function_or_a_value_is_called_as_the_function
+prefixer <- function(namespace, id) {
+  f <- function(id) paste(namespace, id, sep = "-")
+  if (missing(id)) f else f(id)
+}
+scoped <- function(namespace, name) {
+  ns <- prefixer(namespace)
+  ns(name)
+}
+#++++
+prefixer: <T, U, V> fn(namespace: T, [id]: U) -> (fn(id: V) -> character) | character
+scoped: <T, U> fn(namespace: T, name: U) -> Unknown

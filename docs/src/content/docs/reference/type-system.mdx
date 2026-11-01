@@ -1773,6 +1773,20 @@ the call must be valid against every member, since the value could be any of the
 to the union of the members' return types. No member's argument bindings leak into another's.
 Calling a function looked up in a list, as in `handlers[[name]](...)`, has this shape.
 
+A callee whose union joins functions with plain values, such as `(fn(id: T) -> character) | character`,
+comes from a function whose result kind depends on an argument, as `prefixer(namespace)` below
+returns its inner function exactly when `id` is missing. The call presumes the function: it is
+checked against the function members only and is `Unknown`. A union of functions and `NULL` alone
+is different and is reported, as [called names](#called-names) describes.
+
+```r
+prefixer <- function(namespace, id) {
+  f <- function(id) paste(namespace, id, sep = "-")
+  if (missing(id)) f else f(id)
+}
+scoped <- function(namespace, name) prefixer(namespace)(name)
+```
+
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
 [named and positional parameter rules](#named-and-positional-parameters) apply throughout. A missing
