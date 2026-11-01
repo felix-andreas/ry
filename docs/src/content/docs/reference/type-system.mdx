@@ -2792,7 +2792,12 @@ reads them.
 
 Two `unresolved` findings are errors in every mode, because they stop the package from loading: a
 `NAMESPACE` `importFrom` naming something the namespace does not export, and an `export()` naming
-something the package never defines.
+something that is not in the package's namespace. That namespace holds every top-level binding of a
+package file, including each target of a chained assignment such as `memoise <- memoize <-
+function(f) f`, and every imported name, so a package may re-export what it imports: a name from an
+`importFrom`, such as `importFrom(magrittr, "%>%")` with `export("%>%")`, or from an `import(pkg)`
+whose namespace exports it. An `import(pkg)` of a namespace without stubs may supply any name, so it
+silences the check.
 
 ### Per-file directive
 
