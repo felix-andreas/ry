@@ -1876,7 +1876,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
-  `file.copy`, `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
+  `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -1884,10 +1884,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** `bzfile()` and `xzfile()` read all three formats but always write gzip,
-  because ry has no streaming bzip2 or xz encoder (readers detect the format, so the files still
-  load). `memCompress(type = "bzip2")`, `fifo()`, URL connections and sockets are not
-  implemented.
+- **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
+  negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -1918,7 +1916,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, 41 of 66 ending with
   GNU R's exit status). First failures: precision in `polyroot` (complex), noncentral `qchisq`
   and `dbeta` (d-p-q-r-tests, d-p-q-r-tst-2), complex `%*%` (reg-BLAS), `iconv` to ASCII,
-  `file.copy` (reg-packages), `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
+  `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
   `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
   stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
   (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers

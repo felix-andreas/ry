@@ -1155,12 +1155,15 @@ fn decompress(record: &[u8], kind: i32) -> R<Vec<u8>> {
         // A raw LZMA2 stream (GNU R writes no xz container), which `datasets` and packages built
         // with `--data-compress=xz` use.
         b'Z' => {
-            let mut input = std::io::BufReader::new(payload);
-            lzma_rs::lzma2_decompress(&mut input, &mut output)
+            // The record states its decompressed size, and no LZMA2 dictionary needs to be
+            // larger than the output it produces.
+            let dictionary = expected.clamp(4096, u32::MAX as usize) as u32;
+            lzma_rust2::Lzma2Reader::new(payload, dictionary, None)
+                .read_to_end(&mut output)
                 .map_err(|failure| corrupt(&failure))?;
         }
         b'2' => {
-            bzip2_rs::DecoderReader::new(payload)
+            bzip2::read::MultiBzDecoder::new(payload)
                 .read_to_end(&mut output)
                 .map_err(|failure| corrupt(&failure))?;
         }
@@ -1312,11 +1315,16 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
             std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
             encoder.finish().map_err(|failure| call.error(failure.to_string()))?
         }
-        3 => return Err(call.error("bzip2 compression is not supported by ry yet")),
+        3 => {
+            let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
+            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+        }
         4 => {
-            let mut output = Vec::new();
-            lzma_rs::xz_compress(&mut &from[..], &mut output).map_err(|failure| call.error(failure.to_string()))?;
-            output
+            let options = lzma_rust2::XzOptions::with_preset(9);
+            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options).map_err(|failure| call.error(failure.to_string()))?;
+            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
+            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
         }
         _ => return Err(call.error("invalid 'type' argument")),
     };
@@ -1347,8 +1355,8 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
         1 => return raw_vector(from),
         2 if gzip_header => flate2::read::MultiGzDecoder::new(from).read_to_end(&mut output).map(drop),
         2 => ZlibDecoder::new(from).read_to_end(&mut output).map(drop),
-        3 => bzip2_rs::DecoderReader::new(from).read_to_end(&mut output).map(drop),
-        4 => lzma_rs::xz_decompress(&mut &from[..], &mut output).map_err(|failure| std::io::Error::other(failure.to_string())),
+        3 => bzip2::read::MultiBzDecoder::new(from).read_to_end(&mut output).map(drop),
+        4 => lzma_rust2::XzReader::new(from, true).read_to_end(&mut output).map(drop),
         _ => return Err(call.error("invalid 'type' argument")),
     };
     outcome.map_err(|_| call.error("internal error in memDecompress"))?;

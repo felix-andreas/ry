@@ -1,0 +1,31 @@
+[stdout]
+| [1] TRUE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] "a.txt"
+| [1]  TRUE FALSE
+| [1] TRUE
+| [1] "sub/a.txt"
+| [1] 42 5a 68
+| [1] fd 37 7a 58 5a 00
+| [1] "bz"
+| [1] "xz"
+| [1] 42 5a 68
+| [1] TRUE
+| [1] fd 37 7a 58 5a 00
+| [1] TRUE
+| [1] TRUE
+|  [1]  1  2  3  4  5  6  7  8  9 10
+| [1] TRUE
+|  [1]  1  2  3  4  5  6  7  8  9 10
+| [1] TRUE
+|  [1]  1  2  3  4  5  6  7  8  9 10
+| [1] 01 02 03 04 05
+| [1] "extreme"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "extreme"

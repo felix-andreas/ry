@@ -93,7 +93,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.rename", 2, do_file_rename),
     internal("file.create", 2, |call| unsafe { map_paths(call, |path| std::fs::write(path, b"").is_ok()) }),
     internal("file.append", 2, do_file_append),
-    internal("file.copy", 6, |call| unsafe { Err(call.error("file.copy is not supported")) }),
+    internal("file.copy", 6, do_file_copy),
     internal("dir.create", 4, do_dir_create).invisible(),
     internal("file.access", 2, |call| unsafe { {
         let paths = call.arg(0);
@@ -304,6 +304,88 @@ unsafe fn do_file_append(call: &Call<'_>) -> R<Sexp> {
         values::ints_mut(result)[index] = appended as i32;
     }
     Ok(result)
+}
+
+/// `file.copy(from, to, overwrite, recursive, copy.mode, copy.date)`. The R closure handles copies
+/// to file names itself and calls this only when `to` is one existing directory, so each `from`
+/// lands at `to/basename(from)`. A directory is copied only when `recursive` is TRUE.
+unsafe fn do_file_copy(call: &Call<'_>) -> R<Sexp> {
+    let (sources, target) = (call.arg(0), call.arg(1));
+    if sources.kind() != SexpType::String {
+        return Err(call.error("invalid 'from' argument"));
+    }
+    let Some(target) = values::first_string(target) else {
+        return Err(call.error("invalid 'to' argument"));
+    };
+    let options = CopyOptions {
+        overwrite: values::as_logical_scalar(call.arg(2)) == 1,
+        recursive: values::as_logical_scalar(call.arg(3)) == 1,
+        mode: values::as_logical_scalar(call.arg(4)) == 1,
+        date: values::as_logical_scalar(call.arg(5)) == 1,
+    };
+    let directory = Path::new(&crate::connections::expand_path(&target)).to_path_buf();
+    let result = alloc(SexpType::Logical, length(sources))?;
+    for index in 0..length(sources) {
+        let mut copied = false;
+        if let Some(source) = values::string_at(sources, index) {
+            let source = Path::new(&crate::connections::expand_path(&source)).to_path_buf();
+            if let Some(name) = source.file_name() {
+                let destination = directory.join(name);
+                match copy_entry(&source, &destination, &options) {
+                    Ok(outcome) => copied = outcome,
+                    Err(failure) => crate::conditions::warning(format!(
+                        "problem copying {} to {}: {}",
+                        source.display(),
+                        destination.display(),
+                        crate::connections::os_message(&failure)
+                    ))?,
+                }
+            }
+        }
+        values::ints_mut(result)[index] = copied as i32;
+    }
+    Ok(result)
+}
+
+struct CopyOptions {
+    overwrite: bool,
+    recursive: bool,
+    mode: bool,
+    date: bool,
+}
+
+/// Copies one file or directory tree, reporting FALSE for anything skipped: a directory without
+/// `recursive`, or an existing file without `overwrite`.
+fn copy_entry(source: &Path, target: &Path, options: &CopyOptions) -> std::io::Result<bool> {
+    let metadata = std::fs::metadata(source)?;
+    if metadata.is_dir() {
+        if !options.recursive {
+            return Ok(false);
+        }
+        if !target.is_dir() {
+            std::fs::create_dir(target)?;
+        }
+        let mut copied = true;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copied &= copy_entry(&entry.path(), &target.join(entry.file_name()), options)?;
+        }
+        if options.mode {
+            std::fs::set_permissions(target, metadata.permissions())?;
+        }
+        return Ok(copied);
+    }
+    if target.exists() && !options.overwrite {
+        return Ok(false);
+    }
+    std::fs::copy(source, target)?;
+    if options.mode {
+        std::fs::set_permissions(target, metadata.permissions())?;
+    }
+    if options.date {
+        std::fs::File::options().write(true).open(target)?.set_modified(metadata.modified()?)?;
+    }
+    Ok(true)
 }
 
 fn append_file(target: &str, source: &str) -> std::io::Result<()> {

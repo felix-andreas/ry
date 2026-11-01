@@ -24,7 +24,9 @@ use crate::{
     values::{self, nil, scalar_bool, scalar_integer, symbols},
     write_terminal,
 };
+use bzip2::{read::MultiBzDecoder, write::BzEncoder};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
+use lzma_rust2::{XzOptions, XzReader, XzWriter};
 use heap::{
     object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
     strings::Encoding,
@@ -39,9 +41,9 @@ use std::{
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("file", 6, do_file),
-    internal("gzfile", 4, |call| unsafe { compressed_file(call, "gzfile") }),
-    internal("bzfile", 4, |call| unsafe { compressed_file(call, "bzfile") }),
-    internal("xzfile", 4, |call| unsafe { compressed_file(call, "xzfile") }),
+    internal("gzfile", 4, |call| unsafe { compressed_file(call, Compressed::Gzip) }),
+    internal("bzfile", 4, |call| unsafe { compressed_file(call, Compressed::Bzip2) }),
+    internal("xzfile", 4, |call| unsafe { compressed_file(call, Compressed::Xz) }),
     internal("fifo", 4, |_| Err(unsupported("fifo"))),
     internal("url", 6, |_| Err(error("ry does not support URL connections yet"))),
     internal("pipe", 3, do_pipe),
@@ -520,7 +522,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write) {
+    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary) {
         file_compression(&path).ok().flatten()
     } else {
         None
@@ -528,7 +530,7 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let device = Device::File(FileDevice {
         path,
         temporary,
-        gzip: false,
+        encoding: None,
         raw,
         compression: 6,
         stream: None,
@@ -551,22 +553,32 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `gzfile`, `bzfile` and `xzfile(description, open, encoding, compression)`: reads decompress
-/// gzip, bzip2 or xz data and pass anything else through. Writes are always gzip, because ry has
-/// no bzip2 or xz encoder for streams; every reader, GNU R's included, detects the format from
-/// the magic bytes, so `save(compress = "xz")` still loads anywhere.
-unsafe fn compressed_file(call: &Call<'_>, class: &str) -> R<Sexp> {
+/// gzip, bzip2 or xz data, whichever the magic bytes announce, and pass anything else through,
+/// as GNU R's do. Writes use the connection's own format.
+unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
     let description = values::require_string(call.arg(0), "description")?;
     let open = values::require_string(call.arg(1), "open")?;
     let compression = values::as_integer_scalar(call.arg(3));
-    if !(0..=9).contains(&compression) {
+    // xzfile's negative levels select the slower "extreme" presets, which ry treats as the
+    // matching ordinary preset.
+    let valid = match encoding {
+        Compressed::Xz => (-9..=9).contains(&compression),
+        Compressed::Gzip | Compressed::Bzip2 => (0..=9).contains(&compression),
+    };
+    if !valid {
         return Err(error("invalid 'compress' argument"));
     }
+    let class = match encoding {
+        Compressed::Gzip => "gzfile",
+        Compressed::Bzip2 => "bzfile",
+        Compressed::Xz => "xzfile",
+    };
     let device = Device::File(FileDevice {
         path: PathBuf::from(expand_path(&description)),
         temporary: false,
-        gzip: true,
+        encoding: Some(encoding),
         raw: false,
-        compression: compression as u32,
+        compression: compression.unsigned_abs(),
         stream: None,
     });
     new_builtin(class, description.as_bytes(), &open, "rb", device, |_| {})
@@ -2463,8 +2475,9 @@ struct FileDevice {
     path: PathBuf,
     /// `file("")`: an anonymous file, removed when closed.
     temporary: bool,
-    /// `gzfile()`: writes compress; reads decompress when the file is compressed.
-    gzip: bool,
+    /// `gzfile()`, `bzfile()` and `xzfile()`: writes compress in this format; reads decompress
+    /// whatever format the file is in.
+    encoding: Option<Compressed>,
     /// `file(raw = TRUE)`: reads never decompress.
     raw: bool,
     compression: u32,
@@ -2474,7 +2487,42 @@ struct FileDevice {
 enum Stream {
     Plain(PlainFile),
     Inflate(Inflate),
-    Deflate { encoder: GzEncoder<File>, position: u64 },
+    Deflate { encoder: Encoder, position: u64 },
+}
+
+/// A compressing writer for each format the compressed file connections write.
+enum Encoder {
+    Gzip(GzEncoder<File>),
+    Bzip2(BzEncoder<File>),
+    Xz(XzWriter<File>),
+}
+
+impl Encoder {
+    fn finish(self) -> std::io::Result<()> {
+        match self {
+            Encoder::Gzip(encoder) => encoder.finish().map(drop),
+            Encoder::Bzip2(encoder) => encoder.finish().map(drop),
+            Encoder::Xz(encoder) => encoder.finish().map(drop),
+        }
+    }
+}
+
+impl Write for Encoder {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Encoder::Gzip(encoder) => encoder.write(bytes),
+            Encoder::Bzip2(encoder) => encoder.write(bytes),
+            Encoder::Xz(encoder) => encoder.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Encoder::Gzip(encoder) => encoder.flush(),
+            Encoder::Bzip2(encoder) => encoder.flush(),
+            Encoder::Xz(encoder) => encoder.flush(),
+        }
+    }
 }
 
 /// A file read and written through separate positions, as GNU R's file connections are.
@@ -2560,7 +2608,7 @@ fn parse_mode(mode: &[u8]) -> Option<Mode> {
     }
 }
 
-fn os_message(failure: &std::io::Error) -> String {
+pub(crate) fn os_message(failure: &std::io::Error) -> String {
     match failure.raw_os_error() {
         // SAFETY: strerror returns a valid C string for any error number.
         Some(code) => unsafe {
@@ -2645,7 +2693,7 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
 }
 
 fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
-    if device.gzip && mode.write {
+    if let Some(encoding) = device.encoding.filter(|_| mode.write) {
         if mode.read {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
@@ -2655,10 +2703,20 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
             .truncate(!mode.append)
             .append(mode.append)
             .open(&device.path)?;
-        let encoder = GzEncoder::new(file, Compression::new(device.compression));
+        let level = device.compression;
+        let encoder = match encoding {
+            Compressed::Gzip => Encoder::Gzip(GzEncoder::new(file, Compression::new(level))),
+            Compressed::Bzip2 => {
+                Encoder::Bzip2(BzEncoder::new(file, bzip2::Compression::new(level.clamp(1, 9))))
+            }
+            Compressed::Xz => Encoder::Xz(XzWriter::new(file, XzOptions::with_preset(level))?),
+        };
         return Ok(Stream::Deflate { encoder, position: 0 });
     }
-    if mode.read && !mode.write && !device.raw && file_compression(&device.path)?.is_some() {
+    // `file()` decompresses only in text mode, so `readBin()` sees a compressed file's bytes;
+    // the compressed file connections decompress in either mode.
+    let decodes = device.encoding.is_some() || !(mode.binary || device.raw);
+    if mode.read && !mode.write && decodes && file_compression(&device.path)?.is_some() {
         return Ok(Stream::Inflate(open_inflate(&device.path)?));
     }
     let file = OpenOptions::new()
@@ -2736,14 +2794,8 @@ fn decompress(bytes: Vec<u8>) -> std::io::Result<Vec<u8>> {
 fn decoder<'a>(compression: Compressed, input: Box<dyn Read + 'a>) -> std::io::Result<Box<dyn Read + 'a>> {
     Ok(match compression {
         Compressed::Gzip => Box::new(MultiGzDecoder::new(input)),
-        Compressed::Bzip2 => Box::new(bzip2_rs::DecoderReader::new(input)),
-        // lzma-rs decodes xz only into a writer, so the whole stream is decoded up front.
-        Compressed::Xz => {
-            let mut decoded = Vec::new();
-            lzma_rs::xz_decompress(&mut BufReader::new(input), &mut decoded)
-                .map_err(|failure| std::io::Error::other(failure.to_string()))?;
-            Box::new(std::io::Cursor::new(decoded))
-        }
+        Compressed::Bzip2 => Box::new(MultiBzDecoder::new(input)),
+        Compressed::Xz => Box::new(XzReader::new(input, true)),
     })
 }
 
@@ -2768,7 +2820,7 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
                     (*con).status = 0;
                     flush_writes(&mut plain)
                 }
-                Some(Stream::Deflate { encoder, .. }) => encoder.finish().map(drop),
+                Some(Stream::Deflate { encoder, .. }) => encoder.finish(),
                 Some(Stream::Inflate(_)) | None => Ok(()),
             };
             if file.temporary {
