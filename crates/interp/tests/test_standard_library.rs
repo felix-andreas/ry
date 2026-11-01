@@ -1304,6 +1304,28 @@ unsafe fn move_undo_failures() -> Vec<String> {
             "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
             "[1] 1 2 2\n",
         ),
+        // Base replacements change a moved list in place without the journal, so the move ends
+        // before them and the caller keeps its value.
+        (
+            "{ bad <- function(xs, v) { xs[[1]] <- v; xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs$a <- v; xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(length(frame$xs), is.null(names(frame$xs)))",
+            "[1] 2 1\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs[1] <- list(v); xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), 1), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
+        (
+            "{ bad <- function(xs, v) { xs[[1]][[1]] <- v; xs <- Dict.insert(Dict.single(1L, 1), \"k\", xs) }; f <- function() { for (i in 1) NULL; xs <- List.append(List.append(list(), list(1)), 2); frame <<- environment(); xs <- bad(xs, 5) }; f() }",
+            "c(frame$xs[[1]][[1]], frame$xs[[2]], length(frame$xs))",
+            "[1] 1 2 2\n",
+        ),
     ];
     let mut failures = Vec::new();
     for (failing, check, expected) in cases {

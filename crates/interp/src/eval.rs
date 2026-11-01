@@ -2925,6 +2925,9 @@ pub unsafe fn complex_assign(
     while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
         binding_env = binding_env.enclosure();
     }
+    // Ending a move into this frame hands the caller `base` back, which makes it shared, and
+    // must come before any level changes in place, since an inner level is an element of it.
+    crate::moves::modifying(base)?;
     if values::maybe_shared(base)
         || locked
         || index_assigns

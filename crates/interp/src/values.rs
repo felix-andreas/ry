@@ -1134,7 +1134,12 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             }
             list
         }
-        SexpType::Closure => triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?,
+        SexpType::Closure => {
+            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
+            // The copy captures the same frame, so a move must count it as it counts the original.
+            crate::moves::created_closure(copy)?;
+            copy
+        }
         SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
         _ if kind.is_vector() => {
             let source = materialize(object)?;

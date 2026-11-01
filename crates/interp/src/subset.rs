@@ -78,6 +78,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
 
 /// A copy of `object` that may be modified in place.
 pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
+    // Ending a move hands the caller this same value back, which makes it shared.
+    crate::moves::modifying(object)?;
     if values::maybe_shared(object) {
         values::shallow_duplicate(object)
     } else {

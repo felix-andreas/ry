@@ -4222,6 +4222,12 @@ check` releases its trees once, and memoized records are compact" below).
   `{ inc <- function(x) x + 1; xs <- List.append(xs, inc(i)); xs }` take 0.12 s, against 6.9 s
   for the tail form, which still copies because `Op::CallTailUpdate` stays off for a body that
   may capture its frame.
+- **Base replacements end the move.** `xs[[i]] <- v`, `xs$a <- v`, `xs[i] <- v` and nested forms
+  on a moved list modify it in place without reporting to the journal, so `subset::modifiable` and
+  complex assignment in `eval.rs` call `moves::modifying` first, which ends a move whose value is
+  the object being changed. It must run before the sharing check, because ending the move makes
+  the object shared again and forces the copy. A copied closure (`values` duplicate) is reported
+  to `created_closure` like a fresh one.
 - **Limits.** The tail update covers only the last statement and stays off in a body that creates
   a closure. Both are in `backlog.md`.
 

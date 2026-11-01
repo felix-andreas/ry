@@ -318,6 +318,21 @@ pub unsafe fn replacing(object: Sexp, position: usize, old: Sexp) {
     }
 }
 
+/// Ends every move when `object`, which base R code is about to change in place, is a moved
+/// value. The journal records only the library's own updates, so a list changed by `[[<-`, `$<-`
+/// or `[<-` could not be rebuilt; ending first gives the caller its value while it is intact.
+pub unsafe fn modifying(object: Sexp) -> R<()> {
+    if interp()
+        .moves
+        .moves
+        .iter()
+        .any(|entry| !entry.ended && entry.value == object)
+    {
+        end_all()?;
+    }
+    Ok(())
+}
+
 /// Ends every move: each caller's binding gets back the value it held before its call.
 unsafe fn end_all() -> R<()> {
     let heap = crate::heap();

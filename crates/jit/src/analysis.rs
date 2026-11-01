@@ -1516,7 +1516,11 @@ impl<'a> Builder<'a> {
             Op::Field => {
                 let feedback = self.feedback_at(inst.pc);
                 match self.cached_field(self.constant(operand(4))) {
-                    Some((layout, index)) if feedback != Ty::Bottom => {
+                    // Only a boxed subject can be a record, and an unboxed register's window
+                    // slot may be stale, so the read could not even load its kind.
+                    Some((layout, index))
+                        if feedback != Ty::Bottom && state.registers[operand(1)] == Ty::Boxed =>
+                    {
                         // A boxed field is loaded as it is, so only an unboxed scalar's type is
                         // something the read itself checks.
                         let feedback = if feedback.is_unboxed() {
