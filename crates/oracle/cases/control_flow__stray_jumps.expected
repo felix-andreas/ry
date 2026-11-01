@@ -1,0 +1,33 @@
+[stdout]
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| [1] "no loop for break/next, jumping to top level"
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| $value
+| NULL
+| 
+| $visible
+| [1] FALSE
+| 
+| [1] 5
+| [1] "Xb"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "Xb"

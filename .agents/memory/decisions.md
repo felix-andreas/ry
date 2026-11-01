@@ -3912,3 +3912,51 @@ explicit allocators".
   live value sits in a register, the invariant the backward-jump release already relied on.
   `evaluation__finalizer_run_points` pins it, and the bytecode, closure, promise and S3 cases
   give the same output under `gctorture(TRUE)`.
+
+## Inline lookup caches hold their environments weakly
+
+- **Before.** A bytecode inline cache stored the enclosure a lookup started from and the binding
+  cell it found as ordinary list elements. Closures that share a body share its compiled code, so
+  R6's `clone` method (one body, a new environment per object) kept the last object it ran for
+  alive until another object's call refilled the cache, and that object's finalizer ran one
+  `gc()` late.
+- **Now.** The cache list carries the heap flag `WEAK_PAIRS` (`Heap::mark_weak_pairs`). The marker
+  does not trace its elements; after weak references settle, a pair whose key (the enclosure)
+  or value (the cell) is unmarked is set to `NULL`, which is a cache miss. The cell lives in the
+  enclosure's chain, so it is unmarked only when the enclosure is. Minor collections need no
+  special case: an old list that gained a young key is in the remembered set and is traced, and
+  one that did not can only point at old objects.
+- **Why not invalidate by collection count.** Every minor collection would then empty every
+  cache, which costs a full lookup per site after each collection.
+
+## A dead key with a finalizer is revived before any other key is declared dead
+
+- `process_weak_refs` marks live values to a fixpoint, then revives every ready key with its
+  value and finalizer and marks again, until no more finalizers become ready (GNU R's
+  `RunGenCollect` loop). Only then is a reference with a dead key and no finalizer cleared. A
+  single pass let one finalizer's revived closure point at a cleared weak reference, which pool
+  hit as "attempt to apply non-function".
+
+## `break` and `next` check the loop stack
+
+- `Interp::loops` holds the environment of every loop the evaluator or a compiled body is
+  running; `for`, `while` and `repeat` push it, and `break` or `next` with no loop for the
+  current environment errors with GNU R's "no loop for break/next, jumping to top level"
+  instead of unwinding to an unrelated outer loop. `control_flow__stray_jumps` pins it.
+
+## Native code sees a compiled closure's body as its expression
+
+- `BODY` and `R_ClosureBody` return the source expression of a compiled body, as `R_ClosureExpr`
+  does. ry's bytecode holds binding cells and type feedback that have no GNU R type, so native
+  code that walks objects (`lobstr::obj_size`) failed on them.
+
+## Parse data is rebuilt from ry's tree in GNU R's shape
+
+- `getParseData` reads `srcfile$parseData`, which `parse_with_srcfile` builds when
+  `options(keep.parse.data)` is on. ry's tree differs from GNU R's grammar (argument and
+  parameter lists are nodes, a `for` header is not), so `lower.rs`'s `parse_data` rewrites it:
+  each expression becomes an `expr` row (`expr_or_assign_or_help` for `=` assignment), list nodes
+  are flattened, the `for` header becomes `forcond`, and a name's token follows its context
+  (`SYMBOL_FUNCTION_CALL`, `SYMBOL_SUB`, `SYMBOL_FORMALS`, `SYMBOL_PACKAGE`, `SLOT`). Ranges,
+  token names, text and parents match GNU R; ids only keep its children-first order, because
+  replaying bison's lookahead to reproduce its exact numbers is not worth the coupling.

@@ -2124,8 +2124,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
     full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
     was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
-  - `getParseData` returns `NULL` (see the source-references item below), and cli's
-    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
   - POSIX (TRE) patterns still run on fancy-regex through a translation (`perl = TRUE` is PCRE2,
     `decisions.md`). A non-constant-size pattern runs on fancy-regex's backtracking VM because of
     `leftmost_longest`; a DFA leftmost-longest search (regex-automata's `MatchKind::All`,
@@ -2168,8 +2166,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
   `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
   values agree to about seven digits only.
-- **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
-  stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
+- **Parse data has approximate ids, and console srcfiles differ.** `parse(keep.source = TRUE)`
+  stores GNU R's `parseData` (`lower.rs`, `parse_data`) with the same tokens, ranges and parents,
+  but ids are numbered children first without the bison lookahead gaps, so they differ from GNU
+  R's. A console or script expression lowered by `lower_script_expression` gets no parse data
+  yet. In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
   expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
   the column of a second expression after `;` differ. `.Internal(.traceback(x))`, the helper

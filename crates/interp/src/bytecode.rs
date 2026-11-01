@@ -22,7 +22,8 @@
 //!   number of registers the code uses, the sixth the profile counters (an integer vector, see
 //!   [`profile`]) and the seventh the optimizing tier's compiled code, `NULL` until it exists.
 //! - `tag`: the inline caches, a list with two slots per cache: the enclosure the lookup started
-//!   from and the binding cell it found.
+//!   from and the binding cell it found. The list holds them weakly, because closures that share
+//!   a body share its code, and a strong cache would keep the last caller's environment alive.
 //!
 //! The optimizing tier plugs in through [`Tier`]. It works on the same register file: a register
 //! window is a fixed slice of one preallocated buffer that never moves, so compiled code keeps a
@@ -532,6 +533,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         heap.set_element(constants, FIRST_CONSTANT + index, *constant);
     }
     let caches = values::alloc(SexpType::List, compiler.caches as usize * 2)?;
+    heap.mark_weak_pairs(caches);
     let code = values::triple(SexpType::Bytecode, words, constants, caches)?;
     Ok(Some(code))
 }
@@ -1542,6 +1544,13 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let profile = values::ints_mut(constants.element(PROFILE));
     profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
     let mut loops = vec![LoopState::default(); loop_count(code)];
+    // A body with loops counts as looping in its frame for the whole call, so a `break` it
+    // evaluates (through `eval`, say) inside one of them finds it. One outside every loop of
+    // such a body unwinds to the closure boundary instead, which reports the same error.
+    let loop_depth = interp().loops.len();
+    if !loops.is_empty() {
+        interp().loops.push(env);
+    }
     let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
     env.set_gp_bits(gp::COMPILED_FRAME, true);
     let mut machine = Machine {
@@ -1566,6 +1575,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
         None => execute_code(&mut machine, 0),
     };
     interp().bytecode.registers.truncate(base);
+    interp().loops.truncate(loop_depth);
     env.set_gp_bits(gp::COMPILED_FRAME, was_compiled_frame);
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),

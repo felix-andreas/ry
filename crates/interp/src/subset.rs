@@ -2686,8 +2686,6 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         let swapped = values::list_vector(&[first, second])?;
         let names = values::names(dimnames);
         if names != nil() && length(names) == 2 {
-            let swapped_names = values::list_vector(&[])?;
-            drop(swapped_names);
             let new_names = alloc(SexpType::String, 2)?;
             values::set_elt(new_names, 0, names.element(1));
             values::set_elt(new_names, 1, names.element(0));
@@ -2695,6 +2693,8 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         }
         values::set_attr(result, symbols().dimnames, swapped)?;
     }
+    // GNU R's `copyMostAttrib`: everything but names, dim and dimnames, class included.
+    values::copy_most_attributes(object, result, false)?;
     Ok(result)
 }
 

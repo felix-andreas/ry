@@ -12,3 +12,13 @@ for (tag in 5:8) removed(tag)
 forcing <- function(code) code
 in_promise <- function(tag) { held <- make(tag); forcing({ rm(held); invisible(gc()) }); cat("after", tag, "\n") }
 for (tag in 9:10) in_promise(tag)
+# Closures that share a body share its compiled code, whose lookup caches must not keep the
+# previous caller's environment alive.
+shared <- function() { for (i in 1:2) self; NULL }
+for (tag in 11:13) {
+  self <- make(tag)
+  method <- shared
+  environment(method) <- local({ self <- self; environment() })
+  method(); method()
+  rm(self, method); invisible(gc()); cat("after", tag, "\n")
+}

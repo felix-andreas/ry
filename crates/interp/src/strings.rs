@@ -2583,8 +2583,17 @@ fn translate(pattern: &str) -> Translation {
                 quantified = false;
             }
             ')' => {
-                output.push(')');
-                atom = Some(groups.pop().unwrap_or(start));
+                // TRE reads a `)` that closes no group as a literal.
+                match groups.pop() {
+                    Some(group) => {
+                        output.push(')');
+                        atom = Some(group);
+                    }
+                    None => {
+                        output.push_str("\\)");
+                        atom = Some(start);
+                    }
+                }
                 quantified = false;
             }
             '|' => {

@@ -378,6 +378,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         }
     };
     interp().frames.clear();
+    interp().loops.clear();
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();

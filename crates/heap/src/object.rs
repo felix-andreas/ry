@@ -335,6 +335,9 @@ pub(crate) mod flag_bits {
     /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
     /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
     pub const ARRAY: u8 = 1 << 4;
+    /// A list of `(key, value)` pairs that does not keep its keys alive: a collection that
+    /// finds a key dead sets both slots of its pair to `NULL`.
+    pub const WEAK_PAIRS: u8 = 1 << 5;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.

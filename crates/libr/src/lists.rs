@@ -366,10 +366,8 @@ macro_rules! closure_reader {
 }
 
 closure_reader!(FORMALS, SexpType::Closure, car);
-closure_reader!(BODY, SexpType::Closure, cdr);
 closure_reader!(CLOENV, SexpType::Closure, tag);
 closure_reader!(R_ClosureFormals, SexpType::Closure, car);
-closure_reader!(R_ClosureBody, SexpType::Closure, cdr);
 closure_reader!(R_ClosureEnv, SexpType::Closure, tag);
 closure_reader!(PRVALUE, SexpType::Promise, car);
 closure_reader!(PRCODE, SexpType::Promise, cdr);
@@ -418,6 +416,27 @@ pub(crate) unsafe fn bytecode_expression(body: Sexp) -> Sexp {
     } else {
         body
     }
+}
+
+// GNU R hands native code a compiled body as its `BCODESXP`, and code that walks objects
+// (`lobstr::obj_size`, serializers) recurses into it. ry's bytecode holds binding cells and
+// type feedback that have no GNU R type, so native code sees the source expression instead.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn BODY(closure: Sexp) -> Sexp {
+    enter(|| {
+        Ok(bytecode_expression(
+            checked_kind(closure, SexpType::Closure, "BODY")?.cdr(),
+        ))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_ClosureBody(closure: Sexp) -> Sexp {
+    enter(|| {
+        Ok(bytecode_expression(
+            checked_kind(closure, SexpType::Closure, "R_ClosureBody")?.cdr(),
+        ))
+    })
 }
 
 /// `R_ClosureExpr(f)`: the body of a closure as an expression, even when it is compiled.

@@ -1662,6 +1662,15 @@ unsafe fn do_if(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+/// Runs `body` as a loop in `env`, so that a `break` or `next` there has a loop to go to.
+pub unsafe fn in_loop<T>(env: Sexp, body: impl FnOnce() -> R<T>) -> R<T> {
+    let depth = interp().loops.len();
+    interp().loops.push(env);
+    let result = body();
+    interp().loops.truncate(depth);
+    result
+}
+
 /// Runs one loop iteration and reports whether the loop goes on: `Ok(false)` after `break`.
 unsafe fn loop_body(body: Sexp, env: Sexp) -> R<bool> {
     let result = scope(|| eval(body, env).map(|_| ()));
@@ -1705,64 +1714,81 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     // copies it instead of changing the elements still to come.
     sequence.increment_refcount();
     let mut cell = sequence;
-    let mut outcome = Ok(nil());
     let heap = crate::heap();
     heap.root(sequence);
     // Each element is rooted when it is allocated, and the binding keeps it alive after that, so
     // releasing per iteration stops a long loop from holding every element it ever made.
     let mark = heap.handle_mark();
-    for index in 0..count {
-        crate::heap().release_handles(mark);
-        let element = match sequence.kind() {
-            SexpType::List | SexpType::Expression => Ok(sequence.element(index)),
-            SexpType::Pairlist | SexpType::Language => {
-                let value = cell.car();
-                cell = cell.cdr();
-                Ok(value)
-            }
-            _ => crate::subset::vector_element(sequence, index),
-        };
-        match element
-            .and_then(|element| define(variable, element, env))
-            .and_then(|()| loop_body(body, env))
-        {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(unwind) => {
-                outcome = Err(unwind);
-                break;
+    let outcome = in_loop(env, || {
+        for index in 0..count {
+            crate::heap().release_handles(mark);
+            let element = match sequence.kind() {
+                SexpType::List | SexpType::Expression => Ok(sequence.element(index)),
+                SexpType::Pairlist | SexpType::Language => {
+                    let value = cell.car();
+                    cell = cell.cdr();
+                    Ok(value)
+                }
+                _ => crate::subset::vector_element(sequence, index),
+            };
+            match element
+                .and_then(|element| define(variable, element, env))
+                .and_then(|()| loop_body(body, env))
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(unwind) => return Err(unwind),
             }
         }
-    }
+        Ok(nil())
+    });
     sequence.decrement_refcount();
     outcome
 }
 
 unsafe fn do_while(call: &Call<'_>) -> R<Sexp> {
     let env = call.env;
-    loop {
-        let condition = scope(|| eval(call.arg(0), env))?;
-        if !as_condition(condition, call.call)? {
-            break;
+    in_loop(env, || {
+        loop {
+            let condition = scope(|| eval(call.arg(0), env))?;
+            if !as_condition(condition, call.call)? {
+                break;
+            }
+            if !loop_body(call.arg(1), env)? {
+                break;
+            }
         }
-        if !loop_body(call.arg(1), env)? {
-            break;
-        }
-    }
+        Ok(())
+    })?;
     Ok(nil())
 }
 
 unsafe fn do_repeat(call: &Call<'_>) -> R<Sexp> {
-    while loop_body(call.arg(0), call.env)? {}
+    in_loop(call.env, || {
+        while loop_body(call.arg(0), call.env)? {}
+        Ok(())
+    })?;
     Ok(nil())
 }
 
 unsafe fn do_break(call: &Call<'_>) -> R<Sexp> {
-    Err(jump(Jump::Break { env: call.env }))
+    loop_jump(Jump::Break { env: call.env }, call.env)
 }
 
 unsafe fn do_next(call: &Call<'_>) -> R<Sexp> {
-    Err(jump(Jump::Next { env: call.env }))
+    loop_jump(Jump::Next { env: call.env }, call.env)
+}
+
+/// GNU R looks for the loop before jumping, so a `break` or `next` with none running in its
+/// environment is an error reported against the innermost closure's call.
+unsafe fn loop_jump(target: Jump, env: Sexp) -> R<Sexp> {
+    if !interp().loops.contains(&env) {
+        return Err(error_in(
+            crate::unwind::current_call(),
+            "no loop for break/next, jumping to top level",
+        ));
+    }
+    Err(jump(target))
 }
 
 unsafe fn do_return(call: &Call<'_>) -> R<Sexp> {
@@ -1914,13 +1940,15 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
         if let Some(text) = text {
             for (position, arg) in alternatives.iter().enumerate() {
                 if arg.tag.kind() == SexpType::Symbol && symbol_name(arg.tag) == text.as_ref() {
-                    // Fall through empty alternatives to the next non-empty one.
+                    // Fall through empty alternatives to the next non-empty one, or to an
+                    // invisible NULL when only empty ones follow.
                     for later in &alternatives[position..] {
                         if later.value != missing {
                             return eval(later.value, call.env);
                         }
                     }
-                    return Err(call.error("empty alternative in numeric switch"));
+                    interp().visible = false;
+                    return Ok(nil());
                 }
             }
         }

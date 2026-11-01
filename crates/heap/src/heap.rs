@@ -54,6 +54,8 @@ pub struct Heap {
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
     ready_to_finalize: Vec<Sexp>,
+    /// The weak-pair lists the current collection reached, cleared of dead keys after marking.
+    weak_pairs: Vec<Sexp>,
     mark_stack: Vec<Sexp>,
     strings: StringTable,
     symbols: FxHashMap<Sexp, Sexp>,
@@ -347,6 +349,7 @@ impl Heap {
             escaped: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
+            weak_pairs: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
             enclosure_epoch: 0,
@@ -541,6 +544,13 @@ impl Heap {
     /// way (`SETLENGTH`), and binaries built then still do.
     pub unsafe fn mark_resizable(&mut self, vector: Sexp) {
         vector.set_flag(flag_bits::RESIZABLE, true);
+    }
+
+    /// Makes `list`, of even length, hold `(key, value)` pairs weakly: a pair whose key is
+    /// reachable only through the list is cleared at the next collection. An inline cache uses
+    /// this so that it never keeps the environment it was filled from alive.
+    pub unsafe fn mark_weak_pairs(&mut self, list: Sexp) {
+        list.set_flag(flag_bits::WEAK_PAIRS, true);
     }
 
     /// Changes an object's type to another of the same shape (`SET_TYPEOF`): pairlist, call and
@@ -1350,6 +1360,7 @@ impl Heap {
         }
         self.drain();
         self.process_weak_refs();
+        self.clear_dead_weak_pairs();
         // Before the sweep, while a mark still means "survives".
         self.escaped.retain(|object| object.is_marked());
         match kind {
@@ -1451,7 +1462,9 @@ impl Heap {
         }
         match object.kind().shape() {
             Shape::Vector => {
-                if matches!(
+                if object.flags() & flag_bits::WEAK_PAIRS != 0 {
+                    self.weak_pairs.push(object);
+                } else if matches!(
                     object.kind(),
                     SexpType::String | SexpType::List | SexpType::Expression
                 ) {
@@ -1488,8 +1501,63 @@ impl Heap {
     }
 
     /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
-    /// key is, so the values are marked to a fixpoint before any key is declared dead.
+    /// key is, so the values are marked to a fixpoint before any key is declared dead. A dead
+    /// key with a finalizer is then revived with its value and finalizer until the finalizer
+    /// has run, and whatever those reach can revive other keys, so marking repeats until no
+    /// more finalizers become ready, as GNU R's collector does. Only then is a reference whose
+    /// key stayed dead cleared.
     unsafe fn process_weak_refs(&mut self) {
+        loop {
+            self.mark_live_weak_values();
+            let nil = self.known.nil;
+            let (ready, kept): (Vec<Sexp>, Vec<Sexp>) = self.weak_refs.iter().partition(|weak| {
+                !weak.weak_key().is_marked()
+                    && (weak.weak_c_finalizer() != 0 || weak.weak_finalizer() != nil)
+            });
+            if ready.is_empty() {
+                break;
+            }
+            self.weak_refs = kept;
+            for &weak in &ready {
+                self.mark(weak.weak_key());
+                self.mark(weak.weak_value());
+                self.mark(weak.weak_finalizer());
+            }
+            self.drain();
+            self.ready_to_finalize.extend(ready);
+        }
+        let mut index = 0;
+        while index < self.weak_refs.len() {
+            let weak = self.weak_refs[index];
+            if weak.weak_key().is_marked() {
+                index += 1;
+                continue;
+            }
+            self.weak_refs.swap_remove(index);
+            self.clear_weak_ref(weak);
+        }
+    }
+
+    /// Runs after every weak reference is settled, so a key a finalizer revived counts as live.
+    /// A live key's value stays unmarked when it is reachable only through the pair, so the
+    /// pair is cleared then too rather than left pointing at a freed object.
+    unsafe fn clear_dead_weak_pairs(&mut self) {
+        let nil = self.known.nil;
+        for list in std::mem::take(&mut self.weak_pairs) {
+            for pair in 0..list.length() as usize / 2 {
+                let key = list.element(pair * 2);
+                let value = list.element(pair * 2 + 1);
+                if !key.is_marked() || !value.is_marked() {
+                    list.set_element_unbarriered(pair * 2, nil);
+                    list.set_element_unbarriered(pair * 2 + 1, nil);
+                }
+            }
+        }
+    }
+
+    /// Marks the value and finalizer of every weak reference whose key is marked, to a
+    /// fixpoint.
+    unsafe fn mark_live_weak_values(&mut self) {
         loop {
             let mut changed = false;
             for index in 0..self.weak_refs.len() {
@@ -1507,26 +1575,6 @@ impl Heap {
                 break;
             }
             self.drain();
-        }
-        let mut index = 0;
-        while index < self.weak_refs.len() {
-            let weak = self.weak_refs[index];
-            if weak.weak_key().is_marked() {
-                index += 1;
-                continue;
-            }
-            self.weak_refs.swap_remove(index);
-            let has_finalizer =
-                weak.weak_c_finalizer() != 0 || weak.weak_finalizer() != self.known.nil;
-            if has_finalizer {
-                self.mark(weak.weak_key());
-                self.mark(weak.weak_value());
-                self.mark(weak.weak_finalizer());
-                self.drain();
-                self.ready_to_finalize.push(weak);
-            } else {
-                self.clear_weak_ref(weak);
-            }
         }
     }
 

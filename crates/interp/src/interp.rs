@@ -156,6 +156,10 @@ pub struct Interp {
     /// `R_Srcref`: the srcref of the statement being evaluated, or `NULL`. A `{` with source
     /// references sets it for each statement, and a closure call sets it to the closure's own.
     pub srcref: Sexp,
+    /// The environments of the loops running, innermost last. A `break` or `next` in an
+    /// environment with no loop running is an error where it is evaluated, as in GNU R, so a
+    /// handler around it catches it.
+    pub loops: Vec<Sexp>,
     pub builtins: Vec<BuiltinDef>,
     pub builtin_index: FxHashMap<&'static str, u32>,
     /// The formals `.ArgsEnv` or `.GenericArgsEnv` give each builtin, read on first use;
@@ -277,6 +281,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         restarts: None,
         global_handlers: None,
         srcref: heap.known().nil,
+        loops: Vec::new(),
         builtins: Vec::new(),
         builtin_index: FxHashMap::default(),
         primitive_formals: FxHashMap::default(),
