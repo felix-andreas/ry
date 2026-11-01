@@ -5,14 +5,16 @@
 //! minimizes `sum(w (y - f(x))^2) + lambda * integral(f''^2)`. Its normal equations are banded
 //! with three super-diagonals, so every matrix here is stored as four diagonals.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    stats::{c_arguments, c_return},
-    stats_optimize::brent_minimize,
-    unwind::R,
-    values,
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        stats::{c_arguments, c_return},
+        stats_optimize::brent_minimize,
+        unwind::R,
+        values,
+    },
+    heap::object::Sexp,
 };
-use heap::object::Sexp;
 
 /// A symmetric matrix with three super-diagonals: `bands[offset][j]` is entry `(j, j + offset)`.
 type Banded = [Vec<f64>; 4];

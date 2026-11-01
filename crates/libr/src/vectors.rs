@@ -1,19 +1,21 @@
 //! Vector access, type predicates and coercion.
 
-use crate::{
-    R_len_t, R_xlen_t, Rboolean, SEXPTYPE, altrep,
-    attributes::{get_attrib, inherits, set_attrib},
-    boundary::{ApiResult, enter, error, warn},
-    globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
-    memory::{alloc_vector, scalar_string},
-    runtime,
-    strings::{c_bytes, utf8_text},
+use {
+    crate::{
+        R_len_t, R_xlen_t, Rboolean, SEXPTYPE, altrep,
+        attributes::{get_attrib, inherits, set_attrib},
+        boundary::{ApiResult, enter, error, warn},
+        globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
+        memory::{alloc_vector, scalar_string},
+        runtime,
+        strings::{c_bytes, utf8_text},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
+        strings::Encoding,
+    },
+    std::ffi::{c_char, c_int, c_void},
 };
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
-    strings::Encoding,
-};
-use std::ffi::{c_char, c_int, c_void};
 
 pub fn sexp_type(code: SEXPTYPE) -> ApiResult<SexpType> {
     SexpType::from_code(code).ok_or_else(|| error(format!("invalid type code {code}")))
@@ -28,6 +30,19 @@ pub unsafe fn refuse_native(object: Sexp) -> ApiResult<()> {
         return Err(error(interp::records::boundary_message("the value", kind)));
     }
     Ok(())
+}
+
+/// The length of a vector that needs no ALTREP method, read without entering the API.
+#[inline]
+unsafe fn plain_length(object: Sexp) -> Option<R_xlen_t> {
+    let kind = object.kind();
+    if kind.is_vector() && !object.is_altrep() {
+        Some(object.length())
+    } else if kind == SexpType::Nil {
+        Some(0)
+    } else {
+        None
+    }
 }
 
 /// The length of a vector, `LENGTH`'s and `XLENGTH`'s answer.
@@ -967,6 +982,11 @@ pub unsafe extern "C" fn TYPEOF(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LENGTH(object: Sexp) -> c_int {
+    if let Some(length) = plain_length(object)
+        && let Ok(length) = c_int::try_from(length)
+    {
+        return length;
+    }
     enter(|| {
         let length = xlength(object)?;
         if length > i32::MAX as isize {
@@ -978,11 +998,19 @@ pub unsafe extern "C" fn LENGTH(object: Sexp) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn XLENGTH(object: Sexp) -> R_xlen_t {
+    if let Some(length) = plain_length(object) {
+        return length;
+    }
     enter(|| xlength(object))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_length(object: Sexp) -> R_len_t {
+    if let Some(length) = plain_length(object)
+        && let Ok(length) = R_len_t::try_from(length)
+    {
+        return length;
+    }
     enter(|| {
         let length = generic_length(object)?;
         if length > i32::MAX as isize {
@@ -994,11 +1022,17 @@ pub unsafe extern "C" fn Rf_length(object: Sexp) -> R_len_t {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_xlength(object: Sexp) -> R_xlen_t {
+    if let Some(length) = plain_length(object) {
+        return length;
+    }
     enter(|| generic_length(object))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LOGICAL(object: Sexp) -> *mut c_int {
+    if object.kind() == SexpType::Logical && !object.is_altrep() {
+        return object.data() as *mut c_int;
+    }
     enter(|| {
         Ok(typed_data(object, &[SexpType::Logical], "LOGICAL", "logical", true)? as *mut c_int)
     })
@@ -1006,6 +1040,9 @@ pub unsafe extern "C" fn LOGICAL(object: Sexp) -> *mut c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn INTEGER(object: Sexp) -> *mut c_int {
+    if matches!(object.kind(), SexpType::Integer | SexpType::Logical) && !object.is_altrep() {
+        return object.data() as *mut c_int;
+    }
     enter(|| Ok(typed_data(object, INTEGER_TYPES, "INTEGER", "integer", true)? as *mut c_int))
 }
 
@@ -1016,6 +1053,9 @@ pub unsafe extern "C" fn RAW(object: Sexp) -> *mut u8 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn REAL(object: Sexp) -> *mut f64 {
+    if object.kind() == SexpType::Real && !object.is_altrep() {
+        return object.data() as *mut f64;
+    }
     enter(|| Ok(typed_data(object, &[SexpType::Real], "REAL", "numeric", true)? as *mut f64))
 }
 
@@ -1065,6 +1105,9 @@ pub unsafe extern "C" fn DATAPTR(object: Sexp) -> *mut c_void {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn DATAPTR_RO(object: Sexp) -> *const c_void {
+    if object.kind().is_vector() && !object.is_altrep() {
+        return object.data() as *const c_void;
+    }
     enter(|| Ok(data_pointer(object, false)? as *const c_void))
 }
 
@@ -1141,6 +1184,14 @@ or_null_api!(RAW_OR_NULL, u8, [SexpType::Raw], "RAW", "raw");
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
+    // String kernels read every element, so a plain in-bounds read skips the boundary. The
+    // element needs no handle: it stays reachable from `object` as long as GNU R's would.
+    if object.kind() == SexpType::String
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        return object.element(index as usize);
+    }
     enter(|| {
         refuse_native(object)?;
         if object.kind() != SexpType::String {
@@ -1155,6 +1206,12 @@ pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
+    if matches!(object.kind(), SexpType::List | SexpType::Expression)
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        return object.element(index as usize);
+    }
     enter(|| {
         refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
@@ -1175,6 +1232,14 @@ pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Sexp) {
+    if object.kind() == SexpType::String
+        && value.kind() == SexpType::Char
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        runtime().heap.set_element(object, index as usize, value);
+        return;
+    }
     enter(|| {
         refuse_native(object)?;
         if object.kind() != SexpType::String {
@@ -1201,6 +1266,13 @@ pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Se
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_VECTOR_ELT(object: Sexp, index: R_xlen_t, value: Sexp) -> Sexp {
+    if matches!(object.kind(), SexpType::List | SexpType::Expression)
+        && !object.is_altrep()
+        && (0..object.length()).contains(&index)
+    {
+        runtime().heap.set_element(object, index as usize, value);
+        return value;
+    }
     enter(|| {
         refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
@@ -1229,6 +1301,9 @@ pub unsafe extern "C" fn STRING_PTR(object: Sexp) -> *mut Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_PTR_RO(object: Sexp) -> *const Sexp {
+    if object.kind() == SexpType::String && !object.is_altrep() {
+        return object.data() as *const Sexp;
+    }
     enter(|| {
         Ok(typed_data(
             object,
@@ -1400,6 +1475,11 @@ macro_rules! predicate {
     ($name:ident, |$object:ident| $body:expr) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name($object: Sexp) -> Rboolean {
+            // C code tests every element it walks, and a predicate only reads, so it runs outside
+            // the boundary and enters it again only to raise its error.
+            if let Ok(answer) = (|| -> ApiResult<bool> { Ok($body) })() {
+                return answer as Rboolean;
+            }
             enter(|| Ok(($body) as Rboolean))
         }
     };

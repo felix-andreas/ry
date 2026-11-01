@@ -8,6 +8,7 @@
 #ifndef R_EXT_ALTREP_H_
 #define R_EXT_ALTREP_H_
 
+#include <Rversion.h>
 #include <Rinternals.h>
 #include <R_ext/Rdynload.h>
 
@@ -143,7 +144,9 @@ R_ALTREP_SETTER(altlist, Set_elt);
 #undef R_ALTREP_SETTER
 
 /* The writable data pointer, for use inside Dataptr methods. */
+#if R_VERSION >= R_Version(4, 6, 0)
 void *DATAPTR_RW(SEXP x);
+#endif
 
 #ifdef __cplusplus
 }

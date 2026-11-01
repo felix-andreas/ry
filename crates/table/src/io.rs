@@ -16,45 +16,120 @@
 //! different: the string "NA" and a column of digit strings are unquoted, so they read back as
 //! `NA` and as numbers.
 
-use std::{
-    fs::File,
-    io::{BufWriter, Cursor, Write},
-    path::Path,
-    sync::Arc,
+use {
+    crate::{Error, Result, Table, convert::string_to_factor},
+    memmap2::Mmap,
+    polars::prelude::{
+        BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
+        Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
+        Schema as PolarsSchema, SerReader,
+    },
+    polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+    rayon::prelude::*,
+    sniff::{ColumnType as TextColumn, Guess, Layout},
+    std::{
+        fs::File,
+        io::{BufWriter, Cursor, Write},
+        path::Path,
+        sync::Arc,
+    },
 };
-
-use memmap2::Mmap;
-use polars::prelude::{
-    BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
-    Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
-    Schema as PolarsSchema, SerReader,
-};
-use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
-use rayon::prelude::*;
-use sniff::{ColumnType as TextColumn, Guess, Layout};
-
-use crate::{Error, Result, Table, convert::string_to_factor};
 
 /// Reads a delimited text file into a table, as `fread(path)` does.
 pub fn read_csv(path: &Path) -> Result<Table> {
+    read_csv_with(path, &ReadOptions::default())
+}
+
+/// What part of a file a reader needs: the lazy planner pushes a query's projection and a leading
+/// `head` into the reader, so the columns and rows nobody reads are never parsed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// The columns to read, in the file's order whatever order they are listed in; `None` reads
+    /// every column.
+    pub columns: Option<Vec<PlSmallStr>>,
+    /// The number of data rows to read; `None` reads them all.
+    pub rows: Option<usize>,
+}
+
+/// Reads part of a delimited text file into a table.
+pub fn read_csv_with(path: &Path, options: &ReadOptions) -> Result<Table> {
     let file = File::open(path)?;
     // SAFETY: the map is read-only and dropped before this returns. Another process truncating
     // the file meanwhile is undefined behavior, the same trade every memory-mapped reader,
     // including `fread`, makes for not copying the file.
     let map = unsafe { Mmap::map(&file)? };
-    read_csv_bytes(map)
+    read_bytes(map, options)
+}
+
+/// The columns and their types a file reads as, from its sniffed layout, without parsing it.
+pub fn csv_schema(path: &Path) -> Result<crate::Schema> {
+    let file = File::open(path)?;
+    // SAFETY: as in `read_csv_with`.
+    let map = unsafe { Mmap::map(&file)? };
+    let layout = sniff::sniff(map.as_ref());
+    Ok(crate::Schema::new(layout.columns.iter().map(|column| {
+        let kind = match column.kind {
+            TextColumn::Logical => crate::ColumnType::Logical,
+            TextColumn::Integer => crate::ColumnType::Integer,
+            TextColumn::Double => crate::ColumnType::Double,
+            _ => crate::ColumnType::Character,
+        };
+        (column.name.as_str(), kind)
+    })))
 }
 
 /// Reads delimited text held in memory, as `fread(text = ...)` does.
 pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
+    read_bytes(bytes, &ReadOptions::default())
+}
+
+/// Any bytes either read into a table whose columns are the ones the sniffer promised, in its
+/// order, or fail with an error; a table that reads also writes. Nothing panics. Shared with the
+/// coverage-guided `fuzz/` target.
+pub fn check_csv_input(bytes: &[u8]) {
+    let Ok(table) = read_csv_bytes(bytes) else {
+        return;
+    };
+    let promised: Vec<String> = sniff::sniff(bytes)
+        .columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    let read: Vec<String> = table
+        .schema()
+        .columns
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    assert_eq!(
+        read, promised,
+        "the columns read differ from the sniffed ones for {bytes:?}"
+    );
+    let mut written = Vec::new();
+    if let Err(error) = write_csv_to(&table, &mut written) {
+        panic!("a table read from {bytes:?} does not write: {error}");
+    }
+}
+
+fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> Result<Table> {
     let layout = sniff::sniff(bytes.as_ref());
     if layout.columns.is_empty() {
         return Ok(Table::default());
     }
+    if let Some(columns) = &options.columns
+        && let Some(missing) = columns.iter().find(|name| {
+            !layout
+                .columns
+                .iter()
+                .any(|column| column.name == name.as_str())
+        })
+    {
+        return Err(Error::NoColumn(missing.to_string()));
+    }
     let cursor = Cursor::new(bytes);
-    let frame = match parse(cursor.get_ref().as_ref(), &layout, false) {
+    let frame = match parse(cursor.get_ref().as_ref(), &layout, options, false) {
         Ok(frame) => frame,
-        Err(_) => parse(cursor.get_ref().as_ref(), &layout, true)?,
+        Err(_) => parse(cursor.get_ref().as_ref(), &layout, options, true)?,
     };
     Table::new(frame)
 }
@@ -135,7 +210,7 @@ pub fn write_csv_to(table: &Table, writer: &mut impl Write) -> Result<()> {
 
 /// Parses the text with the sniffed layout. With `as_text`, every column reads as text and is
 /// then typed from all of its values, which is the fallback for a value the sample missed.
-fn parse(bytes: &[u8], layout: &Layout, as_text: bool) -> Result<DataFrame> {
+fn parse(bytes: &[u8], layout: &Layout, options: &ReadOptions, as_text: bool) -> Result<DataFrame> {
     let mut schema = PolarsSchema::with_capacity(layout.columns.len());
     for column in &layout.columns {
         let dtype = match (as_text, column.kind) {
@@ -151,6 +226,13 @@ fn parse(bytes: &[u8], layout: &Layout, as_text: bool) -> Result<DataFrame> {
         .with_has_header(layout.header)
         .with_schema(Some(Arc::new(schema)))
         .with_rechunk(false)
+        .with_columns(
+            options
+                .columns
+                .as_ref()
+                .map(|columns| columns.iter().cloned().collect()),
+        )
+        .with_n_rows(options.rows)
         .map_parse_options(|options| {
             options
                 .with_separator(layout.separator)
@@ -167,9 +249,16 @@ fn parse(bytes: &[u8], layout: &Layout, as_text: bool) -> Result<DataFrame> {
     let columns: Vec<Column> = frame
         .into_columns()
         .into_par_iter()
-        .zip(layout.columns.par_iter())
-        .map(|(column, sniffed)| {
-            let declared = if as_text { None } else { Some(sniffed.kind) };
+        .map(|column| {
+            let sniffed = layout
+                .columns
+                .iter()
+                .find(|sniffed| sniffed.name == column.name().as_str());
+            let declared = if as_text {
+                None
+            } else {
+                sniffed.map(|sniffed| sniffed.kind)
+            };
             type_text_column(column, declared)
         })
         .collect::<Result<_>>()?;

@@ -1,13 +1,15 @@
 //! Pairlists, calls, closures and promises: the linked structures native code walks with `CAR`
 //! and `CDR`.
 
-use crate::{
-    boundary::{ApiResult, enter, error},
-    globals::R_NamesSymbol,
-    runtime,
+use {
+    crate::{
+        boundary::{ApiResult, enter, error},
+        globals::R_NamesSymbol,
+        runtime,
+    },
+    heap::object::{Sexp, SexpType, Shape},
+    std::ffi::c_int,
 };
-use heap::object::{Sexp, SexpType, Shape};
-use std::ffi::c_int;
 
 unsafe fn triple(object: Sexp, accessor: &str) -> ApiResult<Sexp> {
     crate::vectors::refuse_native(object)?;
@@ -176,7 +178,18 @@ read_cell!(CAR, car, |object| unsafe {
     Sexp::from_raw(object.external_address().cast()).unwrap_or_else(|| runtime().nil())
 });
 read_cell!(CDR, cdr, |object| unsafe { object.external_protected() });
-read_cell!(TAG, tag, |object| unsafe { object.external_tag() });
+
+/// GNU R leaves a bytecode object's tag unused. ry keeps the inline caches there, and their
+/// environment binding cells are internal objects that native code walking a closure (lobstr's
+/// `obj_size`, for one) must not reach.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn TAG(object: Sexp) -> Sexp {
+    enter(|| match object.kind() {
+        SexpType::ExternalPtr => Ok(object.external_tag()),
+        SexpType::Bytecode => Ok(runtime().nil()),
+        _ => Ok(triple(object, "TAG")?.tag()),
+    })
+}
 read_path!(CAAR, car, car);
 read_path!(CDAR, car, cdr);
 read_path!(CADR, cdr, car);
@@ -373,6 +386,7 @@ closure_reader!(PRVALUE, SexpType::Promise, car);
 closure_reader!(PRCODE, SexpType::Promise, cdr);
 closure_reader!(PRENV, SexpType::Promise, tag);
 closure_reader!(R_PromiseExpr, SexpType::Promise, cdr);
+closure_reader!(PREXPR, SexpType::Promise, cdr);
 
 macro_rules! promise_writer {
     ($name:ident, $setter:ident) => {
@@ -405,7 +419,7 @@ pub unsafe extern "C" fn R_mkClosure(formals: Sexp, body: Sexp, env: Sexp) -> Se
 
 /// The expression a compiled body stands for: GNU R keeps it as the first constant of the
 /// bytecode's constant pool (code in the first slot, constants in the second).
-unsafe fn bytecode_expression(body: Sexp) -> Sexp {
+pub(crate) unsafe fn bytecode_expression(body: Sexp) -> Sexp {
     if body.kind() != SexpType::Bytecode {
         return body;
     }

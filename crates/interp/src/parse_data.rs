@@ -11,13 +11,15 @@
 //! wrapping a statement) still take ids, but they are left out of the table, and their children
 //! hang off the nearest visible ancestor.
 
-use crate::{
-    lower::{SourceMap, is_skipped, position},
-    unwind::R,
-    values::{self, symbols},
+use {
+    crate::{
+        lower::{SourceMap, is_skipped, position},
+        unwind::R,
+        values::{self, symbols},
+    },
+    heap::object::Sexp,
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken},
 };
-use heap::object::Sexp;
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// GNU R's parse data for the source that `root` parsed: the integer matrix with its `tokens`,
 /// `text` and `class` attributes, or `None` when the tree holds a construct GNU R cannot parse,

@@ -33,27 +33,199 @@
 //! vector it stands for, because ry's ALTREP classes do not yet record a class name and a
 //! serialized state.
 
-use crate::{
-    Global, R_xlen_t, altrep,
-    boundary::{ApiResult, enter, error, warn, with_native_scope},
-    environments::frame_value,
-    eval::primitive_name,
-    globals::{R_ClassSymbol, R_NameSymbol, R_NamespaceEnvSymbol, R_SpecSymbol},
-    runtime,
-    strings::utf8_text,
+use {
+    crate::{
+        Global, R_xlen_t, altrep,
+        boundary::{ApiResult, enter, error, warn, with_native_scope},
+        environments::frame_value,
+        eval::primitive_name,
+        globals::{R_ClassSymbol, R_NameSymbol, R_NamespaceEnvSymbol, R_SpecSymbol},
+        runtime,
+        strings::utf8_text,
+    },
+    heap::{
+        WellKnown,
+        object::{NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        strings::Encoding,
+    },
+    interp::builtins::{BuiltinDef, Call, internal},
+    rustc_hash::FxHashMap,
+    std::{
+        borrow::Cow,
+        ffi::{c_char, c_int, c_void},
+        io::Read,
+        path::Path,
+    },
 };
-use heap::{
-    WellKnown,
-    object::{NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    strings::Encoding,
-};
-use rustc_hash::FxHashMap;
-use std::{
-    borrow::Cow,
-    ffi::{c_char, c_int, c_void},
-    io::Read,
-    path::Path,
-};
+
+/// The R-level serialization internals. They replace the interpreter's own XDR-only writer, so
+/// `serialize(version = 2)`, `ascii = TRUE`, `xdr = FALSE` and `refhook` behave as in GNU R:
+/// digest hashes version 2 streams and compares them with GNU R's digests.
+pub const BUILTINS: &[BuiltinDef] = &[
+    internal("serialize", 5, |call| unsafe {
+        do_serialize(call, level_format(call.arg(2))?)
+    }),
+    internal("serializeb", 5, |call| unsafe {
+        let xdr = interp::values::as_logical_scalar(call.arg(2)) != 0;
+        do_serialize(call, if xdr { Format::Xdr } else { Format::Binary })
+    }),
+    internal("serializeToConn", 5, |call| unsafe {
+        do_serialize(call, ascii_format(call.arg(2)))?;
+        Ok(runtime().nil())
+    })
+    .invisible(),
+    internal("saveToConn", 6, |call| unsafe { do_save_to_conn(call) }).invisible(),
+    internal("lazyLoadDBinsertValue", 5, |call| unsafe {
+        do_lazy_load_insert(call)
+    }),
+];
+
+/// `lazyLoadDBinsertValue(value, file, ascii, compress, hook)`: serializes `value` (version 3,
+/// with `hook` deciding which environments become references), compresses it as `compress`
+/// asks, appends the record to `file`, and returns its `c(offset, length)`, which is the key
+/// `lazyLoadDBfetch` takes back.
+unsafe fn do_lazy_load_insert(call: &Call<'_>) -> ApiResult<Sexp> {
+    use std::io::{Seek, Write};
+    let file = interp::values::require_string(call.arg(1), "file")?;
+    let format = if interp::values::as_logical_scalar(call.arg(2)) == 1 {
+        Format::Ascii
+    } else {
+        Format::Xdr
+    };
+    let kind = interp::values::as_integer_scalar(call.arg(3));
+    let stream = serialize_to_bytes(call.arg(0), format, 3, call.arg(4))?;
+    let record =
+        interp::serialize::compress_record(&stream, if kind == NA_INTEGER { 1 } else { kind })?;
+    let failed =
+        |failure: std::io::Error| error(format!("cannot write to file '{file}': {failure}"));
+    let mut handle = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .map_err(failed)?;
+    let offset = handle.seek(std::io::SeekFrom::End(0)).map_err(failed)?;
+    handle.write_all(&record).map_err(failed)?;
+    interp::serialize::forget_database(&file);
+    let key = interp::values::alloc(SexpType::Integer, 2)?;
+    let (Ok(offset), Ok(length)) = (i32::try_from(offset), i32::try_from(record.len())) else {
+        return Err(error(format!(
+            "lazy-load database '{file}' is larger than 2GB"
+        )));
+    };
+    interp::values::ints_mut(key).copy_from_slice(&[offset, length]);
+    Ok(key)
+}
+
+/// `serialize()`'s `type` code: 0 is XDR, 1 ASCII, 2 hexadecimal ASCII and 3 native binary.
+unsafe fn level_format(code: Sexp) -> ApiResult<Format> {
+    Ok(match interp::values::as_integer_scalar(code) {
+        0 => Format::Xdr,
+        1 => Format::Ascii,
+        2 => Format::AsciiHex,
+        3 => Format::Binary,
+        _ => return Err(error("invalid 'type' argument")),
+    })
+}
+
+/// An `ascii` flag as `serializeToConn` and `save()` read it: `NA` asks for hexadecimal ASCII.
+unsafe fn ascii_format(ascii: Sexp) -> Format {
+    match interp::values::as_logical_scalar(ascii) {
+        NA_INTEGER => Format::AsciiHex,
+        0 => Format::Xdr,
+        _ => Format::Ascii,
+    }
+}
+
+/// `version = NULL` means the current default, version 3.
+unsafe fn level_version(version: Sexp) -> ApiResult<c_int> {
+    if version == runtime().nil() {
+        return Ok(3);
+    }
+    match interp::values::as_integer_scalar(version) {
+        NA_INTEGER => Err(error("bad version value")),
+        version => Ok(version),
+    }
+}
+
+/// `(object, connection, format, version, refhook)`: the bytes as a raw vector when
+/// `connection` is `NULL`, and otherwise written to the connection.
+unsafe fn do_serialize(call: &Call<'_>, format: Format) -> ApiResult<Sexp> {
+    let version = level_version(call.arg(3))?;
+    let bytes = serialize_to_bytes(call.arg(0), format, version, call.arg(4))?;
+    let connection = call.arg(1);
+    if connection != runtime().nil() {
+        // ASCII serialization prints to a text-mode connection, as GNU R's does, which is how
+        // `saveRDS(x, textConnection(...), ascii = TRUE)` works.
+        if format == Format::Ascii && interp::connections::is_text_mode(connection)? {
+            interp::connections::print(connection, &bytes)?;
+        } else {
+            interp::connections::write_binary(connection, &bytes)?;
+        }
+        return Ok(runtime().nil());
+    }
+    let result = interp::values::alloc(SexpType::Raw, bytes.len())?;
+    interp::values::raws_mut(result).copy_from_slice(&bytes);
+    Ok(result)
+}
+
+unsafe fn serialize_to_bytes(
+    object: Sexp,
+    format: Format,
+    version: c_int,
+    refhook: Sexp,
+) -> ApiResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut sink = |chunk: &[u8]| -> ApiResult<()> {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    };
+    let mut r_hook = |object: Sexp| -> ApiResult<Sexp> {
+        let value = interp::eval::apply(
+            runtime().nil(),
+            refhook,
+            &interp::eval::value_args(&[object]),
+            interp::values::global_env(),
+        )?;
+        runtime().heap.root(value);
+        Ok(value)
+    };
+    let hook: Option<PersistHook<'_>> = if refhook == runtime().nil() {
+        None
+    } else {
+        Some(&mut r_hook)
+    };
+    serialize(object, format, version, &mut sink, hook, Chunking::Buffered)?;
+    Ok(bytes)
+}
+
+/// `saveToConn(names, con, ascii, version, envir, eval.promises)`: a `save()` file, which is a
+/// magic line naming the format and version followed by the pairlist of the saved bindings.
+unsafe fn do_save_to_conn(call: &Call<'_>) -> ApiResult<Sexp> {
+    let names = call.arg(0);
+    if names.kind() != SexpType::String {
+        return Err(error("first argument must be a character vector"));
+    }
+    let env = call.arg(4);
+    if env.kind() != SexpType::Environment {
+        return Err(error("invalid 'envir' argument"));
+    }
+    let format = ascii_format(call.arg(2));
+    let version = level_version(call.arg(3))?;
+    let force = interp::values::as_logical_scalar(call.arg(5)) == 1;
+    let items = interp::serialize::saved_bindings(call, names, env, force, false)?;
+    let bindings = interp::values::pairlist(&items, SexpType::Pairlist)?;
+    runtime().heap.root(bindings);
+    let letter = if format.is_text() { 'A' } else { 'X' };
+    let mut bytes = format!("RD{letter}{version}\n").into_bytes();
+    bytes.extend(serialize_to_bytes(
+        bindings,
+        format,
+        version,
+        runtime().nil(),
+    )?);
+    interp::connections::write_binary(call.arg(1), &bytes)?;
+    Ok(runtime().nil())
+}
 
 /// The encodings a stream can use, numbered as `R_pstream_format_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -90,8 +262,10 @@ pub const DEFAULT_VERSION: c_int = 3;
 /// What a version-3 stream records as the writer's native encoding.
 const NATIVE_ENCODING: &str = "UTF-8";
 
-/// `R_Version(4, 6, 2)`: ry presents itself as R 4.6.2.
-const WRITER_VERSION: c_int = r_version(4, 6, 2);
+/// The writer's R version, which is the version ry presents (`interp::system::r_version`).
+fn writer_version() -> c_int {
+    interp::system::r_version().code()
+}
 
 const fn r_version(major: c_int, minor: c_int, patch: c_int) -> c_int {
     major * 65536 + minor * 256 + patch
@@ -184,12 +358,21 @@ pub unsafe fn to_bytes(object: Sexp, format: Format, version: c_int) -> ApiResul
             bytes.extend_from_slice(chunk);
             Ok(())
         };
-        serialize(object, format, version, &mut sink, None)?;
+        serialize(object, format, version, &mut sink, None, Chunking::Buffered)?;
     }
     Ok(bytes)
 }
 
-/// Serializes `object`, handing the bytes to `sink` in chunks. `hook` is consulted for every
+/// How the writer hands bytes to its sink.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Chunking {
+    /// In large chunks, for a sink that only collects the bytes.
+    Buffered,
+    /// One call per field, as GNU R calls a stream's `OutBytes`.
+    PerField,
+}
+
+/// Serializes `object`, handing the bytes to `sink`. `hook` is consulted for every
 /// environment (other than the special, namespace and package ones), external pointer and weak
 /// reference; a character vector it returns is written in the object's place.
 pub unsafe fn serialize(
@@ -198,6 +381,7 @@ pub unsafe fn serialize(
     version: c_int,
     sink: &mut dyn FnMut(&[u8]) -> ApiResult<()>,
     hook: Option<PersistHook<'_>>,
+    chunking: Chunking,
 ) -> ApiResult<()> {
     if !matches!(version, 2 | 3) {
         return Err(error(format!("version {version} not supported")));
@@ -207,9 +391,15 @@ pub unsafe fn serialize(
     let mut writer = Writer {
         format,
         version,
-        buffer: Vec::with_capacity(FLUSH_THRESHOLD),
+        flush_threshold: if chunking == Chunking::Buffered {
+            FLUSH_THRESHOLD
+        } else {
+            0
+        },
+        buffer: Vec::new(),
         sink,
         refs: FxHashMap::default(),
+        remembered: 0,
         hook,
         known: *runtime().heap.known(),
     };
@@ -226,10 +416,15 @@ const FLUSH_THRESHOLD: usize = 64 * 1024;
 struct Writer<'s, 'h> {
     format: Format,
     version: c_int,
+    flush_threshold: usize,
     buffer: Vec<u8>,
     sink: &'s mut dyn FnMut(&[u8]) -> ApiResult<()>,
     /// The back-reference index of every remembered object.
     refs: FxHashMap<Sexp, usize>,
+    /// How many objects the reader will have remembered, which exceeds `refs.len()` once the
+    /// persistence hook names an object a second time: GNU R remembers it again under a new
+    /// index, and so does every reader.
+    remembered: usize,
     hook: Option<PersistHook<'h>>,
     known: WellKnown,
 }
@@ -245,7 +440,7 @@ impl Writer<'_, '_> {
 
     fn write_bytes(&mut self, bytes: &[u8]) -> ApiResult<()> {
         self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() >= FLUSH_THRESHOLD {
+        if self.buffer.len() >= self.flush_threshold {
             self.flush()?;
         }
         Ok(())
@@ -336,9 +531,13 @@ impl Writer<'_, '_> {
             Format::Xdr => b"X\n",
         };
         self.write_bytes(magic)?;
-        self.write_integer(self.version)?;
-        self.write_integer(WRITER_VERSION)?;
-        self.write_integer(min_reader_version(self.version))?;
+        for field in [
+            self.version,
+            writer_version(),
+            min_reader_version(self.version),
+        ] {
+            self.write_integer(field)?;
+        }
         if self.version == 3 {
             self.write_integer(NATIVE_ENCODING.len() as i32)?;
             self.write_string(NATIVE_ENCODING.as_bytes())?;
@@ -347,8 +546,8 @@ impl Writer<'_, '_> {
     }
 
     fn remember(&mut self, object: Sexp) {
-        let index = self.refs.len() + 1;
-        self.refs.insert(object, index);
+        self.remembered += 1;
+        self.refs.insert(object, self.remembered);
     }
 
     unsafe fn write_item(&mut self, object: Sexp) -> ApiResult<()> {
@@ -360,6 +559,16 @@ impl Writer<'_, '_> {
     unsafe fn write_item_unguarded(&mut self, mut object: Sexp) -> ApiResult<()> {
         // Pairlist tails are written in a loop, so a long list costs no stack.
         loop {
+            // ry's records, tuples and tagged unions have no R representation to write.
+            if object.kind() == SexpType::Record {
+                let kind = interp::records::native_kind(object);
+                return Err(error(interp::records::boundary_message("the value", kind)));
+            }
+            // ry compiles its own bytecode, which no other R can run, so a compiled body is
+            // written as the expression it was compiled from.
+            if object.kind() == SexpType::Bytecode {
+                object = crate::lists::bytecode_expression(object);
+            }
             if let Some(name) = self.persistent_name(object)? {
                 self.remember(object);
                 self.write_integer(code::PERSISTSXP as i32)?;
@@ -560,10 +769,10 @@ impl Writer<'_, '_> {
         self.write_integer(SexpType::Environment.code() as i32)?;
         self.write_integer(env.has_gp(gp::FRAME_LOCKED) as i32)?;
         self.write_item(env.enclosure())?;
-        // GNU R conses a new binding onto the front of an unhashed frame, so the newest
-        // binding comes first.
+        // `frame_symbols` already lists in GNU R's order, which puts the newest binding of an
+        // unhashed frame first.
         let symbols = runtime().heap.frame_symbols(env);
-        for &symbol in symbols.iter().rev() {
+        for &symbol in &symbols {
             let Some(cell) = runtime().heap.frame_cell(env, symbol) else {
                 continue;
             };
@@ -755,6 +964,30 @@ impl Source for SliceSource<'_> {
 pub unsafe fn from_bytes(bytes: &[u8]) -> ApiResult<Sexp> {
     let mut source = SliceSource::new(bytes);
     Ok(unserialize(&mut source, None)?.0)
+}
+
+/// Any byte stream either fails to read with an error or reads into an object that writes back
+/// and reads again. Nothing panics. Shared by the in-tree corrupted-stream harness and the
+/// coverage-guided `fuzz/` target.
+///
+/// # Safety
+/// The caller has the runtime to itself, as for every API call.
+pub unsafe fn check_unserialize_input(bytes: &[u8]) {
+    unsafe {
+        let mark = runtime().heap.handle_mark();
+        if let Ok(object) = from_bytes(bytes) {
+            let written = to_bytes(object, Format::Xdr, 3);
+            let Ok(written) = written else {
+                panic!("an object read from {bytes:02x?} does not write back: {written:?}");
+            };
+            let again = from_bytes(&written);
+            assert!(
+                again.is_ok(),
+                "an object read from {bytes:02x?} wrote a stream that does not read: {again:?}"
+            );
+        }
+        runtime().heap.release_handles(mark);
+    }
 }
 
 /// Reads a stream's header only, as `R_SerializeInfo` does.
@@ -2196,7 +2429,16 @@ pub unsafe extern "C" fn R_Serialize(object: Sexp, stream: *mut R_outpstream_st)
             }
             None => None,
         };
-        serialize(object, format, (*stream).version, &mut sink, hook)
+        // Native streams count calls: digest's spookyhash skips a fixed number of leading
+        // bytes and fails when one call straddles that boundary.
+        serialize(
+            object,
+            format,
+            (*stream).version,
+            &mut sink,
+            hook,
+            Chunking::PerField,
+        )
     })
 }
 

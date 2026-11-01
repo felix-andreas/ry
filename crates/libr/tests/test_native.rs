@@ -4,12 +4,14 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::{CString, c_char, c_int, c_void},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::{CString, c_char, c_int, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 #[test]

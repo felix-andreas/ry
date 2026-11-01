@@ -2,15 +2,17 @@
 //! young objects into old ones and collects at random points; after every collection each object
 //! the model still reaches must hold exactly what the model says. `FUZZ_ITERS` scales the budget.
 
-use heap::{
-    Collection, GcStress, Heap, HeapError,
-    arena::Arena,
-    object::{NA_REAL, Sexp, SexpType, Slot, is_na_real},
-    records::{Fields, Layout},
-    strings::Encoding,
+use {
+    heap::{
+        Collection, GcStress, Heap, HeapError,
+        arena::Arena,
+        object::{NA_REAL, Sexp, SexpType, Slot, is_na_real},
+        records::{Fields, Layout},
+        strings::Encoding,
+    },
+    std::collections::HashSet,
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use std::collections::HashSet;
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 #[derive(Clone)]
 enum Node {
@@ -366,6 +368,51 @@ fn the_write_barrier_keeps_young_objects_stored_into_old_ones() {
         assert_eq!(old.element(0).kind(), SexpType::Integer);
         assert_eq!(old.element(0).slice::<i32>(), &[42]);
         assert_eq!(young.refcount(), 1, "a store counts as one reference");
+    }
+}
+
+#[test]
+fn stores_through_an_escaped_pointer_survive_minor_collections() {
+    let mut heap = Heap::new();
+    unsafe {
+        let strings = heap.alloc_vector(SexpType::String, 2).expect("alloc");
+        let list = heap.alloc_vector(SexpType::List, 1).expect("alloc");
+        heap.root(strings);
+        heap.root(list);
+        heap.collect(Collection::Minor);
+        heap.escape(strings);
+        heap.escape(list);
+        // Native code stores through the raw element pointers, bypassing the barrier.
+        let text = heap
+            .mk_char(b"escaped text", Encoding::Native)
+            .expect("mk_char");
+        *strings
+            .slice_mut::<Sexp>()
+            .first_mut()
+            .expect("two elements") = text;
+        let young = heap.alloc_vector(SexpType::Integer, 1).expect("alloc");
+        *young.slice_mut::<i32>().first_mut().expect("one element") = 7;
+        *list.slice_mut::<Sexp>().first_mut().expect("one element") = young;
+        heap.collect(Collection::Minor);
+        assert_eq!(strings.element(0).bytes(), b"escaped text");
+        assert_eq!(list.element(0).slice::<i32>(), &[7]);
+
+        // The call returns: the stores made before it are caught once more, then the vectors
+        // are ordinary objects again.
+        let later = heap
+            .mk_char(b"stored before return", Encoding::Native)
+            .expect("mk_char");
+        *strings
+            .slice_mut::<Sexp>()
+            .get_mut(1)
+            .expect("two elements") = later;
+        heap.retire_escaped();
+        heap.collect(Collection::Minor);
+        assert_eq!(strings.element(1).bytes(), b"stored before return");
+        heap.collect(Collection::Major);
+        assert_eq!(strings.element(0).bytes(), b"escaped text");
+        assert_eq!(strings.element(1).bytes(), b"stored before return");
+        assert_eq!(list.element(0).slice::<i32>(), &[7]);
     }
 }
 

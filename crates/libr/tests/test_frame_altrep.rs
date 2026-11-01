@@ -1,20 +1,21 @@
 //! Frame columns exposed to R as ALTREP vectors, read back through libr's own accessors, which
 //! are the paths `INTEGER`, `REAL_ELT`, `STRING_ELT` and `DATAPTR_OR_NULL` take.
 
-use std::sync::{Mutex, MutexGuard};
-
-use R::{
-    altrep::{dataptr, dataptr_or_null, int_elt, length, no_na, real_elt, sexp_elt},
-    attributes::get_attrib,
-    frame_altrep::{expose_column, expose_table, import_column},
-    globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol},
-    runtime,
-};
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
-use table::{
-    Table,
-    convert::{RVector, is_na_real},
-    polars::prelude::PlSmallStr,
+use {
+    R::{
+        altrep::{dataptr, dataptr_or_null, int_elt, length, no_na, real_elt, sexp_elt},
+        attributes::get_attrib,
+        frame_altrep::{expose_column, expose_table, import_column},
+        globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol},
+        runtime,
+    },
+    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+    std::sync::{Mutex, MutexGuard},
+    table::{
+        Table,
+        convert::{RVector, is_na_real},
+        polars::prelude::PlSmallStr,
+    },
 };
 
 /// The R runtime is one process-wide session, so the tests take turns.
@@ -260,7 +261,10 @@ fn a_whole_frame_is_a_classed_list_of_columns() {
             get_attrib(list, R_ClassSymbol.get()).unwrap_or_else(|error| panic!("{error:?}"));
         assert_eq!(
             strings_of(class),
-            [Some("frame".to_string()), Some("data.frame".to_string())]
+            [
+                Some("DataFrame".to_string()),
+                Some("data.frame".to_string())
+            ]
         );
     }
 }

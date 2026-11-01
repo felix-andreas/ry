@@ -8,14 +8,16 @@
 //! and `.Fortran` and the host's consult [`call_base_routine`] first, so `qr()` works with or
 //! without libR.
 
-use crate::{
-    TaskCallbackRoutine, builtin_libraries,
-    builtins::{Arg, BuiltinDef, Call, builtin, internal},
-    interp, linalg,
-    unwind::{R, error},
-    values::{self, nil, scalar_bool, string_vector, symbols},
+use {
+    crate::{
+        TaskCallbackRoutine, builtin_libraries,
+        builtins::{Arg, BuiltinDef, Call, builtin, internal},
+        interp, linalg,
+        unwind::{R, error},
+        values::{self, nil, scalar_bool, string_vector, symbols},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
@@ -154,9 +156,10 @@ pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Opti
     let Some((first, rest)) = call.args.split_first() else {
         return Ok(None);
     };
-    let package_symbol = values::install("PACKAGE")?;
-    let na_ok_symbol = values::install("NAOK")?;
-    let ignored = [values::install("DUP")?, values::install("ENCODING")?];
+    let known = values::symbols();
+    let package_symbol = known.package_arg;
+    let na_ok_symbol = known.na_ok;
+    let ignored = [known.dup, known.encoding];
     let mut package = None;
     let mut na_ok = false;
     let mut args: Vec<Arg> = Vec::with_capacity(rest.len());

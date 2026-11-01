@@ -1,0 +1,144 @@
+#==== frames
+#---- completion_in_a_query_offers_columns
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, .(total = sum(am$0)), by = team]
+#++++
+hover 89..91: am: Unknown
+definition: none
+references: none
+rename: none
+signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
+parameters: [...: integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: difftime, [na.rm]: logical) -> difftime
+parameters: [...: difftime] | [na.rm]: logical
+signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
+signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
+parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (1): amount
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- completion_in_a_query_offers_query_symbols
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+counts <- sales[, .(n = .$0), by = team]
+#++++
+hover 81..82: .: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (128+): .BY, .GRP, .I, .N, .NGRP, .SD, ...elt, ...length
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- completion_outside_the_brackets_offers_no_columns
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+amou$0
+#++++
+hover 57..61: amou: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (9): as.data.frame.noquote, as.matrix.noquote, .amatch_bounds, DataFrame.columns, DataFrame.group_by, DataFrame.with_columns, LazyFrame.group_by, LazyFrame.with_columns
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- hover_on_an_updated_column
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales[, t$0ax := amount * 0.2]
+#++++
+hover 65..68: tax: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- hover_on_a_column_named_by_a_string
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales[, c("t$0ax", "net") := list(amount * 0.2, amount * 0.8)]
+#++++
+hover 67..72: tax: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion: none
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- hover_on_a_column_after_dollar
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales$amo$0unt
+#++++
+hover 63..69: amount: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (1): amount
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- completion_inside_col_offers_the_frame_columns
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+picked <- DataFrame.select(sales, col("am$0"))
+#++++
+hover 95..99: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (1): amount
+hint @5: DataFrame{team: character[], amount: double[]}
+
+#---- hover_on_a_column_string_in_a_verb
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+grouped <- sales |> DataFrame.group_by("te$0am")
+#++++
+hover 96..102: team: character[]
+definition: none
+references: none
+rename: none
+signature: fn(df: DataFrame, ...: Expr | character) -> GroupBy
+parameters: df: DataFrame | [...: Expr | character]
+action: Add inferred type annotation for `grouped`
+  edit 57..57 -> "#: GroupBy{team: character[]; amount: double[]}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+  edit 57..57 -> "#: GroupBy{team: character[]; amount: double[]}\n"
+completion (1): team
+hint @5: DataFrame{team: character[], amount: double[]}
+hint @64: GroupBy{team: character[]; amount: double[]}
+
+#---- completion_in_a_verb_string_after_a_pipe
+sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+top <- sales |> DataFrame.sort("$0")
+#++++
+hover 88..90: character
+definition: none
+references: none
+rename: none
+signature: fn(df: DataFrame, ...: Expr | character, [descending]: logical) -> DataFrame
+parameters: df: DataFrame | [...: Expr | character] | [descending]: logical
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
+completion (2): amount, team
+hint @5: DataFrame{team: character[], amount: double[]}

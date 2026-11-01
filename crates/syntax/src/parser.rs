@@ -2,11 +2,15 @@
 //! groups and end a complete statement at top level and directly inside `{}`;
 //! `else` may follow a newline only when a group or brace encloses the `if`.
 
-use crate::kind::SyntaxKind::{self, *};
-use crate::lexer::{Token, lex};
-use crate::{Parse, SyntaxError};
-use rowan::{Checkpoint, GreenNodeBuilder, NodeCache, TextRange, TextSize};
-use std::cell::RefCell;
+use {
+    crate::{
+        Parse, SyntaxError,
+        kind::SyntaxKind::{self, *},
+        lexer::{Token, lex},
+    },
+    rowan::{Checkpoint, GreenNodeBuilder, NodeCache, TextRange, TextSize},
+    std::cell::RefCell,
+};
 
 /// Parses that share one node cache before it is dropped. Sharing makes identical tokens
 /// and small nodes (whitespace, punctuation, common names) one allocation across files;
@@ -522,6 +526,8 @@ impl Parser<'_, '_> {
                     self.error_here(format!("expected a type after `@{name}`"));
                 }
             }
+            // Purity carries no payload; a type after it is the block's own annotation.
+            "pure" => {}
             "strict" => {
                 self.ann_trivia(end);
                 if self.ann_at(IDENT, end) && self.token_str(self.pos) == "off" {
@@ -734,35 +740,53 @@ impl Parser<'_, '_> {
             }
             Some(COLON) if self.next_token_is(IDENT) => self.ann_tag(end),
             Some(IDENT) if self.token_str(self.pos) == ".." => self.wrap(TYPE_OTHER_TAGS),
-            Some(IDENT | NULL_KW) => match self.token_str(self.pos) {
-                "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
-                    self.ann_list_brackets(end);
-                }
-                // Inline, a body may follow a return type, so `list {` and `fn (` with a
-                // space start the body; only the hugging spelling is the type.
-                "list" | "frame" | "record" | "tuple"
-                    if self.ann_next_significant(end) == Some(L_BRACE)
-                        && (!self.inline_type || self.next_token_is(L_BRACE)) =>
-                {
-                    self.ann_list_braces(end);
-                }
-                "fn" if self.ann_next_significant(end) == Some(L_PAREN)
-                    && (!self.inline_type || self.next_token_is(L_PAREN)) =>
-                {
-                    self.ann_function_type(end);
-                }
-                _ => {
-                    if self.ann_next_significant(end) == Some(LESS) {
-                        self.start(TYPE_APPLY);
-                        self.wrap(NAME);
-                        self.ann_trivia(end);
-                        self.ann_type_arg_list(end);
+            Some(IDENT | NULL_KW) => {
+                match self.token_str(self.pos) {
+                    old @ ("frame" | "record" | "tuple")
+                        if self.ann_next_significant(end) == Some(L_BRACE) =>
+                    {
+                        let new = match old {
+                            "frame" => "DataFrame",
+                            "record" => "Record",
+                            _ => "Tuple",
+                        };
+                        self.error_here(format!("ry's own types are capitalized: write `{new}{{...}}`, not `{old}{{...}}`"));
+                        // Inside `ERROR`, lowering reads the type as unknown, so the one finding is not
+                        // followed by mismatches against a type the user did not mean.
+                        self.start(ERROR);
+                        self.ann_list_braces(end);
                         self.finish();
-                    } else {
-                        self.wrap(TYPE_REF);
+                    }
+                    "list" if self.ann_next_significant(end) == Some(L_BRACKET) => {
+                        self.ann_list_brackets(end);
+                    }
+                    // Inline, a body may follow a return type, so `list {` and `fn (` with a
+                    // space start the body; only the hugging spelling is the type.
+                    "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+                    | "data.table" | "Record" | "Tuple"
+                        if self.ann_next_significant(end) == Some(L_BRACE)
+                            && (!self.inline_type || self.next_token_is(L_BRACE)) =>
+                    {
+                        self.ann_list_braces(end);
+                    }
+                    "fn" if self.ann_next_significant(end) == Some(L_PAREN)
+                        && (!self.inline_type || self.next_token_is(L_PAREN)) =>
+                    {
+                        self.ann_function_type(end);
+                    }
+                    _ => {
+                        if self.ann_next_significant(end) == Some(LESS) {
+                            self.start(TYPE_APPLY);
+                            self.wrap(NAME);
+                            self.ann_trivia(end);
+                            self.ann_type_arg_list(end);
+                            self.finish();
+                        } else {
+                            self.wrap(TYPE_REF);
+                        }
                     }
                 }
-            },
+            }
             _ => {
                 self.error_expected("a type");
                 return;
@@ -901,9 +925,12 @@ impl Parser<'_, '_> {
     fn ann_list_braces(&mut self, end: usize) {
         let checkpoint = self.checkpoint();
         let noun = match self.token_str(self.pos) {
-            "frame" => "frame type",
-            "record" => "record type",
-            "tuple" => "tuple type",
+            "DataFrame" => "DataFrame type",
+            "LazyFrame" => "LazyFrame type",
+            "GroupBy" | "LazyGroupBy" => "GroupBy type",
+            "data.table" => "data.table type",
+            "Record" => "Record type",
+            "Tuple" => "Tuple type",
             _ => "list type",
         };
         self.wrap(NAME);
@@ -940,7 +967,8 @@ impl Parser<'_, '_> {
                 self.ann_type(end, false);
             }
             self.ann_trivia(end);
-            if self.ann_at(COMMA, end) {
+            // `GroupBy{g: character[]; x: double[]}` lists the group keys before the `;`.
+            if self.ann_at(COMMA, end) || (noun == "GroupBy type" && self.ann_at(SEMICOLON, end)) {
                 self.bump();
             } else if self.ann_at(R_BRACE, end) {
                 self.bump();
@@ -1585,6 +1613,7 @@ impl Parser<'_, '_> {
             }
             IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
             COLON if self.next_token_is(IDENT) => self.tag_expr(),
+            AT if self.pure_marker_ahead() => self.function_def(),
             // `obj@slot` broken across lines stays R's own syntax error: at a line start only
             // `@Name(` or `@Name<` reads as a constructor, while after an operator a bare
             // `@Name` is one being typed.
@@ -1597,6 +1626,11 @@ impl Parser<'_, '_> {
                 self.new_expr()
             }
             L_PAREN if self.literal_ahead() => self.collection_literal(),
+            L_BRACKET => self.array_literal(),
+            L_BRACKET2 => {
+                self.split_double_bracket();
+                self.array_literal();
+            }
             ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
                 self.wrap(ERROR);
@@ -1776,8 +1810,39 @@ impl Parser<'_, '_> {
         }
     }
 
+    /// `@pure` then, on the same line, `function` or `\`. R reads `@` only as slot access
+    /// after an operand, so no R program has this shape.
+    fn pure_marker_ahead(&self) -> bool {
+        if !self.at(AT)
+            || !self.next_token_is(IDENT)
+            || !self.adjacent(self.pos + 1)
+            || self.token_str(self.pos + 1) != "pure"
+        {
+            return false;
+        }
+        let mut pos = self.pos + 2;
+        while self
+            .tokens
+            .get(pos)
+            .is_some_and(|token| token.kind == WHITESPACE)
+        {
+            pos += 1;
+        }
+        matches!(
+            self.tokens.get(pos).map(|token| token.kind),
+            Some(FUNCTION_KW | BACKSLASH)
+        )
+    }
+
     fn function_def(&mut self) {
         self.start(FUNCTION_DEF);
+        if self.at(AT) {
+            self.start(PURE_MARKER);
+            self.bump();
+            self.bump();
+            self.finish();
+            self.eat_trivia(false);
+        }
         let keyword_range = self.token_range(self.pos);
         self.bump();
         self.eat_trivia(true);
@@ -1979,7 +2044,7 @@ impl Parser<'_, '_> {
         let dots = self.at(DOTS)
             && self
                 .peek_significant(self.pos + 1, true)
-                .is_none_or(|(kind, _)| matches!(kind, COMMA | R_PAREN));
+                .is_none_or(|(kind, _)| kind == COMMA || kind == closer);
         self.argument(closer);
         let kind = if named {
             ItemKind::Named(unquoted(self.token_str(start)).to_owned())
@@ -2160,6 +2225,48 @@ impl Parser<'_, '_> {
         let named = self.validate_items(&items, "literal");
         self.start_at(checkpoint, if named { RECORD_EXPR } else { TUPLE_EXPR });
         self.finish();
+    }
+
+    /// `[a, b]`: R reads `[` only after an operand, so in operand position it is free for ry's
+    /// Array literal, and every R indexing expression keeps its meaning.
+    fn array_literal(&mut self) {
+        self.start(ARRAY_EXPR);
+        let mut items = Vec::new();
+        self.argument_list_items(L_BRACKET, Some(&mut items));
+        for item in &items {
+            match &item.kind {
+                ItemKind::Empty => self.error_at(item.range, "expected an item in this Array"),
+                ItemKind::Dots => {
+                    self.error_at(item.range, "`...` cannot be spliced into an Array")
+                }
+                ItemKind::Named(_) => self.error_at(
+                    item.range,
+                    "an Array item has no name; use a record such as `(x = 1, y = 2)` for named fields",
+                ),
+                ItemKind::Positional => {}
+            }
+        }
+        self.finish();
+    }
+
+    /// R's lexer reads `[[` as one token, but in operand position it opens two nested Array
+    /// literals, so the token is split in place.
+    fn split_double_bracket(&mut self) {
+        debug_assert!(self.at(L_BRACKET2));
+        let single = TextSize::from(1);
+        self.tokens[self.pos] = Token {
+            kind: L_BRACKET,
+            len: single,
+        };
+        self.tokens.insert(
+            self.pos + 1,
+            Token {
+                kind: L_BRACKET,
+                len: single,
+            },
+        );
+        self.offsets
+            .insert(self.pos + 1, self.offsets[self.pos] + 1);
     }
 
     /// `@Name(value)`: prefix `@` is a syntax error in R, so the form is free. The
@@ -2661,6 +2768,8 @@ fn starts_expression(kind: SyntaxKind) -> bool {
                 | TILDE
                 | QUESTION
                 | L_PAREN
+                | L_BRACKET
+                | L_BRACKET2
                 | L_BRACE
                 | BACKSLASH
         )

@@ -1,0 +1,26 @@
+[stdout]
+| [1] "unknown" "UTF-8"   "unknown"
+| [1] 5
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] "a  " "bbb"
+| [1] "  a" "bbb"
+| [1] "A" "B" "_" "a" "b"
+| [1] 2 3 1
+| [1] "a" NA 
+| [1] "outer.a"  "outer.NA"
+| [1] TRUE
+| [1] 68 65 6c 6c 6f fc 8f
+| [1] "unknown" "UTF-8"   "unknown"
+|      [,1] [,2] [,3]
+| <0 x 0 matrix>
+|     foo    
+| foo "hello"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| structure("hello", dim = c(1L, 1L), dimnames = list(NA_character_, 
+|     NA_character_))

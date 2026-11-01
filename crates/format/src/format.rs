@@ -2,12 +2,19 @@
 //! multiline ones keep their line structure. Syntax errors refuse the file,
 //! except inside `#:` annotations, whose block is kept verbatim.
 
-use serde::Deserialize;
-use std::error::Error;
-use std::fmt::{self, Display};
-use std::iter::{once, repeat_n, successors};
-use syntax::SyntaxKind::{self, *};
-use syntax::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, lex, parse};
+use {
+    serde::Deserialize,
+    std::{
+        error::Error,
+        fmt::{self, Display},
+        iter::{once, repeat_n, successors},
+    },
+    syntax::{
+        SyntaxElement,
+        SyntaxKind::{self, *},
+        SyntaxNode, SyntaxToken, TextRange, TextSize, lex, parse,
+    },
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -664,7 +671,7 @@ impl Formatter<'_> {
         // marker, not a hole argument.
         let is_literal = node
             .parent()
-            .is_some_and(|parent| matches!(parent.kind(), RECORD_EXPR | TUPLE_EXPR));
+            .is_some_and(|parent| matches!(parent.kind(), RECORD_EXPR | TUPLE_EXPR | ARRAY_EXPR));
         let trailing_space = !is_literal
             && close_previous_token
                 .as_ref()
@@ -988,6 +995,10 @@ impl Formatter<'_> {
             let after_comment = previous.is_some_and(is_comment);
             match element.kind() {
                 COMMENT | ANNOTATION => self.place_comment(previous, element, level, level),
+                PURE_MARKER => {
+                    self.element(element, level, false);
+                    self.out.push(' ');
+                }
                 PARAMETER_LIST => {
                     if after_comment {
                         self.newline(level);
@@ -1711,7 +1722,17 @@ fn annotation_space_between(previous: &AnnotationToken, current: AnnotationToken
         OpenBracket if matches!(previous.kind, Word | CloseAngle | CloseBracket) => return false,
         OpenBrace
             if previous.kind == Word
-                && matches!(previous.text.as_str(), "list" | "record" | "tuple") =>
+                && matches!(
+                    previous.text.as_str(),
+                    "list"
+                        | "Record"
+                        | "Tuple"
+                        | "DataFrame"
+                        | "LazyFrame"
+                        | "GroupBy"
+                        | "LazyGroupBy"
+                        | "data.table"
+                ) =>
         {
             return false;
         }

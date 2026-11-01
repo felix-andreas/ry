@@ -7,14 +7,16 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::{c_char, c_int},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::{c_char, c_int},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 struct Case {
     name: String,
@@ -79,7 +81,8 @@ fn parse_expectations(text: &str) -> (Vec<Case>, Vec<PrettyCall>) {
 
 /// How closely a case must agree with GNU R. Direct algorithms follow GNU R's operation order,
 /// so they agree to rounding; the iterative ones compound rounding differences over their
-/// iterations (and the system BLAS GNU R uses for `dnrm2` and friends rounds differently).
+/// iterations. GNU R's LINPACK routines also call the system BLAS for `dnrm2` and friends,
+/// whose rounding depends on the BLAS build, so even the direct ones agree only to rounding.
 fn tolerance(case: &str) -> f64 {
     match case {
         "lbfgsb" | "optif9" | "quadrature" => 1e-6,
@@ -264,7 +267,10 @@ fn r_pretty_agrees_with_gnu_r() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// The recorded expectations are what GNU R answers today.
+/// The recorded expectations are what GNU R answers today. GNU R's LINPACK routines call the
+/// system's level-1 BLAS, and BLAS builds sum in different orders (reference BLAS and OpenBLAS
+/// disagree in the last bits of `dqrdc2`, `svd` and `lbfgsb`), so values are compared with the
+/// same per-case tolerance as ry's answers; everything else must match exactly.
 #[test]
 fn expectations_match_a_fresh_gnu_r_run() {
     if !gnu_r_available() {

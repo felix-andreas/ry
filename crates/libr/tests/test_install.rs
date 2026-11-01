@@ -1,16 +1,19 @@
 //! Packages install into ry's runtime with `R CMD INSTALL` semantics: ry's R home answers
 //! `R CMD config`, a source package compiles with its `Makevars` against ry's headers and
-//! `libR`, and the installed shared object loads under ry. With `RY_SOURCE_PACKAGES` set to a
-//! directory of source tarballs, every one is built that way and the outcome is reported in
-//! `target/tmp/source-packages.tsv`.
+//! `libR`, the R-level half (lazy-load database, `Meta/`, help, lazy data) runs on ry's
+//! interpreter, and the installed package loads under ry. `bin/R` and `bin/Rscript` run R code
+//! on ry. With `RY_SOURCE_PACKAGES` set to a directory of source tarballs, every one is
+//! installed that way and the outcome is reported in `target/tmp/source-packages.tsv`.
 
 mod harness;
 
-use harness::*;
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 /// ry's R home, assembled once per test binary from this build's libR and headers.
@@ -18,30 +21,30 @@ fn home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ry-home");
-        let deps = std::env::current_exe()
-            .expect("the test executable")
-            .parent()
-            .expect("its directory")
-            .to_path_buf();
-        // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test.
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"])
-            .status()
-            .expect("cargo build");
-        assert!(status.success(), "building ry-rcmd failed");
-        let rcmd = deps
-            .parent()
-            .expect("the profile directory")
-            .join("ry-rcmd");
-        let gnu_r_bin =
-            which("Rscript").and_then(|rscript| rscript.parent().map(Path::to_path_buf));
+        let libr = library_path();
+        // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test,
+        // for the profile the test itself runs in.
+        let profile_directory = profile_directory();
+        let mut build = Command::new(env!("CARGO"));
+        build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
+        if profile_directory
+            .file_name()
+            .is_some_and(|name| name == "release")
+        {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().expect("cargo build").success(),
+            "building ry-rcmd failed"
+        );
+        let rcmd = profile_directory.join("ry-rcmd");
         rcmd::assemble(
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("include"),
-                libr: &deps.join("libR.so"),
+                libr: &libr,
                 rcmd: &rcmd,
-                gnu_r_bin: gnu_r_bin.as_deref(),
+                gnu_r_home: &gnu_r_home(),
                 toolchain: rcmd::Toolchain::default(),
             },
         )
@@ -50,10 +53,36 @@ fn home() -> &'static PathBuf {
     })
 }
 
-fn which(program: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|directory| directory.join(program))
-        .find(|path| path.is_file())
+/// The GNU R installation whose base packages ry's R home links: `R RHOME`.
+fn gnu_r_home() -> PathBuf {
+    let output = Command::new("R")
+        .arg("RHOME")
+        .output()
+        .expect("GNU R on PATH");
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+fn no_test_load() -> rcmd::InstallOptions {
+    rcmd::InstallOptions {
+        test_load: false,
+        ..rcmd::InstallOptions::default()
+    }
+}
+
+/// Runs `bin/<program>` of ry's R home and returns its stdout, asserting success.
+fn run_home(program: &str, arguments: &[&str], directory: &Path) -> String {
+    let output = Command::new(home().join("bin").join(program))
+        .args(arguments)
+        .current_dir(directory)
+        .output()
+        .expect("run the front end");
+    assert!(
+        output.status.success(),
+        "{program} {arguments:?}: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 #[test]
@@ -68,6 +97,34 @@ fn r_cmd_config_reports_ry_s_toolchain() {
     assert_eq!(include, home().join("include").display().to_string());
     let blas = rcmd::config(home(), "BLAS_LIBS").expect("BLAS_LIBS");
     assert_eq!(blas, "-lblas");
+}
+
+/// `R CMD SHLIB` reads the user's Makevars last, so it overrides the toolchain, as pkgbuild's
+/// `without_compiler` expects.
+#[test]
+fn the_user_makevars_overrides_the_compiler() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("user-makevars");
+    drop(std::fs::remove_dir_all(&directory));
+    std::fs::create_dir_all(&directory).expect("a directory");
+    std::fs::write(directory.join("probe.c"), "int probe(void) { return 1; }\n").expect("a source");
+    std::fs::write(directory.join("user.mk"), "CC = false\n").expect("a user Makevars");
+    let shlib = |user_makevars: Option<&Path>| {
+        let mut command = Command::new(home().join("bin/R"));
+        command
+            .args(["CMD", "SHLIB", "probe.c"])
+            .current_dir(&directory)
+            .env_remove("R_MAKEVARS_USER");
+        if let Some(path) = user_makevars {
+            command.env("R_MAKEVARS_USER", path);
+        }
+        command.output().expect("run R CMD SHLIB").status.success()
+    };
+    assert!(shlib(None), "probe.c compiles with ry's toolchain");
+    drop(std::fs::remove_file(directory.join("probe.o")));
+    assert!(
+        !shlib(Some(&directory.join("user.mk"))),
+        "CC = false in the user Makevars fails the build"
+    );
 }
 
 /// rytest as a source package: DESCRIPTION, NAMESPACE and its src/.
@@ -100,15 +157,19 @@ fn rytest_source() -> PathBuf {
 #[test]
 fn a_source_package_installs_and_runs_under_ry() {
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ry-library");
-    let installed = rcmd::install(home(), &rytest_source(), &library).expect("install rytest");
+    let installed =
+        rcmd::install(home(), &rytest_source(), &library, &no_test_load()).expect("install rytest");
     let description =
         std::fs::read_to_string(installed.directory.join("DESCRIPTION")).expect("DESCRIPTION");
     assert!(description.contains("RyBuilt: "), "{description}");
+    assert!(description.contains("Built: R "), "{description}");
     assert!(
-        description.contains("Built: R 4.6.2; x86_64-pc-linux-gnu;"),
+        description.contains("; x86_64-pc-linux-gnu;"),
         "{description}"
     );
     assert!(installed.directory.join("NAMESPACE").exists());
+    assert!(installed.directory.join("Meta/package.rds").exists());
+    assert!(installed.directory.join("Meta/nsInfo.rds").exists());
     let shared = installed.library.expect("rytest has compiled code");
     let r = r();
     r.load(&shared);
@@ -130,7 +191,8 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
     )
     .expect("DESCRIPTION");
     let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("binary-library");
-    let installed = rcmd::install(home(), &source, &library).expect("install a binary");
+    let installed =
+        rcmd::install(home(), &source, &library, &no_test_load()).expect("install a binary");
     let description =
         std::fs::read_to_string(installed.directory.join("DESCRIPTION")).expect("DESCRIPTION");
     assert!(
@@ -143,10 +205,330 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
         "Package: ancient\nVersion: 1.0\nBuilt: R 2.15.3; ; 2013-03-01 00:00:00 UTC; unix\n",
     )
     .expect("DESCRIPTION");
-    let error = rcmd::install(home(), &source, &library).expect_err("a pre-3.0.0 build");
+    let error =
+        rcmd::install(home(), &source, &library, &no_test_load()).expect_err("a pre-3.0.0 build");
     assert!(
         error.to_string().contains("built before R 3.0.0"),
         "{error}"
+    );
+}
+
+/// A package with R code, an S4 class, documentation, lazy data, `sysdata.rda` and `inst/`
+/// files, written out as a source directory.
+/// The `rcode` source package, written once because several tests read it concurrently.
+fn rcode_source() -> PathBuf {
+    static SOURCE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(write_rcode_source).clone()
+}
+
+fn write_rcode_source() -> PathBuf {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rcode-source");
+    drop(std::fs::remove_dir_all(&root));
+    for directory in ["R", "man", "data", "inst/extdata"] {
+        std::fs::create_dir_all(root.join(directory)).expect("a source directory");
+    }
+    let files = [
+        (
+            "DESCRIPTION",
+            "Package: rcode\nVersion: 0.2\nTitle: R code installed by ry\nDescription: Tests ry's installer.\n\
+             License: UPL-1.0\nImports: methods\nLazyData: true\nCollate: 'b.R' 'a.R'\n",
+        ),
+        (
+            "NAMESPACE",
+            "export(greet, area, scaled)\nexportClasses(Square)\nimportFrom(methods, new, setClass, setGeneric, setMethod)\n\
+             exportMethods(area)\n",
+        ),
+        // Collated after b.R, so it can use the class b.R defines.
+        (
+            "R/a.R",
+            "greet <- function(name) paste0(prefix, \", \", name, \"!\")\n\
+             setMethod(\"area\", \"Square\", function(shape) shape@side^2)\n\
+             scaled <- function() factor * nrow(sizes)\n",
+        ),
+        (
+            "R/b.R",
+            "prefix <- \"Hello\"\nsetClass(\"Square\", representation(side = \"numeric\"))\n\
+             setGeneric(\"area\", function(shape) standardGeneric(\"area\"))\n",
+        ),
+        (
+            "man/greet.Rd",
+            "\\name{greet}\n\\alias{greet}\n\\title{Greet someone}\n\\usage{greet(name)}\n\
+             \\arguments{\\item{name}{who to greet}}\n\\value{A greeting.}\n\\description{Says hello.}\n",
+        ),
+        ("inst/extdata/notes.txt", "installed from inst/\n"),
+    ];
+    for (path, text) in files {
+        std::fs::write(root.join(path), text).expect("a source file");
+    }
+    let r_home = gnu_r_home();
+    let status = Command::new(r_home.join("bin/Rscript"))
+        .args([
+            "-e",
+            "sizes <- data.frame(n = 1:3); save(sizes, file = 'data/sizes.rda'); \
+             factor <- 10; save(factor, file = 'R/sysdata.rda')",
+        ])
+        .current_dir(&root)
+        .status()
+        .expect("GNU R writes the fixture's data files");
+    assert!(status.success());
+    root
+}
+
+#[test]
+fn the_r_level_half_runs_on_ry() {
+    let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rcode-library");
+    drop(std::fs::remove_dir_all(&library));
+    let installed = rcmd::install(
+        home(),
+        &rcode_source(),
+        &library,
+        &rcmd::InstallOptions::default(),
+    )
+    .expect("install rcode");
+    let directory = &installed.directory;
+    for file in [
+        "Meta/package.rds",
+        "Meta/nsInfo.rds",
+        "Meta/Rd.rds",
+        "Meta/hsearch.rds",
+        "Meta/links.rds",
+        "Meta/data.rds",
+        "R/rcode",
+        "R/rcode.rdb",
+        "R/rcode.rdx",
+        "R/sysdata.rdb",
+        "R/sysdata.rdx",
+        "data/Rdata.rdb",
+        "data/Rdata.rdx",
+        "help/rcode.rdb",
+        "help/rcode.rdx",
+        "help/AnIndex",
+        "help/aliases.rds",
+        "extdata/notes.txt",
+    ] {
+        assert!(directory.join(file).exists(), "{file} was not installed");
+    }
+    let description = std::fs::read_to_string(directory.join("DESCRIPTION")).expect("DESCRIPTION");
+    assert!(description.contains("RyBuilt: "), "{description}");
+    let script = format!(
+        ".libPaths('{}')\nlibrary(rcode)\ncat(greet('ry'), area(new('Square', side = 3)), scaled(), '\\n')\n\
+         cat(nrow(sizes), readLines(system.file('extdata', 'notes.txt', package = 'rcode')), '\\n')\n\
+         cat(names(tools::Rd_db('rcode')), '\\n')\n",
+        library.display()
+    );
+    let output = run_home("Rscript", &["-e", &script], &library);
+    assert_eq!(
+        output,
+        "Hello, ry! 9 30 \n3 installed from inst/ \ngreet.Rd \n"
+    );
+}
+
+/// `install.packages` installs a source package only when the home has `bin/INSTALL`, which
+/// S7's and pkgload's tests rely on.
+#[test]
+fn install_packages_installs_a_source_package() {
+    let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-packages-library");
+    drop(std::fs::remove_dir_all(&library));
+    std::fs::create_dir_all(&library).expect("a library");
+    let script = format!(
+        "install.packages('{}', lib = '{}', repos = NULL, type = 'source', quiet = TRUE)\n\
+         library(rcode, lib.loc = '{}')\ncat(greet('ry'))\n",
+        rcode_source().display(),
+        library.display(),
+        library.display()
+    );
+    let output = run_home("Rscript", &["-e", &script], &library);
+    assert_eq!(output, "Hello, ry!");
+}
+
+/// `R CMD INSTALL --build` leaves a binary tarball in the working directory, which installs
+/// again as a binary package. pkgbuild's binary builds depend on it.
+#[test]
+fn install_build_packs_a_binary_package() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-build");
+    drop(std::fs::remove_dir_all(&directory));
+    std::fs::create_dir_all(directory.join("first")).expect("a library");
+    let source = rcode_source().display().to_string();
+    run_home(
+        "R",
+        &["CMD", "INSTALL", "--build", "-l", "first", &source],
+        &directory,
+    );
+    let tarball = std::fs::read_dir(&directory)
+        .expect("the build directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .map(|name| name.to_string_lossy().into_owned())
+        .find(|name| {
+            name.starts_with("rcode_") && name.contains("_R_") && name.ends_with(".tar.gz")
+        })
+        .expect("a binary tarball");
+    std::fs::create_dir_all(directory.join("second")).expect("a library");
+    run_home(
+        "R",
+        &["CMD", "INSTALL", "-l", "second", &tarball],
+        &directory,
+    );
+    let output = run_home(
+        "Rscript",
+        &["-e", "library(rcode, lib.loc = 'second'); cat(greet('ry'))"],
+        &directory,
+    );
+    assert_eq!(output, "Hello, ry!");
+}
+
+/// Rcpp turns dynamic symbols off and only then registers its routines, and still calls the
+/// unregistered `sourceCppContext` by name, because registering turns dynamic lookup back on.
+#[test]
+fn registering_routines_restores_dynamic_lookup() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-source");
+    drop(std::fs::remove_dir_all(&root));
+    std::fs::create_dir_all(root.join("src")).expect("a source directory");
+    let files = [
+        (
+            "DESCRIPTION",
+            "Package: lookup\nVersion: 0.1\nTitle: Symbol lookup\nLicense: UPL-1.0\nNeedsCompilation: yes\n",
+        ),
+        ("NAMESPACE", "useDynLib(lookup, .registration = TRUE)\n"),
+        (
+            "src/lookup.c",
+            "#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
+             SEXP lookup_registered(void) { return Rf_ScalarInteger(1); }\n\
+             SEXP lookup_unregistered(void) { return Rf_ScalarInteger(2); }\n\
+             static const R_CallMethodDef entries[] = {{\"lookup_registered\", (DL_FUNC) &lookup_registered, 0}, {NULL, NULL, 0}};\n\
+             void R_init_lookup(DllInfo *dll) { R_useDynamicSymbols(dll, FALSE); R_registerRoutines(dll, NULL, entries, NULL, NULL); }\n",
+        ),
+    ];
+    for (path, text) in files {
+        std::fs::write(root.join(path), text).expect("a source file");
+    }
+    let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-library");
+    drop(std::fs::remove_dir_all(&library));
+    rcmd::install(home(), &root, &library, &no_test_load()).expect("install lookup");
+    let script = format!(
+        ".libPaths('{}')\nlibrary(lookup)\n\
+         cat(.Call('lookup_registered', PACKAGE = 'lookup'), .Call('lookup_unregistered', PACKAGE = 'lookup'), '\\n')\n",
+        library.display()
+    );
+    assert_eq!(run_home("Rscript", &["-e", &script], &library), "1 2 \n");
+}
+
+#[test]
+fn the_front_ends_run_r_code_on_ry() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let output = run_home(
+        "Rscript",
+        &[
+            "-e",
+            "cat(R.home() == Sys.getenv('R_HOME'), commandArgs(TRUE))",
+            "a",
+            "b",
+        ],
+        directory,
+    );
+    assert_eq!(output, "TRUE a b");
+    let output = run_home(
+        "R",
+        &[
+            "--vanilla",
+            "--no-echo",
+            "-e",
+            "cat(nzchar(R.home('share')))",
+        ],
+        directory,
+    );
+    assert_eq!(output, "TRUE");
+    let script = directory.join("front-end.R");
+    std::fs::write(&script, "cat(commandArgs(TRUE), sep = ',')\n").expect("a script");
+    let output = run_home(
+        "R",
+        &[
+            "--no-echo",
+            "-f",
+            &script.display().to_string(),
+            "--args",
+            "x",
+            "y",
+        ],
+        directory,
+    );
+    assert_eq!(output, "x,y");
+    // GNU R's own `R CMD` scripts call back into bin/R, so they run on ry too.
+    let page = rcode_source().join("man/greet.Rd").display().to_string();
+    let output = run_home("R", &["CMD", "Rdconv", "-t", "txt", &page], directory);
+    let gnu_r = Command::new("R")
+        .args(["CMD", "Rdconv", "-t", "txt", &page])
+        .output()
+        .expect("GNU R's Rdconv");
+    assert_eq!(output, String::from_utf8_lossy(&gnu_r.stdout));
+    assert!(output.contains("Says hello."), "{output}");
+}
+
+/// The headers, `R.version` and `R --version` present the version of the base R the
+/// interpreter runs, so a package's C code and its R code take the same version branches.
+#[test]
+fn the_headers_and_the_runtime_present_the_base_r_version() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let script = "cat(format(getRversion()) == format(packageVersion('base')), format(getRversion()), R.version$`svn rev`)";
+    let output = run_home("Rscript", &["-e", script], directory);
+    let fields: Vec<&str> = output.split(' ').collect();
+    let [same, version, revision] = fields[..] else {
+        panic!("{output}")
+    };
+    assert_eq!(same, "TRUE", "{output}");
+    assert!(
+        revision
+            .parse::<u32>()
+            .is_ok_and(|revision| revision >= rcmd::MINIMUM_SVN_REVISION),
+        "{output}"
+    );
+    let header =
+        std::fs::read_to_string(home().join("include").join("Rversion.h")).expect("Rversion.h");
+    let parts: Vec<&str> = version.split('.').collect();
+    assert!(
+        header.contains(&format!(
+            "#define R_VERSION R_Version({})",
+            parts.join(", ")
+        )),
+        "{header}"
+    );
+    assert!(
+        header.contains(&format!("#define R_SVN_REVISION {revision}\n")),
+        "{header}"
+    );
+    assert!(
+        run_home("R", &["--version"], directory).starts_with(&format!("R version {version} ("))
+    );
+}
+
+/// `callr::r_session` drives `R --slave` over a stdin pipe and attaches its
+/// helpers from the user profile, so both have to behave as in GNU R.
+#[test]
+fn the_console_reads_stdin_after_the_user_profile() {
+    use std::{io::Write, process::Stdio};
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let profile = directory.join("console-profile.R");
+    std::fs::write(&profile, "greeting <- 'hi'\n").expect("a profile");
+    let mut child = Command::new(home().join("bin").join("R"))
+        .args(["--no-readline", "--slave", "--no-save", "--no-restore"])
+        .env("R_PROFILE_USER", &profile)
+        .current_dir(directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run bin/R");
+    let mut stdin = child.stdin.take().expect("a stdin pipe");
+    stdin
+        .write_all(b"cat(greeting, '\\n')\nstop('boom')\ncat('unreached')\n")
+        .expect("write stdin");
+    std::mem::drop(stdin);
+    let output = child.wait_with_output().expect("bin/R exits");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi \n");
+    assert!(
+        stderr.contains("boom") && stderr.contains("Execution halted"),
+        "{stderr}"
     );
 }
 
@@ -173,7 +555,7 @@ fn source_packages_build_against_ry_s_headers() {
             .expect("a name")
             .to_string_lossy()
             .into_owned();
-        match rcmd::install(home(), tarball, &library) {
+        match rcmd::install(home(), tarball, &library, &rcmd::InstallOptions::default()) {
             Ok(installed) => {
                 built += 1;
                 report.push_str(&format!(

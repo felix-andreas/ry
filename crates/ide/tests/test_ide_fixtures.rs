@@ -1,16 +1,23 @@
 //! A case carries at most one `$0` cursor marker; the output renders each feature at it, then
 //! the inlay hints of the file holding it.
 
-use ide::{
-    DefinitionTarget, HoverDefinition, code_actions, completion, definition, document_symbols,
-    hover, inlay_hints, references, rename, signature_help, type_definition, workspace_symbols,
+use {
+    ide::{
+        DefinitionTarget, HoverDefinition, code_actions, completion, definition, document_symbols,
+        hover, inlay_hints, references, rename, signature_help, type_definition, workspace_symbols,
+    },
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        stubs::{StubSources, install_shipped_stubs},
+        test_document_kind,
+        testing::{ProbeDatabase, with_fixture_project},
+    },
+    std::path::Path,
+    syntax::{
+        TextRange, TextSize,
+        testing::{run_fixture_suite, split_files},
+    },
 };
-use semantics::stubs::{StubSources, install_shipped_stubs};
-use semantics::testing::{ProbeDatabase, with_fixture_project};
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::path::Path;
-use syntax::testing::{run_fixture_suite, split_files};
-use syntax::{TextRange, TextSize};
 
 fn render(source: &str) -> String {
     let files: Vec<(Option<String>, String)> = match split_files(source) {
@@ -29,6 +36,13 @@ fn render(source: &str) -> String {
             cursor = Some((index, TextSize::from(at as u32)));
         }
         let kind = match path {
+            Some(path)
+                if let Some(file_name) = path
+                    .strip_prefix("tests/testthat/")
+                    .filter(|rest| !rest.contains('/')) =>
+            {
+                test_document_kind(file_name)
+            }
             Some(path) if !path.starts_with("R/") => DocumentKind::Script,
             _ => DocumentKind::Package,
         };
@@ -119,6 +133,7 @@ fn render_at(
                     namespace,
                     overloads,
                     declaration,
+                    documentation,
                 }) => {
                     let declared = declaration
                         .map(|target| {
@@ -131,7 +146,10 @@ fn render_at(
                         .unwrap_or_default();
                     output.push_str(&format!(
                         "hover-definition: package {namespace} ({overloads} declaration(s){declared})\n"
-                    ))
+                    ));
+                    for line in documentation.iter().flat_map(|text| text.lines()) {
+                        output.push_str(&format!("hover-documentation: {line}\n"));
+                    }
                 }
                 None => {}
             }

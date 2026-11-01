@@ -9,14 +9,18 @@
 //! references: a `srcref` list on the expression vector and on every `{` call, and a srcref as
 //! the fourth element of every `function` call. Without it, none of that work happens.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    unwind::{R, Unwind, error},
-    values::{self, alloc, install, missing_arg, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        unwind::{R, Unwind, error},
+        values::{self, alloc, install, missing_arg, nil, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
+    },
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
-use heap::strings::Encoding;
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("parse", 6, do_parse),
@@ -68,8 +72,10 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         values::set_attr(result, symbols().srcref, srcrefs)?;
         values::set_attr(result, symbols().srcfile, srcfile)?;
         values::set_attr(result, symbols().whole_srcref, whole)?;
-        // GNU R keeps parse data unless `keep.parse.data` is FALSE.
-        if values::as_logical_scalar(crate::envir::get_option("keep.parse.data")) != 0
+        // Package loaders and installers turn parse data off; building it costs more than
+        // the parse itself on a large file.
+        let keep_data = crate::envir::get_option("keep.parse.data");
+        if (keep_data == nil() || values::as_logical_scalar(keep_data) == 1)
             && let Some(data) = crate::parse_data::parse_data(&script.root, source)?
         {
             crate::heap().define(srcfile, install("parseData")?, data)?;
@@ -679,6 +685,7 @@ pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
             | SyntaxKind::TYPE_BINDER_LIST
             | SyntaxKind::TYPE_DEFINITION
             | SyntaxKind::NEW_TYPE
+            | SyntaxKind::PURE_MARKER
     )
 }
 
@@ -754,7 +761,7 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             let mut function = lower(function, source)?;
             // R's parser turns a string in function position into a symbol: `"f<-"(x)`.
             if function.kind() == SexpType::String && values::length(function) == 1 {
-                function = values::install_bytes(function.element(0).bytes())?;
+                function = values::install_charsxp(function.element(0))?;
             }
             let mut items = vec![(nil(), function)];
             items.extend(argument_list(arguments, source)?);
@@ -773,8 +780,8 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             };
             let mut items = vec![(nil(), operator), (nil(), lower(object, source)?)];
             let subscripts = argument_list(arguments, source)?;
-            // Unlike a call's `f()`, R keeps the lone empty subscript of `x[]`, so
-            // `nargs()` in a `[` method counts it.
+            // R's grammar gives `x[]` and `x[[]]` one empty subscript, unlike `f()`, so
+            // `nargs()` in a `[<-` method counts it (`[<-.data.frame` relies on that).
             if subscripts.is_empty() {
                 items.push((nil(), missing_arg()));
             }
@@ -850,6 +857,13 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 ".ry_tuple"
             };
             let mut items = vec![(nil(), install(head)?)];
+            if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                items.extend(literal_items(&arguments, source)?);
+            }
+            values::pairlist(&items, SexpType::Language)
+        }
+        SyntaxKind::ARRAY_EXPR => {
+            let mut items = vec![(nil(), install(".ry_array")?)];
             if let Some(arguments) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
                 items.extend(literal_items(&arguments, source)?);
             }
@@ -1473,7 +1487,7 @@ pub fn parse_number(text: &str) -> f64 {
 /// The content of a quoted string literal, with escapes resolved.
 pub fn string_literal(text: &str) -> R<String> {
     let inner = &text[1..text.len().saturating_sub(1).max(1)];
-    unescape(inner).map_err(|message| error(message))
+    unescape(inner).map_err(error)
 }
 
 fn raw_string(text: &str) -> String {

@@ -77,7 +77,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (12): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.add_checked, anyNA.numeric_version, is.na.numeric_version, .standard_regexps
+completion (16): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.is_approx_eq
 
 #---- block_body_local
 wrapper <- function(x) {
@@ -175,7 +175,7 @@ object@first_field
 object@second_field
 object@fi$0
 #++++
-hover 39..48: Unknown
+hover 46..48: fi: Unknown
 definition: none
 references: none
 rename: none
@@ -219,7 +219,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (32): for, fortune, forwarded, force, forceAndCall, formalArgs, Formaldehyde, formals
+completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, Formaldehyde, formals
 hint @9: integer
 
 #---- no_matching_prefix

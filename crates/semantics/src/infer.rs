@@ -2,18 +2,24 @@
 //! the member-wise `T | NULL` vs `U | NULL` case. Directional member-wise logic
 //! belongs in compatibility checking, never here.
 
-use crate::Db;
-use crate::annotations::NamedDefinition;
-use crate::diagnostics::nearest_name;
-use crate::stubs::stubs;
-use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, for_each_child_type,
-    map_child_types, scalar, substitute_rigid, union_of, unknown,
+use {
+    crate::{
+        Db,
+        annotations::NamedDefinition,
+        diagnostics::nearest_name,
+        stubs::stubs,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
+            array_element, for_each_child_type, is_ry_value_type, map_child_types, scalar,
+            substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{Cell, RefCell},
+        mem,
+    },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{Cell, RefCell};
-use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -62,8 +68,17 @@ pub struct InferenceTable<'db> {
     epoch: Cell<u64>,
 }
 
-/// Read by the perf witnesses: must stay near-linear in corpus size.
-pub static RESOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// Per thread, because a counter every checking thread bumps on each step costs more
+    /// than the step when the threads contend for it.
+    static RESOLVE_CALLS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Resolution steps this thread has taken, read by the perf witnesses: must stay
+/// near-linear in corpus size.
+pub fn resolve_calls() -> u64 {
+    RESOLVE_CALLS.get()
+}
 
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
@@ -81,6 +96,12 @@ impl<'db> InferenceTable<'db> {
     pub fn fresh_ty(&mut self, db: &'db dyn Db, constraint: Constraint) -> Ty<'db> {
         let var = self.fresh(constraint);
         Ty::new(db, TyKind::Var(var))
+    }
+
+    /// The id the next fresh variable gets, so a caller can tell the variables it creates
+    /// from here on.
+    pub fn next_var(&self) -> InferenceVar {
+        InferenceVar(self.entries.len() as u32)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -176,7 +197,7 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
         visiting: &mut Vec<InferenceVar>,
     ) -> (Ty<'db>, bool) {
-        RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
+        RESOLVE_CALLS.set(RESOLVE_CALLS.get() + 1);
         if let TyKind::Var(var) = ty.kind(db) {
             let root = self.find(*var);
             let shallow = self.shallow_resolve(db, ty);
@@ -374,11 +395,15 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            // A frame whose columns are unknown makes no claim to check.
-            (TyKind::Frame(None), TyKind::Frame(_)) | (TyKind::Frame(_), TyKind::Frame(None)) => {
-                Ok(())
+            (TyKind::Frame(left_kind, _), TyKind::Frame(right_kind, _))
+                if !same_frame_kind(*left_kind, *right_kind) =>
+            {
+                Err(UnifyError::Mismatch(a, b))
             }
-            (TyKind::Frame(Some(left)), TyKind::Frame(Some(right))) => {
+            // A frame whose columns are unknown makes no claim to check.
+            (TyKind::Frame(_, None), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None)) => Ok(()),
+            (TyKind::Frame(_, Some(left)), TyKind::Frame(_, Some(right))) => {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
@@ -580,10 +605,13 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
+        // R's arithmetic promotes `logical` to `integer` and `integer` to `double`.
         let rank = |ty: Ty<'db>| match ty.kind(db) {
+            TyKind::Scalar(Atomic::Logical) => Some((false, 0)),
             TyKind::Scalar(Atomic::Integer) => Some((false, 1)),
             TyKind::Scalar(Atomic::Double) => Some((false, 2)),
             TyKind::Vector(element) => match element.kind(db) {
+                TyKind::Scalar(Atomic::Logical) => Some((true, 0)),
                 TyKind::Scalar(Atomic::Integer) => Some((true, 1)),
                 TyKind::Scalar(Atomic::Double) => Some((true, 2)),
                 _ => None,
@@ -598,10 +626,10 @@ impl<'db> InferenceTable<'db> {
                 // A scalar meeting a vector widens to the vector: R recycles it.
                 let element = scalar(
                     db,
-                    if actual_rank.max(bound_rank) == 2 {
-                        Atomic::Double
-                    } else {
-                        Atomic::Integer
+                    match actual_rank.max(bound_rank) {
+                        2 => Atomic::Double,
+                        1 => Atomic::Integer,
+                        _ => Atomic::Logical,
                     },
                 );
                 let widened = if bound_vector || actual_vector {
@@ -643,6 +671,46 @@ impl<'db> InferenceTable<'db> {
         if actual == expected {
             return true;
         }
+        // An argument fits an open `T | NULL` with `T` taking its non-`NULL` part. Binding an
+        // open argument to the whole union would tell the caller its own value may be `NULL`
+        // (`check(x); x$field` after `check <- function(x) if (is.null(x)) ...`), and binding
+        // `T` to one member of a union argument would reject the others.
+        if let TyKind::Union(members) = expected.kind(db)
+            && let [first, second] = members[..]
+            && let Some(open_member) = match (
+                self.shallow_resolve(db, first).kind(db),
+                self.shallow_resolve(db, second).kind(db),
+            ) {
+                (TyKind::Var(_), TyKind::Null) => Some(first),
+                (TyKind::Null, TyKind::Var(_)) => Some(second),
+                _ => None,
+            }
+        {
+            let present = match actual.kind(db) {
+                TyKind::Var(_) => Some(actual),
+                TyKind::Union(actual_members)
+                    if !actual_members
+                        .iter()
+                        .any(|member| matches!(member.kind(db), TyKind::OtherTags)) =>
+                {
+                    Some(union_of(
+                        db,
+                        actual_members
+                            .iter()
+                            .copied()
+                            .filter(|member| !matches!(member.kind(db), TyKind::Null)),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(present) = present {
+                let snapshot = self.snapshot();
+                if self.unify(db, open_member, present).is_ok() {
+                    return true;
+                }
+                self.rollback(snapshot);
+            }
+        }
         if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
         {
             return self.unify(db, actual, expected).is_ok();
@@ -651,6 +719,41 @@ impl<'db> InferenceTable<'db> {
             return true;
         }
         match (actual.kind(db), expected.kind(db)) {
+            // `character | list{..}` into `T | NULL`: the members the target does not list
+            // bind its one variable together, where member by member the first would pin it.
+            (TyKind::Union(members), TyKind::Union(expected_members))
+                if !members
+                    .iter()
+                    .any(|member| matches!(member.kind(db), TyKind::OtherTags))
+                    && expected_members
+                        .iter()
+                        .filter(|&&member| {
+                            matches!(self.shallow_resolve(db, member).kind(db), TyKind::Var(_))
+                        })
+                        .count()
+                        == 1 =>
+            {
+                let mut variable = None;
+                let mut concrete = Vec::new();
+                for &member in expected_members {
+                    let member = self.shallow_resolve(db, member);
+                    if matches!(member.kind(db), TyKind::Var(_)) {
+                        variable = Some(member);
+                    } else {
+                        concrete.push(member);
+                    }
+                }
+                let rest: Vec<Ty<'db>> = members
+                    .iter()
+                    .copied()
+                    .filter(|member| !concrete.contains(member))
+                    .collect();
+                match variable {
+                    Some(_) if rest.is_empty() => true,
+                    Some(variable) => self.unify(db, variable, union_of(db, rest)).is_ok(),
+                    None => false,
+                }
+            }
             // First, so union-vs-union means every actual member fits some expected member.
             // An open source fits only an open target that it can vouch for: a tag hidden in
             // the source's `..` could carry any payload under a name the target lists.
@@ -753,6 +856,27 @@ impl<'db> InferenceTable<'db> {
                         }
                     })
             }
+            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
+            // fit each other both ways.
+            (TyKind::Named(name, arguments), TyKind::Frame(FrameKind::DataTable, _))
+                if arguments.is_empty() && name.text(db) == "data.table" =>
+            {
+                true
+            }
+            // An Array is an R vector at run time: a scalar item type makes it an atomic vector
+            // and a ry-value item type a list, so it passes to R code as one, never the reverse.
+            (
+                TyKind::Named(..),
+                TyKind::Vector(expected_element) | TyKind::List(expected_element),
+            ) if array_element(db, actual).is_some() => {
+                let element = array_element(db, actual).map(|element| self.resolve(db, element));
+                let Some(element) = element else {
+                    return false;
+                };
+                let atomic = !is_ry_value_type(db, element);
+                atomic == matches!(expected.kind(db), TyKind::Vector(_))
+                    && self.compatible_probe(db, element, *expected_element, depth + 1)
+            }
             // Only the projection direction: structural into nominal happens only via `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
                 match self.representation(db, *actual_name, actual_arguments) {
@@ -802,10 +926,14 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            (TyKind::Frame(None), TyKind::Frame(_)) | (TyKind::Frame(_), TyKind::Frame(None)) => {
-                true
+            (TyKind::Frame(actual_kind, _), TyKind::Frame(expected_kind, _))
+                if !same_frame_kind(*actual_kind, *expected_kind) =>
+            {
+                false
             }
-            (TyKind::Frame(Some(actual_columns)), TyKind::Frame(Some(expected_columns)))
+            (TyKind::Frame(_, None), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None)) => true,
+            (TyKind::Frame(_, Some(actual_columns)), TyKind::Frame(_, Some(expected_columns)))
                 if actual_columns.len() == expected_columns.len() =>
             {
                 expected_columns.iter().all(|expected_column| {
@@ -822,28 +950,33 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            // A frame is no data.frame, but ry's table stands in for data.table: `fread` and
-            // the `set*` family read and return frames, so a frame satisfies a `data.table`
-            // parameter.
-            (TyKind::Frame(_), TyKind::Named(name, arguments))
+            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
+            // fit each other both ways.
+            (TyKind::Frame(FrameKind::DataTable, _), TyKind::Named(name, arguments))
                 if arguments.is_empty() && name.text(db) == "data.table" =>
             {
                 true
             }
             // `as.list` turns a frame into the list of its columns, which is how `lapply`,
-            // `Map` and `Filter` iterate one.
-            (TyKind::Frame(None), TyKind::List(_) | TyKind::NamedList(_)) => true,
-            (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
-                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
-            {
+            // `Map` and `Filter` iterate one. A plan or a grouping is not a list of columns.
+            (
+                TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _),
+                TyKind::List(_) | TyKind::NamedList(_),
+            ) => false,
+            (TyKind::Frame(_, None), TyKind::List(_) | TyKind::NamedList(_)) => true,
+            (
+                TyKind::Frame(_, Some(columns)),
+                TyKind::List(element) | TyKind::NamedList(element),
+            ) if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) => {
                 let joined = union_of(db, columns.iter().map(|column| column.ty));
                 self.unify(db, *element, joined).is_ok()
             }
-            (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element)) => {
-                columns
-                    .iter()
-                    .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
-            }
+            (
+                TyKind::Frame(_, Some(columns)),
+                TyKind::List(element) | TyKind::NamedList(element),
+            ) => columns
+                .iter()
+                .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1)),
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
             // to the first item and reject the rest. An empty `list()` says nothing about `T`,
             // so it leaves `T` open; binding it to the empty join would fail every constraint
@@ -927,7 +1060,7 @@ impl<'db> InferenceTable<'db> {
         expected: &FunctionType<'db>,
         depth: usize,
     ) -> bool {
-        let Some(pairing) = pair_parameters(actual, expected) else {
+        let Some(pairing) = pair_parameters(db, actual, expected) else {
             return false;
         };
         for (expected_element, actual_element) in pairing.rest {
@@ -953,7 +1086,7 @@ impl<'db> InferenceTable<'db> {
         actual: &FunctionType<'db>,
         expected: &FunctionType<'db>,
     ) -> Option<FunctionMismatch<'db>> {
-        let pairing = pair_parameters(actual, expected)?;
+        let pairing = pair_parameters(db, actual, expected)?;
         for pair in pairing.parameters {
             if self.compatible(db, pair.passed, pair.accepts) {
                 continue;
@@ -968,9 +1101,11 @@ impl<'db> InferenceTable<'db> {
         }
         if !self.compatible(db, actual.ret, expected.ret) {
             let returns = self.resolve(db, actual.ret);
+            let required = self.resolve(db, expected.ret);
             return Some(FunctionMismatch::Return {
-                required: self.resolve(db, expected.ret),
+                required,
                 constraint: self.variable_constraint(db, returns),
+                required_constraint: self.variable_constraint(db, required),
                 returns,
             });
         }
@@ -1057,7 +1192,7 @@ impl<'db> InferenceTable<'db> {
 
     /// The one fact the rendered type cannot show: `fn(s: U) -> U` prints the same
     /// whether `U` accepts anything or only numbers.
-    fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
+    pub(crate) fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let TyKind::Var(var) = ty.kind(db) else {
             return None;
         };
@@ -1120,7 +1255,10 @@ pub enum FunctionMismatch<'db> {
     Return {
         required: Ty<'db>,
         returns: Ty<'db>,
+        /// The constraint the function's own result type carries.
         constraint: Option<Constraint>,
+        /// The constraint the expected result type carries, such as `item` on `List.map`'s `B`.
+        required_constraint: Option<Constraint>,
     },
 }
 
@@ -1157,11 +1295,18 @@ struct ParameterPair<'db> {
 
 /// Arity is a range: a function serves an interface when it accepts every call
 /// shape the interface allows, so extra parameters are fine when they default.
-/// Variadics pair only with variadics at the same formal position (conservative).
+/// A variadic interface pairs only with a variadic at the same formal position, unless its
+/// `...` takes `Any`: a callback called with forwarded dots (`function(f, ...) f(...)`) may
+/// receive any arguments, so any function serves it.
 fn pair_parameters<'db>(
+    db: &'db dyn Db,
     actual: &FunctionType<'db>,
     expected: &FunctionType<'db>,
 ) -> Option<Pairing<'db>> {
+    let forwards_anything = expected
+        .variadic
+        .as_ref()
+        .is_some_and(|rest| matches!(rest.element.kind(db), TyKind::Any));
     let mut rest = Vec::new();
     match (&actual.variadic, &expected.variadic) {
         (Some(actual_variadic), Some(expected_variadic)) => {
@@ -1170,8 +1315,11 @@ fn pair_parameters<'db>(
             }
             rest.push((expected_variadic.element, actual_variadic.element));
         }
-        (None, None) => {}
-        _ => return None,
+        // An interface without `...` never passes extras, so the function's own `...`
+        // receives at most the leftovers paired below.
+        (Some(_), None) | (None, None) => {}
+        (None, Some(_)) if forwards_anything => {}
+        (None, Some(_)) => return None,
     }
     // R matches arguments to formals by name regardless of order; the rest pair
     // positionally.
@@ -1219,7 +1367,7 @@ fn pair_parameters<'db>(
         actual_parameters.into_iter().zip(paired)
     {
         let Some((expected_parameter, expected_optional)) = slot else {
-            if actual_optional {
+            if actual_optional || forwards_anything {
                 continue;
             }
             return None;
@@ -1379,15 +1527,28 @@ fn constraint_rejects<'db>(
             .get(name)
             .is_some_and(|declared| declared.join(constraint) == *declared)
     };
+    // A union satisfies a bound when every member does: `double | integer` is a number either way.
+    if let TyKind::Union(members) = ty.kind(db) {
+        let every_member_admissible = members
+            .iter()
+            .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
+        return (!every_member_admissible)
+            .then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
+        // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
         Constraint::Numeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) | TyKind::Any | TyKind::Unknown => {
-                true
-            }
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
+            )
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Vector(element) | TyKind::NamedVector(element) => matches!(
                 element.kind(db),
-                TyKind::Scalar(Atomic::Integer | Atomic::Double)
+                TyKind::Scalar(
+                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex
+                )
             ),
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
@@ -1408,12 +1569,21 @@ fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::ScalarNumeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) | TyKind::Any | TyKind::Unknown => {
-                true
-            }
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
+        },
+        Constraint::ArrayItem => match ty.kind(db) {
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
+            )
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => is_ry_value_type(db, ty),
         },
     };
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))
@@ -1421,9 +1591,13 @@ fn constraint_rejects<'db>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
-    use crate::types::{Parameter, null, scalar};
+    use {
+        super::*,
+        crate::{
+            RootDatabase,
+            types::{Parameter, null, scalar},
+        },
+    };
 
     #[test]
     fn unify_binds_and_resolves() {
@@ -1559,7 +1733,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: int,
                     optional: false,
                     default: None,
@@ -1578,5 +1752,26 @@ mod tests {
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
+    }
+}
+
+/// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind
+/// only when both sides know it: a written `GroupBy{...}` names no keys.
+fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
+    match (left, right) {
+        (
+            FrameKind::GroupBy {
+                lazy: left_lazy,
+                keys: left_keys,
+            },
+            FrameKind::GroupBy {
+                lazy: right_lazy,
+                keys: right_keys,
+            },
+        ) => {
+            left_lazy == right_lazy
+                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
+        }
+        _ => left == right,
     }
 }

@@ -8,14 +8,16 @@
 //! `predLoess` in the stats package call them directly and keep the k-d tree they return in the
 //! fitted object.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    stats::{c_arguments, c_return, integer_values, real_values},
-    unwind::{R, error},
-    values,
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        stats::{c_arguments, c_return, integer_values, real_values},
+        unwind::{R, error},
+        values,
+    },
+    heap::object::Sexp,
+    rustc_hash::FxHashMap,
 };
-use heap::object::Sexp;
-use rustc_hash::FxHashMap;
 
 /// `.C(loess_raw, y, x, weights, robust, d, n, span, degree, nonparametric, drop.square,
 /// sum.drop.sqr, span * cell, surf.stat, fitted.values, parameter, a, xi, vert, vval, diagonal,

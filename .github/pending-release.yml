@@ -1,0 +1,151 @@
+# The release workflow, kept here because agents cannot write to .github/workflows. To enable it:
+#   git mv .github/pending-release.yml .github/workflows/release.yml
+#
+# It runs when a version tag is pushed (`git tag 0.4.0-beta && git push origin 0.4.0-beta`) or when
+# someone, an agent included, starts it from the Actions tab or the API with a version.
+name: Release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without a leading v (must equal workspace.package.version)"
+        required: true
+      publish:
+        description: "Publish the GitHub release and the extension (false builds and smoke-tests only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on the oldest supported runner, so the binaries need no newer glibc than 2.35.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, vscode: linux-x64 }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, vscode: linux-arm64 }
+          - { os: macos-14, target: aarch64-apple-darwin, vscode: darwin-arm64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, vscode: darwin-x64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, vscode: win32-x64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: version matches the workspace
+        run: |
+          workspace=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$workspace" != "$VERSION" ]; then
+            echo "::error::releasing $VERSION, but Cargo.toml is at $workspace; run \`just bump-version $VERSION\` first"
+            exit 1
+          fi
+          just release-kind "$VERSION" >/dev/null
+      # Reads rust-toolchain.toml, so releases build with the pinned compiler.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      # ry's runtime cannot load R 4.6's base packages yet (MEMORY.md, "Bug, blocks the beta"), so
+      # the smoke test's `ry run` steps need the previous release until that is fixed.
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5"
+      # libR links zlib, bzip2 and xz on Linux (crates/libr/build.rs).
+      - name: link libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev libbz2-dev liblzma-dev
+      - name: package
+        run: just package "$VERSION"
+      # RY_SMOKE_PACKAGES installs jsonlite with GNU R and loads it under `ry run`: a CRAN binary on
+      # macOS, which proves ry rebinds a GNU R package's libR to its own runtime, and a source
+      # build on Linux.
+      - name: smoke test
+        env:
+          RY_SMOKE_PACKAGES: "1"
+        run: tools/smoke-test.sh release/$VERSION/ry-${{ matrix.target }}.*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ry-${{ matrix.target }}
+          path: |
+            release/${{ env.VERSION }}/ry-${{ matrix.target }}.tar.gz
+            release/${{ env.VERSION }}/ry-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v4
+        with:
+          path: release/${{ env.VERSION }}
+          merge-multiple: true
+      - name: unpack binaries for the platform extensions
+        run: |
+          cd release/$VERSION
+          for archive in ry-*.tar.gz; do
+            mkdir -p "${archive%.tar.gz}" && tar -xzf "$archive" -C "${archive%.tar.gz}"
+          done
+          for archive in ry-*.zip; do
+            mkdir -p "${archive%.zip}" && unzip -q "$archive" -d "${archive%.zip}"
+          done
+      - name: package the VS Code extension
+        run: |
+          kind=$(just release-kind "$VERSION")
+          dir=release/$VERSION
+          (cd editors/code && bun install --frozen-lockfile)
+          just build-extension "$kind" --out "../../$dir/ry.vsix"
+          just build-platform-vsix x86_64-unknown-linux-gnu linux-x64 ry "$dir" "$kind"
+          just build-platform-vsix aarch64-unknown-linux-gnu linux-arm64 ry "$dir" "$kind"
+          just build-platform-vsix aarch64-apple-darwin darwin-arm64 ry "$dir" "$kind"
+          just build-platform-vsix x86_64-apple-darwin darwin-x64 ry "$dir" "$kind"
+          just build-platform-vsix x86_64-pc-windows-msvc win32-x64 ry.exe "$dir" "$kind"
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          [ "$(just release-kind "$VERSION")" = pre-release ] && prerelease="--prerelease"
+          # A rerun after a later step failed finds the release already there and refreshes its assets.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" --clobber \
+              release/$VERSION/ry-*.tar.gz release/$VERSION/ry-*.zip release/$VERSION/*.vsix
+            exit 0
+          fi
+          gh release create "$VERSION" $prerelease --target "$GITHUB_SHA" --title "ry $VERSION" \
+            --notes "See the [news page](https://ry-lang.org/news/) for what changed." \
+            release/$VERSION/ry-*.tar.gz release/$VERSION/ry-*.zip release/$VERSION/*.vsix
+      - name: VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          flag=$(just vsce-release-flag "$(just release-kind "$VERSION")")
+          for vsix in release/$VERSION/ry-*.vsix release/$VERSION/ry.vsix; do
+            just vsce publish $flag --packagePath "../../$vsix"
+          done
+      - name: Open VSX
+        if: env.OVSX_PAT != ''
+        run: |
+          flag=""
+          [ "$(just release-kind "$VERSION")" = pre-release ] && flag="--pre-release"
+          for vsix in release/$VERSION/ry-*.vsix release/$VERSION/ry.vsix; do
+            bunx ovsx publish "$vsix" $flag --pat "$OVSX_PAT"
+          done

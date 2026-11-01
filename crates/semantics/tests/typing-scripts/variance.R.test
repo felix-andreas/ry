@@ -95,5 +95,5 @@ widened <- outer
 #++++
 outer: Unknown
 widened: Outer<integer | NULL>
-101..121 error[type-mismatch] expected `Sink<integer>`, found `fn(value: T) -> NULL`
+101..121 error[type-mismatch] expected `Sink<integer>`, found `fn([value]: T) -> NULL`. The value has the right shape, but `Sink` is a nominal type, so only `@Sink(...)` or `#: @new Sink` creates one
 148..155 warning[unused] `widened` is assigned but never used.

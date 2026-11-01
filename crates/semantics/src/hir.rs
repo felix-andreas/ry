@@ -1,13 +1,22 @@
 //! Spans are item-relative, so an edit elsewhere in the file reproduces an
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
-use rustc_hash::{FxHashMap, FxHasher};
-use std::hash::{Hash, Hasher};
-use std::num::NonZeroU32;
-use std::sync::{LazyLock, Mutex};
-use std::{fmt, iter, ops};
-use syntax::ast::{BinaryExpr, Name, is_expression_kind};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
+use {
+    rustc_hash::{FxHashMap, FxHasher},
+    std::{
+        cell::{Cell, RefCell},
+        fmt,
+        hash::{Hash, Hasher},
+        marker::PhantomData,
+        num::NonZeroU32,
+        ops,
+        sync::{LazyLock, Mutex},
+    },
+    syntax::{
+        GreenElementAt, GreenNodeAt, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ast::{is_expression_kind, name_text},
+    },
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
@@ -31,8 +40,25 @@ static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHAR
 /// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
 static SYMBOL_TEXT: LazyLock<boxcar::Vec<&'static str>> = LazyLock::new(boxcar::Vec::new);
 
+thread_local! {
+    /// Spellings this thread has interned. Lowering interns every identifier it meets, and
+    /// the shard lock's atomics bounce cache lines between analysis threads, so a repeat
+    /// spelling skips the shared table.
+    static LOCAL_SYMBOL_IDS: RefCell<FxHashMap<&'static str, Symbol>> =
+        RefCell::new(FxHashMap::default());
+}
+
 impl Symbol {
     pub fn new(text: &str) -> Symbol {
+        if let Some(symbol) = LOCAL_SYMBOL_IDS.with_borrow(|local| local.get(text).copied()) {
+            return symbol;
+        }
+        let symbol = Symbol::new_shared(text);
+        LOCAL_SYMBOL_IDS.with_borrow_mut(|local| local.insert(symbol.as_str(), symbol));
+        symbol
+    }
+
+    fn new_shared(text: &str) -> Symbol {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
         let shard = &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS];
@@ -55,6 +81,12 @@ impl Symbol {
         );
         shard.insert(interned, symbol);
         symbol
+    }
+
+    /// The symbol's position in the table: stable for the process, but it depends on the
+    /// order in which threads first met each spelling.
+    pub fn index(self) -> u32 {
+        self.0.get()
     }
 
     pub fn as_str(self) -> &'static str {
@@ -175,26 +207,319 @@ impl fmt::Debug for Symbol {
     }
 }
 
+/// One item's expressions and patterns as dense arrays. An expression is an `ExprId` index
+/// into `kinds` and `ranges`, which are split because inference walks kinds and only
+/// diagnostics read ranges. Every variable-length child list lives in one side array per
+/// element type and an expression holds a [`Span`] into it, so lowering an item makes a
+/// handful of allocations rather than one per list, and every kind is `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Module {
-    pub expressions: Vec<Expression>,
-    pub patterns: Vec<Pattern>,
+    kinds: Vec<ExpressionKind>,
+    ranges: Vec<TextRange>,
+    patterns: Vec<Pattern>,
+    arguments: Vec<Argument>,
+    parameters: Vec<Parameter>,
+    expression_lists: Vec<ExprId>,
+    record_fields: Vec<RecordField>,
+    arms: Vec<MatchArm>,
+    pattern_lists: Vec<PatId>,
+    pattern_fields: Vec<PatternField>,
+    text: String,
     pub root: Option<ExprId>,
 }
 
+/// One expression of a [`Module`], as a scan over [`Module::expressions`] yields it.
+#[derive(Debug, Clone, Copy)]
+pub struct Expression<'a> {
+    pub kind: &'a ExpressionKind,
+    pub range: TextRange,
+}
+
+/// A run of a [`Module`] side array: `module[span]` is the slice.
+pub struct Span<T> {
+    start: u32,
+    len: u32,
+    element: PhantomData<fn() -> T>,
+}
+
+impl<T> Span<T> {
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    fn range(self) -> ops::Range<usize> {
+        self.start as usize..(self.start + self.len) as usize
+    }
+}
+
+impl<T> Clone for Span<T> {
+    fn clone(&self) -> Span<T> {
+        *self
+    }
+}
+
+impl<T> Copy for Span<T> {}
+
+impl<T> PartialEq for Span<T> {
+    fn eq(&self, other: &Span<T>) -> bool {
+        (self.start, self.len) == (other.start, other.len)
+    }
+}
+
+impl<T> Eq for Span<T> {}
+
+impl<T> Hash for Span<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.start, self.len).hash(state);
+    }
+}
+
+impl<T> Default for Span<T> {
+    fn default() -> Span<T> {
+        Span {
+            start: 0,
+            len: 0,
+            element: PhantomData,
+        }
+    }
+}
+
+impl<T> fmt::Debug for Span<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}..{}", self.start, self.start + self.len)
+    }
+}
+
+/// Literal source text in the module's text buffer: `module[text]` is the string. Unlike a
+/// [`Symbol`], which is interned for the life of the process, it is freed with the module, so
+/// editing a string literal does not keep every spelling it passed through.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Text {
+    start: u32,
+    len: u32,
+}
+
+impl Text {
+    fn range(self) -> ops::Range<usize> {
+        self.start as usize..(self.start + self.len) as usize
+    }
+}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "text {}..{}", self.start, self.start + self.len)
+    }
+}
+
+impl ops::Index<Text> for Module {
+    type Output = str;
+
+    fn index(&self, text: Text) -> &str {
+        &self.text[text.range()]
+    }
+}
+
+impl ops::Index<&Text> for Module {
+    type Output = str;
+
+    fn index(&self, text: &Text) -> &str {
+        &self.text[text.range()]
+    }
+}
+
+macro_rules! side_array {
+    ($element:ty, $field:ident) => {
+        impl ops::Index<Span<$element>> for Module {
+            type Output = [$element];
+
+            fn index(&self, span: Span<$element>) -> &[$element] {
+                &self.$field[span.range()]
+            }
+        }
+
+        impl ops::Index<&Span<$element>> for Module {
+            type Output = [$element];
+
+            fn index(&self, span: &Span<$element>) -> &[$element] {
+                &self.$field[span.range()]
+            }
+        }
+    };
+}
+
+side_array!(Argument, arguments);
+side_array!(Parameter, parameters);
+side_array!(ExprId, expression_lists);
+side_array!(RecordField, record_fields);
+side_array!(MatchArm, arms);
+side_array!(PatId, pattern_lists);
+side_array!(PatternField, pattern_fields);
+
 impl Module {
-    pub fn expression(&self, id: ExprId) -> &Expression {
-        &self.expressions[id.0 as usize]
+    fn clear(&mut self) {
+        self.kinds.clear();
+        self.ranges.clear();
+        self.patterns.clear();
+        self.arguments.clear();
+        self.parameters.clear();
+        self.expression_lists.clear();
+        self.record_fields.clear();
+        self.arms.clear();
+        self.pattern_lists.clear();
+        self.pattern_fields.clear();
+        self.text.clear();
+        self.root = None;
+    }
+
+    pub fn kind(&self, id: ExprId) -> &ExpressionKind {
+        &self.kinds[id.0 as usize]
+    }
+
+    pub fn expression(&self, id: ExprId) -> Expression<'_> {
+        Expression {
+            kind: self.kind(id),
+            range: self.range(id),
+        }
+    }
+
+    pub fn range(&self, id: ExprId) -> TextRange {
+        self.ranges[id.0 as usize]
+    }
+
+    /// Every expression's kind, indexed by `ExprId`.
+    pub fn kinds(&self) -> &[ExpressionKind] {
+        &self.kinds
+    }
+
+    /// Every expression's significant source range, indexed by `ExprId`.
+    pub fn ranges(&self) -> &[TextRange] {
+        &self.ranges
+    }
+
+    /// Every expression with its id order, for a scan that reads both kind and range.
+    pub fn expressions(&self) -> impl ExactSizeIterator<Item = Expression<'_>> + Clone {
+        self.kinds
+            .iter()
+            .zip(&self.ranges)
+            .map(|(kind, &range)| Expression { kind, range })
+    }
+
+    pub fn expression_count(&self) -> usize {
+        self.kinds.len()
+    }
+
+    pub fn expression_ids(&self) -> impl Iterator<Item = ExprId> + use<> {
+        (0..self.kinds.len() as u32).map(ExprId)
+    }
+
+    /// Every pattern, indexed by `PatId`.
+    pub fn patterns(&self) -> &[Pattern] {
+        &self.patterns
+    }
+
+    pub fn pattern_count(&self) -> usize {
+        self.patterns.len()
     }
 
     pub fn pattern(&self, id: PatId) -> &Pattern {
         &self.patterns[id.0 as usize]
     }
 
+    /// The direct child expressions of `id`, in source order.
+    pub fn for_each_child(&self, id: ExprId, mut visit: impl FnMut(ExprId)) {
+        match *self.kind(id) {
+            ExpressionKind::Missing
+            | ExpressionKind::Literal(_)
+            | ExpressionKind::NameRef(_)
+            | ExpressionKind::Namespace { .. }
+            | ExpressionKind::Break
+            | ExpressionKind::Next => {}
+            ExpressionKind::Assign { target, value, .. } => {
+                visit(target);
+                visit(value);
+            }
+            ExpressionKind::Unary { operand, .. } => visit(operand),
+            ExpressionKind::Binary { lhs, rhs, .. } => {
+                visit(lhs);
+                visit(rhs);
+            }
+            ExpressionKind::Call {
+                callee: target,
+                arguments,
+            }
+            | ExpressionKind::Index {
+                target, arguments, ..
+            } => {
+                visit(target);
+                self[arguments]
+                    .iter()
+                    .filter_map(|argument| argument.value)
+                    .for_each(visit);
+            }
+            ExpressionKind::Field { target, .. } => visit(target),
+            ExpressionKind::Function { parameters, body } => {
+                self[parameters]
+                    .iter()
+                    .filter_map(|parameter| parameter.default)
+                    .for_each(&mut visit);
+                visit(body);
+            }
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                visit(condition);
+                visit(then_branch);
+                else_branch.into_iter().for_each(visit);
+            }
+            ExpressionKind::For { sequence, body, .. } => {
+                visit(sequence);
+                visit(body);
+            }
+            ExpressionKind::While { condition, body } => {
+                visit(condition);
+                visit(body);
+            }
+            ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => visit(body),
+            ExpressionKind::Block { statements: items }
+            | ExpressionKind::Tuple(items)
+            | ExpressionKind::Array(items) => self[items].iter().copied().for_each(visit),
+            ExpressionKind::Paren(inner) => visit(inner),
+            ExpressionKind::Record(fields) => {
+                self[fields].iter().map(|field| field.value).for_each(visit)
+            }
+            ExpressionKind::Tag { payload, .. } => payload.into_iter().for_each(visit),
+            ExpressionKind::Match { scrutinee, arms } => {
+                visit(scrutinee);
+                for arm in &self[arms] {
+                    self[arm.bindings].iter().copied().for_each(&mut visit);
+                    arm.guard.into_iter().for_each(&mut visit);
+                    visit(arm.body);
+                }
+            }
+        }
+    }
+
+    /// Whether any direct child of `id` satisfies `test`, stopping at the first that does.
+    pub fn any_child(&self, id: ExprId, mut test: impl FnMut(ExprId) -> bool) -> bool {
+        let mut found = false;
+        self.for_each_child(id, |child| {
+            if !found {
+                found = test(child);
+            }
+        });
+        found
+    }
+
     /// Whether a tag payload pattern is a bare `..`, as in `:Tag(..)`, which matches the tag
     /// with any payload or none.
     pub fn is_any_payload(&self, payload: PatId) -> bool {
-        matches!(&self.pattern(payload).kind, PatternKind::Record { fields, rest: true } if fields.is_empty())
+        matches!(self.pattern(payload).kind, PatternKind::Record { fields, rest: true } if fields.is_empty())
     }
 
     /// The names a pattern binds, as `NameRef` expressions, in source order.
@@ -205,29 +530,24 @@ impl Module {
     }
 
     fn collect_pattern_bindings(&self, pattern: PatId, bindings: &mut Vec<ExprId>) {
-        match &self.pattern(pattern).kind {
+        match self.pattern(pattern).kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
-            PatternKind::Bind(name) => bindings.push(*name),
+            PatternKind::Bind(name) => bindings.push(name),
             PatternKind::Tag { payload, .. } => {
                 if let Some(payload) = payload {
-                    self.collect_pattern_bindings(*payload, bindings);
-                }
-            }
-            PatternKind::Tuple(items) => {
-                for item in items {
-                    self.collect_pattern_bindings(*item, bindings);
-                }
-            }
-            PatternKind::Record { fields, .. } => {
-                for field in fields {
-                    self.collect_pattern_bindings(field.pattern, bindings);
+                    self.collect_pattern_bindings(payload, bindings);
                 }
             }
             // Every alternative binds the same names (naming reports it otherwise), and each
             // alternative's leaf is its own write site, so all of them are listed.
-            PatternKind::Or(alternatives) => {
-                for alternative in alternatives {
-                    self.collect_pattern_bindings(*alternative, bindings);
+            PatternKind::Tuple(items) | PatternKind::Or(items) => {
+                for &item in &self[items] {
+                    self.collect_pattern_bindings(item, bindings);
+                }
+            }
+            PatternKind::Record { fields, .. } => {
+                for field in &self[fields] {
+                    self.collect_pattern_bindings(field.pattern, bindings);
                 }
             }
         }
@@ -238,18 +558,18 @@ impl Module {
 /// of names and nested patterns (a computed element makes it an ordinary operator call).
 pub fn destructure_leaves(module: &Module, pattern: ExprId) -> Option<Vec<ExprId>> {
     fn collect(module: &Module, pattern: ExprId, leaves: &mut Vec<ExprId>) -> Option<()> {
-        let ExpressionKind::Call { callee, arguments } = &module.expression(pattern).kind else {
+        let ExpressionKind::Call { callee, arguments } = *module.kind(pattern) else {
             return None;
         };
-        let ExpressionKind::NameRef(name) = &module.expression(*callee).kind else {
+        let ExpressionKind::NameRef(name) = module.kind(callee) else {
             return None;
         };
         if name != "c" && name != "list" {
             return None;
         }
-        for argument in arguments {
+        for argument in &module[arguments] {
             let value = argument.value?;
-            match module.expression(value).kind {
+            match module.kind(value) {
                 ExpressionKind::NameRef(_) => leaves.push(value),
                 ExpressionKind::Call { .. } => collect(module, value, leaves)?,
                 _ => return None,
@@ -260,12 +580,6 @@ pub fn destructure_leaves(module: &Module, pattern: ExprId) -> Option<Vec<ExprId
     let mut leaves = Vec::new();
     collect(module, pattern, &mut leaves)?;
     Some(leaves)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Expression {
-    pub kind: ExpressionKind,
-    pub range: TextRange,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -315,13 +629,14 @@ pub enum BinaryOperator {
     Help,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiteralKind {
     /// Source text is kept for literal index positions and the literal-as-integer courtesy.
-    Integer(Box<str>),
-    Double(Box<str>),
-    Complex(Box<str>),
-    String(Box<str>),
+    Integer(Text),
+    Double(Text),
+    Complex(Text),
+    /// The value without its quotes; escapes are not decoded.
+    String(Text),
     Logical(bool),
     Null,
     Na(NaAtom),
@@ -338,7 +653,7 @@ pub enum NaAtom {
     Character,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Argument {
     pub name: Option<Symbol>,
     pub name_range: Option<TextRange>,
@@ -346,7 +661,7 @@ pub struct Argument {
     pub value: Option<ExprId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Parameter {
     pub name: Symbol,
     pub default: Option<ExprId>,
@@ -354,7 +669,7 @@ pub struct Parameter {
     pub range: TextRange,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpressionKind {
     /// A broken region: types as Unknown and reports nothing of its own.
     Missing,
@@ -379,12 +694,12 @@ pub enum ExpressionKind {
     },
     Call {
         callee: ExprId,
-        arguments: Box<[Argument]>,
+        arguments: Span<Argument>,
     },
     Index {
         double: bool,
         target: ExprId,
-        arguments: Box<[Argument]>,
+        arguments: Span<Argument>,
     },
     Field {
         at: bool,
@@ -398,7 +713,7 @@ pub enum ExpressionKind {
         name: Option<Symbol>,
     },
     Function {
-        parameters: Box<[Parameter]>,
+        parameters: Span<Parameter>,
         body: ExprId,
     },
     If {
@@ -425,15 +740,17 @@ pub enum ExpressionKind {
         body: ExprId,
     },
     Block {
-        statements: Box<[ExprId]>,
+        statements: Span<ExprId>,
     },
     Paren(ExprId),
     Break,
     Next,
     /// `(a, b)` and `(a,)`: a native tuple.
-    Tuple(Box<[ExprId]>),
+    Tuple(Span<ExprId>),
     /// `(x = 1, y = 2)`: a native record, fields in source order.
-    Record(Box<[RecordField]>),
+    Record(Span<RecordField>),
+    /// `[a, b]`: an Array literal.
+    Array(Span<ExprId>),
     /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
     /// parenthesized list, so a payload types exactly like the matching literal.
     Tag {
@@ -443,35 +760,34 @@ pub enum ExpressionKind {
     },
     Match {
         scrutinee: ExprId,
-        arms: Box<[MatchArm]>,
+        arms: Span<MatchArm>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordField {
     pub name: Symbol,
     pub name_range: TextRange,
     pub value: ExprId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchArm {
     pub pattern: PatId,
-    /// The pattern's `Bind` leaves in source order, kept beside the pattern so `child_ids`
-    /// can list them without the pattern arena. Lowering fills both at once and neither
-    /// changes afterwards.
-    pub bindings: Box<[ExprId]>,
+    /// The pattern's `Bind` leaves in source order, so a walk over expressions reaches them
+    /// without reading patterns. Lowering fills both at once and neither changes afterwards.
+    pub bindings: Span<ExprId>,
     pub guard: Option<ExprId>,
     pub body: ExprId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pattern {
     pub kind: PatternKind,
     pub range: TextRange,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternKind {
     /// A broken pattern: matches anything and reports nothing of its own.
     Missing,
@@ -488,100 +804,86 @@ pub enum PatternKind {
         name_range: TextRange,
         payload: Option<PatId>,
     },
-    Tuple(Box<[PatId]>),
+    Tuple(Span<PatId>),
     /// Without `rest`, the pattern must list every field of the record it matches.
     Record {
-        fields: Box<[PatternField]>,
+        fields: Span<PatternField>,
         rest: bool,
     },
-    Or(Box<[PatId]>),
+    Or(Span<PatId>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatternField {
     pub name: Symbol,
     pub name_range: TextRange,
     pub pattern: PatId,
 }
 
-impl ExpressionKind {
-    /// Source order.
-    pub fn child_ids(&self) -> Vec<ExprId> {
-        match self {
-            ExpressionKind::Missing
-            | ExpressionKind::Literal(_)
-            | ExpressionKind::NameRef(_)
-            | ExpressionKind::Namespace { .. }
-            | ExpressionKind::Break
-            | ExpressionKind::Next => Vec::new(),
-            ExpressionKind::Assign { target, value, .. } => vec![*target, *value],
-            ExpressionKind::Unary { operand, .. } => vec![*operand],
-            ExpressionKind::Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
-            ExpressionKind::Call { callee, arguments } => {
-                let mut ids = vec![*callee];
-                ids.extend(arguments.iter().filter_map(|argument| argument.value));
-                ids
-            }
-            ExpressionKind::Index {
-                target, arguments, ..
-            } => {
-                let mut ids = vec![*target];
-                ids.extend(arguments.iter().filter_map(|argument| argument.value));
-                ids
-            }
-            ExpressionKind::Field { target, .. } => vec![*target],
-            ExpressionKind::Function { parameters, body } => {
-                let mut ids: Vec<ExprId> = parameters
-                    .iter()
-                    .filter_map(|parameter| parameter.default)
-                    .collect();
-                ids.push(*body);
-                ids
-            }
-            ExpressionKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                let mut ids = vec![*condition, *then_branch];
-                ids.extend(*else_branch);
-                ids
-            }
-            ExpressionKind::For { sequence, body, .. } => vec![*sequence, *body],
-            ExpressionKind::While { condition, body } => vec![*condition, *body],
-            ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => vec![*body],
-            ExpressionKind::Block { statements, .. } => statements.to_vec(),
-            ExpressionKind::Paren(inner) => vec![*inner],
-            ExpressionKind::Tuple(items) => items.to_vec(),
-            ExpressionKind::Record(fields) => fields.iter().map(|field| field.value).collect(),
-            ExpressionKind::Tag { payload, .. } => payload.iter().copied().collect(),
-            ExpressionKind::Match { scrutinee, arms } => {
-                let mut ids = vec![*scrutinee];
-                for arm in arms {
-                    ids.extend(arm.bindings.iter().copied());
-                    ids.extend(arm.guard);
-                    ids.push(arm.body);
-                }
-                ids
-            }
-        }
-    }
-}
-
 pub fn lower_item(root: &SyntaxNode) -> Module {
-    let mut module = Module::default();
-    let root_id = module.lower_expression(root);
-    module.root = Some(root_id);
-    // The arena is kept for the life of the project, so the doubling slack is not free.
-    module.expressions.shrink_to_fit();
-    module.patterns.shrink_to_fit();
+    let green = root.green();
+    let mut lowering = LOWERING.take();
+    let root_id = lowering.lower_expression(GreenNodeAt::new(&green, root.text_range().start()));
+    let scratch = &mut lowering.module;
+    // The module lives as long as the project, so it gets exact-size copies; the scratch
+    // arrays keep their capacity for the next item this thread lowers, which saves both the
+    // doubling slack and the reallocation churn of growing fresh vectors per item.
+    let module = Module {
+        kinds: scratch.kinds.as_slice().into(),
+        ranges: scratch.ranges.as_slice().into(),
+        patterns: scratch.patterns.as_slice().into(),
+        arguments: scratch.arguments.as_slice().into(),
+        parameters: scratch.parameters.as_slice().into(),
+        expression_lists: scratch.expression_lists.as_slice().into(),
+        record_fields: scratch.record_fields.as_slice().into(),
+        arms: scratch.arms.as_slice().into(),
+        pattern_lists: scratch.pattern_lists.as_slice().into(),
+        pattern_fields: scratch.pattern_fields.as_slice().into(),
+        text: scratch.text.as_str().into(),
+        root: Some(root_id),
+    };
+    scratch.clear();
+    LOWERING.set(lowering);
     module
 }
 
-impl Module {
+thread_local! {
+    static LOWERING: Cell<Lowering> = Cell::default();
+}
+
+/// Lowering reads the green tree, so it builds no red nodes. A list's elements are lowered
+/// before the list is complete, and lowering them appends their own lists first, so each list
+/// gathers on a stack and moves into its side array once its last element is done. A nested
+/// list is always finished and popped before the enclosing one takes its next element, which
+/// keeps every list contiguous at the top of its stack.
+#[derive(Default)]
+struct Lowering {
+    module: Module,
+    expression_stack: Vec<ExprId>,
+    argument_stack: Vec<Argument>,
+    parameter_stack: Vec<Parameter>,
+    field_stack: Vec<RecordField>,
+    arm_stack: Vec<MatchArm>,
+    pattern_stack: Vec<PatId>,
+    pattern_field_stack: Vec<PatternField>,
+}
+
+/// Moves `stack[mark..]` to the end of `store`.
+fn seal<T>(stack: &mut Vec<T>, mark: usize, store: &mut Vec<T>) -> Span<T> {
+    let start = store.len() as u32;
+    store.extend(stack.drain(mark..));
+    Span {
+        start,
+        len: store.len() as u32 - start,
+        element: PhantomData,
+    }
+}
+
+impl Lowering {
     fn allocate(&mut self, kind: ExpressionKind, range: TextRange) -> ExprId {
-        let id = ExprId(self.expressions.len() as u32);
-        self.expressions.push(Expression { kind, range });
+        let id = ExprId(self.module.kinds.len() as u32);
+        self.module.kinds.push(kind);
+        self.module.ranges.push(range);
         id
     }
 
@@ -589,24 +891,22 @@ impl Module {
         self.allocate(ExpressionKind::Missing, range)
     }
 
-    fn lower_optional(&mut self, node: Option<SyntaxNode>, fallback: TextRange) -> ExprId {
+    fn lower_optional(&mut self, node: Option<GreenNodeAt<'_>>, fallback: TextRange) -> ExprId {
         match node {
-            Some(node) => self.lower_expression(&node),
+            Some(node) => self.lower_expression(node),
             None => self.missing(fallback),
         }
     }
 
-    fn lower_expression(&mut self, node: &SyntaxNode) -> ExprId {
-        let range = significant_range(node);
+    fn lower_expression(&mut self, node: GreenNodeAt<'_>) -> ExprId {
+        let range = significant_range_green(node);
         match node.kind() {
             SyntaxKind::NAME => {
-                let text = Name::cast(node.clone())
-                    .and_then(|name| name.text())
-                    .unwrap_or_default();
-                self.allocate(ExpressionKind::NameRef(Symbol::new(&text)), range)
+                let name = name_symbol(node).unwrap_or_default();
+                self.allocate(ExpressionKind::NameRef(name), range)
             }
             SyntaxKind::LITERAL => {
-                let kind = literal_kind(node);
+                let kind = literal_kind(node, &mut self.module.text);
                 self.allocate(ExpressionKind::Literal(kind), range)
             }
             // `@Name(value)` is its value in parentheses once the nominal head is erased;
@@ -617,25 +917,29 @@ impl Module {
                 self.allocate(ExpressionKind::Paren(inner), range)
             }
             SyntaxKind::BRACE_EXPR => {
-                let statements = expression_children(node)
-                    .map(|child| self.lower_expression(&child))
-                    .collect::<Box<[ExprId]>>();
+                let mark = self.expression_stack.len();
+                for child in expression_children(node) {
+                    let statement = self.lower_expression(child);
+                    self.expression_stack.push(statement);
+                }
+                let statements = seal(
+                    &mut self.expression_stack,
+                    mark,
+                    &mut self.module.expression_lists,
+                );
                 // A trailing `;` adds no expression in R's grammar, so
                 // `{ 1L; }` is `1L` and needs no flag here.
                 self.allocate(ExpressionKind::Block { statements }, range)
             }
             SyntaxKind::UNARY_EXPR => {
-                let operator = node
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .find_map(|token| match token.kind() {
-                        SyntaxKind::MINUS => Some(UnaryOperator::Minus),
-                        SyntaxKind::PLUS => Some(UnaryOperator::Plus),
-                        SyntaxKind::BANG => Some(UnaryOperator::Not),
-                        SyntaxKind::TILDE => Some(UnaryOperator::Tilde),
-                        SyntaxKind::QUESTION => Some(UnaryOperator::Help),
-                        _ => None,
-                    });
+                let operator = node.child_tokens().find_map(|token| match token.kind {
+                    SyntaxKind::MINUS => Some(UnaryOperator::Minus),
+                    SyntaxKind::PLUS => Some(UnaryOperator::Plus),
+                    SyntaxKind::BANG => Some(UnaryOperator::Not),
+                    SyntaxKind::TILDE => Some(UnaryOperator::Tilde),
+                    SyntaxKind::QUESTION => Some(UnaryOperator::Help),
+                    _ => None,
+                });
                 let operand = expression_children(node).next();
                 let operand = self.lower_optional(operand, range);
                 match operator {
@@ -648,13 +952,12 @@ impl Module {
             SyntaxKind::BINARY_EXPR => self.lower_binary(node, range),
             SyntaxKind::CALL_EXPR => {
                 let callee_node = expression_children(node).next();
-                let is_local = callee_node.as_ref().is_some_and(|callee| {
+                let is_local = callee_node.is_some_and(|callee| {
                     callee.kind() == SyntaxKind::NAME
-                        && Name::cast(callee.clone())
-                            .and_then(|name| name.text())
-                            .is_some_and(|text| text == "local")
+                        && name_symbol(callee).is_some_and(|name| name == "local")
                 });
-                let arguments = self.lower_arguments(node, None);
+                let mark = self.argument_stack.len();
+                self.lower_arguments(node, None);
                 if is_local
                     && let [
                         Argument {
@@ -662,29 +965,35 @@ impl Module {
                             value: Some(body),
                             ..
                         },
-                    ] = &*arguments
+                    ] = self.argument_stack[mark..]
                 {
-                    return self.allocate(ExpressionKind::Local { body: *body }, range);
+                    self.argument_stack.truncate(mark);
+                    return self.allocate(ExpressionKind::Local { body }, range);
                 }
+                let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
                 let callee = self.lower_optional(callee_node, range);
-                self.allocate(
-                    ExpressionKind::Call {
-                        callee,
-                        arguments: arguments.into(),
-                    },
-                    range,
-                )
+                // R evaluates a string call head by looking up the function of that name, so
+                // `"%in%.integer64"(x, y)` calls exactly what the bare name would.
+                if let Some(callee_kind) = self.module.kinds.get_mut(callee.0 as usize)
+                    && let ExpressionKind::Literal(LiteralKind::String(name)) = *callee_kind
+                {
+                    *callee_kind =
+                        ExpressionKind::NameRef(Symbol::new(&self.module.text[name.range()]));
+                }
+                self.allocate(ExpressionKind::Call { callee, arguments }, range)
             }
             SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR => {
                 let double = node.kind() == SyntaxKind::SUBSET2_EXPR;
                 let target = expression_children(node).next();
                 let target = self.lower_optional(target, range);
-                let arguments = self.lower_arguments(node, None);
+                let mark = self.argument_stack.len();
+                self.lower_arguments(node, None);
+                let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
                 self.allocate(
                     ExpressionKind::Index {
                         double,
                         target,
-                        arguments: arguments.into(),
+                        arguments,
                     },
                     range,
                 )
@@ -695,9 +1004,10 @@ impl Module {
                 let target = children.next();
                 let target = self.lower_optional(target, range);
                 let name_node = children.next();
-                let name_range = name_node.as_ref().map(|child| child.text_range());
-                let name = name_node.and_then(|child| field_name_text(&child));
-                let name_range = name_range.filter(|_| name.is_some());
+                let name = name_node.and_then(field_name_text);
+                let name_range = name_node
+                    .map(|child| child.range())
+                    .filter(|_| name.is_some());
                 self.allocate(
                     ExpressionKind::Field {
                         at,
@@ -710,12 +1020,11 @@ impl Module {
             }
             SyntaxKind::NAMESPACE_EXPR => {
                 let internal = node
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::COLON3);
+                    .child_tokens()
+                    .any(|token| token.kind == SyntaxKind::COLON3);
                 let mut children = expression_children(node);
-                let package = children.next().and_then(|child| field_name_text(&child));
-                let name = children.next().and_then(|child| field_name_text(&child));
+                let package = children.next().and_then(field_name_text);
+                let name = children.next().and_then(field_name_text);
                 self.allocate(
                     ExpressionKind::Namespace {
                         internal,
@@ -726,11 +1035,11 @@ impl Module {
                 )
             }
             SyntaxKind::FUNCTION_DEF => {
-                let parameters = node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::PARAMETER_LIST)
-                    .map(|list| self.lower_parameters(&list))
-                    .unwrap_or_default();
+                let mark = self.parameter_stack.len();
+                if let Some(list) = child_of_kind(node, SyntaxKind::PARAMETER_LIST) {
+                    self.lower_parameters(list);
+                }
+                let parameters = seal(&mut self.parameter_stack, mark, &mut self.module.parameters);
                 let body = expression_children(node).next();
                 let body = self.lower_optional(body, range);
                 self.allocate(ExpressionKind::Function { parameters, body }, range)
@@ -742,7 +1051,7 @@ impl Module {
                 let else_branch = children.next();
                 let condition = self.lower_optional(condition, range);
                 let then_branch = self.lower_optional(then_branch, range);
-                let else_branch = else_branch.map(|node| self.lower_expression(&node));
+                let else_branch = else_branch.map(|node| self.lower_expression(node));
                 self.allocate(
                     ExpressionKind::If {
                         condition,
@@ -754,14 +1063,10 @@ impl Module {
             }
             SyntaxKind::FOR_EXPR => {
                 let mut children = expression_children(node);
-                let variable_node = children.next();
-                let (variable, variable_range) = match &variable_node {
-                    Some(node) if node.kind() == SyntaxKind::NAME => (
-                        Name::cast(node.clone())
-                            .and_then(|name| name.text())
-                            .map(Symbol::from),
-                        Some(node.text_range()),
-                    ),
+                let (variable, variable_range) = match children.next() {
+                    Some(variable) if variable.kind() == SyntaxKind::NAME => {
+                        (name_symbol(variable), Some(variable.range()))
+                    }
                     _ => (None, None),
                 };
                 let sequence = children.next();
@@ -793,29 +1098,42 @@ impl Module {
             }
             SyntaxKind::BREAK_EXPR => self.allocate(ExpressionKind::Break, range),
             SyntaxKind::NEXT_EXPR => self.allocate(ExpressionKind::Next, range),
-            SyntaxKind::TUPLE_EXPR | SyntaxKind::RECORD_EXPR => match node
-                .children()
-                .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
-            {
-                Some(list) => self.lower_items(&list, range),
-                None => self.missing(range),
-            },
+            SyntaxKind::TUPLE_EXPR | SyntaxKind::RECORD_EXPR => {
+                match child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                    Some(list) => self.lower_items(list, range),
+                    None => self.missing(range),
+                }
+            }
+            SyntaxKind::ARRAY_EXPR => {
+                let items = match child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                    Some(list) => {
+                        let mark = self.argument_stack.len();
+                        self.lower_arguments_of(list, None);
+                        let item_mark = self.expression_stack.len();
+                        for argument in self.argument_stack.drain(mark..) {
+                            self.expression_stack.extend(argument.value);
+                        }
+                        seal(
+                            &mut self.expression_stack,
+                            item_mark,
+                            &mut self.module.expression_lists,
+                        )
+                    }
+                    None => Span::default(),
+                };
+                self.allocate(ExpressionKind::Array(items), range)
+            }
             SyntaxKind::TAG_EXPR => {
-                let Some(name_node) = node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::NAME)
-                else {
+                let Some(name_node) = child_of_kind(node, SyntaxKind::NAME) else {
                     return self.missing(range);
                 };
-                let name = field_name_text(&name_node).unwrap_or_default();
-                let payload = node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
-                    .map(|list| self.lower_items(&list, list.text_range()));
+                let name = field_name_text(name_node).unwrap_or_default();
+                let payload = child_of_kind(node, SyntaxKind::ARGUMENT_LIST)
+                    .map(|list| self.lower_items(list, list.range()));
                 self.allocate(
                     ExpressionKind::Tag {
                         name,
-                        name_range: name_node.text_range(),
+                        name_range: name_node.range(),
                         payload,
                     },
                     range,
@@ -824,11 +1142,15 @@ impl Module {
             SyntaxKind::MATCH_EXPR => {
                 let scrutinee = expression_children(node).next();
                 let scrutinee = self.lower_optional(scrutinee, range);
-                let arms = node
-                    .children()
+                let mark = self.arm_stack.len();
+                for arm in node
+                    .child_nodes()
                     .filter(|child| child.kind() == SyntaxKind::MATCH_ARM)
-                    .map(|arm| self.lower_arm(&arm))
-                    .collect();
+                {
+                    let arm = self.lower_arm(arm);
+                    self.arm_stack.push(arm);
+                }
+                let arms = seal(&mut self.arm_stack, mark, &mut self.module.arms);
                 self.allocate(ExpressionKind::Match { scrutinee, arms }, range)
             }
             _ => self.missing(range),
@@ -837,14 +1159,17 @@ impl Module {
 
     /// The items of a native tuple or record literal. The parser already rejects a list that
     /// mixes named and unnamed items, so the first item decides which one this is.
-    fn lower_items(&mut self, list: &SyntaxNode, range: TextRange) -> ExprId {
-        let arguments = self.lower_arguments_of(list, None);
-        let is_record = arguments
-            .first()
+    fn lower_items(&mut self, list: GreenNodeAt<'_>, range: TextRange) -> ExprId {
+        let mark = self.argument_stack.len();
+        self.lower_arguments_of(list, None);
+        let is_record = self
+            .argument_stack
+            .get(mark)
             .is_some_and(|argument| argument.name.is_some());
         if is_record {
-            let mut fields = Vec::with_capacity(arguments.len());
-            for argument in arguments {
+            let field_mark = self.field_stack.len();
+            for index in mark..self.argument_stack.len() {
+                let argument = self.argument_stack[index];
                 let (Some(name), Some(name_range)) = (argument.name, argument.name_range) else {
                     continue;
                 };
@@ -852,35 +1177,53 @@ impl Module {
                     Some(value) => value,
                     None => self.missing(name_range),
                 };
-                fields.push(RecordField {
+                self.field_stack.push(RecordField {
                     name,
                     name_range,
                     value,
                 });
             }
-            return self.allocate(ExpressionKind::Record(fields.into()), range);
+            self.argument_stack.truncate(mark);
+            let fields = seal(
+                &mut self.field_stack,
+                field_mark,
+                &mut self.module.record_fields,
+            );
+            return self.allocate(ExpressionKind::Record(fields), range);
         }
-        let items = arguments
-            .into_iter()
-            .filter_map(|argument| argument.value)
-            .collect();
+        let item_mark = self.expression_stack.len();
+        for argument in self.argument_stack.drain(mark..) {
+            self.expression_stack.extend(argument.value);
+        }
+        let items = seal(
+            &mut self.expression_stack,
+            item_mark,
+            &mut self.module.expression_lists,
+        );
         self.allocate(ExpressionKind::Tuple(items), range)
     }
 
-    fn lower_arm(&mut self, arm: &SyntaxNode) -> MatchArm {
-        let range = significant_range(arm);
-        let pattern = match arm.children().find(|child| is_pattern_kind(child.kind())) {
-            Some(node) => self.lower_pattern(&node),
+    fn lower_arm(&mut self, arm: GreenNodeAt<'_>) -> MatchArm {
+        let range = significant_range_green(arm);
+        let pattern = match arm
+            .child_nodes()
+            .find(|child| is_pattern_kind(child.kind()))
+        {
+            Some(node) => self.lower_pattern(node),
             None => self.allocate_pattern(PatternKind::Missing, range),
         };
-        let bindings = self.pattern_bindings(pattern).into();
-        let guard = arm
-            .children()
-            .find(|child| child.kind() == SyntaxKind::MATCH_GUARD)
-            .map(|guard| {
-                let condition = expression_children(&guard).next();
-                self.lower_optional(condition, significant_range(&guard))
-            });
+        let bindings = self.module.pattern_bindings(pattern);
+        let start = self.module.expression_lists.len() as u32;
+        self.module.expression_lists.extend(bindings);
+        let bindings = Span {
+            start,
+            len: self.module.expression_lists.len() as u32 - start,
+            element: PhantomData,
+        };
+        let guard = child_of_kind(arm, SyntaxKind::MATCH_GUARD).map(|guard| {
+            let condition = expression_children(guard).next();
+            self.lower_optional(condition, significant_range_green(guard))
+        });
         let body = expression_children(arm).next();
         let body = self.lower_optional(body, range);
         MatchArm {
@@ -892,121 +1235,98 @@ impl Module {
     }
 
     fn allocate_pattern(&mut self, kind: PatternKind, range: TextRange) -> PatId {
-        let id = PatId(self.patterns.len() as u32);
-        self.patterns.push(Pattern { kind, range });
+        let id = PatId(self.module.patterns.len() as u32);
+        self.module.patterns.push(Pattern { kind, range });
         id
     }
 
-    fn lower_pattern(&mut self, node: &SyntaxNode) -> PatId {
-        let range = significant_range(node);
+    fn lower_pattern(&mut self, node: GreenNodeAt<'_>) -> PatId {
+        let range = significant_range_green(node);
         let kind = match node.kind() {
             SyntaxKind::PATTERN_WILDCARD => PatternKind::Wildcard,
             SyntaxKind::PATTERN_BIND => {
-                let name = node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::NAME)
-                    .and_then(|name| field_name_text(&name))
+                let name = child_of_kind(node, SyntaxKind::NAME)
+                    .and_then(field_name_text)
                     .unwrap_or_default();
                 PatternKind::Bind(self.allocate(ExpressionKind::NameRef(name), range))
             }
             SyntaxKind::PATTERN_LITERAL => {
                 let negative = node
-                    .children_with_tokens()
-                    .filter_map(|element| element.into_token())
-                    .any(|token| token.kind() == SyntaxKind::MINUS);
-                match node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::LITERAL)
-                {
+                    .child_tokens()
+                    .any(|token| token.kind == SyntaxKind::MINUS);
+                match child_of_kind(node, SyntaxKind::LITERAL) {
                     Some(literal) => PatternKind::Literal {
-                        literal: literal_kind(&literal),
+                        literal: literal_kind(literal, &mut self.module.text),
                         negative,
                     },
                     None => PatternKind::Missing,
                 }
             }
-            SyntaxKind::PATTERN_TAG => {
-                match node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::NAME)
-                {
-                    Some(name_node) => {
-                        let payload = node
-                            .children()
-                            .find(|child| child.kind() == SyntaxKind::PATTERN_LIST)
-                            .map(|list| self.lower_pattern(&list));
-                        PatternKind::Tag {
-                            name: field_name_text(&name_node).unwrap_or_default(),
-                            name_range: name_node.text_range(),
-                            payload,
-                        }
+            SyntaxKind::PATTERN_TAG => match child_of_kind(node, SyntaxKind::NAME) {
+                Some(name_node) => {
+                    let payload = child_of_kind(node, SyntaxKind::PATTERN_LIST)
+                        .map(|list| self.lower_pattern(list));
+                    PatternKind::Tag {
+                        name: field_name_text(name_node).unwrap_or_default(),
+                        name_range: name_node.range(),
+                        payload,
                     }
-                    None => PatternKind::Missing,
                 }
-            }
+                None => PatternKind::Missing,
+            },
             SyntaxKind::PATTERN_LIST => {
-                let is_record = node.children().any(|child| {
+                let is_record = node.child_nodes().any(|child| {
                     matches!(
                         child.kind(),
                         SyntaxKind::PATTERN_FIELD | SyntaxKind::PATTERN_REST
                     )
                 });
                 if is_record {
-                    let rest = node
-                        .children()
-                        .any(|child| child.kind() == SyntaxKind::PATTERN_REST);
-                    let mut fields = Vec::new();
+                    let rest = child_of_kind(node, SyntaxKind::PATTERN_REST).is_some();
+                    let mark = self.pattern_field_stack.len();
                     for field in node
-                        .children()
+                        .child_nodes()
                         .filter(|child| child.kind() == SyntaxKind::PATTERN_FIELD)
                     {
-                        let Some(name_node) = field
-                            .children()
-                            .find(|child| child.kind() == SyntaxKind::NAME)
-                        else {
+                        let Some(name_node) = child_of_kind(field, SyntaxKind::NAME) else {
                             continue;
                         };
-                        let Some(name) = field_name_text(&name_node) else {
+                        let Some(name) = field_name_text(name_node) else {
                             continue;
                         };
                         let pattern = match field
-                            .children()
+                            .child_nodes()
                             .find(|child| is_pattern_kind(child.kind()))
                         {
-                            Some(pattern) => self.lower_pattern(&pattern),
-                            None => self
-                                .allocate_pattern(PatternKind::Missing, significant_range(&field)),
+                            Some(pattern) => self.lower_pattern(pattern),
+                            None => self.allocate_pattern(
+                                PatternKind::Missing,
+                                significant_range_green(field),
+                            ),
                         };
-                        fields.push(PatternField {
+                        self.pattern_field_stack.push(PatternField {
                             name,
-                            name_range: name_node.text_range(),
+                            name_range: name_node.range(),
                             pattern,
                         });
                     }
-                    PatternKind::Record {
-                        fields: fields.into(),
-                        rest,
-                    }
+                    let fields = seal(
+                        &mut self.pattern_field_stack,
+                        mark,
+                        &mut self.module.pattern_fields,
+                    );
+                    PatternKind::Record { fields, rest }
                 } else {
-                    let items = node
-                        .children()
-                        .filter(|child| is_pattern_kind(child.kind()))
-                        .map(|item| self.lower_pattern(&item))
-                        .collect();
-                    PatternKind::Tuple(items)
+                    PatternKind::Tuple(self.lower_pattern_list(node))
                 }
             }
-            SyntaxKind::PATTERN_OR => {
-                let alternatives = node
-                    .children()
-                    .filter(|child| is_pattern_kind(child.kind()))
-                    .map(|alternative| self.lower_pattern(&alternative))
-                    .collect();
-                PatternKind::Or(alternatives)
-            }
+            SyntaxKind::PATTERN_OR => PatternKind::Or(self.lower_pattern_list(node)),
             SyntaxKind::PATTERN_PAREN => {
-                return match node.children().find(|child| is_pattern_kind(child.kind())) {
-                    Some(inner) => self.lower_pattern(&inner),
+                return match node
+                    .child_nodes()
+                    .find(|child| is_pattern_kind(child.kind()))
+                {
+                    Some(inner) => self.lower_pattern(inner),
                     None => self.allocate_pattern(PatternKind::Missing, range),
                 };
             }
@@ -1015,15 +1335,29 @@ impl Module {
         self.allocate_pattern(kind, range)
     }
 
-    fn lower_binary(&mut self, node: &SyntaxNode, range: TextRange) -> ExprId {
-        let Some(binary) = BinaryExpr::cast(node.clone()) else {
+    fn lower_pattern_list(&mut self, node: GreenNodeAt<'_>) -> Span<PatId> {
+        let mark = self.pattern_stack.len();
+        for item in node
+            .child_nodes()
+            .filter(|child| is_pattern_kind(child.kind()))
+        {
+            let item = self.lower_pattern(item);
+            self.pattern_stack.push(item);
+        }
+        seal(
+            &mut self.pattern_stack,
+            mark,
+            &mut self.module.pattern_lists,
+        )
+    }
+
+    fn lower_binary(&mut self, node: GreenNodeAt<'_>, range: TextRange) -> ExprId {
+        let Some(operator_token) = node.child_tokens().find(|token| !token.kind.is_trivia()) else {
             return self.missing(range);
         };
-        let Some(operator_token) = binary.operator() else {
-            return self.missing(range);
-        };
-        let (lhs, rhs) = (binary.lhs(), binary.rhs());
-        let operator = match operator_token.kind() {
+        let mut operands = expression_children(node);
+        let (lhs, rhs) = (operands.next(), operands.next());
+        let operator = match operator_token.kind {
             kind @ (SyntaxKind::LESS_MINUS
             | SyntaxKind::EQ
             | SyntaxKind::LESS2_MINUS
@@ -1056,25 +1390,27 @@ impl Module {
             SyntaxKind::COLON_EQ => {
                 let callee = self.allocate(
                     ExpressionKind::NameRef(Symbol::new(":=")),
-                    operator_token.text_range(),
+                    operator_token.range,
                 );
-                let arguments = [lhs, rhs]
-                    .into_iter()
-                    .map(|operand| Argument {
+                let mark = self.argument_stack.len();
+                for operand in [lhs, rhs] {
+                    let value = self.lower_optional(operand, range);
+                    self.argument_stack.push(Argument {
                         name: None,
                         name_range: None,
-                        value: Some(self.lower_optional(operand, range)),
-                    })
-                    .collect();
+                        value: Some(value),
+                    });
+                }
+                let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
                 return self.allocate(ExpressionKind::Call { callee, arguments }, range);
             }
             SyntaxKind::PIPE_GREATER => {
-                if let Some(call) = self.lower_pipe(lhs.clone(), rhs.clone(), range) {
+                if let Some(call) = self.lower_pipe(lhs, rhs, range) {
                     return call;
                 }
                 BinaryOperator::Pipe
             }
-            SyntaxKind::SPECIAL => match operator_token.text() {
+            SyntaxKind::SPECIAL => match operator_token.text {
                 "%%" => BinaryOperator::Modulo,
                 "%/%" => BinaryOperator::IntegerDivide,
                 _ => BinaryOperator::Special,
@@ -1102,12 +1438,12 @@ impl Module {
         let lhs = self.lower_optional(lhs, range);
         let rhs = self.lower_optional(rhs, range);
         if operator == BinaryOperator::Special {
-            let (pattern, value) = match operator_token.text() {
+            let (pattern, value) = match operator_token.text {
                 "%<-%" => (lhs, rhs),
                 "%->%" => (rhs, lhs),
                 _ => (lhs, lhs),
             };
-            if pattern != value && destructure_leaves(self, pattern).is_some() {
+            if pattern != value && destructure_leaves(&self.module, pattern).is_some() {
                 return self.allocate(
                     ExpressionKind::Assign {
                         spelling: AssignSpelling::Destructure,
@@ -1119,7 +1455,7 @@ impl Module {
             }
         }
         let special_name =
-            (operator == BinaryOperator::Special).then(|| Symbol::new(operator_token.text()));
+            (operator == BinaryOperator::Special).then(|| Symbol::new(operator_token.text));
         self.allocate(
             ExpressionKind::Binary {
                 operator,
@@ -1135,134 +1471,117 @@ impl Module {
     /// Shapes R rejects return `None` and keep the opaque-operator lowering.
     fn lower_pipe(
         &mut self,
-        lhs: Option<SyntaxNode>,
-        rhs: Option<SyntaxNode>,
+        lhs: Option<GreenNodeAt<'_>>,
+        rhs: Option<GreenNodeAt<'_>>,
         range: TextRange,
     ) -> Option<ExprId> {
         let call = rhs.filter(|node| node.kind() == SyntaxKind::CALL_EXPR)?;
-        let shape = pipe_shape(&call)?;
+        let shape = pipe_shape(call)?;
         let piped = self.lower_optional(lhs, range);
         let callee = call
-            .children()
+            .child_nodes()
             .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST);
         let callee = self.lower_optional(callee, range);
+        let mark = self.argument_stack.len();
         let substitute = match shape {
-            PipeShape::FirstArgument => None,
-            PipeShape::NamedPlaceholder(index) => Some((index, piped)),
-        };
-        let mut arguments = self.lower_arguments(&call, substitute);
-        if matches!(shape, PipeShape::FirstArgument) {
-            arguments.insert(
-                0,
-                Argument {
+            PipeShape::FirstArgument => {
+                self.argument_stack.push(Argument {
                     name: None,
                     name_range: None,
                     value: Some(piped),
-                },
-            );
-        }
-        Some(self.allocate(
-            ExpressionKind::Call {
-                callee,
-                arguments: arguments.into(),
-            },
-            range,
-        ))
+                });
+                None
+            }
+            PipeShape::NamedPlaceholder(index) => Some((index, piped)),
+        };
+        self.lower_arguments(call, substitute);
+        let arguments = seal(&mut self.argument_stack, mark, &mut self.module.arguments);
+        Some(self.allocate(ExpressionKind::Call { callee, arguments }, range))
     }
 
-    /// The `_` placeholder never becomes an expression, so nothing dangles in the arena.
-    fn lower_arguments(
-        &mut self,
-        node: &SyntaxNode,
-        substitute: Option<(usize, ExprId)>,
-    ) -> Vec<Argument> {
-        match node
-            .children()
-            .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
-        {
-            Some(list) => self.lower_arguments_of(&list, substitute),
-            None => Vec::new(),
+    /// Pushes the arguments of `node`'s argument list onto the argument stack. The `_`
+    /// placeholder never becomes an expression, so nothing dangles in the module.
+    fn lower_arguments(&mut self, node: GreenNodeAt<'_>, substitute: Option<(usize, ExprId)>) {
+        if let Some(list) = child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+            self.lower_arguments_of(list, substitute);
         }
     }
 
-    fn lower_arguments_of(
-        &mut self,
-        list: &SyntaxNode,
-        substitute: Option<(usize, ExprId)>,
-    ) -> Vec<Argument> {
-        list.children()
+    fn lower_arguments_of(&mut self, list: GreenNodeAt<'_>, substitute: Option<(usize, ExprId)>) {
+        for (index, argument) in list
+            .child_nodes()
             .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
             .enumerate()
-            .map(|(index, argument)| {
-                let tag = argument
-                    .children()
-                    .find(|child| {
-                        child.kind() == SyntaxKind::NAME || child.kind() == SyntaxKind::LITERAL
-                    })
-                    .filter(|_| {
-                        argument
-                            .children_with_tokens()
-                            .filter_map(|element| element.into_token())
-                            .any(|token| token.kind() == SyntaxKind::EQ)
-                    });
-                let name_range = tag.as_ref().map(|tag| tag.text_range());
-                let name = tag.as_ref().and_then(field_name_text);
-                if let Some((placeholder, piped)) = substitute
-                    && placeholder == index
-                {
-                    return Argument {
-                        name,
-                        name_range,
-                        value: Some(piped),
-                    };
+        {
+            let tag = argument
+                .child_nodes()
+                .find(|child| {
+                    child.kind() == SyntaxKind::NAME || child.kind() == SyntaxKind::LITERAL
+                })
+                .filter(|_| {
+                    argument
+                        .child_tokens()
+                        .any(|token| token.kind == SyntaxKind::EQ)
+                });
+            let name_range = tag.map(|tag| tag.range());
+            // R's grammar also takes `NULL` as an argument tag: `switch(x, NULL = 1)`
+            // labels the case for the string "NULL".
+            let name = tag.and_then(|tag| {
+                let null_tag = tag.kind() == SyntaxKind::LITERAL
+                    && tag
+                        .first_token()
+                        .is_some_and(|token| token.kind == SyntaxKind::NULL_KW);
+                if null_tag {
+                    Some(Symbol::new("NULL"))
+                } else {
+                    field_name_text(tag)
                 }
-                let value_node = {
-                    let mut expressions = expression_children(&argument);
+            });
+            let value = match substitute {
+                Some((placeholder, piped)) if placeholder == index => Some(piped),
+                _ => {
+                    let mut expressions = expression_children(argument);
                     if name.is_some() {
                         // The tag itself is the first expression child.
                         expressions.next();
                     }
-                    expressions.next()
-                };
-                let value = value_node.map(|node| self.lower_expression(&node));
-                Argument {
-                    name,
-                    name_range,
-                    value,
+                    expressions.next().map(|node| self.lower_expression(node))
                 }
-            })
-            .collect()
+            };
+            self.argument_stack.push(Argument {
+                name,
+                name_range,
+                value,
+            });
+        }
     }
 
-    fn lower_parameters(&mut self, list: &SyntaxNode) -> Box<[Parameter]> {
-        list.children()
+    fn lower_parameters(&mut self, list: GreenNodeAt<'_>) {
+        for parameter in list
+            .child_nodes()
             .filter(|child| child.kind() == SyntaxKind::PARAMETER)
-            .map(|parameter| {
-                let name = parameter
-                    .first_token()
-                    .map(|token| {
-                        let text = token.text();
+        {
+            let first = parameter.first_token();
+            let name = first
+                .map(|token| {
+                    let text = token.text;
+                    Symbol::new(
                         text.strip_prefix('`')
                             .and_then(|t| t.strip_suffix('`'))
-                            .unwrap_or(text)
-                            .to_owned()
-                    })
-                    .map(Symbol::from)
-                    .unwrap_or_default();
-                let default = expression_children(&parameter)
-                    .next()
-                    .map(|node| self.lower_expression(&node));
-                let range = parameter
-                    .first_token()
-                    .map(|token| token.text_range())
-                    .unwrap_or_else(|| parameter.text_range());
-                Parameter {
-                    name,
-                    default,
-                    range,
-                }
-            })
-            .collect()
+                            .unwrap_or(text),
+                    )
+                })
+                .unwrap_or_default();
+            let default = expression_children(parameter)
+                .next()
+                .map(|node| self.lower_expression(node));
+            let range = first.map_or_else(|| parameter.range(), |token| token.range);
+            self.parameter_stack.push(Parameter {
+                name,
+                default,
+                range,
+            });
+        }
     }
 }
 
@@ -1279,46 +1598,59 @@ fn is_pattern_kind(kind: SyntaxKind) -> bool {
     )
 }
 
-fn expression_children(node: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
-    node.children()
+fn expression_children<'a>(node: GreenNodeAt<'a>) -> impl Iterator<Item = GreenNodeAt<'a>> {
+    node.child_nodes()
         .filter(|child| is_expression_kind(child.kind()))
+}
+
+fn child_of_kind(node: GreenNodeAt<'_>, kind: SyntaxKind) -> Option<GreenNodeAt<'_>> {
+    node.child_nodes().find(|child| child.kind() == kind)
 }
 
 /// Excludes the trailing trivia (including `#:` annotations) rowan attaches
 /// inside expression nodes, so ranges cover code only.
 pub fn significant_range(node: &SyntaxNode) -> TextRange {
-    let full = node.text_range();
-    let mut end = full.end();
-    let mut token = node.last_token();
-    while let Some(current) = token {
-        if current.text_range().start() < full.start() {
-            break;
-        }
-        let trivia = matches!(
-            current.kind(),
-            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-        ) || current
-            .parent_ancestors()
-            .any(|ancestor| ancestor.kind() == SyntaxKind::ANNOTATION);
-        if !trivia {
-            break;
-        }
-        end = current.text_range().start();
-        token = current.prev_token();
-    }
-    TextRange::new(full.start(), end.max(full.start()))
+    let green = node.green();
+    significant_range_green(GreenNodeAt::new(&green, node.text_range().start()))
 }
 
-fn literal_kind(node: &SyntaxNode) -> LiteralKind {
+fn significant_range_green(node: GreenNodeAt<'_>) -> TextRange {
+    let start = node.range().start();
+    TextRange::new(start, significant_end(node).unwrap_or(start))
+}
+
+/// Where the last token that is neither trivia nor inside an `ANNOTATION` ends.
+fn significant_end(node: GreenNodeAt<'_>) -> Option<TextSize> {
+    node.children().rev().find_map(|child| match child {
+        GreenElementAt::Token(token) => (!token.kind.is_trivia()).then_some(token.range.end()),
+        GreenElementAt::Node(child) if child.kind() == SyntaxKind::ANNOTATION => None,
+        GreenElementAt::Node(child) => significant_end(child),
+    })
+}
+
+/// The name a `NAME` node spells, read from its first token.
+fn name_symbol(node: GreenNodeAt<'_>) -> Option<Symbol> {
+    Some(Symbol::new(&name_text(node.first_token()?.text)))
+}
+
+fn literal_kind(node: GreenNodeAt<'_>, buffer: &mut String) -> LiteralKind {
+    let mut text = |value: &str| {
+        let start = buffer.len() as u32;
+        buffer.push_str(value);
+        Text {
+            start,
+            len: value.len() as u32,
+        }
+    };
     let Some(token) = node.first_token() else {
         return LiteralKind::Null;
     };
-    match token.kind() {
-        SyntaxKind::INTEGER => LiteralKind::Integer(token.text().into()),
-        SyntaxKind::DOUBLE => LiteralKind::Double(token.text().into()),
-        SyntaxKind::COMPLEX => LiteralKind::Complex(token.text().into()),
+    match token.kind {
+        SyntaxKind::INTEGER => LiteralKind::Integer(text(token.text)),
+        SyntaxKind::DOUBLE => LiteralKind::Double(text(token.text)),
+        SyntaxKind::COMPLEX => LiteralKind::Complex(text(token.text)),
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
-            LiteralKind::String(string_value(token.text()).into())
+            LiteralKind::String(text(string_value(token.text)))
         }
         SyntaxKind::TRUE_KW => LiteralKind::Logical(true),
         SyntaxKind::FALSE_KW => LiteralKind::Logical(false),
@@ -1339,13 +1671,13 @@ pub fn is_whole_number_double(text: &str) -> bool {
 }
 
 /// 0-based. Whole-number doubles count: R indexes `x[[2]]` exactly like `x[[2L]]`.
-pub fn integer_literal_position(kind: &ExpressionKind) -> Option<usize> {
+pub fn integer_literal_position(module: &Module, kind: &ExpressionKind) -> Option<usize> {
     let one_based_index = match kind {
         ExpressionKind::Literal(LiteralKind::Integer(text)) => {
-            text.trim_end_matches('L').parse::<usize>().ok()?
+            module[text].trim_end_matches('L').parse::<usize>().ok()?
         }
         ExpressionKind::Literal(LiteralKind::Double(text)) => {
-            let value = text.parse::<f64>().ok()?;
+            let value = module[text].parse::<f64>().ok()?;
             if value.fract() != 0.0 || value < 1.0 || !value.is_finite() {
                 return None;
             }
@@ -1357,43 +1689,38 @@ pub fn integer_literal_position(kind: &ExpressionKind) -> Option<usize> {
 }
 
 /// Escapes are not decoded; raw strings strip their full delimiters.
-fn string_value(text: &str) -> String {
+fn string_value(text: &str) -> &str {
     if let Some(rest) = text.strip_prefix(['r', 'R']) {
         let Some(quote) = rest.chars().next() else {
-            return text.to_owned();
+            return text;
         };
         let inner = &rest[quote.len_utf8()..];
         let dashes = inner.chars().take_while(|&c| c == '-').count();
-        let open = inner[dashes..].chars().next();
-        if open.is_some() {
-            let body_start = dashes + 1;
-            let mut closer = String::new();
-            closer.push(match open {
-                Some('(') => ')',
-                Some('[') => ']',
-                _ => '}',
-            });
-            closer.extend(iter::repeat_n('-', dashes));
-            closer.push(quote);
-            let body = &inner[body_start..];
-            return body
-                .strip_suffix(closer.as_str())
-                .unwrap_or(body)
-                .to_owned();
-        }
-        return text.to_owned();
+        let Some(open) = inner[dashes..].chars().next() else {
+            return text;
+        };
+        let body = &inner[dashes + open.len_utf8()..];
+        let close = match open {
+            '(' => ')',
+            '[' => ']',
+            _ => '}',
+        };
+        // The closer is the bracket, the same dashes, then the quote.
+        return body
+            .strip_suffix(quote)
+            .and_then(|body| body.strip_suffix(&inner[..dashes]))
+            .and_then(|body| body.strip_suffix(close))
+            .unwrap_or(body);
     }
-    text.trim_matches(['"', '\'']).to_owned()
+    text.trim_matches(['"', '\''])
 }
 
-fn field_name_text(node: &SyntaxNode) -> Option<Symbol> {
+fn field_name_text(node: GreenNodeAt<'_>) -> Option<Symbol> {
     match node.kind() {
-        SyntaxKind::NAME => Name::cast(node.clone())
-            .and_then(|name| name.text())
-            .map(Symbol::from),
+        SyntaxKind::NAME => name_symbol(node),
         SyntaxKind::LITERAL => {
             let token = node.first_token()?;
-            (token.kind() == SyntaxKind::STRING).then(|| Symbol::new(&string_value(token.text())))
+            (token.kind == SyntaxKind::STRING).then(|| Symbol::new(string_value(token.text)))
         }
         _ => None,
     }
@@ -1406,39 +1733,36 @@ enum PipeShape {
 
 /// R's placeholder rules: `_` may appear exactly once, as the whole value of a
 /// named argument of this call. Any other use is an R error (`None`).
-fn pipe_shape(call: &SyntaxNode) -> Option<PipeShape> {
-    let underscores: Vec<SyntaxToken> = call
-        .descendants_with_tokens()
-        .filter_map(|element| element.into_token())
-        .filter(|token| token.kind() == SyntaxKind::UNDERSCORE)
-        .collect();
-    let [token] = underscores.as_slice() else {
-        return underscores.is_empty().then_some(PipeShape::FirstArgument);
-    };
-    let name = token
-        .parent()
-        .filter(|node| node.kind() == SyntaxKind::NAME)?;
-    let argument = name
-        .parent()
-        .filter(|node| node.kind() == SyntaxKind::ARGUMENT)?;
-    let list = argument
-        .parent()
-        .filter(|node| node.kind() == SyntaxKind::ARGUMENT_LIST)?;
-    if list.parent().as_ref() != Some(call) {
-        return None;
+fn pipe_shape(call: GreenNodeAt<'_>) -> Option<PipeShape> {
+    match count_placeholders(call) {
+        0 => return Some(PipeShape::FirstArgument),
+        1 => {}
+        _ => return None,
     }
-    let named = argument
-        .children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .any(|token| token.kind() == SyntaxKind::EQ);
-    // With a tag present, the value is the second expression child.
-    let is_value = expression_children(&argument).nth(1).as_ref() == Some(&name);
-    if !named || !is_value {
-        return None;
-    }
-    let index = list
-        .children()
+    let list = child_of_kind(call, SyntaxKind::ARGUMENT_LIST)?;
+    list.child_nodes()
         .filter(|child| child.kind() == SyntaxKind::ARGUMENT)
-        .position(|candidate| candidate == argument)?;
-    Some(PipeShape::NamedPlaceholder(index))
+        .position(|argument| {
+            let named = argument
+                .child_tokens()
+                .any(|token| token.kind == SyntaxKind::EQ);
+            // With a tag present, the value is the second expression child.
+            named
+                && expression_children(argument).nth(1).is_some_and(|value| {
+                    value.kind() == SyntaxKind::NAME
+                        && value
+                            .child_tokens()
+                            .any(|token| token.kind == SyntaxKind::UNDERSCORE)
+                })
+        })
+        .map(PipeShape::NamedPlaceholder)
+}
+
+fn count_placeholders(node: GreenNodeAt<'_>) -> usize {
+    node.children()
+        .map(|child| match child {
+            GreenElementAt::Token(token) => usize::from(token.kind == SyntaxKind::UNDERSCORE),
+            GreenElementAt::Node(child) => count_placeholders(child),
+        })
+        .sum()
 }

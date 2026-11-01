@@ -6,17 +6,19 @@
 //! written for them cannot mistake one for a list: a builtin that does not know them refuses them
 //! by name instead of reading garbage.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin, special},
-    deparse, eval, interp,
-    sort::IdenticalFlags,
-    standard_library,
-    unwind::{R, Unwind, error, error_in},
-    values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
-};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
-    records::{Fields, Layout, NativeKind},
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, builtin, special},
+        deparse, eval, interp,
+        sort::IdenticalFlags,
+        standard_library,
+        unwind::{R, Unwind, error, error_in},
+        values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
+        records::{Fields, Layout, NativeKind},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -239,8 +241,15 @@ pub(crate) unsafe fn make(
 
 pub(crate) unsafe fn alloc(layout: Layout, slots: &[Sexp]) -> Result<Sexp, heap::HeapError> {
     let heap = crate::heap();
+    // A dictionary or set counts its holders, so the standard library can grow one in place when
+    // its only holder is the binding being reassigned (`standard_library::reusable`).
+    let counted = matches!(layout.fields, Fields::Dict | Fields::Set);
     let id = heap.layouts.intern(layout);
-    let object = heap.alloc_record(id, slots)?;
+    let object = if counted {
+        heap.alloc_counted_record(id, slots)?
+    } else {
+        heap.alloc_record(id, slots)?
+    };
     heap.root(object);
     Ok(object)
 }
@@ -804,7 +813,7 @@ unsafe fn list_items(list: Sexp, named: bool) -> Result<Vec<(Option<Sexp>, Sexp)
         let name = name.filter(|name| *name != values::na_string() && !name.bytes().is_empty());
         let field = match (named, name) {
             (true, Some(name)) => Some(
-                values::install_bytes(name.bytes())
+                values::install_charsxp(name)
                     .map_err(|_| "cannot intern a field name".to_owned())?,
             ),
             (true, None) => return Err(format!("element {} has no name", index + 1)),

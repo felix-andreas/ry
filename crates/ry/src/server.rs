@@ -1,57 +1,80 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
+//!
+//! The worker never touches the transport or a thread directly: its outgoing traffic goes
+//! through [`Outbox`] and its scheduling through [`run_job`], so [`simulation`] can drive the
+//! same code from one seed without a socket, a runtime or a second thread.
 
-use crate::cli::{
-    data_file_key, project_order, project_stub_paths, scan_data_files, shares_a_namespace,
-    sniff_data_file,
+pub mod simulation;
+
+use {
+    crate::{
+        cli::{
+            data_file_key, document_kind, project_order, project_stub_paths, scan_data_files,
+            sniff_data_file,
+        },
+        config::{
+            CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
+            INLINE_ANNOTATIONS_OFF, suggested_table,
+        },
+        diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
+        namespace::namespace_import_problems,
+        position::{LineColumn, LineIndex},
+    },
+    async_lsp::{
+        ClientSocket, ErrorCode, LanguageClient, LanguageServer, ResponseError,
+        client_monitor::ClientProcessMonitorLayer,
+        lsp_types::{self, request},
+        panic::CatchUnwindLayer,
+        router::Router,
+        server::LifecycleLayer,
+        tracing::TracingLayer,
+    },
+    futures::future::BoxFuture,
+    ide::{
+        CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
+        HoverDefinition, NavigationTarget, SemanticClass, SignatureData, StubTarget,
+        classify_type_token,
+    },
+    salsa::{Durability, Setter},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics, warm_project_folds},
+        metadata::{
+            NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_package,
+            parse_namespace,
+        },
+        project_global_names,
+        stubs::{
+            StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+            shipped_stub_sources, stub_source_problems,
+        },
+    },
+    simulation::Outgoing,
+    std::{
+        cmp::Reverse,
+        collections::{BTreeSet, HashMap},
+        env, fs,
+        hash::{DefaultHasher, Hash, Hasher},
+        mem,
+        num::NonZero,
+        ops::{ControlFlow, Range},
+        panic::{self, AssertUnwindSafe},
+        path::{Path, PathBuf},
+        process,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+        time::{Duration, Instant},
+    },
+    syntax::{SyntaxElement, SyntaxKind, TextRange, TextSize, is_syntactic_name},
+    tokio::{runtime::Handle, sync::oneshot},
+    tower::ServiceBuilder,
 };
-use crate::config::{
-    CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
-    INLINE_ANNOTATIONS_OFF, suggested_table,
-};
-use crate::diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics};
-use crate::namespace::namespace_import_problems;
-use crate::position::{LineColumn, LineIndex};
-use async_lsp::client_monitor::ClientProcessMonitorLayer;
-use async_lsp::lsp_types::{self, request};
-use async_lsp::panic::CatchUnwindLayer;
-use async_lsp::router::Router;
-use async_lsp::server::LifecycleLayer;
-use async_lsp::tracing::TracingLayer;
-use async_lsp::{ClientSocket, ErrorCode, LanguageClient, LanguageServer, ResponseError};
-use futures::future::BoxFuture;
-use ide::{
-    CompletionItem, CompletionKind, DefinitionTarget, DocumentSymbol, DocumentSymbolKind,
-    HoverDefinition, NavigationTarget, SignatureData, StubTarget,
-};
-use salsa::{Durability, Setter};
-use semantics::diagnostics::{Diagnostic, Severity};
-use semantics::metadata::{
-    PackageMetadata, file_attached_namespaces, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_imports,
-};
-use semantics::stubs::{
-    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
-    shipped_stub_sources, stub_source_problems,
-};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::ops::{ControlFlow, Range};
-use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
-use std::{env, fs, panic, process, thread};
-use syntax::{
-    SyntaxElement, SyntaxKind, SyntaxToken, TextRange, TextSize, is_inline_annotation,
-    is_syntactic_name,
-};
-use tokio::runtime::Handle;
-use tokio::sync::oneshot;
-use tower::ServiceBuilder;
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
@@ -63,11 +86,13 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
         let cancel = CancelHandle::default();
 
         let seed = WorkerSeed {
-            client: client.clone(),
+            outbox: Outbox::Client {
+                client: client.clone(),
+                runtime: runtime.clone(),
+            },
             experimental_features,
             debug,
             cancel: cancel.clone(),
-            runtime: runtime.clone(),
         };
         thread::Builder::new()
             .name("ry-analysis".to_owned())
@@ -102,22 +127,88 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
         .expect("language server main loop failed");
 }
 
+/// Files primed per idle unit. Small enough that pending publishes and lowering interleave
+/// with the cold check; large enough to keep every core busy.
+const PRIME_BATCH: usize = 64;
+
 /// The token exists only once the worker builds the database, so it arrives late
 /// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
-    token: Arc<Mutex<Option<salsa::CancellationToken>>>,
+    state: Arc<Mutex<CancelState>>,
+    /// Jobs sent to the worker that it has not received yet. A parallel background unit polls
+    /// this between files, because salsa clears a handle's cancellation flag whenever a
+    /// top-level query returns, so a flip that lands at the end of one query is lost.
+    queued: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+struct CancelState {
+    token: Option<salsa::CancellationToken>,
+    /// Whether the worker is running background work (the semantic wave, priming), which a
+    /// request preempts. One lock covers both fields so a request can never cancel another
+    /// request that started after the background unit ended.
+    idle: bool,
+    /// Tokens of the database clones a parallel background unit runs on. Salsa's tokens are
+    /// per handle, so cancelling the worker's own token would not stop them.
+    helpers: Vec<salsa::CancellationToken>,
 }
 
 impl CancelHandle {
     fn cancel(&self) {
-        if let Some(token) = self.token.lock().expect("cancel token lock").as_ref() {
+        let state = self.state.lock().expect("cancel state lock");
+        if let Some(token) = state.token.as_ref() {
             token.cancel();
+        }
+        for helper in &state.helpers {
+            helper.cancel();
         }
     }
 
+    /// A background unit is cancelled and requeued, so the request runs next instead of
+    /// waiting for a whole file's settled diagnostics.
+    fn preempt_idle(&self) {
+        let state = self.state.lock().expect("cancel state lock");
+        if state.idle
+            && let Some(token) = state.token.as_ref()
+        {
+            token.cancel();
+            for helper in &state.helpers {
+                helper.cancel();
+            }
+        }
+    }
+
+    /// Counted before the send, so a background unit never misses a job already on its way.
+    fn job_sent(&self) {
+        self.queued.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn job_received(&self) {
+        self.queued.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn has_queued_jobs(&self) -> bool {
+        self.queued.load(Ordering::SeqCst) > 0
+    }
+
+    /// A job queued before the helpers were registered still stops them.
+    fn set_helpers(&self, helpers: Vec<salsa::CancellationToken>) {
+        let mut state = self.state.lock().expect("cancel state lock");
+        if self.has_queued_jobs() {
+            for helper in &helpers {
+                helper.cancel();
+            }
+        }
+        state.helpers = helpers;
+    }
+
+    fn set_idle(&self, idle: bool) {
+        self.state.lock().expect("cancel state lock").idle = idle;
+    }
+
     fn install(&self, token: salsa::CancellationToken) {
-        *self.token.lock().expect("cancel token lock") = Some(token);
+        self.state.lock().expect("cancel state lock").token = Some(token);
     }
 }
 
@@ -141,13 +232,22 @@ enum Job {
 }
 
 struct WorkerSeed {
-    client: ClientSocket,
+    outbox: Outbox,
     experimental_features: ExperimentalFeatures,
     /// Surfaces internal analysis facts (hover debug sections). Deliberately not a
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
-    runtime: Handle,
+}
+
+/// Where the worker's server-to-client traffic goes. Every message the worker originates
+/// passes through here, which is what lets a simulation record the exact transcript.
+enum Outbox {
+    Client {
+        client: ClientSocket,
+        runtime: Handle,
+    },
+    Recorder(Arc<Mutex<Vec<simulation::Outgoing>>>),
 }
 
 fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
@@ -166,25 +266,8 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
                 Err(_) => return,
             }
         };
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match job {
-            Some(Job::Initialize(params, reply)) => {
-                let seed = seed.take().expect("initialize arrives exactly once");
-                let (initialized, result) = Worker::initialize(seed, *params);
-                worker = Some(initialized);
-                // The receiver is gone only when the client cancelled the request.
-                reply.send(Ok(result)).ok();
-            }
-            job => match worker.as_mut() {
-                Some(worker) => {
-                    worker.refresh_cancellation();
-                    match job {
-                        Some(Job::Run(work)) => work(worker),
-                        _ => worker.run_idle_unit(),
-                    }
-                }
-                // LSP allows dropping notifications before initialize.
-                None => tracing::warn!("dropping a job that arrived before initialize"),
-            },
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            run_job(&mut seed, &mut worker, job);
         }));
         if outcome.is_err() {
             // A read catches its own cancellation, so this is a coherence panic; serving a
@@ -192,6 +275,47 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
             tracing::error!("analysis worker panicked; exiting");
             process::exit(1);
         }
+    }
+}
+
+/// One scheduling step of the worker: a queued job, or one unit of idle work when `job` is
+/// `None`. The production loop and the simulator both schedule through this function, so the
+/// simulator exercises exactly the worker's own transitions.
+fn run_job(seed: &mut Option<WorkerSeed>, worker: &mut Option<Worker>, job: Option<Job>) {
+    // The seed holds the handle until initialize hands it to the worker.
+    let cancel = match (seed.as_ref(), worker.as_ref()) {
+        (Some(seed), _) => Some(&seed.cancel),
+        (None, Some(worker)) => Some(&worker.cancel),
+        (None, None) => None,
+    };
+    if job.is_some()
+        && let Some(cancel) = cancel
+    {
+        cancel.job_received();
+    }
+    match job {
+        Some(Job::Initialize(params, reply)) => {
+            let seed = seed.take().expect("initialize arrives exactly once");
+            let (initialized, result) = Worker::initialize(seed, *params);
+            *worker = Some(initialized);
+            // The receiver is gone only when the client cancelled the request.
+            reply.send(Ok(result)).ok();
+        }
+        job => match worker.as_mut() {
+            Some(worker) => {
+                worker.refresh_cancellation();
+                match job {
+                    Some(Job::Run(work)) => work(worker),
+                    _ => {
+                        worker.cancel.set_idle(true);
+                        worker.run_idle_unit();
+                        worker.cancel.set_idle(false);
+                    }
+                }
+            }
+            // LSP allows dropping notifications before initialize.
+            None => tracing::warn!("dropping a job that arrived before initialize"),
+        },
     }
 }
 
@@ -211,7 +335,11 @@ impl ServerState {
             // The receiver is gone only when the client cancelled the request.
             reply.send(build(worker)).ok();
         }));
-        self.submit(job, receive)
+        // Queued first: a background unit cancelled before the request is queued would just
+        // start the next one.
+        let response = self.submit(job, receive);
+        self.cancel.preempt_idle();
+        response
     }
 
     fn submit<T: Send + 'static>(
@@ -219,6 +347,7 @@ impl ServerState {
         job: Job,
         receive: oneshot::Receiver<Result<T, ResponseError>>,
     ) -> BoxFuture<'static, Result<T, ResponseError>> {
+        self.cancel.job_sent();
         if self.sender.send(job).is_err() {
             return Box::pin(async { Err(worker_gone_error()) });
         }
@@ -231,12 +360,19 @@ impl ServerState {
     where
         F: FnOnce(&mut Worker) + Send + 'static,
     {
+        // Counted first: a helper whose query returns as the cancel lands loses the flag
+        // to salsa's uncancel, and only the counter then stops it before the next file.
+        self.cancel.job_sent();
         self.cancel.cancel();
         if self.sender.send(Job::Run(Box::new(build))).is_err() {
             panic!("analysis worker is gone; cannot apply a notification");
         }
         ControlFlow::Continue(())
     }
+}
+
+fn record_outgoing(record: &Mutex<Vec<Outgoing>>, message: Outgoing) {
+    record.lock().expect("simulation outbox lock").push(message);
 }
 
 fn worker_gone_error() -> ResponseError {
@@ -250,10 +386,13 @@ enum PositionEncoding {
 }
 
 struct Worker {
-    client: ClientSocket,
-    runtime: Handle,
+    outbox: Outbox,
     cancel: CancelHandle,
     current_token: salsa::CancellationToken,
+    /// Fault injection for the simulator: the cancellation token flips at the given
+    /// cancellable checkpoint of the current job, which is how a simulated edit lands while a
+    /// query is in flight. Always `None` outside a simulation.
+    cancel_at_checkpoint: Option<usize>,
     experimental_features: ExperimentalFeatures,
     debug: bool,
     encoding: PositionEncoding,
@@ -266,7 +405,8 @@ struct Worker {
     pending_config_error: Option<String>,
     db: RootDatabase,
     files: HashMap<PathBuf, SourceFile>,
-    open_documents: HashSet<PathBuf>,
+    /// Ordered, because a refresh walks it and the order of the publishes it owes is observable.
+    open_documents: BTreeSet<PathBuf>,
     stub_documents: HashMap<PathBuf, String>,
     /// Aligned with the `StubSources` order: shipped sources point at materialized
     /// cache copies, overrides at their real files. `None` when materialization failed.
@@ -276,11 +416,28 @@ struct Worker {
     virtual_document_uris: HashMap<PathBuf, lsp_types::Url>,
     /// Most recent last.
     pending_semantic_publishes: Vec<PathBuf>,
+    /// Workspace files whose attach facts the startup warm-up has not scanned yet. Until it
+    /// has, the attach union stays unapplied: applying it per file would re-run every
+    /// diagnostic each time it grows.
+    unscanned: Vec<PathBuf>,
+    /// Workspace files whose per-item naming the startup warm-up has not derived yet. Every
+    /// project-wide name map folds all of them, so while any remain, the first wave skips the
+    /// lints (which read those maps) and the semantic wave waits.
+    unwarmed: Vec<PathBuf>,
     /// Results are never published.
-    prime_queue: VecDeque<PathBuf>,
+    prime_queue: Vec<PathBuf>,
+    /// Set when [`project_global_names`] must re-run before the next editor request.
+    editor_folds_stale: bool,
+    /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
+    /// whose durability drops, so the first LOW write to a file re-derives everything that
+    /// depends on it. Idle time pays that once, so the first keystroke does not.
+    pending_lowering: Vec<PathBuf>,
     /// Non-empty sets only. Kept current per synced or primed file, never by a
     /// whole-project sweep, so keystroke work stays O(open documents).
     attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
+    /// Files whose `library()` scan a cancellation interrupted. The edit that cancelled it may
+    /// be to another file, so nothing else would rescan this one: idle time owes it.
+    pending_attached_scans: BTreeSet<PathBuf>,
 }
 
 struct WorkspaceMetadata {
@@ -288,6 +445,7 @@ struct WorkspaceMetadata {
     dependencies: BTreeSet<String>,
     collate: Vec<String>,
     package: Option<String>,
+    native_symbols: NativeSymbols,
 }
 
 impl Worker {
@@ -361,10 +519,10 @@ impl Worker {
         seed.cancel.install(current_token.clone());
 
         let mut worker = Worker {
-            client: seed.client,
-            runtime: seed.runtime,
+            outbox: seed.outbox,
             cancel: seed.cancel,
             current_token,
+            cancel_at_checkpoint: None,
             experimental_features: seed.experimental_features,
             debug: seed.debug,
             encoding,
@@ -377,29 +535,43 @@ impl Worker {
             pending_config_error: pending_config_error.as_ref().map(config_message),
             db,
             files: HashMap::new(),
-            open_documents: HashSet::new(),
+            open_documents: BTreeSet::new(),
             stub_documents: HashMap::new(),
             stub_source_paths: Vec::new(),
             namespace_documents: HashMap::new(),
             collate_order: Vec::new(),
             virtual_document_uris: HashMap::new(),
             pending_semantic_publishes: Vec::new(),
-            prime_queue: VecDeque::new(),
+            unscanned: Vec::new(),
+            unwarmed: Vec::new(),
+            prime_queue: Vec::new(),
+            editor_folds_stale: false,
+            pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
+            pending_attached_scans: BTreeSet::new(),
         };
+        // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
+        // durable as its least durable input, and nearly every memo reads the stubs or the
+        // settings, so one LOW input would make a keystroke deep-verify the whole project.
         worker.install_stubs();
-        AnalysisSettings::new(&worker.db, worker.config.check.inline_annotations);
+        let _: AnalysisSettings = AnalysisSettings::builder(worker.config.check.inline_annotations)
+            .durability(Durability::MEDIUM)
+            .new(&worker.db);
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
-        PackageMetadata::new(
-            &worker.db,
+        let _: PackageMetadata = PackageMetadata::builder(
             metadata.imports,
             metadata.dependencies,
             Default::default(),
             metadata.package,
-        );
-        DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
+            metadata.native_symbols,
+        )
+        .durability(Durability::MEDIUM)
+        .new(&worker.db);
+        let _: DataFiles = DataFiles::builder(scan_data_files(&worker.workspace_root))
+            .durability(Durability::MEDIUM)
+            .new(&worker.db);
         worker.load_workspace_sources();
 
         let result = initialize_result(encoding, worker.experimental_features);
@@ -423,7 +595,9 @@ impl Worker {
                 }
             }
         }
-        StubSources::new(&self.db, sources, shipped_export_manifests());
+        let _: StubSources = StubSources::builder(sources, shipped_export_manifests())
+            .durability(Durability::MEDIUM)
+            .new(&self.db);
     }
 
     /// The open NAMESPACE buffer wins over disk; DESCRIPTION is not a tracked
@@ -435,10 +609,12 @@ impl Worker {
             .get(&namespace_path)
             .cloned()
             .or_else(|| fs::read_to_string(&namespace_path).ok());
-        let imports = namespace_text
+        let namespace_file = namespace_text
             .as_deref()
-            .map(|text| normalized_imports(&parse_namespace_imports(text)))
+            .map(parse_namespace)
             .unwrap_or_default();
+        let imports = normalized_imports(&namespace_file.imports);
+        let native_symbols = namespace_file.native_symbols;
         let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
             .as_deref()
@@ -457,6 +633,7 @@ impl Worker {
             dependencies,
             collate,
             package,
+            native_symbols,
         }
     }
 
@@ -468,15 +645,19 @@ impl Worker {
     }
 
     /// When the project-wide attach union moves, every file's resolution universe
-    /// changes, so all diagnostics refresh.
+    /// changes, so all diagnostics refresh. A cancelled scan is queued as idle work, because
+    /// the edit that cancelled it may belong to another file and re-scan only that one.
     fn refresh_attached(&mut self, path: &Path) {
+        self.pending_attached_scans.remove(path);
         let scanned = match self.files.get(path) {
             Some(&file) => {
                 let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
                 match scan {
                     Ok(scanned) => scanned,
-                    // A newer edit is already queued; its own sync re-scans.
-                    Err(_) => return,
+                    Err(_) => {
+                        self.pending_attached_scans.insert(path.to_owned());
+                        return;
+                    }
                 }
             }
             None => Default::default(),
@@ -489,9 +670,13 @@ impl Worker {
         } else {
             false
         };
-        if !changed {
+        if !changed || !self.unscanned.is_empty() {
             return;
         }
+        self.apply_attached_union();
+    }
+
+    fn apply_attached_union(&mut self) {
         let union = self.attached_union();
         let metadata = PackageMetadata::get(&self.db);
         if metadata.attached(&self.db) == &union {
@@ -512,13 +697,17 @@ impl Worker {
         let metadata = PackageMetadata::get(&self.db);
         let facts_changed = metadata.imports(&self.db) != &current.imports
             || metadata.dependencies(&self.db) != &current.dependencies
-            || metadata.package(&self.db) != &current.package;
+            || metadata.package(&self.db) != &current.package
+            || metadata.native_symbols(&self.db) != &current.native_symbols;
         if facts_changed {
             metadata.set_imports(&mut self.db).to(current.imports);
             metadata
                 .set_dependencies(&mut self.db)
                 .to(current.dependencies);
             metadata.set_package(&mut self.db).to(current.package);
+            metadata
+                .set_native_symbols(&mut self.db)
+                .to(current.native_symbols);
         }
         if facts_changed || collate_changed {
             self.refresh_all_diagnostics();
@@ -550,14 +739,30 @@ impl Worker {
                 let file = SourceFile::builder(text, DocumentKind::Package)
                     .durability(Durability::MEDIUM)
                     .new(&self.db);
-                self.files.insert(path.clone(), file);
-                self.prime_queue.push_back(path);
+                self.files.insert(path, file);
             }
+            // Largest first, so the last file a warm-up thread picks up is a small one.
+            let mut cold: Vec<(PathBuf, usize)> = self
+                .files
+                .iter()
+                .map(|(path, &file)| (path.clone(), file.text(&self.db).len()))
+                .collect();
+            cold.sort_by_key(|(path, size)| (Reverse(*size), path.clone()));
+            let cold: Vec<PathBuf> = cold.into_iter().map(|(path, _)| path).collect();
+            self.unscanned = cold.clone();
+            self.unwarmed = cold.clone();
+            self.prime_queue = cold;
         }
         self.rebuild_project_files();
     }
 
     /// In the order the last-writer-wins symbol index and the CLI agree on.
+    ///
+    /// The file list is LOW although the files start at MEDIUM. Every project-wide map reads
+    /// it, so those maps are LOW from the start, and a file's first edit (its drop from MEDIUM
+    /// to LOW) lets them backdate. Salsa never backdates a memo whose durability drops, so a
+    /// MEDIUM list would make that first edit re-execute every name lookup and item check in
+    /// the project.
     fn rebuild_project_files(&mut self) {
         let order = project_order(&self.workspace_root, &self.collate_order);
         let mut ordered: Vec<(&PathBuf, &SourceFile)> = self.files.iter().collect();
@@ -567,13 +772,13 @@ impl Worker {
             Some(project) => {
                 project
                     .set_files(&mut self.db)
-                    .with_durability(Durability::MEDIUM)
+                    .with_durability(Durability::LOW)
                     .to(files);
             }
             None => {
                 // A singleton: queries reach it through `ProjectFiles::get`.
                 let _project = ProjectFiles::builder(files)
-                    .durability(Durability::MEDIUM)
+                    .durability(Durability::LOW)
                     .new(&self.db);
             }
         }
@@ -590,10 +795,26 @@ impl Worker {
     }
 
     fn has_idle_work(&self) -> bool {
-        !self.pending_semantic_publishes.is_empty() || !self.prime_queue.is_empty()
+        !self.unwarmed.is_empty()
+            || !self.pending_attached_scans.is_empty()
+            || !self.pending_semantic_publishes.is_empty()
+            || !self.pending_lowering.is_empty()
+            || !self.prime_queue.is_empty()
+            || self.editor_folds_stale
     }
 
     fn run_idle_unit(&mut self) {
+        // The semantic wave reads the project-wide maps, so it waits for the warm-up: on one
+        // thread it would derive the same maps several times slower.
+        if !self.unwarmed.is_empty() {
+            self.warm_up();
+            return;
+        }
+        // Next, because a changed attach set refreshes every document's diagnostics.
+        if let Some(path) = self.pending_attached_scans.pop_first() {
+            self.refresh_attached(&path);
+            return;
+        }
         if let Some(path) = self.pending_semantic_publishes.pop() {
             if !self.open_documents.contains(&path) {
                 return;
@@ -608,28 +829,180 @@ impl Worker {
             }
             return;
         }
-        if let Some(path) = self.prime_queue.pop_front() {
-            let Some(&file) = self.files.get(&path) else {
-                return;
-            };
+        if self.editor_folds_stale {
+            // Goto and references consult this fold for every library call. Lowering an open
+            // file drops its durability, and salsa never backdates across that drop, so the
+            // fold re-runs once (about 20 ms at 300,000 lines) and the first request would
+            // otherwise pay for it.
+            self.editor_folds_stale = false;
+            if let Some(files) = ProjectFiles::try_get(&self.db)
+                && self
+                    .cancellable(|worker| project_global_names(&worker.db, files).len())
+                    .is_err()
+            {
+                self.editor_folds_stale = true;
+            }
+            return;
+        }
+        if let Some(path) = self.pending_lowering.pop() {
+            if self.open_documents.contains(&path)
+                && let Some(&file) = self.files.get(&path)
+            {
+                let text = file.text(&self.db).to_owned();
+                file.set_text(&mut self.db)
+                    .with_durability(Durability::LOW)
+                    .to(text);
+                self.defer_semantic_publish(&path);
+                self.editor_folds_stale = true;
+            }
+            return;
+        }
+        if !self.prime_queue.is_empty() {
+            let batch_start = self.prime_queue.len().saturating_sub(PRIME_BATCH);
+            let batch = self.prime_queue.split_off(batch_start);
             let config = self.config.clone();
-            let outcome = self.cancellable(|worker| {
-                let _ = document_diagnostics(&worker.db, file, &config);
+            let (_, rest) = self.in_parallel(batch, |db, file| {
+                drop(document_diagnostics(db, file, &config));
+                ide::warm_completion_indexes(db, file);
             });
-            match outcome {
-                Ok(()) => {
-                    // Scans the startup workspace's attach facts without a blocking sweep.
-                    self.refresh_attached(&path);
+            self.prime_queue.extend(rest);
+        }
+    }
+
+    /// Scans every file's attach facts and applies their union once, then derives the per-file
+    /// folds the project-wide maps read, across all cores. Naming every item is left to the
+    /// prime queue: a file's check names only the items its interface reaches.
+    fn warm_up(&mut self) {
+        if !self.unscanned.is_empty() {
+            let paths = mem::take(&mut self.unscanned);
+            let (scanned, rest) =
+                self.in_parallel(paths, |db, file| file_attached_namespaces(db, file));
+            for (path, attached) in scanned {
+                if attached.is_empty() {
+                    self.attached_by_file.remove(&path);
+                } else {
+                    self.attached_by_file.insert(path, attached);
                 }
-                Err(_) => self.prime_queue.push_front(path),
+            }
+            self.unscanned = rest;
+            if !self.unscanned.is_empty() {
+                return;
+            }
+            // Before the folds: every memo that reads the attach set would re-run after it.
+            self.apply_attached_union();
+        }
+        let paths = mem::take(&mut self.unwarmed);
+        let cancel = self.cancel.clone();
+        // A cancel can be lost to salsa's uncancel between two files, so each file checks the
+        // queue and is requeued when it stopped early.
+        let (done, mut rest) = self.in_parallel(paths, |db, file| {
+            if cancel.has_queued_jobs() {
+                return false;
+            }
+            warm_project_folds(db, file);
+            true
+        });
+        rest.extend(
+            done.into_iter()
+                .filter(|(_, complete)| !complete)
+                .map(|(path, _)| path),
+        );
+        self.unwarmed = rest;
+        if self.unwarmed.is_empty() {
+            self.editor_folds_stale = true;
+            // Open files so far published only their parse diagnostics.
+            self.refresh_all_diagnostics();
+        }
+    }
+
+    /// Runs `work` on one database clone per core. Returns each finished path's result and
+    /// the paths a cancellation left undone, for the caller to requeue.
+    fn in_parallel<T: Send>(
+        &mut self,
+        paths: Vec<PathBuf>,
+        work: impl Fn(&RootDatabase, SourceFile) -> T + Sync,
+    ) -> (Vec<(PathBuf, T)>, Vec<PathBuf>) {
+        let jobs: Vec<(PathBuf, SourceFile)> = paths
+            .into_iter()
+            .filter_map(|path| Some((path.clone(), *self.files.get(&path)?)))
+            .collect();
+        let workers = thread::available_parallelism()
+            .map(NonZero::get)
+            .unwrap_or(1)
+            .min(jobs.len());
+        let clones: Vec<RootDatabase> = (0..workers).map(|_| self.db.clone()).collect();
+        self.cancel.set_helpers(
+            clones
+                .iter()
+                .map(salsa::Database::cancellation_token)
+                .collect(),
+        );
+        // Shared rather than dealt out: per-file cost varies by orders of magnitude.
+        let next = AtomicUsize::new(0);
+        let finished: Vec<(usize, T)> = thread::scope(|scope| {
+            let handles: Vec<_> = clones
+                .into_iter()
+                .map(|db| {
+                    let (next, work, jobs, cancel) = (&next, &work, &jobs, &self.cancel);
+                    thread::Builder::new()
+                        .stack_size(crate::ANALYSIS_STACK_SIZE)
+                        .spawn_scoped(scope, move || {
+                            let mut done = Vec::new();
+                            while !cancel.has_queued_jobs() {
+                                let index = next.fetch_add(1, Ordering::Relaxed);
+                                let Some((_, file)) = jobs.get(index) else {
+                                    break;
+                                };
+                                match salsa::Cancelled::catch(AssertUnwindSafe(|| work(&db, *file)))
+                                {
+                                    Ok(result) => done.push((index, result)),
+                                    Err(_) => break,
+                                }
+                            }
+                            done
+                        })
+                        .expect("an analysis thread must spawn")
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|payload| panic::resume_unwind(payload))
+                })
+                .collect()
+        });
+        self.cancel.set_helpers(Vec::new());
+        let mut slots: Vec<Option<T>> = jobs.iter().map(|_| None).collect();
+        for (index, result) in finished {
+            if let Some(slot) = slots.get_mut(index) {
+                *slot = Some(result);
             }
         }
+        let mut done = Vec::new();
+        let mut rest = Vec::new();
+        for ((path, _), slot) in jobs.into_iter().zip(slots) {
+            match slot {
+                Some(result) => done.push((path, result)),
+                None => rest.push(path),
+            }
+        }
+        (done, rest)
     }
 
     fn cancellable<T>(
         &mut self,
         body: impl FnOnce(&mut Worker) -> T,
     ) -> Result<T, salsa::Cancelled> {
+        if let Some(remaining) = self.cancel_at_checkpoint.as_mut() {
+            if *remaining == 0 {
+                self.cancel_at_checkpoint = None;
+                self.cancel.cancel();
+            } else {
+                *remaining -= 1;
+            }
+        }
         salsa::Cancelled::catch(AssertUnwindSafe(|| body(self)))
     }
 
@@ -676,8 +1049,13 @@ impl Worker {
         Some((file, text, offset))
     }
 
+    /// Package and test files are read from disk, so a closed or changed one reloads.
+    /// Whether a file belongs to the package namespace, the set the server loads from disk at
+    /// startup and keeps loaded while it is closed. Test and helper files are analyzed only
+    /// while open, so closing one or seeing it change on disk must not pull it into the
+    /// project, or the session would diverge from a server started fresh on the same disk.
     fn is_package_path(&self, path: &Path) -> bool {
-        shares_a_namespace(path, &self.workspace_root)
+        document_kind(path, &self.workspace_root) == DocumentKind::Package
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -752,6 +1130,7 @@ impl Worker {
                 namespace,
                 overloads,
                 declaration,
+                documentation,
             } => {
                 let mut summary = if *overloads > 1 {
                     format!(
@@ -765,6 +1144,9 @@ impl Worker {
                     declaration.and_then(|target| self.render_stub_source_location(target))
                 {
                     summary.push_str(&format!(" Declared at `{location}`."));
+                }
+                if let Some(documentation) = documentation {
+                    summary = format!("{documentation}\n\n{summary}");
                 }
                 Some(summary)
             }
@@ -843,15 +1225,20 @@ impl Worker {
             return;
         }
 
-        let is_package = self.is_package_path(&path);
-        let kind = if is_package {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
+            // Opening usually shows the text already on disk, so lowering its durability
+            // waits for idle time: the drop defeats backdating, and everything derived from
+            // the file re-runs once. Before the warm-up has derived anything from it, the drop
+            // is cheap, and lowering at once spares a second check of the file.
             Some(&file) => {
-                file.set_text(&mut self.db).to(params.text_document.text);
+                if *file.text(&self.db) == params.text_document.text && self.unwarmed.is_empty() {
+                    self.pending_lowering.push(path.clone());
+                } else {
+                    file.set_text(&mut self.db)
+                        .with_durability(Durability::LOW)
+                        .to(params.text_document.text);
+                }
             }
             None => {
                 let file = SourceFile::new(&self.db, params.text_document.text, kind);
@@ -897,6 +1284,7 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let updated = self.apply_content_changes(text, &params.content_changes);
+        self.pending_lowering.retain(|owed| owed != &path);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
@@ -975,6 +1363,7 @@ impl Worker {
         }
         self.open_documents.remove(&path);
         self.pending_semantic_publishes.retain(|owed| owed != &path);
+        self.pending_lowering.retain(|owed| owed != &path);
 
         if self.is_package_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
@@ -1072,7 +1461,8 @@ impl Worker {
                             reloaded_documents.push(path.clone());
                         }
                         None => {
-                            let file = SourceFile::builder(text, DocumentKind::Package)
+                            let kind = document_kind(&path, &self.workspace_root);
+                            let file = SourceFile::builder(text, kind)
                                 .durability(Durability::MEDIUM)
                                 .new(&self.db);
                             self.files.insert(path.clone(), file);
@@ -1168,17 +1558,22 @@ impl Worker {
                 .expect("watcher options serialize"),
             ),
         };
-        let mut client = self.client.clone();
-        self.runtime.spawn(async move {
-            if let Err(error) = client
-                .register_capability(lsp_types::RegistrationParams {
-                    registrations: vec![registration],
-                })
-                .await
-            {
-                tracing::error!("file watcher registration failed: {error}");
+        let params = lsp_types::RegistrationParams {
+            registrations: vec![registration],
+        };
+        match &self.outbox {
+            Outbox::Client { client, runtime } => {
+                let mut client = client.clone();
+                runtime.spawn(async move {
+                    if let Err(error) = client.register_capability(params).await {
+                        tracing::error!("file watcher registration failed: {error}");
+                    }
+                });
             }
-        });
+            Outbox::Recorder(record) => {
+                record_outgoing(record, Outgoing::RegisterCapability(params))
+            }
+        }
     }
 
     fn publish(
@@ -1187,10 +1582,16 @@ impl Worker {
         diagnostics: Vec<lsp_types::Diagnostic>,
         version: Option<i32>,
     ) {
-        let mut client = self.client.clone();
         let params = lsp_types::PublishDiagnosticsParams::new(uri, diagnostics, version);
-        if let Err(error) = client.publish_diagnostics(params) {
-            tracing::error!("publishing diagnostics failed: {error}");
+        match &self.outbox {
+            Outbox::Client { client, .. } => {
+                if let Err(error) = client.clone().publish_diagnostics(params) {
+                    tracing::error!("publishing diagnostics failed: {error}");
+                }
+            }
+            Outbox::Recorder(record) => {
+                record_outgoing(record, Outgoing::PublishDiagnostics(params))
+            }
         }
     }
 
@@ -1201,13 +1602,23 @@ impl Worker {
         let config = self.config.clone();
         let diagnostics = self
             .cancellable(|worker| {
-                let rendered = first_wave_diagnostics(&worker.db, file, &config);
+                let rendered = worker.fast_diagnostics(file, &config);
                 worker.finish_diagnostics(file, rendered)
             })
             .unwrap_or_default();
         let uri = self.document_uri(path);
         self.publish(uri, diagnostics, Some(version));
         self.defer_semantic_publish(path);
+    }
+
+    /// Before the startup warm-up ends, only the parse diagnostics: the lints read the
+    /// project-wide maps, which one thread would take seconds to derive.
+    fn fast_diagnostics(&self, file: SourceFile, config: &Config) -> Vec<Diagnostic> {
+        if self.unwarmed.is_empty() {
+            first_wave_diagnostics(&self.db, file, config)
+        } else {
+            parse_stage_diagnostics(&self.db, file)
+        }
     }
 
     fn defer_semantic_publish(&mut self, path: &Path) {
@@ -1295,7 +1706,7 @@ impl Worker {
     }
 
     fn namespace_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
-        let imports = parse_namespace_imports(text);
+        let imports = parse_namespace(text).imports;
         let knows = |package: &str| namespace_known(&self.db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&self.db, package, name);
         namespace_import_problems(&imports, &knows, &exports)
@@ -1340,12 +1751,19 @@ impl Worker {
     fn refresh_all_diagnostics(&mut self) {
         if self.supports_pull_diagnostics {
             if self.supports_diagnostic_refresh {
-                let mut client = self.client.clone();
-                self.runtime.spawn(async move {
-                    if let Err(error) = client.workspace_diagnostic_refresh(()).await {
-                        tracing::warn!("diagnostic refresh request failed: {error}");
+                match &self.outbox {
+                    Outbox::Client { client, runtime } => {
+                        let mut client = client.clone();
+                        runtime.spawn(async move {
+                            if let Err(error) = client.workspace_diagnostic_refresh(()).await {
+                                tracing::warn!("diagnostic refresh request failed: {error}");
+                            }
+                        });
                     }
-                });
+                    Outbox::Recorder(record) => {
+                        record_outgoing(record, Outgoing::DiagnosticRefresh)
+                    }
+                }
             }
             return;
         }
@@ -1365,9 +1783,14 @@ impl Worker {
     }
 
     fn show_message(&self, typ: lsp_types::MessageType, message: String) {
-        let mut client = self.client.clone();
-        if let Err(error) = client.show_message(lsp_types::ShowMessageParams { typ, message }) {
-            tracing::error!("showing a message failed: {error}");
+        let params = lsp_types::ShowMessageParams { typ, message };
+        match &self.outbox {
+            Outbox::Client { client, .. } => {
+                if let Err(error) = client.clone().show_message(params) {
+                    tracing::error!("showing a message failed: {error}");
+                }
+            }
+            Outbox::Recorder(record) => record_outgoing(record, Outgoing::ShowMessage(params)),
         }
     }
 
@@ -1478,14 +1901,16 @@ fn initialize_result(
                 lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                     lsp_types::SemanticTokensOptions {
                         legend: lsp_types::SemanticTokensLegend {
-                            // In index order. Only `#:` annotation bodies are colored:
-                            // R grammars cannot see type syntax.
+                            // In `semantic_class_index` order. Only ry's own syntax is
+                            // colored, because R grammars already color R.
                             token_types: vec![
                                 lsp_types::SemanticTokenType::TYPE,
                                 lsp_types::SemanticTokenType::TYPE_PARAMETER,
                                 lsp_types::SemanticTokenType::PARAMETER,
                                 lsp_types::SemanticTokenType::OPERATOR,
                                 lsp_types::SemanticTokenType::DECORATOR,
+                                lsp_types::SemanticTokenType::KEYWORD,
+                                lsp_types::SemanticTokenType::ENUM_MEMBER,
                             ],
                             token_modifiers: Vec::new(),
                         },
@@ -1798,7 +2223,10 @@ impl LanguageServer for ServerState {
                 let items = result
                     .items
                     .into_iter()
-                    .map(|item| convert_completion_item(item, worker.supports_snippets))
+                    .enumerate()
+                    .map(|(rank, item)| {
+                        convert_completion_item(item, rank, worker.supports_snippets)
+                    })
                     .collect();
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete: result.is_incomplete,
@@ -1926,10 +2354,9 @@ impl LanguageServer for ServerState {
             };
             match format::format(&text, worker.config.format) {
                 Ok(formatted) => {
-                    let index = LineIndex::new(&text);
-                    let end_line = index.line_count() - 1;
-                    let end =
-                        lsp_types::Position::new(end_line, index.line_length(end_line, &text));
+                    // The negotiated encoding counts the last line's columns, so a final line
+                    // with non-ASCII text and no newline ends where the client thinks it does.
+                    let end = worker.to_position(&text, TextSize::of(text.as_str()));
                     Ok(Some(vec![lsp_types::TextEdit {
                         range: lsp_types::Range {
                             start: lsp_types::Position::new(0, 0),
@@ -2101,7 +2528,7 @@ impl LanguageServer for ServerState {
                 return Ok(None);
             };
             let text = worker.text(file);
-            let tokens = annotation_semantic_tokens(&worker.db, file, &text, worker.encoding);
+            let tokens = ry_semantic_tokens(&worker.db, file, &text, worker.encoding);
             Ok(Some(lsp_types::SemanticTokensResult::Tokens(
                 lsp_types::SemanticTokens {
                     result_id: None,
@@ -2146,6 +2573,24 @@ impl LanguageServer for ServerState {
                 while !worker.current_token.is_cancelled() && Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(5));
                 }
+            }
+            // The warm-up's end asks the client to pull again, so a client that cannot
+            // be asked waits for the full report instead of keeping a parse-only one.
+            if !worker.unwarmed.is_empty()
+                && worker.supports_diagnostic_refresh
+                && let Some(&file) = worker.files.get(&path)
+            {
+                let report = worker.cancellable(|worker| {
+                    let config = worker.config.clone();
+                    let rendered = worker.fast_diagnostics(file, &config);
+                    worker.finish_diagnostics(file, rendered)
+                });
+                return match report {
+                    Ok(diagnostics) => {
+                        Ok(diagnostic_report(diagnostics, params.previous_result_id))
+                    }
+                    Err(_) => Err(diagnostics_cancelled_error()),
+                };
             }
             match worker.cancellable(|worker| worker.settled_diagnostics(&path)) {
                 Ok(Some(diagnostics)) => {
@@ -2203,7 +2648,13 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     }
 }
 
-fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
+/// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
+/// label, which puts `break` ahead of the local the user is about to type.
+fn convert_completion_item(
+    item: CompletionItem,
+    rank: usize,
+    snippets: bool,
+) -> lsp_types::CompletionItem {
     let kind = match item.kind {
         CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
         CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
@@ -2214,6 +2665,7 @@ fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::C
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
         kind: Some(kind),
+        sort_text: Some(format!("{rank:04}")),
         detail: item.detail,
         documentation: item.documentation.map(|documentation| {
             lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
@@ -2389,59 +2841,29 @@ fn folding_ranges(db: &RootDatabase, file: SourceFile, text: &str) -> Vec<lsp_ty
     ranges
 }
 
-fn annotation_semantic_tokens(
+fn ry_semantic_tokens(
     db: &RootDatabase,
     file: SourceFile,
     text: &str,
     encoding: PositionEncoding,
 ) -> Vec<lsp_types::SemanticToken> {
-    let parse = semantics::parse(db, file);
-    let mut spans: Vec<(TextRange, u32)> = Vec::new();
-    for annotation in parse
-        .syntax_node()
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(node))
-    {
-        for element in annotation.descendants_with_tokens() {
-            let SyntaxElement::Token(token) = element else {
-                continue;
-            };
-            if let Some(token_type) = classify_annotation_token(&token)
-                && !token.text_range().is_empty()
-            {
-                spans.push((token.text_range(), token_type));
-            }
-        }
-    }
+    let spans = ide::semantic_tokens(db, file)
+        .into_iter()
+        .map(|(range, class)| (range, semantic_class_index(class)))
+        .collect();
     delta_encode_tokens(spans, text, encoding)
 }
 
-/// Indices into the advertised legend: type names 0, `<T>` binders 1,
-/// field/parameter names 2, punctuation 3, `@` directives 4.
-fn classify_annotation_token(token: &SyntaxToken) -> Option<u32> {
-    let parent_kind = token.parent().map(|parent| parent.kind());
-    match token.kind() {
-        SyntaxKind::IDENT => match parent_kind {
-            Some(SyntaxKind::TYPE_BINDER) => Some(1),
-            Some(SyntaxKind::TYPE_FIELD) | Some(SyntaxKind::TYPE_FUNCTION) => Some(2),
-            Some(SyntaxKind::ANNOTATION_DIRECTIVE) => Some(4),
-            _ => Some(0),
-        },
-        SyntaxKind::COMMA
-        | SyntaxKind::PIPE
-        | SyntaxKind::COLON
-        | SyntaxKind::L_BRACKET
-        | SyntaxKind::R_BRACKET
-        | SyntaxKind::L_PAREN
-        | SyntaxKind::R_PAREN
-        | SyntaxKind::L_BRACE
-        | SyntaxKind::R_BRACE
-        | SyntaxKind::LESS
-        | SyntaxKind::GREATER
-        | SyntaxKind::DOTS => Some(3),
-        SyntaxKind::AT => Some(4),
-        SyntaxKind::NULL_KW => Some(0),
-        _ => None,
+/// The class's index in the advertised legend.
+fn semantic_class_index(class: SemanticClass) -> u32 {
+    match class {
+        SemanticClass::Type => 0,
+        SemanticClass::TypeParameter => 1,
+        SemanticClass::Parameter => 2,
+        SemanticClass::Operator => 3,
+        SemanticClass::Decorator => 4,
+        SemanticClass::Keyword => 5,
+        SemanticClass::Tag => 6,
     }
 }
 
@@ -2505,7 +2927,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
             if u32::from(range.start()) < 3 || range.is_empty() {
                 continue;
             }
-            if let Some(class) = classify_annotation_token(&token) {
+            if let Some(class) = classify_type_token(&token).map(semantic_class_index) {
                 let start = usize::from(range.start()) - 3;
                 let length = usize::from(range.len());
                 if start + length <= type_text.len() + 1 {

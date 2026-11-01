@@ -3,8 +3,10 @@
 //! renders the pages into its file format: PDF, PostScript and SVG as vector graphics, PNG,
 //! JPEG, BMP and TIFF as rasterized pixels.
 
-use crate::graphics::{Colour, text_width_ems};
-use std::{collections::BTreeMap, io::Write, sync::OnceLock};
+use {
+    crate::graphics::{Colour, text_width_ems},
+    std::{collections::BTreeMap, io::Write, sync::OnceLock},
+};
 
 /// One page of a device: its background and the shapes drawn on it, in drawing order.
 pub struct Page {
@@ -86,6 +88,8 @@ pub enum Format {
     },
     Bmp,
     Tiff,
+    Jpeg,
+    PostScript,
 }
 
 /// Renders `pages` of a device `size` inches across into one file for PDF and PostScript, or
@@ -103,36 +107,30 @@ pub fn write_pages(
         Format::Pdf => {
             return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
         }
-        Format::Postscript {
-            onefile: true,
-            paper,
-            landscape,
-        } => {
-            let document = postscript_document(pages, size, paper, landscape, title);
-            return std::fs::write(file_for_page(file, 1), document);
+        Format::PostScript => {
+            return std::fs::write(
+                file_for_page(file, 1),
+                postscript_document(pages, size, title),
+            );
         }
         _ => {}
     }
     for (index, page) in pages.iter().enumerate() {
         let bytes = match format {
             Format::Svg => svg_document(page, size).into_bytes(),
-            Format::Postscript {
-                paper, landscape, ..
-            } => postscript_document(std::slice::from_ref(page), size, paper, landscape, title)
-                .into_bytes(),
-            Format::Png | Format::Jpeg { .. } | Format::Bmp | Format::Tiff => {
+            Format::Png | Format::Bmp | Format::Tiff | Format::Jpeg => {
                 let pixels = rasterize(page, size, resolution)
                     .ok_or_else(|| std::io::Error::other("the page is too large to rasterize"))?;
                 match format {
                     Format::Png => pixels
                         .encode_png()
                         .map_err(|failure| std::io::Error::other(failure.to_string()))?,
-                    Format::Jpeg { quality } => jpeg(&pixels, quality, resolution)?,
                     Format::Bmp => bmp(&pixels),
+                    Format::Jpeg => jpeg(&pixels, resolution)?,
                     _ => tiff(&pixels, resolution),
                 }
             }
-            Format::Pdf => Vec::new(),
+            Format::Pdf | Format::PostScript => Vec::new(),
         };
         std::fs::write(file_for_page(file, index + 1), bytes)?;
     }
@@ -592,206 +590,53 @@ fn pdf_string(text: &str) -> String {
 
 // PostScript.
 
-/// A PostScript document of `pages`, each `size` inches, in the standard fonts re-encoded as
-/// ISO Latin-1. PostScript has no transparency, so semi-transparent colours are drawn opaque,
-/// and fully transparent ones not at all.
-fn postscript_document(
-    pages: &[Page],
-    size: [f64; 2],
-    paper: Option<[f64; 2]>,
-    landscape: bool,
-    title: &str,
-) -> String {
-    let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
-    // The page's placement: the paper's media and orientation comments, the bounding box in
-    // paper coordinates, and the transformation from page to paper.
-    let (media, bounding_box, placement) = match paper {
-        None => (String::new(), [0.0, 0.0, width, height], String::new()),
-        Some(paper) => {
-            let [paper_width, paper_height] = paper.map(|inches| inches * POINTS_PER_INCH);
-            let media = format!(
-                "%%DocumentMedia: custom {paper_width:.0} {paper_height:.0} 0 () ()\n\
-                 %%Orientation: {}\n",
-                if landscape { "Landscape" } else { "Portrait" }
-            );
-            if landscape {
-                let x = (paper_width - height) / 2.0;
-                let y = (paper_height - width) / 2.0;
-                (
-                    media,
-                    [x, y, x + height, y + width],
-                    format!("{paper_width:.2} 0 translate 90 rotate {y:.2} {x:.2} translate\n"),
-                )
-            } else {
-                let x = (paper_width - width) / 2.0;
-                let y = (paper_height - height) / 2.0;
-                (
-                    media,
-                    [x, y, x + width, y + height],
-                    format!("{x:.2} {y:.2} translate\n"),
-                )
-            }
-        }
-    };
-    let [left, bottom, right, top] = bounding_box;
+/// Procedures named after the PDF content operators that `pdf_content` writes, so that a page's
+/// PDF content stream is also a PostScript program. PDF keeps separate stroke and fill colours
+/// where PostScript has one current colour, so `RG` and `rg` store theirs and each painting
+/// operator sets the one it needs. Opacity has no PostScript equivalent, so `gs` drops it, as
+/// GNU R's `postscript` device does.
+const POSTSCRIPT_PROLOG: &str = "\
+/FillColor [0 0 0] def /StrokeColor [0 0 0] def
+/rg { 3 array astore /FillColor exch def } bind def
+/RG { 3 array astore /StrokeColor exch def } bind def
+/m { moveto } bind def /l { lineto } bind def /c { curveto } bind def /h { closepath } bind def
+/re { 4 2 roll moveto 1 index 0 rlineto 0 exch rlineto neg 0 rlineto closepath } bind def
+/f { FillColor aload pop setrgbcolor fill } bind def
+/S { StrokeColor aload pop setrgbcolor stroke } bind def
+/B { gsave f grestore S } bind def
+/q { gsave } bind def /Q { grestore } bind def /W { clip } bind def /n { newpath } bind def
+/w { setlinewidth } bind def /J { setlinecap } bind def /j { setlinejoin } bind def
+/M { setmiterlimit } bind def /d { setdash } bind def /gs { pop } bind def
+/BT { gsave } bind def /ET { grestore } bind def
+/Tf { exch findfont exch scalefont setfont } bind def
+/Tm { 6 array astore concat 0 0 moveto } bind def
+/Tj { FillColor aload pop setrgbcolor show } bind def
+/reencode { findfont dup length dict begin { 1 index /FID ne { def } { pop pop } ifelse } forall
+  /Encoding ISOLatin1Encoding def currentdict end definefont pop } bind def
+/F1 /Helvetica reencode /F2 /Helvetica-Bold reencode /F3 /Helvetica-Oblique reencode
+/F4 /Helvetica-BoldOblique reencode /F5 /Symbol findfont definefont pop
+";
+
+/// A PostScript document of `pages`, each `size` inches. Text uses the standard Helvetica
+/// fonts in the ISO Latin-1 encoding, which matches the escapes `pdf_string` writes for it.
+fn postscript_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
+    let [width, height] = size.map(|inches| (inches * POINTS_PER_INCH).round() as i64);
     let mut out = format!(
-        "%!PS-Adobe-3.0{}\n%%DocumentNeededResources: font Helvetica Helvetica-Bold \
-         Helvetica-Oblique Helvetica-BoldOblique Symbol\n{media}%%Title: {}\n%%Creator: ry\n\
-         %%Pages: {}\n%%BoundingBox: {:.0} {:.0} {:.0} {:.0}\n%%EndComments\n\
-         %%BeginProlog\n\
-         /reencode {{ findfont dup length dict begin {{ 1 index /FID ne {{ def }} {{ pop pop }} \
-         ifelse }} forall /Encoding ISOLatin1Encoding def currentdict end definefont pop }} \
-         bind def\n",
-        if paper.is_none() { " EPSF-3.0" } else { "" },
-        pdf_string(title),
-        pages.len(),
-        left.floor(),
-        bottom.floor(),
-        right.ceil(),
-        top.ceil()
+        "%!PS-Adobe-3.0\n%%DocumentNeededResources: font Helvetica Helvetica-Bold \
+         Helvetica-Oblique Helvetica-BoldOblique Symbol\n%%Title: {}\n%%Creator: R (ry)\n\
+         %%Pages: {}\n%%BoundingBox: 0 0 {width} {height}\n%%EndComments\n\
+         %%BeginProlog\n{POSTSCRIPT_PROLOG}%%EndProlog\n",
+        title.replace(['\n', '\r'], " "),
+        pages.len()
     );
-    for (face, font) in PDF_FONTS.iter().enumerate().take(4) {
-        out.push_str(&format!("/F{} /{font} reencode\n", face + 1));
-    }
-    out.push_str("/F5 /Symbol findfont definefont pop\n%%EndProlog\n");
+    let mut opacities = BTreeMap::new();
     for (index, page) in pages.iter().enumerate() {
-        out.push_str(&format!("%%Page: {0} {0}\nsave\n{placement}", index + 1));
-        postscript_page(&mut out, page);
-        out.push_str("restore\nshowpage\n");
+        out.push_str(&format!("%%Page: {0} {0}\n", index + 1));
+        out.push_str(&pdf_content(page, &mut opacities));
+        out.push_str("showpage\n");
     }
-    out.push_str("%%Trailer\n%%EOF\n");
-    out
-}
-
-fn postscript_page(out: &mut String, page: &Page) {
-    let pt = |value: f64| value * POINTS_PER_INCH;
-    if alpha(page.background) > 0 {
-        let [red, green, blue, _] = channels(page.background);
-        out.push_str(&format!(
-            "{} setrgbcolor 0 0 10000 10000 rectfill\n",
-            pdf_rgb(red, green, blue)
-        ));
-    }
-    let mut current_clip: Option<Rect> = None;
-    for item in &page.items {
-        if current_clip != Some(item.clip) {
-            if current_clip.is_some() {
-                out.push_str("grestore\n");
-            }
-            let clip = item.clip;
-            out.push_str(&format!(
-                "gsave {:.2} {:.2} {:.2} {:.2} rectclip\n",
-                pt(clip.x0),
-                pt(clip.y0),
-                pt(clip.x1 - clip.x0),
-                pt(clip.y1 - clip.y0)
-            ));
-            current_clip = Some(clip);
-        }
-        match &item.shape {
-            Shape::Path {
-                points,
-                closed,
-                fill,
-                stroke,
-            } => {
-                let fill = (*closed && alpha(*fill) > 0).then_some(*fill);
-                let stroke = visible(stroke);
-                if (fill.is_none() && stroke.is_none()) || points.is_empty() {
-                    continue;
-                }
-                out.push_str("newpath\n");
-                for (index, [x, y]) in points.iter().enumerate() {
-                    let operator = if index == 0 { "moveto" } else { "lineto" };
-                    out.push_str(&format!("{:.2} {:.2} {operator}\n", pt(*x), pt(*y)));
-                }
-                if *closed {
-                    out.push_str("closepath\n");
-                }
-                postscript_paint(out, fill, stroke);
-            }
-            Shape::Circle {
-                centre,
-                radius,
-                fill,
-                stroke,
-            } => {
-                let fill = (alpha(*fill) > 0).then_some(*fill);
-                let stroke = visible(stroke);
-                if fill.is_none() && stroke.is_none() {
-                    continue;
-                }
-                out.push_str(&format!(
-                    "newpath {:.2} {:.2} {:.2} 0 360 arc closepath\n",
-                    pt(centre[0]),
-                    pt(centre[1]),
-                    pt(*radius)
-                ));
-                postscript_paint(out, fill, stroke);
-            }
-            Shape::Text {
-                origin,
-                text,
-                points,
-                font,
-                rotation,
-                hadj,
-                colour,
-            } => {
-                let [red, green, blue, a] = channels(*colour);
-                if a == 0 || text.is_empty() {
-                    continue;
-                }
-                let face = if (1..=5).contains(font) { *font } else { 1 };
-                // The font's own metrics place the text, so `hadj` needs no width estimate.
-                out.push_str(&format!(
-                    "gsave {} setrgbcolor {:.2} {:.2} translate {:.2} rotate /F{face} findfont \
-                     {:.2} scalefont setfont 0 0 moveto ({}) dup stringwidth pop {:.3} neg mul \
-                     0 rmoveto show grestore\n",
-                    pdf_rgb(red, green, blue),
-                    pt(origin[0]),
-                    pt(origin[1]),
-                    rotation,
-                    points,
-                    pdf_string(text),
-                    hadj
-                ));
-            }
-        }
-    }
-    if current_clip.is_some() {
-        out.push_str("grestore\n");
-    }
-}
-
-/// Fills and then strokes the current path.
-fn postscript_paint(out: &mut String, fill: Option<Colour>, stroke: Option<&Stroke>) {
-    if let Some(fill) = fill {
-        let [red, green, blue, _] = channels(fill);
-        let keep = if stroke.is_some() { "gsave " } else { "" };
-        let restore = if stroke.is_some() { " grestore" } else { "" };
-        out.push_str(&format!(
-            "{keep}{} setrgbcolor fill{restore}\n",
-            pdf_rgb(red, green, blue)
-        ));
-    }
-    if let Some(stroke) = stroke {
-        let [red, green, blue, _] = channels(stroke.colour);
-        let dash: Vec<String> = dashes(stroke)
-            .iter()
-            .map(|length| format!("{:.2}", length * POINTS_PER_INCH))
-            .collect();
-        out.push_str(&format!(
-            "{} setrgbcolor {:.2} setlinewidth {} setlinecap {} setlinejoin {:.2} setmiterlimit \
-             [{}] 0 setdash stroke\n",
-            pdf_rgb(red, green, blue),
-            stroke.lwd * 0.75,
-            pdf_cap(stroke.lend),
-            pdf_join(stroke.ljoin),
-            stroke.lmitre.max(1.0),
-            dash.join(" ")
-        ));
-    }
+    out.push_str("%%EOF\n");
+    out.into_bytes()
 }
 
 // SVG.
@@ -1318,6 +1163,31 @@ fn on_white([red, green, blue, a]: [u8; 4]) -> [u8; 3] {
         ((u32::from(channel) * a + 255 * (255 - a) + 127) / 255) as u8
     };
     [blend(red), blend(green), blend(blue)]
+}
+
+/// A baseline JPEG at GNU R's default quality of 75, transparent pixels composited on white.
+fn jpeg(pixmap: &tiny_skia::Pixmap, resolution: f64) -> std::io::Result<Vec<u8>> {
+    let (Ok(width), Ok(height)) = (
+        u16::try_from(pixmap.width()),
+        u16::try_from(pixmap.height()),
+    ) else {
+        return Err(std::io::Error::other("the page is too large for a JPEG"));
+    };
+    let image: Vec<u8> = rgba_rows(pixmap)
+        .iter()
+        .flat_map(|pixel| on_white(*pixel))
+        .collect();
+    let mut out = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut out, 75);
+    let density = resolution.round().clamp(1.0, f64::from(u16::MAX)) as u16;
+    encoder.set_density(jpeg_encoder::Density::Inch {
+        x: density,
+        y: density,
+    });
+    encoder
+        .encode(&image, width, height, jpeg_encoder::ColorType::Rgb)
+        .map_err(|failure| std::io::Error::other(failure.to_string()))?;
+    Ok(out)
 }
 
 /// An uncompressed baseline RGB TIFF, transparent pixels composited on white.

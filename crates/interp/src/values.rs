@@ -1,17 +1,19 @@
 //! Constructing and reading R values. Every constructor here roots what it allocates in the
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
-use crate::{
-    interp, records, standard_library,
-    unwind::{R, error},
+use {
+    crate::{
+        interp, records, standard_library,
+        unwind::{R, error},
+    },
+    heap::{
+        Heap, Marker,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+        strings::Encoding,
+    },
+    std::borrow::Cow,
 };
-use heap::{
-    Heap, Marker,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    records::NativeKind,
-    strings::Encoding,
-};
-use std::borrow::Cow;
 
 /// Symbols the interpreter compares against, installed once.
 pub struct Symbols {
@@ -54,6 +56,14 @@ pub struct Symbols {
     pub dot_last_value: Sexp,
     pub dot_package_name: Sexp,
     pub dot_namespace: Sexp,
+    pub package_arg: Sexp,
+    pub na_ok: Sexp,
+    pub dup: Sexp,
+    pub encoding: Sexp,
+    pub name: Sexp,
+    pub spec: Sexp,
+    pub dot_environment: Sexp,
+    pub dot_ry_loader: Sexp,
     pub bracket: Sexp,
     pub bracket2: Sexp,
     pub dollar: Sexp,
@@ -150,6 +160,14 @@ symbol_table! {
     dot_last_value = ".Last.value",
     dot_package_name = ".packageName",
     dot_namespace = ".__NAMESPACE__.",
+    package_arg = "PACKAGE",
+    na_ok = "NAOK",
+    dup = "DUP",
+    encoding = "ENCODING",
+    name = "name",
+    spec = "spec",
+    dot_environment = ".Environment",
+    dot_ry_loader = ".__ry_loader__.",
     bracket = "[",
     bracket2 = "[[",
     dollar = "$",
@@ -307,6 +325,14 @@ pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
     Ok(object)
 }
 
+/// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.
+pub unsafe fn alloc_uninit(kind: SexpType, length: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let object = heap.alloc_vector_uninit(kind, length)?;
+    heap.root(object);
+    Ok(object)
+}
+
 pub unsafe fn cons(car: Sexp, cdr: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let object = heap.cons(car, cdr)?;
@@ -362,6 +388,21 @@ pub unsafe fn install(name: &str) -> R<Sexp> {
 
 pub unsafe fn install_bytes(name: &[u8]) -> R<Sexp> {
     Ok(crate::heap().install(name)?)
+}
+
+/// The symbol named by the `CHARSXP` `name`. An interned ASCII string is already the print name
+/// `install` would intern, so it skips hashing the bytes again; any other string goes through
+/// `install`, which also rejects an empty or overlong name. `NA_STRING` is not the interned
+/// `"NA"`, so it goes through `install` too.
+pub unsafe fn install_charsxp(name: Sexp) -> R<Sexp> {
+    if name != na_string()
+        && name.has_gp(gp::ASCII)
+        && name.has_gp(gp::CACHED)
+        && (1..=10_000).contains(&name.length())
+    {
+        return Ok(crate::heap().install_char(name)?);
+    }
+    install_bytes(name.bytes())
 }
 
 pub unsafe fn scalar_logical(value: i32) -> R<Sexp> {
@@ -533,13 +574,19 @@ pub unsafe fn pairlist_length(mut list: Sexp) -> usize {
 }
 
 pub unsafe fn env_length(env: Sexp) -> usize {
-    crate::heap().frame_symbols(env).len()
+    crate::heap().bound_symbols(env).len()
 }
 
+/// Asks the class's `Length` method, without materializing the elements. `length` cannot
+/// fail, so an error from the method is parked like an element accessor's
+/// ([`crate::unwind::park`]) and the length reads as 0 until it is raised.
 unsafe fn altrep_length(object: Sexp) -> usize {
-    match materialize(object) {
-        Ok(vector) => vector.length() as usize,
-        Err(_) => 0,
+    match (interp().hooks.altrep_length)(object) {
+        Ok(count) => count,
+        Err(unwind) => {
+            crate::unwind::park(unwind);
+            0
+        }
     }
 }
 
@@ -561,9 +608,13 @@ macro_rules! typed_slice {
         #[inline]
         pub unsafe fn $name<'a>(object: Sexp) -> &'a [$type] {
             if object.is_altrep() {
+                // The accessor cannot fail, so a method's error is parked, as for elements.
                 match materialize(object) {
                     Ok(vector) => vector.slice::<$type>(),
-                    Err(_) => &[],
+                    Err(unwind) => {
+                        crate::unwind::park(unwind);
+                        &[]
+                    }
                 }
             } else {
                 object.slice::<$type>()
@@ -707,6 +758,25 @@ pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
     char_str(left) == char_str(right)
 }
 
+/// Whether two distinct interned strings hold the same text. Strings intern by bytes and
+/// encoding, so a native string and a UTF-8 one with the same bytes are distinct objects, and so
+/// are a latin1 string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because
+/// it compares their UTF-8 translations, and the session's native encoding is UTF-8.
+pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
+    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
+        return false;
+    }
+    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
+    // their bytes, which keeps `x == "a"` from decoding every element.
+    if [gp::LATIN1, gp::UTF8]
+        .iter()
+        .all(|&bit| left.has_gp(bit) == right.has_gp(bit))
+    {
+        return false;
+    }
+    char_str(left) == char_str(right)
+}
+
 /// The text of a symbol's name.
 pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
     char_str(symbol.car())
@@ -794,6 +864,15 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         remove_attr(object, name);
         return Ok(());
     }
+    // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
+    // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
+    let value = if value == object {
+        let copy = duplicate(value)?;
+        heap.root(copy);
+        copy
+    } else {
+        value
+    };
     let mut cell = object.attrib();
     let mut last = nil;
     while cell.kind() == SexpType::Pairlist {
@@ -971,13 +1050,27 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
 
 /// A deep copy, as `duplicate()` makes: vectors and pairlists are copied all the way down, while
 /// environments, symbols, promises and external objects are shared.
+///
+/// The copy of an Array is a plain R vector. Whoever copies is about to write, and a builtin or C
+/// code may write a missing value or an attribute that an Array cannot hold, so only the Array
+/// code (which checks every write) puts the bit back. Arrays nested inside a copied list keep it,
+/// because the copy does not write into them.
 pub unsafe fn duplicate(object: Sexp) -> R<Sexp> {
-    duplicate_with(object, true)
+    let copy = duplicate_with(object, true)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
 }
 
-/// A copy of the top level only: list elements and attribute values are shared.
+/// A copy of the top level only: list elements and attribute values are shared. Like
+/// [`duplicate`], it drops the Array bit.
 pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
-    duplicate_with(object, false)
+    let copy = duplicate_with(object, false)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
 }
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
@@ -1003,7 +1096,7 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
                 let value = if deep {
-                    duplicate(cell.car())?
+                    duplicate_with(cell.car(), true)?
                 } else {
                     cell.car()
                 };
@@ -1021,7 +1114,7 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 // The head cell's attributes and flags are the object's, copied below.
                 if position != 0 && attributes != nil() {
                     let attributes = if deep {
-                        duplicate(attributes)?
+                        duplicate_with(attributes, true)?
                     } else {
                         attributes
                     };
@@ -1033,14 +1126,8 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
             }
             list
         }
-        SexpType::Closure => {
-            let copy = triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?;
-            copy
-        }
-        SexpType::Object => {
-            let copy = triple(SexpType::Object, nil(), nil(), nil())?;
-            copy
-        }
+        SexpType::Closure => triple(SexpType::Closure, object.car(), object.cdr(), object.tag())?,
+        SexpType::Object => triple(SexpType::Object, nil(), nil(), nil())?,
         _ if kind.is_vector() => {
             let source = materialize(object)?;
             let count = source.length() as usize;
@@ -1054,7 +1141,11 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 SexpType::List | SexpType::Expression => {
                     for index in 0..count {
                         let element = source.element(index);
-                        let element = if deep { duplicate(element)? } else { element };
+                        let element = if deep {
+                            duplicate_with(element, true)?
+                        } else {
+                            element
+                        };
                         heap.set_element(copy, index, element);
                     }
                 }
@@ -1069,15 +1160,26 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     };
     if object.attrib() != nil() {
         let attributes = if deep {
-            duplicate(object.attrib())?
+            duplicate_with(object.attrib(), true)?
         } else {
-            shallow_duplicate(object.attrib())?
+            duplicate_with(object.attrib(), false)?
         };
         heap.set_attrib(copy, attributes);
     }
     copy.set_object(object.is_object());
+    copy.set_array(object.is_array());
     copy.set_gp(object.gp() & (gp::S4_OBJECT));
     Ok(copy)
+}
+
+/// `object` as a plain R vector: an Array becomes a copy without the Array bit, and anything else
+/// is returned as is. R's own conversions (`as.double`, `as.vector`, `as.list`) go through here,
+/// so they hand back an ordinary vector that `identical()` equates with `c(...)`.
+pub unsafe fn plain(object: Sexp) -> R<Sexp> {
+    if !object.is_array() {
+        return Ok(object);
+    }
+    shallow_duplicate(object)
 }
 
 /// `MAYBE_SHARED`: more than one reference, so a modification must copy first.

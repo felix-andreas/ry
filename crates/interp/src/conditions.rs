@@ -4,20 +4,22 @@
 //! The stacks are persistent lists, as GNU R's are R pairlists: a calling handler runs with the
 //! stack below its own entry, and every closure frame restores the stack it started with.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    deparse, eval, interp,
-    unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
-    values::{
-        self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        deparse, eval, interp,
+        unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
+        values::{
+            self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
+        },
+        write_console,
     },
-    write_console,
+    heap::{
+        Marker,
+        object::{NA_INTEGER, Sexp, SexpType},
+    },
+    std::rc::Rc,
 };
-use heap::{
-    Marker,
-    object::{NA_INTEGER, Sexp, SexpType},
-};
-use std::rc::Rc;
 
 pub type HandlerStack = Option<Rc<Handler>>;
 pub type RestartStack = Option<Rc<RestartEntry>>;
@@ -216,14 +218,14 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         // GNU R prints no traceback for an error without a call, such as a variable missing in
         // top-level code that a callee forced.
         let traceback_wanted = values::as_logical_scalar(calls_option) == 1 && call != nil();
-        if traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some() {
-            if let Some(traceback) = concise_traceback(call) {
-                let line = format!("Calls: {traceback}\n");
-                write_console(line.as_bytes(), true);
-                // `geterrmessage()` shows the traceback too, as GNU R appends it to the buffer.
-                text.push_str(&line);
-                interp().error_message = text.clone();
-            }
+        if (traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some())
+            && let Some(traceback) = concise_traceback(call)
+        {
+            let line = format!("Calls: {traceback}\n");
+            write_console(line.as_bytes(), true);
+            // `geterrmessage()` shows the traceback too, as GNU R appends it to the buffer.
+            text.push_str(&line);
+            interp().error_message = text.clone();
         }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
@@ -550,7 +552,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".addRestart", 1, do_add_restart).invisible(),
     internal(".getRestart", 1, do_get_restart),
     internal(".invokeRestart", 2, do_invoke_restart),
-    internal(".addTryHandlers", 0, |_| unsafe { Ok(nil()) }).invisible(),
+    internal(".addTryHandlers", 0, |_| Ok(nil())).invisible(),
     internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
     internal("interruptsSuspended", -1, |_| unsafe {
         values::scalar_bool(false)
@@ -703,6 +705,7 @@ unsafe fn do_warning(call: &Call<'_>) -> R<Sexp> {
     } else {
         String::new()
     };
+    // Handlers still see an immediate warning; only the default handler prints it at once.
     let outer = std::mem::replace(&mut interp().immediate_warning, immediate);
     let signalled = warning_call(condition_call, message.clone());
     interp().immediate_warning = outer;

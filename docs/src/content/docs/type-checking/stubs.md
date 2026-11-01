@@ -1,9 +1,9 @@
 ---
-title: Packages
+title: Package stubs
 description: How ry knows about packages without running R, and how to describe one it does not know
 ---
 
-ry never loads R, so it cannot ask a package what it exports. It reads *stubs* instead: declaration
+The checker never runs R, so it cannot ask a package what it exports. It reads *stubs* instead: declaration
 files that list a package's names and their types, the way TypeScript reads `.d.ts` files.
 
 ## What ships
@@ -54,4 +54,5 @@ what to add next. Even an empty stub file turns the unresolved-name check back o
 A declaration under `stubs/` replaces a shipped one with the same name, so you can fix a wrong
 return type, or add a function your version of the package has, without waiting for a release.
 `ry check` reports every line it could not load. [Authoring stubs](/contributing/authoring-stubs) has
-the full format, including overloads and data-masking functions.
+the full format, including overloads, data-masking functions, and `@pure` for functions that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) lets a package constant call.

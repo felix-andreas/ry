@@ -2,12 +2,16 @@
 //! the registrations it makes, and the `NAMESPACE` directives a load honors.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::RootDatabase;
-use semantics::load_index::{PackageFile, PackageIndex, PackageSources, package_index};
-use semantics::metadata::NamespaceImportDirective;
-use semantics::{DocumentKind, SourceFile};
-use std::path::PathBuf;
-use syntax::testing::{run_fixture_suite, split_files};
+use {
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        load_index::{PackageFile, PackageIndex, PackageSources, package_index},
+        metadata::NamespaceImportDirective,
+        stubs::install_shipped_stubs,
+    },
+    std::path::PathBuf,
+    syntax::testing::{run_fixture_suite, split_files},
+};
 
 #[test]
 fn load_index_fixtures() {
@@ -20,7 +24,9 @@ const DEFAULT_DESCRIPTION: &str = "Package: demo\nVersion: 0.1.0\n";
 fn render(source: &str) -> String {
     let files =
         split_files(source).unwrap_or_else(|| vec![("R/a.R".to_owned(), source.to_owned())]);
+    // The loader installs the stubs for a strict package, whose pure constants it binds lazily.
     let db = RootDatabase::default();
+    install_shipped_stubs(&db);
     let mut namespace = String::new();
     let mut description = DEFAULT_DESCRIPTION.to_owned();
     let mut package_files = Vec::new();
@@ -34,7 +40,9 @@ fn render(source: &str) -> String {
             }),
         }
     }
-    let sources = PackageSources::new(&db, package_files, namespace, description);
+    let files: Vec<SourceFile> = package_files.iter().map(|file| file.file).collect();
+    ProjectFiles::new(&db, files);
+    let sources = PackageSources::new(&db, package_files, namespace, description, false);
     render_index(&package_index(&db, sources))
 }
 
@@ -107,9 +115,13 @@ fn render_index(index: &PackageIndex) -> String {
             let position = format!("{}:{}", item.span.line, item.span.column);
             let mut line = match index.lazy_name(item) {
                 Some(name) => {
-                    let function = item.function.as_ref().map(|(_, span)| span);
-                    let at = function.map_or(String::new(), |span| {
-                        format!(" function at {}:{}", span.line, span.column)
+                    let at = item.binding.as_ref().map_or(String::new(), |binding| {
+                        let kind = if binding.function {
+                            "function"
+                        } else {
+                            "constant"
+                        };
+                        format!(" {kind} at {}:{}", binding.value.line, binding.value.column)
                     });
                     format!("{position} lazy {name}{at}")
                 }

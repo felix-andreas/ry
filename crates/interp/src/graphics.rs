@@ -7,19 +7,21 @@
 //! does, so scripts that plot as a side effect run to completion and read back the same
 //! `par()` values.
 
-use crate::graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages};
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    coerce::coerce_vector,
-    format::c_general,
-    unwind::{R, error},
-    values::{
-        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
-        symbols,
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        coerce::coerce_vector,
+        format::c_general,
+        graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages},
+        unwind::{R, error},
+        values::{
+            self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
+            symbols,
+        },
     },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
+    std::cell::{Cell, RefCell},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType};
-use std::cell::{Cell, RefCell};
 
 pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("rgb", do_rgb),
@@ -960,11 +962,7 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
         name: "postscript",
         file: device_file(call.arg(0)),
         bitmap: false,
-        format: Some(Format::Postscript {
-            onefile,
-            paper: named_paper(call.arg(1)),
-            landscape: horizontal,
-        }),
+        format: Some(Format::PostScript),
         size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -1022,24 +1020,10 @@ unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
     let (name, bitmap, format) = match values::as_integer_scalar(call.arg(1)) {
         2 | 5 => ("png", true, Some(Format::Png)),
-        3 => (
-            "jpeg",
-            true,
-            Some(Format::Jpeg {
-                quality: jpeg_quality(values::as_integer_scalar(call.arg(8))),
-            }),
-        ),
+        3 => ("jpeg", true, Some(Format::Jpeg)),
         4 => ("svg", false, Some(Format::Svg)),
         6 => ("cairo_pdf", false, Some(Format::Pdf)),
-        7 => (
-            "cairo_ps",
-            false,
-            Some(Format::Postscript {
-                onefile: true,
-                paper: None,
-                landscape: false,
-            }),
-        ),
+        7 => ("cairo_ps", false, Some(Format::PostScript)),
         8 => ("tiff", true, Some(Format::Tiff)),
         9 => ("bmp", true, Some(Format::Bmp)),
         _ => return Err(error("invalid type for cairo device")),
@@ -1079,13 +1063,9 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
     let Some((kind, rest)) = display.split_once("::") else {
         return Err(error("unable to start device X11"));
     };
-    let jpeg = rest
-        .split_once(':')
-        .and_then(|(quality, _)| quality.parse::<i32>().ok())
-        .map_or(75, jpeg_quality);
     let (name, format) = match kind {
         "png" => ("png", Some(Format::Png)),
-        "jpeg" => ("jpeg", Some(Format::Jpeg { quality: jpeg })),
+        "jpeg" => ("jpeg", Some(Format::Jpeg)),
         "bmp" => ("bmp", Some(Format::Bmp)),
         "tiff" => ("tiff", Some(Format::Tiff)),
         _ => return Err(error("unable to start device X11")),
@@ -1118,15 +1098,6 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
         title: String::new(),
     };
     open_device(spec)
-}
-
-/// `jpeg(quality = )` as the encoder takes it, from 1 to 100.
-fn jpeg_quality(quality: i32) -> u8 {
-    if quality == NA_INTEGER {
-        75
-    } else {
-        quality.clamp(1, 100) as u8
-    }
 }
 
 // grDevices: the device list.
@@ -1285,8 +1256,16 @@ unsafe fn do_dev_capabilities(_: &NativeCall<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// GNU R 4.3's `R_GE_version`, which a recorded plot carries as `engineVersion`.
-const GRAPHICS_ENGINE_VERSION: i32 = 16;
+/// GNU R's `R_GE_version`, which a recorded plot carries as `engineVersion` and
+/// `replayPlot()` compares against the running R: 16 (`R_GE_glyphs`) through R 4.5, and 17
+/// (`R_GE_fontVar`) from R 4.6.
+fn graphics_engine_version() -> i32 {
+    if crate::system::r_at_least(4, 6) {
+        17
+    } else {
+        16
+    }
+}
 
 /// `recordPlot()`'s snapshot, shaped like GNU R's: the display list, then one raw vector of
 /// state per graphics system (only base graphics here), with the engine version attached.
@@ -1307,7 +1286,7 @@ unsafe fn do_get_snapshot(_: &NativeCall<'_>) -> R<Sexp> {
     values::set_attr(
         snapshot,
         values::install("engineVersion")?,
-        scalar_integer(GRAPHICS_ENGINE_VERSION)?,
+        scalar_integer(graphics_engine_version())?,
     )?;
     Ok(snapshot)
 }
@@ -2722,7 +2701,7 @@ unsafe fn do_persp(call: &NativeCall<'_>) -> R<Sexp> {
         let largest = half.iter().copied().fold(0.0, f64::max);
         half = [largest; 3];
     }
-    if half.iter().any(|half| *half == 0.0) {
+    if half.contains(&0.0) {
         return Err(error("invalid 'x', 'y' or 'z' limits"));
     }
     let mut perspective = identity();
@@ -5078,10 +5057,18 @@ fn colour_name(colour: Colour) -> String {
 /// A colour given as hex digits or a name, without palette indices.
 fn parse_colour_spec(text: &str) -> Result<Colour, String> {
     if let Some(digits) = text.strip_prefix('#') {
-        let valid =
-            matches!(digits.len(), 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
+        // The short forms `#RGB` and `#RGBA` arrived in R 4.4.
+        let short = crate::system::r_at_least(4, 4) && matches!(digits.len(), 3 | 4);
+        let valid = (short || matches!(digits.len(), 6 | 8))
+            && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
         if !valid {
             return Err("invalid RGB specification".to_owned());
+        }
+        if short {
+            let nibble =
+                |index: usize| 17 * u32::from_str_radix(&digits[index..=index], 16).unwrap_or(0);
+            let alpha = if digits.len() == 4 { nibble(3) } else { OPAQUE };
+            return Ok(rgba(nibble(0), nibble(1), nibble(2), alpha));
         }
         let byte = |index: usize| u32::from_str_radix(&digits[index..index + 2], 16).unwrap_or(0);
         let alpha = if digits.len() == 8 { byte(6) } else { OPAQUE };

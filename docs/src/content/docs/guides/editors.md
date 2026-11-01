@@ -1,24 +1,36 @@
 ---
 title: Editors
-description: What the language server does in your editor
+description: What the language server gives you in your editor, and how to set it up
 ---
 
-`ry server` is a language server, so any editor that speaks LSP can use it. The
-[VS Code extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) starts it
-for you, and [installation](/installation) covers Zed and other editors.
+In your editor, ry shows every finding of `ry check` as you type, and it tells you the type of
+anything you hover, so you see a mistake the moment you make it instead of when the code runs. In
+VS Code, install the
+[ry extension](https://marketplace.visualstudio.com/items?itemName=felix-andreas.ry) and open an R
+project: there is nothing else to set up. [Installation](/installation) covers Zed, and any other
+editor that speaks LSP can run `ry server` as its language server for R.
 
-It gives you:
+You get:
 
 - diagnostics as you type, the same ones `ry check` reports
-- hover with the inferred type of any expression
-- completion, including the fields of a record such as `person$`
+- hover with the inferred type of any expression, parameter or loop variable
+- completion, including the fields of a list such as `person$` and the argument names a call
+  still accepts (`second = `), with your own names ranked ahead of keywords and the library
 - go-to-definition, find references, and rename
-- signature help and inlay hints
+- signature help, and inlay hints for assignments and loop variables
 - formatting with the same rules as `ry fmt`
+
+Hover, completion and inlay hints use inferred types even when type errors are switched off, so you
+get them on any R project.
 
 Rename edits the binding you picked and nothing else: a local `total`, a global `total`, and the
 word "total" in a string are three different things.
 
-Hover, completion, and inlay hints use inferred types even when type errors are switched off, so you
-get them on any R project. The server reads the same `ry.toml` as the command line, and every editor
-setting is listed under [editor settings](/reference/configuration#editor-settings).
+ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
+[DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
+
+## Settings
+
+The server reads the same `ry.toml` as the command line, so the editor and CI report the same
+findings. Every editor setting is listed under
+[editor settings](/reference/configuration#editor-settings).

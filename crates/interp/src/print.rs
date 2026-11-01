@@ -1,21 +1,23 @@
 //! Printing values the way GNU R's `print.default` does, and auto-printing at top level.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    deparse,
-    eval::{self, value_of},
-    format::{self, Settings, display_width, encode_string, pad},
-    interp,
-    unwind::R,
-    values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
-    write_console,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        deparse,
+        eval::{self, value_of},
+        format::{self, Settings, display_width, encode_string, pad},
+        interp,
+        unwind::R,
+        values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
+        write_console,
+    },
+    heap::object::{Sexp, SexpType, gp},
 };
-use heap::object::{Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| unsafe {
+    internal("prmatrix", 6, |call| {
         Err(call.error("prmatrix is not supported"))
     }),
 ];
@@ -120,6 +122,11 @@ unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) 
 /// `PrintValueRec`: prints any value, with `tag` the prefix of the list element being printed.
 pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     match value.kind() {
+        _ if value.is_array() => {
+            for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
+                out(&format!("{line}\n"));
+            }
+        }
         SexpType::Nil => out("NULL\n"),
         SexpType::Symbol if value == values::missing_arg() => out("\n"),
         SexpType::Symbol => {
@@ -279,13 +286,13 @@ pub unsafe fn environment_label(env: Sexp) -> R<String> {
     if env == values::empty_env() {
         return Ok("<environment: R_EmptyEnv>".into());
     }
-    if crate::envir::is_namespace(env) {
-        if let Some(name) = crate::envir::namespace_name(env) {
-            return Ok(format!("<environment: namespace:{name}>"));
-        }
+    if crate::envir::is_namespace(env)
+        && let Some(name) = crate::envir::namespace_name(env)
+    {
+        return Ok(format!("<environment: namespace:{name}>"));
     }
     if crate::envir::is_package_env(env) {
-        let name = get_attr(env, values::install("name")?);
+        let name = get_attr(env, symbols().name);
         if let Some(name) = values::first_string(name) {
             return Ok(format!("<environment: {name}>"));
         }
@@ -449,6 +456,10 @@ pub unsafe fn print_matrix(
     options: &PrintOptions,
     _top: bool,
 ) -> R<()> {
+    if rows == 0 && cols == 0 {
+        out("<0 x 0 matrix>\n");
+        return Ok(());
+    }
     let dimnames = get_attr(matrix, symbols().dimnames);
     let (row_names, col_names) = if dimnames.kind() == SexpType::List && length(dimnames) == 2 {
         (dimnames.element(0), dimnames.element(1))
@@ -473,8 +484,10 @@ pub unsafe fn print_matrix(
     let row_labels: Vec<String> = (0..rows)
         .map(|row| {
             if row_names != nil() {
-                values::string_at(row_names, row)
-                    .map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(row_names, row).map_or_else(
+                    || options.na_string_noquote.clone(),
+                    |text| text.into_owned(),
+                )
             } else {
                 format!("[{},]", row + 1)
             }
@@ -485,12 +498,17 @@ pub unsafe fn print_matrix(
     // for the row title, and always print the column title line.
     let numbered_rows = row_names == nil();
     let titled = dimnames_names != nil();
+    // With no rows, numbered labels still reserve the width of `[0,]`.
+    let empty_width = if numbered_rows {
+        format!("[{rows},]").len()
+    } else {
+        0
+    };
     let label_width = row_labels
         .iter()
         .map(|label| display_width(label))
         .max()
-        // A matrix without rows still reserves the width of a `[0,]` label.
-        .unwrap_or(if numbered_rows { 4 } else { 0 });
+        .unwrap_or(empty_width);
     let offset = if !titled {
         0
     } else if display_width(&row_title) < label_width + 2 {
@@ -519,8 +537,10 @@ pub unsafe fn print_matrix(
     let col_labels: Vec<String> = (0..cols)
         .map(|col| {
             if col_names != nil() {
-                values::string_at(col_names, col)
-                    .map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(col_names, col).map_or_else(
+                    || options.na_string_noquote.clone(),
+                    |text| text.into_owned(),
+                )
             } else {
                 format!("[,{}]", col + 1)
             }

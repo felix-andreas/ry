@@ -1,0 +1,22 @@
+[stdout]
+| [1] 106
+| [1] 115
+| [1] 58 0a 00 00 00 02
+| [1] "A\n2\n"
+| [1] TRUE
+| [1] TRUE
+| [1] 1f 8b
+| [1] 1f 8b
+| [1] "one" "two"
+| [1] "gzfile"
+| [1] "Tagged"
+| attr(,"package")
+| [1] ".GlobalEnv"
+| [1] FALSE
+| [1] 1 2 1 2
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(1, 2, 1, 2)

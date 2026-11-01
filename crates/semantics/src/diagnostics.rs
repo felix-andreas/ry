@@ -1,34 +1,45 @@
-use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_inline_site, is_type_kind,
-    lower_annotation, lower_inline_annotation, statement_inline_site,
+use {
+    crate::{
+        AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
+        annotations::{
+            Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind,
+            lower_annotation, lower_inline_annotation, statement_inline_site,
+        },
+        check::{
+            ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError,
+            TypeErrorKind, column_element,
+        },
+        exhaustiveness::{MatchFinding, MatchFindingKind},
+        file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
+        hir::{ExprId, ExpressionKind, Symbol},
+        infer::{FunctionMismatch, RecordMismatch, apply_definition},
+        inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
+        item_syntax, item_tree,
+        lints::LintConfig,
+        metadata::{
+            declared_dependency, imported_by_name, imports_every_name, is_own_package,
+            native_symbol,
+        },
+        naming::{BindingKind, ItemNaming, NamespaceRead},
+        parse, project_type_definitions, statement_annotations,
+        stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
+        top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
+            substitute_rigid, union_of,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        mem,
+    },
+    syntax::{
+        SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
+        paired_comment_definition,
+    },
 };
-use crate::check::{
-    ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
-    column_element,
-};
-use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
-use crate::hir::{ExprId, ExpressionKind, Symbol};
-use crate::infer::apply_definition;
-use crate::infer::{FunctionMismatch, RecordMismatch};
-use crate::lints::LintConfig;
-use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
-use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::{namespace_exports, namespace_known, stubs};
-use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
-    TypeScheme, map_child_types, substitute_rigid, union_of,
-};
-use crate::{
-    AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
-    inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-    item_tree, parse, project_type_definitions, statement_annotations,
-};
-use rustc_hash::FxHashMap;
-use std::collections::{BTreeMap, BTreeSet};
-use std::{iter, mem};
-use syntax::SyntaxNode;
-use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -64,9 +75,9 @@ pub struct RelatedLocation {
     pub message: &'static str,
 }
 
-/// Derives every fact a later pass reads from the file's tree, while the tree is resident.
-/// A cold pass that evicts trees between batches calls this first, so checking a file never
-/// re-parses another one: past this point only the file's own diagnostics read its tree.
+/// Derives every fact a later pass reads from the file's tree. A cold pass calls this for
+/// every file across all cores first, so a later check that reaches another file finds its
+/// facts memoized instead of walking that file's tree on the checking thread.
 pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = crate::metadata::file_attached_namespaces(db, file);
     let _ = file_error_ranges(db, file);
@@ -75,8 +86,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = definition_agreement_candidates(db, file);
     let _ = crate::lints::file_syntax_lints(db, file, *lints);
     let _ = crate::file_typing_mode(db, file);
-    let _ = crate::file_type_definitions(db, file);
-    let _ = type_declaration_names(db, file);
+    warm_project_folds(db, file);
     let _ = parse_stage_diagnostics(db, file);
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
@@ -113,10 +123,8 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     }
 
     let root = parsed.syntax_node();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    let sites = file_syntax_sites(db, file);
+    for node in sites.nodes(&root, SiteRole::Annotation) {
         let annotation = lower_annotation(db, &node);
         for (message, range) in &annotation.errors {
             diagnostics.push(Diagnostic::new(
@@ -135,9 +143,11 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
     }
-    for node in root.descendants().filter(|node| {
-        node.kind() == SyntaxKind::TYPE_DEFINITION && node.parent().as_ref() != Some(&root)
-    }) {
+    for node in sites
+        .nodes(&root, SiteRole::TypeDefinition)
+        .into_iter()
+        .filter(|node| node.parent().as_ref() != Some(&root))
+    {
         diagnostics.push(Diagnostic::new(
             node.text_range(),
             Severity::Error,
@@ -155,29 +165,18 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 /// inline annotations off to stay runnable by R hears about each one. They are still
 /// typed, but `match` coverage is not counted.
 fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let parsed = parse(db, file);
-    let sites: Vec<SyntaxNode> = parsed
-        .syntax_node()
-        .descendants()
-        .filter(|node| {
-            matches!(
-                node.kind(),
-                SyntaxKind::RECORD_EXPR
-                    | SyntaxKind::TUPLE_EXPR
-                    | SyntaxKind::TAG_EXPR
-                    | SyntaxKind::MATCH_EXPR
-            )
-        })
-        .collect();
-    if sites.is_empty() || inline_annotations_enabled(db) {
+    let sites = file_syntax_sites(db, file);
+    if !sites.any(SiteRole::RySyntax) || inline_annotations_enabled(db) {
         return Vec::new();
     }
+    let sites = sites.nodes(&parse(db, file).syntax_node(), SiteRole::RySyntax);
     sites
         .iter()
         .map(|node| {
             let (what, range) = match node.kind() {
                 SyntaxKind::RECORD_EXPR => ("record", node.text_range()),
                 SyntaxKind::TUPLE_EXPR => ("tuple", node.text_range()),
+                SyntaxKind::ARRAY_EXPR => ("Array", node.text_range()),
                 SyntaxKind::TAG_EXPR => ("tag", node.text_range()),
                 // The arms can be long, so the head `match (x)` stands for the expression.
                 _ => {
@@ -204,22 +203,16 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// annotation instead warns that it types nothing, because the code still cannot run
 /// under R and the author should know the annotation is not checked.
 fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let parsed = parse(db, file);
-    let sites: Vec<SyntaxNode> = parsed
-        .syntax_node()
-        .descendants()
-        .filter(is_inline_site)
-        .collect();
-    if sites.is_empty() {
+    let recorded = file_syntax_sites(db, file);
+    // A `@pure` marker is an inline annotation on a function that is not otherwise an
+    // inline site, so it alone can make a file need the turned-off warning.
+    if !recorded.any(SiteRole::InlineSite) && !recorded.any(SiteRole::InlineAnnotation) {
         return Vec::new();
     }
+    let root = parse(db, file).syntax_node();
     let mut diagnostics = Vec::new();
     if !inline_annotations_enabled(db) {
-        for node in parsed
-            .syntax_node()
-            .descendants()
-            .filter(syntax::is_inline_annotation)
-        {
+        for node in recorded.nodes(&root, SiteRole::InlineAnnotation) {
             diagnostics.push(Diagnostic::new(
                 node.text_range(),
                 Severity::Warning,
@@ -229,7 +222,7 @@ fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
         }
         return diagnostics;
     }
-    for site in &sites {
+    for site in &recorded.nodes(&root, SiteRole::InlineSite) {
         for (message, range) in lower_inline_annotation(db, site).errors {
             diagnostics.push(Diagnostic::new(
                 range,
@@ -249,11 +242,13 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let parsed = parse(db, file);
     let root = parsed.syntax_node();
     let mut diagnostics = Vec::new();
-    let sequences = iter::once(root.clone()).chain(
-        root.descendants()
-            .filter(|node| node.kind() == SyntaxKind::BRACE_EXPR),
-    );
-    for (node, target) in sequences.flat_map(|parent| crate::statement_annotations(&parent)) {
+    let sites = file_syntax_sites(db, file);
+    // Only a sequence with an annotation among its statements can hold a dangling one.
+    let sequences = sites.nodes(&root, SiteRole::AnnotatedSequence);
+    for (node, target) in sequences
+        .iter()
+        .flat_map(|parent| statement_annotations(parent))
+    {
         let annotation = lower_annotation(db, &node);
         if !annotation.definitions.is_empty()
             || annotation.strict.is_some()
@@ -285,10 +280,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             message.to_owned(),
         ));
     }
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in sites.nodes(&root, SiteRole::Annotation) {
         if node.parent().map(|parent| parent.kind()) != Some(SyntaxKind::ARGUMENT_LIST) {
             continue;
         }
@@ -337,6 +329,18 @@ fn file_error_ranges(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
         .filter(|error| !error.in_annotation)
         .map(|error| error.range)
         .collect()
+}
+
+/// Derives the file's share of every project-wide map a single file's check folds, so a host
+/// can spread that work across cores before the first check. Without it, the first check
+/// derives the share of every file of the project on one thread.
+pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
+    file_definitions(db, file);
+    file_conditional_writers(db, file);
+    file_type_definitions(db, file);
+    top_level_binding_names(db, file);
+    type_declaration_names(db, file);
+    file_global_variable_declarations(db, file);
 }
 
 #[salsa::tracked(returns(clone))]
@@ -441,7 +445,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if binding.kind == BindingKind::TopLevel {
                 continue;
             }
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -456,7 +460,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(message) = namespace_read_message(db, read) else {
                 continue;
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -476,7 +480,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             let display = display_name(name);
             let suggestion = suggestion
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
@@ -508,7 +512,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 Some(frame) => format!("the frame `{frame}`"),
                 None => "this frame".to_owned(),
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -566,8 +570,24 @@ fn classify_non_local_read(
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
+    if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+        return NonLocalRead::Resolvable;
+    }
+    if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
+        return NonLocalRead::Resolvable;
+    }
     let files = ProjectFiles::try_get(db);
+    let test_files = files.filter(|_| {
+        matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+    });
     if crate::package_scheme_exists(db, name)
+        || test_files.is_some_and(|_| {
+            let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
+            binding.winner.is_some() || !binding.conditional_writers.is_empty()
+        })
         || super_globals(db, file).contains(name)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
@@ -579,12 +599,7 @@ fn classify_non_local_read(
     // checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
-            nearest_name(
-                name,
-                crate::package_definitions(db, files)
-                    .keys()
-                    .map(String::as_str),
-            )
+            project_typo_suggestion(db, files, Name::new(db, name), test_files.is_some())
         })
         .or_else(|| {
             nearest_name(
@@ -599,7 +614,8 @@ fn classify_non_local_read(
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
-        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name.to_owned()))),
+        suggestion: project_typo
+            .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
 }
 
@@ -652,27 +668,9 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     let definitions = visible_type_definitions(db, file);
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
-    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
-    if let Some(files) = ProjectFiles::try_get(db) {
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for &project_file in files.files(db) {
-            if *project_file.kind(db) != DocumentKind::Package {
-                continue;
-            }
-            for (name, _) in type_declaration_sites(db, project_file) {
-                *counts.entry(name.as_str()).or_default() += 1;
-            }
-        }
-        ambiguous.extend(
-            counts
-                .into_iter()
-                .filter(|(_, count)| *count >= 2)
-                .map(|(name, _)| name.to_owned()),
-        );
-    }
-    let stub_nominals: BTreeSet<String> = stubs(db)
-        .map(|library| library.nominals.iter().cloned().collect())
-        .unwrap_or_default();
+    let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
+    let no_nominals = FxHashSet::default();
+    let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
 
     for annotation in file_annotation_references(db, file) {
         for (message, range) in &annotation.typing_errors {
@@ -684,7 +682,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
         for (element, range) in &annotation.vector_elements {
-            if vector_element_atomic(db, *element, &definitions, &stub_nominals) {
+            if vector_element_atomic(db, *element, &definitions, stub_nominals) {
                 continue;
             }
             let mut renderer = TypeRenderer::default();
@@ -753,7 +751,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             }
         }
         if let Some((name, range)) = &annotation.new_nominal
-            && !ambiguous.contains(name.text(db))
+            && !ambiguous.is_some_and(|ambiguous| ambiguous.contains_key(name.text(db)))
             && definitions
                 .get(name.text(db))
                 .is_some_and(|definition| definition.alias)
@@ -787,22 +785,26 @@ struct AnnotationReferences<'db> {
 
 /// Every annotation in the file lowered with file ranges (the `#:` blocks, and the inline
 /// sites unless inline annotations are turned off), keeping only those that reference a
-/// type or report a typing error. Memoized because it reads the tree, which a cold check
-/// evicts after its first pass.
+/// type or report a typing error. Memoized so that diagnostics never walk the tree again.
 #[salsa::tracked(returns(ref))]
 fn file_annotation_references<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> Vec<AnnotationReferences<'db>> {
     let root = parse(db, file).syntax_node();
-    let mut annotations: Vec<Annotation<'db>> = root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-        .map(|node| lower_annotation(db, &node))
+    let sites = file_syntax_sites(db, file);
+    let mut annotations: Vec<Annotation<'db>> = sites
+        .nodes(&root, SiteRole::Annotation)
+        .iter()
+        .map(|node| lower_annotation(db, node))
         .collect();
-    let sites: Vec<SyntaxNode> = root.descendants().filter(is_inline_site).collect();
-    if !sites.is_empty() && inline_annotations_enabled(db) {
-        annotations.extend(sites.iter().map(|site| lower_inline_annotation(db, site)));
+    if sites.any(SiteRole::InlineSite) && inline_annotations_enabled(db) {
+        annotations.extend(
+            sites
+                .nodes(&root, SiteRole::InlineSite)
+                .iter()
+                .map(|site| lower_inline_annotation(db, site)),
+        );
     }
     annotations
         .into_iter()
@@ -936,8 +938,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
 }
 
 /// A disagreement between a statement's inline annotation and its `#:` comment, found from
-/// syntax alone. Memoized because it reads the tree, which a cold check evicts after its
-/// first pass.
+/// syntax alone. Memoized so that diagnostics never walk the tree again.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum AgreementCandidate<'db> {
     /// Compared as written (a type-parameter constraint, a definition's kind or arity), so
@@ -977,16 +978,14 @@ struct SlotPair<'db> {
 
 #[salsa::tracked(returns(ref))]
 fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<AgreementCandidate<'db>> {
-    let root = parse(db, file).syntax_node();
-    if !root.descendants().any(|node| is_inline_site(&node)) || !inline_annotations_enabled(db) {
+    let sites = file_syntax_sites(db, file);
+    if !sites.any(SiteRole::InlineSite) || !inline_annotations_enabled(db) {
         return Vec::new();
     }
+    let root = parse(db, file).syntax_node();
     let mut candidates = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in sites.nodes(&root, SiteRole::Annotation) {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -1353,7 +1352,7 @@ fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
     definitions: &BTreeMap<String, NamedDefinition<'db>>,
-    stub_nominals: &BTreeSet<String>,
+    stub_nominals: &FxHashSet<String>,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
     let mut current = element;
@@ -1392,7 +1391,12 @@ const ANNOTATION_PRIMITIVES: &[&str] = &[
     "complex",
     "character",
     "raw",
-    "frame",
+    "DataFrame",
+    "LazyFrame",
+    "GroupBy",
+    "LazyGroupBy",
+    "Record",
+    "Tuple",
 ];
 
 #[salsa::tracked(returns(ref))]
@@ -1522,9 +1526,10 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
 
 #[salsa::tracked(returns(ref))]
 fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
-    let parsed = parse(db, file);
     let mut sites: Vec<(String, TextRange)> = Vec::new();
-    for node in parsed.syntax_node().descendants() {
+    let declarations =
+        file_syntax_sites(db, file).nodes(&parse(db, file).syntax_node(), SiteRole::Declaration);
+    for node in declarations {
         let annotation = match node.kind() {
             SyntaxKind::ANNOTATION => lower_annotation(db, &node),
             SyntaxKind::TYPE_DEFINITION => {
@@ -1680,8 +1685,15 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed.
-        false if declared_dependency(db, &read.package) => None,
+        // A declared dependency without stubs is real, just undescribed. A shipped package
+        // the project neither declares nor attaches is real too: `pkg::name` loads it
+        // without attaching it, so a script may use it that way alone.
+        false
+            if declared_dependency(db, &read.package)
+                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
+        {
+            None
+        }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
             let name = read.name.as_ref()?;
@@ -1694,8 +1706,8 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     }
 }
 
-/// Names written by `<<-` with no enclosing binding anywhere in the file: R
-/// creates them in the global environment, so reads of them resolve.
+/// Names the file's items create in the global environment as a side effect (see
+/// `ItemNaming::super_globals`), so reads of them resolve.
 #[salsa::tracked(returns(ref))]
 fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
@@ -1713,17 +1725,34 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
 fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     use crate::hir::LiteralKind;
     let mut declared = BTreeSet::new();
+    // Every file of the project is asked, so the common answer must not cost a tree walk.
+    if !file.text(db).contains("globalVariables") {
+        return declared;
+    }
     for &item in item_tree(db, file) {
+        // Lowering every item of the project to find a handful of calls would dominate a
+        // single file's check, so the name is matched on the syntax first.
+        let spelled = *item.kind(db) == ItemKind::Statement
+            && item_syntax(db, item).is_some_and(|syntax| {
+                syntax
+                    .syntax_node()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.text().trim_matches('`') == "globalVariables")
+            });
+        if !spelled {
+            continue;
+        }
         let Some(module) = item_hir(db, item) else {
             continue;
         };
         let Some(root) = module.root else {
             continue;
         };
-        let ExpressionKind::Call { callee, arguments } = &module.expression(root).kind else {
+        let ExpressionKind::Call { callee, arguments } = module.kind(root) else {
             continue;
         };
-        let is_global_variables = match &module.expression(*callee).kind {
+        let is_global_variables = match module.kind(*callee) {
             ExpressionKind::NameRef(name) => name == "globalVariables",
             ExpressionKind::Namespace { package, name, .. } => {
                 package.as_deref() == Some("utils") && name.as_deref() == Some("globalVariables")
@@ -1733,26 +1762,29 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
         if !is_global_variables {
             continue;
         }
-        let Some(first) = arguments.first().and_then(|argument| argument.value) else {
+        let Some(first) = module[arguments]
+            .first()
+            .and_then(|argument| argument.value)
+        else {
             continue;
         };
         let mut collect = |id| {
-            if let ExpressionKind::Literal(LiteralKind::String(value)) = &module.expression(id).kind
-                && !value.is_empty()
+            if let ExpressionKind::Literal(LiteralKind::String(value)) = module.kind(id)
+                && !module[value].is_empty()
             {
-                declared.insert(value.to_string());
+                declared.insert(module[value].to_string());
             }
         };
-        match &module.expression(first).kind {
+        match module.kind(first) {
             ExpressionKind::Call {
                 callee: inner,
                 arguments: entries,
             } if matches!(
-                &module.expression(*inner).kind,
+                module.kind(*inner),
                 ExpressionKind::NameRef(name) if name == "c"
             ) =>
             {
-                for entry in entries {
+                for entry in &module[entries] {
                     if let Some(value) = entry.value {
                         collect(value);
                     }
@@ -1780,16 +1812,27 @@ fn project_global_variable_declarations(db: &dyn Db, files: ProjectFiles) -> BTr
 /// resolve nowhere lexically.
 const R6_INJECTED_BINDINGS: [&str; 3] = ["self", "private", "super"];
 
+/// `UseMethod`, `NextMethod` and group-generic dispatch bind these in the method's frame, and
+/// any function can be a method, so a read inside a function body may see them.
+const DISPATCH_VARIABLES: [&str; 6] = [
+    ".Generic",
+    ".Method",
+    ".Class",
+    ".Group",
+    ".GenericCallEnv",
+    ".GenericDefEnv",
+];
+
 /// Purely syntactic: a local binding shadowing `R6Class` is not honored.
 #[salsa::tracked]
 fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
     item_spans(db, file).iter().any(|span| {
         item_hir(db, span.item).as_ref().is_some_and(|module| {
-            module.expressions.iter().any(|expression| {
-                let ExpressionKind::Call { callee, .. } = &expression.kind else {
+            module.kinds().iter().any(|kind| {
+                let ExpressionKind::Call { callee, .. } = kind else {
                     return false;
                 };
-                match &module.expression(*callee).kind {
+                match module.kind(*callee) {
                     ExpressionKind::NameRef(name) => name == "R6Class",
                     ExpressionKind::Namespace { name, .. } => name.as_deref() == Some("R6Class"),
                     _ => false,
@@ -1811,12 +1854,34 @@ fn display_name(name: &str) -> String {
     }
 }
 
-/// Memoized per name: the scan over the whole stub corpus is the expensive part.
+/// A per-name firewall over the project-wide definition maps: a new definition elsewhere
+/// re-runs this, but a reading file re-checks only when its suggestion changes.
 #[salsa::tracked(returns(clone))]
-fn typo_suggestion<'db>(db: &'db dyn Db, name: Name<'db>) -> Option<String> {
-    let library = stubs(db)?;
+fn project_typo_suggestion<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: Name<'db>,
+    tests: bool,
+) -> Option<String> {
+    let test_names = tests
+        .then(|| crate::test_definitions(db, files).keys())
+        .into_iter()
+        .flatten();
     nearest_name(
         name.text(db),
+        crate::package_definitions(db, files)
+            .keys()
+            .chain(test_names)
+            .map(String::as_str),
+    )
+}
+
+/// Memoized per name: the scan over the whole stub corpus is the expensive part.
+#[salsa::tracked(returns(clone))]
+fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String> {
+    let library = stubs(db)?;
+    nearest_name(
+        name.name(db).text(db),
         library
             .schemes
             .keys()
@@ -1965,7 +2030,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             && let Some(root) = module.root
             && let Some(name_range) = item_name_range(db, item)
         {
-            let root_range = module.expression(root).range;
+            let root_range = module.range(root);
             let statement_range = root_range + offset;
             // The finding goes on the name, but a syntax error anywhere in the statement
             // suppresses it.
@@ -2097,7 +2162,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ) {
                 continue;
             }
-            diagnostics.push(Diagnostic::new(module.expression(*expression).range + offset, Severity::Error, "strict", format!(
+            diagnostics.push(Diagnostic::new(module.range(*expression) + offset, Severity::Error, "strict", format!(
                     "strict mode: nothing this project can see defines `{}`. It is silent only because an attached package's exports are unknown. Declare the package with a `.Rtypes` stub to check it",
                     display_name(name)
                 )));
@@ -2116,9 +2181,9 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let mut assignment_targets = FxHashMap::default();
-        for expression in &module.expressions {
-            if let ExpressionKind::Assign { target, value, .. } = &expression.kind
-                && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
+        for kind in module.kinds() {
+            if let ExpressionKind::Assign { target, value, .. } = kind
+                && let ExpressionKind::NameRef(name) = module.kind(*target)
             {
                 assignment_targets.insert(*value, *name);
             }
@@ -2165,8 +2230,94 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ));
         }
     }
+    diagnostics.extend(top_level_diagnostics(db, file));
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     diagnostics
+}
+
+/// A package file runs its top level at every load; scripts, tests and the console are where
+/// code runs on purpose, so only `R/` files are judged. An item a syntax error touches is
+/// skipped, because its statement boundaries are a guess.
+pub fn top_level_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    if *file.kind(db) != DocumentKind::Package {
+        return Vec::new();
+    }
+    let broken_ranges = file_error_ranges(db, file);
+    let mut diagnostics = Vec::new();
+    for span in item_spans(db, file) {
+        if broken_ranges
+            .iter()
+            .any(|error| error.start() <= span.range.end() && span.range.start() <= error.end())
+        {
+            continue;
+        }
+        if let TopLevel::Effect { range, effect } = item_top_level(db, span.item) {
+            diagnostics.push(Diagnostic::new(
+                *range + span.range.start(),
+                Severity::Error,
+                "strict",
+                top_level_effect_message(effect),
+            ));
+        }
+    }
+    diagnostics
+}
+
+const TOP_LEVEL_RULE: &str = "A file in `R/` may only define things at its top level";
+const TOP_LEVEL_HOMES: &str = "a function, `.onLoad`, or the script `ry run` starts";
+
+fn top_level_effect_message(effect: &Effect) -> String {
+    match effect {
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Project,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}, or mark `{callee}` `@pure` if calling it has no effect"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Conditional,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is defined inside a condition, so ry cannot tell which definition runs when the package loads. {TOP_LEVEL_RULE}: give `{callee}` one unconditional definition, or move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Local,
+        } => format!(
+            "strict mode: this calls `{callee}`, a function defined inside `local()`, so it may run code every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Other,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::DynamicCall => format!(
+            "strict mode: this calls a computed function, so ry cannot tell whether loading the package runs code. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Loop => format!(
+            "strict mode: this loop runs every time the package loads. {TOP_LEVEL_RULE}: move it into {TOP_LEVEL_HOMES}, or compute the value inside `local()`"
+        ),
+        Effect::SuperAssignment => format!(
+            "strict mode: `<<-` here assigns outside the package every time it loads. {TOP_LEVEL_RULE}: bind the name with `<-`, or move the assignment into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Replacement { target } => {
+            let target = target
+                .as_deref()
+                .map_or_else(|| "a value".to_owned(), |name| format!("`{name}`"));
+            format!(
+                "strict mode: this changes {target} after its definition, every time the package loads. {TOP_LEVEL_RULE}: build the whole value where it is defined (`local()` can hold the steps), or move the change into {TOP_LEVEL_HOMES}"
+            )
+        }
+        Effect::NestedAssignment { target } => {
+            let target = target
+                .as_deref()
+                .map_or_else(|| "a name".to_owned(), |name| format!("`{name}`"));
+            format!(
+                "strict mode: this assignment binds {target} in the middle of an expression. {TOP_LEVEL_RULE}: give {target} its own top-level definition, or build the value inside `local()`"
+            )
+        }
+    }
 }
 
 fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
@@ -2176,11 +2327,39 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     let mut renderer = TypeRenderer::default();
     match &error.kind {
-        TypeErrorKind::Mismatch { expected, found } => format!(
-            "expected `{}`, found `{}`",
-            renderer.render(db, *expected),
-            renderer.render(db, *found)
+        TypeErrorKind::Mismatch { expected, found } => {
+            let mut message = format!(
+                "expected `{}`, found `{}`",
+                renderer.render(db, *expected),
+                renderer.render(db, *found)
+            );
+            // An R vector never becomes an Array implicitly, because the conversion checks
+            // every item; say which call does it.
+            if array_element(db, *expected).is_some()
+                && matches!(
+                    found.kind(db),
+                    TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            {
+                message.push_str(". Convert an R vector with `as.Array()`");
+            }
+            message
+        }
+        TypeErrorKind::AssignmentForRecord { field, expected } => format!(
+            "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
+            renderer.render(db, *expected)
         ),
+        TypeErrorKind::UnwrappedNominal { nominal, found } => {
+            let name = match nominal.kind(db) {
+                TyKind::Named(name, _) => name.text(db).to_owned(),
+                _ => renderer.render(db, *nominal),
+            };
+            format!(
+                "expected `{}`, found `{}`. The value has the right shape, but `{name}` is a nominal type, so only `@{name}(...)` or `#: @new {name}` creates one",
+                renderer.render(db, *nominal),
+                renderer.render(db, *found)
+            )
+        }
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
         ),
@@ -2202,6 +2381,17 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                     plural(*found, "argument", "arguments"),
                 )
             }
+        }
+        TypeErrorKind::MissingArguments { names } => {
+            let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+            let listed = match quoted.split_last() {
+                Some((last, [])) => last.clone(),
+                Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+                None => String::new(),
+            };
+            // A declared required parameter need not be read, so the reason is the
+            // signature's, not the body's.
+            format!("this call leaves out {listed}, which the function requires")
         }
         TypeErrorKind::NamedArgumentMismatch {
             argument,
@@ -2234,7 +2424,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             }
         }
         TypeErrorKind::MaybeNullCallee { found } => format!(
-            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch",
+            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter",
             renderer.render(db, *found)
         ),
         TypeErrorKind::KnownTypeUnderIfUnknown { found } => format!(
@@ -2261,6 +2451,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "expected {}, found `{}`",
             constraint_description(*constraint),
             renderer.render(db, *found)
+        ),
+        TypeErrorKind::ContextualParameter {
+            name,
+            expected,
+            passed,
+        } => format!(
+            "`{name}` is used as {} here, but the call passes this function `{}` for it",
+            operand_description(*expected),
+            renderer.render(db, *passed)
         ),
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {
             RecordMismatch::Field {
@@ -2321,14 +2520,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 required,
                 returns,
                 constraint,
+                required_constraint,
             } => {
                 let required = renderer.render(db, *required);
-                match constraint {
-                    Some(constraint) => format!(
+                match (constraint, required_constraint) {
+                    (Some(constraint), _) => format!(
                         "this function must return `{required}`, but its body produces {}",
                         constraint_description(*constraint)
                     ),
-                    None => format!(
+                    (None, Some(required_constraint)) => format!(
+                        "this function must return {}, but it returns `{}`",
+                        constraint_description(*required_constraint),
+                        renderer.render(db, *returns)
+                    ),
+                    (None, None) => format!(
                         "this function must return `{required}`, but it returns `{}`",
                         renderer.render(db, *returns)
                     ),
@@ -2349,13 +2554,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "a vector cannot be indexed by `{}`. Expected a numeric, logical, or character index",
             renderer.render(db, *index)
         ),
-        TypeErrorKind::UnsupportedIndexShape { index_count } => match index_count {
-            0 => "indexing with an empty index (`x[]`) is not supported yet".to_owned(),
-            1 => "indexing with a named index argument is not supported yet".to_owned(),
-            count => format!(
-                "indexing with {count} indexes is not supported yet. ry does not model matrix and data.frame subsetting"
-            ),
-        },
         TypeErrorKind::PositionDoesNotExist {
             position,
             container,
@@ -2411,6 +2609,12 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "`{function}` needs `{first}` and `{second}` of one type, but `{first}` is `{}` and `{second}` is `{}`",
             renderer.render(db, *first_ty),
             renderer.render(db, *second_ty)
+        ),
+        TypeErrorKind::NotAnAggregation { column } => format!(
+            "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
+        ),
+        TypeErrorKind::HeadInsideExpression { column } => format!(
+            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
         ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",
@@ -2471,7 +2675,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             )
         }
         TypeErrorKind::BadRowIndex { found } => {
-            let hint = if matches!(found.kind(db), TyKind::Frame(_)) {
+            let hint = if matches!(found.kind(db), TyKind::Frame(..)) {
                 ". To join two frames, add `on =`."
             } else {
                 ""
@@ -2485,22 +2689,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
         ),
-        TypeErrorKind::InvalidOperand { expected, found } => {
-            let expected_description = match expected {
-                OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
-                OperandExpectation::ScalarNumeric => {
-                    "a scalar numeric value (`integer` or `double`)"
-                }
-                OperandExpectation::Logical => "a `logical` value",
-                OperandExpectation::Comparable => {
-                    "a comparable value (numeric, `character`, or `logical`)"
-                }
-            };
-            format!(
-                "expected {expected_description}, found `{}`",
-                renderer.render(db, *found)
-            )
-        }
+        TypeErrorKind::InvalidOperand { expected, found } => format!(
+            "expected {}, found `{}`",
+            operand_description(*expected),
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::UnsupportedOperandPair {
             operator,
             left,
@@ -2560,6 +2753,61 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
+            "this item is `{}`, but the Array's first item is `{}`. An Array's items share one type and are never converted into each other",
+            renderer.render(db, *found),
+            renderer.render(db, *first)
+        ),
+        TypeErrorKind::ArrayItemType { found } => format!(
+            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ArrayOperands {
+            operator,
+            left,
+            right,
+        } => {
+            let head = format!(
+                "`{operator}` is not defined between `{}` and `{}`",
+                renderer.render(db, *left),
+                renderer.render(db, *right)
+            );
+            let is_r_vector = |ty: Ty<'_>| {
+                matches!(
+                    ty.kind(db),
+                    TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            };
+            let reason = if is_r_vector(*left) || is_r_vector(*right) {
+                "Convert the R vector with `as.Array()` first"
+            } else if left == right
+                || array_element(db, *left) == Some(*right)
+                || array_element(db, *right) == Some(*left)
+            {
+                match *operator {
+                    "&" | "|" => "On Arrays it takes `logical` items",
+                    _ => "On Arrays it takes `integer` or `double` items",
+                }
+            } else {
+                "Both sides must have one item type, and `integer` and `double` are never converted into each other"
+            };
+            format!("{head}. {reason}")
+        }
+        TypeErrorKind::ArrayIndex { double, found } => {
+            let rule = if *double {
+                "`x[[i]]` on an Array takes one position, an `integer` or `double`"
+            } else {
+                "`x[i]` on an Array takes one index: positions, or a `logical` mask"
+            };
+            match found {
+                Some(found) => format!(
+                    "{rule}, but this index is `{}`. An Array has one dimension and no names",
+                    renderer.render(db, *found)
+                ),
+                None => format!("{rule}. An Array has one dimension and no names"),
+            }
+        }
+        TypeErrorKind::ArrayMissingValue => "an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),
         TypeErrorKind::ConflictingTags { first, second } => format!(
             "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
             renderer.render(db, *first),
@@ -2630,9 +2878,9 @@ impl<'db> TypeRenderer<'db> {
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
             TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
             TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
-            TyKind::NativeTuple(items) => format!("tuple{{{}}}", self.render_items(db, items)),
+            TyKind::NativeTuple(items) => format!("Tuple{{{}}}", self.render_items(db, items)),
             TyKind::NativeRecord(fields) => {
-                format!("record{{{}}}", self.render_native_fields(db, fields))
+                format!("Record{{{}}}", self.render_native_fields(db, fields))
             }
             TyKind::Tag(name, payload) => {
                 let name = name.text(db);
@@ -2648,10 +2896,16 @@ impl<'db> TypeRenderer<'db> {
                 }
             }
             TyKind::OtherTags => "..".to_owned(),
-            TyKind::Frame(Some(columns)) => {
-                format!("frame{{{}}}", self.render_fields(db, columns))
+            TyKind::Frame(kind @ FrameKind::GroupBy { keys, .. }, Some(columns)) if *keys > 0 => {
+                let (keys, rest) = columns.split_at((*keys as usize).min(columns.len()));
+                let keys = self.render_fields(db, keys);
+                let rest = self.render_fields(db, rest);
+                format!("{}{{{keys}; {rest}}}", kind.head())
             }
-            TyKind::Frame(None) => "frame".to_owned(),
+            TyKind::Frame(kind, Some(columns)) => {
+                format!("{}{{{}}}", kind.head(), self.render_fields(db, columns))
+            }
+            TyKind::Frame(kind, None) => kind.head().to_owned(),
             TyKind::Function(function) => self.render_function(db, function),
             TyKind::Union(members) => {
                 let members: Vec<String> = members
@@ -2795,6 +3049,15 @@ impl<'db> TypeRenderer<'db> {
     }
 }
 
+fn operand_description(expected: OperandExpectation) -> &'static str {
+    match expected {
+        OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
+        OperandExpectation::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        OperandExpectation::Logical => "a `logical` value",
+        OperandExpectation::Comparable => "a comparable value (numeric, `character`, or `logical`)",
+    }
+}
+
 fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
@@ -2804,6 +3067,9 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         }
         Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        Constraint::ArrayItem => {
+            "an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag)"
+        }
     }
 }
 
@@ -2820,8 +3086,7 @@ fn atomic_name(atomic: Atomic) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
+    use {super::*, crate::RootDatabase};
 
     fn render_all(db: &RootDatabase, file: SourceFile) -> Vec<String> {
         file_diagnostics(db, file)
@@ -2931,8 +3196,8 @@ mod tests {
     fn renderer_shares_names_across_both_sides() {
         let db = RootDatabase::default();
         let mut renderer = TypeRenderer::default();
-        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A".to_owned())));
-        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B".to_owned())));
+        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A")));
+        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B")));
         assert_eq!(renderer.render(&db, t), "T");
         assert_eq!(renderer.render(&db, u), "U");
         assert_eq!(renderer.render(&db, t), "T");

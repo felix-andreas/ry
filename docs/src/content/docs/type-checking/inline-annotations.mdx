@@ -1,12 +1,18 @@
 ---
 title: Inline annotations
-description: Types written in the code itself, and how they live next to #: comments
+description: "Types written in the code itself, and how they live next to `#:` comments"
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-This page covers the inline spelling and how it lives next to `#:` comments. You can write a type
-right after a name, and a function's return type after its parameters:
+A `#:` comment repeats every parameter name of the function below it, so renaming a parameter
+means editing two places. Inline annotations put each type next to the name it belongs to, which is
+shorter to write and to read, and on ry's runtime they are also checked when the code runs. The
+cost is that plain `Rscript` cannot run a file that has them, which is why this is a separate step.
+They are on by default; a project that must stay runnable by `Rscript` can
+[turn them off](#turning-inline-annotations-off).
+
+You write a type right after a name, and a function's return type after its parameters:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
@@ -34,81 +40,21 @@ apply_discount("100")
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `double`, found `character`
 ```
 
-A variable takes its type the same way:
+Every typed page of this guide already shows this spelling in its Inline tab, and it shares one
+type language with `#:` comments, so this page covers only what changes when you switch. Deleting
+each inline annotation turns a file into the plain R program it means. That includes `@pure` in
+front of `function`, the inline spelling of the `#: @pure` comment that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) reads.
 
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-person: list{name: character, age: integer} <- readRDS("person.rds")
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: list{name: character, age: integer}
-person <- readRDS("person.rds")
-```
-
-</TabItem>
-</Tabs>
-
-Inline annotations and `#:` comments share one type language and mean the same thing. Deleting each
-inline annotation turns a file into the plain R program it means.
-
-## Type definitions
-
-`type` and `alias` define a type at the top level of a file, and `@Name(value)` creates a value of
-a nominal type:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-type UserId = integer
-
-user_id <- function(raw: integer) -> UserId @UserId(raw)
-
-lookup <- function(id: UserId) -> character "ada"
-
-lookup(5L)
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: @type UserId {integer}
-
-#: fn(raw: integer) -> UserId
-user_id <- function(raw) {
-  #: @new UserId
-  raw
-}
-
-#: fn(id: UserId) -> character
-lookup <- function(id) "ada"
-
-lookup(5L)
-```
-
-</TabItem>
-</Tabs>
-
-```text
-type-mismatch
-
-  x expected `UserId`, found `integer`
-```
-
-A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
+Definitions are spelled `type UserId = integer` and `alias Row = list{id: integer}`, and
+`@UserId(raw)` creates a value of a nominal type, as [custom types](/type-checking/custom-types)
+shows. A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
 `id: @new UserId <- 5L`. `type` and `alias` are definitions only when a name follows them on the
 same line, so R code that uses them as ordinary names keeps working.
 
@@ -122,13 +68,19 @@ types, ry uses the inline type and warns:
 apply_rate <- function(price: integer, rate) price * rate
 ```
 
-```text
+```text ry check typing
 annotation-mismatch
 
   ! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it `double`. ry uses the inline type; make the two agree, or delete one
    --[R/both.R:2:31]
+ 1 | #: fn(price: double, rate: double) -> double
  2 | apply_rate <- function(price: integer, rate) price * rate
    |                               ^^^^^^^
+  `->   > the `#:` comment's type is here
+         --[R/both.R:1:14]
+       1 | #: fn(price: double, rate: double) -> double
+         |              ^^^^^^
+       2 | apply_rate <- function(price: integer, rate) price * rate
 ```
 
 A `#:` definition directly above an inline definition of the same name is the same definition
@@ -139,7 +91,7 @@ written twice, so it is not a duplicate. ry uses the inline one and warns when t
 type Celsius = integer
 ```
 
-```text
+```text ry check typing
 annotation-mismatch
 
   ! the inline definition of `Celsius` says `integer`, but the `#:` comment says `double`. ry uses the inline definition; make the two agree, or delete one
@@ -147,20 +99,20 @@ annotation-mismatch
 
 ## Running annotated code
 
-`ry run` and `ry repl` run annotated code. On GNU R they run the plain program it means, and on
-ry's own runtime (`--runtime ry`) the annotations also become checks: an argument of the wrong kind
-fails where the function was called.
-
-Run-time checks are described in terms of inline annotations, so this example has a single spelling:
+`ry run` runs annotated code on ry's own runtime, where the annotations also become checks: an
+argument of the wrong kind fails where the function was called. `ry R` runs it on GNU R as the plain
+program it means, with the annotations erased.
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
 scale("a", 1)
 ```
 
-```text
+```text ry run runtime=ry
+$ ry run scale.R
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`
+Execution halted
 ```
 
 A check runs when the argument is first used, so lazy arguments stay lazy, and it tests only the
@@ -168,19 +120,22 @@ kind of value (`double`, `character`, a list, a function), not its length or cla
 also print the warnings above before the code runs. The
 [type system reference](/reference/type-system#inline-annotations-at-run-time) has the full rules.
 
-## Keeping files runnable by R
+## Turning inline annotations off
 
-`Rscript` and other R tools cannot run code with inline annotations. Inline annotations are on by
-default, so if your project must also run under them, turn inline annotations off:
+Turn inline annotations off when every file must also run under `Rscript` and other R tools, which
+cannot parse them:
 
 ```toml
 [check]
 inline-annotations = false
 ```
 
-ry then warns at every inline annotation it finds, and keeps warning while the setting is off:
+ry then reports every inline annotation it finds, so none slips into a file that must stay plain R.
+It warns once for the project and again at each annotation:
 
 ```text
+  ! inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds
+
 inline-annotation
 
   ! inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on

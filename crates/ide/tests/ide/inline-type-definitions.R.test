@@ -42,10 +42,7 @@ definition 5..11
 references: 5..11*, 40..46, 51..57, 67..73
 rename: 4 edit(s)
 signature: none
-action: Add inferred type annotations for the whole file
-  edit 61..61 -> "#: UserId\n"
 completion (1): UserId
-hint @62: UserId
 
 #---- paired_definition_and_comment_both_rename
 #: @type Celsius {double}
@@ -59,15 +56,15 @@ rename: 4 edit(s)
 signature: none
 completion (1): Celsius
 
-#---- definition_binder_is_not_a_navigable_type
+#---- definition_binder_navigates_to_its_binder
 alias Box<T> = list{value: $0T}
 #++++
-hover 27..28: T
-definition: none
-references: none
-rename: none
+hover 27..28: type parameter T
+definition 10..11
+references: 10..11*, 27..28
+rename: 2 edit(s)
 signature: none
-completion (15): Any, character, complex, double, fn, integer, list, logical
+completion (17): Box, Any, character, complex, double, fn, integer, list
 
 #---- nominal_constructor_name_navigates
 type UserId = integer
@@ -79,12 +76,7 @@ references: 5..11*, 28..34
 rename: 2 edit(s)
 type-definition 5..11
 signature: none
-action: Add inferred type annotation for `x`
-  edit 22..22 -> "#: UserId\n"
-action: Add inferred type annotations for the whole file
-  edit 22..22 -> "#: UserId\n"
 completion (1): UserId
-hint @23: UserId
 
 #---- completion_after_the_equals
 type UserId = integer
@@ -130,4 +122,26 @@ rename: none
 signature: none
 action: Replace `@if-unknown` with `@trust`
   edit 32..43 -> "@trust"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
 completion (1): integer
+hint @5: data.frame
+
+#---- no_hint_restates_a_nominal_constructor
+type Money = double
+price <- @Money(9.5)
+total <- pr$0ice
+#++++
+hover 50..55: price: Money
+hover-definition: global 20..25
+definition 20..25
+references: 20..25*, 50..55
+rename: 2 edit(s)
+type-definition 5..10
+signature: none
+action: Add inferred type annotation for `total`
+  edit 41..41 -> "#: Money\n"
+action: Add inferred type annotations for the whole file
+  edit 41..41 -> "#: Money\n"
+completion (71): price, prcomp, precip, predict, predict.glm, predict.lm, preplot, presidents
+hint @46: Money

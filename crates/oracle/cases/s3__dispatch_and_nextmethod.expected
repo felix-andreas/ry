@@ -10,9 +10,12 @@
 | [1] "$12.5"
 | [1] "money!"
 | [1] 5
+| [1] "foo"
+| [1] "default"
+| [1] "default"
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 5L
+character
+| "default"

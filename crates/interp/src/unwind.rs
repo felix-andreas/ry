@@ -7,9 +7,11 @@
 //! exiting handler or restart (both are returns to a closure frame), and the jump to top level
 //! after the default error handler ran.
 
-use crate::interp;
-use heap::object::Sexp;
-use std::sync::atomic::{AtomicBool, Ordering};
+use {
+    crate::interp,
+    heap::{Marker, object::Sexp},
+    std::sync::atomic::{AtomicBool, Ordering},
+};
 
 pub type R<T> = Result<T, Unwind>;
 
@@ -17,14 +19,59 @@ pub type R<T> = Result<T, Unwind>;
 /// at every call and every loop back edge, so Ctrl-C stops even a tight loop.
 pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Raises a pending user interrupt.
+/// Raises a pending user interrupt, or an unwind [`park`] set aside.
 #[inline]
 pub fn poll_interrupt() -> R<()> {
     if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
         INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
-        return Err(Unwind::Interrupt);
+        return Err(interp().parked_unwind.take().unwrap_or(Unwind::Interrupt));
     }
     Ok(())
+}
+
+/// Raises an unwind [`park`] set aside, leaving a pending user interrupt for the next poll.
+#[inline]
+pub fn raise_parked() -> R<()> {
+    if INTERRUPT_REQUESTED.load(Ordering::Relaxed)
+        && let Some(unwind) = interp().parked_unwind.take()
+    {
+        INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
+        return Err(unwind);
+    }
+    Ok(())
+}
+
+/// Sets aside an unwind raised where no `Result` can carry it, such as inside the heap's
+/// infallible element accessor, so the evaluator raises it as soon as the builtin that made the
+/// access returns ([`raise_parked`]), or else at its next poll: the next call or loop back
+/// edge, which compiled code reaches by handing the activation back to tier 0. The first unwind
+/// wins, as it would have had it propagated at once.
+pub fn park(unwind: Unwind) {
+    let interp = interp();
+    if interp.parked_unwind.is_none() {
+        interp.parked_unwind = Some(unwind);
+    }
+    INTERRUPT_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// # Safety
+/// Only the collector calls this, while it marks.
+pub(crate) unsafe fn trace_unwind(unwind: &Unwind, marker: &mut Marker<'_>) {
+    // SAFETY: the caller is marking, and every object an unwind holds is live until raised.
+    unsafe {
+        match unwind {
+            Unwind::Error(error) => marker.mark(error.call),
+            Unwind::Interrupt => {}
+            Unwind::Jump(jump) => match **jump {
+                Jump::Return { env, value } => {
+                    marker.mark(env);
+                    marker.mark(value);
+                }
+                Jump::Break { env } | Jump::Next { env } => marker.mark(env),
+                Jump::TopLevel => {}
+            },
+        }
+    }
 }
 
 #[derive(Debug)]

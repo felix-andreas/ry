@@ -26,10 +26,10 @@
 #   arguments are type-checked instead of being absorbed untyped into `...`. The `...` is written at
 #   its position in R's formal list: formals before it fill positionally, formals after it fill by
 #   name only, exactly as R matches them.
-# - Functions whose calls carry *arbitrary* identifier-named arguments (`data.frame(x = 1)`,
-#   `Sys.setenv(VAR = "v")`, `structure(x, my_attr = 1)`, plotting `par(...)` sinks) stay `Any`
-#   values: their keyword arguments are data, not formals, and a typed rest element would reject
-#   forms R accepts.
+# - Functions whose calls carry *arbitrary* identifier-named arguments (`Sys.setenv(VAR = "v")`,
+#   `structure(x, my_attr = 1)`, plotting `par(...)` sinks) stay `Any` values unless their result
+#   type is known: their keyword arguments are data, not formals. An `...: Any` rest absorbs them,
+#   which is how `data.frame(x = 1)` returns `data.frame`.
 # - Functions with trailing-dot formals (`stop`/`warning` take `call.`) stay `Any`: parameter names
 #   allow interior dots only, so the signature is not yet writable. `stop`'s `Any` also stands in for a
 #   missing `Never` type: `x <- if (ok) 1L else stop("bad")` must not force a `NULL` join.
@@ -43,7 +43,10 @@
 # `@type NAME` declares a named type with no inspectable representation — compatible only with
 # itself, produced only by functions declared to return it. Consumers that accept them keep `Any`
 # parameters (R coerces liberally), so the nominals tighten *returns* without rejecting calls.
-@type data.frame
+#
+# A data frame is a named list of columns at run time, and `lapply(frame, f)` or `vapply` over its
+# columns is everyday R, so it declares that representation. Its columns are not typed.
+@type data.frame {list[named: Unknown]}
 @type factor
 @type matrix
 @type formula
@@ -68,11 +71,15 @@
 # candidate reports a mismatch rather than falling back to the numeric rules.
 +.Date : fn(e1: Date, e2: double) -> Date
 +.Date : fn(e1: double, e2: Date) -> Date
++.Date : fn(e1: Date, e2: difftime) -> Date
++.Date : fn(e1: difftime, e2: Date) -> Date
 -.Date : fn(e1: Date, e2: Date) -> difftime
 -.Date : fn(e1: Date, e2: double) -> Date
-Compare.Date : fn(e1: Date, e2: Date) -> logical
-Compare.Date : fn(e1: Date, e2: character) -> logical
-Compare.Date : fn(e1: character, e2: Date) -> logical
+-.Date : fn(e1: Date, e2: difftime) -> Date
+# A `logical` partner is `NA`, which compares with any class: a field that starts
+# as `NA` and later holds a date reads as `logical | Date`.
+Compare.Date : fn(e1: Date | character | logical, e2: Date) -> logical
+Compare.Date : fn(e1: Date, e2: character | logical) -> logical
 # R dispatches `c()` as well, so a class with a `c.Class` method keeps its class
 # through concatenation: `c(d1, d2)` is a `Date` vector, not the doubles under
 # it. Declaring the method is what tells the checker so.
@@ -93,9 +100,13 @@ c.factor : fn(...: factor) -> factor
 
 +.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
 +.POSIXct : fn(e1: double, e2: POSIXct) -> POSIXct
++.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
++.POSIXct : fn(e1: difftime, e2: POSIXct) -> POSIXct
 -.POSIXct : fn(e1: POSIXct, e2: POSIXct) -> difftime
 -.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
-Compare.POSIXct : fn(e1: POSIXct, e2: POSIXct) -> logical
+-.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
+Compare.POSIXct : fn(e1: POSIXct | character | logical, e2: POSIXct) -> logical
+Compare.POSIXct : fn(e1: POSIXct, e2: character | logical) -> logical
 c.POSIXct : fn(...: POSIXct) -> POSIXct
 
 # A `difftime` keeps its class through scaling and combination, and compares
@@ -109,15 +120,28 @@ Compare.difftime : fn(e1: difftime, e2: double) -> logical
 Compare.difftime : fn(e1: double, e2: difftime) -> logical
 
 # A matrix supports the full elementwise arithmetic and comparison R gives it,
-# against another matrix or a scalar. Declaring these is what makes typing `%*%`
-# safe: without them the `matrix` the product returns would reject `+ 1L`, which
-# R accepts.
+# against another matrix, a scalar, or a vector that R recycles down its columns.
+# Declaring these is what makes typing `%*%` safe: without them the `matrix` the
+# product returns would reject `+ 1L`, which R accepts.
 Arith.matrix : fn(e1: matrix, e2: matrix) -> matrix
 Arith.matrix : fn(e1: matrix, e2: double) -> matrix
 Arith.matrix : fn(e1: double, e2: matrix) -> matrix
+Arith.matrix : fn(e1: matrix, e2: double[]) -> matrix
+Arith.matrix : fn(e1: double[], e2: matrix) -> matrix
 Compare.matrix : fn(e1: matrix, e2: matrix) -> logical
 Compare.matrix : fn(e1: matrix, e2: double) -> logical
 Compare.matrix : fn(e1: double, e2: matrix) -> logical
+Compare.matrix : fn(e1: matrix, e2: double[]) -> logical
+Compare.matrix : fn(e1: double[], e2: matrix) -> logical
+
+# Arithmetic on a data frame works column by column and keeps the frame, while a
+# comparison gives a logical matrix. `[` keeps the frame unless it drops to one
+# column, which only the index values decide, so its result is untyped.
+Arith.data.frame : fn(e1: data.frame, e2: Any) -> data.frame
+Arith.data.frame : fn(e1: Any, e2: data.frame) -> data.frame
+Compare.data.frame : fn(e1: data.frame, e2: Any) -> matrix
+Compare.data.frame : fn(e1: Any, e2: data.frame) -> matrix
+[.data.frame : fn(x: data.frame, ...: Any) -> Any
 
 # Reserved value constants and built-in constant vectors.
 T : logical
@@ -134,69 +158,69 @@ R.version.string : character
 # Length and sequence helpers: the result type is fixed by the function. `seq_len`'s count is Any-param
 # (`seq_len(10)` passes a whole-number double literal). `seq`/`rep` return shapes vary by which
 # arguments are supplied (value-dependent), so they stay `Any`.
-length : fn(x: Any) -> integer
-lengths : fn(x: Any, [use.names]: logical) -> integer[]
-seq_len : fn(length.out: Any) -> integer[]
-seq_along : fn(along.with: Any) -> integer[]
-seq : Any
-seq.int : Any
-rep : <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
+length : @pure fn(x: Any) -> integer
+lengths : @pure fn(x: Any, [use.names]: logical) -> integer[]
+seq_len : @pure fn(length.out: Any) -> integer[]
+seq_along : @pure fn(along.with: Any) -> integer[]
+seq : @pure Any
+seq.int : @pure Any
+rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
 rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any) -> Any
-rep_len : fn(x: Any, length.out: Any) -> Any
+rep_len : @pure fn(x: Any, length.out: Any) -> Any
 
 # Type predicates: a single logical, computed from the whole value.
-is.null : fn(x: Any) -> logical
-is.numeric : fn(x: Any) -> logical
-is.double : fn(x: Any) -> logical
-is.integer : fn(x: Any) -> logical
-is.character : fn(x: Any) -> logical
-is.logical : fn(x: Any) -> logical
-is.function : fn(x: Any) -> logical
-is.list : fn(x: Any) -> logical
-is.vector : fn(x: Any, [mode]: character) -> logical
-is.atomic : fn(x: Any) -> logical
-is.factor : fn(x: Any) -> logical
-is.data.frame : fn(x: Any) -> logical
-is.matrix : fn(x: Any) -> logical
-is.array : fn(x: Any) -> logical
-is.environment : fn(x: Any) -> logical
-is.name : fn(x: Any) -> logical
-is.symbol : fn(x: Any) -> logical
-is.call : fn(x: Any) -> logical
-is.primitive : fn(x: Any) -> logical
-is.element : fn(el: Any, set: Any) -> logical
-identity : <T> fn(x: T) -> T
+is.null : @pure fn(x: Any) -> logical
+is.numeric : @pure fn(x: Any) -> logical
+is.double : @pure fn(x: Any) -> logical
+is.integer : @pure fn(x: Any) -> logical
+is.character : @pure fn(x: Any) -> logical
+is.logical : @pure fn(x: Any) -> logical
+is.function : @pure fn(x: Any) -> logical
+is.list : @pure fn(x: Any) -> logical
+is.vector : @pure fn(x: Any, [mode]: character) -> logical
+is.atomic : @pure fn(x: Any) -> logical
+is.factor : @pure fn(x: Any) -> logical
+is.data.frame : @pure fn(x: Any) -> logical
+is.matrix : @pure fn(x: Any) -> logical
+is.array : @pure fn(x: Any) -> logical
+is.environment : @pure fn(x: Any) -> logical
+is.name : @pure fn(x: Any) -> logical
+is.symbol : @pure fn(x: Any) -> logical
+is.call : @pure fn(x: Any) -> logical
+is.primitive : @pure fn(x: Any) -> logical
+is.element : @pure fn(el: Any, set: Any) -> logical
+identity : @pure <T> fn(x: T) -> T
 # `missing(arg)` tests whether a formal was supplied. The argument is a parameter name R treats as
 # a promise; the checker sees an ordinary call, and `Any` accepts every argument shape.
 missing : fn(x: Any) -> logical
 
 # Elementwise NA/finiteness predicates: one logical PER ELEMENT in R (unlike the predicates above);
 # scalar-claim so `if (is.na(x))` stays clean on scalars.
-is.na : fn(x: Any) -> logical
-is.finite : fn(x: Any) -> logical
-is.infinite : fn(x: Any) -> logical
-is.nan : fn(x: Any) -> logical
-anyNA : fn(x: Any, [recursive]: logical) -> logical
+is.na : @pure fn(x: Any) -> logical
+is.finite : @pure fn(x: Any) -> logical
+is.infinite : @pure fn(x: Any) -> logical
+is.nan : @pure fn(x: Any) -> logical
+anyNA : @pure fn(x: Any, [recursive]: logical) -> logical
 
 # Coercions: the target atomic type is fixed by the function; elementwise, scalar-claim.
-as.integer : fn(x: Any) -> integer
-as.numeric : fn(x: Any) -> double
-as.double : fn(x: Any) -> double
-as.character : fn(x: Any) -> character
-as.logical : fn(x: Any) -> logical
-as.vector : fn(x: Any, [mode]: character) -> Any
-as.list : fn(x: Any) -> list[Any]
+as.integer : @pure fn(x: Any, ...: Any) -> integer
+as.numeric : @pure fn(x: Any, ...: Any) -> double
+as.double : @pure fn(x: Any, ...: Any) -> double
+as.character : @pure fn(x: Any, ...: Any) -> character
+as.logical : @pure fn(x: Any, ...: Any) -> logical
+as.vector : @pure fn(x: Any, [mode]: character) -> Any
+as.list : @pure fn(x: Any, ...: Any) -> list[Any]
 # `unlist` flattens nesting and coerces to one atomic vector, so its element type depends on the
 # whole (possibly nested, possibly mixed) contents — `Any`, like the other shape-erasing coercions.
-unlist : fn(x: Any, [recursive]: logical, [use.names]: logical) -> Any
+unlist : @pure fn(x: Any, [recursive]: logical, [use.names]: logical) -> Any
 # Coercions to types the stub grammar cannot name yet (factor, data.frame, date/time, language objects).
-as.factor : fn(x: Any) -> factor
-as.data.frame : fn(x: Any, [row.names]: Any, [optional]: logical, ...: Any, [stringsAsFactors]: logical) -> data.frame
-as.matrix : fn(x: Any, ...: Any) -> matrix
-as.Date : fn(x: Any, [format]: character, [tryFormats]: Any, ...: Any, [origin]: Any, [tz]: character) -> Date
-as.POSIXct : fn(x: Any, [tz]: character, [format]: character, [tryFormats]: Any, ...: Any, [origin]: Any) -> POSIXct
-as.name : Any
-as.symbol : Any
+as.factor : @pure fn(x: Any) -> factor
+as.data.frame : @pure fn(x: Any, [row.names]: Any, [optional]: logical, ...: Any, [stringsAsFactors]: logical) -> data.frame
+as.matrix : @pure fn(x: Any, ...: Any) -> matrix
+as.Date : @pure fn(x: Any, [format]: character, [tryFormats]: Any, ...: Any, [origin]: Any, [tz]: character) -> Date
+as.POSIXct : @pure fn(x: Any, [tz]: character, [format]: character, [tryFormats]: Any, ...: Any, [origin]: Any) -> POSIXct
+as.name : @pure Any
+as.symbol : @pure Any
 as.function : Any
 as.environment : Any
 
@@ -204,26 +228,26 @@ as.environment : Any
 # `nchar`'s optional formals are declarable because callback positions tolerate surplus optional
 # formals: `lapply(words, nchar)` re-checks the callback as the forwarded invocation the callee
 # performs, so extra defaults no longer break the idiom.
-nchar : fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
-nzchar : fn(x: Any, [keepNA]: logical) -> logical
-toupper : fn(x: Any) -> character
-tolower : fn(x: Any) -> character
-casefold : fn(x: Any, [upper]: logical) -> character
-substr : fn(x: Any, start: Any, stop: Any) -> character
-substring : fn(text: Any, first: Any, [last]: Any) -> character
-startsWith : fn(x: Any, prefix: Any) -> logical
-endsWith : fn(x: Any, suffix: Any) -> logical
-trimws : fn(x: Any, [which]: character, [whitespace]: character) -> character
-strrep : fn(x: Any, times: Any) -> character
-chartr : fn(old: character, new: character, x: Any) -> character
-toString : fn(x: Any, [sep]: character) -> character
-sQuote : fn(x: Any, [q]: Any) -> character
-dQuote : fn(x: Any, [q]: Any) -> character
-shQuote : fn(string: Any, [type]: character) -> character
-make.names : fn(names: Any, [unique]: logical, [allow_]: logical) -> character
-make.unique : fn(names: Any, [sep]: character) -> character
-enc2utf8 : fn(x: Any) -> character
-enc2native : fn(x: Any) -> character
+nchar : @pure fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
+nzchar : @pure fn(x: Any, [keepNA]: logical) -> logical
+toupper : @pure fn(x: Any) -> character
+tolower : @pure fn(x: Any) -> character
+casefold : @pure fn(x: Any, [upper]: logical) -> character
+substr : @pure fn(x: Any, start: Any, stop: Any) -> character
+substring : @pure fn(text: Any, first: Any, [last]: Any) -> character
+startsWith : @pure fn(x: Any, prefix: Any) -> logical
+endsWith : @pure fn(x: Any, suffix: Any) -> logical
+trimws : @pure fn(x: Any, [which]: character, [whitespace]: character) -> character
+strrep : @pure fn(x: Any, times: Any) -> character
+chartr : @pure fn(old: character, new: character, x: Any) -> character
+toString : @pure fn(x: Any, ...: Any, [sep]: character) -> character
+sQuote : @pure fn(x: Any, [q]: Any) -> character
+dQuote : @pure fn(x: Any, [q]: Any) -> character
+shQuote : @pure fn(string: Any, [type]: character) -> character
+make.names : @pure fn(names: Any, [unique]: logical, [allow_]: logical) -> character
+make.unique : @pure fn(names: Any, [sep]: character) -> character
+enc2utf8 : @pure fn(x: Any) -> character
+enc2native : @pure fn(x: Any) -> character
 Encoding : fn(x: Any) -> character
 iconv : fn(x: Any, [from]: character, [to]: character, [sub]: Any, [mark]: logical, [toRaw]: logical) -> character
 
@@ -232,34 +256,35 @@ iconv : fn(x: Any, [from]: character, [to]: character, [sub]: Any, [mark]: logic
 # no `sep` formal in R (a `sep =` argument is absorbed by `...` and concatenated — almost always a
 # bug), but declaring `[sep]` keeps such calls type-checked instead of erroring; the result type is
 # `character` either way.
-paste : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
-paste0 : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+paste : @pure fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
+paste0 : @pure fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]: logical) -> character
 
 # `sprintf`/`format`/`gettextf` take a leading required argument then variadic extras. Formals before
 # the `...` fill positionally (and by name), formals after it by name only, matching R. `format`'s
-# post-dots formals cover the common `format.default` controls.
-sprintf : fn(fmt: character, ...: Any) -> character
-gettextf : fn(fmt: character, ...: Any, [domain]: Any) -> character
-format : fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
-formatC : fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
-prettyNum : fn(x: Any, [big.mark]: character, ...: Any) -> character
+# post-dots formals cover the common `format.default` controls. Both vectorize over `fmt`; the result
+# keeps the scalar claim.
+sprintf : @pure fn(fmt: character[], ...: Any) -> character
+gettextf : @pure fn(fmt: character[], ...: Any, [domain]: Any) -> character
+format : @pure fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
+formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
+prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
 # used); the subject `x` is Any-param. Elementwise results are scalar-claim. `grep` returns indices or
 # values depending on `value =` (value-dependent), and the match-data functions return position
 # structures consumed by `regmatches`, so those stay `Any`.
-gsub : fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
-sub : fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
-grepl : fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
-grep : Any
-regexpr : Any
-gregexpr : Any
-regexec : Any
-regmatches : Any
-strtoi : fn(x: Any, [base]: Any) -> integer
+gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
+grep : @pure Any
+regexpr : @pure Any
+gregexpr : @pure Any
+regexec : @pure Any
+regmatches : @pure Any
+strtoi : @pure fn(x: Any, [base]: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
-strsplit : fn(x: Any, split: character, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
+strsplit : @pure fn(x: Any, split: character[], [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
 
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
@@ -289,11 +314,11 @@ suppressPackageStartupMessages : <T> fn(expr: T) -> T
 on.exit : fn([expr]: Any, [add]: logical, [after]: logical) -> NULL
 
 # Logic reductions: always a single logical, whatever the inputs (named-formals: `na.rm`).
-any : fn(...: Any, [na.rm]: logical) -> logical
-all : fn(...: Any, [na.rm]: logical) -> logical
-isTRUE : fn(x: Any) -> logical
-isFALSE : fn(x: Any) -> logical
-xor : fn(x: Any, y: Any) -> logical
+any : @pure fn(...: Any, [na.rm]: logical) -> logical
+all : @pure fn(...: Any, [na.rm]: logical) -> logical
+isTRUE : @pure fn(x: Any) -> logical
+isFALSE : @pure fn(x: Any) -> logical
+xor : @pure fn(x: Any, y: Any) -> logical
 
 # Variadic numeric reductions, declared as overload sets: repeating a name adds its next candidate,
 # a call commits the first candidate that accepts the arguments, and a call whose argument types are
@@ -301,115 +326,115 @@ xor : fn(x: Any, y: Any) -> logical
 # logical and integer inputs reduce to integer, doubles to double, and `min`/`max`/`range` also
 # order characters — with `Any` as the fallback for mixtures the candidates cannot express. `prod`
 # genuinely always returns double. `mean`'s second positional is `trim`, not `na.rm`.
-sum : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
+sum : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 sum : fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
 sum : fn(...: difftime, [na.rm]: logical) -> difftime
-sum : fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+sum : fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
 sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
-min : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
+min : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 min : fn(...: double[], [na.rm]: logical) -> double
 min : fn(...: character[], [na.rm]: logical) -> character
 min : fn(...: Any, [na.rm]: logical) -> Any
-max : fn(...: integer[] | logical[], [na.rm]: logical) -> integer
+max : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 max : fn(...: double[], [na.rm]: logical) -> double
 max : fn(...: character[], [na.rm]: logical) -> character
 max : fn(...: Any, [na.rm]: logical) -> Any
-range : fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
+range : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 range : fn(...: double[], [na.rm]: logical) -> double[]
 range : fn(...: character[], [na.rm]: logical) -> character[]
 range : fn(...: Any, [na.rm]: logical) -> Any
-pmin : fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
+pmin : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 pmin : fn(...: double[], [na.rm]: logical) -> double[]
 pmin : fn(...: Any, [na.rm]: logical) -> Any
-pmax : fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
+pmax : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 pmax : fn(...: double[], [na.rm]: logical) -> double[]
 pmax : fn(...: Any, [na.rm]: logical) -> Any
-prod : fn(...: Any, [na.rm]: logical) -> double
-mean : fn(x: Any, [trim]: Any, [na.rm]: logical) -> double
+prod : @pure fn(...: Any, [na.rm]: logical) -> double
+mean : @pure fn(x: Any, [trim]: Any, [na.rm]: logical, ...: Any) -> double
 
 # Cumulative reductions: elementwise type-preserving (logical/integer input gives an integer
 # vector, double gives double), overloaded per atomic family. `cumprod` always returns double —
 # R computes it in double to dodge integer overflow.
-cumsum : fn(x: integer[] | logical[]) -> integer[]
+cumsum : @pure fn(x: integer[] | logical[]) -> integer[]
 cumsum : fn(x: double[]) -> double[]
 cumsum : fn(x: Any) -> Any
-cumprod : fn(x: Any) -> double[]
-cummax : fn(x: integer[] | logical[]) -> integer[]
+cumprod : @pure fn(x: Any) -> double[]
+cummax : @pure fn(x: integer[] | logical[]) -> integer[]
 cummax : fn(x: double[]) -> double[]
 cummax : fn(x: Any) -> Any
-cummin : fn(x: integer[] | logical[]) -> integer[]
+cummin : @pure fn(x: integer[] | logical[]) -> integer[]
 cummin : fn(x: double[]) -> double[]
 cummin : fn(x: Any) -> Any
 
 # Math with a fixed double result (elementwise, scalar-claim, Any-param). `abs` is type-preserving.
-sqrt : fn(x: Any) -> double
-exp : fn(x: Any) -> double
-log : fn(x: Any, [base]: Any) -> double
-log2 : fn(x: Any) -> double
-log10 : fn(x: Any) -> double
-log1p : fn(x: Any) -> double
-expm1 : fn(x: Any) -> double
-sin : fn(x: Any) -> double
-cos : fn(x: Any) -> double
-tan : fn(x: Any) -> double
-asin : fn(x: Any) -> double
-acos : fn(x: Any) -> double
-atan : fn(x: Any) -> double
-atan2 : fn(y: Any, x: Any) -> double
-sign : fn(x: Any) -> double
-choose : fn(n: Any, k: Any) -> double
-factorial : fn(x: Any) -> double
+sqrt : @pure fn(x: Any) -> double
+exp : @pure fn(x: Any) -> double
+log : @pure fn(x: Any, [base]: Any) -> double
+log2 : @pure fn(x: Any) -> double
+log10 : @pure fn(x: Any) -> double
+log1p : @pure fn(x: Any) -> double
+expm1 : @pure fn(x: Any) -> double
+sin : @pure fn(x: Any) -> double
+cos : @pure fn(x: Any) -> double
+tan : @pure fn(x: Any) -> double
+asin : @pure fn(x: Any) -> double
+acos : @pure fn(x: Any) -> double
+atan : @pure fn(x: Any) -> double
+atan2 : @pure fn(y: Any, x: Any) -> double
+sign : @pure fn(x: Any) -> double
+choose : @pure fn(n: Any, k: Any) -> double
+factorial : @pure fn(x: Any) -> double
 # `abs` is shape- and type-preserving on numerics (integer stays integer, scalar stays scalar), so
 # each shape gets a candidate; logical input (which R coerces to integer) falls to `Any`.
-abs : fn(x: integer) -> integer
+abs : @pure fn(x: integer) -> integer
 abs : fn(x: integer[]) -> integer[]
 abs : fn(x: double) -> double
 abs : fn(x: double[]) -> double[]
 abs : fn(x: Any) -> Any
 
 # Rounding: the result is a double regardless of the (numeric) input; `digits` is Any-param.
-round : fn(x: Any, [digits]: Any) -> double
-signif : fn(x: Any, [digits]: Any) -> double
-floor : fn(x: Any) -> double
-ceiling : fn(x: Any) -> double
-trunc : fn(x: Any) -> double
+round : @pure fn(x: Any, [digits]: Any, ...: Any) -> double
+signif : @pure fn(x: Any, [digits]: Any) -> double
+floor : @pure fn(x: Any) -> double
+ceiling : @pure fn(x: Any) -> double
+trunc : @pure fn(x: Any, ...: Any) -> double
 
 # Sorting, ordering, sets: element-preserving, so the vector forms carry a generic `T[]` element
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for
 # the shapes the candidates cannot express. `order`/`which` genuinely produce integer index vectors.
 # `rank`'s result type depends on `ties.method` (double for averages, integer otherwise).
+sort : @pure <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
 sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
-sort : <T> fn(x: T[], [decreasing]: logical, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
-sort : fn(x: Any, [decreasing]: logical, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
-order : fn(...: Any, [na.last]: Any, [decreasing]: logical, [method]: character) -> integer[]
-rank : fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
+sort : fn(x: Any, [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
+order : @pure fn(...: Any, [na.last]: Any, [decreasing]: logical, [method]: character) -> integer[]
+rank : @pure fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
 # Selecting or reordering a list keeps its names, so the named candidate comes
 # ahead of the plain list one — otherwise `rev(opts)$timeout` is reported as a
 # missing field on code R runs.
-rev : fn(x: factor) -> factor
+rev : @pure fn(x: factor) -> factor
 rev : <T> fn(x: T[]) -> T[]
 rev : <T> fn(x: list[named: T]) -> list[named: T]
 rev : <T> fn(x: list[T]) -> list[T]
 rev : fn(x: Any) -> Any
+unique : @pure <T> fn(x: T[], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> T[]
 unique : fn(x: factor, [incomparables]: Any, ...: Any) -> factor
-unique : <T> fn(x: T[], [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> T[]
-unique : <T> fn(x: list[named: T], [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> list[named: T]
-unique : <T> fn(x: list[T], [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> list[T]
+unique : <T> fn(x: list[named: T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[named: T]
+unique : <T> fn(x: list[T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[T]
 # The fallback candidate is variadic because `unique` is a generic and its
 # methods take arguments base's signature does not name — `unique(DT, by = "id")`
 # is `unique.data.table`. The typed candidates above stay exact.
 unique : fn(x: Any, ...: Any, [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> Any
-duplicated : fn(x: Any, [incomparables]: Any, [fromLast]: logical, [nmax]: Any) -> logical
-anyDuplicated : fn(x: Any, [incomparables]: Any, [fromLast]: logical) -> integer
-union : <T> fn(x: T[], y: T[]) -> T[]
+duplicated : @pure fn(x: Any, [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> logical
+anyDuplicated : @pure fn(x: Any, [incomparables]: Any, ...: Any, [fromLast]: logical) -> integer
+union : @pure <T> fn(x: T[], y: T[]) -> T[]
 union : fn(x: Any, y: Any) -> Any
-intersect : <T> fn(x: T[], y: T[]) -> T[]
+intersect : @pure <T> fn(x: T[], y: T[]) -> T[]
 intersect : fn(x: Any, y: Any) -> Any
-setdiff : <T> fn(x: T[], y: T[]) -> T[]
+setdiff : @pure <T> fn(x: T[], y: T[]) -> T[]
 setdiff : fn(x: Any, y: Any) -> Any
-append : <T> fn(x: T[], values: T[], [after]: integer) -> T[]
+append : @pure <T> fn(x: T[], values: T[], [after]: integer) -> T[]
 append : fn(x: Any, values: Any, [after]: Any) -> Any
-replace : <T> fn(x: T[], list: Any, values: T[]) -> T[]
+replace : @pure <T> fn(x: T[], list: Any, values: T[]) -> T[]
 replace : fn(x: Any, list: Any, values: Any) -> Any
 sample : <T> fn(x: T[], [size]: integer, [replace]: logical, [prob]: Any) -> T[]
 sample : fn(x: Any, [size]: Any, [replace]: logical, [prob]: Any) -> Any
@@ -418,71 +443,72 @@ set.seed : fn(seed: Any, [kind]: Any, [normal.kind]: Any, [sample.kind]: Any) ->
 
 # Index searches. `which` is a genuine integer index vector (`arr.ind = TRUE` yields a matrix — not
 # modeled). `match` mirrors `x`'s shape: scalar-claim.
-which : fn(x: Any, [arr.ind]: logical, [useNames]: logical) -> integer[]
-which.max : fn(x: Any) -> integer
-which.min : fn(x: Any) -> integer
-match : fn(x: Any, table: Any, [nomatch]: Any, [incomparables]: Any) -> integer
+which : @pure fn(x: Any, [arr.ind]: logical, [useNames]: logical) -> integer[]
+which.max : @pure fn(x: Any) -> integer
+which.min : @pure fn(x: Any) -> integer
+match : @pure fn(x: Any, table: Any, [nomatch]: Any, [incomparables]: Any) -> integer
 
 # Structure queries. `names`/`dim`/`levels`/`attributes`/`rownames`/`colnames` are NULL-hybrids (see
 # header) and `class` returns the full class vector (scalar-claim keeps `class(x) == "foo"` clean).
 # `NROW`/`NCOL` never return NULL, so they are precisely integer.
-names : fn(x: Any) -> Any
-class : fn(x: Any) -> character
-oldClass : fn(x: Any) -> Any
-inherits : fn(x: Any, what: Any, [which]: logical) -> logical
-dim : fn(x: Any) -> Any
-nrow : fn(x: Any) -> Any
-ncol : fn(x: Any) -> Any
-NROW : fn(x: Any) -> integer
-NCOL : fn(x: Any) -> integer
-dimnames : fn(x: Any) -> Any
-rownames : fn(x: Any, [do.NULL]: logical, [prefix]: character) -> Any
-colnames : fn(x: Any, [do.NULL]: logical, [prefix]: character) -> Any
-levels : fn(x: factor) -> character[]
+names : @pure fn(x: Any) -> Any
+class : @pure fn(x: Any) -> character
+oldClass : @pure fn(x: Any) -> Any
+inherits : @pure fn(x: Any, what: Any, [which]: logical) -> logical
+dim : @pure fn(x: Any) -> Any
+nrow : @pure fn(x: Any) -> Any
+ncol : @pure fn(x: Any) -> Any
+NROW : @pure fn(x: Any) -> integer
+NCOL : @pure fn(x: Any) -> integer
+dimnames : @pure fn(x: Any) -> Any
+rownames : @pure fn(x: Any, [do.NULL]: logical, [prefix]: character) -> Any
+colnames : @pure fn(x: Any, [do.NULL]: logical, [prefix]: character) -> Any
+levels : @pure fn(x: factor) -> character[]
 levels : fn(x: Any) -> Any
-nlevels : fn(x: Any) -> integer
-attr : fn(x: Any, which: Any, [exact]: logical) -> Any
-attributes : fn(x: Any) -> Any
-typeof : fn(x: Any) -> character
+nlevels : @pure fn(x: Any) -> integer
+attr : @pure fn(x: Any, which: Any, [exact]: logical) -> Any
+attributes : @pure fn(x: Any) -> Any
+typeof : @pure fn(x: Any) -> character
 mode : fn(x: Any) -> character
 storage.mode : fn(x: Any) -> character
-unclass : fn(x: Any) -> Any
+unclass : @pure fn(x: Any) -> Any
 # `structure(x, ...)` takes arbitrary attribute names as named arguments — inexpressible until named
 # arguments can be absorbed by a rest parameter, so `Any`.
-structure : Any
+structure : @pure Any
 
-# Builders. `data.frame`/`table`/`cbind`/`rbind` take arbitrary column/cell names as named arguments —
-# `Any` values (see header). `matrix`/`array`/`factor` have closed formal sets but no nameable return
-# type yet. The atomic-vector constructors genuinely return fixed-element vectors.
-vector : fn([mode]: character, [length]: Any) -> Any
-logical : fn([length]: Any) -> logical[]
-integer : fn([length]: Any) -> integer[]
-double : fn([length]: Any) -> double[]
-numeric : fn([length]: Any) -> double[]
-character : fn([length]: Any) -> character[]
-complex : fn([length.out]: Any, [real]: Any, [imaginary]: Any, [modulus]: Any, [argument]: Any) -> complex[]
-matrix : fn([data]: Any, [nrow]: Any, [ncol]: Any, [byrow]: logical, [dimnames]: Any) -> Any
-array : fn([data]: Any, [dim]: Any, [dimnames]: Any) -> Any
-factor : fn([x]: Any, [levels]: Any, [labels]: Any, [exclude]: Any, [ordered]: logical, [nmax]: Any) -> factor
-droplevels : fn(x: factor, ...: Any) -> factor
+# Builders. `table`/`cbind`/`rbind` take arbitrary column/cell names as named arguments and return a
+# type that depends on them, so they stay `Any` values (see header). `data.frame` and `matrix` return
+# their opaque nominals; `array` has no nameable return type yet. The atomic-vector constructors
+# genuinely return fixed-element vectors.
+vector : @pure fn([mode]: character, [length]: Any) -> Any
+logical : @pure fn([length]: Any) -> logical[]
+integer : @pure fn([length]: Any) -> integer[]
+double : @pure fn([length]: Any) -> double[]
+numeric : @pure fn([length]: Any) -> double[]
+character : @pure fn([length]: Any) -> character[]
+complex : @pure fn([length.out]: Any, [real]: Any, [imaginary]: Any, [modulus]: Any, [argument]: Any) -> complex[]
+matrix : @pure fn([data]: Any, [nrow]: Any, [ncol]: Any, [byrow]: logical, [dimnames]: Any) -> matrix
+array : @pure fn([data]: Any, [dim]: Any, [dimnames]: Any) -> Any
+factor : @pure fn([x]: Any, [levels]: Any, [labels]: Any, [exclude]: Any, [ordered]: logical, [nmax]: Any) -> factor
+droplevels : @pure fn(x: factor, ...: Any) -> factor
 droplevels : fn(x: Any, ...: Any) -> Any
-data.frame : Any
-table : Any
-cbind : Any
-rbind : Any
-t : Any
-diag : Any
+data.frame : @pure fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.names]: logical, [fix.empty.names]: logical, [stringsAsFactors]: logical) -> data.frame
+table : @pure Any
+cbind : @pure Any
+rbind : @pure Any
+t : @pure Any
+diag : @pure Any
 solve : Any
 outer : Any
-cut : fn(x: Any, breaks: Any, [labels]: Any, [include.lowest]: logical, [right]: logical, [dig.lab]: Any, [ordered_result]: logical) -> Any
-split : fn(x: Any, f: Any, [drop]: logical, [sep]: character, [lex.order]: logical) -> list[Any]
+cut : @pure fn(x: Any, [breaks]: Any, [labels]: Any, [include.lowest]: logical, [right]: logical, [dig.lab]: Any, [ordered_result]: logical, ...: Any) -> Any
+split : @pure fn(x: Any, f: Any, [drop]: logical, ...: Any, [sep]: character, [lex.order]: logical) -> list[Any]
 merge : Any
 scale : Any
-tabulate : fn(bin: Any, [nbins]: Any) -> integer[]
-rowSums : fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
-colSums : fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
-rowMeans : fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
-colMeans : fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
+tabulate : @pure fn(bin: Any, [nbins]: Any) -> integer[]
+rowSums : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
+colSums : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
+rowMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
+colMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 
 # Genuinely parametric transforms — the type system's payoff. `lapply` cannot yet accept forwarded
 # `...` arguments for `f` (a rest-aware function-compat rule is needed). Every sequence parameter
@@ -497,22 +523,23 @@ colMeans : fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # `lapply` keeps its input's names, so a named list in is a named list out. The
 # named candidate comes first because it is the narrower one: a plain list or a
-# vector does not fit it at all and takes the general form below.
-lapply : <T, U> fn(x: list[named: T], f: fn(T) -> U, ...: Any) -> list[named: U]
-lapply : <T, U> fn(x: list[T] | T[], f: fn(T) -> U, ...: Any) -> list[U]
+# vector does not fit it at all and takes the general form below, which also takes
+# `NULL` (`lapply(NULL, f)` is `list()`).
+lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
+lapply : <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
-Filter : <T> fn(f: fn(T) -> logical, x: T[]) -> T[]
-Filter : <T> fn(f: fn(T) -> logical, x: list[named: T]) -> list[named: T]
-Filter : <T> fn(f: fn(T) -> logical, x: list[T]) -> list[T]
-Find : <T> fn(f: fn(T) -> logical, x: list[T] | T[]) -> T | NULL
-Position : <T> fn(f: fn(T) -> logical, x: list[T] | T[]) -> integer | NULL
-Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical) -> U
+Filter : <T> fn(f: fn(T) -> Any, x: T[]) -> T[]
+Filter : <T> fn(f: fn(T) -> Any, x: list[named: T]) -> list[named: T]
+Filter : <T> fn(f: fn(T) -> Any, x: list[T]) -> list[T]
+Find : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> T | NULL
+Position : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> integer | NULL
+Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical, [simplify]: logical) -> U
 # `identity : <T> fn(x: T) -> T` and `apply : Any` are deliberately NOT declared yet: many existing
 # fixtures bind those names as local helpers, and a stub declaration makes each such binding fire the
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
-invisible : <T> fn([x]: T) -> T
+invisible : @pure <T> fn([x]: T) -> T
 force : <T> fn(x: T) -> T
 # `sapply`/`vapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
 # results (value-dependent); `apply` and friends also forward named arguments to the callee. `Negate`
@@ -523,14 +550,20 @@ sapply : Any
 # `character` under a `numeric(1)` template is the error R raises at runtime
 # ("values must be type 'double'"), caught statically here. The template accepts
 # `V[] | V` because the idiomatic spelling is a length-1 vector (`numeric(1)`)
-# while the callback returns a scalar. A multi-element template makes R return a
+# while the callback returns a scalar. R promotes a logical result under an
+# `integer` template and a logical or integer one under a `double` template, so
+# the atomic templates come first, narrowest first, because a wider template
+# would also accept a narrower one. A multi-element template makes R return a
 # matrix; the result claim stays `V[]` (scalar-claim, as elsewhere in this file).
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical, FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer | logical, FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any
 tapply : Any
-Negate : Any
-Vectorize : Any
+Negate : @pure Any
+Vectorize : @pure Any
 Recall : Any
 
 # Infix operators R exports. `a %op% b` is a call to a function of that name, so
@@ -539,7 +572,7 @@ Recall : Any
 # products are Any-param (R coerces both operands); `%*%` and `%o%` produce a
 # matrix, which is why they are worth declaring at all — the result class was
 # otherwise `Unknown` and invisible even to strict mode.
-%in% : fn(x: Any, table: Any) -> logical
+%in% : @pure fn(x: Any, table: Any) -> logical
 %*% : fn(x: Any, y: Any) -> matrix
 %o% : fn(X: Any, Y: Any) -> matrix
 %x% : fn(X: Any, Y: Any) -> matrix
@@ -550,9 +583,9 @@ Recall : Any
 do.call : fn(what: Any, args: Any, [quote]: logical, [envir]: Any) -> Any
 match.arg : fn(arg: Any, [choices]: Any, [several.ok]: logical) -> character
 match.fun : fn(FUN: Any, [descend]: logical) -> Any
-ifelse : fn(test: Any, yes: Any, no: Any) -> Any
-all.equal : fn(target: Any, current: Any, [tolerance]: Any, [scale]: Any, ...: Any, [check.attributes]: logical, [check.names]: logical) -> Any
-identical : fn(x: Any, y: Any, [num.eq]: logical, [single.NA]: logical, [attrib.as.set]: logical, [ignore.bytecode]: logical, [ignore.environment]: logical, [ignore.srcref]: logical, [extptr.as.ref]: logical) -> logical
+ifelse : @pure fn(test: Any, yes: Any, no: Any) -> Any
+all.equal : @pure fn(target: Any, current: Any, [tolerance]: Any, [scale]: Any, ...: Any, [check.attributes]: logical, [check.names]: logical) -> Any
+identical : @pure fn(x: Any, y: Any, [num.eq]: logical, [single.NA]: logical, [attrib.as.set]: logical, [ignore.bytecode]: logical, [ignore.environment]: logical, [ignore.srcref]: logical, [extptr.as.ref]: logical) -> logical
 UseMethod : fn(generic: character, [object]: Any) -> Any
 NextMethod : fn([generic]: Any, [object]: Any, ...: Any) -> Any
 nargs : fn() -> integer
@@ -574,18 +607,18 @@ return : Any
 # Reflective environment access (deliberately shallow — see the scope discipline in the stubs doc).
 # The environment-returning and NSE forms are `Any` values; the string-keyed lookups have stable
 # signatures worth declaring.
-environment : Any
+environment : @pure Any
 globalenv : Any
-emptyenv : Any
-baseenv : Any
-topenv : Any
-new.env : Any
+emptyenv : @pure Any
+baseenv : @pure Any
+topenv : @pure Any
+new.env : @pure Any
 parent.frame : Any
 parent.env : Any
 sys.call : Any
 sys.function : Any
 match.call : Any
-environmentName : fn(env: Any) -> character
+environmentName : @pure fn(env: Any) -> character
 get : fn(x: character, [pos]: Any, [envir]: Any, [mode]: character, [inherits]: logical) -> Any
 get0 : fn(x: character, [envir]: Any, [mode]: character, [inherits]: logical, [ifnotfound]: Any) -> Any
 mget : fn(x: Any, [envir]: Any, [mode]: character, [ifnotfound]: Any, [inherits]: logical) -> list[Any]
@@ -594,13 +627,13 @@ assign : fn(x: character, value: Any, [pos]: Any, [envir]: Any, [inherits]: logi
 rm : fn(...: Any, [list]: Any, [pos]: Any, [envir]: Any, [inherits]: logical) -> NULL
 eval : fn(expr: Any, [envir]: Any, [enclos]: Any) -> Any
 evalq : fn(expr: Any, [envir]: Any, [enclos]: Any) -> Any
-quote : fn(expr: Any) -> Any
-substitute : fn(expr: Any, [env]: Any) -> Any
+quote : @pure fn(expr: Any) -> Any
+substitute : @pure fn([expr]: Any, [env]: Any) -> Any
 bquote : fn(expr: Any, [where]: Any, [splice]: logical) -> Any
 deparse : fn(expr: Any, [width.cutoff]: Any, [backtick]: logical, [control]: Any, [nlines]: Any) -> character
 parse : fn([file]: Any, [n]: Any, [text]: Any, [prompt]: Any, [keep.source]: logical, [srcfile]: Any, [encoding]: character) -> Any
 body : fn(fun: Any) -> Any
-formals : fn(fun: Any, [envir]: Any) -> Any
+formals : fn([fun]: Any, [envir]: Any) -> Any
 args : fn(name: Any) -> Any
 # NSE data-masking helpers: deliberately not modeled beyond resolution.
 subset : Any
@@ -613,17 +646,17 @@ within : Any
 library : fn([package]: Any, [help]: Any, [pos]: Any, [lib.loc]: Any, [character.only]: logical, [logical.return]: logical, [warn.conflicts]: logical, [quietly]: logical, [verbose]: logical) -> Any
 require : fn([package]: Any, [lib.loc]: Any, [quietly]: logical, [warn.conflicts]: logical, [character.only]: logical) -> logical
 requireNamespace : fn(package: Any, [quietly]: logical) -> logical
-source : fn(file: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [verbose]: logical, [chdir]: logical, [encoding]: Any) -> Any
+source : fn([file]: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [exprs]: Any, [spaced]: logical, [verbose]: logical, [prompt.echo]: character, [max.deparse.length]: Any, [width.cutoff]: Any, [deparseCtrl]: Any, [chdir]: logical, [catch.aborts]: logical, [encoding]: Any, [continue.echo]: character, [skip.echo]: Any, [keep.source]: logical) -> Any
 getOption : fn(x: character, [default]: Any) -> Any
 # `options(warn = 1, digits = 7)`: arbitrary option names as named arguments.
 options : Any
-getRversion : fn() -> Any
+getRversion : @pure fn() -> Any
 .libPaths : fn([new]: Any, [include.site]: logical) -> character[]
 commandArgs : fn([trailingOnly]: logical) -> character[]
 
 # File-system helpers. Elementwise path functions are scalar-claim (`if (file.exists(p))` must stay
 # clean); `list.files` genuinely returns a character vector.
-file.path : fn(...: Any, [fsep]: character) -> character
+file.path : @pure fn(...: Any, [fsep]: character) -> character
 file.exists : fn(...: Any) -> logical
 file.remove : fn(...: Any) -> logical
 file.size : fn(...: Any) -> double
@@ -632,14 +665,14 @@ file.rename : fn(from: Any, to: Any) -> logical
 dir.exists : fn(paths: Any) -> logical
 dir.create : fn(path: Any, [showWarnings]: logical, [recursive]: logical, [mode]: character) -> logical
 unlink : fn(x: Any, [recursive]: logical, [force]: logical, [expand]: logical) -> integer
-basename : fn(path: Any) -> character
-dirname : fn(path: Any) -> character
+basename : @pure fn(path: Any) -> character
+dirname : @pure fn(path: Any) -> character
 normalizePath : fn(path: Any, [winslash]: character, [mustWork]: logical) -> character
 path.expand : fn(path: Any) -> character
-list.files : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical) -> character[]
-dir : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical) -> character[]
+list.files : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: logical) -> character[]
+dir : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: logical) -> character[]
 list.dirs : fn([path]: Any, [full.names]: logical, [recursive]: logical) -> character[]
-tempfile : fn([pattern]: character, [tmpdir]: character, [fileext]: character) -> character
+tempfile : fn([pattern]: character[], [tmpdir]: character[], [fileext]: character[]) -> character
 tempdir : fn([check]: logical) -> character
 
 # Reading, writing, and serialization. Connection constructors return connection objects the grammar
@@ -657,21 +690,21 @@ file : fn([description]: character, [open]: character, [blocking]: logical, [enc
 url : fn(description: character, [open]: character, [blocking]: logical, [encoding]: character, [method]: character, [headers]: Any) -> connection
 gzfile : fn(description: character, [open]: character, [encoding]: character, [compression]: Any) -> connection
 textConnection : fn(object: Any, [open]: character, [local]: logical, [name]: character, [encoding]: character) -> connection
-close : fn(con: Any, [type]: character) -> Any
+close : fn(con: Any, ...: Any, [type]: character) -> Any
 readline : fn([prompt]: character) -> character
 
 # Date and time construction. `difftime` and `as.difftime` produce the class the
 # `Arith.difftime` / `Compare.difftime` methods above give arithmetic to;
 # `format`/`strftime` render a date back to text.
-difftime : fn(time1: Any, time2: Any, [tz]: character, [units]: character) -> difftime
-as.difftime : fn(tim: Any, [format]: character, [units]: character) -> difftime
+difftime : @pure fn(time1: Any, time2: Any, [tz]: character, [units]: character) -> difftime
+as.difftime : @pure fn(tim: Any, [format]: character, [units]: character) -> difftime
 strftime : fn(x: Any, [format]: character, [tz]: character, [usetz]: logical, ...: Any) -> character
 strptime : fn(x: Any, format: character, [tz]: character) -> POSIXct
-weekdays : fn(x: Any, [abbreviate]: logical) -> character
+weekdays : @pure fn(x: Any, [abbreviate]: logical) -> character
 # lubridate adds months.numeric, which builds a period (`months(1)`).
-months : fn(x: double | integer) -> Any
+months : @pure fn(x: double | integer) -> Any
 months : fn(x: Any, [abbreviate]: logical) -> character
-julian : Any
+julian : @pure Any
 
 # System and session.
 Sys.time : fn() -> POSIXct
@@ -692,7 +725,7 @@ quit : fn([save]: character, [status]: Any, [runLast]: logical) -> Any
 q : fn([save]: character, [status]: Any, [runLast]: logical) -> Any
 # `summary` is an S3 generic whose result shape is class-dependent; `diff` is type-preserving.
 summary : Any
-diff : fn(x: Any, [lag]: Any, [differences]: Any) -> Any
+diff : @pure fn(x: Any, [lag]: Any, [differences]: Any, ...: Any) -> Any
 
 # Interactive debugging. All side-effecting; `debug`/`trace` take the function object itself
 # (Any-param: any callable value is legal), and the returns follow R (`NULL` invisibly, except

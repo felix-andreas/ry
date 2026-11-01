@@ -16,16 +16,18 @@ mod analysis;
 mod codegen;
 mod runtime;
 
-use analysis::Refusal;
-use heap::object::{Header, Sexp, SexpType};
-use interp::{
-    bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
-    heap, interp,
-    unwind::{R, error},
-    values,
+use {
+    analysis::Refusal,
+    heap::object::{Header, Sexp, SexpType, gp},
+    interp::{
+        bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
+        heap, interp,
+        unwind::{R, error},
+        values,
+    },
+    runtime::{Activation, Compiled, MAX_COMPILES},
+    std::{cell::Cell, ffi::c_void, panic::resume_unwind},
 };
-use runtime::{Activation, Compiled, MAX_COMPILES};
-use std::{cell::Cell, ffi::c_void, panic::resume_unwind};
 
 /// How the JIT is configured for the session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,14 +48,17 @@ impl Mode {
     }
 }
 
-/// Calls a body makes before it compiles, in the default mode.
-const ENTRY_THRESHOLD: i32 = 10;
-/// Backward jumps a body takes before a loop compiles, in the default mode.
-const BACK_EDGE_THRESHOLD: i32 = 500;
+/// Calls a body makes before it compiles, in the default mode. Compiling a body costs about as
+/// much as interpreting it a few thousand times, and loading a package runs many bodies (the
+/// methods package's, for each `setClass`) only a few dozen times: at 10 calls, compiling them
+/// took half the time of a large package's S4 definitions. Code that is really hot passes 1000
+/// calls within milliseconds, so the benchmarks lose nothing.
+const ENTRY_THRESHOLD: i32 = 1000;
+/// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
+const BACK_EDGE_THRESHOLD: i32 = 10_000;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
-    static STRAIGHT_LINE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Installs the JIT in the current interpreter, in the mode `RY_JIT` asks for.
@@ -73,11 +78,6 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1),
     };
     ENTRY_LIMIT.with(|limit| limit.set(entries));
-    // A body without a loop runs each compiled instruction once per call, so entering compiled
-    // code and forcing the arguments through helpers costs more than tier 0's dispatch saves.
-    // Such bodies pay off only once calls go directly from compiled code to compiled code, so
-    // the default mode leaves them to tier 0 and only `force` compiles them, for coverage.
-    STRAIGHT_LINE.with(|straight_line| straight_line.set(mode == Mode::Force));
     bytecode::set_tier(Some(Tier {
         enter,
         back_edge,
@@ -87,9 +87,6 @@ pub fn install_mode(mode: Mode) {
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
-        if bytecode::loop_count(machine.code) == 0 && !STRAIGHT_LINE.with(Cell::get) {
-            return None;
-        }
         let entries = values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES];
         let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get))?;
         run(machine, compiled, 0)
@@ -112,10 +109,21 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
         let constants = machine.code.cdr();
         let tier1 = constants.element(TIER1);
         if tier1 != values::nil() {
-            let compiled = &*(tier1.external_address() as *const Compiled);
-            // Closures made by one `function` expression share their body but not their
-            // enclosure, which the compiled lookups are specialized to.
-            return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+            if tier1.external_protected().weak_key() != values::nil() {
+                let compiled = &*(tier1.external_address() as *const Compiled);
+                // Closures made by one `function` expression share their body but not their
+                // enclosure, which the compiled lookups are specialized to.
+                return (compiled.enclosure == machine.env.enclosure()).then_some(compiled);
+            }
+            // The enclosure the code was compiled for died, and no activation can still run the
+            // code, because a running one keeps its enclosure reachable. The address is cleared
+            // so that a copy of the constants sharing this pointer does not free it twice.
+            let address = tier1.external_address() as *mut Compiled;
+            if !address.is_null() {
+                tier1.set_external_address(std::ptr::null_mut());
+                drop(Box::from_raw(address));
+            }
+            heap().set_element(constants, TIER1, values::nil());
         }
         let counters = values::ints_mut(constants.element(PROFILE));
         if !hot || counters[profile::TIER_STATE] < 0 {
@@ -157,7 +165,24 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
         let plan = analysis::plan(machine.code, machine.function.car(), enclosure)?;
         let entry = codegen::compile(&plan, machine.code)?;
         if std::env::var_os("RY_JIT_LOG").is_some() {
-            eprintln!("jit: compiled {}", describe(machine.code));
+            // The instructions left to tier 0 are where compiled code is slow.
+            let steps: Vec<String> = plan
+                .insts
+                .iter()
+                .zip(&plan.actions)
+                .filter(|(_, action)| matches!(action, analysis::Action::Step { .. }))
+                .map(|(inst, _)| format!("{:?}@{}", inst.op, inst.pc))
+                .collect();
+            eprintln!(
+                "jit: compiled {} ({} speculations; tier 0 runs: {})",
+                describe(machine.code),
+                plan.speculations.len(),
+                if steps.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    steps.join(", ")
+                }
+            );
         }
         let osr = plan
             .loop_headers
@@ -175,13 +200,16 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
             osr,
         });
         // Everything the machine code and the speculations point to stays reachable from the
-        // external pointer, so the collector never frees an object compiled code embeds.
+        // external pointer while the enclosure lives, so the collector never frees an object
+        // compiled code embeds. They hang off a weak reference keyed on the enclosure, because
+        // the body outlives any one closure: R6 gives every object's methods the same body, and a
+        // strong reference would keep the first object compiled for alive with its finalizer.
         let mut kept = vec![enclosure];
         kept.extend(plan.slots.iter().copied());
         for speculation in &plan.speculations {
             kept.extend([speculation.symbol, speculation.cell, speculation.function]);
-            kept.extend(speculation.frames.iter().copied());
-            kept.extend(speculation.home);
+            speculation.symbol.set_gp_bits(gp::WATCHED, true);
+            speculation.cell.set_gp_bits(gp::WATCHED, true);
         }
         let heap = heap();
         let mark = heap.handle_mark();
@@ -191,8 +219,12 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
             for (index, object) in kept.iter().enumerate() {
                 heap.set_element(protected, index, *object);
             }
+            let weak = heap
+                .alloc_weak_ref(enclosure, protected, values::nil(), 0, false)
+                .map_err(|_| error("the JIT could not allocate its code object"))?;
+            heap.root(weak);
             let address = Box::into_raw(compiled) as *mut c_void;
-            heap.alloc_external_ptr(address, values::nil(), protected)
+            heap.alloc_external_ptr(address, values::nil(), weak)
                 .map_err(|_| error("the JIT could not allocate its code object"))
         })();
         heap.release_handles(mark);
@@ -248,6 +280,11 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
             _ => {}
         }
         Some(TierExit::Finished(match Sexp::from_raw(result) {
+            // An error parked by a helper whose failure compiled code does not branch on.
+            Some(_) if activation.pending.is_some() => Err(activation
+                .pending
+                .take()
+                .unwrap_or_else(|| error("compiled code failed without an error"))),
             Some(value) => Ok(value),
             None => Err(activation
                 .pending

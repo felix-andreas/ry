@@ -1,14 +1,18 @@
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::time::Duration;
-
-use clap::{Parser, Subcommand};
-use oracle::bench::{self, Summary};
-use oracle::{
-    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
-    gnu_r_available, packages, parse, render,
+use {
+    clap::{Parser, Subcommand},
+    oracle::{
+        Engine, EngineError, ProcessEngine,
+        bench::{self, Summary},
+        diff, engine_from_environment, expected_path, find_cases, gnu_r_available, install,
+        packages, parse, render,
+    },
+    packages::{PackageOutcome, Runtime, Settings},
+    std::{
+        path::{Path, PathBuf},
+        process::ExitCode,
+        time::Duration,
+    },
 };
-use packages::{PackageOutcome, Runtime, Settings};
 
 /// Differential testing of R engines against GNU R.
 #[derive(Parser)]
@@ -33,6 +37,26 @@ enum Command {
     },
     /// Print the outcome of one file under GNU R.
     Show { path: PathBuf },
+    /// Generate random R programs from consecutive seeds and run each under GNU R and the
+    /// given engines, reporting every divergence with its seed and program.
+    Fuzz {
+        /// The first seed.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// How many consecutive seeds to run.
+        #[arg(long, default_value_t = 1)]
+        count: u64,
+        /// The engines compared with GNU R, comma separated: `ry-tier0`, `ry-jit`, `ry`,
+        /// `ry-gctorture`, or command lines.
+        #[arg(long, default_value = "ry-tier0,ry-jit")]
+        engines: String,
+        /// Seconds one engine may take on one program.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Print the program for `--seed` and exit, without running anything.
+        #[arg(long)]
+        print: bool,
+    },
     /// Run packages' testthat suites under GNU R and ry's runtime (both through `ry load`) and
     /// compare them test by test.
     Bench {
@@ -77,13 +101,45 @@ enum Command {
         /// The corpus directory (default: `$RY_CORPUS_DIR`, then `.corpus` in the repository).
         #[arg(long)]
         corpus: Option<PathBuf>,
+        /// Run ry's side on the packages `oracle install` built (`.corpus/ry-library`), through
+        /// ry's R home (`.corpus/ry-home`), recording results under `ry-installed`.
+        #[arg(long)]
+        installed: bool,
         /// The packages to run (default: every package in `closure.txt`).
+        packages: Vec<String>,
+    },
+    /// Install corpus packages from source through ry's `R CMD INSTALL` on ry's runtime, in
+    /// dependency order, and load each one.
+    Install {
+        /// ry's R home, from `ry-rcmd assemble` (default: `.corpus/ry-home`).
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// The library to install into (default: `.corpus/ry-library`).
+        #[arg(long)]
+        library: Option<PathBuf>,
+        /// Packages installed in parallel.
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+        /// The limit in seconds for one package's installation.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// The corpus directory (default: `$RY_CORPUS_DIR`, then `.corpus` in the repository).
+        #[arg(long)]
+        corpus: Option<PathBuf>,
+        /// The packages to install (default: every package in `closure.txt`).
         packages: Vec<String>,
     },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Fuzz {
+        seed, print: true, ..
+    } = cli.command
+    {
+        print!("{}", oracle::fuzz::program(seed));
+        return ExitCode::SUCCESS;
+    }
     if !gnu_r_available() {
         eprintln!("GNU R was not found; install R or set ORACLE_R to its path");
         return ExitCode::from(2);
@@ -139,8 +195,32 @@ fn main() -> ExitCode {
             timeout,
             rerun_gnu_r,
             corpus,
+            installed,
             packages,
-        } => run_packages(runtime, jobs, timeout, rerun_gnu_r, corpus, packages),
+        } => run_packages(
+            runtime,
+            jobs,
+            timeout,
+            rerun_gnu_r,
+            corpus,
+            installed,
+            packages,
+        ),
+        Command::Install {
+            home,
+            library,
+            jobs,
+            timeout,
+            corpus,
+            packages,
+        } => run_install(home, library, jobs, timeout, corpus, packages),
+        Command::Fuzz {
+            seed,
+            count,
+            engines,
+            timeout,
+            print: _,
+        } => run_fuzz(seed, count, &engines, Duration::from_secs(timeout)),
         Command::Show { path } => match gnu_r.run(&path) {
             Ok(outcome) => {
                 print!("{}", render(&outcome));
@@ -259,12 +339,165 @@ fn compare(gnu_r: &ProcessEngine, second: &dyn Engine, cases: &[PathBuf]) -> Exi
     summarize(cases.len() - skipped, failures)
 }
 
+fn run_fuzz(first: u64, count: u64, engines: &str, timeout: Duration) -> ExitCode {
+    let mut parsed = Vec::new();
+    for name in engines
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        match ProcessEngine::named(name) {
+            Some(engine) => parsed.push(engine.with_timeout(timeout)),
+            None => {
+                eprintln!("unknown engine `{name}`");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let engines: Vec<&dyn Engine> = parsed.iter().map(|engine| engine as &dyn Engine).collect();
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(timeout);
+    let directory = std::env::temp_dir().join(format!("ry-oracle-fuzz-{}", std::process::id()));
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        eprintln!("{}: {error}", directory.display());
+        return ExitCode::FAILURE;
+    }
+    let started = std::time::Instant::now();
+    let mut diverging = Vec::new();
+    let mut ended_in_error = 0;
+    for seed in first..first.saturating_add(count) {
+        match oracle::fuzz::check_seed(seed, &gnu_r, &engines, &directory) {
+            Ok(report) => {
+                if !report.reference.errors.is_empty() {
+                    ended_in_error += 1;
+                }
+                for reason in &report.unavailable {
+                    eprintln!("unavailable: {reason}");
+                }
+                if report.divergences.is_empty() {
+                    println!("ok      seed {seed}");
+                } else {
+                    println!("DIFFERS {}", oracle::fuzz::render_divergences(&report));
+                    diverging.push(seed);
+                }
+                if !report.unavailable.is_empty() && report.unavailable.len() == engines.len() {
+                    eprintln!("no engine besides GNU R can run here");
+                    return ExitCode::from(2);
+                }
+            }
+            Err(error) => {
+                println!("ERROR   seed {seed}: GNU R: {error}");
+                diverging.push(seed);
+            }
+        }
+    }
+    if let Err(error) = std::fs::remove_dir_all(&directory) {
+        eprintln!("could not remove {}: {error}", directory.display());
+    }
+    println!(
+        "{} of {count} seeds agree ({ended_in_error} ended in an error under GNU R) in {:.1} s",
+        count as usize - diverging.len(),
+        started.elapsed().as_secs_f64()
+    );
+    if diverging.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        println!("diverging seeds: {diverging:?}");
+        ExitCode::FAILURE
+    }
+}
+
+fn corpus_directory(corpus: Option<PathBuf>) -> PathBuf {
+    corpus
+        .or_else(|| std::env::var_os("RY_CORPUS_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"))
+}
+
+fn run_install(
+    home: Option<PathBuf>,
+    library: Option<PathBuf>,
+    jobs: usize,
+    timeout: u64,
+    corpus: Option<PathBuf>,
+    packages: Vec<String>,
+) -> ExitCode {
+    let corpus = corpus_directory(corpus);
+    let absolute = |path: PathBuf| std::path::absolute(&path).unwrap_or(path);
+    let everything = match packages::closure(&corpus) {
+        Ok(everything) => everything,
+        Err(error) => {
+            eprintln!(
+                "cannot read {}: {error}; run `just corpus-sources` first",
+                corpus.join("closure.txt").display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let packages = if packages.is_empty() {
+        everything
+    } else {
+        packages
+    };
+    let settings = install::Settings {
+        home: absolute(home.unwrap_or_else(|| corpus.join("ry-home"))),
+        library: absolute(library.unwrap_or_else(|| corpus.join("ry-library"))),
+        corpus: absolute(corpus),
+        jobs,
+        timeout: Duration::from_secs(timeout),
+    };
+    if !settings.home.join("bin/R").exists() {
+        eprintln!(
+            "{} is not an R home; run `just ry-home` first",
+            settings.home.display()
+        );
+        return ExitCode::from(2);
+    }
+    let report = |package: &str, outcome: &install::Outcome| {
+        let line = match outcome {
+            install::Outcome::Installed {
+                seconds,
+                loaded: Ok(()),
+            } => format!("installed {seconds:>6.1}s, loads"),
+            install::Outcome::Installed {
+                seconds,
+                loaded: Err(error),
+            } => {
+                format!("installed {seconds:>6.1}s, load failed: {error}")
+            }
+            install::Outcome::Failed { seconds, error } => {
+                format!("failed    {seconds:>6.1}s: {error}")
+            }
+            install::Outcome::Skipped(reason) => format!("skipped: {reason}"),
+            install::Outcome::NoSources => "no sources".to_owned(),
+        };
+        println!("{package:<24} {line}");
+    };
+    let outcomes = install::run(&settings, &packages, &report);
+    let path = settings.corpus.join("ry-install").join("summary.tsv");
+    // A run over some packages replaces their rows and keeps the rest of the summary.
+    let previous = std::fs::read_to_string(&path).unwrap_or_default();
+    let summary = install::merge_summary(&previous, &outcomes);
+    if let Err(error) = std::fs::write(&path, &summary) {
+        eprintln!("cannot write {}: {error}", path.display());
+        return ExitCode::FAILURE;
+    }
+    let (installed, loaded) = install::counts(&outcomes);
+    println!(
+        "{} packages: {installed} installed, {loaded} load; summary in {}",
+        outcomes.len(),
+        path.display()
+    );
+    let (total, installed, loaded) = install::summary_counts(&summary);
+    println!("summary: {total} packages, {installed} installed, {loaded} load");
+    ExitCode::SUCCESS
+}
+
 fn run_packages(
     runtime: String,
     jobs: usize,
     timeout: u64,
     rerun_gnu_r: bool,
     corpus: Option<PathBuf>,
+    installed: bool,
     packages: Vec<String>,
 ) -> ExitCode {
     let runtimes = match runtime.as_str() {
@@ -276,9 +509,7 @@ fn run_packages(
             return ExitCode::from(2);
         }
     };
-    let corpus = corpus
-        .or_else(|| std::env::var_os("RY_CORPUS_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.corpus"));
+    let corpus = corpus_directory(corpus);
     let everything = match packages::closure(&corpus) {
         Ok(everything) => everything,
         Err(error) => {
@@ -289,7 +520,11 @@ fn run_packages(
             return ExitCode::from(2);
         }
     };
-    let packages = if packages.is_empty() { everything.clone() } else { packages };
+    let packages = if packages.is_empty() {
+        everything.clone()
+    } else {
+        packages
+    };
     let settings = Settings {
         corpus: corpus.clone(),
         rscript: std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_owned()),
@@ -300,6 +535,12 @@ fn run_packages(
         jobs,
         timeout: Duration::from_secs(timeout),
         reuse_gnu_r: !rerun_gnu_r,
+        installed: installed.then(|| packages::Installed {
+            home: std::path::absolute(corpus.join("ry-home"))
+                .unwrap_or_else(|_| corpus.join("ry-home")),
+            library: std::path::absolute(corpus.join("ry-library"))
+                .unwrap_or_else(|_| corpus.join("ry-library")),
+        }),
     };
     let report = |package: &str, outcome: &PackageOutcome| {
         let line = match outcome {
@@ -320,7 +561,11 @@ fn run_packages(
     // The summary always covers the whole closure, reading recorded results for the rest.
     let all = packages::run_all(&settings, &everything, &[], &|_, _| {});
     let summary = packages::summary(&all);
-    let path = corpus.join("tests").join("summary.md");
+    let path = corpus.join("tests").join(if installed {
+        "summary-installed.md"
+    } else {
+        "summary.md"
+    });
     if let Err(error) = std::fs::write(&path, &summary) {
         eprintln!("cannot write {}: {error}", path.display());
         return ExitCode::FAILURE;
@@ -346,7 +591,12 @@ fn default_ry() -> PathBuf {
     )
 }
 
-fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json: Option<&Path>) -> ExitCode {
+fn run_bench(
+    packages: &[PathBuf],
+    options: &bench::Options,
+    verbose: bool,
+    json: Option<&Path>,
+) -> ExitCode {
     if packages.is_empty() {
         eprintln!("name at least one package directory");
         return ExitCode::from(2);
@@ -367,10 +617,21 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
     println!();
     println!(
         "{:<10} {:>6} {:>8} {:>6} {:>8} {:>8} {:>8} {:>10} {:>10} {:>7}",
-        "package", "tests", "match", "rate", "differs", "missing", "ry pass", "GNU R s", "ry s", "ry/R"
+        "package",
+        "tests",
+        "match",
+        "rate",
+        "differs",
+        "missing",
+        "ry pass",
+        "GNU R s",
+        "ry s",
+        "ry/R"
     );
     for summary in &summaries {
-        let suite = |seconds: Option<f64>| seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"));
+        let suite = |seconds: Option<f64>| {
+            seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"))
+        };
         let ratio = match (summary.gnu_r_suite_seconds, summary.ry_suite_seconds) {
             (Some(gnu_r), Some(ry)) if gnu_r > 0.0 => format!("{:.2}x", ry / gnu_r),
             _ => "-".to_string(),
@@ -389,7 +650,9 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
             ratio
         );
     }
-    println!("Suite times count only the tests. Process wall time, which adds startup and loading the package:");
+    println!(
+        "Suite times count only the tests. Process wall time, which adds startup and loading the package:"
+    );
     for summary in &summaries {
         println!(
             "  {}: GNU R {:.2} s, ry {:.2} s",
@@ -409,6 +672,12 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
             return ExitCode::FAILURE;
         }
     }
-    let all_match = summaries.iter().all(|summary| summary.matching == summary.tests);
-    if all_match { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    let all_match = summaries
+        .iter()
+        .all(|summary| summary.matching == summary.tests);
+    if all_match {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

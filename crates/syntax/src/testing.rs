@@ -4,13 +4,30 @@
 //! The fuzz helpers live here too, so every crate's harness draws from one
 //! generator and one set of mutation operators.
 
-use rowan::NodeOrToken;
-use std::collections::HashSet;
-use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::{env, fs};
+use {
+    crate::SyntaxNode,
+    rowan::NodeOrToken,
+    std::{
+        collections::HashSet,
+        env, fs,
+        ops::Range,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, Ordering},
+    },
+};
 
-use crate::SyntaxNode;
+static INVARIANTS: AtomicBool = AtomicBool::new(false);
+
+/// Switches on the expensive cross-checks that production skips: an incremental result is
+/// recomputed from scratch and must be equal. Simulators and fuzzers turn it on for the whole
+/// process, so a divergence panics at the step that caused it, with the inputs that reproduce it.
+pub fn enable_invariants() {
+    INVARIANTS.store(true, Ordering::Relaxed);
+}
+
+pub fn invariants_enabled() -> bool {
+    INVARIANTS.load(Ordering::Relaxed)
+}
 
 pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     let files = parse_fixture_files(suite_dir);
@@ -200,6 +217,7 @@ pub fn check_parse_invariants(input: &str) {
     }
 
     check_geometry(&parse.syntax_node(), input);
+    check_green_search(&parse.syntax_node(), input);
 
     // One mistake must not fan out into a storm of errors.
     assert!(
@@ -275,6 +293,66 @@ impl SplitMix64 {
 
     pub fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
         self.next_u64() % denominator < numerator
+    }
+}
+
+/// The choices a structured generator makes. The in-tree harnesses draw them from a seeded
+/// [`SplitMix64`]; a coverage-guided target draws them from its input through [`ByteStream`],
+/// so one generator serves both and libFuzzer's byte mutations become structural mutations.
+pub trait Entropy {
+    fn next_u64(&mut self) -> u64;
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next_u64() % bound.max(1) as u64) as usize
+    }
+
+    fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
+        self.below(denominator as usize) < numerator as usize
+    }
+}
+
+impl Entropy for SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        SplitMix64::next_u64(self)
+    }
+}
+
+/// Fuzzer input read as a stream of choices. A small choice consumes one byte, so a byte
+/// mutation changes one decision. An exhausted stream answers zero forever, which every
+/// generator must treat as "stop growing".
+pub struct ByteStream<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> ByteStream<'a> {
+    pub fn new(bytes: &'a [u8]) -> ByteStream<'a> {
+        ByteStream { bytes }
+    }
+
+    fn take(&mut self, count: usize) -> u64 {
+        let (head, rest) = self.bytes.split_at(count.min(self.bytes.len()));
+        self.bytes = rest;
+        head.iter()
+            .rev()
+            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte))
+    }
+}
+
+impl Entropy for ByteStream<'_> {
+    fn next_u64(&mut self) -> u64 {
+        self.take(8)
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        let bound = bound.max(1) as u64;
+        let value = if bound <= 1 << 8 {
+            self.take(1)
+        } else if bound <= 1 << 16 {
+            self.take(2)
+        } else {
+            self.take(8)
+        };
+        (value % bound) as usize
     }
 }
 
@@ -550,5 +628,94 @@ fn check_geometry(node: &SyntaxNode, input: &str) {
             "children do not cover {:?} for input {input:?}",
             node.kind()
         );
+    }
+}
+
+/// The green-tree searches agree with the red-tree walks they replace, for the whole tree
+/// and for a subtree, and whatever subset of kinds is wanted.
+fn check_green_search(root: &crate::SyntaxNode, input: &str) {
+    let mut text = String::new();
+    crate::for_each_token(root, |_, token| text.push_str(token));
+    assert_eq!(
+        text, input,
+        "green token walk lost text for input {input:?}"
+    );
+    let descendants: Vec<crate::SyntaxNode> = root.descendants().collect();
+    let mut visited = Vec::new();
+    let mut green_text = String::new();
+    let mut open = 0usize;
+    crate::walk_green(root, |event| match event {
+        crate::GreenEvent::Enter {
+            node,
+            parent,
+            range,
+        } => {
+            open += 1;
+            visited.push((node.kind(), parent.map(crate::GreenRef::kind), range));
+        }
+        crate::GreenEvent::Leave(_) => open -= 1,
+        crate::GreenEvent::Token { text, range, .. } => {
+            assert_eq!(usize::from(range.start()), green_text.len());
+            green_text.push_str(text);
+        }
+    });
+    assert_eq!(open, 0, "green walk left nodes open for input {input:?}");
+    assert_eq!(
+        green_text, input,
+        "green walk lost text for input {input:?}"
+    );
+    let expected: Vec<_> = descendants
+        .iter()
+        .map(|node| {
+            let parent = (node != root)
+                .then(|| node.parent().map(|parent| parent.kind()))
+                .flatten();
+            (node.kind(), parent, node.text_range())
+        })
+        .collect();
+    assert_eq!(
+        visited, expected,
+        "green node walk diverged for input {input:?}"
+    );
+    for node in &descendants {
+        let first = descendants
+            .iter()
+            .find(|other| other.kind() == node.kind() && other.text_range() == node.text_range());
+        assert_eq!(
+            crate::node_at(root, node.kind(), node.text_range()).as_ref(),
+            first,
+            "node_at missed a node for input {input:?}"
+        );
+    }
+    let subtrees = root.children().take(3);
+    for node in std::iter::once(root.clone()).chain(subtrees) {
+        for modulus in [1, 3, 7] {
+            let wanted = |kind: crate::SyntaxKind| (kind as u16) % modulus == 0;
+            let expected: Vec<crate::SyntaxNode> = node
+                .descendants()
+                .filter(|node| wanted(node.kind()))
+                .collect();
+            let mut parents = Vec::new();
+            let found = crate::matching_nodes(&node, |green, parent| {
+                let accepted = wanted(green.kind());
+                if accepted {
+                    parents.push(parent.map(crate::GreenRef::kind));
+                }
+                accepted
+            });
+            let expected_parents: Vec<Option<crate::SyntaxKind>> = expected
+                .iter()
+                .map(|found| {
+                    (*found != node)
+                        .then(|| found.parent().map(|parent| parent.kind()))
+                        .flatten()
+                })
+                .collect();
+            assert_eq!(
+                parents, expected_parents,
+                "green search parents diverged for input {input:?}"
+            );
+            assert_eq!(found, expected, "green search diverged for input {input:?}");
+        }
     }
 }

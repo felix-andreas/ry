@@ -115,6 +115,8 @@ pub enum SyntaxKind {
     TUPLE_EXPR,
     /// `(x = 1, y = 2)`, a ry record literal.
     RECORD_EXPR,
+    /// `[a, b]`, a ry Array literal.
+    ARRAY_EXPR,
     /// `:Name` or `:Name(payload)`, a ry tag constructor.
     TAG_EXPR,
     /// `match (value) { arms }`.
@@ -169,6 +171,8 @@ pub enum SyntaxKind {
     TYPE_DEFINITION,
     /// The `@Name` or `@Name<Args>` head of a [`NEW_EXPR`].
     NEW_TYPE,
+    /// `@pure` before a function's keyword, declaring that calling it has no effect.
+    PURE_MARKER,
 
     ERROR,
 }
@@ -318,6 +322,7 @@ impl SyntaxKind {
             NEXT_EXPR => "`next`",
             TUPLE_EXPR => "tuple",
             RECORD_EXPR => "record",
+            ARRAY_EXPR => "Array",
             TAG_EXPR => "tag",
             MATCH_EXPR => "`match` expression",
             NEW_EXPR => "nominal constructor",
@@ -356,6 +361,7 @@ impl SyntaxKind {
             TYPE_OTHER_TAGS => "`..`",
             TYPE_DEFINITION => "type definition",
             NEW_TYPE => "nominal type",
+            PURE_MARKER => "purity marker",
             ERROR => "error",
         }
     }

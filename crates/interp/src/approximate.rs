@@ -9,16 +9,18 @@
 //! The limits on single kinds of edits are checked against the cheapest path to each state, so
 //! a text that only a costlier path could match within those limits is not found.
 
-use crate::{
-    arith::real_at,
-    builtins::{BuiltinDef, Call, internal},
-    conditions::warning,
-    strings::{Syntax, flag, subject_at, translate},
-    unwind::{R, error},
-    values::{self, alloc, get_attr, length, set_attr, set_elt, symbols},
+use {
+    crate::{
+        arith::real_at,
+        builtins::{BuiltinDef, Call, internal},
+        conditions::warning,
+        strings::{Syntax, flag, subject_at, translate},
+        unwind::{R, error},
+        values::{self, alloc, get_attr, length, set_attr, set_elt, symbols},
+    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real},
+    regex_syntax::hir::{Class, Hir, HirKind, Look},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, is_na_real};
-use regex_syntax::hir::{Class, Hir, HirKind, Look};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("agrep", 8, |call| unsafe { agrep(call, false) }),

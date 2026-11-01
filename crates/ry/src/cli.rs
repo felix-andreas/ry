@@ -1,38 +1,51 @@
-use crate::config::{self, ExperimentalFeatures};
-use crate::diagnostics::{apply_suppressions, document_diagnostics};
-use crate::namespace;
-use crate::position::LineIndex;
-use console::style;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use miette::{
-    GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
-    Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
+use {
+    crate::{
+        config::{self, ExperimentalFeatures},
+        diagnostics::{apply_suppressions, document_diagnostics},
+        namespace,
+        position::LineIndex,
+    },
+    console::style,
+    ignore::gitignore::{Gitignore, GitignoreBuilder},
+    miette::{
+        GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
+        Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
+    },
+    rustc_hash::FxHashSet,
+    salsa::Durability,
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax},
+        metadata::{
+            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_description_package, parse_namespace,
+        },
+        stubs::{
+            StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+            shipped_stub_sources, stub_source_problems,
+        },
+        test_document_kind,
+    },
+    std::{
+        cmp::Reverse,
+        collections::{BTreeMap, BTreeSet, HashMap},
+        env, fmt, fs,
+        io::Read,
+        iter, mem,
+        num::NonZero,
+        path::{Path, PathBuf},
+        sync::{
+            LazyLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    },
+    syntax::{
+        TextRange,
+        literate::{is_literate_extension, r_source_of_literate},
+    },
 };
-use salsa::Database;
-use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
-use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_exports,
-    parse_namespace_imports,
-};
-use semantics::stubs::{
-    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
-    shipped_stub_sources, stub_source_problems,
-};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-};
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Read;
-use std::num::NonZero;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use std::{env, fmt, fs, iter, mem, thread};
-use syntax::TextRange;
-use syntax::literate::{is_literate_extension, r_source_of_literate};
 
 /// A run summary: not a finding, so a plain line rather than a report.
 pub fn info(message: &str) {
@@ -240,9 +253,16 @@ pub(crate) fn analyze_project(
             .map(|stub| (stub.stem.clone(), stub.text.clone())),
     );
 
+    // A one-shot check changes one input after analysis starts: the attached namespaces,
+    // known only once every file is parsed. Every other input is high durability, so a memo
+    // that never read the attached set skips verification in the revision that sets it.
     let mut db = RootDatabase::one_shot();
-    StubSources::new(&db, stub_sources, shipped_export_manifests());
-    AnalysisSettings::new(&db, config.check.inline_annotations);
+    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
+        .durability(Durability::HIGH)
+        .new(&db);
+    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
+        .durability(Durability::HIGH)
+        .new(&db);
 
     // A broken override stub silently changes what every file checks against, so
     // its dropped declarations are reported as findings.
@@ -268,9 +288,9 @@ pub(crate) fn analyze_project(
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
-    let namespace_imports = namespace_source
+    let namespace_file = namespace_source
         .as_deref()
-        .map(parse_namespace_imports)
+        .map(parse_namespace)
         .unwrap_or_default();
     let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let dependencies = description_source
@@ -281,15 +301,18 @@ pub(crate) fn analyze_project(
         .as_deref()
         .map(parse_description_collate)
         .unwrap_or_default();
-    let metadata = PackageMetadata::new(
-        &db,
-        normalized_imports(&namespace_imports),
+    let metadata = PackageMetadata::builder(
+        normalized_imports(&namespace_file.imports),
         dependencies,
         BTreeSet::new(),
         description_source
             .as_deref()
             .and_then(parse_description_package),
-    );
+        namespace_file.native_symbols,
+    )
+    .durability(Durability::HIGH)
+    .attached_durability(Durability::LOW)
+    .new(&db);
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
@@ -317,19 +340,21 @@ pub(crate) fn analyze_project(
     let mut project = Vec::with_capacity(checked.len());
     for index in ordered {
         let (path, source) = &mut checked[index];
-        let kind = if shares_a_namespace(path, root) {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
-        let file = SourceFile::new(&db, mem::take(source), kind);
+        let file = SourceFile::builder(mem::take(source), kind)
+            .durability(Durability::HIGH)
+            .new(&db);
         files[index] = Some(file);
         project.push(file);
     }
     let files: Vec<SourceFile> = files.into_iter().flatten().collect();
-    ProjectFiles::new(&db, project.clone());
-    DataFiles::new(&db, scan_data_files(&root));
+    let _: ProjectFiles = ProjectFiles::builder(project.clone())
+        .durability(Durability::HIGH)
+        .new(&db);
+    let _: DataFiles = DataFiles::builder(scan_data_files(&root))
+        .durability(Durability::HIGH)
+        .new(&db);
     let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
     // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
     // Workers need the analysis stack: interface resolution recurses per dependency edge.
@@ -341,16 +366,21 @@ pub(crate) fn analyze_project(
     let mut by_size: Vec<usize> = (0..files.len()).collect();
     by_size.sort_by_cached_key(|&index| Reverse(files[index].text(&db).len()));
 
-    // Trees are evicted batch by batch, so everything later phases read from them is
-    // derived while they are resident.
-    let want_tokens = namespace_source.is_some();
-    let mut used_tokens = BTreeSet::new();
-    for (_, tokens) in in_batches(&mut db, workers, &by_size, |db, index| {
+    // Everything later passes read from a tree is derived here, across all cores, so a check
+    // that reaches another file never walks that file's tree on its own thread.
+    let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
+    let want_tokens = namespace_source.is_some() && !imported.is_empty();
+    let mut used_tokens = FxHashSet::default();
+    for (_, tokens) in in_parallel(&db, workers, &by_size, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
-        let mut tokens = BTreeSet::new();
+        let mut tokens = FxHashSet::default();
         if want_tokens {
-            namespace::collect_used_tokens(&semantics::parse(db, file).syntax_node(), &mut tokens);
+            namespace::collect_used_tokens(
+                &semantics::parse(db, file).syntax_node(),
+                &imported,
+                &mut tokens,
+            );
         }
         tokens
     }) {
@@ -362,15 +392,16 @@ pub(crate) fn analyze_project(
         metadata.set_attached(&mut db).to(attached);
     }
 
-    // Per-item naming runs across cores first: inside the project-wide interface walk it
-    // would serialize on one thread.
-    in_batches(&mut db, workers, &by_size, |db, index| {
-        for &item in semantics::item_tree(db, files[index]) {
-            let _ = semantics::item_naming(db, item);
+    // Every item is named across cores first: a file's check names the items of other files its
+    // interface reaches, and two threads reaching the same item would block on one claim.
+    in_parallel(&db, workers, &by_size, |db, index| {
+        let file = files[index];
+        for &item in semantics::item_tree(db, file) {
+            semantics::item_naming(db, item);
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    for (index, diagnostics) in in_batches(&mut db, workers, &by_size, |db, index| {
+    for (index, diagnostics) in in_parallel(&db, workers, &by_size, |db, index| {
         let rendered = document_diagnostics(db, files[index], &config);
         apply_suppressions(rendered, files[index].text(db))
     }) {
@@ -382,17 +413,26 @@ pub(crate) fn analyze_project(
         let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
-            namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
+            namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
+        // R resolves an export with `exists()` from the namespace, which inherits through base
+        // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
         let defines = |name: &str| {
             ProjectFiles::try_get(&db)
-                .is_some_and(|files| semantics::package_definitions(&db, files).contains_key(name))
+                .is_some_and(|files| semantics::package_binds(&db, files, name))
+                || semantics::check::DEFAULT_SEARCH_PATH
+                    .iter()
+                    .any(|package| namespace_exports(&db, package, name))
         };
         problems.extend(namespace::namespace_export_problems(
-            &parse_namespace_exports(namespace_source),
+            &namespace_file.exports,
+            &namespace_file.imports,
             &defines,
+            &knows,
+            &exports,
+            &used_tokens,
         ));
         problems.extend(namespace::unused_import_diagnostics(
-            &namespace_imports,
+            &namespace_file.imports,
             &used_tokens,
             config.lint.unused_import,
         ));
@@ -419,49 +459,39 @@ pub(crate) fn analyze_project(
     })
 }
 
-/// Runs `work` for every index in `order` across `workers` threads, a batch at a time.
-/// Between batches the least recently used trees are evicted, so a cold pass holds about a
-/// batch of them instead of the whole project's.
-fn in_batches<T: Send>(
-    db: &mut RootDatabase,
+/// Runs `work` for every index in `order` across `workers` threads.
+fn in_parallel<T: Send>(
+    db: &RootDatabase,
     workers: usize,
     order: &[usize],
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for batch in order.chunks(workers * FILES_PER_WORKER_BATCH) {
-        // Shared rather than dealt out: check times vary by orders of magnitude per file.
-        let next = AtomicUsize::new(0);
-        thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers.min(batch.len()))
-                .map(|_| {
-                    let db = db.clone();
-                    let (next, work) = (&next, &work);
-                    thread::Builder::new()
-                        .stack_size(crate::ANALYSIS_STACK_SIZE)
-                        .spawn_scoped(scope, move || {
-                            let mut done = Vec::new();
-                            while let Some(&index) = batch.get(next.fetch_add(1, Ordering::Relaxed))
-                            {
-                                done.push((index, work(&db, index)));
-                            }
-                            done
-                        })
-                        .expect("check worker thread should spawn")
-                })
-                .collect();
-            for handle in handles {
-                results.extend(handle.join().expect("check worker should not panic"));
-            }
-        });
-        db.trigger_lru_eviction();
-    }
+    // Shared rather than dealt out: check times vary by orders of magnitude per file.
+    let next = AtomicUsize::new(0);
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers.min(order.len()))
+            .map(|_| {
+                let db = db.clone();
+                let (next, work) = (&next, &work);
+                thread::Builder::new()
+                    .stack_size(crate::ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, move || {
+                        let mut done = Vec::new();
+                        while let Some(&index) = order.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            done.push((index, work(&db, index)));
+                        }
+                        done
+                    })
+                    .expect("check worker thread should spawn")
+            })
+            .collect();
+        for handle in handles {
+            results.extend(handle.join().expect("check worker should not panic"));
+        }
+    });
     results
 }
-
-/// Large enough that a batch's thread start-up is noise, small enough that a batch's
-/// trees stay a small part of the project's.
-const FILES_PER_WORKER_BATCH: usize = 16;
 
 /// An empty tree exits clean: a monorepo stage with no R in it yet must not fail a pipeline.
 fn report_check_summary(n_files: usize, n_diagnostics: usize) {
@@ -536,14 +566,26 @@ pub(crate) fn exclude_matcher(
 /// Vendored dependency infrastructure rather than project code; scopes only the walk.
 const VENDORED_DIRECTORIES: [&str; 5] = ["renv", "packrat", "revdep", ".Rproj.user", ".Rcheck"];
 
-/// `R/` and `tests/testthat/` files each share one environment (testthat sources
-/// helpers first). Every surface assigning a [`DocumentKind`] must call this, or it
-/// analyses a different program. Not the ordering key: that is `R/` membership alone.
-pub(crate) fn shares_a_namespace(path: &Path, root: &Path) -> bool {
-    path.starts_with(root.join("R"))
-        || path
-            .parent()
-            .is_some_and(|parent| parent == root.join("tests").join("testthat"))
+/// `R/` files form the package namespace. Of the files directly in `tests/testthat/`, the
+/// helper and setup files fill the environment testthat runs every test file in, and the rest
+/// are test files, each in its own child of it. Every surface assigning a [`DocumentKind`]
+/// must call this, or it analyses a different program. Not the ordering key: that is `R/`
+/// membership alone.
+pub(crate) fn document_kind(path: &Path, root: &Path) -> DocumentKind {
+    if path.starts_with(root.join("R")) {
+        return DocumentKind::Package;
+    }
+    if path
+        .parent()
+        .is_none_or(|parent| parent != root.join("tests").join("testthat"))
+    {
+        return DocumentKind::Script;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    test_document_kind(file_name)
 }
 
 /// How much of a data file the checker sniffs: enough rows to type the columns, and little
@@ -738,8 +780,11 @@ pub(crate) fn render_findings<'a>(
     diagnostics: &[Diagnostic],
     resolve_note: &dyn Fn(&RelatedLocation) -> Option<RelatedNote<'a>>,
 ) -> usize {
-    let line_index = LineIndex::new(source);
-    let snippet_lines = LineStarts::new(source);
+    if diagnostics.is_empty() {
+        return 0;
+    }
+    let mut line_index = None;
+    let mut snippet_lines = None;
     let mut rendered = 0;
     for diagnostic in diagnostics {
         if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
@@ -750,10 +795,12 @@ pub(crate) fn render_findings<'a>(
             diagnostic.related.iter().filter_map(resolve_note).collect();
         match output {
             OutputFormat::Human => {
-                render_human_diagnostic(path, source, &snippet_lines, diagnostic, &related)
+                let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
+                render_human_diagnostic(path, source, lines, diagnostic, &related)
             }
             OutputFormat::Json => {
-                render_json_diagnostic(path, source, &line_index, diagnostic, &related)
+                let index = line_index.get_or_insert_with(|| LineIndex::new(source));
+                render_json_diagnostic(path, source, index, diagnostic, &related)
             }
         }
     }
@@ -1014,7 +1061,8 @@ static REPORTER: LazyLock<Reporter> = LazyLock::new(|| {
         .with_show_related_as_nested(true);
     let handler = match console::user_attended_stderr() {
         true => handler.with_width(console::Term::stderr().size().1 as usize),
-        false => handler,
+        // A pipe has no width, and a wrapped line breaks `grep` and every tool reading the output.
+        false => handler.with_wrap_lines(false),
     };
     Reporter {
         handler,
@@ -1380,8 +1428,10 @@ pub fn parse_experimental_flags(flags: &[impl AsRef<str>]) -> ExperimentalFeatur
 }
 
 fn print_diff(old: &str, new: &str) {
-    use console::Style;
-    use similar::{ChangeTag, TextDiff};
+    use {
+        console::Style,
+        similar::{ChangeTag, TextDiff},
+    };
 
     struct Line(Option<usize>);
     impl fmt::Display for Line {

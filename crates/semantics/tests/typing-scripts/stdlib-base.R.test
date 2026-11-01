@@ -217,7 +217,7 @@ sum(c("a", "b"))
 integer
 double
 complex
-Unknown
+double
 difftime
 Unknown
 100..116 error[type-mismatch] no overload of `sum` matches these arguments. I tried all 5 declared signatures; the first candidate fails with: expected `integer[] | logical[]`, found `character[]`
@@ -591,11 +591,11 @@ integer[]
 character[]
 logical[]
 
-#---- matrix_and_factor_degrade_to_any_with_checked_formals
+#---- matrix_and_factor_return_their_nominals
 matrix(c(1L, 2L), nrow = 1L)
 factor(c("a"), levels = c("a", "b"))
 #++++
-Any
+matrix
 factor
 
 #---- rowSums_is_double_vector
@@ -727,7 +727,7 @@ cbind(a = 1L, b = 2L)
 Sys.setenv(MY_VAR = "v")
 table(group = c("a", "a"))
 #++++
-Unknown
+data.frame
 integer
 Unknown
 Unknown
@@ -859,7 +859,7 @@ greet <- function(name, punct) {
 }
 greet("ada")
 #++++
-greet: <T> fn(name: T, [punct]: T) -> T
+greet: <T> fn([name]: T, [punct]: T) -> T
 character
 
 #---- unguarded_formal_stays_required
@@ -870,7 +870,7 @@ join2("a")
 #++++
 join2: <T, U> fn(left: T, right: U) -> character
 character
-57..62 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
+57..62 error[type-mismatch] this call leaves out `right`, which the function requires
 
 #---- negated_missing_test_also_marks_optional
 pick <- function(x) {

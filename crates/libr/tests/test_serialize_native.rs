@@ -4,12 +4,14 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::c_int,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::c_int,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 fn serialtest(r: &R) {
@@ -36,6 +38,31 @@ fn unhex(text: &str) -> Vec<u8> {
         .step_by(2)
         .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))
         .collect()
+}
+
+/// The writer version a stream's header records, as `R_Version` encodes it: the version of the
+/// base R the session runs, as in GNU R.
+fn session_writer_version() -> i32 {
+    interp::system::r_version().code()
+}
+
+/// `stream` with the writer version in its header replaced by the session's, so a stream
+/// recorded by one GNU R release is what another release writes.
+fn with_session_writer_version(stream: &[u8]) -> Vec<u8> {
+    let writer = session_writer_version();
+    let mut output = stream.to_vec();
+    match stream.first() {
+        Some(b'X') if stream.len() >= 10 => output[6..10].copy_from_slice(&writer.to_be_bytes()),
+        Some(b'B') if stream.len() >= 10 => output[6..10].copy_from_slice(&writer.to_le_bytes()),
+        Some(b'A') => {
+            let lines: Vec<&[u8]> = stream.splitn(4, |byte| *byte == b'\n').collect();
+            if let [format, version, _, rest] = lines[..] {
+                output = [format, version, writer.to_string().as_bytes(), rest].join(&b'\n');
+            }
+        }
+        _ => {}
+    }
+    output
 }
 
 fn format_code(name: &str) -> c_int {
@@ -67,11 +94,13 @@ fn recorded_streams_round_trip_through_native_streams() {
         }
         let stream = unhex(fields[3]);
         // Base R's ALTREP objects survive a version-3 round trip as themselves.
-        let expected = if fields[4].is_empty() || (version == "3" && name.starts_with("altrep")) {
+        let expected = with_session_writer_version(&if fields[4].is_empty()
+            || (version == "3" && name.starts_with("altrep"))
+        {
             stream.clone()
         } else {
             unhex(fields[4])
-        };
+        });
         r.stress(line_number % 10 == 0);
         let mark = r.protected.get();
         let input = raw(&r, &stream);
@@ -120,7 +149,8 @@ fn input_streams_report_format_and_encoding() {
     let written = r
         .call("serialtest_serialize", &[value, ascii, version])
         .expect("serialize");
-    assert!(bytes(&r, written).starts_with(b"A\n2\n263682\n131840\n"));
+    let header = format!("A\n2\n{}\n131840\n", session_writer_version());
+    assert!(bytes(&r, written).starts_with(header.as_bytes()));
     let xdr = r.integer(3);
     let error = r
         .call("serialtest_unserialize", &[written, xdr])

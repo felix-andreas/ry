@@ -1,22 +1,27 @@
 //! The operating system as R sees it: environment variables, files and directories, time and
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
-use crate::http::FetchError;
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal, special},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
-        scalar_string, string_vector, symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal, special},
+        http::FetchError,
+        interp,
+        unwind::{R, error},
+        values::{
+            self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
+            scalar_string, string_vector, symbols,
+        },
+    },
+    heap::{
+        GcStress,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+        strings::Encoding,
+    },
+    std::{
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
     },
 };
-use heap::{
-    GcStress,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
-    strings::Encoding,
-};
-use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
@@ -27,7 +32,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         values::set_attr(result, symbols().names, names)?;
         Ok(result)
     }),
-    internal("icuSetCollate", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("icuSetCollate", -1, |_| Ok(nil())).invisible(),
     internal("icuGetCollate", 1, |_| unsafe {
         scalar_string("ICU not in use")
     }),
@@ -38,19 +43,19 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_bool(descriptor >= 0 && libc::isatty(descriptor) == 1)
     }),
     internal("readRenviron", 1, do_read_renviron).invisible(),
-    internal("debug", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("undebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("debug", 3, |_| Ok(nil())).invisible(),
+    internal("undebug", 1, |_| Ok(nil())).invisible(),
+    internal("debugonce", 3, |_| Ok(nil())).invisible(),
     internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
     internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
-    internal("browserText", 1, |call| unsafe {
+    internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
-    internal("browserCondition", 1, |call| unsafe {
+    internal("browserCondition", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
-    internal("browserSetDebug", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("browserSetDebug", 1, |_| Ok(nil())).invisible(),
     internal("memory.profile", 0, |_| unsafe {
         values::integer_vector(&[])
     }),
@@ -62,7 +67,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.link", 2, |call| unsafe {
         link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok())
     }),
-    internal("setFileTime", 2, |_| unsafe { scalar_bool(true) }),
+    internal("setFileTime", 2, do_sys_set_file_time).invisible(),
     internal("file.show", 5, |call| unsafe {
         for index in 0..length(call.arg(0)) {
             if let Some(path) = values::string_at(call.arg(0), index) {
@@ -75,7 +80,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         Ok(nil())
     })
     .invisible(),
-    internal("file.choose", 1, |call| unsafe {
+    internal("file.choose", 1, |call| {
         Err(call.error("file.choose() needs an interactive session"))
     }),
     internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
@@ -108,7 +113,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         map_paths(call, |path| Path::new(path).is_dir())
     }),
     internal("file.info", 2, do_file_info),
-    internal("list.files", 8, do_list_files),
+    internal("list.files", -1, do_list_files),
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
     internal("path.expand", 1, |call| unsafe {
@@ -144,24 +149,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.append", 2, do_file_append),
     internal("file.copy", 6, do_file_copy),
     internal("dir.create", 4, do_dir_create).invisible(),
-    internal("file.access", 2, |call| unsafe {
-        {
-            let paths = call.arg(0);
-            let result = alloc(SexpType::Integer, length(paths))?;
-            for index in 0..length(paths) {
-                let path = values::string_at(paths, index)
-                    .map(|text| text.into_owned())
-                    .unwrap_or_default();
-                values::ints_mut(result)[index] =
-                    if Path::new(&crate::connections::expand_path(&path)).exists() {
-                        0
-                    } else {
-                        -1
-                    };
-            }
-            Ok(result)
-        }
-    }),
+    internal("file.access", 2, do_file_access),
     internal("getwd", 0, |_| unsafe {
         scalar_string(
             &std::env::current_dir()
@@ -178,25 +166,27 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 .unwrap_or_default()
         })
     }),
-    internal("Sys.chmod", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("Sys.umask", 1, |_| unsafe { scalar_integer(18) }),
+    internal("Sys.chmod", 3, do_sys_chmod).invisible(),
+    internal("Sys.umask", 1, do_sys_umask),
     internal("Sys.getpid", 0, |_| unsafe {
         scalar_integer(std::process::id() as i32)
     }),
     internal("Sys.info", 0, do_sys_info),
     internal("Sys.setlocale", 2, do_sys_setlocale),
-    internal("Sys.getlocale", 1, |_| unsafe {
-        scalar_string(
-            "LC_CTYPE=C.UTF-8;LC_NUMERIC=C;LC_TIME=C.UTF-8;LC_COLLATE=C.UTF-8;LC_MONETARY=C.UTF-8;LC_MESSAGES=C.UTF-8;LC_PAPER=C.UTF-8;LC_NAME=C;LC_ADDRESS=C;LC_TELEPHONE=C;LC_MEASUREMENT=C.UTF-8;LC_IDENTIFICATION=C",
-        )
-    }),
+    internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
     internal("Sys.localeconv", 0, |_| unsafe { values::named_list(&[]) }),
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
+            if !(seconds >= 0.0) {
+                return Err(error("invalid 'time' value"));
+            }
             if seconds.is_finite() && seconds > 0.0 {
-                std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+                std::thread::sleep(
+                    std::time::Duration::try_from_secs_f64(seconds)
+                        .unwrap_or(std::time::Duration::MAX),
+                );
             }
             Ok(nil())
         }
@@ -213,20 +203,20 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", 3, do_system),
+    internal("system", -1, do_system),
     internal("Cstack_info", 0, |_| unsafe { cstack_info() }),
-    internal("setTimeLimit", 3, |_| unsafe { Ok(nil()) }).invisible(),
-    internal("setSessionTimeLimit", 2, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("setTimeLimit", 3, |_| Ok(nil())).invisible(),
+    internal("setSessionTimeLimit", 2, |_| Ok(nil())).invisible(),
     internal("reg.finalizer", 3, do_reg_finalizer),
     internal("traceback", 1, |call| unsafe {
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
     }),
-    internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
+    internal(".traceback", 1, |_| Ok(nil())),
     internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
     internal("Encoding", 1, do_encoding),
     internal("setEncoding", 2, do_set_encoding),
-    builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
-    builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
+    builtin("enc2native", 1, |call| Ok(call.arg(0))),
+    builtin("enc2utf8", 1, |call| Ok(call.arg(0))),
     internal("iconv", 6, do_iconv),
     internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
@@ -234,7 +224,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
-    internal("format.POSIXlt", 3, do_format_posixlt),
+    internal("format.POSIXlt", -1, do_format_posixlt),
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
@@ -259,25 +249,25 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     // ry has no interactive debugger, so `browser()` continues as it does in a
     // non-interactive GNU R session.
-    special("browser", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    special("browser", -1, |_| Ok(nil())).invisible(),
     internal("inspect", -1, do_inspect).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
-    builtin("untracemem", 1, |_| unsafe { Ok(nil()) }).invisible(),
-    builtin("retracemem", -1, |_| unsafe { Ok(nil()) }).invisible(),
-    builtin(".primTrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    builtin(".primUntrace", 1, |call| unsafe { Ok(call.arg(0)) }).invisible(),
-    internal("format.Date", 2, |call| unsafe {
+    builtin("untracemem", 1, |_| Ok(nil())).invisible(),
+    builtin("retracemem", -1, |_| Ok(nil())).invisible(),
+    builtin(".primTrace", 1, |call| Ok(call.arg(0))).invisible(),
+    builtin(".primUntrace", 1, |call| Ok(call.arg(0))).invisible(),
+    internal("format.Date", 2, |call| {
         Err(call.error("format.Date is not supported"))
     }),
     internal("tzone_name", 0, |_| unsafe {
         scalar_string(&session_zone_name())
     }),
-    internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
-    internal("gettext", 3, |call| unsafe { Ok(call.arg(1)) }),
+    internal("bindtextdomain", 2, |_| Ok(nil())),
+    internal("gettext", 3, |call| Ok(call.arg(1))),
     internal("ngettext", 4, do_ngettext),
-    internal("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("enc2native", 1, |call| Ok(call.arg(0))),
     internal("crc64", 1, |call| unsafe {
         scalar_string(&crc64_hex(
             values::first_string(call.arg(0))
@@ -286,7 +276,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         ))
     }),
     internal("mkjunction", 2, |_| unsafe { scalar_bool(false) }),
-    internal("pkgload", -1, |_| unsafe { Ok(nil()) }),
+    internal("pkgload", -1, |_| Ok(nil())),
 ];
 
 /// GNU R's identifier for its internals interface, which `loadNamespace` compares against the one a
@@ -294,38 +284,71 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// GNU R 4.3 load unchanged.
 const INTERNALS_ID: &str = "2fdf6c18-697a-4ba7-b8ef-11c0d92f1327";
 
-/// The R installation whose base and recommended packages the session loads.
+/// The R installation whose base and recommended packages the session loads. When none was
+/// found this is GNU R's usual home, so `R.home()` still answers; [`missing_r_home`] says why.
 pub fn r_home() -> String {
-    static mut HOME: Option<String> = None;
-    // SAFETY: single-threaded access, as for the rest of the interpreter.
-    #[allow(static_mut_refs)]
-    unsafe {
-        HOME.get_or_insert_with(find_r_home).clone()
-    }
+    located_r_home()
+        .clone()
+        .unwrap_or_else(|_| FALLBACK_R_HOME.to_owned())
 }
 
-fn find_r_home() -> String {
-    if let Ok(home) = std::env::var("R_HOME")
-        && Path::new(&home).join("library/base").exists()
-    {
-        return home;
-    }
-    for candidate in [
-        "/usr/lib/R",
-        "/usr/local/lib/R",
-        "/opt/R/lib/R",
-        "/usr/lib64/R",
-    ] {
-        if Path::new(candidate).join("library/base").exists() {
-            return candidate.to_owned();
+/// The message a host prints, before starting a session, when no GNU R installation was found:
+/// what ry looked for, where, and how to fix it.
+pub fn missing_r_home() -> Option<String> {
+    located_r_home().as_ref().err().cloned()
+}
+
+/// GNU R's usual home on the platform, which `R.home()` reports when no installation was found.
+#[cfg(target_os = "macos")]
+const FALLBACK_R_HOME: &str = "/Library/Frameworks/R.framework/Resources";
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_R_HOME: &str = "/usr/lib/R";
+
+fn located_r_home() -> &'static Result<String, String> {
+    static HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(find_r_home)
+}
+
+/// An R home is usable when it holds base R's R code, which the session sources first. A set
+/// `R_HOME` is authoritative, as it is for GNU R, so an unusable one is not searched past.
+fn find_r_home() -> Result<String, String> {
+    let usable = |home: &str| Path::new(home).join("library/base/R/base").exists();
+    let fix = "install GNU R, or set R_HOME to the directory `R RHOME` prints; \
+               see https://ry-lang.org/installation/";
+    // An exported but empty R_HOME, as some env files leave it, names no directory.
+    if let Some(home) = std::env::var("R_HOME").ok().filter(|home| !home.is_empty()) {
+        if usable(&home) {
+            return Ok(home);
         }
+        return Err(format!(
+            "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {home}, \
+             which holds none (no library/base/R/base)\n  fix: {fix}\n"
+        ));
     }
-    if let Ok(output) = std::process::Command::new("R").arg("RHOME").output()
-        && output.status.success()
-    {
-        return String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let mut searched = vec!["R_HOME (not set)".to_owned()];
+    for candidate in crate::gnu_r_home::candidate_r_homes() {
+        let candidate = candidate.to_string_lossy().into_owned();
+        if usable(&candidate) {
+            return Ok(candidate);
+        }
+        searched.push(candidate);
     }
-    "/usr/lib/R".to_owned()
+    match std::process::Command::new("R").arg("RHOME").output() {
+        Ok(output) if output.status.success() => {
+            let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if usable(&home) {
+                return Ok(home);
+            }
+            searched.push(format!("`R RHOME` ({home}, which holds no base R)"));
+        }
+        Ok(_) => searched.push("`R RHOME` (it failed)".to_owned()),
+        Err(_) => searched.push("`R RHOME` (no `R` on PATH)".to_owned()),
+    }
+    Err(format!(
+        "ry: ry's runtime loads base R from a GNU R installation, and none was found\n  \
+         searched: {}\n  fix: {fix}\n",
+        searched.join(", ")
+    ))
 }
 
 fn temp_dir() -> String {
@@ -793,20 +816,23 @@ impl Zone {
                 };
                 return instant - correction + fraction - shift;
             }
+            // In a spring-forward gap glibc's `mktime` reads the clock with the offset before
+            // the gap unless told the time is daylight time, so an unknown DST flag lands
+            // after the gap: New York's 02:30 becomes 03:30 EDT.
             AmbiguousOffset::Gap { before, after } => {
-                if isdst == 0 {
-                    before
-                } else {
-                    after
-                }
-            }
-            AmbiguousOffset::Fold { before, after } => {
-                if isdst == 0 {
+                if isdst == 1 {
                     after
                 } else {
                     before
                 }
             }
+            // glibc's `mktime` resolves a repeated time with the offset in force at the wall
+            // clock read as UTC, so Berlin's 02:30 reads as CET and New York's 01:30 as EDT.
+            AmbiguousOffset::Fold { before, after } => match isdst {
+                0 => after,
+                1 => before,
+                _ => self.rules.to_offset(timestamp(local)),
+            },
         };
         local.floor() - offset.seconds() as f64 + fraction - shift
     }
@@ -850,6 +876,8 @@ fn resolve_zone(tz: &str) -> Zone {
     } else {
         tz.to_owned()
     };
+    // glibc reads `TZ=":Europe/Berlin"` as the zone file name after the colon.
+    let name = name.strip_prefix(':').map_or(name.clone(), str::to_owned);
     if name.is_empty() {
         return Zone {
             rules: jiff::tz::TimeZone::system(),
@@ -1022,10 +1050,22 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             characters.next();
             width = Some(width.unwrap_or(0) * 10 + digit as usize);
         }
-        let Some(spec) = characters.next() else {
+        let Some(mut spec) = characters.next() else {
             output.push('%');
             break;
         };
+        // The POSIX `E` and `O` modifiers ask for a locale's alternative forms, which the C
+        // locale does not have, so they print the plain field; only `%OS` means something else.
+        if spec == 'E' || (spec == 'O' && characters.peek() != Some(&'S')) {
+            match characters.next() {
+                Some(base) => spec = base,
+                None => {
+                    output.push('%');
+                    output.push(spec);
+                    break;
+                }
+            }
+        }
         let start = output.len();
         match spec {
             'Y' => output.push_str(&time.year.to_string()),
@@ -1237,6 +1277,12 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         })
         .collect::<R<_>>()?;
     let zone = resolve_zone(tz);
+    let name = if tz.is_empty() {
+        session_zone_name()
+    } else {
+        tz.to_owned()
+    };
+    let utc = name == "UTC" || name == "GMT";
     for (index, &value) in seconds.iter().enumerate() {
         if !value.is_finite() {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
@@ -1245,8 +1291,14 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
                 values::ints_mut(fields[field])[index] = NA_INTEGER;
             }
             values::ints_mut(fields[8])[index] = -1;
-            values::set_elt(fields[9], index, values::mkchar("")?);
-            values::ints_mut(fields[10])[index] = NA_INTEGER;
+            // UTC and GMT name themselves and have a known offset even for a missing time.
+            let (zone_name, offset) = if utc {
+                (name.as_str(), 0)
+            } else {
+                ("", NA_INTEGER)
+            };
+            values::set_elt(fields[9], index, values::mkchar(zone_name)?);
+            values::ints_mut(fields[10])[index] = offset;
             continue;
         }
         let (offset, dst, abbreviation) = zone.offset_at(value);
@@ -1271,12 +1323,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     // UTC and GMT keep their bare name; every other zone, the session's included, adds its
     // standard and daylight-saving abbreviations.
     let tzone = values::install("tzone")?;
-    let name = if tz.is_empty() {
-        session_zone_name()
-    } else {
-        tz.to_owned()
-    };
-    let names = if name == "UTC" || name == "GMT" {
+    let names = if utc {
         scalar_string(&name)?
     } else {
         let (standard, daylight) = zone.abbreviations();
@@ -1435,7 +1482,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         // reads them. One without stays without them: GNU R normalizes its wall clock as plain
         // calendar arithmetic and keeps its `isdst` and `tzone`.
         let tz = posixlt_zone(list)?;
-        let result = if length(list) >= 11 {
+        if length(list) >= 11 {
             let seconds = posixlt_instants(list, &tz)?;
             posixlt_from_seconds(&seconds, &tz)?
         } else {
@@ -1475,8 +1522,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
             }
             values::set_attr(result, balanced_symbol, scalar_bool(true)?)?;
             result
-        };
-        result
+        }
     };
     if !already && length(list) > 5 && length(result) > 5 {
         // The year's names recycle with the fields, as GNU R balances them.
@@ -1557,10 +1603,22 @@ unsafe fn cstack_info() -> R<Sexp> {
     Ok(result)
 }
 
+/// `format.POSIXlt(x, format, usetz)`, plus R 4.4's `digits`. A bare `%OS` prints that many
+/// decimals; before R 4.4 the C code read them from `options("digits.secs")` itself.
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let formats = call.arg(1);
     let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
+    let digits = if call.len() > 3 {
+        call.arg(3)
+    } else {
+        crate::envir::get_option("digits.secs")
+    };
+    let second_digits = if digits == nil() {
+        0
+    } else {
+        values::as_integer_scalar(digits).clamp(0, 6)
+    };
     let seconds = posixlt_seconds(list)?;
     // A longer `format` recycles the times, as in GNU R.
     let count = if seconds.is_empty() {
@@ -1595,9 +1653,21 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             values::set_elt(result, index, values::mkchar(text)?);
             continue;
         }
-        let format = values::string_at(formats, index % length(formats).max(1))
+        let mut format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+        if second_digits > 0 {
+            let pieces: Vec<&str> = format.split("%OS").collect();
+            let mut widened = pieces[0].to_owned();
+            for piece in &pieces[1..] {
+                widened.push_str("%OS");
+                if !piece.starts_with(|character: char| character.is_ascii_digit()) {
+                    widened.push_str(&second_digits.to_string());
+                }
+                widened.push_str(piece);
+            }
+            format = widened;
+        }
         // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
         let dst = if length(isdst) > 0 {
             crate::subset::numeric_element(isdst, index % length(isdst))
@@ -1659,105 +1729,69 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The parsed time as whole seconds since the epoch and the fraction of a second apart, so
-/// that the fraction keeps every digit the text gave it.
-fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f64, f64)> {
-    let mut year = 1970i64;
-    let mut month = 1i64;
-    let mut day = 1i64;
-    let mut hour = 0i64;
-    let mut minute = 0i64;
-    let mut second = 0f64;
-    let mut yearday = None;
-    let mut input = text.trim_start();
-    let mut format_characters = format.chars();
-    let number = |input: &mut &str, max_digits: usize| -> Option<i64> {
-        let trimmed = input.trim_start();
-        let (sign, rest) = match trimmed.strip_prefix('-') {
-            Some(rest) => (-1, rest),
-            None => (1, trimmed),
-        };
-        let digits: String = rest
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .take(max_digits)
-            .collect();
-        if digits.is_empty() {
-            return None;
-        }
-        *input = &rest[digits.len()..];
-        digits.parse::<i64>().ok().map(|value| sign * value)
-    };
-    while let Some(character) = format_characters.next() {
-        if character != '%' {
-            if character.is_whitespace() {
-                input = input.trim_start();
-                continue;
-            }
-            input = input.strip_prefix(character)?;
-            continue;
-        }
-        match format_characters.next()? {
-            'Y' => year = number(&mut input, 4)?,
-            'y' => {
-                let value = number(&mut input, 2)?;
-                year = if value < 69 {
-                    2000 + value
-                } else {
-                    1900 + value
-                };
-            }
-            'm' => month = number(&mut input, 2)?,
-            'd' | 'e' => day = number(&mut input, 2)?,
-            'H' => hour = number(&mut input, 2)?,
-            'M' => minute = number(&mut input, 2)?,
-            'S' => second = number(&mut input, 2)? as f64,
-            'O' => {
-                if format_characters.next()? == 'S' {
-                    let trimmed = input.trim_start();
-                    let length = trimmed
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit() || *c == '.')
-                        .count();
-                    second = trimmed[..length].parse().ok()?;
-                    input = &trimmed[length..];
-                }
-            }
-            'j' => yearday = Some(number(&mut input, 3)?),
-            'B' | 'b' | 'h' => {
-                let lower = input.to_lowercase();
-                let found = MONTHS
-                    .iter()
-                    .position(|name| lower.starts_with(&name.to_lowercase()))
-                    .map(|position| (position, MONTHS[position].len()))
-                    .or_else(|| {
-                        MONTHS
-                            .iter()
-                            .position(|name| lower.starts_with(&name[..3].to_lowercase()))
-                            .map(|position| (position, 3))
-                    })?;
-                month = found.0 as i64 + 1;
-                input = &input[found.1..];
-            }
-            'F' => {
-                year = number(&mut input, 4)?;
-                input = input.strip_prefix('-')?;
-                month = number(&mut input, 2)?;
-                input = input.strip_prefix('-')?;
-                day = number(&mut input, 2)?;
-            }
-            'T' => {
-                hour = number(&mut input, 2)?;
-                input = input.strip_prefix(':')?;
-                minute = number(&mut input, 2)?;
-                input = input.strip_prefix(':')?;
-                second = number(&mut input, 2)? as f64;
-            }
-            '%' => input = input.strip_prefix('%')?,
-            _ => {}
-        }
+/// A parsed time: whole wall-clock seconds since the epoch read as UTC, the fraction of a second
+/// apart so that it keeps every digit the text gave, and the UTC offset a `%z` gave.
+struct ParsedTime {
+    whole: f64,
+    fraction: f64,
+    offset: Option<i64>,
+}
+
+/// Parses `text` with a `strptime` format.
+fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> R<Option<ParsedTime>> {
+    let mut fields = Parsed::default();
+    let mut input = text;
+    let matched = parse_with(&mut fields, &mut input, format);
+    // Like GNU R, a `%Z` is an error only once parsing reaches it, and an out-of-range `%z`
+    // warns, so a text that fails earlier stays a quiet NA.
+    if fields.zone_requested {
+        return Err(error("use of %Z for input is not supported"));
     }
-    if let Some(yearday) = yearday {
+    if fields.offset_out_of_range {
+        warnings.push("values for %z outside +/-1400 are an error".to_owned());
+    }
+    Ok(matched.and_then(|()| resolve_fields(fields, warnings)))
+}
+
+fn resolve_fields(mut fields: Parsed, warnings: &mut Vec<String>) -> Option<ParsedTime> {
+    if let (Some((week, monday_first)), Some(weekday), None) =
+        (fields.week, fields.weekday, fields.yearday)
+        && (fields.month.is_none() || fields.day.is_none())
+        && let Some(year) = fields.year
+    {
+        // GNU R's formula from the weekday of 1 January, with the weekday not reduced modulo
+        // 7, so that `%u` 7 (Sunday) closes a Monday-first week.
+        let first = (days_from_civil(year, 1, 1) + 4).rem_euclid(7);
+        let shift = i64::from(monday_first);
+        fields.yearday = Some((7 - (first - shift)) % 7 + (week - 1) * 7 + weekday - shift + 1);
+    }
+    // GNU R fills an unspecified year, month or day from today's date, except that a month
+    // without a day is invalid, since today's day need not exist in that month.
+    if fields.month.is_some() && fields.day.is_none() && fields.yearday.is_none() {
+        return None;
+    }
+    let (this_year, this_month, this_day) =
+        if fields.year.is_some() && fields.month.is_some() && fields.day.is_some() {
+            (0, 0, 0)
+        } else {
+            let now = now_seconds().floor();
+            let (offset, _, _) = resolve_zone("").offset_at(now);
+            civil_from_days((now as i64 + offset as i64).div_euclid(86400))
+        };
+    let year = match (fields.century, fields.year) {
+        (Some(century), Some(year)) => century * 100 + year.rem_euclid(100),
+        (Some(century), None) => century * 100,
+        (None, year) => year.unwrap_or(this_year),
+    };
+    let mut hour = fields.hour;
+    if let (Some(afternoon), true) = (fields.afternoon, fields.twelve_hour) {
+        hour = hour % 12 + if afternoon { 12 } else { 0 };
+    }
+    let (mut month, mut day) = (
+        fields.month.unwrap_or(this_month),
+        fields.day.unwrap_or(this_day),
+    );
+    if let Some(yearday) = fields.yearday {
         if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
             if yearday == 366 {
                 warnings.push(format!("day-of-year 366 in year {year} is invalid"));
@@ -1766,33 +1800,258 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f
         }
         month = 1;
         day = yearday;
+    } else {
+        if !(1..=12).contains(&month) {
+            return None;
+        }
+        let month_days = [
+            31,
+            if is_leap(year) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        if day < 1 || day > month_days[(month - 1) as usize] {
+            return None;
+        }
     }
-    if !(1..=12).contains(&month) {
-        return None;
-    }
-    let month_days = [
-        31,
-        if is_leap(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    if day < 1 || day > month_days[(month - 1) as usize] && format.contains("%d") {
+    if hour > 24
+        || fields.minute > 59
+        || fields.second > 61.0
+        || hour == 24 && (fields.minute > 0 || fields.second > 0.0)
+    {
         return None;
     }
     let days = days_from_civil(year, month, 1) + day - 1;
-    let whole = second.floor();
-    Some((
-        days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + whole,
-        second - whole,
-    ))
+    let whole = fields.second.floor();
+    Some(ParsedTime {
+        whole: days as f64 * 86400.0 + hour as f64 * 3600.0 + fields.minute as f64 * 60.0 + whole,
+        fraction: fields.second - whole,
+        offset: fields.offset,
+    })
+}
+
+#[derive(Default)]
+struct Parsed {
+    year: Option<i64>,
+    century: Option<i64>,
+    month: Option<i64>,
+    day: Option<i64>,
+    hour: i64,
+    minute: i64,
+    second: f64,
+    yearday: Option<i64>,
+    afternoon: Option<bool>,
+    /// `%p` adjusts only an hour read with `%I` or `%l`.
+    twelve_hour: bool,
+    offset: Option<i64>,
+    /// Sunday is 0; `%u` reads Sunday as 7, which GNU R keeps as 0.
+    weekday: Option<i64>,
+    /// A `%U` or `%W` week number, and whether weeks start on Monday (`%W`).
+    week: Option<(i64, bool)>,
+    zone_requested: bool,
+    offset_out_of_range: bool,
+}
+
+/// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
+/// format matches any run of whitespace, including none, and numeric fields skip leading blanks,
+/// as in glibc's `strptime`.
+fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()> {
+    let mut characters = format.chars();
+    while let Some(character) = characters.next() {
+        if character.is_whitespace() {
+            *input = input.trim_start();
+            continue;
+        }
+        if character != '%' {
+            *input = input.strip_prefix(character)?;
+            continue;
+        }
+        let mut spec = characters.next()?;
+        if spec == 'E' || spec == 'O' {
+            let base = characters.next()?;
+            // GNU R's strptime fails on a modifier POSIX does not allow, such as `%Ob`, and
+            // lubridate relies on that to rank the formats it guesses.
+            let allowed = if spec == 'E' {
+                "cCyYxX"
+            } else {
+                "deHImMSUVWwy"
+            };
+            if !allowed.contains(base) {
+                return None;
+            }
+            if spec == 'O' && base == 'S' {
+                // `%OS` reads seconds with an optional fraction; `%OSn` is for output only, so on
+                // input its digit is a literal the text must contain.
+                let trimmed = input.trim_start();
+                let integer = trimmed
+                    .chars()
+                    .take(2)
+                    .take_while(char::is_ascii_digit)
+                    .count();
+                if integer == 0 {
+                    return None;
+                }
+                let fraction = match trimmed[integer..].strip_prefix(['.', ',']) {
+                    Some(rest) => 1 + rest.chars().take_while(char::is_ascii_digit).count(),
+                    None => 0,
+                };
+                fields.second = trimmed[..integer + fraction]
+                    .replace(',', ".")
+                    .parse()
+                    .ok()?;
+                *input = &trimmed[integer + fraction..];
+                continue;
+            }
+            spec = base;
+        }
+        match spec {
+            'Y' => {
+                fields.year = Some(number(input, 4)?);
+                fields.century = None;
+            }
+            'y' => {
+                let value = number(input, 2)?;
+                fields.year = Some(if value < 69 {
+                    2000 + value
+                } else {
+                    1900 + value
+                });
+            }
+            'C' => fields.century = Some(number(input, 2)?),
+            'm' => fields.month = Some(number(input, 2)?),
+            'd' | 'e' => fields.day = Some(number(input, 2)?),
+            'H' | 'k' => {
+                fields.hour = number(input, 2)?;
+                fields.twelve_hour = false;
+            }
+            'I' | 'l' => {
+                fields.hour = number(input, 2)?;
+                fields.twelve_hour = true;
+                if !(1..=12).contains(&fields.hour) {
+                    return None;
+                }
+            }
+            'M' => fields.minute = number(input, 2)?,
+            'S' => fields.second = number(input, 2)? as f64,
+            'j' => fields.yearday = Some(number(input, 3)?),
+            'p' | 'P' => {
+                let lower = input.trim_start().to_ascii_lowercase();
+                fields.afternoon = Some(match lower.get(..2) {
+                    Some("am") => false,
+                    Some("pm") => true,
+                    _ => return None,
+                });
+                *input = &input.trim_start()[2..];
+            }
+            'B' | 'b' | 'h' => {
+                let found = match_name(input, &MONTHS)?;
+                fields.month = Some(found as i64 + 1);
+            }
+            'A' | 'a' => {
+                match_name(input, &WEEKDAYS)?;
+            }
+            'w' => fields.weekday = Some(Some(number(input, 1)?).filter(|day| *day <= 6)?),
+            'u' => {
+                fields.weekday =
+                    Some(Some(number(input, 1)?).filter(|day| (1..=7).contains(day))? % 7)
+            }
+            'U' | 'W' => fields.week = Some((number(input, 2)?, spec == 'W')),
+            'V' => {
+                number(input, 2)?;
+            }
+            'z' => match parse_offset(input) {
+                Ok(offset) => fields.offset = Some(offset),
+                Err(out_of_range) => {
+                    fields.offset_out_of_range = out_of_range;
+                    return None;
+                }
+            },
+            'Z' => {
+                fields.zone_requested = true;
+                return None;
+            }
+            'n' | 't' => *input = input.trim_start(),
+            '%' => *input = input.trim_start().strip_prefix('%')?,
+            'F' => parse_with(fields, input, "%Y-%m-%d")?,
+            'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
+            'D' => parse_with(fields, input, "%m/%d/%y")?,
+            'x' => parse_with(fields, input, "%y/%m/%d")?,
+            'R' => parse_with(fields, input, "%H:%M")?,
+            'r' => parse_with(fields, input, "%I:%M:%S %p")?,
+            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// A month or weekday name, in full or abbreviated to three letters, ignoring case. Returns its
+/// position in `names`.
+fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
+    let trimmed = input.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let full = names
+        .iter()
+        .position(|name| lower.starts_with(&name.to_ascii_lowercase()));
+    let (position, consumed) = match full {
+        Some(position) => (position, names[position].len()),
+        None => (
+            names
+                .iter()
+                .position(|name| lower.starts_with(&name[..3].to_ascii_lowercase()))?,
+            3,
+        ),
+    };
+    *input = &trimmed[consumed..];
+    Some(position)
+}
+
+/// A field of at most `max_digits` digits, after leading blanks.
+fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
+    let trimmed = input.trim_start();
+    let digits = trimmed
+        .chars()
+        .take(max_digits)
+        .take_while(char::is_ascii_digit)
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    *input = &trimmed[digits..];
+    trimmed[..digits].parse().ok()
+}
+
+/// A `%z` offset in seconds. The error is true when the offset is well formed but beyond
+/// +/-1400, which GNU R warns about.
+fn parse_offset(input: &mut &str) -> Result<i64, bool> {
+    let trimmed = input.trim_start();
+    let sign = match trimmed.chars().next() {
+        Some('+') => 1,
+        Some('-') => -1,
+        _ => return Err(false),
+    };
+    let value = trimmed
+        .get(1..5)
+        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .ok_or(false)?;
+    let (hours, minutes) = (value / 100, value % 100);
+    if minutes > 59 {
+        return Err(false);
+    }
+    if value > 1400 {
+        return Err(true);
+    }
+    *input = &trimmed[5..];
+    Ok(sign * (hours * 3600 + minutes * 60))
 }
 
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
@@ -1808,34 +2067,77 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         .map(|text| text.into_owned())
         .unwrap_or_default();
     let count = length(texts);
-    let mut seconds = Vec::with_capacity(count);
-    let mut fractions = Vec::with_capacity(count);
     let zone = resolve_zone(&tz);
-    let mut warnings = Vec::new();
-    for index in 0..count {
-        let format = values::string_at(formats, index % length(formats).max(1))
-            .map(|text| text.into_owned())
-            .unwrap_or_default();
-        let (whole, fraction) = values::string_at(texts, index)
-            .and_then(|text| parse_time(&text, &format, &mut warnings))
-            .unwrap_or((NA_REAL, 0.0));
-        seconds.push(zone.local_to_utc(whole, -1));
-        fractions.push(fraction);
-    }
-    let result = posixlt_from_seconds(&seconds, &tz)?;
-    let second_field = values::list_elt(result, 0);
-    for (second, fraction) in values::reals_mut(second_field).iter_mut().zip(&fractions) {
-        *second += fraction;
-    }
-    // GNU R's strptime leaves the UTC offset unknown outside UTC, because it fills the fields
-    // from the text rather than from an instant.
     let name = if tz.is_empty() {
         session_zone_name()
     } else {
         tz.clone()
     };
-    if name != "UTC" && name != "GMT" {
-        values::ints_mut(values::list_elt(result, 10)).fill(NA_INTEGER);
+    let utc = name == "UTC" || name == "GMT";
+    let mut parsed = Vec::with_capacity(count);
+    let mut warnings = Vec::new();
+    for index in 0..count {
+        let format = values::string_at(formats, index % length(formats).max(1))
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
+        parsed.push(match values::string_at(texts, index) {
+            Some(text) => parse_time(&text, &format, &mut warnings)?,
+            None => None,
+        });
+    }
+    let seconds: Vec<f64> = parsed
+        .iter()
+        .map(|time| match time {
+            None => NA_REAL,
+            Some(time) => match time.offset {
+                Some(offset) => time.whole - offset as f64,
+                None => zone.local_to_utc(time.whole, -1),
+            },
+        })
+        .collect();
+    let result = posixlt_from_seconds(&seconds, &tz)?;
+    let fields: Vec<Sexp> = (0..11)
+        .map(|field| values::list_elt(result, field))
+        .collect();
+    for (index, time) in parsed.iter().enumerate() {
+        let Some(time) = time else { continue };
+        values::reals_mut(fields[0])[index] += time.fraction;
+        if utc {
+            continue;
+        }
+        // GNU R's strptime fills the fields from the text rather than from an instant, so the
+        // UTC offset stays unknown outside UTC, and a time with an explicit offset carries no
+        // abbreviation either.
+        values::ints_mut(fields[10])[index] = NA_INTEGER;
+        if time.offset.is_some() {
+            values::set_elt(fields[9], index, values::mkchar("")?);
+            continue;
+        }
+        let (offset, _, _) = zone.offset_at(seconds[index]);
+        if seconds[index] + offset as f64 != time.whole {
+            // A time in a spring-forward gap keeps its wall-clock fields. Through R 4.3 it
+            // reports the zone in force after the gap, where the wall clock read with the
+            // earlier offset lands; from R 4.4 on its DST flag is unknown and its zone empty.
+            let (dst, abbreviation) = if r_at_least(4, 4) {
+                (-1, String::new())
+            } else {
+                let (_, dst, abbreviation) = zone.offset_at(seconds[index]);
+                (dst as i32, abbreviation)
+            };
+            let wall = broken_down(time.whole);
+            values::ints_mut(fields[1])[index] = wall.minute as i32;
+            values::ints_mut(fields[2])[index] = wall.hour as i32;
+            values::ints_mut(fields[3])[index] = wall.day as i32;
+            values::ints_mut(fields[4])[index] = wall.month as i32 - 1;
+            values::ints_mut(fields[5])[index] = wall.year as i32 - 1900;
+            values::ints_mut(fields[6])[index] = wall.weekday as i32;
+            values::ints_mut(fields[7])[index] = wall.yearday as i32;
+            values::ints_mut(fields[8])[index] = dst;
+            values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+        }
+    }
+    if !utc {
+        values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
     set_year_names(result, values::names(texts))?;
     for message in warnings {
@@ -1908,7 +2210,6 @@ unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
             Ok(metadata) => {
                 values::reals_mut(size)[index] = metadata.len() as f64;
                 values::ints_mut(is_dir)[index] = metadata.is_dir() as i32;
-                use std::os::unix::fs::PermissionsExt;
                 values::ints_mut(mode)[index] = (metadata.permissions().mode() & 0o777) as i32;
                 values::reals_mut(mtime)[index] = metadata
                     .modified()
@@ -1974,14 +2275,18 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     let ignore_case = values::as_logical_scalar(call.arg(5)) == 1;
     let include_dirs = values::as_logical_scalar(call.arg(6)) == 1;
     let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
+    // R 4.5 added `fixed`, which matches the pattern as a literal string.
+    let fixed = values::as_logical_scalar(call.arg(8)) == 1;
     let regex = match &pattern {
         Some(pattern) => Some(
-            regex::RegexBuilder::new(&crate::strings::translate_regex(pattern, true))
-                .case_insensitive(ignore_case)
-                .build()
-                .map_err(|failure| {
-                    error(format!("invalid 'pattern' regular expression: {failure}"))
-                })?,
+            regex::RegexBuilder::new(&if fixed {
+                regex::escape(pattern)
+            } else {
+                crate::strings::translate_regex(pattern, true)
+            })
+            .case_insensitive(ignore_case)
+            .build()
+            .map_err(|failure| error(format!("invalid 'pattern' regular expression: {failure}")))?,
         ),
         None => None,
     };
@@ -2233,47 +2538,6 @@ unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
     scalar_string(&previous)
 }
 
-unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
-    let patterns = call.arg(0);
-    let mut matches = Vec::new();
-    for index in 0..length(patterns) {
-        let Some(pattern) = values::string_at(patterns, index) else {
-            continue;
-        };
-        let pattern = crate::connections::expand_path(&pattern);
-        let (directory, file_pattern) = match pattern.rfind('/') {
-            Some(position) => (
-                pattern[..position].to_owned(),
-                pattern[position + 1..].to_owned(),
-            ),
-            None => (".".to_owned(), pattern.clone()),
-        };
-        let regex_text = format!(
-            "^{}$",
-            regex::escape(&file_pattern)
-                .replace("\\*", ".*")
-                .replace("\\?", ".")
-        );
-        let Ok(regex) = regex::Regex::new(&regex_text) else {
-            continue;
-        };
-        if let Ok(entries) = std::fs::read_dir(&directory) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if regex.is_match(&name) && !name.starts_with('.') {
-                    matches.push(if pattern.contains('/') {
-                        format!("{directory}/{name}")
-                    } else {
-                        name
-                    });
-                }
-            }
-        }
-    }
-    crate::sort::sort_strings(&mut matches);
-    string_vector(&matches)
-}
-
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     let mut name: libc::utsname = std::mem::zeroed();
     libc::uname(&mut name);
@@ -2311,23 +2575,18 @@ unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The runtime always runs in the C.UTF-8 locale, so setting a locale only reports the name
-/// asked for, the way GNU R reports a locale it switched to; an empty name means the default.
-unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
-    let locale =
-        values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
-    if locale.is_empty() {
-        scalar_string("C.UTF-8")
-    } else {
-        scalar_string(&locale)
-    }
-}
-
 unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
-    let utf8 = scalar_bool(true)?;
-    let latin1 = scalar_bool(false)?;
-    let mbcs = scalar_bool(true)?;
-    let codeset = scalar_string("UTF-8")?;
+    let name = native_codeset();
+    let upper = name.to_ascii_uppercase();
+    let is_utf8 = matches!(upper.as_str(), "UTF-8" | "UTF8");
+    let utf8 = scalar_bool(is_utf8)?;
+    let latin1 = scalar_bool(matches!(
+        upper.as_str(),
+        "ISO-8859-1" | "ISO8859-1" | "LATIN1"
+    ))?;
+    // UTF-8 is the only multibyte codeset ry supports as a native encoding.
+    let mbcs = scalar_bool(is_utf8)?;
+    let codeset = scalar_string(&name)?;
     values::named_list(&[
         ("MBCS", mbcs),
         ("UTF-8", utf8),
@@ -2337,28 +2596,170 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
-    let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
+    // GNU R's own platform strings, which packages match on (`grepl("darwin", R.version$os)`).
+    // CRAN's macOS builds target Darwin 20, the first release with Apple silicon.
+    let os = if cfg!(target_os = "macos") {
+        "darwin20"
+    } else {
+        "linux-gnu"
+    };
+    let vendor = if cfg!(target_os = "macos") {
+        "apple"
+    } else {
+        "pc"
+    };
+    let arch = std::env::consts::ARCH;
+    let platform = format!("{arch}-{vendor}-{os}");
+    let version = r_version();
+    let (year, month, day) = (
+        version.date.get(0..4).unwrap_or(""),
+        version.date.get(5..7).unwrap_or(""),
+        version.date.get(8..10).unwrap_or(""),
+    );
     let fields: Vec<(&str, String)> = vec![
         ("platform", platform.clone()),
-        ("arch", std::env::consts::ARCH.to_owned()),
-        ("os", "linux-gnu".to_owned()),
-        ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
+        ("arch", arch.to_owned()),
+        ("os", os.to_owned()),
+        ("system", format!("{arch}, {os}")),
         ("status", String::new()),
-        ("major", "4".to_owned()),
-        ("minor", "3.3".to_owned()),
-        ("year", "2024".to_owned()),
-        ("month", "02".to_owned()),
-        ("day", "29".to_owned()),
-        ("svn rev", "86002".to_owned()),
+        ("major", version.major.to_string()),
+        ("minor", format!("{}.{}", version.minor, version.patch)),
+        ("year", year.to_owned()),
+        ("month", month.to_owned()),
+        ("day", day.to_owned()),
+        ("svn rev", version.revision.to_string()),
         ("language", "R".to_owned()),
-        ("version.string", "R version 4.3.3 (2024-02-29)".to_owned()),
-        ("nickname", "Angel Food Cake".to_owned()),
+        (
+            "version.string",
+            format!(
+                "R version {}.{}.{} ({})",
+                version.major, version.minor, version.patch, version.date
+            ),
+        ),
+        ("nickname", version.nickname.clone()),
     ];
     let items: Vec<(&str, Sexp)> = fields
         .iter()
         .map(|(name, value)| Ok((*name, scalar_string(value)?)))
         .collect::<R<_>>()?;
     values::named_list(&items)
+}
+
+/// The version of the GNU R whose base packages the session loads, which is the version the
+/// session presents (`R.version`, `getRversion()`, the `Built:` field it writes). Presenting
+/// that version, rather than a fixed one, is what keeps base R's own version checks honest:
+/// `library()` warns about a package built under a newer R by comparing its `Built:` field
+/// with `R.version`, and the default packages were built by exactly the R in `R_HOME`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    /// The release date, `YYYY-MM-DD`.
+    pub date: String,
+    /// The Subversion revision, at least [`MINIMUM_SVN_REVISION`].
+    pub revision: u32,
+    pub nickname: String,
+}
+
+impl RVersion {
+    /// GNU R's `R_Version(major, minor, patch)`, as `R_VERSION` and the serialization header
+    /// encode a version.
+    pub fn code(&self) -> i32 {
+        ((self.major << 16) + (self.minor << 8) + self.patch) as i32
+    }
+
+    pub fn number(&self) -> String {
+        format!("{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// Whether the emulated R is `major.minor` or later. Behavior that GNU R changed between
+/// supported releases follows the release in `R_HOME`, so the base packages' R code and the
+/// internals it calls always agree.
+pub fn r_at_least(major: u32, minor: u32) -> bool {
+    let version = r_version();
+    (version.major, version.minor) >= (major, minor)
+}
+
+/// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
+/// guard for them also checks the revision, so ry reports at least this one
+/// (`rcmd::MINIMUM_SVN_REVISION` writes the same floor into `Rversion.h`).
+pub const MINIMUM_SVN_REVISION: u32 = 89194;
+
+/// The oldest GNU R whose base packages ry's runtime loads. Older releases call internals
+/// with argument lists ry does not implement.
+pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
+
+/// The version of the R in [`r_home`], read once.
+pub fn r_version() -> &'static RVersion {
+    static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| read_r_version(&r_home()))
+}
+
+/// Reads the version from the installation itself: the base package's `DESCRIPTION` holds
+/// the version that `library()`'s checks compare against, and `SVN-REVISION` in the GNU R home
+/// that base really lives in holds the revision and release date. ry's own R home links
+/// `library/base` from a GNU R home, so the link is resolved first. The session cannot start
+/// without a base package ([`missing_r_home`]), so a missing one is a broken installation.
+pub fn read_r_version(home: &str) -> RVersion {
+    let base = Path::new(home).join("library/base");
+    let path = base.join("DESCRIPTION");
+    let description = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("cannot read the base package's {}: {error}", path.display())
+    });
+    let field = |text: &str, name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_owned())
+        })
+    };
+    let version = field(&description, "Version")
+        .unwrap_or_else(|| panic!("{} has no Version field", path.display()));
+    let mut parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    let gnu_home = std::fs::canonicalize(&base)
+        .ok()
+        .and_then(|base| Some(base.parent()?.parent()?.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(home));
+    let svn = std::fs::read_to_string(gnu_home.join("SVN-REVISION")).unwrap_or_default();
+    let built_date = field(&description, "Built")
+        .and_then(|built| built.split(';').nth(2).map(|date| date.trim().to_owned()))
+        .and_then(|date| date.get(0..10).map(str::to_owned));
+    let date = field(&svn, "Last Changed Date")
+        .or(built_date)
+        .unwrap_or_default();
+    let revision = field(&svn, "Revision")
+        .and_then(|revision| revision.parse().ok())
+        .unwrap_or(0);
+    // Debian keeps the headers outside R_HOME and names them in the `R_INCLUDE_DIR` that
+    // `bin/R` exports.
+    let shared_include = std::env::var_os("R_INCLUDE_DIR").map(PathBuf::from);
+    let nickname = [gnu_home.join("include"), Path::new(home).join("include")]
+        .into_iter()
+        .chain(shared_include)
+        .find_map(|include| {
+            let header = std::fs::read_to_string(include.join("Rversion.h")).ok()?;
+            header.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("#define R_NICK")?;
+                Some(rest.trim().trim_matches('"').to_owned())
+            })
+        })
+        .unwrap_or_default();
+    RVersion {
+        major,
+        minor,
+        patch,
+        date,
+        revision: revision.max(MINIMUM_SVN_REVISION),
+        nickname,
+    }
 }
 
 unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
@@ -2615,7 +3016,7 @@ unsafe fn do_system(call: &Call<'_>) -> R<Sexp> {
             values::set_attr(result, values::install("status")?, scalar_integer(status)?)?;
             crate::conditions::warning_call(
                 call.call,
-                &format!("running command '{command}' had status {status}"),
+                format!("running command '{command}' had status {status}"),
             )?;
         }
         return Ok(result);
@@ -2689,6 +3090,11 @@ unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
 /// Linux, so the encoding names and conversions are the system's.
 unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     let input = call.arg(0);
+    // `iconvlist()` asks for the converter's encoding names with a NULL `x`. glibc cannot list
+    // them, so GNU R answers NULL there and `iconvlist()` reads utils' `iconvlist` file instead.
+    if input == nil() {
+        return Ok(nil());
+    }
     let from = values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
     let to = values::first_string(call.arg(2)).map_or_else(String::new, |name| name.into_owned());
     let substitute = values::string_at(call.arg(3), 0).map(|text| text.into_owned());
@@ -2698,11 +3104,11 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     if !from_list && input.kind() != SexpType::String {
         return Err(call.error("'x' must be a character vector"));
     }
-    // The native encoding is always UTF-8 here, while the C library would read "" as the
-    // process locale's, which is ASCII until something calls setlocale.
+    // As in GNU R, "" names the codeset of the current LC_CTYPE, so text that a C locale
+    // cannot represent converts to NA; packages such as utf8 probe the locale this way.
     let system_name = |name: &str| -> String {
         match name {
-            "" => "UTF-8".to_string(),
+            "" => native_codeset(),
             other => other.to_string(),
         }
     };
@@ -2763,6 +3169,10 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
             None if to_raw => {}
             None => values::set_elt(result, index, values::na_string()),
         }
+    }
+    // GNU R converts a duplicate of a character `x`, so names and other attributes survive.
+    if !from_list && !to_raw {
+        values::copy_attributes(input, result)?;
     }
     Ok(result)
 }
@@ -3047,7 +3457,7 @@ unsafe fn do_read_renviron(call: &Call<'_>) -> R<Sexp> {
     let Ok(text) = std::fs::read_to_string(&path) else {
         crate::conditions::warning_call(
             call.call,
-            &format!("file '{path}' cannot be opened for reading"),
+            format!("file '{path}' cannot be opened for reading"),
         )?;
         return scalar_bool(false);
     };
@@ -3126,4 +3536,319 @@ unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
         TRACING.with(|tracing| tracing.set(value != 0));
     }
     scalar_bool(previous)
+}
+
+/// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
+/// component and each pattern's matches stay in pattern order, sorted only among themselves.
+unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
+    let patterns = call.arg(0);
+    if patterns.kind() != SexpType::String {
+        return Err(error("invalid 'paths' argument"));
+    }
+    let dirmark = values::as_logical_scalar(call.arg(1));
+    if dirmark == NA_LOGICAL {
+        return Err(error("invalid 'dirmark' argument"));
+    }
+    let mut buffer: libc::glob_t = std::mem::zeroed();
+    let mut appended = false;
+    for index in 0..length(patterns) {
+        let Some(pattern) = values::string_at(patterns, index) else {
+            continue;
+        };
+        let Ok(pattern) = std::ffi::CString::new(crate::connections::expand_path(&pattern)) else {
+            continue;
+        };
+        let mut flags = if dirmark != 0 { libc::GLOB_MARK } else { 0 };
+        if appended {
+            flags |= libc::GLOB_APPEND;
+        }
+        match libc::glob(pattern.as_ptr(), flags, None, &mut buffer) {
+            0 => appended = true,
+            libc::GLOB_NOMATCH => {}
+            libc::GLOB_NOSPACE => {
+                libc::globfree(&mut buffer);
+                return Err(error("internal out-of-memory condition"));
+            }
+            libc::GLOB_ABORTED => {
+                if let Err(condition) = crate::conditions::warning("read error on directory") {
+                    libc::globfree(&mut buffer);
+                    return Err(condition);
+                }
+            }
+            _ => {}
+        }
+    }
+    let matches: Vec<String> = if appended {
+        (0..buffer.gl_pathc)
+            .map(|index| {
+                std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    libc::globfree(&mut buffer);
+    string_vector(&matches)
+}
+
+unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
+    let number = values::as_integer_scalar(call.arg(0));
+    let category = locale_category(number).ok_or_else(|| error("invalid 'category' argument"))?;
+    let locale = call.arg(1);
+    let Some(name) = (locale.kind() == SexpType::String && length(locale) == 1)
+        .then(|| values::string_at(locale, 0))
+        .flatten()
+    else {
+        return Err(error("invalid 'locale' argument"));
+    };
+    let Ok(text) = std::ffi::CString::new(name.as_bytes()) else {
+        return Err(error("invalid 'locale' argument"));
+    };
+    let honoured = if category == libc::LC_ALL {
+        // As in GNU R, LC_ALL sets the categories R uses but leaves LC_NUMERIC at C.
+        let honoured = !libc::setlocale(libc::LC_CTYPE, text.as_ptr()).is_null();
+        if honoured {
+            for category in [libc::LC_COLLATE, libc::LC_MONETARY, libc::LC_TIME] {
+                libc::setlocale(category, text.as_ptr());
+            }
+        }
+        honoured
+    } else {
+        if category == libc::LC_NUMERIC && name != "C" {
+            crate::conditions::warning("setting 'LC_NUMERIC' may cause R to function strangely")?;
+        }
+        !libc::setlocale(category, text.as_ptr()).is_null()
+    };
+    crate::sort::refresh_collation();
+    if !honoured {
+        crate::conditions::warning(format!(
+            "OS reports request to set locale to \"{name}\" cannot be honored"
+        ))?;
+        return scalar_string("");
+    }
+    scalar_string(&current_locale(category))
+}
+
+unsafe fn do_sys_getlocale(call: &Call<'_>) -> R<Sexp> {
+    let category = locale_category(values::as_integer_scalar(call.arg(0)))
+        .ok_or_else(|| error("invalid 'category' argument"))?;
+    scalar_string(&current_locale(category))
+}
+
+/// Takes the locale of the categories GNU R uses from the environment, as it does at startup;
+/// numbers and the rest stay in the C locale.
+pub unsafe fn init_locale() {
+    for category in [
+        libc::LC_CTYPE,
+        libc::LC_COLLATE,
+        libc::LC_TIME,
+        libc::LC_MONETARY,
+        libc::LC_MESSAGES,
+        LC_PAPER,
+        LC_MEASUREMENT,
+    ] {
+        libc::setlocale(category, c"".as_ptr());
+    }
+    crate::sort::refresh_collation();
+}
+
+/// macOS's C library has no paper or measurement category. `setlocale` rejects an unknown
+/// category, so on macOS these read as `""` and cannot be set, as in GNU R there.
+#[cfg(target_os = "linux")]
+const LC_PAPER: libc::c_int = libc::LC_PAPER;
+#[cfg(target_os = "linux")]
+const LC_MEASUREMENT: libc::c_int = libc::LC_MEASUREMENT;
+#[cfg(not(target_os = "linux"))]
+const LC_PAPER: libc::c_int = -1;
+#[cfg(not(target_os = "linux"))]
+const LC_MEASUREMENT: libc::c_int = -1;
+
+/// The C library category for `Sys.setlocale`'s category number, which indexes
+/// `c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+/// "LC_MESSAGES", "LC_PAPER", "LC_MEASUREMENT")`.
+fn locale_category(number: i32) -> Option<libc::c_int> {
+    Some(match number {
+        1 => libc::LC_ALL,
+        2 => libc::LC_COLLATE,
+        3 => libc::LC_CTYPE,
+        4 => libc::LC_MONETARY,
+        5 => libc::LC_NUMERIC,
+        6 => libc::LC_TIME,
+        7 => libc::LC_MESSAGES,
+        8 => LC_PAPER,
+        9 => LC_MEASUREMENT,
+        _ => return None,
+    })
+}
+
+/// The codeset of the current LC_CTYPE, as `l10n_info()` reports it.
+unsafe fn native_codeset() -> String {
+    let codeset = libc::nl_langinfo(libc::CODESET);
+    if codeset.is_null() {
+        return "UTF-8".to_owned();
+    }
+    std::ffi::CStr::from_ptr(codeset)
+        .to_string_lossy()
+        .into_owned()
+}
+
+unsafe fn current_locale(category: libc::c_int) -> String {
+    let current = libc::setlocale(category, std::ptr::null());
+    if current.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(current)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    let mode = values::as_integer_scalar(call.arg(1));
+    let result = alloc(SexpType::Integer, length(paths))?;
+    for index in 0..length(paths) {
+        let accessible = values::string_at(paths, index)
+            .and_then(|path| std::ffi::CString::new(crate::connections::expand_path(&path)).ok())
+            .is_some_and(|path| libc::access(path.as_ptr(), mode & 7) == 0);
+        values::ints_mut(result)[index] = if accessible { 0 } else { -1 };
+    }
+    Ok(result)
+}
+
+/// `Sys.umask(NA)` reports the mask visibly; setting a new one returns the old one invisibly.
+unsafe fn do_sys_umask(call: &Call<'_>) -> R<Sexp> {
+    let mode = values::as_integer_scalar(call.arg(0));
+    let old = if mode == NA_INTEGER {
+        current_umask()
+    } else {
+        interp().visible = false;
+        libc::umask(mode as libc::mode_t) as u32
+    };
+    let result = scalar_integer(old as i32)?;
+    let octmode = scalar_string("octmode")?;
+    values::set_attr(result, symbols().class, octmode)?;
+    Ok(result)
+}
+
+unsafe fn do_sys_chmod(call: &Call<'_>) -> R<Sexp> {
+    let (paths, modes) = (
+        call.arg(0),
+        crate::coerce::coerce_vector(call.arg(1), SexpType::Integer)?,
+    );
+    let use_umask = values::as_logical_scalar(call.arg(2)) == 1;
+    let result = alloc(SexpType::Logical, length(paths))?;
+    for index in 0..length(paths) {
+        let mode = match length(modes) {
+            0 => 0o777,
+            count => values::ints(modes)
+                .get(index % count)
+                .copied()
+                .unwrap_or(0o777) as u32,
+        };
+        let mode = if use_umask {
+            mode & !current_umask()
+        } else {
+            mode
+        };
+        let changed = values::string_at(paths, index).is_some_and(|path| {
+            std::fs::set_permissions(
+                crate::connections::expand_path(&path),
+                std::fs::Permissions::from_mode(mode),
+            )
+            .is_ok()
+        });
+        values::ints_mut(result)[index] = changed as i32;
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_set_file_time(call: &Call<'_>) -> R<Sexp> {
+    let (paths, times) = (
+        call.arg(0),
+        crate::coerce::coerce_vector(call.arg(1), SexpType::Real)?,
+    );
+    let result = alloc(SexpType::Logical, length(paths))?;
+    for index in 0..length(paths) {
+        let time = match length(times) {
+            0 => None,
+            count => values::reals(times)
+                .get(index % count)
+                .copied()
+                .filter(|time| time.is_finite()),
+        };
+        let changed = match (values::string_at(paths, index), time) {
+            (Some(path), Some(time)) => {
+                set_modified_time(&crate::connections::expand_path(&path), time).is_ok()
+            }
+            _ => false,
+        };
+        values::ints_mut(result)[index] = changed as i32;
+    }
+    Ok(result)
+}
+
+fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
+    let out_of_range =
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "time out of range");
+    let offset =
+        std::time::Duration::try_from_secs_f64(seconds.abs()).map_err(|_| out_of_range())?;
+    let time = if seconds >= 0.0 {
+        std::time::UNIX_EPOCH.checked_add(offset)
+    } else {
+        std::time::UNIX_EPOCH.checked_sub(offset)
+    }
+    .ok_or_else(out_of_range)?;
+    let since_epoch = time.duration_since(std::time::UNIX_EPOCH);
+    let (whole, nanoseconds) = match since_epoch {
+        Ok(after) => (after.as_secs() as i64, after.subsec_nanos() as i64),
+        Err(before) => {
+            let before = before.duration();
+            let nanoseconds = before.subsec_nanos() as i64;
+            if nanoseconds == 0 {
+                (-(before.as_secs() as i64), 0)
+            } else {
+                (-(before.as_secs() as i64) - 1, 1_000_000_000 - nanoseconds)
+            }
+        }
+    };
+    let stamp = libc::timespec {
+        tv_sec: whole as libc::time_t,
+        tv_nsec: nanoseconds as _,
+    };
+    let path = std::ffi::CString::new(path)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path holds a NUL"))?;
+    // utimensat, as in GNU R, needs only ownership, so a read-only file the user owns still
+    // takes the new time, and nothing is opened, which would block on a FIFO.
+    // SAFETY: both pointers point at live values for the duration of the call.
+    match unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), [stamp, stamp].as_ptr(), 0) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("invalid 'x' argument"));
+    }
+    let result = alloc(SexpType::Logical, length(strings))?;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        let valid = charsxp == values::na_string() || std::str::from_utf8(charsxp.bytes()).is_ok();
+        values::ints_mut(result)[index] = valid as i32;
+    }
+    Ok(result)
+}
+
+/// The process umask. The C library can only read it by setting it, so this sets it back at once.
+fn current_umask() -> u32 {
+    // SAFETY: umask only swaps the process's file creation mask and cannot fail.
+    unsafe {
+        let mask = libc::umask(0);
+        libc::umask(mask);
+        mask as u32
+    }
 }

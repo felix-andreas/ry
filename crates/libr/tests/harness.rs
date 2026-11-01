@@ -9,12 +9,14 @@
 // API's own names so it reads like the C it binds.
 #![allow(dead_code, non_snake_case)]
 
-use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
-use std::{
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{Mutex, MutexGuard, OnceLock},
+use {
+    libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW},
+    std::{
+        ffi::{CStr, CString, c_char, c_int, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{Mutex, MutexGuard, OnceLock},
+    },
 };
 
 pub type Sexp = *mut c_void;
@@ -136,24 +138,50 @@ unsafe extern "C" fn capture_console(
         .extend_from_slice(bytes);
 }
 
-/// `cargo test` writes the crate's fresh shared library next to the test executable, in
-/// `target/<profile>/deps`; the copy one level up is only refreshed by `cargo build`.
-fn library_dir() -> PathBuf {
+/// The freshest `libR.so` cargo built for this profile. Where `cargo test` writes it depends on
+/// the toolchain's target layout: next to the test executable in `target/<profile>/deps`, or in
+/// a hashed `target/<profile>/build/libr/*/out` directory beside the executable's own. The copy in
+/// `target/<profile>` is only refreshed by `cargo build`, so the newest file wins.
+pub fn library_path() -> PathBuf {
+    let profile = profile_directory();
+    let built = std::fs::read_dir(profile.join("build").join("libr"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("out"));
+    let candidates = [profile.join("deps"), profile.to_path_buf()]
+        .into_iter()
+        .chain(built)
+        .map(|directory| directory.join("libR.so"));
+    candidates
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified());
+            modified.ok().map(|modified| (modified, path))
+        })
+        .max()
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| {
+            panic!(
+                "no libR.so under {}; cargo builds it with the crate",
+                profile.display()
+            )
+        })
+}
+
+/// `target/<profile>`, the closest directory above the test executable that holds cargo's
+/// `build` directory.
+pub fn profile_directory() -> PathBuf {
     let executable = std::env::current_exe().expect("the test executable has a path");
     executable
-        .parent()
-        .expect("the test executable lives in a directory")
+        .ancestors()
+        .find(|directory| directory.join("build").is_dir())
+        .expect("the test executable lives in a cargo profile directory")
         .to_path_buf()
 }
 
 fn session() -> &'static Session {
     SESSION.get_or_init(|| {
-        let path = library_dir().join("libR.so");
-        assert!(
-            path.exists(),
-            "{} does not exist; cargo builds it with the crate",
-            path.display()
-        );
+        let path = library_path();
         // GLOBAL, so packages loaded later resolve their R API references against this library.
         let library = unsafe { Library::open(Some(&path), RTLD_NOW | RTLD_GLOBAL) }
             .unwrap_or_else(|error| panic!("cannot load {}: {error}", path.display()));

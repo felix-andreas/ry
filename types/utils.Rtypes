@@ -6,16 +6,16 @@
 # Prefix/suffix of the argument: type-preserving returns, but the arity and `n =` formal are real.
 # Taking a slice of a list keeps its names, so the named candidate comes ahead of
 # the plain list one.
-head : fn(x: factor, [n]: integer) -> factor
-head : <T> fn(x: T[], [n]: integer) -> T[]
-head : <T> fn(x: list[named: T], [n]: integer) -> list[named: T]
-head : <T> fn(x: list[T], [n]: integer) -> list[T]
-head : fn(x: Any, [n]: Any) -> Any
-tail : fn(x: factor, [n]: integer) -> factor
-tail : <T> fn(x: T[], [n]: integer) -> T[]
-tail : <T> fn(x: list[named: T], [n]: integer) -> list[named: T]
-tail : <T> fn(x: list[T], [n]: integer) -> list[T]
-tail : fn(x: Any, [n]: Any) -> Any
+head : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
+head : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
+head : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
+head : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]
+head : fn(x: Any, [n]: Any, ...: Any) -> Any
+tail : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
+tail : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
+tail : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
+tail : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]
+tail : fn(x: Any, [n]: Any, ...: Any) -> Any
 
 # `str` prints a structure summary and returns NULL invisibly. Its first argument is a bare positional
 # (the checker fills a variadic function's named parameters by name only); the named formals cover the
@@ -29,24 +29,24 @@ str : fn(object: Any, [max.level]: Any, [vec.len]: Any, [list.len]: Any, [digits
 # formals must be declared (named-formals) or `write.csv(x, f, row.names = FALSE)` would falsely
 # error. `write.csv` forbids overriding `sep`/`dec`/`qmethod` in R, so only the formals it genuinely
 # accepts are declared.
-read.csv : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
-read.csv2 : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
-read.delim : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
-read.table : fn(file: character | connection, [header]: logical, [sep]: character, [quote]: character, [dec]: character, [fill]: logical, [comment.char]: character, [stringsAsFactors]: logical, [colClasses]: Any, [nrows]: integer, [skip]: integer, [na.strings]: Any, ...: Any) -> data.frame
+read.csv : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character[], [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
+read.csv2 : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character[], [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
+read.delim : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character[], [dec]: character, [fill]: logical, [comment.char]: character, ...: Any) -> data.frame
+read.table : fn([file]: character | connection, [header]: logical, [sep]: character, [quote]: character[], [dec]: character, [fill]: logical, [comment.char]: character, [stringsAsFactors]: logical, [colClasses]: Any, [nrows]: integer, [skip]: integer, [na.strings]: Any, ...: Any) -> data.frame
 write.csv : fn(x: Any, [file]: Any, [quote]: Any, [na]: character, [row.names]: Any, [fileEncoding]: character, [eol]: character, ...: Any) -> NULL
 write.csv2 : fn(x: Any, [file]: Any, [quote]: Any, [na]: character, [row.names]: Any, [fileEncoding]: character, [eol]: character, ...: Any) -> NULL
 write.table : fn(x: Any, [file]: Any, [append]: logical, [quote]: Any, [sep]: character, [eol]: character, [na]: character, [dec]: character, [row.names]: Any, [col.names]: Any, [qmethod]: character, [fileEncoding]: character) -> NULL
 
 # Package management. `install.packages`'s full formal set is declared so named arguments (`repos =`,
 # `dependencies =`, `Ncpus =`) match; the pickers/listings return install matrices (`Any`).
-install.packages : fn(pkgs: Any, [lib]: Any, [repos]: Any, [contriburl]: Any, [method]: Any, [available]: Any, [destdir]: Any, [dependencies]: Any, [type]: character, [configure.args]: Any, [configure.vars]: Any, [clean]: logical, [Ncpus]: Any, [verbose]: logical, [libs_only]: logical, [INSTALL_opts]: Any, [quiet]: logical, [keep_outputs]: Any) -> NULL
+install.packages : fn(pkgs: Any, [lib]: Any, [repos]: Any, [contriburl]: Any, [method]: Any, [available]: Any, [destdir]: Any, [dependencies]: Any, [type]: character, [configure.args]: Any, [configure.vars]: Any, [clean]: logical, [Ncpus]: Any, [verbose]: logical, [libs_only]: logical, [INSTALL_opts]: Any, [quiet]: logical, [keep_outputs]: Any, ...: Any) -> NULL
 remove.packages : fn(pkgs: Any, [lib]: Any) -> NULL
 update.packages : Any
 installed.packages : Any
 available.packages : Any
 packageVersion : fn(pkg: character, [lib.loc]: Any) -> Any
-download.file : fn(url: Any, destfile: Any, [method]: character, [quiet]: logical, [mode]: character, [cacheOK]: logical, [extra]: Any, [headers]: Any) -> integer
-untar : fn(tarfile: Any, [files]: Any, [list]: logical, [exdir]: character, [tar]: character) -> Any
+download.file : fn(url: Any, destfile: Any, [method]: character, [quiet]: logical, [mode]: character, [cacheOK]: logical, [extra]: Any, [headers]: Any, ...: Any) -> integer
+untar : fn(tarfile: Any, [files]: Any, [list]: logical, [exdir]: character, [tar]: character, [compressed]: Any, [extras]: Any, [verbose]: Any, [restore_times]: Any, [support_old_tars]: Any) -> Any
 unzip : fn(zipfile: Any, [files]: Any, [list]: logical, [overwrite]: logical, [junkpaths]: logical, [exdir]: character, [unzip]: Any, [setTimes]: logical) -> Any
 zip : fn(zipfile: Any, files: Any, [flags]: character, [extras]: character, [zip]: character) -> Any
 
@@ -61,18 +61,18 @@ sessionInfo : fn([package]: Any) -> Any
 object.size : fn(x: Any) -> Any
 capture.output : fn(...: Any, [file]: Any, [append]: logical, [type]: character, [split]: logical) -> character[]
 combn : fn(x: Any, m: Any, [FUN]: Any, [simplify]: logical, ...: Any) -> Any
-modifyList : fn(x: Any, val: Any, [keep.null]: logical) -> Any
+modifyList : @pure fn(x: Any, val: Any, [keep.null]: logical) -> Any
 data : Any
 txtProgressBar : Any
 setTxtProgressBar : fn(pb: Any, value: Any, [title]: Any, [label]: Any) -> Any
-URLencode : fn(URL: Any, [reserved]: logical, [repeated]: logical) -> character
-URLdecode : fn(URL: Any) -> character
-glob2rx : fn(pattern: Any, [trim.head]: logical, [trim.tail]: logical) -> character
+URLencode : @pure fn(URL: Any, [reserved]: logical, [repeated]: logical) -> character
+URLdecode : @pure fn(URL: Any) -> character
+glob2rx : @pure fn(pattern: Any, [trim.head]: logical, [trim.tail]: logical) -> character
 globalVariables : fn(names: character | character[], [package]: character, [add]: logical) -> character[]
 
 # Interactive debugging and console helpers.
 recover : fn() -> NULL
 menu : fn(choices: character | character[], [graphics]: logical, [title]: Any) -> integer
-askYesNo : fn(msg: character, [default]: Any, [prompts]: Any) -> logical
+askYesNo : fn(msg: character, [default]: Any, [prompts]: Any, ...: Any) -> logical
 browseURL : fn(url: character, [browser]: Any, [encodeIfNeeded]: logical) -> NULL
 flush.console : fn() -> NULL

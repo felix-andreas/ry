@@ -9,7 +9,7 @@ f <- function(x) {
 #++++
 == R/main.R
 x: integer
-f: <T> fn(x: T) -> character
+f: <T> fn([x]: T) -> character
 
 #==== cross_file_rebinding
 #---- later_file_rebinding_wins_for_later_files
@@ -30,3 +30,105 @@ x: Unknown
   = 0..1 the earlier binding is here.
 == R/c.R
 Unknown
+
+#==== call_heads_skip_non_functions
+#---- null_global_falls_through_to_the_library
+#~~~~ R/main.R
+l10n_info <- NULL
+utf8 <- function() l10n_info()$`UTF-8`
+#++++
+== R/main.R
+l10n_info: NULL
+utf8: fn() -> Unknown
+
+#---- local_vector_named_like_a_function
+#~~~~ R/main.R
+upper_names <- function(x) {
+  names <- toupper(names(x))
+  names(x)
+}
+#++++
+== R/main.R
+upper_names: <T> fn(x: T) -> Any
+
+#---- untyped_parameter_named_like_a_function
+#~~~~ R/main.R
+redact <- function(x, names) {
+  x[names(x) %in% names] <- NA
+  x
+}
+listing <- function(path) {
+  dir <- path
+  dir(dir)
+}
+#++++
+== R/main.R
+redact: <T, U> fn(x: T, names: U) -> T
+listing: <T> fn(path: T) -> Unknown
+
+#---- inner_value_skips_to_the_enclosing_function
+#~~~~ R/main.R
+outer <- function() {
+  helper <- function(y) y + 1
+  inner <- function() {
+    helper <- "three"
+    helper(2)
+  }
+  inner()
+}
+#++++
+== R/main.R
+outer: fn() -> double
+
+#---- parameter_without_a_namesake_is_still_called
+#~~~~ R/main.R
+apply_to <- function(x, callback) callback(x)
+#++++
+== R/main.R
+apply_to: <T, U> fn(x: T, callback: fn(T) -> U) -> U
+
+#---- callback_named_like_a_library_function_is_called
+#~~~~ R/main.R
+apply1 <- function() {
+  call_with <- function(format) format(1L)
+  call_with(function(x) x + 1L)
+}
+#++++
+== R/main.R
+apply1: fn() -> integer
+
+#---- callback_named_like_a_project_function_is_called
+#~~~~ R/main.R
+helper <- function(x) "text"
+run <- function(helper) helper(1L)
+use <- function() run(function(x) x + 1L)
+#++++
+== R/main.R
+helper: <T> fn([x]: T) -> character
+run: <T> fn(helper: fn(integer) -> T) -> T
+use: fn() -> integer
+
+#---- value_with_no_function_of_its_name_is_reported
+#~~~~ R/main.R
+f <- function(x) {
+  nope <- 1
+  nope(x)
+}
+#++++
+== R/main.R
+f: Unknown
+33..37 error[type-mismatch] this has type `double`, which is not a function, so it cannot be called
+
+#==== qualified_names_stay_in_their_namespace
+#---- base_name_ignores_the_project_binding
+#~~~~ R/main.R
+date <- function(x) x
+today <- function() base::date()
+str <- "abc"
+show <- function(x) utils::str(x)
+#++++
+== R/main.R
+date: <T> fn(x: T) -> T
+today: fn() -> character
+str: character
+show: <T> fn(x: T) -> NULL

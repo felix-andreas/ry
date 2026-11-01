@@ -3,20 +3,22 @@
 //! number of decimals, decided by GNU R's rule (fixed unless it is wider than scientific by more
 //! than `scipen`).
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    unwind::{R, error},
-    values::{self, alloc, length, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        unwind::{R, error},
+        values::{self, alloc, length, nil, symbols},
+    },
+    heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    std::cell::RefCell,
+    unicode_width::UnicodeWidthChar,
 };
-use heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, gp, is_na_real};
-use std::cell::RefCell;
-use unicode_width::UnicodeWidthChar;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("format", 9, do_format),
     internal("formatC", 7, do_format_c),
     internal("encodeString", 5, do_encode_string),
-    internal("prettyNum", -1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("prettyNum", -1, |call| Ok(call.arg(0))),
     internal("format.info", 3, do_format_info),
 ];
 
@@ -314,8 +316,12 @@ pub fn format_complex_with(
     let real_part = if rounded.r == 0.0 { 0.0 } else { value.r };
     let imaginary_part = if rounded.i == 0.0 { 0.0 } else { value.i };
     let real_text = format_real_with(real_part, real, "NA");
-    let sign = if imaginary_part < 0.0 { '-' } else { '+' };
     let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
+    let sign = if imaginary_part < 0.0 && imaginary_text != "0" {
+        '-'
+    } else {
+        '+'
+    };
     // Each part is right-justified to its own common width, as in GNU R's `1+ 1i 1+10i`.
     format!(
         "{}{sign}{}i",
@@ -382,8 +388,12 @@ pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
 }
 
 /// `value` rounded to `digits` significant digits relative to its larger part, as GNU R's
-/// `z_prec_r` rounds before printing: a part far smaller than the other one prints as zero.
+/// `z_prec_r` rounds before printing through R 4.3: a part far smaller than the other one
+/// prints as zero. From R 4.4 on, each part formats on its own, so nothing is rounded.
 fn round_complex(value: Rcomplex, digits: usize) -> Rcomplex {
+    if crate::system::r_at_least(4, 4) {
+        return value;
+    }
     let magnitude = [value.r.abs(), value.i.abs()]
         .into_iter()
         .filter(|part| part.is_finite())
@@ -849,7 +859,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     let exponent: i32 = text
         .split_once('e')
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
-    let text = if exponent < -4 || exponent >= significant as i32 {
+    if exponent < -4 || exponent >= significant as i32 {
         let text = scientific_text(value, significant.saturating_sub(1));
         if keep_zeros {
             text
@@ -866,8 +876,7 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         } else {
             trim_zeros(&text).to_owned()
         }
-    };
-    text
+    }
 }
 
 /// `formatC`'s `fg`: `significant` digits in fixed notation, never in scientific. Digits left of
@@ -917,9 +926,16 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
             None => na_encode.then(|| if quote.is_some() { "NA" } else { "<NA>" }.to_owned()),
         })
         .collect();
-    let target = if width == nil() {
-        0
-    } else if values::as_integer_scalar(width) == NA_INTEGER {
+    // GNU R treats `width = NULL` like `width = NA`: pad to the widest element.
+    let requested = if width == nil() {
+        NA_INTEGER
+    } else {
+        values::as_integer_scalar(width)
+    };
+    if requested != NA_INTEGER && requested < 0 {
+        return Err(error("invalid 'width' value"));
+    }
+    let target = if requested == NA_INTEGER {
         encoded
             .iter()
             .flatten()
@@ -927,7 +943,7 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
             .max()
             .unwrap_or(0)
     } else {
-        values::as_integer_scalar(width).max(0) as usize
+        requested as usize
     };
     let result = alloc(SexpType::String, count)?;
     for (index, item) in encoded.into_iter().enumerate() {

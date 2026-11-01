@@ -3,23 +3,23 @@
 point <- (x = 1, y = "a")
 point$y$0
 #++++
-hover 26..33: character
+hover 32..33: y: character
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 completion (1): y
-hint @5: record{x: double, y: character}
+hint @5: Record{x: double, y: character}
 
 #---- hover_on_a_tag_literal
 some <- :So$0me(5L)
 #++++
 hover 8..17: :Some(integer)
 definition: none
-references: none
-rename: none
+references: 9..13
+rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `some`
   edit 0..0 -> "#: :Some(integer)\n"
@@ -43,7 +43,7 @@ definition 87..92
 references: 87..92*, 97..102
 rename: 2 edit(s)
 signature: none
-completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion: none
 
 #---- hover_on_a_pattern_binding_use
 #: fn(o: :Some(integer) | :None) -> integer
@@ -74,9 +74,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: record{x: double, y: character}\n"
+  edit 18..18 -> "  #: Record{x: double, y: character}\n"
 completion (2): x, y
-hint @25: record{x: double, y: character}
+hint @25: Record{x: double, y: character}
 
 #---- completion_after_dollar_with_a_prefix
 f <- function() {
@@ -84,15 +84,15 @@ f <- function() {
   point$wi$0
 }
 #++++
-hover 55..63: Unknown
+hover 61..63: wi: Unknown
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: record{height: double, width: double}\n"
+  edit 18..18 -> "  #: Record{height: double, width: double}\n"
 completion (1): width
-hint @25: record{height: double, width: double}
+hint @25: Record{height: double, width: double}
 
 #---- completion_after_colon_in_an_arm_offers_tags
 #: fn(o: :Some(integer) | :None | :Pending) -> integer
@@ -120,13 +120,13 @@ f <- function(o) {
 #++++
 hover 92..94: Unknown
 definition: none
-references: none
-rename: none
+references: 93..94
+rename: 1 edit(s)
 signature: none
 completion (1): Pending
 
 #---- record_pattern_field_binding
-#: fn(r: record{x: double, y: character}) -> character
+#: fn(r: Record{x: double, y: character}) -> character
 f <- function(r) {
   match (r) {
     (x = a, y = la$0bel) => label
@@ -139,4 +139,430 @@ definition 104..109
 references: 104..109*, 114..119
 rename: 2 edit(s)
 signature: none
-completion (16): label, La.svd, La_library, La_version, labels, labels.default, lag, lag.plot
+completion: none
+
+#---- hover_on_a_tag_in_a_pattern_shows_its_narrowed_case
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :So$0me(value) => value
+    :None => 0L
+  }
+}
+#++++
+hover 81..86: :Some(integer)
+definition: none
+references: 10..14, 82..86
+rename: 2 edit(s)
+signature: none
+completion (1): Some
+
+#---- hover_on_a_nested_tag_in_a_pattern
+#: fn(r: :Ok(integer) | :Err(:Missing | :Invalid)) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(value) => value
+    :Err(:Miss$0ing) => 0L
+    :Err(:Invalid) => -1L
+  }
+}
+#++++
+hover 128..136: :Missing
+definition: stub source 12 at `Missing`
+references: 30..37, 129..136
+rename: none
+signature: none
+completion (1): Missing
+
+#---- hover_on_a_record_pattern_field_name
+#: fn(s: :Circle(radius: double) | :Empty) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(rad$0ius = r) => r
+    :Empty => 0
+  }
+}
+#++++
+hover 101..107: radius: double
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): radius
+
+#---- hover_on_a_record_literal_field_name
+point <- (x$0 = 1, y = "a")
+#++++
+hover 10..11: x: double
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `point`
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
+completion: none
+hint @5: Record{x: double, y: character}
+
+#---- hover_on_a_tag_payload_field_name
+shape <- :Circle(rad$0ius = 2)
+#++++
+hover 17..23: radius: double
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `shape`
+  edit 0..0 -> "#: :Circle(radius: double)\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: :Circle(radius: double)\n"
+completion (106): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
+hint @5: :Circle(radius: double)
+
+#---- tag_references_and_rename_cover_values_patterns_and_types
+alias Shape = :Circle(radius: double) | :Empty
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => r
+    :Empty => 0
+  }
+}
+empty <- :Emp$0ty
+#++++
+hover 169..175: :Empty
+definition 41..46
+references: 41..46*, 143..148, 170..175
+rename: 3 edit(s)
+signature: none
+completion (2): Empty, ListWasEmpty
+
+#---- library_tag_is_not_renamed
+#: fn(x: integer) -> :Ok(integer) | :Err(character)
+check <- function(x) :O$0k(x)
+#++++
+hover 73..79: :Ok(integer)
+definition: stub source 12 at `Ok`
+references: 22..24, 74..76
+rename: none
+signature: none
+completion (3): Ok, OutOfBounds, Overflow
+
+#---- completion_in_a_payload_offers_its_record_fields
+#: fn(s: :Circle(radius: double) | :Rect(width: double, height: double)) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => r
+    :Rect(width = w, $0) => w
+  }
+}
+#++++
+hover 107..179: double
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): height
+
+#---- completion_after_a_nested_colon_offers_the_payload_tags
+#: fn(r: :Ok(integer) | :Err(:Missing | :Invalid)) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(value) => value
+    :Err(:$0) => 0L
+  }
+}
+#++++
+hover 83..140: integer
+definition: none
+references: none
+rename: none
+signature: none
+completion (2): Invalid, Missing
+
+#---- completion_after_a_colon_in_a_value_offers_known_tags
+status <- :Pending
+other <- :Pe$0
+#++++
+hover 28..31: :Pe
+definition: none
+references: 29..31
+rename: 1 edit(s)
+signature: none
+completion (1): Pending
+
+#---- completion_after_a_range_colon_is_not_a_tag
+n <- 3L
+values <- 1:$0
+#++++
+hover 18..20: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion: none
+hint @1: integer
+
+#---- completion_after_dollar_on_a_tuple_offers_nothing
+pair <- (1L, "x")
+named <- (first = 1L,)
+pair$$0
+#++++
+hover 41..46: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Tuple{integer, character}\n"
+  edit 18..18 -> "#: Record{first: integer}\n"
+completion: none
+hint @4: Tuple{integer, character}
+hint @23: Record{first: integer}
+
+#---- no_hint_restates_a_payload_free_tag
+nothing <- :None
+some <- :Some(1L)
+no$0thing
+#++++
+hover 35..42: nothing: :None
+hover-definition: global 0..7
+definition 0..7
+references: 0..7*, 35..42
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 17..17 -> "#: :Some(integer)\n"
+completion (6): nothing, nobs, noquote, norm, normalizePath, nottem
+hint @21: :Some(integer)
+
+#---- nominal_record_field_completion
+type Point = Record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+p$$0
+#++++
+hover 68..70: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (2): x, y
+
+#---- nominal_record_field_hover
+type Point = Record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+p$y$0
+#++++
+hover 70..71: y: double
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): y
+
+#---- nominal_tag_union_hover_on_the_name
+type Sha$0pe = :Circle(radius: double) | :Empty
+#++++
+hover 5..10: type Shape = :Circle(radius: double) | :Empty
+definition 5..10
+references: 5..10*
+rename: 1 edit(s)
+signature: none
+completion (1): Shape
+
+#---- nominal_tag_union_rename_from_a_constructor
+type Shape = :Circle(radius: double) | :Empty
+s <- @Sha$0pe(:Empty)
+area <- function(s: Shape) -> double 0
+#++++
+hover 52..57: type Shape = :Circle(radius: double) | :Empty
+definition 5..10
+references: 5..10*, 52..57, 86..91
+rename: 3 edit(s)
+type-definition 5..10
+signature: none
+completion (1): Shape
+
+#---- nominal_payload_binding_keeps_its_type
+type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)
+size <- function(t: Tree<integer>) -> integer {
+  match (t) {
+    :Leaf => 0L
+    :Node(left = le$0ft, value = v, right = r) => size(left) + v + size(r)
+  }
+}
+#++++
+hover 165..169: left: Tree<integer>
+hover-definition: local 165..169
+definition 165..169
+references: 165..169*, 201..205
+rename: 2 edit(s)
+type-definition 5..9
+signature: none
+completion: none
+
+#---- nominal_comment_definition_goto
+#: @type Shape {:Circle(radius: double) | :Empty}
+
+#: fn(s: Sha$0pe) -> double
+area <- function(s) 0
+#++++
+hover 60..65: @type Shape {:Circle(radius: double) | :Empty}
+definition 9..14
+references: 9..14*, 60..65
+rename: 2 edit(s)
+signature: none
+completion (1): Shape
+
+#---- structural_record_field_completion
+point <- (x = 1, y = 2)
+point$$0
+#++++
+hover 24..30: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Record{x: double, y: double}\n"
+completion (2): x, y
+hint @5: Record{x: double, y: double}
+
+#---- completion_in_a_record_literal_offers_the_missing_fields
+#: Record{amount: double, currency: character, rate: double}
+m <- (amount = 1, cu$0)
+#++++
+hover 66..82: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency
+
+#---- completion_in_an_empty_record_slot_offers_the_missing_fields
+#: Record{amount: double, currency: character}
+m <- (amount = 1, $0)
+#++++
+hover 52..66: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency
+
+#---- completion_of_a_first_field_offers_the_expected_fields
+#: Record{amount: double, currency: character}
+m <- (am$0)
+#++++
+hover 53..55: am: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): amount
+
+#---- completion_in_a_record_argument_follows_the_parameter
+#: fn(p: Record{x: double, y: double}) -> double
+f <- function(p) p$x
+v <- f((x = 1, $0))
+#++++
+hover 77..86: Record{x: double}
+definition: none
+references: none
+rename: none
+signature: fn(p: Record{x: double, y: double}) -> double
+parameters: [p: Record{x: double, y: double}]
+completion (1): y
+
+#---- completion_in_a_nested_record_follows_the_field
+#: Record{inner: Record{left: double, right: double}}
+p <- (inner = (left = 1, $0),)
+#++++
+hover 68..80: Record{left: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): right
+
+#---- completion_in_a_tag_payload_follows_the_expected_union
+#: :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Rect(width = 1, $0)
+#++++
+hover 76..89: Record{width: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): height
+
+#---- completion_in_a_tag_payload_falls_back_to_values_when_no_field_matches
+#: :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Circle(totalRadius$0)
+totalRadius <- 2
+#++++
+hover 79..90: totalRadius: double
+hover-definition: global 92..103
+definition 92..103
+references: 79..90, 92..103*
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 92..92 -> "#: double\n"
+completion (1): totalRadius
+hint @103: double
+
+#---- completion_in_a_nominal_constructor_follows_its_definition
+type Money = Record{amount: double, currency: character}
+m <- @Money((amount = 1, cur$0))
+#++++
+hover 69..86: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency
+
+#---- completion_in_an_unexpected_record_offers_nothing
+m <- (amount = 1, cu$0)
+#++++
+hover 5..21: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `m`
+  edit 0..0 -> "#: Record{amount: double}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Record{amount: double}\n"
+completion: none
+hint @1: Record{amount: double}
+
+#---- completion_in_an_unchecked_tag_payload_follows_the_type_definitions
+alias Shape = :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Rect(width = 1, he$0)
+#++++
+hover 87..102: Record{width: double}
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `s`
+  edit 77..77 -> "#: :Rect(width: double)\n"
+action: Add inferred type annotations for the whole file
+  edit 77..77 -> "#: :Rect(width: double)\n"
+completion (1): height
+hint @78: :Rect(width: double)
+
+#---- completion_in_a_record_literal_follows_an_inline_annotation
+m: Record{amount: double, currency: character} <- (amount = 1, cu$0)
+#++++
+hover 50..66: Record{amount: double}
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): currency

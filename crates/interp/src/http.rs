@@ -3,12 +3,14 @@
 //! platform's root certificates and the standard proxy variables, and reports failures in
 //! libcurl's words because R code and tests match on them.
 
-use std::sync::OnceLock;
-use std::time::Duration;
-
-use reqwest::blocking::{Client, Response};
-use reqwest::redirect::Policy;
-use reqwest::{StatusCode, Version};
+use {
+    reqwest::{
+        StatusCode, Version,
+        blocking::{Client, Response},
+        redirect::Policy,
+    },
+    std::{sync::OnceLock, time::Duration},
+};
 
 /// A finished transfer: the final status, the content type the server declared, and the body.
 pub struct Fetched {

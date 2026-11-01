@@ -2,22 +2,29 @@
 //! checks each top-level command. It prints the inline-annotation warnings and enforces strict
 //! mode; everything else stays `ry check`'s job, so plain R runs exactly as it always did.
 
-use crate::cli::{
-    CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
-    render_findings, report, warn_config,
+use {
+    crate::{
+        cli::{
+            CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
+            render_findings, report, warn_config,
+        },
+        config::Config,
+        diagnostics::{apply_suppressions, document_diagnostics, file_is_strict},
+    },
+    repl::{Filtered, InputFilter},
+    salsa::Setter,
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Diagnostic, RelatedLocation, Severity},
+        stubs::install_shipped_stubs,
+    },
+    std::{
+        fs,
+        path::{Path, PathBuf},
+        thread,
+    },
+    syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation},
 };
-use crate::config::Config;
-use crate::diagnostics::{apply_suppressions, document_diagnostics};
-use repl::{Filtered, InputFilter};
-use salsa::Setter;
-use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
-use semantics::stubs::install_shipped_stubs;
-use semantics::{
-    DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode, file_typing_mode,
-};
-use std::path::{Path, PathBuf};
-use std::{fs, thread};
-use syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation};
 
 /// Analysis state for one run or one console session. A console session is checked as one
 /// growing script, so a command sees the definitions earlier commands made.
@@ -72,6 +79,12 @@ impl Preflight {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Names the source in the findings of later checks, as when a console continues the
+    /// session a script began.
+    pub fn rename(&mut self, path: PathBuf) {
+        self.path = path;
     }
 
     /// Checks `input` as the next part of the session. Accepted input joins the session;
@@ -196,12 +209,7 @@ fn strict_errors(analysis: &ProjectAnalysis, config: &Config) -> Vec<Vec<Diagnos
         .files
         .iter()
         .map(|file| {
-            let strict = match file_typing_mode(&analysis.db, file.file) {
-                Some(TypingMode::Strict) => true,
-                Some(TypingMode::On | TypingMode::Off) => false,
-                None => config.check.strict,
-            };
-            if !file.requested || !strict {
+            if !file.requested || !file_is_strict(&analysis.db, file.file, config) {
                 return Vec::new();
             }
             file.diagnostics
@@ -229,11 +237,7 @@ fn findings(
     config: &Config,
     source: &str,
 ) -> (Verdict, Vec<Diagnostic>) {
-    let strict = match file_typing_mode(db, file) {
-        Some(TypingMode::Strict) => true,
-        Some(TypingMode::On | TypingMode::Off) => false,
-        None => config.check.strict,
-    };
+    let strict = file_is_strict(db, file, config);
     // Plain R without strict mode has nothing to report, so it skips analysis entirely.
     if !strict && !has_inline_annotation(&semantics::parse(db, file).syntax_node()) {
         return (Verdict::Run, Vec::new());

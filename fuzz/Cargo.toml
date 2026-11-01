@@ -1,5 +1,6 @@
 # The in-tree property fuzzers' invariants under libFuzzer, which follows branch coverage where
-# deterministic-random inputs cannot. Needs nightly and cargo-fuzz (see contributing/testing.md).
+# deterministic-random inputs cannot. Needs cargo-fuzz (see contributing/testing.md).
+# Every target wraps a battery its crate exports and its in-tree harness runs too.
 [package]
 name = "ry-fuzz"
 version = "0.0.0"
@@ -14,6 +15,20 @@ libfuzzer-sys = "0.4"
 syntax = { path = "../crates/syntax" }
 format = { path = "../crates/format" }
 semantics = { path = "../crates/semantics" }
+ide = { path = "../crates/ide" }
+interp = { path = "../crates/interp", optional = true }
+loader = { path = "../crates/loader" }
+sniff = { path = "../crates/sniff" }
+table = { path = "../crates/table", optional = true }
+libr = { path = "../crates/libr", optional = true }
+# Only the `ry` binary uses mimalloc, so the targets skip building it.
+ry-lang = { path = "../crates/ry", default-features = false }
+
+# The runtime targets link polars, whose build needs far more memory than the
+# analysis targets, so `--no-default-features` builds the analysis targets alone.
+[features]
+default = ["runtime"]
+runtime = ["dep:interp", "dep:table", "dep:libr"]
 
 [[bin]]
 name = "parse"
@@ -36,5 +51,161 @@ test = false
 doc = false
 bench = false
 
-# Its own workspace: it needs nightly, so it stays out of the stable battery.
+[[bin]]
+name = "ide"
+path = "fuzz_targets/ide.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interp_lower"
+path = "fuzz_targets/interp_lower.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interp_unserialize"
+path = "fuzz_targets/interp_unserialize.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytecode"
+path = "fuzz_targets/bytecode.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_index"
+path = "fuzz_targets/load_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reload"
+path = "fuzz_targets/reload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "position"
+path = "fuzz_targets/position.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unserialize"
+path = "fuzz_targets/unserialize.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lsp"
+path = "fuzz_targets/lsp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "csv"
+path = "fuzz_targets/csv.rs"
+required-features = ["runtime"]
+test = false
+doc = false
+bench = false
+
+# Its own workspace, so the libFuzzer build and its sanitizer flags stay out of the main one.
 [workspace]
+
+# Polars is a dependency, not a fuzzing subject, and at opt-level 3 with
+# coverage instrumentation its largest crates need more memory than a 16GB
+# machine has. A lower level without debug info keeps the build within it.
+[profile.release.package.polars]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-arrow]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-compute]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-core]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-expr]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-io]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-lazy]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-mem-engine]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-ops]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-parquet]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-plan]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-row]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-sql]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-stream]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-time]
+opt-level = 1
+debug = false
+
+[profile.release.package.polars-utils]
+opt-level = 1
+debug = false

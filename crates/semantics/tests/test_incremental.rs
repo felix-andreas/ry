@@ -1,17 +1,19 @@
-use salsa::{Database, Durability, Setter};
-use semantics::diagnostics::{derive_from_syntax, file_diagnostics};
-use semantics::lints::{LintConfig, lint_file};
-use semantics::load_index::{PackageFile, PackageSources, package_index};
-use semantics::metadata::{PackageMetadata, attached_union};
-use semantics::stubs::install_shipped_stubs;
-use semantics::testing::ProbeDatabase;
-use semantics::types::{Atomic, scalar, unknown};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile, global_scheme,
-    item_naming, item_tree, limit_resident_trees, package_definitions,
+use {
+    salsa::{Database, Durability, Setter},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
+        global_scheme, interface_group, item_naming, item_tree,
+        lints::{LintConfig, lint_file},
+        load_index::{PackageFile, PackageSources, package_index},
+        metadata::{PackageMetadata, attached_union},
+        package_definitions,
+        stubs::install_shipped_stubs,
+        testing::{ProbeDatabase, render_semantics},
+        types::{Atomic, scalar, unknown},
+    },
+    std::{collections::BTreeMap, thread},
 };
-use std::collections::BTreeMap;
-use std::thread;
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
     for &file in files {
@@ -50,6 +52,59 @@ fn a_body_edit_keeping_the_scheme_rechecks_only_the_edited_item() {
     db.edit(files[0], "x <- function() 2L\n".to_owned());
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["x"]);
+}
+
+fn settle_top_level(db: &ProbeDatabase, files: &[SourceFile]) {
+    settle(db, files);
+    for &file in files {
+        top_level_diagnostics(db, file);
+    }
+}
+
+#[test]
+fn an_effect_added_to_a_pure_function_reclassifies_only_that_function() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "#: @pure\nscale <- function(x) x * 2\n",
+        "scaled <- scale(2)\n",
+    ]);
+    settle_top_level(&db, &files);
+    db.executions_since(&[]);
+
+    db.edit(
+        files[0],
+        "#: @pure\nscale <- function(x) {\n  cat(x)\n  x * 2\n}\n".to_owned(),
+    );
+    settle_top_level(&db, &files);
+    assert_eq!(
+        db.executions_since(&["item_top_level", "item_declared_pure", "item_check"]),
+        [1, 0, 1],
+        "the edited body is reclassified, its unchanged `#: @pure` block is not reread, and \
+         the caller's classification stays memoized"
+    );
+}
+
+#[test]
+fn removing_a_purity_marker_reclassifies_its_callers() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "#: @pure\nscale <- function(x) x * 2\n",
+        "scaled <- scale(2)\n",
+        "other <- 1\n",
+    ]);
+    settle_top_level(&db, &files);
+    db.executions_since(&[]);
+
+    assert!(top_level_diagnostics(&db, files[1]).is_empty());
+    db.executions_since(&[]);
+    db.edit(files[0], "scale <- function(x) x * 2\n".to_owned());
+    settle_top_level(&db, &files);
+    assert_eq!(top_level_diagnostics(&db, files[1]).len(), 1);
+    assert_eq!(
+        db.executions_since(&["item_top_level"]),
+        [1],
+        "only the caller is reclassified: `scale`'s HIR, which has no annotations, is unchanged"
+    );
 }
 
 #[test]
@@ -109,6 +164,35 @@ fn defining_a_missing_name_rechecks_its_readers() {
         "`later` resolves"
     );
     assert_eq!(db.checked_since(), ["later", "use_later"]);
+}
+
+#[test]
+fn a_new_helper_definition_rediagnoses_no_test_file_that_does_not_read_it() {
+    let mut db = ProbeDatabase::default();
+    let helper = SourceFile::new(
+        &db,
+        "helper_a <- function() 1L\n".to_owned(),
+        DocumentKind::TestHelper,
+    );
+    let test = SourceFile::new(
+        &db,
+        "helper_a()\nmisspeled()\n".to_owned(),
+        DocumentKind::Test,
+    );
+    ProjectFiles::new(&db, vec![helper, test]);
+    settle(&db, &[helper, test]);
+    db.executions_since(&["file_diagnostics"]);
+
+    db.edit(
+        helper,
+        "helper_a <- function() 1L\nfresh <- function() 2L\n".to_owned(),
+    );
+    settle(&db, &[helper, test]);
+    assert_eq!(
+        db.executions_since(&["file_diagnostics"]),
+        [1],
+        "only the edited helper's diagnostics re-run"
+    );
 }
 
 #[test]
@@ -239,7 +323,7 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     })
     .collect();
     let _project = ProjectFiles::builder(files.clone())
-        .durability(Durability::MEDIUM)
+        .durability(Durability::LOW)
         .new(&db);
     settle(&db, &files);
     files[0]
@@ -258,15 +342,60 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
     );
 }
 
-/// More files than the tree caches hold, so a cold pass really evicts trees. Each file has
-/// every kind of syntax a later pass reads: a lint, a `#:` comment, and a statement
-/// annotated both ways.
-/// Two files far apart both bind `shared`, so reporting the duplicate reads the other file's
-/// facts after its tree is evicted, and the trailing script reports an unused binding.
-fn evicting_project(db: &ProbeDatabase) -> Vec<SourceFile> {
+#[test]
+fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
+    let mut db = ProbeDatabase::default();
+    let files: Vec<SourceFile> = [
+        "x <- function() 1L\n",
+        "use_x <- function() x()\nif (TRUE) slot <- 1L\ny <- function() use_x()\n",
+        "other <- function() 3L\nmore <- function() other()\nlast <- 4L\n",
+    ]
+    .into_iter()
+    .map(|text| {
+        SourceFile::builder(text.to_owned(), DocumentKind::Package)
+            .durability(Durability::MEDIUM)
+            .new(&db)
+    })
+    .collect();
+    // LOW, as hosts create it: the project-wide maps read it, so they are LOW before any
+    // file's first edit and can backdate through that file's drop from MEDIUM.
+    let _project = ProjectFiles::builder(files.clone())
+        .durability(Durability::LOW)
+        .new(&db);
+    settle(&db, &files);
+    db.checked_since();
+    files[0]
+        .set_text(&mut db)
+        .with_durability(Durability::LOW)
+        .to("x <- function() 2L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.checked_since(),
+        ["x"],
+        "a file's first edit drops its durability without re-executing the rest of the project"
+    );
+
+    db.edit(files[0], "x <- function() 3L\n".to_owned());
+    settle(&db, &files);
+    // Each checked item's interface group verifies the edges it reaches, so validations of
+    // `item_interface_reads` follow the items a check demands. What must not happen is any
+    // untouched item recomputing its reads.
+    assert_eq!(
+        db.executions_since(&["item_interface_reads", "item_top_level_names"]),
+        [0, 1],
+        "only the edited item re-derives its top-level names, for its own file's frame binders; \
+         its naming backdates, so nothing recomputes interface reads, and none of the five items \
+         in the untouched files reruns either"
+    );
+}
+
+/// Each file has every kind of syntax a later pass reads: a lint, a `#:` comment, and a
+/// statement annotated both ways. Two files far apart both bind `shared`, so reporting the
+/// duplicate reads the other file's facts, and the trailing script reports an unused binding.
+fn wide_project(db: &ProbeDatabase) -> Vec<SourceFile> {
     let mut files: Vec<SourceFile> = (0..200)
         .map(|index| {
-            let mut source = evicting_project_source(index);
+            let mut source = wide_project_source(index);
             if index == 0 || index == 199 {
                 source.push_str("shared <- 1L\n");
             }
@@ -282,15 +411,13 @@ fn evicting_project(db: &ProbeDatabase) -> Vec<SourceFile> {
     files
 }
 
-/// The order `ry check` runs in: derive from each tree and evict, name every item, then
-/// report.
+/// The order `ry check` runs in: derive from each tree, name every item, then report.
 fn cold_check(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     for &file in files {
         derive_from_syntax(db, file, lints);
-        db.trigger_lru_eviction();
     }
-    // `ry check` writes the attached namespaces here, so later passes verify memos over
-    // evicted trees instead of reusing them within one revision.
+    // `ry check` writes the attached namespaces here, so later passes verify memos instead of
+    // reusing them within one revision.
     db.synthetic_write(Durability::LOW);
     for &file in files {
         for &item in item_tree(db, file) {
@@ -304,15 +431,13 @@ fn report(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) {
     for &file in files {
         file_diagnostics(db, file);
         lint_file(db, file, lints);
-        db.trigger_lru_eviction();
     }
 }
 
 #[test]
-fn a_cold_check_that_evicts_trees_parses_each_file_once() {
+fn a_cold_check_parses_each_file_once() {
     let mut db = ProbeDatabase::default();
-    limit_resident_trees(&mut db);
-    let files = evicting_project(&db);
+    let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
     assert_eq!(db.executions_since(&["parse"]), [files.len()]);
@@ -341,15 +466,14 @@ fn a_cold_check_that_evicts_trees_parses_each_file_once() {
 }
 
 #[test]
-fn an_edit_after_eviction_reparses_and_relints_only_the_edited_file() {
+fn an_edit_after_a_cold_check_reparses_and_relints_only_the_edited_file() {
     let mut db = ProbeDatabase::default();
-    limit_resident_trees(&mut db);
-    let files = evicting_project(&db);
+    let files = wide_project(&db);
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
     db.checked_since();
 
-    let edited = evicting_project_source(0).replace("x + 0L", "x + 9L");
+    let edited = wide_project_source(0).replace("x + 0L", "x + 9L");
     db.edit(files[0], edited);
     report(&mut db, &files, &lints);
     assert_eq!(
@@ -358,7 +482,7 @@ fn an_edit_after_eviction_reparses_and_relints_only_the_edited_file() {
     );
 }
 
-fn evicting_project_source(index: usize) -> String {
+fn wide_project_source(index: usize) -> String {
     format!(
         "f{index} <- function(x) x + {index}L\n#: integer\nn{index} <- T\n#: integer\nm{index}: integer <- 1L\nsetClass(\"A{index}\")\n"
     )
@@ -393,6 +517,7 @@ fn package(
         files,
         namespace.to_owned(),
         "Package: demo\nVersion: 1.0\n".to_owned(),
+        false,
     );
     (sources, handles)
 }
@@ -490,7 +615,14 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         "trades <- fread(\"trades.csv\")\n",
     ]);
     let attached = attached_union(&db, files.iter().copied());
-    PackageMetadata::new(&db, Vec::new(), Default::default(), attached, None);
+    PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        attached,
+        None,
+        Default::default(),
+    );
     let layouts = |prices: &str| {
         BTreeMap::from([
             (
@@ -515,6 +647,98 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
     let scheme = global_scheme(&db, definition(&db, "prices"));
     assert_eq!(
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
-        "frame{id: integer[], price: double[], ticker: character[]}"
+        "data.table{id: integer[], price: double[], ticker: character[]}"
+    );
+}
+
+/// Renders every file, edits `files[edited]` to `text`, and renders again after editing it
+/// back. Breaking a cycle while a member's value stays the same re-executes that member with
+/// only older inputs, which salsa rejects unless the cycle never formed inside salsa.
+fn round_trip_edit(kind: DocumentKind, sources: &[&str], edited: usize, text: &str) {
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let files: Vec<SourceFile> = sources
+        .iter()
+        .map(|source| SourceFile::new(&db, (*source).to_owned(), kind))
+        .collect();
+    ProjectFiles::new(&db, files.clone());
+    let render_all = |db: &RootDatabase| -> Vec<String> {
+        files
+            .iter()
+            .map(|&file| render_semantics(db, file))
+            .collect()
+    };
+    let before = render_all(&db);
+    files[edited].set_text(&mut db).to(text.to_owned());
+    render_all(&db);
+    files[edited]
+        .set_text(&mut db)
+        .to(sources[edited].to_owned());
+    assert_eq!(
+        render_all(&db),
+        before,
+        "output not restored after editing back"
+    );
+}
+
+#[test]
+fn removing_a_cross_file_cycle_and_restoring_it_revalidates() {
+    // `g <- rev(g)` reads the other file's `g`, which reads itself; emptying that file makes
+    // the first `g` read itself instead.
+    round_trip_edit(
+        DocumentKind::Package,
+        &["g <- rev(g)\nf <- g$x\n", "g <- g + 1L\n"],
+        1,
+        "",
+    );
+    for reader in ["rev", "sort", "as.Array"] {
+        round_trip_edit(
+            DocumentKind::Package,
+            &[
+                &format!("g <- {reader}(g)\nf <- g$x + g[[1L]]\n"),
+                "g <- g + 1L\n",
+            ],
+            1,
+            "",
+        );
+    }
+}
+
+#[test]
+fn a_cycle_through_an_earlier_writer_revalidates() {
+    // The added last `g` is the winner the first one reads, and it reads the first one back
+    // as the earlier writer in its file: a cycle a graph of winners alone would miss.
+    round_trip_edit(
+        DocumentKind::Package,
+        &["g <- rev(g)\nf <- g$x\n"],
+        0,
+        "g <- rev(g)\nf <- g$x\ng <- g\n",
+    );
+}
+
+#[test]
+fn a_script_cycle_through_deferred_reads_revalidates() {
+    let source = "f <- function() rev(g())\nk <- f\ng <- function() h()\n";
+    let cyclic = "f <- function() rev(g())\nk <- f\ng <- function() f()\n";
+    round_trip_edit(DocumentKind::Script, &[source], 0, cyclic);
+    round_trip_edit(DocumentKind::Test, &[source], 0, cyclic);
+}
+
+#[test]
+fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
+    let db = ProbeDatabase::default();
+    let files = db.project(&["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"]);
+    let items = item_tree(&db, files[0]);
+    let project = ProjectFiles::get(&db);
+    assert!(
+        interface_group(&db, project, items[1]).is_some(),
+        "the loop reads the slot it writes, so the group fixpoint resolves it, not salsa"
+    );
+    assert!(interface_group(&db, project, items[0]).is_none());
+    round_trip_edit(
+        DocumentKind::Package,
+        &["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"],
+        0,
+        "while (b > 0L) b <- b - 1L\n",
     );
 }

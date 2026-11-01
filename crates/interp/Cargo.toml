@@ -11,11 +11,13 @@ path = "src/interp.rs"
 
 [dependencies]
 heap = { path = "../heap" }
+smallvec = { version = "1.15", features = ["union"] }
 syntax = { path = "../syntax" }
 table = { path = "../table" }
 rowan.workspace = true
 rustc-hash.workspace = true
 regex.workspace = true
+regex-automata = "0.4"
 fancy-regex = { version = "0.20", features = ["leftmost_longest"] }
 regex-syntax = "0.8"
 flate2 = "1"
@@ -25,6 +27,7 @@ unicode-width.workspace = true
 bzip2 = "0.6"
 lzma-rust2 = "0.24"
 jiff = "0.2"
+zstd = "0.13"
 tiny-skia = "0.11"
 ab_glyph = "0.2"
 jpeg-encoder = "0.6"

@@ -2,11 +2,14 @@
 //! encoding is one object, so native code may compare strings by pointer. The table holds its
 //! strings weakly: a collection removes the entries whose strings died before it frees them.
 //!
-//! A `CHARSXP` caches its hash in the vector capacity field, which strings do not otherwise use.
+//! A `CHARSXP` caches its hash in the high half of the vector capacity field, which strings do not
+//! otherwise use, and keeps its `TRUELENGTH` in the low half ([`Sexp::char_truelength`]).
 
-use crate::object::{Sexp, gp};
-use hashbrown::HashTable;
-use std::hash::Hasher;
+use {
+    crate::object::{Sexp, gp},
+    hashbrown::HashTable,
+    std::hash::Hasher,
+};
 
 /// R's `cetype_t`, numbered as in GNU R.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,12 +66,18 @@ pub(crate) struct StringTable {
     young: Vec<Sexp>,
 }
 
-pub(crate) fn hash(bytes: &[u8], encoding_bits: u16) -> u64 {
+/// The intern hash of a string, as the `CHARSXP` stores it.
+pub(crate) fn hash(bytes: &[u8], encoding_bits: u16) -> u32 {
     let mut hasher = rustc_hash::FxHasher::default();
     hasher.write(bytes);
     hasher.write_u16(encoding_bits);
-    // The capacity field is signed, so keep the hash non-negative.
-    hasher.finish() >> 1
+    (hasher.finish() >> 32) as u32
+}
+
+/// The table's hash for a stored 32-bit hash. The table takes its control bits from the top of
+/// the hash, so the stored bits are spread over all 64.
+fn spread(hash: u32) -> u64 {
+    u64::from(hash).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 impl StringTable {
@@ -76,18 +85,19 @@ impl StringTable {
         self.table.len()
     }
 
-    pub unsafe fn find(&self, hash: u64, bytes: &[u8], encoding_bits: u16) -> Option<Sexp> {
+    pub unsafe fn find(&self, hash: u32, bytes: &[u8], encoding_bits: u16) -> Option<Sexp> {
         self.table
-            .find(hash, |&candidate| unsafe {
+            .find(spread(hash), |&candidate| unsafe {
                 candidate.bytes() == bytes && candidate.gp() & gp::ENCODING == encoding_bits
             })
             .copied()
     }
 
-    pub unsafe fn insert(&mut self, hash: u64, string: Sexp) {
-        self.table.insert_unique(hash, string, |candidate| unsafe {
-            candidate.capacity() as u64
-        });
+    pub unsafe fn insert(&mut self, hash: u32, string: Sexp) {
+        self.table
+            .insert_unique(spread(hash), string, |candidate| unsafe {
+                spread(candidate.char_hash())
+            });
         self.young.push(string);
     }
 
@@ -97,7 +107,7 @@ impl StringTable {
             if unsafe { string.is_marked() } {
                 continue;
             }
-            let hash = unsafe { string.capacity() } as u64;
+            let hash = spread(unsafe { string.char_hash() });
             if let Ok(entry) = self
                 .table
                 .find_entry(hash, |&candidate| candidate == string)

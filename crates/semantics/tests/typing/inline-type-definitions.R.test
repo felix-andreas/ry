@@ -12,7 +12,7 @@ f(5L)
 #++++
 f: fn(id: UserId) -> UserId
 UserId
-63..65 error[type-mismatch] expected `UserId`, found `integer`
+63..65 error[type-mismatch] expected `UserId`, found `integer`. The value has the right shape, but `UserId` is a nominal type, so only `@UserId(...)` or `#: @new UserId` creates one
 
 #---- alias_is_structural
 alias Count = integer
@@ -44,7 +44,7 @@ unwrap_or(:Ok("a"), 0L)
 unwrap_or: fn(r: Result<integer, character>, default: integer) -> integer
 integer
 integer
-214..222 error[type-mismatch] expected `:Ok(integer) | :Err(character)`, found `:Ok(character)`
+218..221 error[type-mismatch] expected `integer`, found `character`
 
 #---- nominal_tagged_union
 type Shape = :Circle(double) | :Square(double)
@@ -60,7 +60,7 @@ area(:Circle(1))
 area: fn(s: Shape) -> double
 double
 double
-184..194 error[type-mismatch] expected `Shape`, found `:Circle(double)`
+184..194 error[type-mismatch] expected `Shape`, found `:Circle(double)`. The value has the right shape, but `Shape` is a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
 
 #---- constrained_binder
 alias Numeric<T: numeric> = T[]
@@ -154,7 +154,7 @@ b <- @Box<integer>(list(value = 1L))
 b: Box<integer>
 
 #---- constructor_wraps_a_record
-type Point = record{x: double, y: double}
+type Point = Record{x: double, y: double}
 p <- @Point((x = 1, y = 2))
 #++++
 p: Point
@@ -189,7 +189,7 @@ frame <- data.frame(a = 1)
 gap: @if-unknown integer <- frame$a
 known: @if-unknown integer <- "a"
 #++++
-frame: Unknown
+frame: data.frame
 gap: integer
 known: Unknown
 93..96 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `character`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
@@ -215,8 +215,8 @@ type Celsius = double
 #++++
 
 #---- pair_with_renamed_binders_agrees
-#: @alias Pair<T> {tuple{T, T}}
-alias Pair<U> = tuple{U, U}
+#: @alias Pair<T> {Tuple{T, T}}
+alias Pair<U> = Tuple{U, U}
 #++++
 
 

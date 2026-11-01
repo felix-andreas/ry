@@ -10,14 +10,16 @@
 //! user code read them back: a letter macro swallows one following space into its srcref
 //! but not its text, and a verbatim environment's contents end on the backslash of `\end`.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    conditions,
-    eval::find_var,
-    unwind::{R, current_call, error},
-    values::{self, alloc, install, integer_vector, list_vector, scalar_string, unbound},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        conditions,
+        eval::find_var,
+        unwind::{R, current_call, error},
+        values::{self, alloc, install, integer_vector, list_vector, scalar_string, unbound},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 /// `parseLatex(text, srcfile, verbose, verbatim)`: the LaTeX tree of `text`, one string.
 pub unsafe fn parse_latex(call: &NativeCall<'_>) -> R<Sexp> {

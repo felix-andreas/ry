@@ -1,14 +1,16 @@
 //! Environments and variable lookup.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, enter, error},
-    eval::force_promise,
-    runtime,
-    strings::utf8_text,
+use {
+    crate::{
+        Rboolean,
+        boundary::{ApiResult, enter, error},
+        eval::force_promise,
+        runtime,
+        strings::utf8_text,
+    },
+    heap::object::{Sexp, SexpType, gp},
+    std::ffi::c_int,
 };
-use heap::object::{Sexp, SexpType, gp};
-use std::ffi::c_int;
 
 unsafe fn environment(object: Sexp, what: &str) -> ApiResult<Sexp> {
     match object.kind() {
@@ -894,10 +896,10 @@ pub unsafe extern "C" fn R_NamespaceEnvSpec(env: Sexp) -> Sexp {
                 .heap
                 .mk_char(b"base", heap::strings::Encoding::Native)?;
             runtime().heap.set_element(spec, 0, name);
-            let version = runtime().heap.mk_char(
-                crate::R_VERSION_STRING.as_bytes(),
-                heap::strings::Encoding::Native,
-            )?;
+            let version = interp::system::r_version();
+            let version = runtime()
+                .heap
+                .mk_char(version.number().as_bytes(), heap::strings::Encoding::Native)?;
             runtime().heap.set_element(spec, 1, version);
             return Ok(spec);
         }

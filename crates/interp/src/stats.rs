@@ -7,18 +7,20 @@
 //! the papers each routine cites), in the operation order GNU R uses, so that results agree with
 //! GNU R to the last printed digit.
 
-use crate::{
-    arith,
-    builtin_libraries::{NativeCall, NativeFn, c_result},
-    coerce::coerce_vector,
-    distributions, linalg,
-    long_double::LongDouble,
-    random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
-    stats_optimize, stats_port, stats_spline, stats_tests,
-    unwind::{R, error},
-    values::{self, length, scalar_bool, scalar_integer, symbols},
+use {
+    crate::{
+        arith,
+        builtin_libraries::{NativeCall, NativeFn, c_result},
+        coerce::coerce_vector,
+        distributions, linalg,
+        long_double::LongDouble,
+        random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
+        stats_optimize, stats_port, stats_spline, stats_tests,
+        unwind::{R, error},
+        values::{self, length, scalar_bool, scalar_integer, symbols},
+    },
+    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("termsform", stats_models::termsform),
@@ -101,6 +103,10 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("SWilk", stats_tests::swilk),
     ("pKolmogorov2x", stats_tests::p_kolmogorov_2x),
     ("pKS2", stats_tests::p_ks2),
+    ("pkolmogorov_two_exact", stats_tests::p_kolmogorov_two_exact),
+    ("pkolmogorov_two_limit", stats_tests::p_kolmogorov_two_limit),
+    ("dpermdist1", stats_tests::dpermdist1),
+    ("dpermdist2", stats_tests::dpermdist2),
     ("psmirnov_exact", stats_tests::psmirnov_exact),
     ("pAnsari", stats_tests::p_ansari),
     ("qAnsari", stats_tests::q_ansari),
@@ -971,7 +977,7 @@ fn factorize(mut n: usize) -> Vec<usize> {
     }
     let mut divisor = 3;
     while divisor * divisor <= n {
-        while n % divisor == 0 {
+        while n.is_multiple_of(divisor) {
             factors.push(divisor);
             n /= divisor;
         }
@@ -1040,7 +1046,7 @@ fn unit_root(angle: f64, multiple: usize, period: usize) -> (f64, f64) {
     if reduced == 0 {
         return (0.0, 1.0);
     }
-    if (4 * reduced) % period == 0 {
+    if (4 * reduced).is_multiple_of(period) {
         let quarter = 4 * reduced / period;
         let direction = angle.signum();
         return match quarter {
@@ -2147,7 +2153,7 @@ unsafe fn arma_to_ma(call: &NativeCall<'_>) -> R<Sexp> {
     for i in 0..psi.len() {
         let mut value = if i < theta.len() { theta[i] } else { 0.0 };
         for j in 0..(i + 1).min(phi.len()) {
-            value += phi[j] * if i >= j + 1 { psi[i - j - 1] } else { 1.0 };
+            value += phi[j] * if i > j { psi[i - j - 1] } else { 1.0 };
         }
         psi[i] = value;
     }
@@ -3158,7 +3164,7 @@ fn loess_jumps(
             i += step;
         }
     } else if step == 1 {
-        let half = (span + 1) / 2;
+        let half = span.div_ceil(2);
         right = span;
         for i in 1..=n {
             if i > half && right != n {
@@ -3168,13 +3174,13 @@ fn loess_jumps(
             fit_at(i, left, right, &mut fitted);
         }
     } else {
-        let half = (span + 1) / 2;
+        let half = span.div_ceil(2);
         let mut i = 1;
         while i <= n {
             if i < half {
                 left = 1;
                 right = span;
-            } else if i >= n - half + 1 {
+            } else if i > n - half {
                 left = n - span + 1;
                 right = n;
             } else {

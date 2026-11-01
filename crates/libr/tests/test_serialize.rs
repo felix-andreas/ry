@@ -7,24 +7,26 @@
 //! shared library exports, in-process. It is one process-wide session, so every test takes the
 //! session lock.
 
-use R::{
-    runtime,
-    serialize::{
-        Format, LazyLoadCompression, PersistHook, from_bytes, header_of, lazyload_fetch, read_rds,
-        to_bytes,
+use {
+    R::{
+        runtime,
+        serialize::{
+            Format, LazyLoadCompression, PersistHook, check_unserialize_input, from_bytes,
+            header_of, lazyload_fetch, read_rds, to_bytes,
+        },
     },
+    heap::{
+        GcStress,
+        object::{NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    std::{
+        path::Path,
+        process::Command,
+        sync::{Mutex, MutexGuard},
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use heap::{
-    GcStress,
-    object::{NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use std::{
-    path::Path,
-    process::Command,
-    sync::{Mutex, MutexGuard},
-};
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -640,7 +642,15 @@ fn persistence_hooks_replace_and_restore_objects() {
             Ok(())
         };
         let hook: PersistHook = &mut name_env;
-        R::serialize::serialize(list, Format::Xdr, 3, &mut sink, Some(hook)).expect("written");
+        R::serialize::serialize(
+            list,
+            Format::Xdr,
+            3,
+            &mut sink,
+            Some(hook),
+            R::serialize::Chunking::Buffered,
+        )
+        .expect("written");
         assert_eq!(named, 2, "the hook names every occurrence, as in GNU R");
         assert!(from_bytes(&bytes).is_err(), "restoring needs a hook");
         let mut restored = 0;
@@ -776,7 +786,9 @@ fn installed_lazy_load_databases_read() {
     }
 }
 
-/// Corrupted streams fail with an error: never a panic, a crash or a runaway allocation.
+/// Corrupted streams fail with an error, or read into an object that writes back: never a panic,
+/// a crash or a runaway allocation. The contract is `serialize::check_unserialize_input`, which
+/// the coverage-guided `unserialize` target shares.
 #[test]
 fn corrupted_streams_fail_cleanly() {
     let _session = session();
@@ -801,13 +813,11 @@ fn corrupted_streams_fail_cleanly() {
                 _ => bytes.insert(at, rng.next_u64() as u8),
             }
         }
-        let mark = runtime().heap.handle_mark();
         if iteration % 64 == 63 {
             runtime().heap.policy_mut().stress = GcStress::EveryAllocation;
         }
-        let outcome = std::panic::catch_unwind(|| unsafe { from_bytes(&bytes) });
+        let outcome = std::panic::catch_unwind(|| unsafe { check_unserialize_input(&bytes) });
         runtime().heap.policy_mut().stress = GcStress::Off;
-        runtime().heap.release_handles(mark);
         assert!(
             outcome.is_ok(),
             "iteration {iteration} panicked on {}",

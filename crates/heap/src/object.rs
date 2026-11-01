@@ -18,8 +18,38 @@
 //! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
 //! exist to catch it.
 
-use crate::env::Frame;
-use std::{cell::Cell, ffi::c_void, fmt, ptr::NonNull};
+use {
+    crate::env::Frame,
+    std::{
+        cell::{Cell, UnsafeCell},
+        ffi::c_void,
+        fmt,
+        ptr::NonNull,
+        sync::OnceLock,
+    },
+};
+
+/// Reads and writes elements of ALTREP string and list vectors. Only the C API host knows the
+/// classes' methods, so it installs these; the heap and the interpreter then treat every vector
+/// alike.
+#[derive(Clone, Copy)]
+pub struct AltrepElements {
+    pub read: unsafe fn(Sexp, usize) -> Sexp,
+    pub write: unsafe fn(Sexp, usize, Sexp),
+}
+
+static ALTREP_ELEMENTS: OnceLock<AltrepElements> = OnceLock::new();
+
+/// Installs the accessors behind [`Sexp::element`] and `Heap::set_element` for ALTREP
+/// instances. Later calls keep the first.
+pub fn install_altrep_elements(elements: AltrepElements) {
+    ALTREP_ELEMENTS.get_or_init(|| elements);
+}
+
+/// The installed ALTREP accessors, for an object that has the ALTREP flag.
+pub(crate) fn altrep_elements() -> Option<&'static AltrepElements> {
+    ALTREP_ELEMENTS.get()
+}
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -269,9 +299,18 @@ pub mod gp {
     pub const UTF8: u16 = 1 << 3;
     pub const S4_OBJECT: u16 = 1 << 4;
     pub const CACHED: u16 = 1 << 5;
+    /// GNU R's `GROWABLE_MASK` on a vector, the same bit as `CACHED` on a string. ry keeps
+    /// growability in the heap's resizable flag, and `LEVELS` reports it through this bit.
+    pub const GROWABLE: u16 = 1 << 5;
     pub const ASCII: u16 = 1 << 6;
     /// The encoding bits that distinguish two interned strings with the same bytes.
     pub const ENCODING: u16 = BYTES | LATIN1 | UTF8;
+    /// A binding cell for a formal bound to its default, which `missing()` reads.
+    pub const BINDING_MISSING: u16 = 1 << 0;
+    /// A binding cell for an S4 method's formal whose argument was missing from the generic's
+    /// call (GNU R's `MISSING == 1`). Unlike a plain default it stays missing when the method
+    /// passes it on, so `missing()` in a callee sees it.
+    pub const BINDING_ABSENT: u16 = 1 << 1;
     pub const BINDING_LOCKED: u16 = 1 << 14;
     pub const ACTIVE_BINDING: u16 = 1 << 15;
     pub const FRAME_LOCKED: u16 = 1 << 14;
@@ -279,6 +318,14 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// An environment a compiled closure body is running on. The body keeps values in registers
+    /// that do not count as references, which code running on the environment from elsewhere
+    /// must respect before it updates a value in place.
+    pub const COMPILED_FRAME: u16 = 1 << 9;
+    /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
+    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
+    /// compiled code revalidates its lookups only when the epoch moved.
+    pub const WATCHED: u16 = 1 << 10;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.
     pub const TYPED_DEFINITION: u16 = 1 << 12;
@@ -308,6 +355,9 @@ pub(crate) mod flag_bits {
     /// The object's fields do not count as references (GNU R's `DISABLE_REFCNT`), as for the
     /// `*tmp*` value of a complex assignment, which must not make the target look shared.
     pub const UNTRACKED: u8 = 1 << 3;
+    /// A ry Array: an attribute-free, NA-free vector built by `[...]` or `as.Array`. The bit lives
+    /// here, not in the general-purpose bits, so C code reading `LEVELS` never sees it.
+    pub const ARRAY: u8 = 1 << 4;
 }
 
 /// The reference count saturates here, and a saturated count is sticky, as in GNU R.
@@ -328,10 +378,23 @@ pub(crate) struct TripleObject {
     pub third: Cell<Sexp>,
 }
 
+/// A symbol is a triple (print name, base binding, internal) followed by the state of its lookup
+/// caches, which no collection traces: every reader checks the stamp first, and a cell whose
+/// stamp is current is still bound in an environment on the search path.
+#[repr(C)]
+pub(crate) struct SymbolObject {
+    pub triple: TripleObject,
+    pub epoch: Cell<u64>,
+    pub global_cell: Cell<Option<Sexp>>,
+    pub global_stamp: Cell<u64>,
+}
+
 #[repr(C)]
 pub(crate) struct EnvironmentObject {
     pub header: Header,
-    pub frame: Cell<*mut Frame>,
+    /// The frame lives inside the object, so a closure call's environment costs one heap
+    /// allocation and no malloc while its bindings fit the frame's inline cells.
+    pub frame: UnsafeCell<Frame>,
     pub enclosure: Cell<Sexp>,
     pub spare: Cell<usize>,
 }
@@ -411,7 +474,8 @@ impl Slot {
 }
 
 /// How `value` is stored in slot `index`: raw when it is a length-one double, integer or logical
-/// without attributes, and a handle otherwise.
+/// without attributes, and a handle otherwise. A resizable vector stays a handle, because it is
+/// kept to grow in place.
 pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
     unsafe {
         if index >= UNBOXED_SLOTS
@@ -422,6 +486,7 @@ pub unsafe fn slot_for(value: Sexp, index: usize) -> Slot {
                 SexpType::Real | SexpType::Integer | SexpType::Logical
             )
             || value.length() != 1
+            || value.flags() & flag_bits::RESIZABLE != 0
         {
             return Slot::Handle(value);
         }
@@ -468,6 +533,7 @@ pub fn object_size(kind: SexpType, length: usize) -> Option<usize> {
                 .checked_add(15)
                 .map(|size| size & !15)
         }
+        Shape::Triple if kind == SexpType::Symbol => Some(size_of::<SymbolObject>()),
         Shape::Triple => Some(size_of::<TripleObject>()),
         Shape::Environment => Some(size_of::<EnvironmentObject>()),
         Shape::ExternalPtr => Some(size_of::<ExternalPtrObject>()),
@@ -546,6 +612,14 @@ impl Sexp {
 
     pub unsafe fn set_object(self, on: bool) {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
+    }
+
+    pub unsafe fn is_array(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::ARRAY != 0 }
+    }
+
+    pub unsafe fn set_array(self, on: bool) {
+        unsafe { self.set_flag(flag_bits::ARRAY, on) }
     }
 
     pub unsafe fn is_altrep(self) -> bool {
@@ -627,6 +701,25 @@ impl Sexp {
         unsafe { self.payload::<VectorObject>().capacity.get() }
     }
 
+    /// A `CHARSXP`'s intern hash, the high half of its capacity field.
+    pub unsafe fn char_hash(self) -> u32 {
+        unsafe { (self.capacity() as u64 >> 32) as u32 }
+    }
+
+    /// A `CHARSXP`'s `TRUELENGTH`, the low half of its capacity field. data.table's string
+    /// kernels set and read the truelength of every string they meet, so it lives in the string
+    /// itself and costs a load, as in GNU R.
+    pub unsafe fn char_truelength(self) -> i32 {
+        unsafe { self.capacity() as u64 as u32 as i32 }
+    }
+
+    pub unsafe fn set_char_truelength(self, value: i32) {
+        unsafe {
+            let hash = self.capacity() as u64 & !0xFFFF_FFFF;
+            self.set_capacity((hash | u64::from(value as u32)) as isize);
+        }
+    }
+
     pub(crate) unsafe fn set_capacity(self, capacity: isize) {
         unsafe { self.payload::<VectorObject>().capacity.set(capacity) }
     }
@@ -656,9 +749,17 @@ impl Sexp {
         unsafe { self.slice::<u8>() }
     }
 
-    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`.
+    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`. An ALTREP instance has no element
+    /// storage, so its class's `Elt` method answers through the accessor the host installed.
     pub unsafe fn element(self, index: usize) -> Sexp {
-        unsafe { *(self.data() as *const Sexp).add(index) }
+        unsafe {
+            if self.is_altrep()
+                && let Some(elements) = ALTREP_ELEMENTS.get()
+            {
+                return (elements.read)(self, index);
+            }
+            *(self.data() as *const Sexp).add(index)
+        }
     }
 
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {
@@ -697,8 +798,8 @@ impl Sexp {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
     }
 
-    pub(crate) unsafe fn set_frame_ptr(self, frame: *mut Frame) {
-        unsafe { self.payload::<EnvironmentObject>().frame.set(frame) }
+    pub(crate) unsafe fn symbol_payload(self) -> &'static SymbolObject {
+        unsafe { &*self.0.as_ptr().cast::<SymbolObject>() }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {
@@ -798,7 +899,7 @@ impl Sexp {
     }
 
     /// The handle in slot `index`, if the slot holds one.
-    pub(crate) unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
+    pub unsafe fn record_handle(self, index: usize) -> Option<Sexp> {
         match unsafe { self.record_slot(index) } {
             Slot::Handle(handle) => Some(handle),
             _ => None,
@@ -807,6 +908,22 @@ impl Sexp {
 
     unsafe fn record_slots(self) -> *mut u8 {
         unsafe { (self.0.as_ptr() as *mut u8).add(RECORD_DATA_OFFSET) }
+    }
+
+    pub(crate) unsafe fn set_record_slot_unbarriered(self, index: usize, slot: Slot) {
+        unsafe {
+            let payload = self.payload::<RecordObject>();
+            if index < UNBOXED_SLOTS {
+                let bit = 1u64 << index;
+                let unboxed = payload.unboxed.get();
+                payload.unboxed.set(if matches!(slot, Slot::Handle(_)) {
+                    unboxed & !bit
+                } else {
+                    unboxed | bit
+                });
+            }
+            *(self.record_slots() as *mut u64).add(index) = slot.encode();
+        }
     }
 
     /// Fills a fresh record's header fields and slots. Nothing may read the record before.

@@ -26,6 +26,14 @@ f <- function() {
 f: fn() -> integer
 20..21 warning[unused] `x` is assigned but never used.
 
+#---- a_function_named_by_a_match_fun_string_is_used
+f <- function(xs) {
+  shout <- function(x) toupper(x)
+  vapply(xs, "shout", character(1))
+}
+#++++
+f: <T> fn(xs: list[T] | T[]) -> character[]
+
 #==== reaching_writes
 #---- conditional_update_before_read_is_used
 f <- function(flag) {
@@ -152,7 +160,7 @@ unused_global: integer
 #---- unused_parameter_is_not_reported
 f <- function(unused_param) 1L
 #++++
-f: <T> fn(unused_param: T) -> integer
+f: <T> fn([unused_param]: T) -> integer
 
 #---- unused_for_variable_is_not_reported
 f <- function() {

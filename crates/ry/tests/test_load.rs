@@ -5,10 +5,14 @@
 
 #![cfg(unix)]
 
-use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
-use tempfile::TempDir;
+use {
+    std::{
+        fs,
+        path::Path,
+        process::{Command, Output},
+    },
+    tempfile::TempDir,
+};
 
 fn r_available() -> bool {
     let available = Command::new("R")
@@ -103,7 +107,7 @@ fn a_package_loads_with_collate_imports_s3_and_s4() {
         let printed = text(&output);
         assert!(output.status.success(), "{printed}");
         assert!(
-            printed.contains("Loaded demo: 5 functions bound lazily, 5 top-level statements run"),
+            printed.contains("Loaded demo: 5 definitions bound lazily, 5 top-level statements run"),
             "{printed}"
         );
         assert!(printed.contains("hello ry !"), "{printed}");
@@ -226,6 +230,55 @@ fn strict_mode_refuses_an_untyped_package_on_both_runtimes() {
 }
 
 #[test]
+fn a_loaded_package_cannot_define_classes_when_object_systems_are_off() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: classless\nVersion: 1.0\n"),
+        ("ry.toml", "[check]\nobject-systems = false\n"),
+        (
+            "R/a.R",
+            "make_account <- function() setRefClass(\"Account\")\n",
+        ),
+    ]);
+    let output = ry_load(root.path(), &["cat(\"loaded\\n\")", "make_account()"]);
+    let printed = text(&output);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(printed.contains("loaded"), "{printed}");
+    assert!(
+        printed.contains(
+            "Reference Classes are turned off in this project (`[check] object-systems = false`), so `setRefClass` cannot define a Reference Class"
+        ),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_strict_project_binds_pure_constants_lazily_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: tally\nVersion: 1.0\n"),
+        ("ry.toml", "[check]\nstrict = true\n"),
+        (
+            "R/a.R",
+            "#: fn(x: double[]) -> double[]\nscale_up <- function(x) x * 2\n#: double[]\nbase <- c(1, 2)\n",
+        ),
+    ]);
+    for runtime in ["ry", "gnu-r"] {
+        let output = ry_load_on(runtime, root.path(), &["print(base)"]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("2 definitions bound lazily, 0 top-level statements run"),
+            "{runtime}: {printed}"
+        );
+    }
+}
+
+#[test]
 fn a_failing_statement_names_its_file_and_line() {
     if !r_available() {
         return;
@@ -296,7 +349,7 @@ fn plain_r_gets_load_all_from_the_entry_point() {
     assert!(output.status.success(), "{printed}");
     assert!(printed.contains("hello a !"), "{printed}");
     assert!(
-        printed.contains("Reloaded demo: 1 function rebound"),
+        printed.contains("Reloaded demo: 1 definition rebound"),
         "{printed}"
     );
     assert!(printed.contains("hi b !"), "{printed}");

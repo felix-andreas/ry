@@ -5,30 +5,33 @@
 //! an unstable algorithm (`sort` on doubles, `psort`, `qsort`) use the same textbook algorithm,
 //! because the arrangement of ties and of `NaN` is observable through them.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    coerce::{coerce_vector, factor_as_character},
-    conditions::warning,
-    eval, records, standard_library,
-    subset::select_elements,
-    unwind::{R, error},
-    values::{
-        self, alloc, as_logical_scalar, char_str, get_attr, length, na_string, nil, string_at,
-        symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        coerce::{coerce_vector, factor_as_character},
+        conditions::warning,
+        eval, records, standard_library,
+        subset::select_elements,
+        unwind::{R, error},
+        values::{
+            self, alloc, as_logical_scalar, char_str, get_attr, length, na_string, nil, string_at,
+            symbols,
+        },
     },
-};
-use heap::{
-    object::{
-        NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+    heap::{
+        object::{
+            NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+        },
+        records::NativeKind,
     },
-    records::NativeKind,
-};
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
-use std::{
-    borrow::Cow,
-    cell::Cell,
-    cmp::Ordering,
-    hash::{Hash, Hasher},
+    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
+    std::{
+        borrow::Cow,
+        cell::Cell,
+        cmp::Ordering,
+        hash::{Hash, Hasher},
+        sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -58,49 +61,83 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// for the scripts R code commonly sorts: spaces, then punctuation and symbols, then digits, then
 /// letters compared without case or accents; ties go to accents, then lowercase before uppercase.
 pub fn collate(left: &str, right: &str) -> Ordering {
-    if c_collation() {
+    if c_collation() || left == right {
         return left.cmp(right);
     }
-    let primary = |text: &str| text.chars().map(primary_weight).collect::<Vec<_>>();
-    let secondary = |text: &str| {
-        text.chars()
-            .map(|character| base_letter(character).1)
-            .collect::<Vec<_>>()
-    };
-    let tertiary = |text: &str| {
-        text.chars()
-            .map(|character| character.is_uppercase())
-            .collect::<Vec<_>>()
-    };
-    primary(left)
-        .cmp(&primary(right))
-        .then_with(|| secondary(left).cmp(&secondary(right)))
-        .then_with(|| tertiary(left).cmp(&tertiary(right)))
+    // Each level compares lazily, so the common case of strings that differ early never looks
+    // past the first differing character.
+    let accent = |character| base_letter(character).1;
+    (left.chars().map(primary_weight))
+        .cmp(right.chars().map(primary_weight))
+        .then_with(|| left.chars().map(accent).cmp(right.chars().map(accent)))
+        .then_with(|| {
+            (left.chars().map(char::is_uppercase)).cmp(right.chars().map(char::is_uppercase))
+        })
         .then_with(|| left.cmp(right))
 }
 
-/// Whether the session collates by code point: `LC_ALL`, then `LC_COLLATE`, then `LANG` is `C` or
-/// `POSIX`.
+/// Whether the C library's `LC_COLLATE` is `C` or `POSIX`, so strings collate by code point.
+/// The C library owns the locale; this mirrors it so a comparison need not ask, and
+/// `refresh_collation` runs wherever the session changes the locale.
+static C_COLLATION: AtomicBool = AtomicBool::new(true);
+
 fn c_collation() -> bool {
-    static C_COLLATION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *C_COLLATION.get_or_init(|| {
-        let locale = ["LC_ALL", "LC_COLLATE", "LANG"]
-            .iter()
-            .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
-            .unwrap_or_else(|| "C".to_owned());
-        locale == "C" || locale == "POSIX"
-    })
+    C_COLLATION.load(AtomicOrdering::Relaxed)
+}
+
+pub fn refresh_collation() {
+    // SAFETY: querying with a null locale only reads the current setting.
+    let current = unsafe { libc::setlocale(libc::LC_COLLATE, std::ptr::null()) };
+    let c = current.is_null() || {
+        // SAFETY: a non-null result is a NUL-terminated string the C library owns.
+        let name = unsafe { std::ffi::CStr::from_ptr(current) }.to_bytes();
+        name == b"C" || name == b"POSIX"
+    };
+    C_COLLATION.store(c, AtomicOrdering::Relaxed);
 }
 
 /// The root collation's primary weight of a character, as a (group, value) pair.
 fn primary_weight(character: char) -> (u8, u32) {
-    // The punctuation and symbols of ASCII, in the order the root collation sorts them.
-    const PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+    match ASCII_PRIMARY_WEIGHTS.get(character as usize) {
+        Some(&weight) => weight,
+        None => non_ascii_primary_weight(character),
+    }
+}
+
+/// The punctuation and symbols of ASCII, in the order the root collation sorts them.
+const PUNCTUATION: &[u8] = b"_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+
+/// `primary_weight` of every ASCII character, because sorting is dominated by ASCII text.
+const ASCII_PRIMARY_WEIGHTS: [(u8, u32); 128] = {
+    let mut table = [(0u8, 0u32); 128];
+    let mut code = 0;
+    while code < 128 {
+        let byte = code as u8;
+        table[code] = if byte.is_ascii_whitespace() || byte == 0x0b {
+            (0, code as u32)
+        } else if byte.is_ascii_digit() {
+            (3, (byte - b'0') as u32)
+        } else if byte.is_ascii_alphabetic() {
+            (4, byte.to_ascii_lowercase() as u32)
+        } else {
+            let mut position = 0;
+            while position < PUNCTUATION.len() && PUNCTUATION[position] != byte {
+                position += 1;
+            }
+            if position < PUNCTUATION.len() {
+                (1, position as u32)
+            } else {
+                (2, code as u32)
+            }
+        };
+        code += 1;
+    }
+    table
+};
+
+fn non_ascii_primary_weight(character: char) -> (u8, u32) {
     if character.is_whitespace() {
         return (0, character as u32);
-    }
-    if let Some(position) = PUNCTUATION.find(character) {
-        return (1, position as u32);
     }
     if let Some(digit) = character.to_digit(10) {
         return (3, digit);
@@ -117,6 +154,9 @@ fn primary_weight(character: char) -> (u8, u32) {
 
 /// A Latin letter without its accent, and an accent rank (0 for none).
 fn base_letter(character: char) -> (char, u32) {
+    if character.is_ascii() {
+        return (character, 0);
+    }
     const ACCENTED: [(&str, char); 14] = [
         ("àáâãäåāăą", 'a'),
         ("ÀÁÂÃÄÅĀĂĄ", 'A'),
@@ -775,7 +815,7 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
     if codes.is_empty() && observations > 0 {
         return Err(error("group length is 0 but data length > 0"));
     }
-    if !codes.is_empty() && observations % codes.len() != 0 {
+    if !codes.is_empty() && !observations.is_multiple_of(codes.len()) {
         warning("data length is not a multiple of split variable")?;
     }
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); level_count];
@@ -820,7 +860,10 @@ unsafe fn do_identical(call: &Call<'_>) -> R<Sexp> {
         "extptr.as.ref",
     ];
     for (position, name) in names.iter().enumerate() {
-        settings[position] = flag(call.arg(position + 2), &format!("invalid '{name}' value"))?;
+        settings[position] = match as_logical_scalar(call.arg(position + 2)) {
+            NA_LOGICAL => return Err(error(format!("invalid '{name}' value"))),
+            value => value != 0,
+        };
     }
     let flags = IdenticalFlags {
         num_eq: settings[0],
@@ -873,6 +916,9 @@ enum Column<'a> {
     Complex(&'a [Rcomplex]),
     Raw(&'a [u8]),
     String(Vec<Option<Cow<'a, str>>>),
+    /// Strings the radix sort orders: GNU R's radix sort compares bytes, as in the C locale,
+    /// whatever the session's collation.
+    Bytes(Vec<Option<Cow<'a, str>>>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
     /// `decreasing` and `na.last` say.
@@ -909,7 +955,10 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                 .collect();
             Some(Column::Grouped(codes))
         }
-        _ => column(vector),
+        _ => match column(vector) {
+            Some(Column::String(items)) => Some(Column::Bytes(items)),
+            other => other,
+        },
     }
 }
 
@@ -919,7 +968,7 @@ impl Column<'_> {
             Column::Integer(items) => items[index] == NA_INTEGER,
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
-            Column::String(items) => items[index].is_none(),
+            Column::String(items) | Column::Bytes(items) => items[index].is_none(),
             Column::Grouped(_) | Column::Raw(_) => false,
         }
     }
@@ -944,6 +993,7 @@ impl Column<'_> {
                 (Some(left), Some(right)) => collate(left, right),
                 _ => Ordering::Equal,
             },
+            Column::Bytes(items) => items[left].cmp(&items[right]),
         }
     }
 
@@ -1457,6 +1507,7 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
     let kind = x.kind();
     if kind != y.kind()
         || x.is_object() != y.is_object()
+        || x.is_array() != y.is_array()
         || x.has_gp(gp::S4_OBJECT) != y.has_gp(gp::S4_OBJECT)
     {
         return false;

@@ -2,20 +2,27 @@
 //! project-wide salsa queries. On throttled vCPUs check raw thread scaling (H) first.
 //! Usage: `WORKERS=4 cargo run --release -p ry-lang --example parallel_probe <package-dir>...`
 
-use semantics::diagnostics::file_diagnostics;
-use semantics::stubs::install_shipped_stubs;
-use semantics::types::{Name, Ty, TyKind, unknown};
-use semantics::{
-    Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache, global_scheme,
-    interface_sccs, item_naming, item_tree, package_definitions,
+use {
+    semantics::{
+        Db, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile, SpliceCache,
+        diagnostics::file_diagnostics,
+        global_scheme, interface_group, item_naming, item_tree, package_definitions,
+        stubs::install_shipped_stubs,
+        types::{Name, Ty, TyKind, unknown},
+    },
+    std::{
+        collections::HashMap,
+        env, fs,
+        num::NonZero,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::Instant,
+    },
 };
-use std::collections::HashMap;
-use std::num::NonZero;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-use std::{env, fs, thread};
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static BLOCKS: AtomicUsize = AtomicUsize::new(0);
@@ -79,15 +86,12 @@ fn main() {
 
     let (db, files) = setup::<RootDatabase>(&sources);
     let start = Instant::now();
-    let sccs = interface_sccs(&db, ProjectFiles::get(&db));
+    let cyclic = interface_groups(&db, &files);
     let interface = start.elapsed();
     let start = Instant::now();
     let findings = full_check(&db, &files);
     let rest = start.elapsed();
-    println!(
-        "B interface_sccs alone: {interface:?} ({} cyclic groups)",
-        sccs.groups.len()
-    );
+    println!("B interface groups of every item: {interface:?} ({cyclic} cyclic members)");
     println!("C remaining check after B: {rest:?} ({findings} findings)");
 
     let (db, files) = setup::<RootDatabase>(&sources);
@@ -112,8 +116,8 @@ fn main() {
     warm_naming(&db, &files, workers);
     println!("E1 parallel naming warm: {:?}", start.elapsed());
     let start = Instant::now();
-    interface_sccs(&db, ProjectFiles::get(&db));
-    println!("E2 interface_sccs after warm: {:?}", start.elapsed());
+    interface_groups(&db, &files);
+    println!("E2 interface groups after warm: {:?}", start.elapsed());
     let start = Instant::now();
     let cpu_before = cpu_ticks();
     let findings = parallel_check(&db, &files, workers);
@@ -134,7 +138,7 @@ fn main() {
 
     let (db, files) = setup::<ProbeDatabase>(&sources);
     warm_naming(&db, &files, workers);
-    interface_sccs(&db, ProjectFiles::get(&db));
+    interface_groups(&db, &files);
     let executes_before = EXECUTES.load(Ordering::Relaxed);
     let blocks_before = BLOCKS.load(Ordering::Relaxed);
     let start = Instant::now();
@@ -152,7 +156,6 @@ fn main() {
     let start = Instant::now();
     warm_naming(&db, &files, workers);
     let project = ProjectFiles::get(&db);
-    let sccs = interface_sccs(&db, project);
     let winners = package_definitions(&db, project);
     let mut nodes: Vec<Item> = Vec::new();
     let mut position = HashMap::new();
@@ -179,8 +182,9 @@ fn main() {
     }
     // Cycle members all take their group's first member's level.
     let same_group = |a: usize, b: usize| {
-        sccs.membership.contains_key(&nodes[a])
-            && sccs.membership.get(&nodes[a]) == sccs.membership.get(&nodes[b])
+        interface_group(&db, project, nodes[a])
+            .as_deref()
+            .is_some_and(|members| members.contains(&nodes[b]))
     };
     let mut level: Vec<usize> = vec![0; nodes.len()];
     let mut changed = true;
@@ -348,4 +352,14 @@ fn cpu_ticks() -> (u64, u64) {
             .unwrap_or(0)
     };
     (field(11), field(12))
+}
+
+/// Resolves every item's cyclic group and counts the items that belong to one.
+fn interface_groups(db: &dyn Db, files: &[SourceFile]) -> usize {
+    let project = ProjectFiles::get(db);
+    files
+        .iter()
+        .flat_map(|&file| item_tree(db, file).iter())
+        .filter(|&&item| interface_group(db, project, item).is_some())
+        .count()
 }

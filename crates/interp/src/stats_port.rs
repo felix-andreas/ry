@@ -13,16 +13,18 @@
 //! a run converges or fails for the same reasons, but iterates and evaluation counts are not
 //! PORT's.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    coerce::coerce_vector,
-    eval,
-    format::c_general,
-    stats::real_values,
-    unwind::R,
-    values::{self, length},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        coerce::coerce_vector,
+        eval,
+        format::c_general,
+        stats::real_values,
+        unwind::R,
+        values::{self, length},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 /// `port_ivset(kind, iv, v)`: fills `iv` and `v` with the default settings. `kind` 1 is
 /// least squares and 2 general minimization; both use the same defaults here.

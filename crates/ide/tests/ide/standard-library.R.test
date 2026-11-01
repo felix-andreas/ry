@@ -3,17 +3,20 @@
 doubled <- List.m$0ap(list(1L, 2L), function(x) x * 2L)
 #++++
 hover 11..19: List.map: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
-hover-definition: package ry (1 declaration(s), declared in stub source 11 at `List.map`)
-definition: stub source 11 at `List.map`
+hover-definition: package ry (2 declaration(s), declared in stub source 12 at `List.map`)
+hover-documentation: Applies `f` to each element.
+definition: stub source 12 at `List.map`
 references: none
 rename: none
-signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer]
+signature: <T, U: item> fn(list: Array<T>, f: fn(T) -> U) -> Array<U>
+parameters: [list: Array<T>] | f: fn(T) -> U
+signature: fn(list: list[integer], f: fn(integer) -> integer) -> list[integer] (active)
 parameters: [list: list[integer]] | f: fn(integer) -> integer
 action: Add inferred type annotation for `doubled`
   edit 0..0 -> "#: list[integer]\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: list[integer]\n"
-completion (10): List.map, List.map2, List.map_try, List.map_with_index, List.max, List.min, List.from_vector, List.is_empty
+completion (14): List.map, List.map2, List.map3, List.map4, List.map_try, List.map_with_index, List.max, List.min
 hint @7: list[integer]
 
 #---- completion_after_a_module_prefix
@@ -35,8 +38,9 @@ hover 43..51: Dict.get: fn(
 hover 43..51:   dict: Dict<character, double>,
 hover 43..51:   key: character,
 hover 43..51: ) -> :Ok(double) | :Err(:KeyNotFound)
-hover-definition: package ry (1 declaration(s), declared in stub source 11 at `Dict.get`)
-definition: stub source 11 at `Dict.get`
+hover-definition: package ry (1 declaration(s), declared in stub source 12 at `Dict.get`)
+hover-documentation: The value stored under `key`, or `:Err(:KeyNotFound)`.
+definition: stub source 12 at `Dict.get`
 references: none
 rename: none
 signature: fn(dict: Dict<character, double>, key: character) -> :Ok(double) | :Err(:KeyNotFound)
@@ -60,3 +64,34 @@ references: none
 rename: none
 signature: none
 completion (1): Result
+
+#---- hover_on_a_library_alias_shows_its_definition
+#: fn(r: Res$0ult<integer, character>) -> integer
+unwrap <- function(r) Result.with_default(r, 0L)
+#++++
+hover 9..15: @alias Result<T, U> {:Ok(T) | :Err(U)}
+hover-definition: package ry (0 declaration(s), declared in stub source 12 at `Result`)
+definition: stub source 12 at `Result`
+references: 9..15
+rename: none
+signature: none
+completion (1): Result
+
+#---- hint_drops_an_impossible_vector_member
+type Position = Record{x: double, y: double}
+#: fn(p: Position) -> double
+position_value <- function(p) p$x
+summa$0rise <- function(positions) vapply(positions, position_value, numeric(1))
+#++++
+hover 108..117: summarise: fn(positions: list[Position]) -> double[]
+hover-definition: global 108..117
+definition 108..117
+references: 108..117*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotation for `summarise`
+  edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
+action: Add inferred type annotations for the whole file
+  edit 108..108 -> "#: fn(positions: list[Position]) -> double[]\n"
+completion (37): summarise, Summary, summary, summary.aov, summary.connection, Summary.data.frame, summary.data.frame, Summary.Date
+hint @117: fn(positions: list[Position]) -> double[]

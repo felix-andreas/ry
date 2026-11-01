@@ -1,15 +1,25 @@
 //! `ry.toml` and the former `roughly.toml` are both looked for in a directory
 //! before walking to its parent, so a stale old-name file higher up never wins.
 
-use miette::{Diagnostic, LabeledSpan, NamedSource, SourceCode, SourceSpan};
-use semantics::lints::{LintConfig, NameStyle};
-use serde::de::{self, DeserializeOwned, Deserializer, Visitor};
-use serde::{Deserialize, forward_to_deserialize_any};
-use std::fs;
-use std::iter::once;
-use std::path::{Component, Path, PathBuf, absolute};
-use std::{fmt, io};
-use thiserror::Error;
+use {
+    crate::cli::exclude_matcher,
+    miette::{
+        Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
+        SourceSpan,
+    },
+    semantics::lints::{LintConfig, NameStyle},
+    serde::{
+        Deserialize,
+        de::{self, DeserializeOwned, Deserializer, Visitor},
+        forward_to_deserialize_any,
+    },
+    std::{
+        fmt, fs, io,
+        iter::once,
+        path::{Component, Path, PathBuf, absolute},
+    },
+    thiserror::Error,
+};
 
 pub const CONFIG_FILE_NAME: &str = "ry.toml";
 
@@ -141,6 +151,50 @@ impl Config {
             source_directory: None,
             unknown_keys,
         })
+    }
+}
+
+/// Any text read as `ry.toml` or `roughly.toml` either loads or fails with a report that renders,
+/// and nothing on either path panics: loading, the warnings, the exclude matcher, and the report
+/// with its location. Shared with the coverage-guided `fuzz/` target.
+pub fn check_config_invariants(text: &str) {
+    let parsed = Config::from_toml_str(text);
+    match (&parsed, &Config::from_toml_str(text)) {
+        (Ok(first), Ok(again)) => {
+            assert_eq!(first, again, "non-deterministic config for {text:?}")
+        }
+        (Err(first), Err(again)) => assert_eq!(
+            first.to_string(),
+            again.to_string(),
+            "non-deterministic config error for {text:?}"
+        ),
+        _ => panic!("the config loads only sometimes for {text:?}"),
+    }
+    match parsed {
+        Ok(config) => {
+            config.warnings();
+            // An invalid pattern is a reported error, not a panic.
+            exclude_matcher(&config, Path::new("/")).ok();
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "an empty config error for {text:?}"
+            );
+            if let Some((line, column)) = error.parse_location() {
+                assert!(
+                    line >= 1 && line <= text.lines().count().max(1) + 1 && column >= 1,
+                    "config error location {line}:{column} escapes {text:?}"
+                );
+            }
+            let mut rendered = String::new();
+            assert!(
+                GraphicalReportHandler::new_themed(GraphicalTheme::none())
+                    .render_report(&mut rendered, &error)
+                    .is_ok(),
+                "the config error report does not render for {text:?}"
+            );
+        }
     }
 }
 
@@ -417,10 +471,7 @@ impl ExperimentalFeatures {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use format::LineEnding;
-    use indoc::indoc;
-    use semantics::lints::LintLevel;
+    use {super::*, format::LineEnding, indoc::indoc, semantics::lints::LintLevel};
 
     fn parse(text: &str) -> Config {
         Config::from_toml_str(text).unwrap()

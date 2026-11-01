@@ -3,7 +3,7 @@ title: Package loading
 description: What ry binds, runs and rebinds when it loads a package from source, and what it does not do yet
 ---
 
-[`ry load`](/guides/loading-packages), `ry repl` and `load_all()` all load a package the same way.
+[`ry load`](/guides/loading-packages), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
 This page is the exact behavior.
 
 ## A load
@@ -12,6 +12,11 @@ This page is the exact behavior.
   evaluates only that definition the first time anything uses `name`. When another top-level
   statement writes the same name, as `f <- memoise(f)` does, every writer of it runs in order
   instead.
+- **A constant of a strict file**, `name <- value` in a file under [strict mode](/type-checking/strict-mode)
+  whose value calls only pure functions, becomes a promise the same way, unless another statement
+  writes the same name. Strict mode guarantees the value has no effect, so evaluating it on first use
+  gives what a load would have computed
+  ([lazy constants](/reference/type-system#lazy-constants)).
 - **Every other top-level statement** runs at load time, in `Collate` order, with the files that
   `Collate` leaves out following in C-locale order.
 - **`NAMESPACE`** works as in an installed package: imports, `S3method()` registrations, and exports.
@@ -25,7 +30,7 @@ This page is the exact behavior.
   `# typing: strict` comment, `ry load` checks the package's `R/` files first, on either runtime.
   If any has a strict-mode error, it prints the errors and exits with status 1 without loading
   anything. The `R/` files are checked together, so a name one file defines resolves in the others.
-  A later `load_all()` in the same session, and the load `ry repl` makes, do not check.
+  A later `load_all()` in the same session, and the load a console makes, do not check.
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
 into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an
@@ -41,10 +46,17 @@ A reload works out which top-level items changed and touches only those:
   it ran, including anything the functions it called use. `cached <- helper()` reruns after you edit
   `helper`, or a function `helper` calls, while a function that calls `helper()` does not need to,
   because it looks `helper` up when it runs.
+- A lazy constant is bound again when you changed it, or when anything its value reaches changed,
+  such as the body of a pure function it calls, so its next use computes the new value.
 - When two statements write the same name, the last one in collation order wins again, and a
   statement like `f <- memoise(f)` sees `f` as it was at load time rather than wrapping it twice.
 - A `NAMESPACE` change rebuilds the imports or resyncs the exports, `.onLoad` runs again when you
   changed it, and a deleted S4 method or class is removed.
+
+A console reloads before a command when the names, sizes or modification times of `DESCRIPTION`,
+`NAMESPACE` or the files in `R/` changed since the last load, so it never reads a file to find out.
+An edit under `src/` is not noticed, and neither is anything in a package whose first load failed:
+call `load_all()` after either.
 
 ## Limits
 
@@ -54,8 +66,8 @@ A reload works out which top-level items changed and touches only those:
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
-- On ry's own runtime (the default for `ry load`), functions carry no source references. Use
-  `ry load --runtime gnu-r` when you need them.
+- On ry's own runtime (`ry load`, the `ry run` console, and `load_all()` in a `ry run` script),
+  functions carry no source references. Load in `ry R` when you need them.
 - Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
   GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
   ry's own `libR.so` already provides.

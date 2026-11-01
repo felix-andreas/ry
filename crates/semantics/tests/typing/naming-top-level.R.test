@@ -74,7 +74,7 @@ character
 10..11 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
   = 0..1 the earlier binding is here.
 
-#---- assignment_rhs_resolves_to_final_global_binding
+#---- assignment_rhs_resolves_to_the_earlier_binding
 #~~~~ R/main.R
 x <- 1L
 x <- x
@@ -82,9 +82,49 @@ x
 #++++
 == R/main.R
 x: integer
-x: Unknown
-Unknown
+x: integer
+integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
   = 8..9 the later binding is here.
 8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
   = 0..1 the earlier binding is here.
+
+#==== chained_definitions
+#---- every_target_of_a_chain_is_a_top_level_function
+#~~~~ R/memo.R
+memoise <- memoize <- function(f, cache = NULL) f
+#~~~~ R/use.R
+a <- memoise(abs)
+b <- memoize(abs)
+c <- memoize(abs, 1, 2)
+#++++
+== R/memo.R
+memoise: <T, U> fn(f: T, [cache]: U) -> T
+== R/use.R
+a: fn(x: Any) -> Any
+b: fn(x: Any) -> Any
+c: Unknown
+57..58 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 2
+
+#==== dispatch_variables
+#---- a_method_reads_the_dispatch_variables
+#~~~~ R/ops.R
+Ops.money <- function(e1, e2) {
+  if (.Generic %in% c("+", "-")) NextMethod() else stop(.Generic, " is not supported")
+}
+print.money <- function(x, ...) {
+  cat(.Class[1], .Method, "\n")
+  invisible(x)
+}
+#++++
+== R/ops.R
+Ops.money: <T, U> fn([e1]: T, [e2]: U) -> Any
+print.money: <T> fn(x: T, ...: Any) -> T
+
+#---- the_top_level_does_not_see_them
+#~~~~ R/ops.R
+generic <- .Generic
+#++++
+== R/ops.R
+generic: Unknown
+11..19 warning[unresolved] I could not resolve `.Generic` in this package, its imports, or builtins. Did you mean `generic`?

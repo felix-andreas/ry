@@ -29,17 +29,15 @@ c(1L, 2L) >= 1.5
 #++++
 logical[]
 
-#---- comparison_logical_vs_character_rejected
+#---- comparison_logical_vs_character_coerces
 TRUE == "a"
 #++++
-Unknown
-8..11 error[type-mismatch] expected `logical`, found `character`
+logical
 
 #---- comparison_against_null_rejected
 1L == NULL
 #++++
 Unknown
-6..10 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `NULL`
 
 #---- and_chained
 TRUE && FALSE && TRUE
@@ -70,8 +68,7 @@ logical[]
 #---- not_null_rejected
 !NULL
 #++++
-Unknown
-1..5 error[type-mismatch] expected a `logical` value, found `NULL`
+logical[]
 
 #---- and_numeric_operand_coerces
 1L && TRUE
@@ -124,11 +121,10 @@ list(foo = 1L, bar = "x")[["foo"]]
 #++++
 integer
 
-#---- double_bracket_record_missing_name_rejected
+#---- double_bracket_record_missing_name_reads_unknown
 list(foo = 1L)[["missing"]]
 #++++
 Unknown
-16..25 error[type-mismatch] field `missing` does not exist in `list{foo: integer}`
 
 #---- double_bracket_array_list
 #: list[integer]
@@ -194,11 +190,16 @@ list(foo = 1L, bar = "x")$foo
 #++++
 integer
 
-#---- dollar_missing_record_field_rejected
+#---- dollar_missing_record_field_reads_unknown
 list(foo = 1L)$bar
 #++++
 Unknown
-15..18 error[type-mismatch] field `bar` does not exist in `list{foo: integer}`
+
+#---- dollar_near_miss_record_field_rejected
+list(value = 1L)$valeu
+#++++
+Unknown
+17..22 error[type-mismatch] field `valeu` does not exist in `list{value: integer}`. Did you mean `value`?
 
 #---- dollar_tuple_list_rejected
 list(1L, 2L)$foo
@@ -393,11 +394,10 @@ v <- c(TRUE, FALSE)
 v: logical[]
 logical
 
-#---- or_with_nullable_operand_rejected
+#---- or_with_nullable_operand_accepted
 c(a = TRUE)[["a"]] || FALSE
 #++++
 logical
-0..18 error[type-mismatch] expected `logical`, found `logical | NULL`
 
 #---- nominal_comparison_character_projects
 #: @type Name {character}

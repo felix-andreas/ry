@@ -178,10 +178,15 @@ f <- function(d) dplyr::mutate(d, x = 1)
 f: <T> fn(d: T) -> T
 
 #---- undeclared_namespaces_still_warn
+f <- function(d) unshipped::mutate(d, x = 1)
+#++++
+f: <T> fn(d: T) -> Unknown
+17..34 warning[unresolved] unknown package namespace `unshipped`.
+
+#---- a_shipped_package_may_be_read_by_qualification_alone
 f <- function(d) dplyr::mutate(d, x = 1)
 #++++
 f: <T> fn(d: T) -> Unknown
-17..30 warning[unresolved] unknown package namespace `dplyr`.
 
 #---- an_import_source_counts_as_declared
 #namespace importFrom(dplyr, mutate)
@@ -208,22 +213,22 @@ call_it: fn() -> Unknown
 sd <- function(x) "not the real one"
 call_it <- function() stats::sd(1L)
 #++++
-sd: <T> fn(x: T) -> character
+sd: <T> fn([x]: T) -> character
 call_it: fn() -> character
 
 #---- a_different_package_is_still_validated
 #description Package: withr
-call_it <- function(d) dplyr::mutate(d, x = 1)
+call_it <- function(d) unshipped::mutate(d, x = 1)
 #++++
 call_it: <T> fn(d: T) -> Unknown
-51..64 warning[unresolved] unknown package namespace `dplyr`.
+51..68 warning[unresolved] unknown package namespace `unshipped`.
 
 #==== datatable
 #---- declared_dependency_activates_the_stub
 #description Imports: data.table
 load <- function(path) fread(path)
 #++++
-load: fn(path: character) -> frame
+load: fn(path: character) -> data.table
 
 #---- inactive_namespace_stays_dark
 load <- function(path) fread(path)
@@ -236,7 +241,7 @@ library(data.table)
 load <- function(path) fread(path)
 #++++
 Any
-load: fn(path: character) -> frame
+load: fn(path: character) -> data.table
 
 #---- brackets_keep_the_class_through_chains
 #description Imports: data.table
@@ -327,3 +332,62 @@ f <- function(df) mutate(df, x = 1)
 #++++
 f: <T> fn(df: T) -> Unknown
 18..24 warning[unresolved] I could not resolve `mutate` in this package, its imports, or builtins.
+
+#==== native_symbols
+#---- registered_routines_with_a_prefix_resolve
+#namespace useDynLib(xts, .registration = TRUE, .fixes = "C_")
+endpoints <- function(x, k) .Call(C_endpoints, x, k)
+routine <- function() C_lag
+#++++
+endpoints: <T, U> fn(x: T, k: U) -> Unknown
+routine: fn() -> Unknown
+
+#---- registered_routines_without_a_prefix_resolve_as_routines
+#namespace useDynLib(cachem, .registration = TRUE)
+size <- function(x) .Call(C_size, x)
+other <- function() C_size
+#++++
+size: <T> fn(x: T) -> Unknown
+other: fn() -> Unknown
+108..114 warning[unresolved] I could not resolve `C_size` in this package, its imports, or builtins.
+
+#---- listed_symbols_resolve_with_their_prefix
+#namespace useDynLib(memo, hash, alias = digest_impl, .fixes = "c_")
+h <- function(x) .Call(c_hash, x)
+a <- function(x) .Call(c_alias, x)
+plain <- function(x) .Call(hash, x)
+#++++
+h: <T> fn(x: T) -> Unknown
+a: <T> fn(x: T) -> Unknown
+plain: <T> fn(x: T) -> Unknown
+165..169 warning[unresolved] I could not resolve `hash` in this package, its imports, or builtins.
+
+#---- without_use_dyn_lib_a_routine_is_unresolved
+f <- function(x) .Call(C_endpoints, x)
+#++++
+f: <T> fn(x: T) -> Unknown
+23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins.
+
+#---- a_parameter_named_like_an_unknown_import_calls_the_import
+#namespace import(fs)
+read_description <- function(path) {
+  path <- path(path, "DESCRIPTION")
+  path
+}
+#++++
+read_description: <T> fn(path: T) -> Unknown
+
+#---- a_typed_parameter_named_like_an_unknown_import_calls_the_import
+#namespace import(fs)
+#: fn(path: character) -> Any
+package_file <- function(path) {
+  path(path, "DESCRIPTION")
+}
+#++++
+package_file: fn(path: character) -> Any
+
+#---- a_parameter_applied_to_itself_without_an_import_is_an_infinite_type
+apply_twice <- function(path) path(path)
+#++++
+apply_twice: Unknown
+30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.

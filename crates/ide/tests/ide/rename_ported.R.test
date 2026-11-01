@@ -28,7 +28,7 @@ wrapper <- function(val$0ue) {
   value
 }
 #++++
-hover 11..71: fn(value: T) -> T
+hover 20..25: value: T
 definition 20..25
 references: 20..25*, 64..69
 rename: 2 edit(s)
@@ -94,7 +94,7 @@ hint @64: fn(item: T) -> T
 #---- at_field_rhs
 obj@fie$0ld
 #++++
-hover 0..9: Unknown
+hover 4..9: field: Unknown
 definition: none
 references: none
 rename: none

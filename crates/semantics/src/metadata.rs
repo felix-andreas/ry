@@ -1,11 +1,14 @@
 //! `NAMESPACE` and `DESCRIPTION` facts. `NAMESPACE` is R call syntax and parses with the
 //! ordinary grammar; `DESCRIPTION` is DCF.
 
-use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
-use crate::{Db, SourceFile, parse};
-use std::collections::BTreeSet;
-use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use {
+    crate::{
+        Db, SiteRole, SourceFile, file_syntax_sites, parse,
+        stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known},
+    },
+    std::{collections::BTreeSet, num::NonZero, thread},
+    syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind},
+};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
 #[salsa::input(singleton, debug)]
@@ -24,6 +27,205 @@ pub struct PackageMetadata {
     /// definitions already in view.
     #[returns(ref)]
     pub package: Option<String>,
+    #[returns(ref)]
+    pub native_symbols: NativeSymbols,
+}
+
+/// The bindings `NAMESPACE`'s `useDynLib` directives create in the package namespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct NativeSymbols {
+    /// Each listed symbol's binding, its `.fixes` prefix included: `useDynLib(pkg, foo,
+    /// .fixes = "C_")` binds `C_foo`.
+    pub names: BTreeSet<String>,
+    /// The non-empty `.fixes` prefixes of registering directives. The routines a package
+    /// registers live in its compiled code, so any name with one of these prefixes may be one.
+    pub registered_prefixes: BTreeSet<String>,
+    /// Whether any directive has `.registration = TRUE`, which binds every registered routine.
+    pub registers: bool,
+}
+
+/// What the checker reads from `NAMESPACE`, all from one parse: a generated `NAMESPACE` can
+/// run to a megabyte, and parsing it is serial work before and after the parallel passes.
+#[derive(Default)]
+pub struct NamespaceFile {
+    pub imports: Vec<NamespaceImport>,
+    /// Only explicit `export()` names: `exportPattern` is a load-time regex, and
+    /// `exportClasses`/`exportMethods`/`S3method` name S4 and S3 entities, not bindings.
+    pub exports: Vec<(String, TextRange)>,
+    pub native_symbols: NativeSymbols,
+}
+
+/// A large file parses in chunks on separate threads. Every directive is self-contained, so
+/// the chunks' facts concatenate in order to exactly what one parse would give.
+pub fn parse_namespace(source: &str) -> NamespaceFile {
+    let workers = thread::available_parallelism().map_or(1, NonZero::get);
+    if source.len() < PARALLEL_NAMESPACE_BYTES || workers == 1 {
+        return parse_namespace_chunk(source, TextSize::from(0));
+    }
+    parse_namespace_in_chunks(source, &call_boundaries(source, workers))
+}
+
+/// Below this, one parse is faster than starting threads.
+const PARALLEL_NAMESPACE_BYTES: usize = 64 * 1024;
+
+fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
+    if chunks.len() == 1 {
+        return parse_namespace_chunk(source, TextSize::from(0));
+    }
+    let ends = chunks.iter().skip(1).copied().chain([source.len()]);
+    let parts: Vec<NamespaceFile> = thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .zip(ends)
+            .map(|(&start, end)| {
+                let offset = TextSize::from(start as u32);
+                scope.spawn(move || parse_namespace_chunk(&source[start..end], offset))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(part) => part,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    });
+    let mut file = NamespaceFile::default();
+    for part in parts {
+        file.imports.extend(part.imports);
+        file.exports.extend(part.exports);
+        let symbols = part.native_symbols;
+        file.native_symbols.names.extend(symbols.names);
+        file.native_symbols
+            .registered_prefixes
+            .extend(symbols.registered_prefixes);
+        file.native_symbols.registers |= symbols.registers;
+    }
+    file
+}
+
+fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
+    let root = syntax::parse(source).syntax_node();
+    let directives = namespace_directives(&root);
+    let mut imports = namespace_imports(&directives);
+    for import in &mut imports {
+        import.range += offset;
+    }
+    NamespaceFile {
+        imports,
+        exports: directives
+            .iter()
+            .filter(|(directive, _)| directive == "export")
+            .flat_map(|(_, values)| values)
+            .filter_map(name_argument)
+            .map(|(name, range)| (name, range + offset))
+            .collect(),
+        native_symbols: native_symbols(namespace_spec_of(&root)),
+    }
+}
+
+/// Start offsets of up to `parts` chunks, the first at 0. A chunk may start only on a line
+/// that opens with `name(` right after a line holding nothing but a complete top-level
+/// `name(...)` call. The parser ends a top-level expression at such a newline whatever came
+/// before it, while a looser rule would split an `if (cond)` from its body on the next line.
+fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
+    use SyntaxKind::*;
+    let (tokens, _) = syntax::lex(source);
+    let significant: Vec<(SyntaxKind, usize)> = tokens
+        .iter()
+        .scan(0usize, |offset, token| {
+            let start = *offset;
+            *offset += usize::from(token.len);
+            Some((token.kind, start))
+        })
+        .filter(|(kind, _)| !matches!(kind, WHITESPACE | COMMENT))
+        .collect();
+    let target = source.len() / parts;
+    let mut boundaries = vec![0];
+    // `simple` holds while the current line is exactly one call: a name, then a parenthesis
+    // that `open` follows back to empty.
+    let mut open: Vec<SyntaxKind> = Vec::new();
+    let mut simple = true;
+    let mut closed = false;
+    for (index, &(kind, _)) in significant.iter().enumerate() {
+        let at_line_start = index == 0 || significant[index - 1].0 == NEWLINE;
+        match kind {
+            NEWLINE if open.is_empty() => {
+                let next = significant.get(index + 1..index + 3);
+                if let (true, Some([(IDENT, start), (L_PAREN, _)])) = (simple && closed, next) {
+                    let due = boundaries.len() * target;
+                    if *start >= due && boundaries.len() < parts {
+                        boundaries.push(*start);
+                    }
+                }
+                simple = true;
+                closed = false;
+                continue;
+            }
+            NEWLINE => continue,
+            L_PAREN | L_BRACE | L_BRACKET => open.push(kind),
+            L_BRACKET2 => open.extend([L_BRACKET, L_BRACKET]),
+            R_PAREN | R_BRACE | R_BRACKET => {
+                let opener = match kind {
+                    R_PAREN => L_PAREN,
+                    R_BRACE => L_BRACE,
+                    _ => L_BRACKET,
+                };
+                // A stray or mismatched closer leaves the parser's recovery, not bracket
+                // matching, to decide where a call ends, so only one parse is exact.
+                if open.pop() != Some(opener) {
+                    return vec![0];
+                }
+            }
+            _ => {}
+        }
+        let depth = open.len();
+        let call_start = at_line_start && kind == IDENT;
+        let call_open = index > 0
+            && kind == L_PAREN
+            && depth == 1
+            && significant[index - 1].0 == IDENT
+            && (index == 1 || significant[index - 2].0 == NEWLINE);
+        if closed || !(call_start || call_open || depth > 0 || kind == R_PAREN) {
+            simple = false;
+        }
+        if kind == R_PAREN && depth == 0 {
+            closed = true;
+        }
+    }
+    boundaries
+}
+
+fn native_symbols(spec: NamespaceSpec) -> NativeSymbols {
+    let mut symbols = NativeSymbols::default();
+    for library in spec.dynamic_libraries {
+        for (binding, _) in &library.symbols {
+            symbols.names.insert(format!("{}{binding}", library.fixes));
+        }
+        if library.registration {
+            symbols.registers = true;
+            if !library.fixes.is_empty() {
+                symbols.registered_prefixes.insert(library.fixes);
+            }
+        }
+    }
+    symbols
+}
+
+/// Whether a `useDynLib` directive may bind `name`. A registering directive binds names that
+/// only the compiled code knows, so a bare name read as a native interface's routine resolves
+/// (`native_routine`), and so does any name with a registered `.fixes` prefix.
+pub fn native_symbol(db: &dyn Db, name: &str, native_routine: bool) -> bool {
+    let Some(metadata) = PackageMetadata::try_get(db) else {
+        return false;
+    };
+    let symbols = metadata.native_symbols(db);
+    symbols.names.contains(name)
+        || (native_routine && symbols.registers)
+        || symbols
+            .registered_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
 }
 
 /// Knowledge about `name` itself, unlike the blanket tolerance of [`imports_every_name`].
@@ -109,24 +311,9 @@ pub fn attached_union(
 #[salsa::tracked(returns(clone))]
 pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     let mut attached = BTreeSet::new();
-    for node in parse(db, file).syntax_node().descendants() {
-        if node.kind() != SyntaxKind::CALL_EXPR {
-            continue;
-        }
-        let Some(callee) = node
-            .children()
-            .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
-        else {
-            continue;
-        };
-        if callee.kind() != SyntaxKind::NAME
-            || !matches!(
-                callee.text().to_string().as_str(),
-                "library" | "require" | "requireNamespace" | "loadNamespace"
-            )
-        {
-            continue;
-        }
+    let root = parse(db, file).syntax_node();
+    let calls = file_syntax_sites(db, file).nodes(&root, SiteRole::AttachCall);
+    for node in calls {
         let first_positional = node
             .children()
             .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
@@ -153,6 +340,20 @@ pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<Strin
     attached
 }
 
+pub(crate) fn is_green_attach_call(node: GreenRef<'_>) -> bool {
+    node.kind() == SyntaxKind::CALL_EXPR
+        && node
+            .child_nodes()
+            .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
+            .is_some_and(|callee| {
+                callee.kind() == SyntaxKind::NAME
+                    && matches!(
+                        callee.single_token_text(),
+                        Some("library" | "require" | "requireNamespace" | "loadNamespace")
+                    )
+            })
+}
+
 pub struct NamespaceImport {
     pub namespace: String,
     /// `None` for a whole-namespace `import(pkg)`.
@@ -161,9 +362,9 @@ pub struct NamespaceImport {
 }
 
 /// Directives R would reject are skipped, not reported: R itself validates NAMESPACE syntax.
-pub fn parse_namespace_imports(source: &str) -> Vec<NamespaceImport> {
+fn namespace_imports(directives: &[(String, Vec<SyntaxNode>)]) -> Vec<NamespaceImport> {
     let mut imports = Vec::new();
-    for (directive, values) in namespace_directives(source) {
+    for (directive, values) in directives {
         match directive.as_str() {
             "import" => imports.extend(values.iter().filter_map(name_argument).map(
                 |(namespace, range)| NamespaceImport {
@@ -190,22 +391,11 @@ pub fn parse_namespace_imports(source: &str) -> Vec<NamespaceImport> {
     imports
 }
 
-/// Only explicit `export()` names: `exportPattern` is a load-time regex, and
-/// `exportClasses`/`exportMethods`/`S3method` name S4 and S3 entities, not bindings.
-pub fn parse_namespace_exports(source: &str) -> Vec<(String, TextRange)> {
-    namespace_directives(source)
-        .into_iter()
-        .filter(|(directive, _)| directive == "export")
-        .flat_map(|(_, values)| values)
-        .filter_map(|value| name_argument(&value))
-        .collect()
-}
-
 /// Each top-level call with a bare-name callee, with its argument values. A named argument
 /// (`except = ...`) puts its name first; the value is the last expression child.
-fn namespace_directives(source: &str) -> Vec<(String, Vec<SyntaxNode>)> {
+fn namespace_directives(root: &SyntaxNode) -> Vec<(String, Vec<SyntaxNode>)> {
     let mut directives = Vec::new();
-    for node in syntax::parse(source).syntax_node().children() {
+    for node in root.children() {
         if node.kind() != SyntaxKind::CALL_EXPR {
             continue;
         }
@@ -292,8 +482,12 @@ pub struct DynamicLibraryDirective {
 /// Directives R would reject are skipped: R validates `NAMESPACE` syntax itself when it
 /// installs the package.
 pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
+    namespace_spec_of(&syntax::parse(source).syntax_node())
+}
+
+fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
     let mut spec = NamespaceSpec::default();
-    for node in syntax::parse(source).syntax_node().children() {
+    for node in root.children() {
         if !is_expression_kind(node.kind()) {
             continue;
         }
@@ -660,6 +854,54 @@ pub fn string_content(literal: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn namespace_facts(file: &NamespaceFile) -> String {
+        let imports: Vec<_> = file
+            .imports
+            .iter()
+            .map(|import| (&import.namespace, &import.name, import.range))
+            .collect();
+        format!("{imports:?} {:?} {:?}", file.exports, file.native_symbols)
+    }
+
+    #[test]
+    fn chunked_namespace_parse_matches_one_parse() {
+        let mut source = String::from("# generated\nimport(stats)\n");
+        for index in 0..200 {
+            source.push_str(&format!("export(f{index})\n"));
+            match index % 25 {
+                3 => {
+                    source.push_str("if (getRversion() >= \"4.0\")\nexport(late)\nexport(after)\n")
+                }
+                7 => source.push_str("importFrom(utils,\n  head, tail)\n"),
+                11 => source.push_str("x <- function()\nexport(body)\n"),
+                13 => source.push_str("useDynLib(pkg, foo, .fixes = \"C_\")\n"),
+                17 => source.push_str("export(\"quoted\n name\")\n\n# note\n"),
+                19 => source.push_str("f(a)(b)\nexport(g)\n"),
+                _ => {}
+            }
+        }
+        let whole = namespace_facts(&parse_namespace_chunk(&source, TextSize::from(0)));
+        for parts in [2, 3, 7, 50] {
+            let chunks = call_boundaries(&source, parts);
+            assert!(chunks.len() > 1, "{parts} parts found no boundary");
+            assert_eq!(
+                namespace_facts(&parse_namespace_in_chunks(&source, &chunks)),
+                whole
+            );
+        }
+    }
+
+    #[test]
+    fn unbalanced_namespace_parses_in_one_chunk() {
+        for prefix in ["}\nf(\n", "f(]\n", "g(a))\nf(\n"] {
+            let mut source = String::from(prefix);
+            for index in 0..200 {
+                source.push_str(&format!("export(f{index})\n"));
+            }
+            assert_eq!(call_boundaries(&source, 4), [0], "{prefix:?}");
+        }
+    }
 
     #[test]
     fn description_dependencies_parse_dcf_fields() {

@@ -7,13 +7,15 @@
 //! 2001), and the initial covariance of the ARMA part solves the stationary Lyapunov equation
 //! `P = T P T' + R R'` directly.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    stats::{real_matrix, real_values},
-    unwind::R,
-    values::{self, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        stats::{real_matrix, real_values},
+        unwind::R,
+        values::{self, symbols},
+    },
+    heap::object::{NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_REAL, Sexp, SexpType};
 
 /// The ARMA orders `arima` passes as `arma`: AR, MA, seasonal AR, seasonal MA, period,
 /// differences and seasonal differences.

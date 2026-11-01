@@ -24,8 +24,8 @@ setGeneric : Any
 setMethod : Any
 setValidity : Any
 setRefClass : Any
-representation : Any
-signature : Any
+representation : @pure Any
+signature : @pure Any
 callNextMethod : Any
 getMethod : Any
 selectMethod : Any
@@ -37,11 +37,11 @@ getSlots : Any
 # dispatches and returns the method's (dynamic) value. `slot : fn(object: Any, name: Any, [check]:
 # logical) -> Any` is deliberately NOT declared yet: a naming fixture binds `slot` as a local helper
 # and would fire the builtin-shadow warning; rename it first, then declare.
-isVirtualClass : fn(Class: character) -> logical
-extends : fn(class1: character, class2: character) -> logical
+isVirtualClass : fn(Class: character, [where]: Any) -> logical
+extends : fn(class1: character, class2: character, [maybe]: Any, [fullInfo]: Any) -> logical
 isGeneric : fn(f: Any, [where]: Any, [fdef]: Any, [getName]: logical) -> logical
 existsMethod : fn(f: Any, [signature]: Any, [where]: Any) -> logical
 hasMethod : fn(f: Any, [signature]: Any, [where]: Any) -> logical
-slot : fn(object: Any, name: character) -> Any
-slotNames : fn(x: Any) -> character[]
+slot : @pure fn(object: Any, name: character) -> Any
+slotNames : @pure fn(x: Any) -> character[]
 show : fn(object: Any) -> Any

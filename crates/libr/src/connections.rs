@@ -3,13 +3,15 @@
 //! package's own connection methods through the C trampolines in `native.c`, so that an
 //! `Rf_error` inside a method comes back as an unwind instead of a `longjmp` across Rust frames.
 
-use crate::boundary::{ApiResult, enter, with_native_scope};
-use heap::object::Sexp;
-use interp::connections::{
-    IntMethod, NativeMethod, OpaqueMethod, OpenMethod, Rconnection, ReadMethod, SeekMethod,
-    VoidMethod, WriteMethod,
+use {
+    crate::boundary::{ApiResult, enter, with_native_scope},
+    heap::object::Sexp,
+    interp::connections::{
+        IntMethod, NativeMethod, OpaqueMethod, OpenMethod, Rconnection, ReadMethod, SeekMethod,
+        VoidMethod, WriteMethod,
+    },
+    std::ffi::{CStr, c_char, c_int, c_void},
 };
-use std::ffi::{CStr, c_char, c_int, c_void};
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_new_custom_connection(

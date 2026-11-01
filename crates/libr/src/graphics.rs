@@ -6,14 +6,16 @@
 //! point is exported: the color and text helpers work, and anything that needs a device raises
 //! an R error that says graphics devices are not supported yet.
 
-use crate::{
-    boundary::{ApiResult, enter, error, raise},
-    runtime,
-    strings::{c_bytes, utf8_text},
-    vectors::{int_elt, real_elt, xlength},
+use {
+    crate::{
+        boundary::{ApiResult, enter, error, raise},
+        runtime,
+        strings::{c_bytes, utf8_text},
+        vectors::{int_elt, real_elt, xlength},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real},
+    std::ffi::{c_char, c_int, c_uint},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real};
-use std::ffi::{c_char, c_int, c_uint};
 
 /// The graphics engine version ry presents: R 4.6's (`R_GE_fontVar`).
 pub const GE_VERSION: c_int = 17;

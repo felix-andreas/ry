@@ -17,28 +17,30 @@
 //!
 //! [`Hooks::connection_method`]: crate::Hooks
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    http::{self, FetchError},
-    interp,
-    unwind::{R, Unwind, error},
-    values::{self, nil, scalar_bool, scalar_integer, symbols},
-    write_terminal,
-};
-use bzip2::{read::MultiBzDecoder, write::BzEncoder};
-use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType},
-    strings::Encoding,
-};
-use lzma_rust2::{XzOptions, XzReader, XzWriter};
-use std::{
-    borrow::Cow,
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    fs::{File, OpenOptions},
-    io::{BufReader, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
-    ptr::null_mut,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        http::{self, FetchError},
+        interp,
+        unwind::{R, Unwind, error},
+        values::{self, nil, scalar_bool, scalar_integer, symbols},
+        write_terminal,
+    },
+    bzip2::{read::MultiBzDecoder, write::BzEncoder},
+    flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
+    },
+    lzma_rust2::{XzOptions, XzReader, XzWriter},
+    std::{
+        borrow::Cow,
+        ffi::{CStr, CString, c_char, c_int, c_void},
+        fs::{File, OpenOptions},
+        io::{BufReader, Read, Seek, SeekFrom, Write},
+        path::PathBuf,
+        ptr::null_mut,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -51,6 +53,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("xzfile", 4, |call| unsafe {
         compressed_file(call, Compressed::Xz)
+    }),
+    // R 4.5 on.
+    internal("zstdfile", 4, |call| unsafe {
+        compressed_file(call, Compressed::Zstd)
     }),
     internal("fifo", 4, |_| Err(unsupported("fifo"))),
     internal("url", 6, do_url),
@@ -306,6 +312,18 @@ impl Table {
                     }
                     _ => break,
                 }
+            }
+        }
+        // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
+        // `sink(file(path))` is not closed as unused while output still goes to it.
+        for sink in &self.sinks {
+            let id = self
+                .entries
+                .get(sink.slot)
+                .and_then(Option::as_ref)
+                .and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
+            if let Some(id) = id {
+                marker.mark(id);
             }
         }
     }
@@ -617,9 +635,11 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    let compression = if !raw
-        && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary)
-    {
+    // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
+    // and the connection then becomes a `gzfile` for good.
+    let sniffs = open.is_empty()
+        || parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary);
+    let compression = if !raw && sniffs {
         file_compression(&path).ok().flatten()
     } else {
         None
@@ -634,15 +654,24 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         compression: 6,
         stream: None,
     });
-    let object = new_builtin("file", description.as_bytes(), &open, "r", device, |con| {
-        (*con).blocking = blocking as Rboolean;
-    })?;
+    let default_mode = if compression.is_some() { "rt" } else { "r" };
+    let object = new_builtin(
+        "file",
+        description.as_bytes(),
+        &open,
+        default_mode,
+        device,
+        |con| {
+            (*con).blocking = blocking as Rboolean;
+        },
+    )?;
     // The object keeps the class it was created with; only the struct says what it became.
     if let Some(compression) = compression {
         let class: &[u8] = match compression {
             Compressed::Gzip => b"gzfile",
             Compressed::Bzip2 => b"bzfile",
             Compressed::Xz => b"xzfile",
+            Compressed::Zstd => b"zstdfile",
         };
         let con = resolve_con(object)?.1;
         libc::free((*con).class.cast());
@@ -663,6 +692,7 @@ unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
     let valid = match encoding {
         Compressed::Xz => (-9..=9).contains(&compression),
         Compressed::Gzip | Compressed::Bzip2 => (0..=9).contains(&compression),
+        Compressed::Zstd => (0..=22).contains(&compression),
     };
     if !valid {
         return Err(error("invalid 'compress' argument"));
@@ -671,6 +701,7 @@ unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
         Compressed::Gzip => "gzfile",
         Compressed::Bzip2 => "bzfile",
         Compressed::Xz => "xzfile",
+        Compressed::Zstd => "zstdfile",
     };
     let device = Device::File(FileDevice {
         path: PathBuf::from(expand_path(&description)),
@@ -2199,11 +2230,16 @@ unsafe fn read_char(con: Rconnection) -> R<c_int> {
     Ok(character)
 }
 
+/// Whether pushback or a saved look-ahead character is still waiting to be read.
+unsafe fn has_buffered_input(con: Rconnection) -> bool {
+    (*con).save2 != NO_SAVE || (*con).nPushBack > 0 || (*con).save != NO_SAVE
+}
+
 /// Everything a text read would still see, as [`read_char`] would deliver it. A built-in
 /// device is read in bulk once the pushback and look-ahead are used up.
 unsafe fn read_text_rest(con: Rconnection) -> R<Vec<u8>> {
     let mut text = Vec::new();
-    while (*con).save2 != NO_SAVE || (*con).nPushBack > 0 || (*con).save != NO_SAVE {
+    while has_buffered_input(con) {
         let character = read_char(con)?;
         if character == EOF {
             return Ok(text);
@@ -2961,6 +2997,7 @@ enum Encoder {
     Gzip(GzEncoder<File>),
     Bzip2(BzEncoder<File>),
     Xz(XzWriter<File>),
+    Zstd(zstd::stream::write::Encoder<'static, File>),
 }
 
 impl Encoder {
@@ -2969,6 +3006,7 @@ impl Encoder {
             Encoder::Gzip(encoder) => encoder.finish().map(drop),
             Encoder::Bzip2(encoder) => encoder.finish().map(drop),
             Encoder::Xz(encoder) => encoder.finish().map(drop),
+            Encoder::Zstd(encoder) => encoder.finish().map(drop),
         }
     }
 }
@@ -2979,6 +3017,7 @@ impl Write for Encoder {
             Encoder::Gzip(encoder) => encoder.write(bytes),
             Encoder::Bzip2(encoder) => encoder.write(bytes),
             Encoder::Xz(encoder) => encoder.write(bytes),
+            Encoder::Zstd(encoder) => encoder.write(bytes),
         }
     }
 
@@ -2987,6 +3026,7 @@ impl Write for Encoder {
             Encoder::Gzip(encoder) => encoder.flush(),
             Encoder::Bzip2(encoder) => encoder.flush(),
             Encoder::Xz(encoder) => encoder.flush(),
+            Encoder::Zstd(encoder) => encoder.flush(),
         }
     }
 }
@@ -3333,6 +3373,9 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
                 bzip2::Compression::new(level.clamp(1, 9)),
             )),
             Compressed::Xz => Encoder::Xz(XzWriter::new(file, XzOptions::with_preset(level))?),
+            Compressed::Zstd => {
+                Encoder::Zstd(zstd::stream::write::Encoder::new(file, level as i32)?)
+            }
         };
         return Ok(Stream::Deflate {
             encoder,
@@ -3388,13 +3431,14 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
 }
 
 /// The compressions a file opened for reading is decoded from, recognized by their magic bytes.
-/// GNU R's `gzfile()` reads all three, because `save()` and `usethis::use_data()` write bzip2
-/// and xz `.rda` files through it.
+/// GNU R's `gzfile()` reads all of them, because `save()` and `usethis::use_data()` write
+/// bzip2 and xz `.rda` files through it; zstd is R 4.5's addition.
 #[derive(Clone, Copy)]
 enum Compressed {
     Gzip,
     Bzip2,
     Xz,
+    Zstd,
 }
 
 fn compression_of(magic: &[u8]) -> Option<Compressed> {
@@ -3404,6 +3448,8 @@ fn compression_of(magic: &[u8]) -> Option<Compressed> {
         Some(Compressed::Bzip2)
     } else if magic.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
         Some(Compressed::Xz)
+    } else if magic.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        Some(Compressed::Zstd)
     } else {
         None
     }
@@ -3423,7 +3469,7 @@ fn file_compression(path: &PathBuf) -> std::io::Result<Option<Compressed>> {
     Ok(compression_of(magic.get(..filled).unwrap_or_default()))
 }
 
-/// `bytes` decoded when they start with gzip's, bzip2's or xz's magic bytes, else unchanged.
+/// `bytes` decoded when they start with a known compression's magic bytes, else unchanged.
 pub fn decompress(bytes: &[u8]) -> std::io::Result<Cow<'_, [u8]>> {
     let Some(compression) = compression_of(bytes) else {
         return Ok(Cow::Borrowed(bytes));
@@ -3441,6 +3487,7 @@ fn decoder<'a>(
         Compressed::Gzip => Box::new(MultiGzDecoder::new(input)),
         Compressed::Bzip2 => Box::new(MultiBzDecoder::new(input)),
         Compressed::Xz => Box::new(XzReader::new(input, true)),
+        Compressed::Zstd => Box::new(zstd::stream::read::Decoder::new(input)?),
     })
 }
 
@@ -3922,8 +3969,10 @@ unsafe fn device_flush(con: Rconnection) -> R<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::mem::{offset_of, size_of};
+    use {
+        super::*,
+        std::mem::{offset_of, size_of},
+    };
 
     /// The Rust mirror of `struct Rconn` must have GNU R's layout, which the ryconn test
     /// package's `layout.expected` records from GNU R's own header.

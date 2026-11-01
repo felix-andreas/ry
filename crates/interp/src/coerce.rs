@@ -1,12 +1,16 @@
 //! Coercion between R's types, and the type predicates (`is.*`, `typeof`).
 
-use crate::{
-    builtins::{BuiltinDef, Call, Generic, builtin, internal},
-    conditions, deparse,
-    unwind::{R, error},
-    values::{self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, Generic, builtin, internal},
+        conditions, deparse,
+        unwind::{R, error},
+        values::{
+            self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
+        },
+    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real};
 
 /// Warnings a coercion raises, collected so each is reported once per call.
 #[derive(Default, Clone, Copy)]
@@ -222,13 +226,10 @@ pub unsafe fn coerce_vector_quiet(
             )));
         }
     };
-    if source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression) {
-        if kind.is_vector() {
-            values::copy_attributes(object, result)?;
-            if kind.is_atomic() && source == SexpType::List {
-                // Classes of a list do not carry over to an atomic vector.
-            }
-        }
+    if (source.is_atomic() || matches!(source, SexpType::List | SexpType::Expression))
+        && kind.is_vector()
+    {
+        values::copy_attributes(object, result)?;
     }
     Ok(result)
 }
@@ -667,6 +668,7 @@ pub fn mode_type(mode: &str) -> Option<SexpType> {
 
 /// `as.vector(x, mode)`: converts and drops attributes, except a list's names.
 pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
+    let object = values::plain(object)?;
     if mode == "any" {
         if object.kind().is_atomic() && values::has_attributes(object) {
             let copy = values::shallow_duplicate(object)?;
@@ -813,7 +815,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin("is.numeric", 1, do_is_numeric).generic(Generic::Internal),
     builtin("is.matrix", 1, |call| unsafe {
-        { scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2)) }
+        scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2))
     })
     .generic(Generic::Internal),
     builtin("is.array", 1, |call| unsafe {
@@ -822,9 +824,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     .generic(Generic::Internal),
     builtin("is.atomic", 1, |call| unsafe {
         {
-            // GNU R 4.3, whose R code runs here, still counts NULL as atomic.
+            // NULL stopped counting as atomic in R 4.4, and R 4.3's own `var()` relies on
+            // the older answer.
             let kind = call.arg(0).kind();
-            scalar_bool(kind.is_atomic() || kind == SexpType::Nil)
+            scalar_bool(
+                kind.is_atomic() || (kind == SexpType::Nil && !crate::system::r_at_least(4, 4)),
+            )
         }
     }),
     builtin("is.recursive", 1, |call| unsafe {
@@ -866,7 +871,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
             ))
         }
     }),
-    builtin("is.single", 1, |call| unsafe {
+    builtin("is.single", 1, |call| {
         Err(call.error("type \"single\" unimplemented in R"))
     }),
     internal("is.builtin.internal", 1, |call| unsafe {
@@ -882,7 +887,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
 ];
 
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
-    let object = call.arg(0);
+    let object = values::plain(call.arg(0))?;
     if object.kind() == kind && !values::has_attributes(object) {
         return Ok(object);
     }
@@ -893,9 +898,9 @@ unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
         )));
     }
     if values::inherits(object, "factor") && kind == SexpType::String {
-        return factor_as_character(object).and_then(|result| {
+        return factor_as_character(object).map(|result| {
             values::clear_attributes(result);
-            Ok(result)
+            result
         });
     }
     let result = match object.kind() {

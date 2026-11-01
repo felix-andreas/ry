@@ -3,15 +3,17 @@
 //! precedence with the parentheses they need, a line break after a separator once a line is
 //! longer than the cutoff, and four spaces per level of indentation.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    format, records, standard_library, strings,
-    unwind::R,
-    values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
-};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
-    records::NativeKind,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        format, records, standard_library, strings,
+        unwind::R,
+        values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -171,12 +173,11 @@ pub fn is_syntactic(name: &str) -> bool {
     if !(first.is_alphabetic() || first == '.') {
         return false;
     }
-    if first == '.' {
-        if let Some(second) = name.chars().nth(1)
-            && second.is_ascii_digit()
-        {
-            return false;
-        }
+    if first == '.'
+        && let Some(second) = name.chars().nth(1)
+        && second.is_ascii_digit()
+    {
+        return false;
     }
     name.chars()
         .all(|character| character.is_alphanumeric() || character == '.' || character == '_')
@@ -271,6 +272,11 @@ impl Deparser {
         self.depth += 1;
         if self.depth > 500 {
             self.print("...");
+            self.depth -= 1;
+            return;
+        }
+        if object.is_array() {
+            self.array(object);
             self.depth -= 1;
             return;
         }
@@ -415,11 +421,11 @@ impl Deparser {
     }
 
     unsafe fn closure(&mut self, function: Sexp) {
-        if self.opts & options::USE_SOURCE != 0 {
-            if let Some(lines) = source_lines(get_attr(function, symbols().srcref)) {
-                self.source(&lines);
-                return;
-            }
+        if self.opts & options::USE_SOURCE != 0
+            && let Some(lines) = source_lines(get_attr(function, symbols().srcref))
+        {
+            self.source(&lines);
+            return;
         }
         let saved = self.opts;
         self.opts &= !options::QUOTE_EXPRESSIONS;
@@ -662,8 +668,11 @@ impl Deparser {
                         }
                         return;
                     }
+                    // Every `PP_BINARY` operator called with one argument deparses as a
+                    // prefix, so `` `%*%`(x) `` is `%*%x`, as GNU R prints it.
                     (Kind::Binary | Kind::Binary2 | Kind::Unary, 1)
-                        if matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
+                        if info.kind == Kind::Binary
+                            || matches!(name, b"+" | b"-" | b"!" | b"~" | b"?") =>
                     {
                         let operand = arguments.car();
                         let info = if info.precedence == precedence::SUM {
@@ -797,6 +806,51 @@ impl Deparser {
         self.print(")");
     }
 
+    /// An Array as its literal, `[1, 2, 3]`, which is the code that rebuilds it.
+    unsafe fn array(&mut self, object: Sexp) {
+        let count = values::length(object);
+        // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
+        if count == 0 {
+            match object.kind() {
+                SexpType::Integer => return self.print("as.Array(integer(0))"),
+                SexpType::Real => return self.print("as.Array(numeric(0))"),
+                SexpType::String => return self.print("as.Array(character(0))"),
+                SexpType::List => return self.print("as.Array(list())"),
+                _ => {}
+            }
+        }
+        self.print("[");
+        self.in_list += 1;
+        let mut broken = false;
+        for index in 0..count {
+            let item = match object.kind() {
+                SexpType::Logical => values::scalar_logical(values::ints(object)[index]),
+                SexpType::Integer => values::scalar_integer(values::ints(object)[index]),
+                SexpType::Real => values::scalar_real(values::reals(object)[index]),
+                SexpType::String => {
+                    values::scalar_string_charsxp(values::string_elt(object, index))
+                }
+                _ => Ok(values::list_elt(object, index)),
+            };
+            // The deparser cannot fail, and boxing one item fails only on an exhausted heap.
+            match item {
+                Ok(value) => self.deparse(value),
+                Err(failure) => {
+                    panic!("an Array item could not be boxed for deparsing: {failure:?}")
+                }
+            }
+            if index + 1 < count {
+                self.print(", ");
+                self.line_break(&mut broken);
+            }
+        }
+        if broken {
+            self.indent -= 1;
+        }
+        self.in_list -= 1;
+        self.print("]");
+    }
+
     /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
     /// `Set.empty()`.
     unsafe fn collection(&mut self, object: Sexp, dict: bool) {
@@ -852,6 +906,13 @@ impl Deparser {
                     self.print(",");
                 }
                 self.print(")");
+            }
+            RyForm::Array => {
+                self.print("[");
+                self.in_list += 1;
+                self.arguments(arguments, false);
+                self.in_list -= 1;
+                self.print("]");
             }
             RyForm::Tag => {
                 self.print(":");
@@ -1479,6 +1540,7 @@ unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
 /// The calls ry's own syntax lowers to.
 #[derive(Clone, Copy)]
 enum RyForm {
+    Array,
     Record,
     Tuple,
     Tag,
@@ -1493,6 +1555,7 @@ unsafe fn ry_form(name: &[u8], arguments: Sexp) -> Option<RyForm> {
     match name {
         b".ry_record" if !items.is_empty() && named == items.len() => Some(RyForm::Record),
         b".ry_tuple" if named == 0 => Some(RyForm::Tuple),
+        b".ry_array" if named == 0 => Some(RyForm::Array),
         b".ry_tag" => {
             let (first_tag, first) = items.first()?;
             (*first_tag == nil() && first.kind() == SexpType::String && length(*first) == 1)

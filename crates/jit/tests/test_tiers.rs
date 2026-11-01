@@ -7,11 +7,13 @@
 //!
 //! `FUZZ_ITERS` raises the budget.
 
-use heap::{Heap, object::Sexp};
-use interp::{deparse, eval, lower, unwind::Unwind, values};
-use jit::Mode;
-use std::sync::Once;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    heap::{Heap, object::Sexp},
+    interp::{deparse, eval, lower, unwind::Unwind, values},
+    jit::Mode,
+    std::sync::Once,
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 static INSTALL: Once = Once::new();
 
@@ -140,6 +142,31 @@ fn seeds_agree_across_tiers() {
         (
             "s <- 0\nfor (i in 1:n) { s <- s + 1; if (i %% 2 == 0) switch(\"a\", a = next) }\ns",
             "(n = 3000L)",
+            false,
+        ),
+        // Subsetting a plain vector, which reaches the element intrinsic.
+        (
+            "s <- 0\nfor (i in 1:n) s <- s + v[(i %% 2L) + 1L] * v[[1L]]\ns",
+            "(n = 50L)",
+            false,
+        ),
+        // A subject that gains a class mid-loop dispatches, and the method sees its index
+        // unevaluated.
+        (
+            "`[.tagged` <- function(x, i) substitute(i)\nx <- 1:3\nout <- list()\nfor (j in 1:n) { if (j == 3L) class(x) <- \"tagged\"; out[[j]] <- x[j + 1L] }\nout",
+            "(n = 4L)",
+            false,
+        ),
+        // A missing formal as the index selects everything.
+        (
+            "g <- function(i) v[i]\nfor (j in 1:n) r <- g()\nr",
+            "(n = 3L)",
+            false,
+        ),
+        // A formal that is only called shadows a function of the same name in the enclosure.
+        (
+            "h <- function(x) -1\ng <- function(h) { s <- 0; for (i in 1:n) s <- s + h(i); s }\nc(g(function(x) x * 2), g(function(x) x * 3))",
+            "(n = 4L)",
             false,
         ),
     ];

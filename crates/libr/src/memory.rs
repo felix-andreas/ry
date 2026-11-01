@@ -1,20 +1,22 @@
 //! Allocation, protection and collection: `Rf_allocVector` and its relatives, `PROTECT`, the
 //! precious list, `R_alloc` and the `R_Calloc` family.
 
-use crate::{
-    R_len_t, R_xlen_t, Rboolean, SEXPTYPE,
-    boundary::{ApiResult, enter, error, run_pending_finalizers},
-    runtime,
-    strings::c_bytes,
-    vectors::{set_names_from, sexp_type},
+use {
+    crate::{
+        R_len_t, R_xlen_t, Rboolean, SEXPTYPE,
+        boundary::{ApiResult, enter, error, run_pending_finalizers},
+        runtime,
+        strings::c_bytes,
+        vectors::{set_names_from, sexp_type},
+    },
+    heap::{
+        Collection, HeapError,
+        arena::Arena,
+        object::{Header, NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    std::ffi::{c_char, c_int, c_long, c_void},
 };
-use heap::{
-    Collection, HeapError,
-    arena::Arena,
-    object::{Header, NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use std::ffi::{c_char, c_int, c_long, c_void};
 
 /// `Rf_allocVector` as Rust code calls it. Pairlist and call types allocate pairlists, as in
 /// GNU R.
@@ -25,7 +27,10 @@ pub unsafe fn alloc_vector(kind: SexpType, length: R_xlen_t) -> ApiResult<Sexp> 
         SexpType::Pairlist => alloc_list(length, SexpType::Pairlist),
         SexpType::Language => alloc_list(length, SexpType::Language),
         _ if kind.is_vector() && kind != SexpType::Char => {
-            let object = runtime.heap.alloc_vector(kind, length)?;
+            // GNU R leaves a fresh vector of numbers uninitialized, and packages fill what they
+            // allocate, so zeroing it would touch every page of a large vector twice.
+            let length = usize::try_from(length).map_err(|_| HeapError::NegativeLength)?;
+            let object = runtime.heap.alloc_vector_uninit(kind, length)?;
             runtime.heap.root(object);
             Ok(object)
         }
@@ -553,8 +558,39 @@ pub unsafe extern "C" fn R_maxLength(vector: Sexp) -> R_xlen_t {
 
 // Protection.
 
+/// What GNU R's inline `LENGTH` calls on a long vector; tcltk links against it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_BadLongVector(_object: *mut Header, file: *const c_char, line: c_int) {
+    enter(|| {
+        let file = if file.is_null() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(c_bytes(file)).into_owned()
+        };
+        Err::<(), _>(error(format!(
+            "long vectors not supported yet: {file}:{line}"
+        )))
+    })
+}
+
+/// What GNU R's inline `PROTECT` calls when the protect stack is full; tcltk links against it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_signal_protect_error() {
+    enter(|| Err::<(), _>(error("protect(): protection stack overflow")))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_protect(object: *mut Header) -> *mut Header {
+    // Native code protects every temporary, so only an overflow enters the boundary to raise.
+    if runtime()
+        .heap
+        .roots
+        .protect
+        .protect(protectable(object))
+        .is_ok()
+    {
+        return object;
+    }
     enter(|| {
         runtime().heap.roots.protect.protect(protectable(object))?;
         Ok(object)
@@ -570,6 +606,17 @@ unsafe fn protectable(object: *mut Header) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_unprotect(count: c_int) {
+    // An underflow leaves the stack untouched, so the boundary only has to raise it.
+    if count >= 0
+        && runtime()
+            .heap
+            .roots
+            .protect
+            .unprotect(count as usize)
+            .is_ok()
+    {
+        return;
+    }
     enter(|| {
         if count < 0 {
             return Err(error("unprotect(): negative count"));
@@ -579,8 +626,14 @@ pub unsafe extern "C" fn Rf_unprotect(count: c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Rf_unprotect_ptr(object: Sexp) {
-    enter(|| Ok(runtime().heap.roots.protect.unprotect_object(object)?))
+pub unsafe extern "C" fn Rf_unprotect_ptr(object: *mut Header) {
+    enter(|| {
+        Ok(runtime()
+            .heap
+            .roots
+            .protect
+            .unprotect_object(protectable(object))?)
+    })
 }
 
 #[unsafe(no_mangle)]

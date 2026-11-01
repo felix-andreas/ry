@@ -1,11 +1,21 @@
-use crate::diagnostics::{Diagnostic, Severity};
-use crate::naming::BindingKind;
-use crate::stubs::{declaring_namespace, stubs};
-use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
-use rowan::{NodeOrToken, WalkEvent};
-use syntax::ast::BinaryExpr;
-use syntax::native_values::{object_system_function, object_systems_disabled_message};
-use syntax::{SyntaxKind, SyntaxNode, TextRange, is_inline_annotation};
+use {
+    crate::{
+        Db, SourceFile,
+        diagnostics::{Diagnostic, Severity},
+        is_s3_method_name, item_naming, item_spans,
+        naming::BindingKind,
+        parse, s3_generics,
+        stubs::{declaring_namespace, stubs},
+    },
+    rowan::NodeOrToken,
+    syntax::{
+        GreenEvent, GreenRef, SyntaxKind, SyntaxNode, TextRange,
+        ast::BinaryExpr,
+        is_green_inline_annotation,
+        native_values::{object_system_function, object_systems_disabled_message},
+        node_at, walk_green,
+    },
+};
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize)]
@@ -100,9 +110,8 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
     diagnostics
 }
 
-/// Memoized so that revalidating an untouched file never needs its tree, which may have
-/// been evicted. It reads only syntax, so a cold check can compute it while the tree is
-/// still in memory, before naming has run.
+/// Memoized so that relinting after an edit elsewhere never walks this file's tree again. It
+/// reads only syntax, so a cold check computes it in its first pass, before naming has run.
 #[salsa::tracked(returns(ref))]
 pub fn file_syntax_lints(db: &dyn Db, file: SourceFile, config: LintConfig) -> SyntaxLints {
     let mut lints = SyntaxLints::default();
@@ -178,50 +187,91 @@ fn shadow_lints(
 fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints) {
     let diagnostics = &mut lints.always;
     // `#:` annotation regions and inline annotations are type syntax, not R identifiers.
+    // One entry per open node, so a `Leave` knows whether its node opened a region.
+    let mut opens_annotation = Vec::new();
     let mut annotation_depth = 0usize;
-    for event in root.preorder_with_tokens() {
-        match event {
-            WalkEvent::Enter(NodeOrToken::Node(node)) => match node.kind() {
-                SyntaxKind::ANNOTATION => annotation_depth += 1,
-                _ if is_inline_annotation(&node) => annotation_depth += 1,
-                SyntaxKind::BINARY_EXPR => binary_lints(&node, config, diagnostics),
-                SyntaxKind::ARGUMENT_LIST
-                    if node
-                        .parent()
-                        .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR) =>
-                {
-                    trailing_comma_lint(&node, config, diagnostics);
-                }
-                SyntaxKind::PARAMETER => parameter_name_lint(&node, config, diagnostics),
+    // The walk reads the green tree and builds a red node only where a cheap green test says
+    // a lint may fire, because a red walk of every file was a large share of the cold check.
+    walk_green(root, |event| match event {
+        GreenEvent::Enter {
+            node,
+            parent,
+            range,
+        } => {
+            let kind = node.kind();
+            let opens = kind == SyntaxKind::ANNOTATION
+                || is_green_inline_annotation(kind, parent.map(GreenRef::kind));
+            opens_annotation.push(opens);
+            annotation_depth += usize::from(opens);
+            if opens || !may_lint(node, parent, config) {
+                return;
+            }
+            let Some(red) = node_at(root, kind, range) else {
+                panic!("syntax_lints: no node of kind {kind:?} at {range:?}");
+            };
+            match kind {
+                SyntaxKind::BINARY_EXPR => binary_lints(&red, config, diagnostics),
+                SyntaxKind::ARGUMENT_LIST => trailing_comma_lint(&red, config, diagnostics),
+                SyntaxKind::PARAMETER => parameter_name_lint(&red, config, diagnostics),
                 SyntaxKind::CALL_EXPR => {
-                    object_system_lint(&node, config, &mut lints.unless_redefined, diagnostics);
+                    object_system_lint(&red, config, &mut lints.unless_redefined, diagnostics);
                 }
                 _ => {}
-            },
-            WalkEvent::Enter(NodeOrToken::Token(token))
-                if token.kind() == SyntaxKind::IDENT && annotation_depth == 0 =>
-            {
-                let message = match token.text() {
-                    "T" => "Use TRUE, not T, for Boolean values",
-                    "F" => "Use FALSE, not F, for Boolean values",
-                    _ => continue,
-                };
-                push_lint(
-                    diagnostics,
-                    config.boolean_shorthand,
-                    Severity::Warning,
-                    "boolean-shorthand",
-                    token.text_range(),
-                    message,
-                );
             }
-            WalkEvent::Leave(NodeOrToken::Node(node))
-                if node.kind() == SyntaxKind::ANNOTATION || is_inline_annotation(&node) =>
-            {
+        }
+        GreenEvent::Leave(_) => {
+            if opens_annotation.pop() == Some(true) {
                 annotation_depth -= 1;
             }
-            _ => {}
         }
+        GreenEvent::Token { kind, text, range }
+            if kind == SyntaxKind::IDENT && annotation_depth == 0 =>
+        {
+            let message = match text {
+                "T" => "Use TRUE, not T, for Boolean values",
+                "F" => "Use FALSE, not F, for Boolean values",
+                _ => return,
+            };
+            push_lint(
+                diagnostics,
+                config.boolean_shorthand,
+                Severity::Warning,
+                "boolean-shorthand",
+                range,
+                message,
+            );
+        }
+        GreenEvent::Token { .. } => {}
+    });
+}
+
+/// A conservative green-tree test for whether the red lint for `node` can report anything:
+/// `false` only when it certainly reports nothing.
+fn may_lint(node: GreenRef<'_>, parent: Option<GreenRef<'_>>, config: &LintConfig) -> bool {
+    match node.kind() {
+        SyntaxKind::BINARY_EXPR => node.child_kinds().any(|kind| {
+            kind == SyntaxKind::EQ
+                || (config.naming_style.is_some() && kind == SyntaxKind::LESS_MINUS)
+        }),
+        SyntaxKind::ARGUMENT_LIST => {
+            parent.is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
+                && node
+                    .child_kinds()
+                    .fold(false, |comma_last, kind| match kind {
+                        SyntaxKind::COMMA => true,
+                        SyntaxKind::ARGUMENT => false,
+                        _ => comma_last,
+                    })
+        }
+        SyntaxKind::PARAMETER => config.naming_style.is_some(),
+        SyntaxKind::CALL_EXPR => match node.child_nodes().next() {
+            Some(callee) if callee.kind() == SyntaxKind::NAME => callee
+                .single_token_text()
+                .is_none_or(|name| object_system_function(name).is_some()),
+            Some(callee) => callee.kind() == SyntaxKind::NAMESPACE_EXPR,
+            None => false,
+        },
+        _ => false,
     }
 }
 
@@ -355,7 +405,10 @@ fn trailing_comma_lint(
         push_lint(
             diagnostics,
             config.trailing_comma,
-            Severity::Error,
+            // R reads the comma as an empty argument, which only fails when the callee
+            // evaluates it (`c(1, )`); a closure that leaves it unforced runs fine, so the
+            // comma is a style finding, not a certain run-time error.
+            Severity::Warning,
             "trailing-comma",
             range,
             "Unexpected comma after last argument",

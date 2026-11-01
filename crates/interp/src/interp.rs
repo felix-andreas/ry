@@ -25,6 +25,7 @@
 pub mod annotations;
 mod approximate;
 pub mod arith;
+pub mod arrays;
 pub mod builtin_libraries;
 pub mod builtins;
 pub mod bytecode;
@@ -32,6 +33,7 @@ pub mod coerce;
 pub mod conditions;
 pub mod connections;
 pub mod data_table;
+pub mod dataframe;
 pub mod deparse;
 pub mod dispatch;
 pub mod distributions;
@@ -39,6 +41,7 @@ pub mod envir;
 pub mod eval;
 pub mod format;
 pub mod frame;
+pub mod gnu_r_home;
 pub mod graphics;
 pub mod graphics_render;
 pub mod http;
@@ -74,21 +77,23 @@ pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
+pub mod testing;
 pub mod tools;
 pub mod unwind;
 pub mod utils;
 pub mod values;
 
-use crate::{
-    builtins::{BuiltinDef, Kind},
-    conditions::{HandlerStack, RestartStack},
-    unwind::R,
-};
-use heap::{Heap, Marker, RootSource, object::Sexp};
-use rustc_hash::FxHashMap;
-use std::{cell::UnsafeCell, rc::Rc};
-
 pub use crate::unwind::{Jump, RError};
+use {
+    crate::{
+        builtins::{BuiltinDef, Kind},
+        conditions::{HandlerStack, RestartStack},
+        unwind::{R, Unwind},
+    },
+    heap::{Heap, Marker, RootSource, object::Sexp},
+    rustc_hash::FxHashMap,
+    std::{cell::UnsafeCell, rc::Rc},
+};
 
 /// One closure call: GNU R's function context.
 pub struct Frame {
@@ -118,6 +123,8 @@ pub struct Hooks {
     pub write_console: unsafe fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    /// An ALTREP vector's length, from its class's `Length` method.
+    pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
@@ -176,8 +183,7 @@ pub struct Interp {
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
-    /// Set while `warning(immediate. = TRUE)` signals, so that the default handler prints the
-    /// warning at once instead of deferring it.
+    /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
     pub immediate_warning: bool,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
@@ -208,6 +214,9 @@ pub struct Interp {
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
+    /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
+    pub parked_unwind: Option<Unwind>,
 }
 
 struct InterpState {
@@ -308,6 +317,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         object_systems: true,
+        parked_unwind: None,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -327,6 +337,7 @@ pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
@@ -420,6 +431,13 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            if let Some(unwind) = &interp.parked_unwind {
+                crate::unwind::trace_unwind(unwind, marker);
+            }
+            if let Some((replacement, whole, _)) = interp.assignment_call {
+                marker.mark(replacement);
+                marker.mark(whole);
+            }
             for &(call, _) in &interp.warnings {
                 marker.mark(call);
             }

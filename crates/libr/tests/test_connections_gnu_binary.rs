@@ -6,8 +6,7 @@
 mod connection_scenarios;
 mod harness;
 
-use connection_scenarios::*;
-use harness::*;
+use {connection_scenarios::*, harness::*};
 
 #[test]
 fn a_package_built_against_gnu_r_runs_the_scenarios() {

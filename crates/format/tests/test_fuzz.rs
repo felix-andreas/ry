@@ -1,11 +1,12 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
-use format::check_format_invariants as check_invariants;
-use format::{Config, format};
-use std::panic::catch_unwind;
-use syntax::testing::{
-    SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes, mutate_seed,
-    program_corpus_sources, random_bytes, token_soup,
+use {
+    format::{Config, check_format_invariants as check_invariants, format},
+    std::panic::catch_unwind,
+    syntax::testing::{
+        SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes,
+        mutate_seed, program_corpus_sources, random_bytes, token_soup,
+    },
 };
 
 const SEEDS: &[&str] = &[
@@ -45,13 +46,15 @@ const SEEDS: &[&str] = &[
     "repeat {\n  next\n}\n",
     "{\n  1; 2\n  3\n}\n",
     "p <- (x = 1, y = 2); t <- (1L, \"a\"); e <- (); one <- (x = 1,)\n",
+    "a <- [1, 2, 3]; e <- []; n <- [[1L], [2L, 3L]]\nxs <- [\n  1,\n  2,\n]\nx\n[1]\n",
     "s <- :Rect(width = 2, height = 3); n <- :None\n",
     "match (s) { # c\n  :Circle(radius = r) => r, :Rect(width = w, ..) if (w > 0) => w\n\n  (a, 'x') | (_, a) => a; -1L => 0\n  _ => NULL\n}\n",
     "x: :Some(integer) | :None | .. <- :None\n",
-    "#: fn(p: record{x: double}) -> :Ok(value: double)\nf <- function(p) p\n",
+    "#: fn(p: Record{x: double}) -> :Ok(value: double)\nf <- function(p) p\n",
     "type UserId = integer\nalias Box<T: numeric> = list{value: T}\nid <- @UserId(5L)\n",
     "alias Shape =\n  | :Circle(radius: double)\n  | :Empty\nx: @trust Shape <- y\n",
-    "#: @alias Pair<T> {tuple{T, T}}\nalias Pair<U> = tuple{U, U}\np <- @Pair<integer>((1L, 2L))\n",
+    "#: @alias Pair<T> {Tuple{T, T}}\nalias Pair<U> = Tuple{U, U}\np <- @Pair<integer>((1L, 2L))\n",
+    "#: @pure\ntwice <- @pure function(x) x * 2\nhalve <- @pure \\(x) x / 2\n",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -114,6 +117,7 @@ const ALPHABET: &[&str] = &[
     "repeat",
     "in",
     "@type",
+    "@pure",
     "fn",
     "list[",
     "list{",
@@ -123,12 +127,12 @@ const ALPHABET: &[&str] = &[
     "..",
     ":None",
     ":Some(",
-    "record{",
+    "Record{",
     "type ",
     "alias ",
     "|",
     "@trust ",
-    "tuple{",
+    "Tuple{",
 ];
 
 /// Coverage-guided fuzzer finds. Unlike `SEEDS` these may refuse; only the

@@ -1,18 +1,21 @@
 //! Arithmetic, comparison and logic operators, the `Math` and `Summary` groups, NA tests,
 //! sequences and repetition.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
-    coerce::{self, coerce_vector},
-    conditions,
-    long_double::LongDouble,
-    rmath,
-    unwind::{R, error},
-    values::{
-        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
+use {
+    crate::{
+        arrays::{self, OperatorClass},
+        builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        coerce::{self, coerce_vector},
+        conditions,
+        long_double::LongDouble,
+        rmath,
+        unwind::{R, error},
+        values::{
+            self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
+        },
     },
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real};
 
 unsafe extern "C" {
     fn expm1(x: f64) -> f64;
@@ -107,40 +110,96 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }
         Ok(result)
     }),
-    builtin("+", -1, |call| unsafe { arithmetic(call, Op::Add) }).generic(Generic::Ops),
-    builtin("-", -1, |call| unsafe { arithmetic(call, Op::Subtract) }).generic(Generic::Ops),
-    builtin("*", 2, |call| unsafe { arithmetic(call, Op::Multiply) }).generic(Generic::Ops),
-    builtin("/", 2, |call| unsafe { arithmetic(call, Op::Divide) }).generic(Generic::Ops),
-    builtin("^", 2, |call| unsafe { arithmetic(call, Op::Power) }).generic(Generic::Ops),
-    builtin("%%", 2, |call| unsafe { arithmetic(call, Op::Modulo) }).generic(Generic::Ops),
+    builtin("+", -1, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Add)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("-", -1, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Subtract)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("*", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Multiply)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("/", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Divide)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("^", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Power)
+        })
+    })
+    .generic(Generic::Ops),
+    builtin("%%", 2, |call| unsafe {
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::Modulo)
+        })
+    })
+    .generic(Generic::Ops),
     builtin("%/%", 2, |call| unsafe {
-        arithmetic(call, Op::IntegerDivide)
+        strict(call, OperatorClass::Arithmetic, |call| {
+            arithmetic(call, Op::IntegerDivide)
+        })
     })
     .generic(Generic::Ops),
     builtin("==", 2, |call| unsafe {
-        comparison(call, Comparison::Equal)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::Equal)
+        })
     })
     .generic(Generic::Ops),
     builtin("!=", 2, |call| unsafe {
-        comparison(call, Comparison::NotEqual)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::NotEqual)
+        })
     })
     .generic(Generic::Ops),
-    builtin("<", 2, |call| unsafe { comparison(call, Comparison::Less) }).generic(Generic::Ops),
+    builtin("<", 2, |call| unsafe {
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::Less)
+        })
+    })
+    .generic(Generic::Ops),
     builtin(">", 2, |call| unsafe {
-        comparison(call, Comparison::Greater)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::Greater)
+        })
     })
     .generic(Generic::Ops),
     builtin("<=", 2, |call| unsafe {
-        comparison(call, Comparison::LessEqual)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::LessEqual)
+        })
     })
     .generic(Generic::Ops),
     builtin(">=", 2, |call| unsafe {
-        comparison(call, Comparison::GreaterEqual)
+        strict(call, OperatorClass::Comparison, |call| {
+            comparison(call, Comparison::GreaterEqual)
+        })
     })
     .generic(Generic::Ops),
-    builtin("&", 2, |call| unsafe { logic(call, true) }).generic(Generic::Ops),
-    builtin("|", 2, |call| unsafe { logic(call, false) }).generic(Generic::Ops),
-    builtin("!", 1, do_not).generic(Generic::Ops),
+    builtin("&", 2, |call| unsafe {
+        strict(call, OperatorClass::Logic, |call| logic(call, true))
+    })
+    .generic(Generic::Ops),
+    builtin("|", 2, |call| unsafe {
+        strict(call, OperatorClass::Logic, |call| logic(call, false))
+    })
+    .generic(Generic::Ops),
+    builtin("!", 1, |call| unsafe {
+        strict(call, OperatorClass::Logic, |call| do_not(call))
+    })
+    .generic(Generic::Ops),
     builtin("abs", 1, |call| unsafe { math1(call, Math::Abs) }).generic(Generic::Math),
     builtin("sign", 1, |call| unsafe { math1(call, Math::Sign) }).generic(Generic::Math),
     builtin("sqrt", 1, |call| unsafe { math1(call, Math::Sqrt) }).generic(Generic::Math),
@@ -240,7 +299,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bitwiseShiftR", 2, |call| unsafe {
         bitwise(call, |a, b| ((a as u32) >> (b & 31)) as i32)
     }),
-    builtin("xtfrm", 1, |call| unsafe { Ok(call.arg(0)) }).generic(Generic::Internal),
+    builtin("xtfrm", 1, |call| Ok(call.arg(0))).generic(Generic::Internal),
     builtin("Re", 1, |call| unsafe { complex_part(call, 0) }).generic(Generic::Complex),
     builtin("Im", 1, |call| unsafe { complex_part(call, 1) }).generic(Generic::Complex),
     builtin("Mod", 1, |call| unsafe { complex_part(call, 2) }).generic(Generic::Complex),
@@ -250,7 +309,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("polyroot", 1, do_polyroot),
     internal("pmin", -1, |call| unsafe { parallel_extreme(call, false) }),
     internal("pmax", -1, |call| unsafe { parallel_extreme(call, true) }),
-    internal("cumall", 1, |call| unsafe { Ok(call.arg(0)) }),
+    internal("cumall", 1, |call| Ok(call.arg(0))),
     internal("tabulate", 2, do_tabulate),
     internal("which", 1, do_which),
     internal("which.max", 1, |call| unsafe { which_extreme(call, true) }),
@@ -270,9 +329,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rowMeans", 4, |call| unsafe {
         margin_sums(call, true, true)
     }),
-    internal("findInterval", 5, do_find_interval),
+    internal("findInterval", -1, do_find_interval),
     internal("pretty", 8, do_pretty),
-    internal("sequence", 3, do_sequence),
+    internal("sequence", -1, do_sequence),
     internal("bincode", 4, do_bincode),
 ];
 
@@ -346,6 +405,8 @@ unsafe fn margin_sums(call: &Call<'_>, rows: bool, mean: bool) -> R<Sexp> {
 }
 
 /// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`.
+/// `findInterval(vec, x, rightmost.closed, all.inside, left.open)`, plus `checkNA` from R 4.4 on,
+/// which only lets GNU R skip its NA scan, so the answer does not depend on it.
 unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
     let breaks = values::reals(call.arg(0)).to_vec();
     let points = call.arg(1);
@@ -597,16 +658,76 @@ pub fn pretty(
 }
 
 /// `sequence(nvec, from, by)`.
+/// `sequence(nvec, from, by)`, plus R 4.4's `recycle`: `TRUE` recycles all three to the longest,
+/// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
+/// to `nvec`, with a warning when that drops elements.
 unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
     let lengths = coerce_vector(call.arg(0), SexpType::Integer)?;
     let from = coerce_vector(call.arg(1), SexpType::Integer)?;
     let by = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let recycle_argument = call.arg(3);
+    // R 4.6 and later pass `recycle`, as an integer when the caller left it missing.
+    let maybe_warn = call.len() > 3 && recycle_argument.kind() != SexpType::Logical;
+    let recycle = call.len() > 3
+        && recycle_argument.kind() == SexpType::Logical
+        && values::as_logical_scalar(recycle_argument) == 1;
+    let (lengths, from, by) = (values::ints(lengths), values::ints(from), values::ints(by));
+    if lengths.is_empty() {
+        return values::integer_vector(&[]);
+    }
+    for (values, name) in [(from, "from"), (by, "by")] {
+        if values.is_empty() {
+            if recycle {
+                return values::integer_vector(&[]);
+            }
+            let message = if crate::system::r_at_least(4, 6) {
+                format!(
+                    "'{name}' has length 0, but not 'nvec'; 'recycle = TRUE' returns empty here"
+                )
+            } else {
+                format!("'{name}' has length 0, but not 'lengths'")
+            };
+            return Err(crate::unwind::error(message));
+        }
+    }
+    let mut total = lengths.len().max(from.len()).max(by.len());
+    if !recycle && lengths.len() < total {
+        // GNU R warns about the coming default at most once per session.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if maybe_warn && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::conditions::warning(format!(
+                "length(nvec) {} < {total} = max(length(from), length(by)) -- future R`s \
+                 default 'recycle = TRUE' will recycle 'nvec'",
+                lengths.len()
+            ))?;
+        }
+        total = lengths.len();
+    }
+    if lengths
+        .iter()
+        .any(|&count| count == NA_INTEGER || count < 0)
+    {
+        let name = if crate::system::r_at_least(4, 6) {
+            "nvec"
+        } else {
+            "lengths"
+        };
+        return Err(crate::unwind::error(format!(
+            "'{name}' must be a vector of non-negative integers"
+        )));
+    }
     let mut output = Vec::new();
-    for index in 0..length(lengths) {
-        let count = values::ints(lengths)[index];
-        let start = values::ints(from)[index % length(from).max(1)];
-        let step = values::ints(by)[index % length(by).max(1)];
-        for position in 0..count.max(0) {
+    for index in 0..total {
+        let count = lengths[index % lengths.len()];
+        let start = from[index % from.len()];
+        let step = by[index % by.len()];
+        if count != 0 && start == NA_INTEGER {
+            return Err(crate::unwind::error("'from' contains NAs"));
+        }
+        if count >= 2 && step == NA_INTEGER {
+            return Err(crate::unwind::error("'by' contains NAs"));
+        }
+        for position in 0..count {
             output.push(start + position * step);
         }
     }
@@ -670,18 +791,45 @@ impl Op {
     }
 }
 
+/// Runs an operator, enforcing an Array's strict rules when an operand is one: R's own operator
+/// computes the plain result, which then becomes an Array again.
+unsafe fn strict(
+    call: &Call<'_>,
+    class: OperatorClass,
+    compute: impl FnOnce(&Call<'_>) -> R<Sexp>,
+) -> R<Sexp> {
+    if !call.args.iter().any(|arg| arg.value.is_array()) {
+        return compute(call);
+    }
+    let operands: Vec<Sexp> = call.args.iter().map(|arg| arg.value).collect();
+    let name = call.name();
+    if arrays::check_operands(call.call, &name, class, &operands)? {
+        let result = compute(call)?;
+        return arrays::finish_result(call.call, &name, result);
+    }
+    let result = compute(call)?;
+    // R's operator may hand back an operand, which is an Array here and may still be bound to a
+    // variable, so unflag a copy rather than the operand itself.
+    if result.is_array() {
+        let copy = values::shallow_duplicate(result)?;
+        copy.set_array(false);
+        return Ok(copy);
+    }
+    Ok(result)
+}
+
 unsafe fn arithmetic(call: &Call<'_>, op: Op) -> R<Sexp> {
     match call.args {
         [single] => unary_arithmetic(call, op, single.value),
         [left, right] => binary_arithmetic(call.call, op, left.value, right.value),
-        _ => Err(call.error(format!("operator needs one or two arguments"))),
+        _ => Err(call.error("operator needs one or two arguments".to_string())),
     }
 }
 
 unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     let operand = values::materialize(operand)?;
     if !matches!(op, Op::Add | Op::Subtract) {
-        return Err(call.error(format!("invalid unary operator")));
+        return Err(call.error("invalid unary operator".to_string()));
     }
     let result = match operand.kind() {
         SexpType::Logical => {
@@ -701,8 +849,7 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
             if op == Op::Add {
                 return Ok(operand);
             }
-            let result = values::shallow_duplicate(operand)?;
-            result
+            values::shallow_duplicate(operand)?
         }
         _ => return Err(call.error("invalid argument to unary operator")),
     };
@@ -843,7 +990,7 @@ unsafe fn recycled_length(call: Sexp, left: usize, right: usize) -> R<usize> {
         return Ok(0);
     }
     let longer = left.max(right);
-    if longer % left.min(right) != 0 {
+    if !longer.is_multiple_of(left.min(right)) {
         conditions::warning_call(
             call,
             "longer object length is not a multiple of shorter object length",
@@ -924,26 +1071,117 @@ pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
 }
 
 unsafe fn real_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
-    let result = alloc(SexpType::Real, count)?;
-    let left_length = length(left);
-    let right_length = length(right);
+    let result = values::alloc_uninit(SexpType::Real, count)?;
+    if count == 0 {
+        return Ok(result);
+    }
     let output = values::reals_mut(result);
-    if left.kind() == SexpType::Real && right.kind() == SexpType::Real {
-        let a = values::reals(left);
-        let b = values::reals(right);
-        for (index, slot) in output.iter_mut().enumerate() {
-            *slot = real_op(op, a[index % left_length], b[index % right_length]);
-        }
-    } else {
-        for (index, slot) in output.iter_mut().enumerate() {
-            *slot = real_op(
-                op,
-                real_at(left, index % left_length),
-                real_at(right, index % right_length),
-            );
-        }
+    let real = |value: f64| value;
+    match (left.kind(), right.kind()) {
+        (SexpType::Real, SexpType::Real) => real_kernel(
+            op,
+            values::reals(left),
+            values::reals(right),
+            output,
+            real,
+            real,
+        ),
+        (SexpType::Real, _) => real_kernel(
+            op,
+            values::reals(left),
+            values::ints(right),
+            output,
+            real,
+            widen,
+        ),
+        (_, SexpType::Real) => real_kernel(
+            op,
+            values::ints(left),
+            values::reals(right),
+            output,
+            widen,
+            real,
+        ),
+        _ => real_kernel(
+            op,
+            values::ints(left),
+            values::ints(right),
+            output,
+            widen,
+            widen,
+        ),
     }
     Ok(result)
+}
+
+/// An integer or logical element as a double.
+#[inline(always)]
+fn widen(value: i32) -> f64 {
+    if value == NA_INTEGER {
+        NA_REAL
+    } else {
+        value as f64
+    }
+}
+
+/// Applies `op` elementwise with recycling. Each operator gets its own loop, so the common
+/// cases compile to straight-line vector code instead of a dispatch per element.
+#[inline(always)]
+fn real_kernel<A: Copy, B: Copy>(
+    op: Op,
+    a: &[A],
+    b: &[B],
+    output: &mut [f64],
+    left: impl Fn(A) -> f64,
+    right: impl Fn(B) -> f64,
+) {
+    match op {
+        Op::Add => recycle(a, b, output, |x, y| left(x) + right(y)),
+        Op::Subtract => recycle(a, b, output, |x, y| left(x) - right(y)),
+        Op::Multiply => recycle(a, b, output, |x, y| left(x) * right(y)),
+        Op::Divide => recycle(a, b, output, |x, y| left(x) / right(y)),
+        Op::Power => recycle(a, b, output, |x, y| power(left(x), right(y))),
+        Op::Modulo => recycle(a, b, output, |x, y| real_modulo(left(x), right(y))),
+        Op::IntegerDivide => recycle(a, b, output, |x, y| (left(x) / right(y)).floor()),
+    }
+}
+
+/// `output[i] = f(a[i % a.len()], b[i % b.len()])`, with the equal-length and scalar cases
+/// split out because they are almost every call and vectorize.
+#[inline(always)]
+fn recycle<T: Copy, U: Copy, O>(a: &[T], b: &[U], output: &mut [O], f: impl Fn(T, U) -> O) {
+    let count = output.len();
+    if a.is_empty() || b.is_empty() {
+        return;
+    }
+    if a.len() == count && b.len() == count {
+        for ((slot, &x), &y) in output.iter_mut().zip(a).zip(b) {
+            *slot = f(x, y);
+        }
+    } else if a.len() == count && b.len() == 1 {
+        let y = b[0];
+        for (slot, &x) in output.iter_mut().zip(a) {
+            *slot = f(x, y);
+        }
+    } else if a.len() == 1 && b.len() == count {
+        let x = a[0];
+        for (slot, &y) in output.iter_mut().zip(b) {
+            *slot = f(x, y);
+        }
+    } else {
+        let (mut i, mut j) = (0, 0);
+        for slot in output.iter_mut() {
+            *slot = f(a[i], b[j]);
+            i += 1;
+            if i == a.len() {
+                i = 0;
+            }
+            j += 1;
+            if j == b.len() {
+                j = 0;
+            }
+        }
+    }
 }
 
 #[inline]
@@ -1070,50 +1308,66 @@ fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
-    let result = alloc(SexpType::Integer, count)?;
+    let result = values::alloc_uninit(SexpType::Integer, count)?;
+    if count == 0 {
+        return Ok(result);
+    }
     let a = values::ints(left);
     let b = values::ints(right);
-    let left_length = a.len();
-    let right_length = b.len();
-    let mut overflow = false;
     let output = values::ints_mut(result);
-    for (index, slot) in output.iter_mut().enumerate() {
-        let x = a[index % left_length];
-        let y = b[index % right_length];
-        *slot = if x == NA_INTEGER || y == NA_INTEGER {
+    let overflowed = std::cell::Cell::new(false);
+    let checked = |value: Option<i32>| match value {
+        Some(value) if value != NA_INTEGER => value,
+        _ => {
+            overflowed.set(true);
             NA_INTEGER
-        } else {
-            let value = match op {
-                Op::Add => x.checked_add(y),
-                Op::Subtract => x.checked_sub(y),
-                Op::Multiply => x.checked_mul(y),
-                Op::Modulo => {
-                    if y == 0 {
-                        None
-                    } else {
-                        Some(x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 })
-                    }
-                }
-                Op::IntegerDivide => {
-                    if y == 0 {
-                        None
-                    } else {
-                        Some((x as f64 / y as f64).floor() as i32)
-                    }
-                }
-                Op::Divide | Op::Power => unreachable!(),
-            };
-            match value {
-                Some(value) if value != NA_INTEGER => value,
-                _ => {
-                    if !matches!(op, Op::Modulo | Op::IntegerDivide) {
-                        overflow = true;
-                    }
+        }
+    };
+    let either_na = |x: i32, y: i32| x == NA_INTEGER || y == NA_INTEGER;
+    match op {
+        Op::Add => recycle(a, b, output, |x, y| {
+            if either_na(x, y) {
+                NA_INTEGER
+            } else {
+                checked(x.checked_add(y))
+            }
+        }),
+        Op::Subtract => recycle(a, b, output, |x, y| {
+            if either_na(x, y) {
+                NA_INTEGER
+            } else {
+                checked(x.checked_sub(y))
+            }
+        }),
+        Op::Multiply => recycle(a, b, output, |x, y| {
+            if either_na(x, y) {
+                NA_INTEGER
+            } else {
+                checked(x.checked_mul(y))
+            }
+        }),
+        Op::Modulo => recycle(a, b, output, |x, y| {
+            if either_na(x, y) || y == 0 {
+                NA_INTEGER
+            } else {
+                x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 }
+            }
+        }),
+        Op::IntegerDivide => recycle(a, b, output, |x, y| {
+            if either_na(x, y) || y == 0 {
+                NA_INTEGER
+            } else {
+                let value = (x as f64 / y as f64).floor() as i32;
+                if value == NA_INTEGER {
                     NA_INTEGER
+                } else {
+                    value
                 }
             }
-        };
+        }),
+        Op::Divide | Op::Power => unreachable!(),
     }
+    let overflow = overflowed.get();
     if overflow {
         conditions::warning_call(call, "NAs produced by integer overflow")?;
     }
@@ -1329,7 +1583,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
-    let result = alloc(SexpType::Logical, count)?;
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
     // A list operand takes the other operand's type, element by element, as GNU R's `relop`
     // coerces it; two lists have no common type.
     let operand_kind = |value: Sexp| {
@@ -1363,7 +1617,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 {
                     NA_LOGICAL
                 } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
-                    comparison.holds(if values::same_string(a, b) {
+                    comparison.holds(if a == b || values::same_text(a, b) {
                         std::cmp::Ordering::Equal
                     } else {
                         std::cmp::Ordering::Less
@@ -1397,41 +1651,115 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 values::ints_mut(result)[index] = comparison.holds(a.cmp(&b)) as i32;
             }
         }
+        _ if count == 0 => {}
         SexpType::Integer | SexpType::Logical
-            if left.kind() != SexpType::Real && right.kind() != SexpType::Real =>
+            if matches!(left.kind(), SexpType::Integer | SexpType::Logical)
+                && matches!(right.kind(), SexpType::Integer | SexpType::Logical) =>
         {
-            let left = coerce_vector(left, SexpType::Integer)?;
-            let right = coerce_vector(right, SexpType::Integer)?;
-            let a = values::ints(left);
-            let b = values::ints(right);
-            for index in 0..count {
-                let x = a[index % left_length];
-                let y = b[index % right_length];
-                values::ints_mut(result)[index] = if x == NA_INTEGER || y == NA_INTEGER {
-                    NA_LOGICAL
-                } else {
-                    comparison.holds(x.cmp(&y)) as i32
-                };
-            }
+            let output = values::ints_mut(result);
+            compare_kernel(
+                comparison,
+                values::ints(left),
+                values::ints(right),
+                output,
+                |x| x == NA_INTEGER,
+                |x| x == NA_INTEGER,
+                |x| x,
+                |y| y,
+            );
         }
         _ => {
-            let left = coerce_vector(left, SexpType::Real)?;
-            let right = coerce_vector(right, SexpType::Real)?;
-            let a = values::reals(left);
-            let b = values::reals(right);
-            for index in 0..count {
-                let x = a[index % left_length];
-                let y = b[index % right_length];
-                values::ints_mut(result)[index] = if x.is_nan() || y.is_nan() {
-                    NA_LOGICAL
-                } else {
-                    comparison.holds(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)) as i32
-                };
+            let output = values::ints_mut(result);
+            let real = |value: f64| value;
+            let integer_na = |value: i32| value == NA_INTEGER;
+            let real_na = |value: f64| value.is_nan();
+            let left_integer = matches!(left.kind(), SexpType::Integer | SexpType::Logical);
+            let right_integer = matches!(right.kind(), SexpType::Integer | SexpType::Logical);
+            match (
+                left_integer,
+                right_integer,
+                left.kind() == SexpType::Real && right.kind() == SexpType::Real,
+            ) {
+                (_, _, true) => compare_kernel(
+                    comparison,
+                    values::reals(left),
+                    values::reals(right),
+                    output,
+                    real_na,
+                    real_na,
+                    real,
+                    real,
+                ),
+                (false, true, _) if left.kind() == SexpType::Real => compare_kernel(
+                    comparison,
+                    values::reals(left),
+                    values::ints(right),
+                    output,
+                    real_na,
+                    integer_na,
+                    real,
+                    widen,
+                ),
+                (true, false, _) if right.kind() == SexpType::Real => compare_kernel(
+                    comparison,
+                    values::ints(left),
+                    values::reals(right),
+                    output,
+                    integer_na,
+                    real_na,
+                    widen,
+                    real,
+                ),
+                _ => {
+                    let left = coerce_vector(left, SexpType::Real)?;
+                    let right = coerce_vector(right, SexpType::Real)?;
+                    compare_kernel(
+                        comparison,
+                        values::reals(left),
+                        values::reals(right),
+                        output,
+                        real_na,
+                        real_na,
+                        real,
+                        real,
+                    );
+                }
             }
         }
     }
     relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
     Ok(result)
+}
+
+/// Compares elementwise with recycling, `NA` wherever either side is missing. Each operator
+/// gets its own loop for the same reason as [`real_kernel`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn compare_kernel<A: Copy, B: Copy, T: PartialOrd>(
+    comparison: Comparison,
+    a: &[A],
+    b: &[B],
+    output: &mut [i32],
+    left_na: impl Fn(A) -> bool,
+    right_na: impl Fn(B) -> bool,
+    left: impl Fn(A) -> T,
+    right: impl Fn(B) -> T,
+) {
+    let compare = |x: A, y: B, holds: fn(&T, &T) -> bool| {
+        if left_na(x) || right_na(y) {
+            NA_LOGICAL
+        } else {
+            holds(&left(x), &right(y)) as i32
+        }
+    };
+    match comparison {
+        Comparison::Equal => recycle(a, b, output, |x, y| compare(x, y, T::eq)),
+        Comparison::NotEqual => recycle(a, b, output, |x, y| compare(x, y, T::ne)),
+        Comparison::Less => recycle(a, b, output, |x, y| compare(x, y, T::lt)),
+        Comparison::Greater => recycle(a, b, output, |x, y| compare(x, y, T::gt)),
+        Comparison::LessEqual => recycle(a, b, output, |x, y| compare(x, y, T::le)),
+        Comparison::GreaterEqual => recycle(a, b, output, |x, y| compare(x, y, T::ge)),
+    }
 }
 
 // Logic.
@@ -1467,6 +1795,19 @@ unsafe fn logical_at(vector: Sexp, index: usize) -> i32 {
     }
 }
 
+/// A vector's elements as logicals, borrowed when it already is one.
+unsafe fn logical_view<'a>(vector: Sexp) -> std::borrow::Cow<'a, [i32]> {
+    if vector.kind() == SexpType::Logical {
+        std::borrow::Cow::Borrowed(values::ints(vector))
+    } else {
+        std::borrow::Cow::Owned(
+            (0..length(vector))
+                .map(|index| logical_at(vector, index))
+                .collect(),
+        )
+    }
+}
+
 unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;
     let right = values::materialize(call.arg(1))?;
@@ -1490,32 +1831,39 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
             )
     };
     if !valid(left) || !valid(right) {
-        return Err(call.error(format!(
-            "operations are possible only for numeric, logical or complex types"
-        )));
+        return Err(call.error(
+            "operations are possible only for numeric, logical or complex types".to_string(),
+        ));
     }
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        let a = logical_at(left, index % left_length);
-        let b = logical_at(right, index % right_length);
-        values::ints_mut(result)[index] = if is_and {
-            if a == 0 || b == 0 {
-                0
-            } else if a == NA_LOGICAL || b == NA_LOGICAL {
-                NA_LOGICAL
-            } else {
-                1
-            }
-        } else if a == 1 || b == 1 {
-            1
-        } else if a == NA_LOGICAL || b == NA_LOGICAL {
-            NA_LOGICAL
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
+    if count > 0 {
+        let (left_values, right_values) = (logical_view(left), logical_view(right));
+        let (a, b) = (left_values.as_ref(), right_values.as_ref());
+        let output = values::ints_mut(result);
+        if is_and {
+            recycle(a, b, output, |x, y| {
+                if x == 0 || y == 0 {
+                    0
+                } else if x == NA_LOGICAL || y == NA_LOGICAL {
+                    NA_LOGICAL
+                } else {
+                    1
+                }
+            });
         } else {
-            0
-        };
+            recycle(a, b, output, |x, y| {
+                if x == 1 || y == 1 {
+                    1
+                } else if x == NA_LOGICAL || y == NA_LOGICAL {
+                    NA_LOGICAL
+                } else {
+                    0
+                }
+            });
+        }
     }
     relational_attributes(left, right, result, call.call)?;
     Ok(result)
@@ -1558,7 +1906,8 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
-        SexpType::List | SexpType::Expression if count == 0 => alloc(SexpType::Logical, 0),
+        // GNU R negates any empty vector, so `!character()` is `logical(0)`.
+        _ if count == 0 => alloc(SexpType::Logical, 0),
         _ => Err(call.error("invalid argument type")),
     }
 }
@@ -1781,13 +2130,14 @@ fn times_minus_i(z: Rcomplex) -> Rcomplex {
     Rcomplex { r: z.i, i: -z.r }
 }
 
-/// Far from the real axis the tangent is `±i`, which some C libraries return as NaN.
+/// Far from the real axis the imaginary part of the tangent is `±1`, which some C libraries
+/// return as NaN. The tiny real part stays as the library computed it.
 unsafe fn complex_tan(z: Rcomplex) -> Rcomplex {
     let result = ctan(z);
     if z.i.is_finite() && z.i.abs() > 25.0 {
         return Rcomplex {
-            r: 0.0,
-            i: if z.i > 0.0 { 1.0 } else { -1.0 },
+            r: result.r,
+            i: if z.i < 0.0 { -1.0 } else { 1.0 },
         };
     }
     result
@@ -2117,7 +2467,14 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                         if is_na_real(value) { NA_REAL } else { f64::NAN };
                     continue;
                 }
+                // GNU R accumulates in x87 long double, where NA's payload outranks a plain
+                // NaN's, so NA wins over NaN in whichever order they come.
                 accumulator = match kind {
+                    Cumulative::Sum | Cumulative::Product
+                        if is_na_real(accumulator) || is_na_real(value) =>
+                    {
+                        NA_REAL
+                    }
                     Cumulative::Sum => accumulator + value,
                     Cumulative::Product => accumulator * value,
                     Cumulative::Max => accumulator.max(value),
@@ -2157,6 +2514,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                 op: call.op,
                 args: &args,
                 env: call.env,
+                reusable: None,
             };
             return cumulative(&inner, kind);
         }
@@ -2237,21 +2595,27 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
                 return values::scalar_complex(total);
             }
             if kind == SexpType::Real {
+                // Within one argument the first NaN or NA wins, as GNU R's long double loop gives;
+                // each argument's sum is rounded to double, and across arguments NA outranks NaN.
                 let mut total = LongDouble::ZERO;
                 let mut na = false;
                 for &item in &items {
+                    let mut item_total = LongDouble::ZERO;
+                    let mut first_nan = None;
                     for index in 0..length(item) {
                         let value = real_at(item, index);
                         if value.is_nan() {
                             if na_rm {
                                 continue;
                             }
-                            if is_na_real(value) {
-                                na = true;
-                            }
+                            first_nan = Some(value);
+                            break;
                         }
-                        total += value;
+                        item_total += value;
                     }
+                    let item_sum = first_nan.unwrap_or_else(|| item_total.to_f64());
+                    na |= is_na_real(item_sum);
+                    total += item_sum;
                 }
                 return scalar_real(if na { NA_REAL } else { total.to_f64() });
             }
@@ -2274,17 +2638,29 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             scalar_integer(total as i32)
         }
         Summary::Product => {
+            // The same NaN order as the sum: first wins within an argument, NA across them.
             let mut total = 1.0;
+            let mut na = false;
             for &item in &items {
+                let mut item_product: f64 = 1.0;
                 for index in 0..length(item) {
                     let value = real_at(item, index);
                     if na_rm && value.is_nan() {
                         continue;
                     }
-                    total *= value;
+                    if item_product.is_nan() {
+                        break;
+                    }
+                    item_product = if value.is_nan() {
+                        value
+                    } else {
+                        item_product * value
+                    };
                 }
+                na |= is_na_real(item_product);
+                total *= item_product;
             }
-            scalar_real(total)
+            scalar_real(if na { NA_REAL } else { total })
         }
         Summary::Max | Summary::Min => {
             let is_max = function == Summary::Max;
@@ -2446,6 +2822,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
         op: call.op,
         args: &args,
         env: call.env,
+        reusable: None,
     };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
@@ -2518,7 +2895,12 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             scalar_real(total / count as f64)
         }
         SexpType::Real => {
-            scalar_real(long_double_mean(values::reals(operand).iter().copied()).to_f64())
+            let data = values::reals(operand);
+            // GNU R sums in x87 long double, where NA's payload outranks a plain NaN's.
+            if data.iter().any(|&value| is_na_real(value)) {
+                return scalar_real(NA_REAL);
+            }
+            scalar_real(long_double_mean(data.iter().copied()).to_f64())
         }
         SexpType::Complex => {
             let mut total = Rcomplex { r: 0.0, i: 0.0 };
@@ -2915,6 +3297,7 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             op: call.op,
             args: &[Arg { tag: nil(), value }],
             env: call.env,
+            reusable: None,
         });
     }
     let from_value = one(from, "from")?;
@@ -3119,6 +3502,16 @@ unsafe fn do_rep(call: &Call<'_>) -> R<Sexp> {
     if names != nil() {
         let new_names = crate::subset::select_elements(names, &indices)?;
         values::set_attr(result, symbols().names, new_names)?;
+    }
+    // GNU R keeps the class of an S4 object that extends a basic type, such as
+    // `setClass("SQL", contains = "character")`, so the repeated value is still that class.
+    if object.has_gp(gp::S4_OBJECT) {
+        values::set_attr(
+            result,
+            symbols().class,
+            values::get_attr(object, symbols().class),
+        )?;
+        result.set_gp_bits(gp::S4_OBJECT, true);
     }
     Ok(result)
 }
@@ -3570,7 +3963,7 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
         _ => return Err(call.error("invalid 'type' argument")),
     };
     let count = length(bits);
-    if count % width != 0 {
+    if !count.is_multiple_of(width) {
         return Err(call.error(format!("argument 'x' must be a multiple of {width} long")));
     }
     let mut flags = Vec::with_capacity(count);

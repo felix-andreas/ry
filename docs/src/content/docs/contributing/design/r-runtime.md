@@ -6,11 +6,11 @@ description: "Design draft: how ry runs R, from the C API up to the JIT, the tab
 This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
 and why. Built so far are the object model and collector in `crates/heap`, the C API as `libR.so`
 in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
-`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run --runtime ry`),
+`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run`),
 a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
 `crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
-code still comes from a GNU R installation), and the table type's use from the interpreter. `ry repl`
-and `ry run` still drive GNU R by default. The C API measurements in section 2 are real and
+code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
+runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
 reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 
@@ -236,6 +236,13 @@ That means `R_VERSION` and `Rversion.h`, and also `R_SVN_REVISION`: data.table's
 `R_VERSION < R_Version(4, 6, 0) || R_SVN_REVISION < 89077` (and `< 89194` for `R_mapAttrib`), so ry
 must report a revision of at least 89194 or data.table takes the backport.
 
+In practice the runtime runs the base R code of the GNU R installation its R home links, so ry
+presents that installation's version. `R.version`, `getRversion()` and the home's generated
+`Rversion.h` all come from its `library/base/DESCRIPTION`, and the revision is raised to at least
+89194. Linked to R 4.6, ry presents 4.6 as recommended here. Linked to an older R, such as the 4.3.3
+the corpus baseline runs on, it presents that version, because a package whose C code takes the 4.6
+branches while its R code runs on a 4.3 base breaks (rlang's `ns_registry_env()` is one example).
+
 A real non-API surface remains after that, unguarded: the promise accessors in `rlang`, `vctrs`,
 `lazyeval` and `magrittr` and `PRCODE`/`PRENV` in Rcpp's `Promise.h`, `ATTRIB` and `SET_ATTRIB`,
 `IS_UTF8` and `IS_ASCII` in `stringi`, `fansi` and data.table's `forder.c`, `Rf_findVarInFrame` in
@@ -343,8 +350,7 @@ the interpreter and the base library, one for the JIT, and `libr` for the C API.
 shared `libR` and contains a small amount of C, for the reason in "Errors across the boundary" below.
 Because a package built against GNU R records `libR.so` as a needed library, `libR` is the whole
 runtime: the interpreter and the JIT link into it, and the `ry` binary loads it.
-The `repl` crate keeps driving GNU R until ry's runtime can run the console's own code, and then
-gains a backend switch, so `ry repl` and `ry run` keep working throughout.
+The `repl` crate drives both: GNU R behind `ry R`, and ry's runtime behind `ry run`.
 
 ### Objects
 
@@ -425,6 +431,19 @@ Package libraries load with `dlopen`, then `R_init_<pkg>` runs and registers its
 `useDynLib` resolves registered symbols first, and C callables live in a global table keyed by
 package and name. ry builds source packages itself (`R CMD INSTALL` semantics, `Makevars`, the
 compiler flags `R CMD config` reports), and installs prebuilt binaries when the platform matches.
+
+A package library built by GNU R must bind its API calls to ry's `libR`, not GNU R's. On Linux it
+names its dependency by soname, `libR.so`, and ry's library carries that soname and is loaded with
+`RTLD_GLOBAL` first, so the dynamic loader reuses it. Mach-O binds each symbol to a named library
+instead (the two-level namespace), and CRAN's binaries name
+`/Library/Frameworks/R.framework/Versions/4.x-arm64/Resources/lib/libR.dylib` while Homebrew's name
+its own `libR.dylib`. ry therefore loads a copy of each such library whose `libR` load command is
+rewritten in place to `@rpath/libR.dylib`, the install name of ry's `libR.dylib`, and re-signed ad
+hoc (`crates/libr/src/macho.rs`, `crates/libr/src/dynload.rs`). dyld matches that load command
+against the already loaded image with the same install name, so the package binds to ry. Packages
+that `rcmd` builds on macOS link with `-undefined dynamic_lookup` and record no `libR` at all, so
+the same build loads under ry and under GNU R. `decisions.md` ("macOS packages bind to ry's libR")
+has the reasoning.
 
 ### Threads
 
@@ -514,11 +533,11 @@ that the gain over a good interpreter is real but modest.
 `crates/jit` implements the core of this design for loops; the rest of the list above is still
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
-- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body that contains a
-  loop compiles on its tenth entry, and a running loop compiles after 500 backward jumps and
-  continues in compiled code at the loop header (on-stack replacement). A body without a loop stays
-  in tier 0, because without direct calls the cost of entering compiled code and forcing arguments
-  through helpers is larger than what it saves.
+- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
+  1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
+  code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
+  optimizing compiler: a lower one compiled the methods package's code that a package load runs
+  only a few dozen times, which made the load slower.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -531,7 +550,17 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it. Promises are not elided.
+  after something that could change it.
+- **Calls.** A call to a frame-safe closure whose binding was resolved at compile time is direct:
+  effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
+  position without the general matcher. Evaluating early is invisible only if nothing can assign
+  what an argument reads before the callee forces it, so the callee must be frame-safe: its body
+  and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
+  The call goes through tier 0 instead when a calling handler is established, because a handler
+  could run R code in between. A call of a small closure defined in the same body, which computes a scalar
+  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  against one global binding epoch, which the heap bumps whenever a watched binding changes or a
+  watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
   speculated against the binding epoch. A failed guard boxes the live values, writes back the dirty
   variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
@@ -547,8 +576,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
-- **Not yet built:** direct calls between compiled closures, promise elision, the use of static
-  types as early profiles, and freeing the machine code of invalidated bodies.
+- **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
+  call still enters through tier 0's call path and allocates a frame and forced promises), the use
+  of static types as early profiles, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -598,7 +628,7 @@ The cost there is the install step, which is exactly what the development loop w
 
 ### ry's design
 
-The loader is built, ahead of the runtime, on the GNU R backend that `ry repl` embeds
+The loader is built, ahead of the runtime, on the GNU R backend that `ry R` embeds
 ([loading packages](/guides/loading-packages) is the user page). It splits into three parts, and only the
 last one knows which runtime runs the code:
 
@@ -646,7 +676,7 @@ The rules the implementation settled:
 
 Hooks run where R runs them: `.onLoad` after the eager expressions and S3 registration, `.onAttach`
 on attach. A reload runs `.onLoad` again only when the `.onLoad` definition changed, because it
-usually sets options or registers things once. `ry load` and `ry repl` are the entry points, and
+usually sets options or registers things once. `ry load` and the `ry R` console are the entry points, and
 `load_all()`, attached in `tools:ry`, serves both ry's console and plain R sessions; ry does not
 intercept `devtools::load_all()`.
 
@@ -681,15 +711,20 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
 
 The engine is `crates/table` and its query IR; `crates/interp/src/frame.rs` makes frames
 interpreter values and lowers queries into the IR, and `crates/libr/src/frame_altrep.rs` exposes
-columns as ALTREP vectors to native code. The user guide is [Frames](/guides/frames/).
+columns as ALTREP vectors to native code. The user guide is [DataFrames](/guides/dataframes/).
 
-- **The type is `frame`, and a frame is an external pointer that owns a Polars `DataFrame`.** The
-  name is not `table`, because base R's `table()` and its `"table"` class must keep working. The
-  constructor is `frame(...)`, the runtime class is `"frame"` alone (a frame is no `data.frame`;
-  `as.data.frame()` and `as.frame()` convert), and the checker types it as
-  `frame{id: integer[], price: double[], ticker: character[]}` (the "Frames" section of the typing
-  reference). Column references in a query are checked, and the data-masking draft gets the row
-  type it was waiting for.
+- **The type is `DataFrame`, an external pointer that owns a Polars `DataFrame`.** The runtime
+  class is `"DataFrame"` alone (a DataFrame is no `data.frame`; `as.data.frame()` and
+  `as.DataFrame()` convert), and the checker types it as
+  `DataFrame{id: integer[], price: double[], ticker: character[]}` (the "DataFrames" section of the
+  typing reference). `LazyFrame` holds a plan instead of a table, and `GroupBy` a DataFrame or plan
+  plus its keys.
+- **The primary API is Polars' verbs over expressions** (`DataFrame.select`, `with_columns`,
+  `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`, `head`, with `col("x")` expressions), all
+  qualified names in `package:ry`. Every verb builds a step of `table::lazy::Plan`, and an eager
+  verb collects at once. The planner pushes filters below `with_columns` and projections, and pushes
+  filters, needed columns and row limits into a file scan. The bracket syntax below stays as
+  data.table compatibility and lowers to the same IR.
 - **A column reaches R code as a copied R vector, and native code as an ALTREP vector over the
   Arrow buffer.** The interpreter copies a column when R code reads it (`$`, `as.list`, a data
   mask), which is cheap next to the query. The ALTREP path in `libr` is built but no interpreter
@@ -710,7 +745,7 @@ columns as ALTREP vectors to native code. The user guide is [Frames](/guides/fra
   `NaN` with low word 1954) are rewritten into validity at the boundary. A vector coming in from R
   is copied into a new Arrow buffer; only a column R never materialized comes back zero-copy.
 - **Queries go through a small IR to a Polars lazy plan.** The evaluator and the bytecode hand
-  `tbl[...]` on a frame to the lowering before `i`, `j` and `by` are evaluated, so
+  `tbl[...]` on a DataFrame to the lowering before `i`, `j` and `by` are evaluated, so
   `tbl[price > 0, .(total = sum(price)), by = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
   filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
@@ -734,6 +769,67 @@ The claim that the frame outperforms data.table rests on a benchmark of its own
 (`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
 DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
 same machine against data.table with all threads.
+
+At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
+`ry run` beat data.table under GNU R on every question, and all three runs give the
+same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
+driven from Rust, without R.
+
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 0.151 | 0.022 | 0.034 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.192 | 0.020 | 0.044 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.272 | 0.096 | 0.110 |
+| groupby q4: three means by `id4` | 0.357 | 0.158 | 0.175 |
+| groupby q5: three sums by `id6` | 0.291 | 0.089 | 0.157 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.692 | 0.091 | 0.146 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.714 | 0.053 | 0.081 |
+| groupby q8: the two largest `v3` by `id6` | 0.759 | 0.177 | 0.235 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.769 | 0.041 | 0.099 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.733 | 1.033 | 0.896 |
+| `:=` on a whole column, 100 times | 5.349 | 0.291 | 2.081 |
+| `:=` on 1% of rows, 100 times | 3.803 | 1.112 | 0.891 |
+| `:=` adding a column, 100 times | 5.159 | 0.744 | 2.666 |
+| join q1: small, on `id1` | 0.356 | 0.110 | 0.149 |
+| join q2: medium, on `id2` | 0.522 | 0.131 | 0.229 |
+| join q3: medium, left, on `id2` | 0.612 | 0.179 | 0.192 |
+| join q4: medium, on factor `id5` | 0.499 | 0.119 | 0.230 |
+| join q5: big, on `id3` | 3.797 | 0.664 | 1.028 |
+| keyed rolling join, 1e6 trades | 0.130 | 0.094 | 0.100 |
+| total | 26.16 | 5.22 | 9.54 |
+
+The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
+in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
+allocation-heavy questions, because the allocator returns large blocks to the OS between queries
+(`.agents/memory/backlog.md`, "Large allocations page-fault on every query").
+
+`tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers on
+the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums. The
+numbers are measured from Rust, in seconds, as the faster of two runs. Calls from R do not reach
+these kernels yet.
+
+| Operation | data.table | ry |
+|---|---|---|
+| `fread` | 2.92 | 1.39 |
+| `fwrite` | 0.87 | 0.70 |
+| `setkey` | 0.42 | 0.46 |
+| `setorder` | 0.97 | 0.69 |
+| `unique` | 0.10 | 0.09 |
+| `uniqueN` | 0.13 | 0.10 |
+| `rbindlist` | 0.88 | 0.29 |
+| `melt` | 1.20 | 0.39 |
+| `dcast` | 0.26 | 0.26 |
+| `shift` | 0.024 | 0.004 |
+| `fifelse` | 0.084 | 0.050 |
+| `fcoalesce` | 0.059 | 0.047 |
+| `nafill` | 0.081 | 0.042 |
+| `rleid` | 0.026 | 0.011 |
+| `between` | 0.018 | 0.013 |
+| `%chin%` | 0.049 | 0.036 |
+| `tstrsplit` | 5.17 | 1.86 |
+
+Each cell is the faster of two runs.
+
 
 ## 8. Typing integration
 
@@ -857,7 +953,7 @@ Each step ends with something real running, and each one is a large, whole chang
    exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
    URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
-   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`.
+   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
    implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `postscript`,
    `svg`, `png`, `jpeg`, `bmp` and `tiff` files with GNU R's geometry, while `xfig` and `pictex`
@@ -879,20 +975,32 @@ Each step ends with something real running, and each one is a large, whole chang
    installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
-   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
-   `rcmd` does not run yet, although the interpreter now exists.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. `rcmd`
+   also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
+   on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
+   packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
+   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
+   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
-6. **Inline syntax, agreement warnings and strict mode,** in the parser, the checker and the
+6. **Inline syntax, agreement warnings and strict mode (done),** in the parser, the checker and the
    runtime, with the runtime type summary and body facts.
-7. **The JIT.** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
+7. **The JIT (loops done, calls next).** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
-   IR, ALTREP exposure and the checker's `frame` type exist (section 7); wiring them into the
-   interpreter is next.
+   IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
+   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
+   helpers to it is next.
+
+9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
+   `@rpath/libR.dylib` and the full export list, GNU R's package binaries are rebound to it (section
+   4), and `rcmd` reads its toolchain from GNU R's `Makeconf`. All of this is verified by
+   cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
+   the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
+   Windows is next (section 11).
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
@@ -904,16 +1012,30 @@ JIT fits around them.
 - **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
   alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
   benchmark's test suites.
-- **Windows.** The C layer and the `dlopen` path need a Windows equivalent; the REPL's Windows work
-  (`contributing/design/repl.md`) is the starting point.
+- **Windows runtime.** Designed, not built. The design:
+  - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
+    so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has
+    loaded it, with no rewriting.
+  - Exports come from a generated `.def` file holding the same names as the Linux version script,
+    and `libr`'s build emits the matching import library for packages that `rcmd` builds.
+  - The headers' `LibExtern` becomes `__declspec(dllimport) extern` under `_WIN32`, because data
+    exports such as `R_NilValue` need an import thunk on Windows.
+  - Package DLLs load with `LoadLibraryExW` and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own
+    dependent DLLs in its `libs/x64/` resolve.
+
+  The gap: the interpreter uses about 70 Unix-only libc items (`iconv`, `glob`, `popen`, signals,
+  `getpwuid` and others), and `libr`'s C layer includes `dlfcn.h` and `sys/select.h`, so neither
+  compiles for Windows yet. R home discovery from the registry and Program Files exists and serves
+  `ry R` today.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,
   but it costs install time.
 - **How much of base R to reimplement natively versus reuse as R source.** The plan above reuses the
   R sources, which is less work but ties ry to GNU R's base implementation details.
-- **Licensing.** Reusing base R's R sources would bring their GPL-2-or-later license into the
-  runtime crates. The default, recorded in `.agents/memory/decisions.md` ("runtime licensing"), is
-  to load them at runtime from the user's own GNU R installation instead of vendoring them.
+
+Settled: **licensing.** Base R's R sources are GPL-2-or-later, so ry loads them at runtime from the
+user's own GNU R installation instead of vendoring them, and needs GNU R installed. The owner
+confirmed this default; the reasoning is in `.agents/memory/decisions.md` ("runtime licensing").
 
 ## Sources
 

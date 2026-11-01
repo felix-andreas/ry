@@ -20,14 +20,17 @@ path = "src/main.rs"
 [features]
 # Heap profilers such as massif only see the system allocator, so profiling builds drop it.
 default = ["mimalloc"]
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 
 [dependencies]
 clap.workspace = true
 dirs = "6"
 mimalloc = { version = "0.1", optional = true }
+libmimalloc-sys = { version = "0.1.49", features = ["extended"], optional = true }
 console.workspace = true
 ignore.workspace = true
 miette.workspace = true
+rustc-hash.workspace = true
 salsa.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_ignored = "0.1"
@@ -57,6 +60,8 @@ futures.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+# The scenario runner assembles ry's R home to script package installs.
+rcmd = { path = "../rcmd" }
 async-lsp.workspace = true
 unicode-width.workspace = true
 indoc.workspace = true

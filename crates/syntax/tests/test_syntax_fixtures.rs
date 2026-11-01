@@ -1,6 +1,7 @@
-use std::path::Path;
-use syntax::parse;
-use syntax::testing::run_fixture_suite;
+use {
+    std::path::Path,
+    syntax::{parse, testing::run_fixture_suite},
+};
 
 #[test]
 fn syntax_fixtures() {
@@ -25,6 +26,8 @@ fn erasure_of_inline_forms() {
         ("id <- @UserId(5L)\n", "id <- (5L)\n"),
         ("p <- @Box<integer>((x = 1,))\n", "p <- ((x = 1,))\n"),
         ("x: @trust integer <- v\n", "x <- v\n"),
+        ("f <- @pure function(x) x\n", "f <-  function(x) x\n"),
+        ("f <- @pure \\(x) x\n", "f <-  \\(x) x\n"),
         ("type UserId = integer\n", "#: @type UserId {integer}\n"),
         (
             "alias Box<T: numeric> = list{value: T}\n",

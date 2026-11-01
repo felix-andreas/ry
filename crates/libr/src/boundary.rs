@@ -13,16 +13,18 @@
 //! A jump restores the `PROTECT` stack and the `R_alloc` watermark to where they were when its
 //! context began, as GNU R does.
 
-use crate::{Global, Runtime, runtime};
-use heap::{
-    arena::Arena,
-    object::{Sexp, SexpType},
-};
-use std::{
-    any::Any,
-    ffi::{CStr, c_char, c_int, c_void},
-    io::Write,
-    panic::{AssertUnwindSafe, catch_unwind},
+use {
+    crate::{Global, Runtime, runtime},
+    heap::{
+        arena::Arena,
+        object::{Sexp, SexpType},
+    },
+    std::{
+        any::Any,
+        ffi::{CStr, c_char, c_int, c_void},
+        io::Write,
+        panic::{AssertUnwindSafe, catch_unwind},
+    },
 };
 
 pub type DlFunc = unsafe extern "C" fn() -> *mut c_void;
@@ -192,6 +194,9 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
     );
     let runtime = runtime();
     runtime.native_depth -= 1;
+    if runtime.native_depth == 0 {
+        runtime.heap.retire_escaped();
+    }
     let exit_depth = runtime.heap.roots.protect.leave(saved_base);
     runtime.arena.reset(watermark);
     runtime.heap.release_handles(mark);
@@ -269,6 +274,9 @@ pub unsafe fn with_native_scope(call: impl FnOnce() -> c_int) -> ApiResult<()> {
     let status = call();
     let runtime = runtime();
     runtime.native_depth -= 1;
+    if runtime.native_depth == 0 {
+        runtime.heap.retire_escaped();
+    }
     runtime.heap.roots.protect.leave(saved_base);
     runtime.arena.reset(watermark);
     runtime.heap.release_handles(mark);
@@ -321,7 +329,8 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     let c_finalizer = weak.weak_c_finalizer();
     let finalizer = weak.weak_finalizer();
     // The key is dead by definition, so only these roots keep it and the finalizer alive while
-    // the finalizer runs.
+    // the finalizer runs. `root_finalizable` has rooted them for a queued finalizer already, but
+    // a caller that runs one weak reference directly has not.
     let mark = runtime().heap.handle_mark();
     runtime().heap.root(key);
     runtime().heap.root(finalizer);

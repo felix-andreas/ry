@@ -51,7 +51,7 @@ f <- function(x) {
 }
 #++++
 == R/main.R
-f: <T> fn(x: T) -> character
+f: <T> fn([x]: T) -> character
 
 #---- assignment_rhs_can_use_other_outer_binding_while_rebinding_different_name
 #~~~~ R/main.R

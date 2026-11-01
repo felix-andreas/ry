@@ -2,17 +2,19 @@
 //! semantics (join layout, rolling matches, group order, `NA` handling) was read from data.table
 //! 1.17 under GNU R on the same inputs.
 
-use syntax::testing::{SplitMix64, fuzz_iterations};
-use table::{
-    ColumnType, Schema, Table,
-    convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
-    ffi, io, ops,
-    polars::prelude::{IntoColumn, PlSmallStr},
-    query::{
-        Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query, ResultType,
-        Roll, Rows, Select, SortKey, UnaryOp,
-        build::{aggregate, binary, column},
-        execute, execute_with_plans_only, plan, result_type,
+use {
+    syntax::testing::{SplitMix64, fuzz_iterations},
+    table::{
+        ColumnType, Schema, Table,
+        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        ffi, io, ops,
+        polars::prelude::{IntoColumn, PlSmallStr},
+        query::{
+            Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query,
+            ResultType, Roll, Rows, Select, SortKey, UnaryOp,
+            build::{aggregate, binary, column},
+            execute, execute_with_plans_only, plan, result_type,
+        },
     },
 };
 
@@ -237,14 +239,14 @@ fn the_schema_prints_and_parses_in_the_checkers_notation() {
     let schema = table.schema();
     assert_eq!(
         schema.to_string(),
-        "frame{id: integer[], price: double[], ticker: character[]}"
+        "DataFrame{id: integer[], price: double[], ticker: character[]}"
     );
     assert_eq!(
         Schema::parse(&schema.to_string()).ok(),
         Some(schema.clone())
     );
     assert!(schema.check(&table).is_ok());
-    let wrong = Schema::parse("frame{id: integer[], price: integer[], ticker: character[]}")
+    let wrong = Schema::parse("DataFrame{id: integer[], price: integer[], ticker: character[]}")
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         wrong.check(&table).map_err(|error| error.to_string()),
@@ -264,7 +266,7 @@ fn polars_dtypes_without_an_r_type_are_normalized() {
     let table = Table::new(input).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         table.schema().to_string(),
-        "frame{small: integer[], wide: double[], single: double[]}"
+        "DataFrame{small: integer[], wide: double[], single: double[]}"
     );
 }
 
@@ -324,7 +326,7 @@ fn by_keeps_first_appearance_and_na_propagates_unless_removed() {
     assert_eq!(read(&mut result, "n"), ints(&[2, 2, 1]));
     assert_eq!(
         result.schema().to_string(),
-        "frame{g: character[], s: integer[], n: integer[]}"
+        "DataFrame{g: character[], s: integer[], n: integer[]}"
     );
 }
 
@@ -1975,7 +1977,9 @@ fn mult_keeps_the_first_or_last_match_as_data_table_does() {
 }
 
 /// The fuzz builds small tables, so this one is large enough for the grouped median, sd and `cor`
-/// kernels to split their rows across threads; the Polars plan is the reference.
+/// kernels to split their rows across threads; the Polars plan is the reference. `g` groups
+/// through dense states and `sparse`, the same groups spread over a wide code range, through
+/// hashed partitions.
 #[test]
 fn large_grouped_medians_and_moments_match_the_plan() {
     let mut rng = SplitMix64(7);
@@ -1995,8 +1999,10 @@ fn large_grouped_medians_and_moments_match_the_plan() {
         .iter()
         .map(|y| *y as i32 / 3 + rng.below(100) as i32)
         .collect();
+    let sparse: Vec<i32> = groups.iter().map(|group| group * 4_000_000).collect();
     let table = frame(vec![
         ("g", ints(&groups)),
+        ("sparse", ints(&sparse)),
         ("x", doubles(&x)),
         ("y", doubles(&y)),
         ("z", ints(&z)),
@@ -2006,47 +2012,54 @@ fn large_grouped_medians_and_moments_match_the_plan() {
         arg: Box::new(column("x")),
         na_rm: true,
     };
-    let query = || Query {
-        select: Select::Columns(vec![
-            named("md", removed(Aggregate::Median)),
-            named("md_na", aggregate(Aggregate::Median, column("x"))),
-            named("sd", removed(Aggregate::Sd)),
-            named("var", aggregate(Aggregate::Var, column("y"))),
-            named(
-                "cor",
-                Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
-            ),
-        ]),
-        by: vec![named("g", column("g"))],
-        ..Query::default()
-    };
-    let mut kernel = run_table(&mut table.fork(), query());
-    let mut planned =
-        match execute_with_plans_only(&mut table.fork(), query()).map(|executed| executed.output) {
+    for key in ["g", "sparse"] {
+        let query = || Query {
+            select: Select::Columns(vec![
+                named("md", removed(Aggregate::Median)),
+                named("md_na", aggregate(Aggregate::Median, column("x"))),
+                named("sd", removed(Aggregate::Sd)),
+                named("var", aggregate(Aggregate::Var, column("y"))),
+                named(
+                    "cor",
+                    Expr::Correlation(Box::new(column("y")), Box::new(column("z"))),
+                ),
+            ]),
+            by: vec![named(key, column(key))],
+            ..Query::default()
+        };
+        let mut kernel = run_table(&mut table.fork(), query());
+        let mut planned = match execute_with_plans_only(&mut table.fork(), query())
+            .map(|executed| executed.output)
+        {
             Ok(Output::Table(result)) => result,
             other => panic!("expected a table, got {other:?}"),
         };
-    assert_eq!(read(&mut kernel, "g"), get(&mut planned, "g"));
-    for name in ["md", "md_na"] {
-        assert_eq!(read(&mut kernel, name), get(&mut planned, name), "{name}");
-    }
-    for name in ["sd", "var", "cor"] {
-        let (RVector::Double(left), RVector::Double(right)) =
-            (get(&mut kernel, name), get(&mut planned, name))
-        else {
-            panic!("{name} is not a double column");
-        };
-        assert_eq!(left.len(), right.len(), "{name}");
-        for (left, right) in left.iter().zip(&right) {
+        assert_eq!(read(&mut kernel, key), get(&mut planned, key));
+        for name in ["md", "md_na"] {
             assert_eq!(
-                is_na_real(*left),
-                is_na_real(*right),
-                "{name}: {left} against {right}"
+                read(&mut kernel, name),
+                get(&mut planned, name),
+                "{key} {name}"
             );
-            assert!(
-                is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
-                "{name}: {left} against {right}"
-            );
+        }
+        for name in ["sd", "var", "cor"] {
+            let (RVector::Double(left), RVector::Double(right)) =
+                (get(&mut kernel, name), get(&mut planned, name))
+            else {
+                panic!("{key} {name} is not a double column");
+            };
+            assert_eq!(left.len(), right.len(), "{key} {name}");
+            for (left, right) in left.iter().zip(&right) {
+                assert_eq!(
+                    is_na_real(*left),
+                    is_na_real(*right),
+                    "{key} {name}: {left} against {right}"
+                );
+                assert!(
+                    is_na_real(*left) || (left - right).abs() <= 1e-6 * right.abs().max(1.0),
+                    "{key} {name}: {left} against {right}"
+                );
+            }
         }
     }
 }
@@ -3071,7 +3084,7 @@ fn a_csv_file_reads_into_the_column_types_fread_gives() {
         read_text("id,price,flag,name,empty\n1,1.5,TRUE,x,NA\n2, 3,FALSE,,\n NA,NA,,\"y, z\",\n");
     assert_eq!(
         table.schema().to_string(),
-        "frame{id: integer[], price: double[], flag: logical[], name: character[], empty: logical[]}"
+        "DataFrame{id: integer[], price: double[], flag: logical[], name: character[], empty: logical[]}"
     );
     assert_eq!(get(&mut table, "id"), ints(&[1, 2, NA_INTEGER]));
     assert_eq!(
@@ -3090,18 +3103,36 @@ fn a_csv_file_reads_into_the_column_types_fread_gives() {
     );
 }
 
+/// Mutated delimited text reads or fails cleanly under `io::check_csv_input`, which the
+/// coverage-guided `csv` target shares.
+#[test]
+fn fuzz_csv_reading() {
+    let seeds = [
+        "id,price,flag,name,empty\n1,1.5,TRUE,x,NA\n2, 3,FALSE,,\n NA,NA,,\"y, z\",\n",
+        "a\tb\n1\t\"q\nq\"\n2\t3\n",
+        "x|y\n1|2.5\nInf|-inf\n",
+        "1,2\n3,4\n",
+        "a,a,\n1,2,3\n",
+    ];
+    let mut rng = SplitMix64(0xc5f_f022);
+    for _ in 0..fuzz_iterations(500) {
+        let seed = seeds[rng.below(seeds.len())];
+        io::check_csv_input(&syntax::testing::mutate_bytes(&mut rng, seed));
+    }
+}
+
 #[test]
 fn a_first_row_that_fits_the_columns_is_data() {
     let table = read_text("1,2\n3,4\n");
     assert_eq!(
         table.schema().to_string(),
-        "frame{V1: integer[], V2: integer[]}"
+        "DataFrame{V1: integer[], V2: integer[]}"
     );
     assert_eq!(table.height(), 2);
     let table = read_text("a,a,\n1,2,3\n");
     assert_eq!(
         table.schema().to_string(),
-        "frame{a: integer[], a.1: integer[], V3: integer[]}"
+        "DataFrame{a: integer[], a.1: integer[], V3: integer[]}"
     );
 }
 
@@ -3134,7 +3165,7 @@ fn a_value_the_sample_missed_rereads_the_column_from_all_its_values() {
         let table = read_text(&text);
         assert_eq!(
             table.schema().to_string(),
-            format!("frame{{id: integer[], value: {expected}, flag: logical[]}}"),
+            format!("DataFrame{{id: integer[], value: {expected}, flag: logical[]}}"),
             "{odd:?}"
         );
         assert_eq!(table.height(), rows);
@@ -3195,7 +3226,10 @@ fn files_read_and_write_through_the_file_system() {
     std::fs::remove_file(&path).unwrap_or_else(|error| panic!("cannot remove: {error}"));
     assert_eq!(get(&mut back, "v"), ints(&[1, 2]));
     io::strings_as_factors(&mut back).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(back.schema().to_string(), "frame{k: factor, v: integer[]}");
+    assert_eq!(
+        back.schema().to_string(),
+        "DataFrame{k: factor, v: integer[]}"
+    );
 }
 
 fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {
@@ -3241,7 +3275,7 @@ fn setnames_and_setcolorder_rename_and_reorder_in_place() {
     ops::set_column_order(&mut x, &["c"]).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         x.schema().to_string(),
-        "frame{c: integer[], id: integer[], b: integer[]}"
+        "DataFrame{c: integer[], id: integer[], b: integer[]}"
     );
     assert!(ops::set_names(&mut x, &[("b", "c")]).is_err());
     assert!(ops::set_names(&mut x, &[("nope", "d")]).is_err());
@@ -3255,7 +3289,7 @@ fn rbindlist_widens_types_and_fills_by_name() {
         ops::rbind_list(&[&a, &b], ops::Bind::Position).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         stacked.schema().to_string(),
-        "frame{a: double[], b: character[]}"
+        "DataFrame{a: double[], b: character[]}"
     );
     assert_eq!(Read(get(&mut stacked, "a")), doubles(&[1.0, 2.5]));
 
@@ -3269,7 +3303,7 @@ fn rbindlist_widens_types_and_fills_by_name() {
         ops::rbind_list(&[&c, &d], ops::Bind::Fill).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         filled.schema().to_string(),
-        "frame{a: integer[], b: factor, c: logical[]}"
+        "DataFrame{a: integer[], b: factor, c: logical[]}"
     );
     assert_eq!(get(&mut filled, "a"), ints(&[1, NA_INTEGER]));
     assert_eq!(
@@ -3311,7 +3345,7 @@ fn melt_stacks_measures_under_a_factor_of_their_names() {
     let mut long = output_table(executed);
     assert_eq!(
         long.schema().to_string(),
-        "frame{id: integer[], variable: factor, value: double[]}"
+        "DataFrame{id: integer[], variable: factor, value: double[]}"
     );
     assert_eq!(get(&mut long, "id"), ints(&[1, 2, 1, 2]));
     assert_eq!(
@@ -3340,7 +3374,7 @@ fn dcast_spreads_sorted_values_into_sorted_columns() {
     let mut summed = output_table(cast(Some(Aggregate::Sum)));
     assert_eq!(
         summed.schema().to_string(),
-        "frame{r: character[], x: integer[], y: integer[], z: integer[]}"
+        "DataFrame{r: character[], x: integer[], y: integer[], z: integer[]}"
     );
     assert_eq!(summed.key(), ["r"]);
     assert_eq!(get(&mut summed, "r"), strings(&["a", "b"]));
@@ -3381,7 +3415,7 @@ fn dcast_names_columns_as_r_spells_the_values() {
         ops::dcast(&numbers, &["r"], "c", "v", None).unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         output_table(cast).schema().to_string(),
-        "frame{r: character[], 0.5: integer[], 1: integer[]}"
+        "DataFrame{r: character[], 0.5: integer[], 1: integer[]}"
     );
 }
 

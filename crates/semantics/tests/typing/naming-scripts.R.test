@@ -60,7 +60,7 @@ value <- 1L
 == inst/scripts/helper.R
 value: Person
 10..15 warning[unused] `value` is assigned but never used.
-19..21 error[type-mismatch] expected `Person`, found `integer`
+19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- script_type_does_not_contribute_project_global
 #~~~~ R/main.R

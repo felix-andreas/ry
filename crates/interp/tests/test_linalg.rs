@@ -2,16 +2,20 @@
 //! (BLAS), the `La_*` internals (LAPACK), `backsolve`, and the LINPACK routines base registers
 //! for `.Fortran`, `dqrdc2` among them. The expected values are GNU R's on the reference BLAS
 //! and LAPACK 3.12, the libraries both run on.
+//! A machine whose default BLAS or LAPACK is OpenBLAS differs in the last bit, so run the test with
+//! `LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack` there.
 //!
 //! The interpreter runs here without base R and without libR, so the cases build their inputs
 //! from primitives and call `.Internal` and `.Fortran` directly. That also checks that base's
 //! `.Fortran` routines work without the libR host.
 
-use heap::{
-    Heap,
-    object::{Sexp, SexpType},
+use {
+    heap::{
+        Heap,
+        object::{Sexp, SexpType},
+    },
+    interp::{eval, lower, unwind::Unwind, values},
 };
-use interp::{eval, lower, unwind::Unwind, values};
 
 /// The inputs: a 9 x 3 matrix `x`, a 9 x 5 matrix `n` whose second column nearly repeats its
 /// first (so `dqrdc2` must recompute that column's norm) and whose fourth is the sum of two

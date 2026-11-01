@@ -1,5 +1,10 @@
-use crate::kind::SyntaxKind::{self, *};
-use crate::{SyntaxNode, SyntaxToken};
+use {
+    crate::{
+        SyntaxNode, SyntaxToken,
+        kind::SyntaxKind::{self, *},
+    },
+    std::borrow::Cow,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Name(SyntaxNode);
@@ -16,12 +21,17 @@ impl Name {
     /// The name as R sees it (backticks stripped, escapes resolved), so every
     /// spelling of one name compares equal.
     pub fn text(&self) -> Option<String> {
-        let token = self.token()?;
-        let text = token.text();
-        let Some(quoted) = text.strip_prefix('`').and_then(|t| t.strip_suffix('`')) else {
-            return Some(text.to_owned());
-        };
-        Some(unescape_name(quoted))
+        Some(name_text(self.token()?.text()).into_owned())
+    }
+}
+
+/// The name a `NAME` token spells, as [`Name::text`] reads it. Only a backticked name with
+/// an escape allocates.
+pub fn name_text(token: &str) -> Cow<'_, str> {
+    match token.strip_prefix('`').and_then(|t| t.strip_suffix('`')) {
+        Some(quoted) if quoted.contains('\\') => Cow::Owned(unescape_name(quoted)),
+        Some(quoted) => Cow::Borrowed(quoted),
+        None => Cow::Borrowed(token),
     }
 }
 
@@ -77,6 +87,7 @@ pub fn is_expression_kind(kind: SyntaxKind) -> bool {
             | NEXT_EXPR
             | TUPLE_EXPR
             | RECORD_EXPR
+            | ARRAY_EXPR
             | TAG_EXPR
             | MATCH_EXPR
             | NEW_EXPR

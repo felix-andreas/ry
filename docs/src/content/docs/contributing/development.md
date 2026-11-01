@@ -3,25 +3,40 @@ title: Development
 description: How to build, test, and debug ry
 ---
 
-ry is a Rust workspace of six crates under `crates/`. [Structure](/contributing/structure) maps
+ry is a Rust workspace whose crates live under `crates/`. [Structure](/contributing/structure) maps
 every source file, and [Architecture](/contributing/architecture) explains how the analysis fits
 together. The editor extensions live in `editors/code` (VS Code) and `editors/zed` (Zed).
 
 ## Build and test
 
+The workspace builds on the dated nightly that `rust-toolchain.toml` pins, because std's allocator
+API and other unstable features are worth having before they stabilize (the policy is in
+`.agents/memory/decisions.md`, "Data-oriented design and explicit allocators"). With rustup, cargo
+downloads that toolchain, with clippy, rustfmt and the `wasm32-wasip2` target, on the first build.
+The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
+`rustfmt.toml`, so `cargo fmt` keeps a single `use { ... }` tree per file.
+
 The `justfile` at the repository root names every day-to-day action, and `just` with no arguments
 lists them all. The common ones:
 
 ```sh
+just ry check                       # build ry and its runtime if needed, then run `ry check`
+just build                          # every binary and ry's runtime (`just build --release`)
+just try                            # build ry and walk through every command in a demo project
+just try-editor                     # build ry and print how to point an editor at it
 just gate                           # tests, clippy -D warnings, and fmt --check
 just battery                        # all workspace tests, excluding zed_ry
 just fixture <group__case>          # one fixture case
 just bless -p semantics --test ...  # rewrite fixture expectations from current output
-just fuzz-deep                      # the long seeded fuzz run
+just docs-test [page]               # run the docs' marked examples through the real binary
 just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
-just repl-e2e                       # drive `ry repl` through a pty against the system R
+just repl-e2e                       # drive `ry R` and `ry run` through a pty
+just release-dry-run                # package and smoke-test this machine's release archive
 ```
+
+The simulators, fuzzers and long oracle runs have their own recipes, which
+[Robustness](/contributing/robustness#running-the-long-harnesses) lists.
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a
 different target and package as its second and third arguments. Review the diff after every bless:
@@ -44,7 +59,7 @@ environment variables come up every day:
 - `FIXTURE_FILTER=group__case` runs a single case.
 
 Some suites and every performance instrument read a corpus of real-world R code. Fetch it with
-`cargo +nightly -Zscript scripts/fetch-corpus.rs`, which writes into the gitignored `corpus/`
+`cargo -Zscript scripts/fetch-corpus.rs`, which writes into the gitignored `corpus/`
 directory. The resolved inventory is committed as `scripts/corpus-manifest.txt`.
 
 ### The R console needs no R to build
@@ -53,6 +68,22 @@ The `repl` crate loads R's shared library at runtime instead of linking against 
 workspace builds and its tests run on a machine with no R. Only running the console needs R. The
 end-to-end tests skip cleanly where R is missing; run `just repl-e2e` before you touch the console.
 [REPL design](/contributing/design/repl/) records how the embedding works.
+
+### ry's runtime is built separately
+
+`ry run` and `ry repl --runtime ry` load ry's own runtime, `libR.so`, from the directory of the
+`ry` executable. It is a separate crate (`libr`), so `cargo build -p ry-lang` does not rebuild it;
+`just ry` and `just build` do. To keep a leftover library from running old code, `ry` compares a
+hash of the runtime's sources with the one stored in `libR.so` right after loading it, and refuses
+a mismatch with exit status 2:
+
+```text
+  x ry's runtime (target/debug/libR.so) is out of date: it has build 8fcdf6d9f4862983, but this ry is build
+  | 2588183553632a45; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)
+```
+
+Build `libr` with the same profile as `ry` and the error goes away. The hash covers the sources
+of `libr` and the crates it links, so editing the formatter or the IDE layer never triggers it.
 
 ## Debugging
 
@@ -68,12 +99,26 @@ end-to-end tests skip cleanly where R is missing; run `just repl-e2e` before you
 
 ## The docs site
 
-Every typed example in the docs is a pair of tabs, `Inline` first and `Comments` second, inside a
-Starlight `<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. Pages
-with tabs are `.mdx`. After editing one, run `python3 docs/check-tabs.py docs/src/content/docs/**/*.mdx`
-with a built `ry` (set `RY` if it is not at `target/debug/ry`): it checks both tabs of each pair and
-fails when their diagnostics differ. Every annotation form has both spellings, type definitions
-included, so the Inline tab carries no `#:` line except to show the two spellings together.
+Every typed example in the docs is a pair of tabs, `Inline` and `Comments`, inside a Starlight
+`<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. A page lists
+`Comments` first when it teaches the `#:` form (the step 2 pages) and `Inline` first otherwise. Pages
+with tabs are `.mdx`. Every annotation form has both spellings, type definitions included, so the
+Inline tab carries no `#:` line except to show the two spellings together.
+
+Every block of `ry` output on a page is a test: mark it as described in
+[Docs examples](/contributing/testing#docs-examples), and `just docs-test` runs each tab through the
+real binary and compares the output. A tab group with no output block after it must give the same
+findings in both tabs.
+
+Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
+`/type-checking/overview.md`), with the frontmatter, imports and components removed and each tab
+group turned into consecutive `Inline` and `Comments` subheadings. `/llms.txt` lists the pages with
+their descriptions in sidebar order, and `/llms-full.txt` concatenates them all. Each page's head
+links its Markdown version with `<link rel="alternate" type="text/markdown">`, and the breadcrumb row
+has a "View as Markdown" link. The code is `docs/src/lib/markdown.ts`, the three endpoints in
+`docs/src/pages/`, and `docs/src/routeData.ts`. A new MDX component must be handled in
+`bodyToMarkdown`, or it leaks into the Markdown as raw tags. A `description` containing ` #` must be
+quoted, because YAML reads the rest of the line as a comment.
 
 Run `just docs` for a live preview, and `cd docs && bun run build` for a full build, which needs
 Node 22.23.4 or newer.

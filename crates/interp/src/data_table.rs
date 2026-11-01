@@ -31,21 +31,26 @@
 //! memory, which is safe because every engine value built from it is dropped before [`query`]
 //! returns.
 
-use crate::{
-    eval,
-    frame::{self, Lowering, Piece, Plan},
-    interp, scope,
-    unwind::{R, Unwind, error},
-    values::{self, install, is_nil, length, nil, symbols},
-};
-use heap::object::{Sexp, SexpType};
-use rustc_hash::FxHashSet;
-use std::cell::Cell;
-use table::{
-    ColumnType, Schema, Table,
-    convert::{self, RVector},
-    polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
-    query::{self, Output, Query, Rows, Select},
+use {
+    crate::{
+        eval,
+        frame::{self, Lowering, Piece, Plan},
+        interp, scope,
+        unwind::{R, Unwind, error},
+        values::{self, install, is_nil, length, nil, symbols},
+    },
+    heap::object::{Sexp, SexpType},
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{cell::Cell, collections::HashSet},
+    table::{
+        ColumnType, Schema, Table,
+        convert::{self, RVector},
+        polars::prelude::{
+            ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries,
+            NewChunkedArray, PlSmallStr, Series, StringChunked,
+        },
+        query::{self, Output, Query, Rows, Select},
+    },
 };
 
 /// R helpers in the `ry` namespace. They call into data.table, which may not be installed, so
@@ -163,11 +168,15 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     if values::as_logical_scalar(helper(".datatable_aware", &[env])?) != 1 {
         return Ok(None);
     }
-    let Some(mut table) = import(subject)? else {
+    let Some((columns, height)) = subject_columns(subject)? else {
         return Ok(None);
     };
+    let schema = Schema::new(
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.kind)),
+    );
     let parts = frame::parse_parts(call, env, true)?;
-    let schema = table.schema();
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
     {
@@ -175,7 +184,7 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     }
     let lowering = Lowering {
         schema: &schema,
-        height: table.height(),
+        height,
         env,
         call,
         strict: true,
@@ -205,33 +214,38 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     if matches!(rows, Rows::Join(_)) && parts.on.is_none() {
         return Ok(None);
     }
-    if assigns {
-        return update(subject, table, rows, select, by, call);
-    }
-    // `x[]` returns `x` itself, which only data.table can do.
-    if parts.i.is_none() && parts.j.is_none() {
-        return Ok(None);
-    }
-    let shape = if !by.is_empty() {
-        Shape::Grouped
-    } else if matches!(select, Select::All)
-        || selects_columns(&select, parts.j.as_ref().and_then(Piece::expression))
-    {
-        Shape::Rows
-    } else {
-        Shape::Selected
-    };
-    let sorted = parts.keyed.then(|| {
-        by.iter()
-            .map(|(name, _)| name.to_string())
-            .collect::<Vec<_>>()
-    });
     let query = Query {
         rows,
         select,
         by,
         keyed: parts.keyed,
     };
+    // Only the columns the query reads enter the engine, because importing a character column
+    // converts every string.
+    let mut table = import(&columns, height, query::referenced_columns(&query))?;
+    if assigns {
+        return update(subject, table, query, call);
+    }
+    // `x[]` returns `x` itself, which only data.table can do.
+    if parts.i.is_none() && parts.j.is_none() {
+        return Ok(None);
+    }
+    let shape = if !query.by.is_empty() {
+        Shape::Grouped
+    } else if matches!(query.select, Select::All)
+        || selects_columns(&query.select, parts.j.as_ref().and_then(Piece::expression))
+    {
+        Shape::Rows
+    } else {
+        Shape::Selected
+    };
+    let sorted = parts.keyed.then(|| {
+        query
+            .by
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>()
+    });
     let Some(output) = run(&mut table, query)? else {
         return Ok(None);
     };
@@ -426,18 +440,11 @@ unsafe fn run(table: &mut Table, query: Query) -> R<Option<Output>> {
 
 /// `:=` on `subject`, computed on `table`, its copy in the engine, and written into `subject`
 /// through `data.table::set()` once every value is known, so a decline leaves `subject` as it was.
-unsafe fn update(
-    subject: Sexp,
-    mut table: Table,
-    rows: Rows,
-    select: Select,
-    by: Vec<(PlSmallStr, table::query::Expr)>,
-    call: Sexp,
-) -> R<Option<Sexp>> {
-    let Select::Assign(assignments) = &select else {
+unsafe fn update(subject: Sexp, mut table: Table, query: Query, call: Sexp) -> R<Option<Sexp>> {
+    let Select::Assign(assignments) = &query.select else {
         return Ok(None);
     };
-    let positions = match &rows {
+    let positions = match &query.rows {
         Rows::All => None,
         Rows::Filter(condition) => Some(frame::selected_positions(
             &mut table,
@@ -447,7 +454,7 @@ unsafe fn update(
         _ => return Ok(None),
     };
     let deletes = assignments.iter().any(|(_, value)| value.is_none());
-    if deletes && (positions.is_some() || !by.is_empty()) {
+    if deletes && (positions.is_some() || !query.by.is_empty()) {
         return Ok(None);
     }
     let existing: Vec<String> = values::strings(values::names(subject))
@@ -468,12 +475,6 @@ unsafe fn update(
         }
     }
     let names: Vec<PlSmallStr> = assignments.iter().map(|(name, _)| name.clone()).collect();
-    let query = Query {
-        rows,
-        select,
-        by,
-        keyed: false,
-    };
     if run(&mut table, query)?.is_none() {
         return Ok(None);
     }
@@ -582,9 +583,16 @@ unsafe fn result_table(result: &Table, shape: Shape, sorted: Option<&[String]>) 
     )
 }
 
-/// The columns of `subject` as an engine table, or `None` when a column has a type or an
-/// attribute the engine does not represent exactly.
-unsafe fn import(subject: Sexp) -> R<Option<Table>> {
+/// One column of the subject, typed without reading its data.
+struct SubjectColumn {
+    name: PlSmallStr,
+    vector: Sexp,
+    kind: ColumnType,
+}
+
+/// The columns of `subject` and its height, or `None` when a column has a type or an attribute
+/// the engine does not represent exactly.
+unsafe fn subject_columns(subject: Sexp) -> R<Option<(Vec<SubjectColumn>, usize)>> {
     let names = values::names(subject);
     if is_nil(names) {
         return Ok(None);
@@ -600,50 +608,107 @@ unsafe fn import(subject: Sexp) -> R<Option<Table>> {
         if name.is_empty() || !seen.insert(name.to_string()) {
             return Ok(None);
         }
-        let column = values::materialize(subject.element(index))?;
-        if *height.get_or_insert(length(column)) != length(column) {
+        let vector = subject.element(index);
+        if *height.get_or_insert(length(vector)) != length(vector) {
             return Ok(None);
         }
-        let Some(series) = import_column(PlSmallStr::from(name.as_ref()), column)? else {
-            return Ok(None);
+        let plain = is_nil(vector.attrib());
+        let kind = match vector.kind() {
+            SexpType::Integer if plain => ColumnType::Integer,
+            SexpType::Real if plain => ColumnType::Double,
+            SexpType::Logical if plain => ColumnType::Logical,
+            SexpType::String if plain => ColumnType::Character,
+            SexpType::Integer if is_plain_factor(vector) => ColumnType::Factor,
+            _ => return Ok(None),
         };
-        columns.push(series.into_column());
+        columns.push(SubjectColumn {
+            name: PlSmallStr::from(name.as_ref()),
+            vector,
+            kind,
+        });
     }
-    let frame = DataFrame::new(height.unwrap_or(0), columns)
-        .map_err(|failure| error(failure.to_string()))?;
-    Table::new(frame)
-        .map(Some)
-        .map_err(|failure| error(failure.to_string()))
+    Ok(Some((columns, height.unwrap_or(0))))
 }
 
-unsafe fn import_column(name: PlSmallStr, column: Sexp) -> R<Option<Series>> {
-    let attributes = column.attrib();
-    let plain = is_nil(attributes);
-    let series = match column.kind() {
-        // The engine reads integer and double data where R keeps it, see the module docs.
-        SexpType::Integer if plain => convert::borrow_integer(name, values::ints(column)),
-        SexpType::Real if plain => convert::borrow_double(name, values::reals(column)),
-        SexpType::Logical if plain => {
-            to_series(name, RVector::Logical(values::ints(column).to_vec()))?
+/// The engine table of `columns`, keeping only those in `needed` when it is given.
+unsafe fn import(
+    columns: &[SubjectColumn],
+    height: usize,
+    needed: Option<HashSet<PlSmallStr>>,
+) -> R<Table> {
+    let mut imported = Vec::with_capacity(columns.len());
+    for column in columns {
+        if needed
+            .as_ref()
+            .is_some_and(|needed| !needed.contains(&column.name))
+        {
+            continue;
         }
-        SexpType::String if plain => to_series(name, RVector::Character(values::strings(column)))?,
-        SexpType::Integer if is_plain_factor(column) => {
-            let levels = values::get_attr(column, symbols().levels);
+        imported.push(import_column(column)?.into_column());
+    }
+    let frame = DataFrame::new(height, imported).map_err(|failure| error(failure.to_string()))?;
+    Table::new(frame).map_err(|failure| error(failure.to_string()))
+}
+
+unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
+    let name = column.name.clone();
+    let vector = values::materialize(column.vector)?;
+    Ok(match column.kind {
+        // The engine reads integer and double data where R keeps it, see the module docs.
+        ColumnType::Integer => convert::borrow_integer(name, values::ints(vector)),
+        ColumnType::Double => convert::borrow_double(name, values::reals(vector)),
+        ColumnType::Logical => to_series(name, RVector::Logical(values::ints(vector).to_vec()))?,
+        ColumnType::Character => {
+            // R interns its strings, so a column repeats a few CHARSXPs. Each distinct one
+            // converts once, and the column gathers them, which copies a 16-byte view per row.
+            let na = values::na_string();
+            let mut positions: FxHashMap<Sexp, IdxSize> = FxHashMap::default();
+            let mut distinct = Vec::new();
+            let mut indices = Vec::with_capacity(length(vector));
+            let mut has_na = false;
+            for index in 0..length(vector) {
+                let charsxp = vector.element(index);
+                if charsxp == na {
+                    has_na = true;
+                    indices.push(IdxSize::MAX);
+                    continue;
+                }
+                let position = *positions.entry(charsxp).or_insert_with(|| {
+                    distinct.push(values::char_str(charsxp));
+                    (distinct.len() - 1) as IdxSize
+                });
+                indices.push(position);
+            }
+            let indices = if has_na {
+                IdxCa::from_iter_options(
+                    PlSmallStr::EMPTY,
+                    indices
+                        .into_iter()
+                        .map(|index| (index != IdxSize::MAX).then_some(index)),
+                )
+            } else {
+                IdxCa::from_vec(PlSmallStr::EMPTY, indices)
+            };
+            StringChunked::from_iter_values(name, distinct.iter().map(AsRef::as_ref))
+                .take(&indices)
+                .map_err(|failure| error(failure.to_string()))?
+                .into_series()
+        }
+        ColumnType::Factor => {
+            let levels = values::get_attr(vector, symbols().levels);
             let levels: Vec<String> = values::strings(levels).into_iter().flatten().collect();
-            if levels.len() != length(values::get_attr(column, symbols().levels)) {
-                return Ok(None);
+            if levels.len() != length(values::get_attr(vector, symbols().levels)) {
+                return Err(error("a factor level is NA"));
             }
             to_series(
                 name,
                 RVector::Factor {
-                    codes: values::ints(column).to_vec(),
+                    codes: values::ints(vector).to_vec(),
                     levels,
                 },
             )?
         }
-        _ => return Ok(None),
-    };
-    Ok(Some(series))
+    })
 }
 
 /// Whether `column` is a factor with only its levels and the class `"factor"`.

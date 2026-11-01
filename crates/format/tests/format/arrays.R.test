@@ -1,0 +1,41 @@
+#==== arrays
+#---- arrays_space_like_calls
+a <- [ 1,2 ,3 ]
+e <- [ ]
+n <- [[1L],[ 2L,3L ]]
+#++++
+a <- [1, 2, 3]
+e <- []
+n <- [[1L], [2L, 3L]]
+
+#---- multiline_array_expands_one_item_per_line
+xs <- [
+1, 2,
+3]
+#++++
+xs <- [
+  1,
+  2,
+  3
+]
+
+#---- trailing_comma_hugs
+xs <- [1, 2,]
+#++++
+xs <- [1, 2,]
+
+#---- indexing_an_array_literal
+[1, 2][[1L]]
+#++++
+[1, 2][[1L]]
+
+#---- multiline_trailing_comma
+xs <- [
+  1,
+  2,
+]
+#++++
+xs <- [
+  1,
+  2,
+]

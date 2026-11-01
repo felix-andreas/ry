@@ -1,12 +1,16 @@
 //! `.Rtypes` stubs: `name : <type>` lines whose type half goes through the `#:` annotation
 //! grammar. Stub text is a set-once input, so it never participates in per-edit invalidation.
 
-use crate::Db;
-use crate::annotations::{NamedDefinition, lower_annotation};
-use crate::metadata::namespace_active;
-use crate::types::{Name, Ty, TyKind, TypeScheme, for_each_child_type};
-use rustc_hash::{FxHashMap, FxHashSet};
-use syntax::{SyntaxKind, TextRange};
+use {
+    crate::{
+        Db,
+        annotations::{NamedDefinition, lower_annotation},
+        metadata::namespace_active,
+        types::{Name, Ty, TyKind, TypeScheme, for_each_child_type},
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    syntax::{SyntaxKind, TextRange},
+};
 
 /// Sources are in precedence order: a later source replaces a name's whole overload set.
 /// Manifest names resolve even without a typed declaration, as `Unknown`.
@@ -28,6 +32,10 @@ pub struct StubLibrary<'db> {
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
     pub masked: FxHashMap<String, Vec<String>>,
+    /// Names whose winning declaration is marked `@pure`: calling them never has an effect.
+    pub pure: FxHashSet<String>,
+    /// `@pure` names per declaring namespace, for `pkg::name` calls.
+    pub pure_by_namespace: FxHashMap<String, FxHashSet<String>>,
     /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
     pub exports_by_namespace: FxHashMap<String, FxHashSet<String>>,
@@ -36,6 +44,9 @@ pub struct StubLibrary<'db> {
     /// Manifest-listed exports of the active namespaces; these always resolve, untyped ones as
     /// `Unknown`.
     pub known_exports: FxHashSet<String>,
+    /// The `#'` lines written directly above a declaration, joined as Markdown, which hover and
+    /// completion show beside its type.
+    pub documentation: FxHashMap<String, String>,
 }
 
 /// `source_index` indexes the `StubSources` order the host fed in.
@@ -105,6 +116,7 @@ pub fn shipped_stub_sources() -> Vec<(String, String)> {
         ("dplyr", include_str!("../../../types/dplyr.Rtypes")),
         ("ggplot2", include_str!("../../../types/ggplot2.Rtypes")),
         ("testthat", include_str!("../../../types/testthat.Rtypes")),
+        ("memoise", include_str!("../../../types/memoise.Rtypes")),
         (STANDARD_LIBRARY, include_str!("../../../types/ry.Rtypes")),
     ]
     .into_iter()
@@ -174,6 +186,7 @@ pub fn shipped_export_manifests() -> Vec<(String, String)> {
 /// with an unknowable export set disables unresolved-name detection project-wide.
 pub const CONDITIONAL_NAMESPACES: &[&str] = &[
     "data.table",
+    "memoise",
     "dplyr",
     "ggplot2",
     "testthat",
@@ -244,10 +257,16 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         // replaces any earlier source's set.
         let mut seen_here: FxHashSet<&str> = FxHashSet::default();
         let mut line_start = 0usize;
+        let mut pending_documentation: Vec<&str> = Vec::new();
         for raw_segment in text.split_inclusive('\n') {
             let raw_line = raw_segment.trim_end_matches(['\n', '\r']);
             let this_line_start = line_start;
             line_start += raw_segment.len();
+            if let Some(line) = raw_line.trim_start().strip_prefix("#'") {
+                pending_documentation.push(line.strip_prefix(' ').unwrap_or(line));
+                continue;
+            }
+            let documentation = std::mem::take(&mut pending_documentation);
             let content = strip_comment(raw_line).trim();
             if content.is_empty() {
                 continue;
@@ -300,20 +319,38 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if name.is_empty() || !is_stub_name(name) {
                 continue;
             }
-            let masked = if let Some(rest) = type_text.strip_prefix("@masked") {
-                type_text = rest.trim_start();
-                true
-            } else {
-                false
-            };
+            let markers = declaration_markers(type_text);
+            type_text = markers.type_text;
             let Some(scheme) = lower_type_text(db, type_text) else {
                 continue;
             };
-            if masked && let Some(leading) = masked_leading_formals(db, &scheme) {
+            if markers.masked
+                && let Some(leading) = masked_leading_formals(db, &scheme)
+            {
                 library.masked.insert(name.to_owned(), leading);
             }
             namespace_exports.insert(name.to_owned());
+            let first_here = !seen_here.contains(name);
+            // Purity belongs to the name: any candidate's marker marks it, and a later
+            // source's first declaration decides afresh.
+            if markers.pure {
+                library.pure.insert(name.to_owned());
+                library
+                    .pure_by_namespace
+                    .entry(namespace.clone())
+                    .or_default()
+                    .insert(name.to_owned());
+            } else if first_here {
+                library.pure.remove(name);
+            }
             if seen_here.insert(name) {
+                if documentation.is_empty() {
+                    library.documentation.remove(name);
+                } else {
+                    library
+                        .documentation
+                        .insert(name.to_owned(), documentation.join("\n"));
+                }
                 library.schemes.insert(name.to_owned(), vec![scheme]);
                 if let Some(range) = name_range(name) {
                     library.declarations.insert(
@@ -361,6 +398,37 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
     library
 }
 
+struct DeclarationMarkers<'text> {
+    masked: bool,
+    pure: bool,
+    type_text: &'text str,
+}
+
+/// The `@masked` and `@pure` markers that may precede a declaration's type, in any order.
+fn declaration_markers(mut type_text: &str) -> DeclarationMarkers<'_> {
+    let mut markers = DeclarationMarkers {
+        masked: false,
+        pure: false,
+        type_text,
+    };
+    loop {
+        let (marker, rest) = if let Some(rest) = type_text.strip_prefix("@masked") {
+            (&mut markers.masked, rest)
+        } else if let Some(rest) = type_text.strip_prefix("@pure") {
+            (&mut markers.pure, rest)
+        } else {
+            break;
+        };
+        if !rest.starts_with(char::is_whitespace) {
+            break;
+        }
+        *marker = true;
+        type_text = rest.trim_start();
+    }
+    markers.type_text = type_text;
+    markers
+}
+
 /// `None` when the scheme is not variadic: `stub_source_problems` reports that, and the loader
 /// skips the mask.
 fn masked_leading_formals(db: &dyn Db, scheme: &TypeScheme<'_>) -> Option<Vec<String>> {
@@ -398,7 +466,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     for raw_line in text.lines() {
         let content = strip_comment(raw_line).trim();
         if let Some(name) = definition_line_name(content) {
-            known_nominals.insert(name.to_owned());
+            if type_definition_line(db, content).is_some() {
+                known_nominals.insert(name.to_owned());
+            }
         } else if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
             if is_nominal_name(name) {
@@ -435,7 +505,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 }
                 None => problems.push(StubProblem {
                     line,
-                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}` or `@type NAME<T>`.".to_owned(),
+                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.".to_owned(),
                 }),
             }
             continue;
@@ -482,11 +552,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             });
             continue;
         }
-        let mut masked = false;
-        if let Some(rest) = type_text.strip_prefix("@masked") {
-            type_text = rest.trim_start();
-            masked = true;
-        }
+        let markers = declaration_markers(type_text);
+        type_text = markers.type_text;
+        let masked = markers.masked;
         let Some(scheme) = lower_type_text(db, type_text) else {
             problems.push(StubProblem {
                 line,
@@ -542,13 +610,14 @@ fn collect_unknown_nominals<'db>(
     });
 }
 
-/// The declared name of an `@alias` line or a generic `@type NAME<T, ...>` line. A plain
-/// `@type NAME` is the older opaque form, handled on its own.
+/// The declared name of an `@alias` line, a generic `@type NAME<T, ...>` line, or a `@type NAME
+/// {TYPE}` line with a representation. A plain `@type NAME` is the older opaque form, handled on
+/// its own.
 fn definition_line_name(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("@alias").or_else(|| {
         content
             .strip_prefix("@type")
-            .filter(|rest| rest.contains('<'))
+            .filter(|rest| rest.contains(['<', '{']))
     })?;
     let rest = rest.trim_start();
     let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
@@ -556,12 +625,12 @@ fn definition_line_name(content: &str) -> Option<&str> {
     is_nominal_name(name).then_some(name)
 }
 
-/// An `@alias NAME<T> {TYPE}` or `@type NAME<T>` line, lowered through the annotation grammar a
-/// project's own `#: @alias` uses. A generic opaque type is a `@type` whose representation is
-/// `Unknown`, which the checker already treats as having none.
+/// An `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>` line, lowered through the
+/// annotation grammar a project's own `#: @alias` uses. A generic opaque type is a `@type` whose
+/// representation is `Unknown`, which the checker already treats as having none.
 fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefinition<'db>> {
     definition_line_name(content)?;
-    let text = if content.starts_with("@type") {
+    let text = if content.starts_with("@type") && !content.contains('{') {
         format!("#: {content} {{Unknown}}")
     } else {
         format!("#: {content}")
@@ -665,16 +734,19 @@ pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::check::{ItemCheck, TypeErrorKind};
-    use crate::diagnostics::file_diagnostics;
-    use crate::metadata::{PackageMetadata, attached_union};
-    use crate::types::Atomic;
-    use crate::{
-        DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree,
-        package_scheme_exists,
+    use {
+        super::*,
+        crate::{
+            DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+            check::{ItemCheck, TypeErrorKind},
+            diagnostics::file_diagnostics,
+            item_check, item_tree,
+            metadata::{PackageMetadata, attached_union},
+            package_scheme_exists,
+            types::Atomic,
+        },
+        salsa::Setter,
     };
-    use salsa::Setter;
 
     #[test]
     fn shipped_corpus_loads() {
@@ -714,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type_name_must_be_an_identifier() {
+    fn a_representation_must_be_a_type() {
         let db = RootDatabase::default();
         install_shipped_stubs(&db);
         let problems = stub_source_problems(
@@ -724,7 +796,7 @@ mod tests {
         assert_eq!(problems[0].line, 0);
         assert_eq!(
             problems[0].message,
-            "`structural { a: integer }` is not a valid type name."
+            "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`."
         );
         // The nominal is refused, so the use below reports too, and an author
         // who reads only the second error is not sent to a correct line.
@@ -758,6 +830,7 @@ mod tests {
                 .collect(),
             Default::default(),
             None,
+            Default::default(),
         );
         let sources = StubSources::new(&db, shipped_stub_sources(), Vec::new());
         let library = stub_library(&db, sources);
@@ -844,6 +917,7 @@ mod tests {
             Default::default(),
             ["parallel".to_owned()].into(),
             None,
+            Default::default(),
         );
         assert!(package_scheme_exists(&active, "mclapply"));
     }
@@ -877,6 +951,7 @@ mod tests {
             ["data.table".to_owned()].into(),
             Default::default(),
             None,
+            Default::default(),
         );
         assert!(package_scheme_exists(&active, "alloc.col"));
     }
@@ -917,6 +992,7 @@ mod tests {
             ["data.table".to_owned()].into(),
             Default::default(),
             None,
+            Default::default(),
         );
         let library = stub_library(&db, sources);
         assert!(library.schemes.contains_key("fread"));
@@ -933,6 +1009,7 @@ mod tests {
             Default::default(),
             Default::default(),
             None,
+            Default::default(),
         );
         let file = SourceFile::new(
             &db,

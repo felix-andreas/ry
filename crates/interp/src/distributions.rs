@@ -22,20 +22,22 @@
 //! precision) are collected while the functions run and raised by the builtin afterwards, which
 //! keeps the functions free of interpreter state.
 
-use crate::rmath::*;
-use crate::{
-    builtin_libraries::NativeFn,
-    builtins::{Arg, BuiltinDef, internal},
-    coerce::coerce_vector,
-    conditions::warning,
-    random,
-    unwind::{R, error},
-    values::{
-        alloc, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
-        ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
+use {
+    crate::{
+        builtin_libraries::NativeFn,
+        builtins::{Arg, BuiltinDef, internal},
+        coerce::coerce_vector,
+        conditions::warning,
+        random,
+        rmath::*,
+        unwind::{R, error},
+        values::{
+            alloc, as_integer_scalar, copy_attributes, get_attr, inherits, integer_vector, ints,
+            ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
+        },
     },
+    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real},
 };
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real};
 
 /// Generates the `.Internal` table and the stats routine table from one list, so that both
 /// entry points vectorize every function identically.
@@ -358,9 +360,15 @@ unsafe fn random_vector(
         let mut deviates = SessionDeviates;
         let mut arguments = [0.0f64; 3];
         let mut outcome = Ok(());
+        let scalar = lengths[..parameters].iter().all(|&length| length == 1);
+        for index in 0..parameters {
+            arguments[index] = reals(operands[index])[0];
+        }
         for (element, slot) in drawn.iter_mut().enumerate() {
-            for index in 0..parameters {
-                arguments[index] = reals(operands[index])[element % lengths[index]];
+            if !scalar {
+                for index in 0..parameters {
+                    arguments[index] = reals(operands[index])[element % lengths[index]];
+                }
             }
             match function(&mut deviates, &arguments) {
                 Ok(value) => *slot = value,
@@ -1419,9 +1427,10 @@ pub fn rmultinom(
 #[cfg(test)]
 #[allow(clippy::excessive_precision)]
 mod tests {
-    use super::*;
-    use crate::random::SeededDeviates;
-    use crate::rmath::*;
+    use {
+        super::*,
+        crate::{random::SeededDeviates, rmath::*},
+    };
 
     // Expected values are GNU R 4.3's, printed with `sprintf("%.17g")` from `.Internal(...)`.
 

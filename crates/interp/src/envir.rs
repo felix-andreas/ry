@@ -1,18 +1,20 @@
 //! Environments, the call stack as R code sees it (`sys.call`, `parent.frame`, ...), the search
 //! path, namespaces and options.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
-    eval::{self, define, find_var, find_var_in_frame, value_of},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env, length,
-        missing_arg, new_env, nil, scalar_bool, scalar_integer, scalar_string, string_at,
-        string_vector, symbol_name, symbols, unbound,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        eval::{self, define, find_var, find_var_in_frame, value_of},
+        interp,
+        unwind::{R, error},
+        values::{
+            self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env,
+            length, missing_arg, new_env, nil, scalar_bool, scalar_integer, scalar_string,
+            string_at, string_vector, symbol_name, symbols, unbound,
+        },
     },
+    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("environment", 1, do_environment),
@@ -20,9 +22,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("new.env", 3, do_new_env),
     internal("parent.env", 1, do_parent_env),
     internal("parent.env<-", 2, do_set_parent_env),
-    builtin("globalenv", 0, |_| unsafe { Ok(global_env()) }),
-    builtin("emptyenv", 0, |_| unsafe { Ok(empty_env()) }),
-    builtin("baseenv", 0, |_| unsafe { Ok(base_env()) }),
+    builtin("globalenv", 0, |_| Ok(global_env())),
+    builtin("emptyenv", 0, |_| Ok(empty_env())),
+    builtin("baseenv", 0, |_| Ok(base_env())),
     internal("topenv", 2, do_topenv),
     internal("environmentName", 1, do_environment_name),
     internal("assign", 4, do_assign).invisible(),
@@ -82,7 +84,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
     internal("unregisterNamespace", 1, do_unregister_namespace).invisible(),
-    internal("getNamespaceRegistry", 0, |_| unsafe {
+    internal("getNamespaceRegistry", 0, |_| {
         Ok(crate::heap().known().namespace_registry)
     }),
     internal("importIntoEnv", 4, do_import_into_env).invisible(),
@@ -95,9 +97,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mapply", 3, do_mapply),
     internal("rapply", 5, do_rapply),
     internal("eapply", 4, do_eapply),
-    internal("Filter", -1, |_| unsafe { Ok(nil()) }),
+    internal("Filter", -1, |_| Ok(nil())),
     internal("env.profile", 1, do_env_profile),
-    internal("emptyenv", 0, |_| unsafe { Ok(empty_env()) }),
+    internal("emptyenv", 0, |_| Ok(empty_env())),
     builtin("...length", 0, do_dots_length),
     builtin("...elt", 1, do_dots_elt).keep_visibility(),
     builtin("...names", 0, do_dots_names),
@@ -113,7 +115,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("args", 1, do_args),
     internal("bodyCode", 1, do_body_code),
     internal("match.call", 4, do_match_call),
-    internal("sys.source", -1, |_| unsafe { Ok(nil()) }),
+    internal("sys.source", -1, |_| Ok(nil())),
 ];
 
 unsafe fn environment_arg(value: Sexp, what: &str) -> R<Sexp> {
@@ -354,7 +356,7 @@ unsafe fn do_environment(call: &Call<'_>) -> R<Sexp> {
         SexpType::Closure => Ok(function.tag()),
         SexpType::Builtin | SexpType::Special => Ok(nil()),
         _ => {
-            let environment = values::install(".Environment")?;
+            let environment = symbols().dot_environment;
             Ok(get_attr(function, environment))
         }
     }
@@ -379,7 +381,7 @@ unsafe fn do_set_environment(call: &Call<'_>) -> R<Sexp> {
     } else {
         object
     };
-    let environment = values::install(".Environment")?;
+    let environment = symbols().dot_environment;
     values::set_attr(copy, environment, env)?;
     Ok(copy)
 }
@@ -466,7 +468,7 @@ pub unsafe fn is_namespace(env: Sexp) -> bool {
 
 /// Whether `env` is a package environment on the search path (its `name` starts `package:`).
 pub unsafe fn is_package_env(env: Sexp) -> bool {
-    let name = get_attr(env, values::install("name").unwrap_or(nil()));
+    let name = get_attr(env, symbols().name);
     matches!(values::first_string(name), Some(text) if text.starts_with("package:"))
 }
 
@@ -482,7 +484,7 @@ pub unsafe fn namespace_name(env: Sexp) -> Option<String> {
     if info.kind() != SexpType::Environment {
         return None;
     }
-    let spec_symbol = values::install("spec").ok()?;
+    let spec_symbol = symbols().spec;
     let spec = value_of(find_var_in_frame(spec_symbol, info).ok()?).ok()?;
     values::first_string(spec).map(|text| text.into_owned())
 }
@@ -499,14 +501,14 @@ unsafe fn do_environment_name(call: &Call<'_>) -> R<Sexp> {
     } else if env == empty_env() {
         "R_EmptyEnv".to_owned()
     } else if is_package_env(env) {
-        let name_attr = get_attr(env, values::install("name")?);
+        let name_attr = get_attr(env, symbols().name);
         values::first_string(name_attr)
             .map(|text| text.into_owned())
             .unwrap_or_default()
     } else if is_namespace(env) {
         namespace_name(env).unwrap_or_default()
     } else {
-        let name_attr = get_attr(env, values::install("name")?);
+        let name_attr = get_attr(env, symbols().name);
         values::first_string(name_attr)
             .map(|text| text.into_owned())
             .unwrap_or_default()
@@ -523,7 +525,7 @@ unsafe fn name_symbol(value: Sexp, what: &str) -> R<Sexp> {
             if name.bytes().is_empty() {
                 return Err(error("attempt to use zero-length variable name"));
             }
-            values::install_bytes(name.bytes())
+            values::install_charsxp(name)
         }
         _ => Err(error(format!("invalid '{what}' argument"))),
     }
@@ -697,7 +699,12 @@ unsafe fn do_remove(call: &Call<'_>) -> R<Sexp> {
 
 /// The symbols bound in `env`, in the order `ls()` lists their names.
 pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
-    let mut symbols = crate::heap().frame_symbols(env);
+    let heap = crate::heap();
+    let mut symbols = if sorted {
+        heap.bound_symbols(env)
+    } else {
+        heap.frame_symbols(env)
+    };
     if !all {
         symbols.retain(|symbol| symbol.car().bytes().first() != Some(&b'.'));
     }
@@ -790,7 +797,7 @@ unsafe fn do_lock_environment(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "env")?;
     let bindings = values::as_logical_scalar(call.arg(1)) == 1;
     if bindings {
-        for symbol in crate::heap().frame_symbols(env) {
+        for symbol in crate::heap().bound_symbols(env) {
             if let Some(cell) = crate::heap().frame_cell(env, symbol) {
                 cell.set_gp_bits(gp::BINDING_LOCKED, true);
             }
@@ -884,7 +891,7 @@ unsafe fn search_name(env: Sexp) -> R<String> {
     if env == base_env() {
         return Ok("package:base".into());
     }
-    let name = get_attr(env, values::install("name")?);
+    let name = get_attr(env, symbols().name);
     Ok(values::first_string(name)
         .map(|text| text.into_owned())
         .unwrap_or_default())
@@ -973,7 +980,7 @@ unsafe fn do_attach(call: &Call<'_>) -> R<Sexp> {
         }
         env
     };
-    let name_symbol = values::install("name")?;
+    let name_symbol = symbols().name;
     values::set_attr(env, name_symbol, name)?;
     let mut previous = global_env();
     for _ in 2..position {
@@ -1210,7 +1217,7 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             }
             let count = values::as_integer_scalar(value);
             if count < 1 {
-                return Err(error(&format!("invalid value for '{name}'")));
+                return Err(error(format!("invalid value for '{name}'")));
             }
             scalar_integer(count)
         }
@@ -1245,6 +1252,15 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             } else {
                 Ok(value)
             }
+        }
+        // GNU R stores a function given as the error handler as a call to it.
+        "error"
+            if matches!(
+                value.kind(),
+                SexpType::Closure | SexpType::Builtin | SexpType::Special
+            ) =>
+        {
+            values::lcons(value, nil())
         }
         _ => Ok(value),
     }
@@ -1306,7 +1322,7 @@ pub unsafe fn install_default_options() -> R<()> {
 unsafe fn registry_symbol(name: Sexp) -> R<Sexp> {
     match name.kind() {
         SexpType::Symbol => Ok(name),
-        SexpType::String if length(name) >= 1 => values::install_bytes(name.element(0).bytes()),
+        SexpType::String if length(name) >= 1 => values::install_charsxp(name.element(0)),
         _ => Err(error("bad namespace name")),
     }
 }
@@ -1354,8 +1370,8 @@ unsafe fn do_import_into_env(call: &Call<'_>) -> R<Sexp> {
     }
     let heap = crate::heap();
     for index in 0..length(target_names) {
-        let target_symbol = values::install_bytes(target_names.element(index).bytes())?;
-        let source_symbol = values::install_bytes(source_names.element(index).bytes())?;
+        let target_symbol = values::install_charsxp(target_names.element(index))?;
+        let source_symbol = values::install_charsxp(source_names.element(index))?;
         let mut env = source;
         let mut cell = None;
         while env != empty_env() {
@@ -1395,7 +1411,7 @@ unsafe fn do_do_call(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("second argument must be a list"));
     }
     let function_expression = match what.kind() {
-        SexpType::String if length(what) == 1 => values::install_bytes(what.element(0).bytes())?,
+        SexpType::String if length(what) == 1 => values::install_charsxp(what.element(0))?,
         SexpType::Closure | SexpType::Builtin | SexpType::Special => what,
         _ => return Err(call.error("'what' must be a function or character string")),
     };
@@ -1443,7 +1459,7 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::force_and_call(fun_call, 1, env)
+            eval::force_and_call_with(fun_call, 1, env, plain_element(list, i, element)?)
         })?;
         values::set_elt(result, index, value);
     }
@@ -1452,6 +1468,15 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
         values::set_attr(result, symbols.names, names)?;
     }
     Ok(result)
+}
+
+/// `X[[i]]` without evaluating the call when `X` is a vector with no class, where `[[` cannot
+/// dispatch and base's `[[` is the one `lapply` finds, so the result is the same.
+unsafe fn plain_element(list: Sexp, i: Sexp, element: Sexp) -> R<Option<Sexp>> {
+    if !list.kind().is_vector() || list.is_object() {
+        return Ok(None);
+    }
+    crate::subset::subset2(list, &[i], Some(true), element).map(Some)
 }
 
 unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
@@ -1477,7 +1502,7 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::force_and_call(fun_call, 1, env)
+            eval::force_and_call_with(fun_call, 1, env, plain_element(list, i, element)?)
         })?;
         if length(value) != template_length {
             return Err(error(format!(
@@ -1768,7 +1793,7 @@ unsafe fn do_body_code(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {
     let mut function = call.arg(0);
     if function.kind() == SexpType::String && length(function) == 1 {
-        let symbol = values::install_bytes(function.element(0).bytes())?;
+        let symbol = values::install_charsxp(function.element(0))?;
         function = eval::find_fun(symbol, call.env)?;
     }
     match function.kind() {
@@ -1913,6 +1938,8 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
         package
     } else if values::first_string(package).is_some_and(|package_name| package_name == "base") {
         base_namespace()
+    } else if let Some(loaded) = loaded_namespace(package)? {
+        loaded
     } else {
         let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
         eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?
@@ -1952,7 +1979,7 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
         return value_of(data);
     }
     let package_name = if info.kind() == SexpType::Environment {
-        let spec = find_var_in_frame(values::install("spec")?, info)?;
+        let spec = find_var_in_frame(symbols().spec, info)?;
         values::first_string(spec)
             .map(|text| text.into_owned())
             .unwrap_or_default()
@@ -1964,4 +1991,18 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     Err(error(format!(
         "'{name}' is not an exported object from 'namespace:{package_name}'"
     )))
+}
+
+/// The namespace registered for a package name, without calling `asNamespace`, which costs
+/// several microseconds per `pkg::name` and would dominate a hot loop that uses one.
+unsafe fn loaded_namespace(package: Sexp) -> R<Option<Sexp>> {
+    let Some(package_name) = values::first_string(package) else {
+        return Ok(None);
+    };
+    let registry = crate::heap().known().namespace_registry;
+    let namespace = value_of(find_var_in_frame(
+        values::install(&package_name)?,
+        registry,
+    )?)?;
+    Ok((namespace.kind() == SexpType::Environment).then_some(namespace))
 }

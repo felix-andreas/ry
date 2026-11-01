@@ -2,21 +2,27 @@
 //! re-execute for it. Execution counts, not wall times, are the trustworthy signal.
 //! Usage: `cargo run --release -p ry-lang --example keystroke_probe <package-dir>...`
 
-use salsa::Setter as _;
-use semantics::diagnostics::file_diagnostics;
-use semantics::stubs::install_shipped_stubs;
-use semantics::{Db, DocumentKind, ProjectFiles, SourceFile, SpliceCache};
-use std::cmp::Reverse;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use std::{env, fs, mem};
+use {
+    salsa::Setter as _,
+    semantics::{
+        Db, DocumentKind, ProjectFiles, SourceFile, SpliceCache, diagnostics::file_diagnostics,
+        stubs::install_shipped_stubs,
+    },
+    std::{
+        cmp::Reverse,
+        env, fs, mem,
+        path::PathBuf,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Instant,
+    },
+};
 
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static WALK_EXECUTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 const WALKS: &[&str] = &[
-    "interface_sccs",
     "conditional_slot_items",
     "package_definitions",
     "project_type_definitions",

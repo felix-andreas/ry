@@ -1,6 +1,4 @@
-use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::{fs, path::Path, process::Command};
 
 /// One finished `ry` invocation, its streams decoded.
 struct Run {
@@ -756,6 +754,86 @@ fn check_reports_an_export_the_package_does_not_define() {
     );
 }
 
+#[test]
+fn check_accepts_exports_of_imports_and_of_chained_definitions() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\nImports: magrittr\n"),
+        (
+            "NAMESPACE",
+            "export(\"%>%\")\nexport(memoize)\nexport(memoise)\nexport(not_anywhere)\n\
+             importFrom(magrittr,\"%>%\")\n",
+        ),
+        ("R/a.R", "memoise <- memoize <- function(f) f\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    let rendered = &output.stderr;
+    for name in ["%>%", "memoize", "memoise"] {
+        assert!(
+            !rendered.contains(&format!("`{name}` is exported")),
+            "`{name}` is in the namespace: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("`not_anywhere` is exported"),
+        "an export nothing defines or imports is still reported: {rendered}"
+    );
+
+    // A whole-namespace import of a package without stubs may supply any name.
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\nImports: someunknownpkg\n"),
+        ("NAMESPACE", "export(reexported)\nimport(someunknownpkg)\n"),
+        ("R/a.R", "f <- function() 1L\n"),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("`reexported` is exported"),
+        "the unknown namespace may export it: {}",
+        output.stderr
+    );
+}
+
+// testthat runs a test file in a child of the package namespace, so the file's own `path`
+// value neither hides the package's `path` from `pkg::path` nor from a call of `path`.
+#[test]
+fn check_reads_the_package_namespace_past_a_test_file_s_bindings() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: pathpkg\n"),
+        ("ry.toml", "[check]\ntyping = true\n"),
+        ("R/a.R", "path <- function(x) x\n"),
+        (
+            "tests/testthat/test-a.R",
+            "path <- \"a\"\nqualified <- pathpkg::path(1L)\ncalled <- path(2L)\n",
+        ),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("not a function"),
+        "both calls reach the package's function: {}",
+        output.stderr
+    );
+}
+
+#[test]
+fn check_accepts_exports_made_at_run_time_or_found_on_the_search_path() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\n"),
+        (
+            "NAMESPACE",
+            "export(bgRed)\nexport(diff)\nS3method(diff,thing)\n",
+        ),
+        (
+            "R/a.R",
+            "styles <- list(bgRed = 41L)\nfor (style in names(styles)) assign(style, styles[[style]])\ndiff.thing <- function(x, ...) x\n",
+        ),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("is exported but"),
+        "every export is bound: {}",
+        output.stderr
+    );
+}
+
 // The caret pads by terminal cells, not characters, so it sits beneath the glyph.
 #[test]
 fn check_reports_character_columns_and_aligns_the_caret() {
@@ -1124,7 +1202,6 @@ fn strict_reports_a_read_the_attached_package_tolerance_silenced() {
             "library(someunknownpkg)
 
 bare <- mystery_thing
-print(bare)
 ",
         ),
         (
@@ -1373,4 +1450,120 @@ fn check_turns_object_system_definitions_into_errors_when_disabled() {
         "expected the object-system error, got: {}",
         output.stderr
     );
+}
+
+#[test]
+fn root_help_lists_run_and_r_but_not_the_console_s_earlier_name() {
+    let directory = project(&[]);
+    let output = ry(directory.path(), &["--help"]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    let commands: Vec<&str> = output
+        .stdout
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "check", "fmt", "run", "R", "load", "server", "debug", "help"
+        ],
+        "{}",
+        output.stdout
+    );
+}
+
+#[test]
+fn run_and_r_help_hide_the_runtime_flag() {
+    let directory = project(&[]);
+    for command in ["run", "R", "load"] {
+        let output = ry(directory.path(), &[command, "--help"]);
+        assert_eq!(output.code, 0, "{command}: {}", output.stderr);
+        assert!(
+            !output.stdout.contains("--runtime"),
+            "{command}: {}",
+            output.stdout
+        );
+    }
+    let run = ry(directory.path(), &["run", "--help"]);
+    assert!(
+        run.stdout
+            .contains("Usage: ry run [OPTIONS] [FILE] [ARGS]..."),
+        "{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("--interactive"), "{}", run.stdout);
+    assert!(run.stdout.contains("--no-load"), "{}", run.stdout);
+    let r = ry(directory.path(), &["R", "--help"]);
+    assert!(
+        r.stdout.contains("Usage: ry R [OPTIONS] [FILE] [ARGS]..."),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("--no-load"), "{}", r.stdout);
+}
+
+#[test]
+fn a_missing_script_exits_two_before_any_r_starts() {
+    let directory = project(&[]);
+    for arguments in [
+        &["run", "missing.R"][..],
+        &["R", "missing.R"],
+        &["run", "-i", "missing.R"],
+        &["R", "--interactive", "missing.R"],
+        &["repl", "-f", "missing.R"],
+    ] {
+        let output = ry(directory.path(), arguments);
+        assert_eq!(output.code, 2, "{arguments:?}: {}", output.stderr);
+        assert!(
+            output.stderr.contains("cannot read missing.R"),
+            "{arguments:?}: {}",
+            output.stderr
+        );
+        assert_eq!(output.stdout, "", "{arguments:?}");
+    }
+}
+
+#[test]
+fn session_usage_errors_exit_two() {
+    let directory = project(&[("script.R", "1\n")]);
+    for arguments in [
+        &["run", "--interactive"][..],
+        &["run", "-i", "script.R", "extra"],
+        &["R", "--runtime", "ry", "script.R"],
+        &["run", "--keybindings", "nano"],
+        &["run", "--runtime", "jvm", "script.R"],
+        &["R", "--bogus"],
+    ] {
+        let output = ry(directory.path(), arguments);
+        assert_eq!(output.code, 2, "{arguments:?}: {}", output.stderr);
+        assert!(
+            output.stderr.starts_with("error:"),
+            "{arguments:?}: {}",
+            output.stderr
+        );
+    }
+}
+
+#[test]
+fn a_strict_mode_refusal_exits_one_before_any_r_starts() {
+    let directory = project(&[
+        ("ry.toml", "[check]\ntyping = true\nstrict = true\n"),
+        (
+            "script.R",
+            "describe <- function(x) cat(\"a value\\n\")\ndescribe(1)\n",
+        ),
+    ]);
+    for command in ["run", "R"] {
+        let output = ry(directory.path(), &[command, "script.R"]);
+        assert_eq!(output.code, 1, "{command}: {}", output.stderr);
+        assert!(
+            output.stderr.contains("strict mode found 1 error"),
+            "{}",
+            output.stderr
+        );
+        assert_eq!(output.stdout, "", "{command}: nothing ran");
+    }
 }

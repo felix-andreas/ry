@@ -1,0 +1,110 @@
+---
+title: DataFrame types
+description: ry's typed table, whose columns the checker follows through every query
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A `DataFrame` is ry's built-in table, and the checker knows every column. Each verb produces a new
+column list, so the types follow the data through a whole query, and a misspelled column, a join on
+a column that does not exist, or a column that `agg` forgets to aggregate is reported before the
+query runs. The [DataFrames guide](/guides/dataframes) covers the API and running it with `ry run`,
+because DataFrames need ry's own runtime.
+
+```r
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L), price = c(1.5, 2))
+summary <- sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.with_columns(revenue = col("units") * col("price")) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(total = col("revenue") |> Expr.sum(), orders = Expr.len())
+```
+
+Hover on each name to see its type:
+
+```text
+sales:   DataFrame{region: character[], units: integer[], price: double[]}
+summary: DataFrame{region: character[], total: double[], orders: integer[]}
+```
+
+The steps in between have types too. After `DataFrame.group_by("region")` the value is a
+`GroupBy{region: character[]; units: integer[], price: double[], revenue: double[]}`, whose key
+columns come before the semicolon. A `LazyFrame` carries its columns the same way, so a lazy query
+is checked as closely as an eager one.
+
+In the editor, completion inside `col("...")` or any column string of a verb offers the columns of
+the DataFrame at that step, and hovering such a string shows the column's type.
+
+## Mistakes in a query
+
+A column that does not exist is reported on the string that names it, with the nearest column:
+
+```r
+bad <- sales |> DataFrame.select(col("prcie"))
+```
+
+```text ry check typing continue
+type-mismatch
+
+  x the frame `sales` has no column `prcie`. Did you mean `price`?
+```
+
+The same check covers the keys of a join. Inside `GroupBy.agg`, every expression must reduce each
+group to one value:
+
+```r
+per_region <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("units"))
+```
+
+```text ry check typing continue
+type-mismatch
+
+  x `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
+```
+
+Columns have types, so arithmetic follows R's rules: `col("units") * col("price")` is a `double`
+column, a comparison is `logical`, and `Expr.sum` of an `integer` column stays `integer`.
+
+## Annotating a parameter
+
+A DataFrame type lists its columns, like a record. A column type is always a vector, so
+`DataFrame{units: integer}` means the same as `DataFrame{units: integer[]}`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+total_units <- function(sales: DataFrame{region: character, units: integer}) -> integer {
+  sum(sales$units)
+}
+total_units(DataFrame(region = "eu", unit = 1L))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(sales: DataFrame{region: character, units: integer}) -> integer
+total_units <- function(sales) {
+  sum(sales$units)
+}
+total_units(DataFrame(region = "eu", unit = 1L))
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x expected `DataFrame{region: character[], units: integer[]}`, found `DataFrame{region: character[], unit: integer[]}`
+```
+
+The columns must match exactly, as a record's fields do, so a DataFrame with an extra column is not
+accepted either: an unexpected column is usually a misspelled one. A bare
+`DataFrame` accepts any DataFrame and leaves its columns unknown, and so do `LazyFrame`,
+`GroupBy` and `LazyGroupBy`. A DataFrame is not a `data.frame`, so a `data.frame` parameter
+rejects it: convert with `as.data.frame()` first.
+
+The [typing reference](/reference/type-system/#dataframes) lists how each verb types, and what
+the checker understands of the data.table bracket syntax that DataFrames also accept.

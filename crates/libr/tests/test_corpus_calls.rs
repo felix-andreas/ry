@@ -9,8 +9,10 @@
 
 mod harness;
 
-use harness::*;
-use std::{ffi::CString, path::Path, process::Command};
+use {
+    harness::*,
+    std::{ffi::CString, path::Path, process::Command},
+};
 
 const CHILD_CASE: &str = "RY_CORPUS_CALL_CASE";
 

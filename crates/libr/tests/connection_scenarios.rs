@@ -9,12 +9,14 @@
 
 #![allow(dead_code)]
 
-use crate::harness::*;
-use std::{
-    ffi::{CStr, c_char, c_int},
-    fmt::Write as _,
-    path::{Path, PathBuf},
-    process::Command,
+use {
+    crate::harness::*,
+    std::{
+        ffi::{CStr, c_char, c_int},
+        fmt::Write as _,
+        path::{Path, PathBuf},
+        process::Command,
+    },
 };
 
 #[derive(Clone, Debug)]

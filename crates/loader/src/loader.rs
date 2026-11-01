@@ -7,28 +7,35 @@
 pub mod r;
 #[cfg(feature = "runtime")]
 pub mod ry_runtime;
+pub mod testing;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::{Durability, Setter};
-use semantics::load_index::{
-    IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration, file_items,
-    file_load_index, fnv1a, package_index,
+use {
+    rustc_hash::{FxHashMap, FxHashSet},
+    salsa::{Durability, Setter},
+    semantics::{
+        ANALYSIS_STACK_SIZE, Db, DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode,
+        file_conditional_writers, file_definitions, file_typing_mode,
+        load_index::{
+            IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
+            classify_constants, file_items, file_load_index, fnv1a, package_index,
+        },
+        metadata::{
+            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
+            parse_description_collate,
+        },
+        stubs::install_shipped_stubs,
+    },
+    serde::{Deserialize, Serialize},
+    std::{
+        collections::BTreeSet,
+        fmt, fs, io,
+        path::{Path, PathBuf},
+        sync::Arc,
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    },
+    syntax::Parse,
 };
-use semantics::metadata::{
-    DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
-    parse_description_collate,
-};
-use semantics::{ANALYSIS_STACK_SIZE, DocumentKind, RootDatabase, SourceFile};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::fmt;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
-use std::time::SystemTime;
-use syntax::Parse;
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
 /// reload re-derives only the items whose text changed.
@@ -38,6 +45,14 @@ pub struct Loader {
     packages: Vec<LoadedPackage>,
     /// Size and modification time of each file as last read, per package root.
     stamps: FxHashMap<PathBuf, FxHashMap<String, (u64, Option<SystemTime>)>>,
+    /// Whether the shipped stubs are in the database. A strict package needs them to tell
+    /// which constants call only pure functions; any other load never reads them, so it skips
+    /// their parse.
+    stubs_installed: bool,
+    /// Whether the project's `ry.toml` turns strict mode on, which the host reads and sets
+    /// with [`Loader::set_strict`]: the loader reads package sources, not ry's configuration.
+    /// Off, a file is strict only when its `# typing: strict` directive says so.
+    strict: bool,
 }
 
 /// A package's sources as the loader reads them.
@@ -52,6 +67,8 @@ pub struct PackageInputs {
     pub sysdata: Option<u64>,
     /// Of the sources under `src/`.
     pub compiled: Option<u64>,
+    /// `[check] strict`, the mode of each file without its own `# typing:` directive.
+    pub strict: bool,
 }
 
 struct LoadedPackage {
@@ -62,6 +79,10 @@ struct LoadedPackage {
     committed: Option<LoadState>,
     /// The state a plan was made for, until the backend confirms it applied.
     pending: Option<LoadState>,
+    /// [`source_fingerprint`] of what is loaded.
+    committed_fingerprint: Option<u64>,
+    /// [`source_fingerprint`] of what the pending plan read.
+    pending_fingerprint: Option<u64>,
 }
 
 /// What is loaded for one package: the load index plus the inputs the analysis does not read.
@@ -97,7 +118,7 @@ pub struct Plan {
     pub remove: Vec<String>,
     /// Registrations by items that are gone.
     pub unregister: Vec<Registration>,
-    /// Function definitions to bind lazily.
+    /// Definitions to bind lazily: functions, and the pure constants of strict files.
     pub bind: Vec<Code>,
     /// Top-level code to run, in collation order.
     pub run: Vec<Code>,
@@ -214,13 +235,29 @@ pub fn find_package_root(path: &Path) -> Result<PathBuf, LoadError> {
 }
 
 impl Loader {
+    /// Sets whether the project's configuration turns strict mode on for every package this
+    /// loader plans from then on.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
     /// Reads the package at or above `path` and plans loading it. Without a committed state, or
     /// with `full`, the plan builds the namespace from scratch; otherwise it patches the loaded
     /// one. The plan stays pending until [`Loader::commit`].
     pub fn plan(&mut self, path: &Path, full: bool) -> Result<Plan, LoadError> {
         let root = find_package_root(path)?;
+        // Taken before reading, so an edit made while the plan is read shows as a change later.
+        let fingerprint = source_fingerprint(&root);
         let inputs = self.read(&root)?;
-        self.plan_inputs(&root, inputs, full)
+        let plan = self.plan_inputs(&root, inputs, full)?;
+        if let Some(package) = self
+            .packages
+            .iter_mut()
+            .find(|package| package.root == root)
+        {
+            package.pending_fingerprint = fingerprint;
+        }
+        Ok(plan)
     }
 
     /// Plans a load of the package at `root` from sources the caller read.
@@ -231,9 +268,27 @@ impl Loader {
         full: bool,
     ) -> Result<Plan, LoadError> {
         let root = root.to_path_buf();
-        let (position, changed) =
-            self.sync(&root, inputs.description, inputs.namespace, inputs.files)?;
-        self.warm(&changed);
+        let (position, changed) = self.sync(
+            &root,
+            inputs.description,
+            inputs.namespace,
+            inputs.files,
+            inputs.strict,
+        )?;
+        self.warm(&changed, |db, file| {
+            file_items(db, file);
+            file_typing_mode(db, file);
+        });
+        if self.prepare_purity(position) {
+            // Classifying a constant resolves its callees through the project-wide definition
+            // maps, which join per-file facts that are cheaper to derive across cores first.
+            self.warm(&changed, |db, file| {
+                file_definitions(db, file);
+                file_conditional_writers(db, file);
+            });
+            let sources = self.packages[position].sources;
+            self.warm(&changed, |db, file| classify_constants(db, sources, file));
+        }
         let package = &self.packages[position];
         let index = package_index(&self.db, package.sources);
         if index.package.is_empty() {
@@ -267,7 +322,10 @@ impl Loader {
                 .get(path)
                 .map_or("", |&file| file_load_index(db, file).text.as_str())
         });
-        self.packages[position].pending = Some(next);
+        let package = &mut self.packages[position];
+        package.pending = Some(next);
+        // Only `plan` knows what the caller's sources were read from, and it sets this after.
+        package.pending_fingerprint = None;
         Ok(plan)
     }
 
@@ -283,10 +341,29 @@ impl Loader {
         match package.pending.take() {
             Some(state) => {
                 package.committed = Some(state);
+                package.committed_fingerprint = package.pending_fingerprint.take();
                 true
             }
             None => false,
         }
+    }
+
+    /// The roots of the loaded packages whose sources changed on disk since they were loaded,
+    /// judged from file names, sizes and modification times without reading a file. A root is
+    /// reported once per change: a reload that fails is not retried until the next change.
+    pub fn changed_roots(&mut self) -> Vec<PathBuf> {
+        let mut changed = Vec::new();
+        for package in &mut self.packages {
+            if package.committed.is_none() {
+                continue;
+            }
+            let current = source_fingerprint(&package.root);
+            if current != package.committed_fingerprint {
+                package.committed_fingerprint = current;
+                changed.push(package.root.clone());
+            }
+        }
+        changed
     }
 
     /// The pending state for `root`, which a backend that persists state saves.
@@ -305,6 +382,7 @@ impl Loader {
             inputs.description,
             inputs.namespace,
             inputs.files,
+            inputs.strict,
         )?;
         self.packages[position].committed = Some(state);
         Ok(())
@@ -323,9 +401,42 @@ impl Loader {
         self.packages.iter().map(|package| package.root.as_path())
     }
 
+    /// A strict file binds its pure constants lazily, and telling which constants are pure
+    /// reads the stubs and the package's own `@pure` definitions, as `ry check` does.
+    fn prepare_purity(&mut self, position: usize) -> bool {
+        let sources = self.packages[position].sources;
+        let strict = *sources.strict(&self.db)
+            || sources
+                .files(&self.db)
+                .iter()
+                .any(|file| *file_typing_mode(&self.db, file.file) == Some(TypingMode::Strict));
+        if !strict {
+            return false;
+        }
+        if !self.stubs_installed {
+            install_shipped_stubs(&self.db);
+            self.stubs_installed = true;
+        }
+        let files: Vec<SourceFile> = sources
+            .files(&self.db)
+            .iter()
+            .map(|file| file.file)
+            .collect();
+        match ProjectFiles::try_get(&self.db) {
+            Some(project) if project.files(&self.db) == &files => {}
+            Some(project) => {
+                project.set_files(&mut self.db).to(files);
+            }
+            None => {
+                ProjectFiles::new(&self.db, files);
+            }
+        }
+        true
+    }
+
     /// Derives the changed files' per-item facts across cores, so `package_index` only joins
     /// memoized results. Salsa storage handles share memos, so the workers fill one cache.
-    fn warm(&self, files: &[SourceFile]) {
+    fn warm(&self, files: &[SourceFile], derive: impl Fn(&dyn Db, SourceFile) + Sync) {
         if files.is_empty() {
             return;
         }
@@ -336,12 +447,13 @@ impl Loader {
             for worker in 0..workers {
                 let db = self.db.clone();
                 let files = &files;
+                let derive = &derive;
                 thread::Builder::new()
                     .name("ry-loader-index".to_owned())
                     .stack_size(ANALYSIS_STACK_SIZE)
                     .spawn_scoped(scope, move || {
                         for &file in files.iter().skip(worker).step_by(workers) {
-                            file_items(&db, file);
+                            derive(&db, file);
                         }
                     })
                     .expect("a loader worker thread should spawn");
@@ -383,6 +495,7 @@ impl Loader {
             files,
             sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
             compiled: compiled_fingerprint(&root.join("src"))?,
+            strict: self.strict,
         })
     }
 
@@ -398,6 +511,7 @@ impl Loader {
         description: String,
         namespace: String,
         texts: Vec<(String, Option<String>)>,
+        strict: bool,
     ) -> Result<(usize, Vec<SourceFile>), LoadError> {
         let position = match self
             .packages
@@ -406,16 +520,23 @@ impl Loader {
         {
             Some(position) => position,
             None => {
-                let sources =
-                    PackageSources::builder(Vec::new(), namespace.clone(), description.clone())
-                        .namespace_durability(Durability::HIGH)
-                        .description_durability(Durability::HIGH)
-                        .new(&self.db);
+                let sources = PackageSources::builder(
+                    Vec::new(),
+                    namespace.clone(),
+                    description.clone(),
+                    strict,
+                )
+                .namespace_durability(Durability::HIGH)
+                .description_durability(Durability::HIGH)
+                .strict_durability(Durability::HIGH)
+                .new(&self.db);
                 self.packages.push(LoadedPackage {
                     root: root.to_path_buf(),
                     sources,
                     files: FxHashMap::default(),
                     committed: None,
+                    committed_fingerprint: None,
+                    pending_fingerprint: None,
                     pending: None,
                 });
                 self.packages.len() - 1
@@ -465,6 +586,9 @@ impl Loader {
                 .with_durability(Durability::LOW)
                 .to(namespace);
         }
+        if *sources.strict(db) != strict {
+            sources.set_strict(db).to(strict);
+        }
         if sources.description(db) != &description {
             sources
                 .set_description(db)
@@ -488,11 +612,7 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
     for entry in entries {
         let entry = entry.map_err(|error| LoadError::Io(directory.clone(), error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let is_code = Path::new(&name)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"));
-        if is_code && entry.path().is_file() {
+        if is_r_code(&name) && entry.path().is_file() {
             names.push(name);
         }
     }
@@ -512,6 +632,14 @@ pub fn collated_r_files(root: &Path, collate: &[String]) -> Result<Vec<String>, 
         .into_iter()
         .map(|name| format!("R/{name}"))
         .collect())
+}
+
+/// Whether a file in `R/` is code a load sources, as R CMD INSTALL decides.
+fn is_r_code(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "R" | "r" | "S" | "s" | "q"))
 }
 
 /// The plan that turns `previous` (nothing, for a full load) into `next`. It looks inside only
@@ -580,12 +708,14 @@ pub fn diff<'text>(
         .collect();
     let new_items = dirty_items(&new_dirty_files);
 
-    // Names whose laziness flipped, because a second writer appeared or went away. Only a
-    // dirty item can change a writer count, so only their names are candidates.
-    let flipped: FxHashSet<&str> = old_items
-        .iter()
-        .chain(&new_items)
-        .flat_map(|(_, item)| item.binds.iter().map(String::as_str))
+    // Names whose laziness flipped: a second writer appeared or went away, or, for a constant
+    // of a strict file, a name it mentions or a function it calls changed in another file.
+    // The latter can flip a name no dirty item writes, so every name is a candidate.
+    let flipped: FxHashSet<&str> = old
+        .names
+        .keys()
+        .chain(index.names.keys())
+        .map(String::as_str)
         .filter(|name| old.is_lazy(name) != index.is_lazy(name))
         .collect();
 
@@ -600,7 +730,10 @@ pub fn diff<'text>(
         })
     };
     let lazy_code = |path: &str, name: &str, item: &IndexedItem| {
-        let span = item.function.as_ref().map_or(item.span, |(_, span)| *span);
+        let span = item
+            .binding
+            .as_ref()
+            .map_or(item.span, |binding| binding.value);
         Code {
             name: Some(name.to_owned()),
             path: path.to_owned(),
@@ -641,9 +774,9 @@ pub fn diff<'text>(
                 // The same code at a new position: rebinding keeps source references right,
                 // and nothing that read it needs to rerun.
                 let position = |item: &IndexedItem| {
-                    item.function
+                    item.binding
                         .as_ref()
-                        .map(|(_, span)| (span.line, span.column))
+                        .map(|binding| (binding.value.line, binding.value.column))
                 };
                 *old_path != path.as_str() || position(previous) != position(item)
             }
@@ -709,9 +842,9 @@ pub fn diff<'text>(
             for &position in &eager_positions {
                 let item = &file.items.items[position];
                 if item
-                    .function
+                    .binding
                     .as_ref()
-                    .is_some_and(|(name, _)| flipped.contains(name.as_str()))
+                    .is_some_and(|binding| flipped.contains(binding.name.as_str()))
                 {
                     fresh.insert((file_position, position));
                 }
@@ -786,6 +919,26 @@ pub fn diff<'text>(
         }
     }
     let mut rerun: Vec<bool> = eager.iter().map(|(_, _, fresh)| full || *fresh).collect();
+    // A lazy constant holds the value its initializer computed when it was forced, so like an
+    // eager statement it is bound afresh when anything its initializer reaches changed.
+    let constants: Vec<(&str, &str, &IndexedItem)> = if full {
+        Vec::new()
+    } else {
+        index
+            .files
+            .iter()
+            .flat_map(|file| {
+                file.items.items.iter().filter_map(|item| {
+                    let binding = item.binding.as_ref()?;
+                    if binding.function {
+                        return None;
+                    }
+                    Some((file.path.as_str(), index.lazy_name(item)?, item))
+                })
+            })
+            .collect()
+    };
+    let mut bound: FxHashSet<String> = bind.iter().filter_map(|code| code.name.clone()).collect();
     loop {
         if !full && !changed.is_empty() {
             let roots: Vec<&str> = eager
@@ -801,6 +954,20 @@ pub fn diff<'text>(
         }
         let changed_before = changed.len();
         let mut grew = false;
+        for (path, name, item) in &constants {
+            if bound.contains(*name) {
+                continue;
+            }
+            if reached_through_calls(&item.mentions, &functions)
+                .iter()
+                .any(|reached| changed.contains(*reached))
+            {
+                bind.push(lazy_code(path, name, item));
+                bound.insert((*name).to_owned());
+                changed.insert((*name).to_owned());
+                grew = true;
+            }
+        }
         for (position, (_, item, _)) in eager.iter().enumerate() {
             if !rerun[position]
                 && !changed.is_empty()
@@ -1142,6 +1309,40 @@ impl Plan {
             && self.dynamic_libraries.is_none()
             && !self.exports_changed
     }
+}
+
+/// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE` and the code
+/// files in `R/`, so a change is noticed without reading a file. `src/` is left out: hashing it
+/// would cost a walk of the compiled sources before every command, and a rebuild is slow enough
+/// that it is asked for with `load_all()`.
+fn source_fingerprint(root: &Path) -> Option<u64> {
+    let mut records = Vec::new();
+    let mut record = |path: &Path| {
+        if let Ok(metadata) = fs::metadata(path) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            records.push(format!(
+                "{}\0{}\0{modified}",
+                path.display(),
+                metadata.len()
+            ));
+        }
+    };
+    record(&root.join("DESCRIPTION"));
+    record(&root.join("NAMESPACE"));
+    let entries = fs::read_dir(root.join("R")).ok()?;
+    // An editor's swap and backup files (`.a.R.swp`, `a.R~`) are not code, so saving one
+    // reloads nothing.
+    for entry in entries.flatten() {
+        if is_r_code(&entry.file_name().to_string_lossy()) {
+            record(&entry.path());
+        }
+    }
+    records.sort();
+    Some(fnv1a(records.join("\n").as_bytes()))
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {

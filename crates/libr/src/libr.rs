@@ -15,6 +15,38 @@
 // live, as GNU R requires of the same functions.
 #![allow(clippy::missing_safety_doc)]
 
+// The runtime allocates and frees vectors at a high rate. glibc's malloc returns freed memory
+// above its trim threshold to the kernel and zeroes calloc'd memory by hand, so every fresh large
+// vector paid for page faults and a memset. The binary's allocator does not reach this library,
+// which is a separate shared object, so the library declares its own.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// `mi_option_arena_eager_commit` in mimalloc's `mi_option_e`, which `libmimalloc-sys` does not
+/// export as a constant.
+#[cfg(target_os = "linux")]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+
+/// An eagerly committed arena is backed by transparent huge pages, which the kernel zeroes in full
+/// when they are first touched or faulted back in after a purge, compacting memory to find them.
+/// Loading a package plans it on every core and every new arena paid for that zeroing, which made
+/// the plan of a large package take twice as long and vary from run to run; data.table's
+/// `rbindlist` on 1e7 rows went from about one second to six once earlier work had left purged
+/// arenas behind. mimalloc reads the option each time it reserves an arena, so it is set from a
+/// constructor that runs when the library loads, as a default that `MIMALLOC_ARENA_EAGER_COMMIT`
+/// can still override. The `ry` binary sets the same option for its own allocator in
+/// `crates/ry/src/main.rs`.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static LAZY_ARENA_COMMIT: extern "C" fn() = {
+    extern "C" fn lazy_arena_commit() {
+        // SAFETY: setting an option's default has no preconditions.
+        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+    }
+    lazy_arena_commit
+};
+
 pub mod altrep;
 pub mod applic;
 pub mod arith;
@@ -34,6 +66,7 @@ pub mod hashtab;
 pub mod legacy;
 pub mod linpack;
 pub mod lists;
+pub mod macho;
 pub mod memory;
 pub mod rmath;
 pub mod serialize;
@@ -41,10 +74,12 @@ pub mod strings;
 pub mod utils;
 pub mod vectors;
 
-use crate::{boundary::Unwind, dynload::Dll};
-use heap::{Heap, arena::Arena, object::Sexp};
-use rustc_hash::FxHashMap;
-use std::{cell::UnsafeCell, ffi::c_int};
+use {
+    crate::{boundary::Unwind, dynload::Dll},
+    heap::{Heap, arena::Arena, object::Sexp},
+    rustc_hash::FxHashMap,
+    std::{cell::UnsafeCell, ffi::c_int},
+};
 
 pub type SEXP = Sexp;
 pub type SEXPTYPE = u32;
@@ -52,8 +87,6 @@ pub type R_xlen_t = isize;
 pub type R_len_t = c_int;
 /// `Rboolean` is a C enum, so it has the size of `int`.
 pub type Rboolean = c_int;
-/// The R version ry presents, which `Rversion.h` and `R.version` report too.
-pub const R_VERSION_STRING: &str = "4.6.2";
 pub const TRUE: Rboolean = 1;
 pub const FALSE: Rboolean = 0;
 
@@ -73,8 +106,8 @@ pub struct Runtime {
     pub error_buffer: Vec<u8>,
     pub dlls: Vec<Box<Dll>>,
     pub c_callables: FxHashMap<(String, String), usize>,
-    /// `TRUELENGTH` values set on objects whose storage has no field for one: strings and
-    /// vectors set to a value other than their capacity. Each key is preserved while it has an
+    /// `TRUELENGTH` values set on vectors to a value other than their capacity, which their
+    /// storage has no field for. Each key is preserved while it has an
     /// entry, so its address cannot be reused by another object.
     pub truelengths: FxHashMap<Sexp, isize>,
     pub rng: arith::Rng,
@@ -121,18 +154,28 @@ impl<T: Copy> Global<T> {
 /// The reference must not be held across a call into native code, which may re-enter the API
 /// and take its own. Functions that call native code take the runtime afresh afterwards.
 #[allow(clippy::mut_from_ref)]
+#[inline]
 pub fn runtime() -> &'static mut Runtime {
     // SAFETY: single-threaded access, see `Global`.
     unsafe {
         let slot = &mut *RUNTIME.as_ptr();
-        if slot.is_none() {
-            *slot = Some(Runtime::start());
-            globals::publish(slot.as_mut().unwrap_or_else(|| unreachable!()));
-            eval::install_interpreter(slot.as_mut().unwrap_or_else(|| unreachable!()));
-            embed::start_frontend();
+        match slot {
+            Some(runtime) => runtime,
+            None => start_runtime(slot),
         }
-        slot.as_mut().unwrap_or_else(|| unreachable!())
     }
+}
+
+/// Starts the runtime on the first API call. Every later call takes the inlined branch above,
+/// which is one load and a compare on the path of every C API function.
+#[cold]
+#[inline(never)]
+unsafe fn start_runtime(slot: &'static mut Option<Runtime>) -> &'static mut Runtime {
+    let runtime = slot.insert(Runtime::start());
+    globals::publish(runtime);
+    eval::install_interpreter(runtime);
+    embed::start_frontend();
+    runtime
 }
 
 impl Runtime {

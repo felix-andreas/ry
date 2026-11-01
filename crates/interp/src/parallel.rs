@@ -3,13 +3,15 @@
 //! that talk to forked children) is not, so `mclapply` and `mcparallel` work only on the paths
 //! that run in the current process, such as `mc.cores = 1`.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    coerce::coerce_vector,
-    unwind::R,
-    values::{self, nil, scalar_bool},
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        coerce::coerce_vector,
+        unwind::R,
+        values::{self, nil, scalar_bool},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("nextStream", |call| unsafe {

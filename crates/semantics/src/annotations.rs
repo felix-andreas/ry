@@ -3,16 +3,23 @@
 //! the same type lowering into the same `Annotation`, so the checker sees one shape whichever
 //! way a type was written.
 
-use crate::Db;
-use crate::diagnostics::TypeRenderer;
-use crate::types::{
-    Atomic, Constraint, FunctionType, Name, NativeField, Parameter, RecordField, RestParameter, Ty,
-    TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null, scalar,
-    substitute_rigid, union_of, unknown,
+use {
+    crate::{
+        Db,
+        diagnostics::TypeRenderer,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField,
+            RestParameter, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
+            native_record, null, scalar, substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::mem::take,
+    syntax::{
+        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
+        matching_nodes,
+    },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::mem::take;
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct Annotation<'db> {
@@ -188,18 +195,19 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
 /// parameter's `: TYPE`, or `-> TYPE`, a type definition (`type Name = TYPE`), or a
 /// nominal constructor (`@Name(value)`).
 pub fn is_inline_site(node: &SyntaxNode) -> bool {
+    is_green_inline_site(GreenRef::new(&node.green()))
+}
+
+/// [`is_inline_site`] on the green tree, for searches that skip building red nodes.
+pub fn is_green_inline_site(node: GreenRef<'_>) -> bool {
     match node.kind() {
         SyntaxKind::TYPE_DEFINITION | SyntaxKind::NEW_EXPR => true,
-        SyntaxKind::BINARY_EXPR => node
-            .children()
-            .any(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION),
-        SyntaxKind::FUNCTION_DEF => node.children().any(|child| match child.kind() {
+        SyntaxKind::BINARY_EXPR => node.has_child(SyntaxKind::TYPE_ASCRIPTION),
+        SyntaxKind::FUNCTION_DEF => node.child_nodes().any(|child| match child.kind() {
             SyntaxKind::TYPE_BINDER_LIST | SyntaxKind::RETURN_TYPE => true,
-            SyntaxKind::PARAMETER_LIST => child.children().any(|parameter| {
-                parameter
-                    .children()
-                    .any(|part| part.kind() == SyntaxKind::TYPE_ASCRIPTION)
-            }),
+            SyntaxKind::PARAMETER_LIST => child
+                .child_nodes()
+                .any(|parameter| parameter.has_child(SyntaxKind::TYPE_ASCRIPTION)),
             _ => false,
         }),
         _ => false,
@@ -320,11 +328,12 @@ pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
 /// The written inline annotations of a site, from the first to the last, so a finding
 /// about the whole annotation never covers the value or the body.
 fn inline_range(site: &SyntaxNode) -> TextRange {
-    let mut parts = site
-        .descendants()
-        .filter(is_inline_annotation)
-        .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
-        .map(|node| node.text_range());
+    let mut parts = matching_nodes(site, |node, parent| {
+        is_green_inline_annotation(node.kind(), parent.map(GreenRef::kind))
+    })
+    .into_iter()
+    .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
+    .map(|node| node.text_range());
     let Some(first) = parts.next() else {
         return site.text_range();
     };
@@ -852,6 +861,8 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
         }
         let form = match child.kind() {
             SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
+                // A flag on the function, not a type, so it fits beside any form.
+                "pure" => continue,
                 "type" | "alias" => BlockForm::Definition,
                 "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
                 _ => BlockForm::Compact,
@@ -908,11 +919,11 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
     )
 }
 
-/// `record{...}` and `tuple{...}` share the brace grammar of `list{...}` too.
+/// `Record{...}` and `Tuple{...}` share the brace grammar of `list{...}` too.
 fn native_head(node: &SyntaxNode) -> Option<NativeHead> {
     match name_text(node).as_deref() {
-        Some("record") => Some(NativeHead::Record),
-        Some("tuple") => Some(NativeHead::Tuple),
+        Some("Record") => Some(NativeHead::Record),
+        Some("Tuple") => Some(NativeHead::Tuple),
         _ => None,
     }
 }
@@ -923,12 +934,21 @@ enum NativeHead {
     Tuple,
 }
 
-/// `frame{...}` shares the brace grammar of `list{...}`; the head word tells them apart.
-fn is_frame_type(node: &SyntaxNode) -> bool {
-    name_text(node).as_deref() == Some("frame")
+/// `DataFrame{...}` and the other table types share the brace grammar of `list{...}`; the head
+/// word tells them apart.
+fn frame_kind(node: &SyntaxNode) -> Option<FrameKind> {
+    FrameKind::from_head(name_text(node).as_deref()?)
 }
 
 /// Joins adjacent tokens after `@`: `@if-unknown` lexes as `if` `-` `unknown`.
+/// Whether a `#:` block carries `@pure`. Read apart from the lowered annotation, so a block
+/// refused for its type still declares purity and the fact stays a per-item `bool`.
+pub fn declares_pure(annotation: &SyntaxNode) -> bool {
+    annotation.children().any(|child| {
+        child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE && directive_name(&child) == "pure"
+    })
+}
+
 fn directive_name(node: &SyntaxNode) -> String {
     let mut name = String::new();
     let mut cursor: Option<TextSize> = None;
@@ -1261,20 +1281,20 @@ impl<'db> Lowering<'db> {
                 match native_head(node) {
                     Some(NativeHead::Record) if positional => {
                         self.errors.push((
-                            "a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items".to_owned(),
+                            "a `Record{...}` type names every field: write each one as `name: TYPE`, or use `Tuple{...}` for unnamed items".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
                     }
                     Some(NativeHead::Tuple) if named => {
                         self.errors.push((
-                            "a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields".to_owned(),
+                            "a `Tuple{...}` type lists its items without names: drop the names, or use `Record{...}` for named fields".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
                     }
                     Some(NativeHead::Record) => {
-                        self.lower_native_fields(node, "this `record{...}` type")
+                        self.lower_native_fields(node, "this `Record{...}` type")
                     }
                     _ => self.lower_native_items(node),
                 }
@@ -1300,8 +1320,8 @@ impl<'db> Lowering<'db> {
                     && node.children().any(|c| is_type_kind(c.kind())) =>
             {
                 self.errors.push((
-                    if is_frame_type(node) {
-                        "a `frame{...}` type names every column: write each one as `name: TYPE`".to_owned()
+                    if let Some(kind) = frame_kind(node) {
+                        format!("a `{}{{...}}` type names every column: write each one as `name: TYPE`", kind.head())
                     } else {
                         "a `list{...}` type cannot mix named and unnamed items: write every item as `name: TYPE`, or none of them".to_owned()
                     },
@@ -1309,16 +1329,19 @@ impl<'db> Lowering<'db> {
                 ));
                 unknown(self.db)
             }
-            SyntaxKind::TYPE_TUPLE if is_frame_type(node) => {
+            SyntaxKind::TYPE_TUPLE if frame_kind(node).is_some() => {
+                let kind = frame_kind(node).unwrap_or(FrameKind::DataFrame);
                 if node.children().any(|c| is_type_kind(c.kind())) {
                     self.errors.push((
-                        "a `frame{...}` type names every column: write each one as `name: TYPE`"
-                            .to_owned(),
+                        format!(
+                            "a `{}{{...}}` type names every column: write each one as `name: TYPE`",
+                            kind.head()
+                        ),
                         node.text_range(),
                     ));
                     return unknown(self.db);
                 }
-                Ty::new(self.db, TyKind::Frame(Some(Vec::new())))
+                Ty::new(self.db, TyKind::Frame(kind, Some(Vec::new())))
             }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
@@ -1329,7 +1352,7 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, TyKind::Tuple(items))
             }
             SyntaxKind::TYPE_RECORD => {
-                let frame = is_frame_type(node);
+                let frame = frame_kind(node);
                 let fields: Vec<(String, SyntaxNode)> = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -1339,9 +1362,10 @@ impl<'db> Lowering<'db> {
                 for (name, field) in &fields {
                     if !seen.insert(name.as_str()) {
                         self.errors.push((
-                            if frame {
+                            if let Some(kind) = frame {
                                 format!(
-                                    "the column `{name}` appears twice in this `frame{{...}}` type"
+                                    "the column `{name}` appears twice in this `{}{{...}}` type",
+                                    kind.head()
                                 )
                             } else {
                                 format!(
@@ -1352,6 +1376,27 @@ impl<'db> Lowering<'db> {
                         ));
                     }
                 }
+                // In `GroupBy{g: character[]; x: double[]}` the fields before the `;` are keys.
+                let frame = match frame {
+                    Some(FrameKind::GroupBy { lazy, .. }) => {
+                        let keys = node
+                            .children_with_tokens()
+                            .find(|element| element.kind() == SyntaxKind::SEMICOLON)
+                            .map_or(0, |semicolon| {
+                                fields
+                                    .iter()
+                                    .filter(|(_, field)| {
+                                        field.text_range().end() <= semicolon.text_range().start()
+                                    })
+                                    .count()
+                            });
+                        Some(FrameKind::GroupBy {
+                            lazy,
+                            keys: keys as u32,
+                        })
+                    }
+                    other => other,
+                };
                 let fields = fields
                     .into_iter()
                     .map(|(name, field)| {
@@ -1360,15 +1405,19 @@ impl<'db> Lowering<'db> {
                             .unwrap_or_else(|| unknown(self.db));
                         RecordField {
                             name: Name::new(self.db, name),
-                            ty: if frame { column_type(self.db, ty) } else { ty },
+                            ty: if frame.is_some() {
+                                column_type(self.db, ty)
+                            } else {
+                                ty
+                            },
                             optional: false,
                         }
                     })
                     .collect();
                 Ty::new(
                     self.db,
-                    if frame {
-                        TyKind::Frame(Some(fields))
+                    if let Some(kind) = frame {
+                        TyKind::Frame(kind, Some(fields))
                     } else {
                         TyKind::Record(fields)
                     },
@@ -1405,6 +1454,24 @@ impl<'db> Lowering<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
+                // An Array is one-dimensional and NA-free, so a vector, list, `NULL` or function
+                // item would make it ragged or missing.
+                if text == "Array"
+                    && let [item] = arguments.as_slice()
+                    && !array_item_annotation(self.db, *item)
+                    && let Some(argument) = node
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::TYPE_ARG_LIST)
+                        .and_then(|list| list.children().find(|c| is_type_kind(c.kind())))
+                {
+                    self.errors.push((
+                        format!(
+                            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+                            argument.text().to_string().trim()
+                        ),
+                        argument.text_range(),
+                    ));
+                }
                 if let Some(range) = reference {
                     self.applied_references.push((text, arguments.len(), range));
                 }
@@ -1467,10 +1534,35 @@ impl<'db> Lowering<'db> {
             "complex" => return scalar(self.db, Atomic::Complex),
             "character" => return scalar(self.db, Atomic::Character),
             "raw" => return scalar(self.db, Atomic::Raw),
-            "frame" => return Ty::new(self.db, TyKind::Frame(None)),
+            "DataFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None)),
+            "LazyFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None)),
+            "GroupBy" => {
+                return Ty::new(
+                    self.db,
+                    TyKind::Frame(
+                        FrameKind::GroupBy {
+                            lazy: false,
+                            keys: 0,
+                        },
+                        None,
+                    ),
+                );
+            }
+            "LazyGroupBy" => {
+                return Ty::new(
+                    self.db,
+                    TyKind::Frame(
+                        FrameKind::GroupBy {
+                            lazy: true,
+                            keys: 0,
+                        },
+                        None,
+                    ),
+                );
+            }
             _ => {}
         }
-        let name = Name::new(self.db, text.to_owned());
+        let name = Name::new(self.db, text);
         if self.binders.contains(&name) {
             return Ty::new(self.db, TyKind::Rigid(name));
         }
@@ -1544,5 +1636,26 @@ impl<'db> Lowering<'db> {
                 ret,
             }),
         )
+    }
+}
+
+/// Whether an annotation may name `item` as an Array's item type. A type name, a type parameter or
+/// a union of tags may; an R vector, list, `NULL`, function, `complex` or `raw` may not.
+fn array_item_annotation(db: &dyn Db, item: Ty<'_>) -> bool {
+    match item.kind(db) {
+        TyKind::Scalar(atomic) => !matches!(atomic, Atomic::Complex | Atomic::Raw),
+        TyKind::Union(members) => members.iter().all(|&member| {
+            !matches!(member.kind(db), TyKind::Null) && array_item_annotation(db, member)
+        }),
+        TyKind::Vector(_)
+        | TyKind::NamedVector(_)
+        | TyKind::List(_)
+        | TyKind::NamedList(_)
+        | TyKind::Tuple(_)
+        | TyKind::Record(_)
+        | TyKind::Frame(..)
+        | TyKind::Function(_)
+        | TyKind::Null => false,
+        _ => true,
     }
 }

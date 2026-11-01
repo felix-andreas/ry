@@ -24,8 +24,10 @@
 // `do ... while (a > b)` they follow does; `a <= b` would loop forever.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
-use crate::linalg::format_g;
-use std::{cell::RefCell, ffi::c_int, rc::Rc};
+use {
+    crate::linalg::format_g,
+    std::{cell::RefCell, ffi::c_int, rc::Rc},
+};
 
 pub const DBL_EPSILON: f64 = f64::EPSILON;
 pub const DBL_MIN: f64 = f64::MIN_POSITIVE;
@@ -7220,7 +7222,12 @@ pub fn psignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
     if n <= 0.0 || !signrank_valid(n) {
         return f64::NAN;
     }
-    let x = forceint(x + 1e-7);
+    // R 4.6's wilcox.test asks for the upper tail at `q - 1/4`, which only floors correctly.
+    let x = if crate::system::r_at_least(4, 6) {
+        (x + 1e-7).floor()
+    } else {
+        forceint(x + 1e-7)
+    };
     if x < 0.0 {
         return dt0(lower, log);
     }

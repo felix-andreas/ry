@@ -1,0 +1,78 @@
+[stdout]
+| [1] 1357020000
+| attr(,"tzone")
+| [1] "America/Chicago"
+| [1] "2013-01-01 00:00:00 -0600 CST"
+| [1] "2010-07-05 10:00:00 CEST"
+| [1] "+0530 IST"
+| [1] 1268548200
+| attr(,"tzone")
+| [1] "America/New_York"
+| [1] 1289107800
+| attr(,"tzone")
+| [1] "America/New_York"
+| [1] 1289111400
+| attr(,"tzone")
+| [1] "America/New_York"
+| List of 4
+|  $ hour  : int 1
+|  $ isdst : int 0
+|  $ zone  : chr "EST"
+|  $ gmtoff: int -18000
+| [1] "America/New_York" "EST"              "EDT"             
+| [1] "Australia/Sydney" "AEST"             "AEDT"            
+| List of 3
+|  $ isdst : int -1
+|  $ zone  : chr ""
+|  $ gmtoff: int NA
+| List of 3
+|  $ isdst : int -1
+|  $ zone  : chr "UTC"
+|  $ gmtoff: int 0
+| [1] "2010-07-06 06 +0200 CEST"
+| [1] "2010-07-06 06:00:00 CEST"
+| List of 4
+|  $ hour  : int 3
+|  $ isdst : int 0
+|  $ zone  : chr ""
+|  $ gmtoff: int NA
+| List of 4
+|  $ hour  : int 2
+|  $ isdst : int 1
+|  $ zone  : chr "EDT"
+|  $ gmtoff: int NA
+| [1] "2012-08-13 23:05:09 UTC"
+| [1] "1999-03-04 UTC"
+| [1] 15.25
+| [1] NA
+| [1] NA
+| [1] "1970-01-01 UTC" NA              
+| [1] "2009-53 09 00 00 5 20 1262304000" "2013-01 13 53 53 1 20 1356912000"
+| [3] "2015-53 15 01 00 7 20 1451779200" "2020-53 20 00 00 5 20 1609459200"
+| [1] " 0|12|am|12:30:00 AM|Thu Mar  4 00:30:00 1999|99|04|03/04/99|00:30:00"
+| [1] NA NA
+| [1] "2008-08-05 UTC"
+| [1] "2019-12-29"
+| [1] "CET"
+| [1] "EDT"
+| [1] "use of %Z for input is not supported"
+| [1] NA
+| [1] "2020-01-01 05:00:00 UTC"
+| [1] "2024-01-15 UTC" NA              
+| [1] NA               "2024-01-02 UTC"
+| [1] "2024-03-11 UTC"
+| [1] "2024-03-04 UTC" "2024-03-03 UTC"
+| [1] 0
+| [1] 5
+| [1] NA
+| warning: values for %z outside +/-1400 are an error 
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] "use of %Z for input is not supported"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "use of %Z for input is not supported"

@@ -11,15 +11,23 @@ pub mod naming;
 pub mod sorted;
 pub mod stubs;
 pub mod testing;
+pub mod top_level;
 pub mod types;
 
-use crate::hir::Symbol;
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use syntax::ast::is_expression_kind;
-use syntax::ast::{self, BinaryExpr};
-use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, paired_comment_definition};
+use {
+    crate::hir::Symbol,
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{OnceCell, RefCell},
+        collections::{BTreeMap, BTreeSet},
+        sync::{Arc, Mutex},
+    },
+    syntax::{
+        GreenEvent, Parse, SyntaxElement, SyntaxKind, SyntaxNode, TextRange, TextSize,
+        ast::{self, BinaryExpr, is_expression_kind},
+        matching_nodes, paired_comment_definition,
+    },
+};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
 /// run on threads with this stack rather than `ulimit -s`'s.
@@ -40,32 +48,17 @@ pub struct RootDatabase {
 }
 
 impl RootDatabase {
-    /// For a single cold pass, such as `ry check`. Trees are evicted whenever the host calls
-    /// `trigger_lru_eviction`, and no file is parsed twice from an edit, so splice caching
-    /// would only hold a second copy of every text and of recent trees.
-    ///
-    /// The default database keeps every tree: an editor host pays for eviction in latency
-    /// (about 10 ms per settled re-check on the benchmark code bases) more than it gains in
-    /// memory.
+    /// For a single cold pass, such as `ry check`. No file is parsed twice from an edit, so
+    /// splice caching would only hold a second copy of every text and of recent trees.
     pub fn one_shot() -> RootDatabase {
-        let mut db = RootDatabase {
+        RootDatabase {
             storage: salsa::Storage::default(),
             splice_cache: Arc::new(SpliceCache {
                 entries: Mutex::default(),
                 enabled: false,
             }),
-        };
-        limit_resident_trees(&mut db);
-        db
+        }
     }
-}
-
-/// Lets `trigger_lru_eviction` drop all but the most recently used syntax trees.
-pub fn limit_resident_trees(db: &mut dyn Db) {
-    parse::set_lru_capacity(db, 128);
-    file_item_annotations::set_lru_capacity(db, 128);
-    item_syntax::set_lru_capacity(db, 4096);
-    item_annotation_syntax::set_lru_capacity(db, 4096);
 }
 
 #[salsa::db]
@@ -80,8 +73,26 @@ impl Db for RootDatabase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum DocumentKind {
+    /// A file of the package namespace (`R/`).
     Package,
+    /// A testthat test file (`tests/testthat/test-*.R`). testthat runs each one in its own
+    /// environment, so it reads its own bindings, the helpers and the package namespace, and
+    /// contributes to none of them.
+    Test,
+    /// A testthat helper or setup file (`helper-*.R`, `setup-*.R`), which testthat sources
+    /// into the environment every test file runs in.
+    TestHelper,
+    /// A standalone script, which reads the package namespace and its own bindings only.
     Script,
+}
+
+/// The kind of a file directly in `tests/testthat/`, from its name alone.
+pub fn test_document_kind(file_name: &str) -> DocumentKind {
+    if file_name.starts_with("helper") || file_name.starts_with("setup") {
+        DocumentKind::TestHelper
+    } else {
+        DocumentKind::Test
+    }
 }
 
 #[salsa::input(debug)]
@@ -91,10 +102,7 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-/// Trees are the largest memos and cheap to rebuild, so a cold pass keeps only recent ones
-/// resident (see [`RootDatabase::one_shot`]); everything derived from them is memoized
-/// item-relative and survives eviction.
-#[salsa::tracked(returns(clone), lru = 0)]
+#[salsa::tracked(returns(clone))]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
@@ -211,9 +219,8 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
-/// from it stay item-relative until the rendering edge. Holds part of the file's tree, so
-/// it is evicted alongside `parse`.
-#[salsa::tracked(returns(clone), lru = 0)]
+/// from it stay item-relative until the rendering edge.
+#[salsa::tracked(returns(clone))]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
@@ -251,6 +258,139 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
         });
     }
     spans
+}
+
+/// The sparse nodes the per-file passes look for, in preorder, from one walk of the green
+/// tree: each pass reading the tree itself would walk every node once per pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct SyntaxSites(Vec<SyntaxSite>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SyntaxSite {
+    kind: SyntaxKind,
+    range: TextRange,
+    roles: u8,
+}
+
+/// What a recorded site is to the passes that read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteRole {
+    /// A `#:` block.
+    Annotation,
+    TypeDefinition,
+    /// A `#:` block or an inline type definition: everything that can declare a type.
+    Declaration,
+    /// A record, tuple, tag or `match`, which R cannot run.
+    RySyntax,
+    /// A node carrying an inline annotation, as [`annotations::is_green_inline_site`].
+    InlineSite,
+    /// An inline annotation itself, as [`syntax::is_green_inline_annotation`].
+    InlineAnnotation,
+    /// The file or a brace body with a `#:` block among its statements.
+    AnnotatedSequence,
+    /// A call that attaches a namespace, as [`metadata::is_green_attach_call`].
+    AttachCall,
+}
+
+impl SiteRole {
+    fn bit(self) -> u8 {
+        match self {
+            SiteRole::InlineSite => 1,
+            SiteRole::InlineAnnotation => 2,
+            SiteRole::AnnotatedSequence => 4,
+            SiteRole::AttachCall => 8,
+            SiteRole::Annotation
+            | SiteRole::TypeDefinition
+            | SiteRole::Declaration
+            | SiteRole::RySyntax => 0,
+        }
+    }
+
+    fn holds(self, site: &SyntaxSite) -> bool {
+        match self {
+            SiteRole::Annotation => site.kind == SyntaxKind::ANNOTATION,
+            SiteRole::TypeDefinition => site.kind == SyntaxKind::TYPE_DEFINITION,
+            SiteRole::Declaration => matches!(
+                site.kind,
+                SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION
+            ),
+            SiteRole::RySyntax => is_ry_syntax(site.kind),
+            SiteRole::InlineSite
+            | SiteRole::InlineAnnotation
+            | SiteRole::AnnotatedSequence
+            | SiteRole::AttachCall => site.roles & self.bit() != 0,
+        }
+    }
+}
+
+impl SyntaxSites {
+    pub fn any(&self, role: SiteRole) -> bool {
+        self.0.iter().any(|site| role.holds(site))
+    }
+
+    /// The sites with `role` as nodes of `root`, the tree the sites were recorded from.
+    pub fn nodes(&self, root: &SyntaxNode, role: SiteRole) -> Vec<SyntaxNode> {
+        self.0
+            .iter()
+            .filter(|site| role.holds(site))
+            .map(|site| match syntax::node_at(root, site.kind, site.range) {
+                Some(node) => node,
+                None => panic!(
+                    "a recorded syntax site at {:?} is not in its tree",
+                    site.range
+                ),
+            })
+            .collect()
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
+    let mut sites = Vec::new();
+    syntax::walk_green(&parse(db, file).syntax_node(), |event| {
+        let GreenEvent::Enter {
+            node,
+            parent,
+            range,
+        } = event
+        else {
+            return;
+        };
+        let kind = node.kind();
+        let mut roles = 0;
+        if annotations::is_green_inline_site(node) {
+            roles |= SiteRole::InlineSite.bit();
+        }
+        if syntax::is_green_inline_annotation(kind, parent.map(syntax::GreenRef::kind)) {
+            roles |= SiteRole::InlineAnnotation.bit();
+        }
+        if (parent.is_none() || kind == SyntaxKind::BRACE_EXPR)
+            && node.has_child(SyntaxKind::ANNOTATION)
+        {
+            roles |= SiteRole::AnnotatedSequence.bit();
+        }
+        if metadata::is_green_attach_call(node) {
+            roles |= SiteRole::AttachCall.bit();
+        }
+        if roles != 0
+            || matches!(kind, SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION)
+            || is_ry_syntax(kind)
+        {
+            sites.push(SyntaxSite { kind, range, roles });
+        }
+    });
+    SyntaxSites(sites)
+}
+
+fn is_ry_syntax(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::RECORD_EXPR
+            | SyntaxKind::TUPLE_EXPR
+            | SyntaxKind::ARRAY_EXPR
+            | SyntaxKind::TAG_EXPR
+            | SyntaxKind::MATCH_EXPR
+    )
 }
 
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
@@ -320,10 +460,7 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db).is_some_and(|files| {
-        package_definitions(db, files).contains_key(name)
-            || conditional_slot_items(db, files).contains_key(name)
-    }) {
+    if ProjectFiles::try_get(db).is_some_and(|files| package_binds(db, files, name)) {
         return true;
     }
     stubs::stubs(db).is_some_and(|library| {
@@ -385,7 +522,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone), lru = 0)]
+#[salsa::tracked(returns(clone))]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
@@ -393,7 +530,7 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref), lru = 0)]
+#[salsa::tracked(returns(ref))]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -428,7 +565,7 @@ pub struct ItemAnnotations<'db> {
 }
 
 /// Memoized so the checker reads lowered annotations instead of the item's tree: once
-/// lowering is done, nothing on the check path needs syntax, and trees can be evicted.
+/// lowering is done, nothing on the check path needs syntax.
 #[salsa::tracked(returns(ref))]
 pub fn item_annotations<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemAnnotations<'db> {
     ItemAnnotations {
@@ -465,10 +602,15 @@ fn expression_annotations<'db>(
     // Each annotated statement once, in source order, with its `#:` block if it has one.
     let mut targets: Vec<(SyntaxNode, Option<SyntaxNode>)> = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    // One walk for both kinds of site; the item tree is position-free, so the file's
+    // recorded sites cannot stand in for it.
+    let (comments, inline_sites): (Vec<SyntaxNode>, Vec<SyntaxNode>) =
+        matching_nodes(&root, |node, _| {
+            node.kind() == SyntaxKind::ANNOTATION || annotations::is_green_inline_site(node)
+        })
+        .into_iter()
+        .partition(|node| node.kind() == SyntaxKind::ANNOTATION);
+    for node in comments {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -482,10 +624,6 @@ fn expression_annotations<'db>(
             }
         }
     }
-    let inline_sites: Vec<SyntaxNode> = root
-        .descendants()
-        .filter(annotations::is_inline_site)
-        .collect();
     let inline_enabled = !inline_sites.is_empty() && inline_annotations_enabled(db);
     if inline_enabled {
         for site in inline_sites {
@@ -505,9 +643,9 @@ fn expression_annotations<'db>(
     for (statement, comment) in targets {
         let range = hir::significant_range(&statement);
         let Some(index) = module
-            .expressions
+            .ranges()
             .iter()
-            .position(|expression| expression.range == range)
+            .position(|&candidate| candidate == range)
         else {
             continue;
         };
@@ -686,6 +824,34 @@ pub fn project_type_definitions<'db>(
     definitions
 }
 
+/// Whether any package file binds `name` at top level, including the inner targets of
+/// `a <- b <- value` and conditional writes.
+pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
+    package_definitions(db, files).contains_key(name)
+        || conditional_slot_items(db, files).contains_key(name)
+}
+
+/// Every name a project file of any kind declares at top level: its named definitions and its
+/// other top-level writes. Editor requests consult it before treating a name as a stub's, and it
+/// folds the per-file memos the cold check already derives, so a lookup is one hash probe.
+#[salsa::tracked(returns(ref))]
+pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbol> {
+    let mut names = FxHashSet::default();
+    for &file in files.files(db) {
+        names.extend(
+            file_definitions(db, file)
+                .iter()
+                .map(|(name, _)| Symbol::new(name)),
+        );
+        names.extend(
+            file_conditional_writers(db, file)
+                .iter()
+                .map(|&(name, _)| name),
+        );
+    }
+    names
+}
+
 /// Items writing a top-level name other than their own (conditionally, or nested as in
 /// `y <- (x <- 1L)`); cross-item reads with no unconditional winner join their types.
 #[salsa::tracked(returns(ref))]
@@ -693,21 +859,76 @@ pub fn conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
 ) -> FxHashMap<String, Vec<Item<'db>>> {
+    conditional_writers_of(db, files, DocumentKind::Package)
+}
+
+/// The helper files' counterpart of [`conditional_slot_items`].
+#[salsa::tracked(returns(ref))]
+pub fn test_conditional_slot_items<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+) -> FxHashMap<String, Vec<Item<'db>>> {
+    conditional_writers_of(db, files, DocumentKind::TestHelper)
+}
+
+fn conditional_writers_of<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    kind: DocumentKind,
+) -> FxHashMap<String, Vec<Item<'db>>> {
     let mut writers: FxHashMap<String, Vec<Item<'db>>> = FxHashMap::default();
     for &file in files.files(db) {
-        if *file.kind(db) != DocumentKind::Package {
+        if *file.kind(db) != kind {
             continue;
         }
-        for &item in item_tree(db, file) {
-            let own_name = item.name(db).clone();
-            for name in item_top_level_names(db, item) {
-                if own_name.as_deref() != Some(name.as_str()) {
-                    writers.entry(name.to_string()).or_default().push(item);
-                }
-            }
+        for &(name, item) in file_conditional_writers(db, file) {
+            writers.entry(name.to_string()).or_default().push(item);
         }
     }
     writers
+}
+
+/// The file's share of [`conditional_slot_items`]. The project-wide walks fold these per-file
+/// memos rather than reading per-item ones: after an edit, salsa then verifies one memo per
+/// untouched file by durability instead of one edge per item in the project.
+///
+/// Every package file is asked on the first check, so the items that cannot write a name other
+/// than their own are screened on the file's tree here instead of each through per-item
+/// queries. Reading the tree re-runs this on any edit to the file, which costs one walk of it,
+/// and the value still backdates when the writers stay the same.
+#[salsa::tracked(returns(ref))]
+pub fn file_conditional_writers<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+) -> Vec<(Symbol, Item<'db>)> {
+    let root = parse(db, file).syntax_node();
+    let mut writers = Vec::new();
+    for span in item_spans(db, file) {
+        let node = root
+            .child_or_token_at_range(span.range)
+            .and_then(|element| element.into_node())
+            .filter(|node| node.text_range() == span.range);
+        if node.is_some_and(|node| binds_only_own_name(db, span.item, &node)) {
+            continue;
+        }
+        writers.extend(
+            item_side_names(db, span.item)
+                .into_iter()
+                .map(|name| (name, span.item)),
+        );
+    }
+    writers
+}
+
+/// The top-level names an item binds besides its own, such as the bindings a branch or a loop
+/// leaves behind.
+fn item_side_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Symbol> {
+    let own_name = item.name(db);
+    item_top_level_names(db, item)
+        .iter()
+        .copied()
+        .filter(|name| own_name.as_deref() != Some(name.as_str()))
+        .collect()
 }
 
 /// A per-name projection of the project-wide maps, so a check depends only on the names
@@ -719,15 +940,30 @@ pub struct PackageName<'db> {
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn package_name<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: types::Name<'db>,
-) -> PackageName<'db> {
-    let text = name.text(db);
+pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageName<'db> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return PackageName::default();
+    };
+    let text = name.name(db).text(db);
     PackageName {
         winner: package_definitions(db, files).get(text).copied(),
         conditional_writers: conditional_slot_items(db, files)
+            .get(text)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// The test files' counterpart of [`package_name`].
+#[salsa::tracked(returns(ref))]
+pub fn test_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageName<'db> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return PackageName::default();
+    };
+    let text = name.name(db).text(db);
+    PackageName {
+        winner: test_definitions(db, files).get(text).copied(),
+        conditional_writers: test_conditional_slot_items(db, files)
             .get(text)
             .cloned()
             .unwrap_or_default(),
@@ -786,20 +1022,42 @@ pub fn package_definitions<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
 ) -> FxHashMap<String, Item<'db>> {
+    winners_of(db, files, DocumentKind::Package)
+}
+
+/// The last top-level definition of each name across the helper files, which testthat
+/// sources into the one environment every test file runs in.
+#[salsa::tracked(returns(ref))]
+pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<String, Item<'db>> {
+    winners_of(db, files, DocumentKind::TestHelper)
+}
+
+fn winners_of<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    kind: DocumentKind,
+) -> FxHashMap<String, Item<'db>> {
     let mut winners = FxHashMap::default();
     for &file in files.files(db) {
-        if *file.kind(db) != DocumentKind::Package {
+        if *file.kind(db) != kind {
             continue;
         }
-        for &item in item_tree(db, file) {
-            if matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                && let Some(name) = item.name(db).clone()
-            {
-                winners.insert(name, item);
-            }
+        for (name, item) in file_definitions(db, file) {
+            winners.insert(name.clone(), *item);
         }
     }
     winners
+}
+
+/// The file's named function and value items in item order, the candidates for
+/// [`package_definitions`]. Per file for the same reason as [`file_conditional_writers`].
+#[salsa::tracked(returns(ref))]
+pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(String, Item<'db>)> {
+    item_tree(db, file)
+        .iter()
+        .filter(|item| matches!(*item.kind(db), ItemKind::Function | ItemKind::Value))
+        .filter_map(|&item| Some((item.name(db).clone()?, item)))
+        .collect()
 }
 
 /// `generic.class` split at the last dot (`as.character.myclass`), the generic being
@@ -834,14 +1092,13 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     generics
 }
 
-/// Reads the read-set projection so a body edit does not re-derive the set. The
-/// `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
+/// The `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
 #[salsa::tracked(returns(ref))]
 fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
         if let Some(name) = item.name(db).clone()
-            && item_interface_reads(db, item).contains("UseMethod")
+            && *reads_use_method(db, item)
         {
             generics.insert(name);
         }
@@ -849,20 +1106,159 @@ fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     generics
 }
 
-/// A firewall: whole-project walks depend on this read set rather than the full naming,
-/// so a body edit that only shifts ranges backdates here.
+/// A firewall, so a body edit does not re-derive the file's generics.
+#[salsa::tracked]
+fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    item_naming(db, item)
+        .as_ref()
+        .is_some_and(|naming| naming.non_locals.values().any(|name| *name == "UseMethod"))
+}
+
+/// Where an item's check can read another item's exports, resolved as far as the item's own
+/// file decides. The rest depends on the project's winners, which [`item_interface_edges`]
+/// looks up.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct InterfaceReads<'db> {
+    /// Binders in the item's own file that a read reaches.
+    pub frame: Vec<Item<'db>>,
+    /// Names whose read may continue past the file into the project's layers.
+    pub layered: BTreeSet<Symbol>,
+    /// Names whose read continues past the file to a definition only (`earlier_binding`).
+    pub earlier: BTreeSet<Symbol>,
+}
+
+/// A firewall: whole-project walks depend on this rather than the full naming, so a body edit
+/// that only shifts ranges backdates here. Every read `SalsaGlobals` can make for a name the
+/// item spells is here, so a cycle through them never closes inside salsa.
 #[salsa::tracked(returns(ref))]
-pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
+pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceReads<'db> {
+    let mut reads = InterfaceReads::default();
     let Some(naming) = item_naming(db, item) else {
-        return BTreeSet::new();
+        return reads;
     };
-    let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
-    reads.extend(naming.namespace_reads.values().filter_map(|read| read.name));
+    let package = *item.file(db).kind(db) == DocumentKind::Package;
+    // `(name, deferred)` reads through the item's frame first, the rest straight from the
+    // layers (`enclosing_scheme`, and `namespace_scheme` outside a package file).
+    let mut lookups: BTreeSet<(Symbol, bool)> = BTreeSet::new();
+    for (id, &name) in naming.non_locals.iter() {
+        lookups.insert((name, naming.deferred_non_locals.contains(id)));
+        if !package {
+            reads.layered.insert(name);
+        }
+    }
+    for (id, &name) in naming.quiet_reads.iter() {
+        lookups.insert((name, naming.deferred_quiet_reads.contains(id)));
+    }
+    for name in naming.namespace_reads.values().filter_map(|read| read.name) {
+        match package {
+            true => lookups.insert((name, false)),
+            false => reads.layered.insert(name),
+        };
+    }
+    let top_level = |slot: &naming::BindingId| {
+        naming
+            .bindings
+            .get(slot)
+            .is_some_and(|binding| binding.kind == naming::BindingKind::TopLevel)
+    };
+    for (callee, fallback) in naming.callee_fallbacks.iter() {
+        let Some(slot) = naming.resolutions.get(callee) else {
+            continue;
+        };
+        let Some(binding) = naming.bindings.get(slot) else {
+            continue;
+        };
+        if top_level(slot) || fallback.outer.iter().any(top_level) {
+            if !package {
+                reads.layered.insert(binding.name);
+            }
+        } else {
+            lookups.insert((binding.name, fallback.deferred));
+        }
+    }
+    // A top-level slot read before the item writes it reads the binding that stood before
+    // the item.
+    lookups.extend(
+        naming
+            .used_top_level_names
+            .iter()
+            .map(|&name| (name, false)),
+    );
+    let globals = SalsaGlobals::for_item(db, item, None);
+    // A side binding a branch or loop may leave unwritten reads the earlier binding.
+    for name in item_side_names(db, item) {
+        match globals.frame_definition(types::Name::new(db, name.as_str()), false) {
+            Some(binder) => push_unique(&mut reads.frame, binder),
+            None => {
+                reads.earlier.insert(name);
+            }
+        }
+    }
+    for (name, deferred) in lookups {
+        let binder = globals.frame_definition(types::Name::new(db, name.as_str()), deferred);
+        match binder.map(|binder| binder_source(db, binder, name.as_str())) {
+            Some(Source::Definition(binder)) => push_unique(&mut reads.frame, binder),
+            Some(Source::Statement(binder)) => {
+                push_unique(&mut reads.frame, binder);
+                reads.layered.insert(name);
+            }
+            Some(Source::Conditional(_)) | None => {
+                reads.layered.insert(name);
+            }
+        }
+    }
     reads
+}
+
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+/// Where a read past the item's own scope takes its scheme from, nearest first.
+#[derive(Clone, Copy)]
+enum Source<'a, 'db> {
+    /// A definition of the name: its scheme always answers, which ends the search.
+    Definition(Item<'db>),
+    /// A statement that binds the name on the side, which answers only when its check
+    /// writes the name.
+    Statement(Item<'db>),
+    /// The writers of a name no definition binds, which answer when any of them writes it.
+    Conditional(&'a [Item<'db>]),
+}
+
+fn binder_source<'a, 'db>(db: &'db dyn Db, binder: Item<'db>, name: &str) -> Source<'a, 'db> {
+    match binder.name(db).as_deref() == Some(name) {
+        true => Source::Definition(binder),
+        false => Source::Statement(binder),
+    }
+}
+
+fn layer_source<'a, 'db>(
+    winner: Option<Item<'db>>,
+    conditional_writers: &'a [Item<'db>],
+) -> Option<Source<'a, 'db>> {
+    match winner {
+        Some(winner) => Some(Source::Definition(winner)),
+        None => {
+            (!conditional_writers.is_empty()).then_some(Source::Conditional(conditional_writers))
+        }
+    }
 }
 
 #[salsa::tracked(returns(ref))]
 pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
+    if item_syntax(db, item)
+        .is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))
+    {
+        return item
+            .name(db)
+            .as_deref()
+            .map(Symbol::new)
+            .into_iter()
+            .collect();
+    }
     let Some(naming) = item_naming(db, item) else {
         return BTreeSet::new();
     };
@@ -874,232 +1270,330 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         .collect()
 }
 
-/// Only cyclic groups are recorded: their schemes must resolve through one canonical
-/// fixpoint, since iterating from whichever member was queried first would make the
-/// round-cap pins depend on query order.
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-pub struct InterfaceSccs<'db> {
-    pub membership: FxHashMap<Item<'db>, u32>,
-    /// Members in canonical order: project file order, then item order.
-    pub groups: Vec<Vec<Item<'db>>>,
-}
-
+/// The items an item's check can read exports from: its frame binders, and the project's
+/// winners and conditional writers for the names it reads past its file, layer by layer in the
+/// order `SalsaGlobals` resolves them. Memoized per item so the reachability walks of every
+/// item share one edge list each.
 #[salsa::tracked(returns(ref))]
-pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceSccs<'db> {
-    let winners = package_definitions(db, files);
-    let mut nodes: Vec<Item<'db>> = Vec::new();
-    let mut position: FxHashMap<Item<'db>, usize> = FxHashMap::default();
-    for &file in files.files(db) {
-        if *file.kind(db) != DocumentKind::Package {
-            continue;
-        }
-        for &item in item_tree(db, file) {
-            if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                || item.name(db).is_none()
-            {
-                continue;
-            }
-            position.insert(item, nodes.len());
-            nodes.push(item);
-        }
-    }
-    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    for (index, &item) in nodes.iter().enumerate() {
-        for name in item_interface_reads(db, item) {
-            if let Some(target) = winners.get(name.as_str())
-                && let Some(&target_index) = position.get(target)
-            {
-                edges[index].push(target_index);
-            }
-        }
-    }
-
-    // Iterative: recursion depth would scale with package size.
-    let mut result = InterfaceSccs::default();
-    let mut index_of: Vec<Option<u32>> = vec![None; nodes.len()];
-    let mut low: Vec<u32> = vec![0; nodes.len()];
-    let mut on_stack: Vec<bool> = vec![false; nodes.len()];
-    let mut stack: Vec<usize> = Vec::new();
-    let mut next_index = 0u32;
-    for start in 0..nodes.len() {
-        if index_of[start].is_some() {
-            continue;
-        }
-        let mut work: Vec<(usize, usize)> = vec![(start, 0)];
-        while let Some(&mut (node, ref mut edge_cursor)) = work.last_mut() {
-            if *edge_cursor == 0 {
-                index_of[node] = Some(next_index);
-                low[node] = next_index;
-                next_index += 1;
-                stack.push(node);
-                on_stack[node] = true;
-            }
-            if let Some(&target) = edges[node].get(*edge_cursor) {
-                *edge_cursor += 1;
-                match index_of[target] {
-                    None => work.push((target, 0)),
-                    Some(target_index) => {
-                        if on_stack[target] {
-                            low[node] = low[node].min(target_index);
-                        }
-                    }
-                }
-                continue;
-            }
-            work.pop();
-            if let Some(&(parent, _)) = work.last() {
-                low[parent] = low[parent].min(low[node]);
-            }
-            if Some(low[node]) == index_of[node] {
-                let mut members = Vec::new();
-                loop {
-                    let member = stack.pop().expect("tarjan stack holds the component");
-                    on_stack[member] = false;
-                    members.push(member);
-                    if member == node {
+fn item_interface_edges<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+) -> Vec<Item<'db>> {
+    let package_winners = package_definitions(db, files);
+    let package_writers = conditional_slot_items(db, files);
+    let test_winners = test_definitions(db, files);
+    let test_writers = test_conditional_slot_items(db, files);
+    let test = matches!(
+        *item.file(db).kind(db),
+        DocumentKind::Test | DocumentKind::TestHelper
+    );
+    let reads = item_interface_reads(db, item);
+    let mut targets: Vec<Item<'db>> = reads.frame.clone();
+    for name in &reads.layered {
+        let name = name.as_str();
+        let layer = |winners: &FxHashMap<String, Item<'db>>,
+                     writers: &'db FxHashMap<String, Vec<Item<'db>>>| {
+            layer_source(
+                winners.get(name).copied(),
+                writers.get(name).map_or(&[][..], Vec::as_slice),
+            )
+        };
+        let test_layer = test.then(|| layer(test_winners, test_writers)).flatten();
+        for source in test_layer
+            .into_iter()
+            .chain(layer(package_winners, package_writers))
+        {
+            match source {
+                Source::Definition(item) | Source::Statement(item) => {
+                    push_unique(&mut targets, item);
+                    if matches!(source, Source::Definition(_)) {
                         break;
                     }
                 }
-                let cyclic = members.len() > 1 || edges[node].contains(&node);
-                if cyclic {
-                    members.sort_unstable();
-                    let group = result.groups.len() as u32;
-                    let items: Vec<Item<'db>> =
-                        members.iter().map(|&member| nodes[member]).collect();
-                    for &item in &items {
-                        result.membership.insert(item, group);
+                Source::Conditional(writers) if writers.len() > CONDITIONAL_SLOT_JOIN_CAP => {
+                    break;
+                }
+                Source::Conditional(writers) => {
+                    for &writer in writers {
+                        push_unique(&mut targets, writer);
                     }
-                    result.groups.push(items);
                 }
             }
         }
     }
-    result
+    for name in &reads.earlier {
+        let name = name.as_str();
+        let test_winner = test.then(|| test_winners.get(name)).flatten();
+        if let Some(&winner) = test_winner.or_else(|| package_winners.get(name)) {
+            push_unique(&mut targets, winner);
+        }
+    }
+    targets
 }
 
-/// A per-item projection, so reshaping the graph elsewhere leaves acyclic items' checks green.
-#[salsa::tracked(returns(copy))]
-fn interface_group<'db>(db: &'db dyn Db, files: ProjectFiles, item: Item<'db>) -> Option<u32> {
-    interface_sccs(db, files).membership.get(&item).copied()
+/// Whether the item's top-level writes are at most its own binding, read off its syntax so the
+/// common case needs no naming pass.
+fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
+    // `name <- function(...)` binds only its own name at top level, since the body is a scope
+    // of its own. Most items are functions, and skipping them keeps whole-project walks, such
+    // as the loader's strict-mode classification, from naming everything.
+    if *item.kind(db) == ItemKind::Function && node.kind() == SyntaxKind::BINARY_EXPR {
+        return true;
+    }
+    // Only a write evaluated in the top-level frame binds a top-level name, so an item whose
+    // text holds no write besides its own binds its own name alone. Most value and statement
+    // items are of this shape (`x <- list(...)`, `library(pkg)`). A named item binds its name
+    // with a token only when it is an assignment: `setGeneric("f", ...)` writes none.
+    let own_write = item.name(db).is_some() && node.kind() == SyntaxKind::BINARY_EXPR;
+    write_tokens(node) <= usize::from(own_write)
+}
+
+/// The tokens outside nested functions that can start a write in naming: an assignment
+/// operator, `for`, a destructuring `%<-%` or `%->%`, and the by-reference `:=` called by
+/// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
+/// that this misses would drop a top-level binding.
+fn write_tokens(node: &SyntaxNode) -> usize {
+    let mut count = 0;
+    let mut preorder = node.preorder_with_tokens();
+    while let Some(event) = preorder.next() {
+        let rowan::WalkEvent::Enter(element) = event else {
+            continue;
+        };
+        match element {
+            SyntaxElement::Node(child) => {
+                if child.kind() == SyntaxKind::FUNCTION_DEF {
+                    preorder.skip_subtree();
+                }
+            }
+            SyntaxElement::Token(token) => {
+                let writes = match token.kind() {
+                    SyntaxKind::LESS_MINUS
+                    | SyntaxKind::LESS2_MINUS
+                    | SyntaxKind::MINUS_GREATER
+                    | SyntaxKind::MINUS_GREATER2
+                    | SyntaxKind::COLON_EQ
+                    | SyntaxKind::FOR_KW => true,
+                    SyntaxKind::EQ => token
+                        .parent()
+                        .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR),
+                    SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
+                    SyntaxKind::IDENT => matches!(
+                        token.text().trim_matches('`'),
+                        ":=" | "setnames" | "setcolorder"
+                    ),
+                    _ => false,
+                };
+                count += usize::from(writes);
+            }
+        }
+    }
+    count
+}
+
+/// The cyclic group an item belongs to, members in canonical order (project file order, then
+/// item order), or `None` when no read cycle runs through the item. A group must resolve
+/// through one canonical fixpoint, since iterating from whichever member was queried first
+/// would make the round-cap pins depend on query order.
+///
+/// A strongly connected component lies inside the reachable set of each of its members, so
+/// the walk visits only what the item can read, transitively. One file's check therefore
+/// names only the items it can reach, not the whole project.
+#[salsa::tracked(returns(ref))]
+pub fn interface_group<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+) -> Option<Box<[Item<'db>]>> {
+    // Iterative Tarjan over the reachable subgraph: recursion depth would scale with the
+    // longest read chain.
+    let mut nodes: Vec<Item<'db>> = vec![item];
+    let mut index_of: FxHashMap<Item<'db>, usize> = FxHashMap::default();
+    index_of.insert(item, 0);
+    let mut low: Vec<usize> = vec![0];
+    let mut on_stack: Vec<bool> = vec![true];
+    let mut stack: Vec<usize> = vec![0];
+    let mut work: Vec<(usize, usize)> = vec![(0, 0)];
+    while let Some(&mut (node, ref mut edge_cursor)) = work.last_mut() {
+        let edges = item_interface_edges(db, files, nodes[node]);
+        if let Some(&target) = edges.get(*edge_cursor) {
+            *edge_cursor += 1;
+            match index_of.get(&target) {
+                Some(&target_index) => {
+                    if on_stack[target_index] {
+                        low[node] = low[node].min(target_index);
+                    }
+                }
+                None => {
+                    let target_index = nodes.len();
+                    nodes.push(target);
+                    index_of.insert(target, target_index);
+                    low.push(target_index);
+                    on_stack.push(true);
+                    stack.push(target_index);
+                    work.push((target_index, 0));
+                }
+            }
+            continue;
+        }
+        work.pop();
+        if let Some(&(parent, _)) = work.last() {
+            low[parent] = low[parent].min(low[node]);
+        }
+        if low[node] == node {
+            // Discovery order doubles as the Tarjan index, so a root is a node whose low
+            // link is its own position.
+            let mut members = Vec::new();
+            while let Some(member) = stack.pop() {
+                on_stack[member] = false;
+                members.push(member);
+                if member == node {
+                    break;
+                }
+            }
+            if node == 0 {
+                let cyclic =
+                    members.len() > 1 || item_interface_edges(db, files, item).contains(&item);
+                if !cyclic {
+                    return None;
+                }
+                let mut group: Vec<Item<'db>> =
+                    members.iter().map(|&member| nodes[member]).collect();
+                let file_order: FxHashMap<SourceFile, usize> = files
+                    .files(db)
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &file)| (file, index))
+                    .collect();
+                group.sort_by_cached_key(|&member| {
+                    let file = *member.file(db);
+                    let item_order = item_tree(db, file)
+                        .iter()
+                        .position(|&candidate| candidate == member);
+                    (file_order.get(&file).copied(), item_order)
+                });
+                return Some(group.into_boxed_slice());
+            }
+        }
+    }
+    None
+}
+
+/// What a cyclic-group member exports to its readers: the scheme `global_scheme` serves and
+/// the bindings `statement_binding_scheme` serves.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct MemberExports<'db> {
+    pub scheme: types::TypeScheme<'db>,
+    pub top_level_bindings: Vec<(Symbol, types::TypeScheme<'db>)>,
 }
 
 /// Independent of which member was queried first: each round re-checks every member
-/// against the previous round's table, and members still changing at the cap pin to
+/// against the previous round's exports, and members still changing at the cap pin to
 /// `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
-    cycle_fn = scc_schemes_recover,
-    cycle_initial = scc_schemes_initial
+    cycle_fn = scc_exports_recover,
+    cycle_initial = scc_exports_initial
 )]
-pub fn scc_schemes<'db>(
+pub fn scc_exports<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-    group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
-    let sccs = interface_sccs(db, files);
-    let Some(members) = sccs.groups.get(group as usize) else {
-        return FxHashMap::default();
+    representative: Item<'db>,
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
+    let mut exports = unknown_group_exports(db, files, representative);
+    let Some(members) = interface_group(db, files, representative) else {
+        return exports;
     };
-    let winners = package_definitions(db, files);
-    // Only a name's winner is reachable through reads.
-    let member_names: Vec<(String, Item<'db>)> = members
-        .iter()
-        .filter_map(|&item| {
-            let name = item.name(db).clone()?;
-            (winners.get(&name) == Some(&item)).then_some((name, item))
-        })
-        .collect();
-
-    let unknown_scheme = types::TypeScheme::monomorphic(types::unknown(db));
-    let mut table: FxHashMap<String, types::TypeScheme<'db>> = member_names
-        .iter()
-        .map(|(name, _)| (name.clone(), unknown_scheme.clone()))
-        .collect();
-    let mut schemes: FxHashMap<Item<'db>, types::TypeScheme<'db>> = members
-        .iter()
-        .map(|&item| (item, unknown_scheme.clone()))
-        .collect();
     for _round in 0..SCHEME_ROUND_CAP {
-        let mut next_schemes = FxHashMap::default();
-        for &item in members {
-            let scheme =
-                check_member_scheme(db, item, &table).unwrap_or_else(|| unknown_scheme.clone());
-            next_schemes.insert(item, scheme);
-        }
-        let next_table: FxHashMap<String, types::TypeScheme<'db>> = member_names
+        let next_exports: FxHashMap<Item<'db>, MemberExports<'db>> = members
             .iter()
-            .map(|(name, item)| (name.clone(), next_schemes[item].clone()))
+            .map(|&item| {
+                let globals = SalsaGlobals::for_item(db, item, Some(&exports));
+                (
+                    item,
+                    member_exports(db, check_item_against(db, item, &globals)),
+                )
+            })
             .collect();
-        let converged = next_schemes == schemes;
-        schemes = next_schemes;
-        table = next_table;
-        if converged {
-            return schemes;
+        if next_exports == exports {
+            return exports;
         }
+        exports = next_exports;
     }
     // Pinning every member is the only entry-order-free refusal.
-    for scheme in schemes.values_mut() {
-        *scheme = unknown_scheme.clone();
-    }
-    schemes
+    unknown_group_exports(db, files, representative)
 }
 
-fn unknown_group_schemes<'db>(
+fn member_exports<'db>(
+    db: &'db dyn Db,
+    check: Option<check::ItemCheck<'db>>,
+) -> MemberExports<'db> {
+    let unknown = || types::TypeScheme::monomorphic(types::unknown(db));
+    match check {
+        Some(check) => MemberExports {
+            scheme: check.scheme.unwrap_or_else(unknown),
+            top_level_bindings: check.top_level_bindings,
+        },
+        None => MemberExports {
+            scheme: unknown(),
+            top_level_bindings: Vec::new(),
+        },
+    }
+}
+
+/// The fixpoint's starting point and its refusal: every surface a member exports is `Unknown`.
+fn unknown_group_exports<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-    group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+    representative: Item<'db>,
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
     let unknown = types::TypeScheme::monomorphic(types::unknown(db));
-    interface_sccs(db, files)
-        .groups
-        .get(group as usize)
+    interface_group(db, files, representative)
+        .as_deref()
         .map(|members| {
             members
                 .iter()
-                .map(|&item| (item, unknown.clone()))
+                .map(|&item| {
+                    let top_level_bindings = item_top_level_names(db, item)
+                        .iter()
+                        .map(|&name| (name, unknown.clone()))
+                        .collect();
+                    let exports = MemberExports {
+                        scheme: unknown.clone(),
+                        top_level_bindings,
+                    };
+                    (item, exports)
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn scc_schemes_initial<'db>(
+fn scc_exports_initial<'db>(
     db: &'db dyn Db,
     _id: salsa::Id,
     files: ProjectFiles,
-    group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
-    unknown_group_schemes(db, files, group)
+    representative: Item<'db>,
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
+    unknown_group_exports(db, files, representative)
 }
 
 /// Backstop for edges the static graph cannot see (a name the checker constructs, such
 /// as an S3 method), which re-enter this group through `global_scheme`.
-fn scc_schemes_recover<'db>(
+fn scc_exports_recover<'db>(
     db: &'db dyn Db,
     _cycle: &salsa::Cycle,
-    last_provisional: &FxHashMap<Item<'db>, types::TypeScheme<'db>>,
-    value: FxHashMap<Item<'db>, types::TypeScheme<'db>>,
+    last_provisional: &FxHashMap<Item<'db>, MemberExports<'db>>,
+    value: FxHashMap<Item<'db>, MemberExports<'db>>,
     files: ProjectFiles,
-    group: u32,
-) -> FxHashMap<Item<'db>, types::TypeScheme<'db>> {
+    representative: Item<'db>,
+) -> FxHashMap<Item<'db>, MemberExports<'db>> {
     // Refuse on the first disagreement: salsa iterating this query would multiply the
     // group's own bounded rounds and can exhaust memory.
     if &value == last_provisional {
         return value;
     }
-    unknown_group_schemes(db, files, group)
-}
-
-fn check_member_scheme<'db>(
-    db: &'db dyn Db,
-    item: Item<'db>,
-    table: &FxHashMap<String, types::TypeScheme<'db>>,
-) -> Option<types::TypeScheme<'db>> {
-    let base = SalsaGlobals::for_item(db, item);
-    let globals = SccGlobals {
-        base: &base,
-        members: table,
-    };
-    check_item_against(db, item, &globals)?.scheme
+    unknown_group_exports(db, files, representative)
 }
 
 fn check_item_against<'db>(
@@ -1171,29 +1665,37 @@ pub fn item_check<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCh
 }
 
 fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<'db>> {
-    let mut check = check_item_against(db, item, &SalsaGlobals::for_item(db, item))?;
-    // A cyclic-group member exports the group's fixpoint value, not this one-step
-    // re-derivation, which runs one propagation hop ahead of what readers see.
-    if check.scheme.is_some()
-        && let Some(files) = ProjectFiles::try_get(db)
-        && let Some(group) = interface_group(db, files, item)
-    {
-        check.scheme = scc_schemes(db, files, group).get(&item).cloned();
-        // A clean body whose export still carries `Unknown` owes it to the cycle itself, so
-        // strict mode marks the whole binding.
-        if check.errors.is_empty()
-            && check.strict_origins.is_empty()
-            && let Some(scheme) = &check.scheme
-            && types::contains_unknown(db, scheme.body)
-            && let Some(module) = item_hir(db, item)
-            && let Some(root) = module.root
-            && let Some(name) = item.name(db).clone()
-        {
-            check.strict_origins.push(check::StrictOrigin {
-                expression: root,
-                range: module.expression(root).range,
-                kind: check::StrictOriginKind::RecursiveUnknown(name),
-            });
+    // A cyclic-group member reads its fellow members' exports from the group's fixpoint,
+    // never through `global_scheme`: that read would close a salsa cycle, and salsa backdates
+    // a cycle's head but not its other queries, so an edit that breaks the cycle while
+    // keeping a member's value re-executes that member with an older `changed_at` than its
+    // memo holds, which salsa rejects.
+    let group = ProjectFiles::try_get(db).and_then(|files| {
+        let representative = *interface_group(db, files, item).as_deref()?.first()?;
+        Some(scc_exports(db, files, representative))
+    });
+    let mut check = check_item_against(db, item, &SalsaGlobals::for_item(db, item, group))?;
+    // The exports are the group's fixpoint values, not this check's, which differ once the
+    // round cap pins the group.
+    if let Some(exports) = group.and_then(|group| group.get(&item)) {
+        check.top_level_bindings = exports.top_level_bindings.clone();
+        if check.scheme.is_some() {
+            check.scheme = Some(exports.scheme.clone());
+            // A clean body whose export still carries `Unknown` owes it to the cycle itself,
+            // so strict mode marks the whole binding.
+            if check.errors.is_empty()
+                && check.strict_origins.is_empty()
+                && types::contains_unknown(db, exports.scheme.body)
+                && let Some(module) = item_hir(db, item)
+                && let Some(root) = module.root
+                && let Some(name) = item.name(db).clone()
+            {
+                check.strict_origins.push(check::StrictOrigin {
+                    expression: root,
+                    range: module.range(root),
+                    kind: check::StrictOriginKind::RecursiveUnknown(name),
+                });
+            }
         }
     }
     Some(check)
@@ -1245,17 +1747,27 @@ fn refuse_check<'db>(db: &'db dyn Db, check: check::ItemCheck<'db>) -> check::It
 }
 
 /// Every lookup goes through a per-name query, so a check depends on exactly the names it reads.
-struct SalsaGlobals<'db> {
+struct SalsaGlobals<'db, 'a> {
     db: &'db dyn Db,
     item: Item<'db>,
+    /// The exports of the item's cyclic group, which stand in for the queries that serve a
+    /// member's: reading a member through salsa would re-enter the group.
+    group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
     files: Option<ProjectFiles>,
     file: SourceFile,
+    // A body reads the same few globals many times, and each salsa read pays for interning
+    // its key and verifying the memo, so a check looks each one up once.
+    schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
+    item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
+    frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
+    package_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
+    test_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
 }
 
 /// A script's own declarations are visible to itself alone and shadow project names.
 /// Memoized per file so the merge runs once per file, not once per checked item.
 #[salsa::tracked(returns(ref))]
-fn visible_type_definitions<'db>(
+pub fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
@@ -1267,7 +1779,7 @@ fn visible_type_definitions<'db>(
             definitions.insert(*name, definition.clone());
         }
     }
-    if *file.kind(db) == DocumentKind::Script {
+    if *file.kind(db) != DocumentKind::Package {
         for definition in file_type_definitions(db, file) {
             definitions.insert(definition.name, definition);
         }
@@ -1283,6 +1795,21 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
     }
     classes.extend(file_arithmetic_classes(db, file).iter().cloned());
     classes
+}
+
+/// A project's `+.string` method dispatches on a class attribute that `class(x) <- "string"`
+/// sets on a plain list, which no type tracks, so arithmetic on a list may be that method.
+#[salsa::tracked]
+fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
+    let definitions = visible_type_definitions(db, file);
+    let tracked = |class: &String| definitions.keys().any(|name| name.text(db) == class);
+    let project_classes = ProjectFiles::try_get(db)
+        .map(|files| project_arithmetic_classes(db, files))
+        .unwrap_or_default();
+    project_classes
+        .iter()
+        .chain(file_arithmetic_classes(db, file).iter())
+        .any(|class| !tracked(class))
 }
 
 /// Past this many conditional writers a slot is `Unknown`: each writer costs an item
@@ -1315,7 +1842,9 @@ fn file_binders<'db>(
 
 /// An immediate read sees the nearest earlier writer in the file (R sources top-down).
 /// A deferred read (inside a closure) sees the file's last writer in a script; in a
-/// package it sees the project-wide winner instead, so callers skip this query.
+/// package it sees the project-wide winner instead, so callers skip this query. In a test
+/// file it sees the reading statement's own writer first: each `test_that` block runs in its
+/// own environment, so a helper it defines is the one its closures call.
 #[salsa::tracked(returns(copy))]
 fn frame_binder<'db>(
     db: &'db dyn Db,
@@ -1323,8 +1852,55 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
+    frame_binder_of(db, item, name.text(db), deferred)
+}
+
+/// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
+/// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
+/// which interned a key and kept a memo, and its value still changes only when a binder of
+/// one of the item's own names does.
+#[salsa::tracked(returns(ref))]
+fn item_frame_binders<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)> {
+    let mut binders = FxHashMap::default();
+    let Some(naming) = item_naming(db, item) else {
+        return binders;
+    };
+    let names = naming
+        .non_locals
+        .values()
+        .chain(naming.quiet_reads.values())
+        .chain(naming.quiet_operator_reads.iter());
+    for &name in names {
+        binders.entry(name).or_insert_with(|| {
+            (
+                frame_binder_of(db, item, name.as_str(), false),
+                frame_binder_of(db, item, name.as_str(), true),
+            )
+        });
+    }
+    binders
+}
+
+fn frame_binder_of<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    name: &str,
+    deferred: bool,
+) -> Option<Item<'db>> {
     let file = *item.file(db);
-    let binders = file_binders(db, file).get(name.text(db))?;
+    let binders = file_binders(db, file).get(name)?;
+    if deferred
+        && matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+        && binders.iter().any(|&(_, binder)| binder == item)
+    {
+        return Some(item);
+    }
     let visible = match deferred {
         true => &binders[..],
         false => {
@@ -1338,47 +1914,136 @@ fn frame_binder<'db>(
     visible.last().map(|&(_, item)| item)
 }
 
-impl<'db> SalsaGlobals<'db> {
-    fn for_item(db: &'db dyn Db, item: Item<'db>) -> SalsaGlobals<'db> {
+impl<'db, 'a> SalsaGlobals<'db, 'a> {
+    fn for_item(
+        db: &'db dyn Db,
+        item: Item<'db>,
+        group: Option<&'a FxHashMap<Item<'db>, MemberExports<'db>>>,
+    ) -> SalsaGlobals<'db, 'a> {
         SalsaGlobals {
             db,
             item,
+            group,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            schemes: RefCell::default(),
+            item_frame_binders: OnceCell::new(),
+            frame_binders: RefCell::default(),
+            package_names: RefCell::default(),
+            test_names: RefCell::default(),
         }
+    }
+
+    fn item_scheme(&self, item: Item<'db>) -> types::TypeScheme<'db> {
+        match self.group.and_then(|group| group.get(&item)) {
+            Some(exports) => exports.scheme.clone(),
+            None => global_scheme(self.db, item),
+        }
+    }
+
+    fn statement_scheme(
+        &self,
+        item: Item<'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        let Some(exports) = self.group.and_then(|group| group.get(&item)) else {
+            return statement_binding_scheme(self.db, item, name);
+        };
+        let name = name.text(self.db);
+        exports
+            .top_level_bindings
+            .iter()
+            .find(|(binding, _)| binding == name)
+            .map(|(_, scheme)| scheme.clone())
+    }
+
+    fn source_scheme(
+        &self,
+        source: Source<'_, 'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        match source {
+            Source::Definition(item) => Some(self.item_scheme(item)),
+            Source::Statement(item) => self.statement_scheme(item, name),
+            Source::Conditional(writers) if writers.len() > CONDITIONAL_SLOT_JOIN_CAP => {
+                Some(types::TypeScheme::monomorphic(types::unknown(self.db)))
+            }
+            Source::Conditional(writers) => {
+                let mut schemes: Vec<types::TypeScheme<'db>> = writers
+                    .iter()
+                    .filter_map(|&item| self.statement_scheme(item, name))
+                    .collect();
+                match schemes.len() {
+                    0 => None,
+                    1 => schemes.pop(),
+                    _ => {
+                        let bodies: Vec<types::Ty<'db>> =
+                            schemes.into_iter().map(|scheme| scheme.body).collect();
+                        Some(types::TypeScheme::monomorphic(types::union_of(
+                            self.db, bodies,
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    fn layer_scheme(
+        &self,
+        layer: &PackageName<'db>,
+        name: types::Name<'db>,
+    ) -> Option<types::TypeScheme<'db>> {
+        self.source_scheme(
+            layer_source(layer.winner, &layer.conditional_writers)?,
+            name,
+        )
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
-        if deferred && *self.file.kind(self.db) != DocumentKind::Script {
+        if deferred && *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
-        frame_binder(self.db, self.item, name, deferred)
+        let text = name.text(self.db);
+        if let Some(&(immediate, later)) = self
+            .item_frame_binders
+            .get_or_init(|| item_frame_binders(self.db, self.item))
+            .get(&Symbol::new(text))
+        {
+            return if deferred { later } else { immediate };
+        }
+        *self
+            .frame_binders
+            .borrow_mut()
+            .entry((name, deferred))
+            .or_insert_with(|| frame_binder(self.db, self.item, name, deferred))
     }
 
-    fn package_name(&self, name: types::Name<'db>) -> Option<&'db PackageName<'db>> {
-        Some(package_name(self.db, self.files?, name))
-    }
-
-    fn conditional_slot_scheme(&self, name: types::Name<'db>) -> Option<types::TypeScheme<'db>> {
-        let writers = &self.package_name(name)?.conditional_writers;
-        if writers.len() > CONDITIONAL_SLOT_JOIN_CAP {
-            return Some(types::TypeScheme::monomorphic(types::unknown(self.db)));
-        }
-        let mut schemes: Vec<types::TypeScheme<'db>> = writers
-            .iter()
-            .filter_map(|&item| statement_binding_scheme(self.db, item, name))
-            .collect();
-        match schemes.len() {
-            0 => None,
-            1 => schemes.pop(),
-            _ => {
-                let bodies: Vec<types::Ty<'db>> =
-                    schemes.into_iter().map(|scheme| scheme.body).collect();
-                Some(types::TypeScheme::monomorphic(types::union_of(
-                    self.db, bodies,
-                )))
-            }
-        }
+    /// The namespaces a read of `name` searches past the item's own frame, nearest first: a
+    /// test or helper file sees the helpers' bindings before the package namespace.
+    fn layers(&self, name: types::Name<'db>) -> impl Iterator<Item = &'db PackageName<'db>> {
+        let files = self.files;
+        let test = files
+            .filter(|_| {
+                matches!(
+                    *self.file.kind(self.db),
+                    DocumentKind::Test | DocumentKind::TestHelper
+                )
+            })
+            .map(|_| {
+                *self
+                    .test_names
+                    .borrow_mut()
+                    .entry(name)
+                    .or_insert_with(|| test_name(self.db, types::QueryName::new(self.db, name)))
+            });
+        let package = files.map(|_| {
+            *self
+                .package_names
+                .borrow_mut()
+                .entry(name)
+                .or_insert_with(|| package_name(self.db, types::QueryName::new(self.db, name)))
+        });
+        test.into_iter().chain(package)
     }
 
     fn binder_scheme(
@@ -1386,29 +2051,24 @@ impl<'db> SalsaGlobals<'db> {
         item: Item<'db>,
         name: types::Name<'db>,
     ) -> Option<types::TypeScheme<'db>> {
-        if item.name(self.db).as_deref() == Some(name.text(self.db)) {
-            return Some(global_scheme(self.db, item));
-        }
-        statement_binding_scheme(self.db, item, name)
+        self.source_scheme(binder_source(self.db, item, name.text(self.db)), name)
     }
 
-    fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
-        self.package_name(name)?.winner
-    }
-}
-
-impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
-    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name.to_owned());
+    fn lookup_scheme(
+        &self,
+        name: &str,
+        interned: types::Name<'db>,
+        deferred: bool,
+    ) -> Option<types::TypeScheme<'db>> {
         if let Some(item) = self.frame_definition(interned, deferred)
             && let Some(scheme) = self.binder_scheme(item, interned)
         {
             return Some(scheme);
         }
-        if let Some(item) = self.winner(interned) {
-            return Some(global_scheme(self.db, item));
-        }
-        if let Some(scheme) = self.conditional_slot_scheme(interned) {
+        if let Some(scheme) = self
+            .layers(interned)
+            .find_map(|layer| self.layer_scheme(layer, interned))
+        {
             return Some(scheme);
         }
         // A plain-value read of an overloaded stub takes the last candidate: the corpus orders
@@ -1417,30 +2077,83 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         library.schemes.get(name)?.last().cloned()
     }
 
+    fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
+        self.layers(name).find_map(|layer| layer.winner)
+    }
+}
+
+impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
+    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
+        let interned = types::Name::new(self.db, name);
+        if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
+            return scheme.clone();
+        }
+        let scheme = self.lookup_scheme(name, interned, deferred);
+        self.schemes
+            .borrow_mut()
+            .insert((interned, deferred), scheme.clone());
+        scheme
+    }
+
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
-            || self.package_name(interned).is_some_and(|binding| {
-                binding.winner.is_some() || !binding.conditional_writers.is_empty()
-            })
+            || self
+                .layers(interned)
+                .any(|binding| binding.winner.is_some() || !binding.conditional_writers.is_empty())
     }
 
     fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
-        Some(global_scheme(self.db, self.winner(interned)?))
+        Some(self.item_scheme(self.winner(interned)?))
+    }
+
+    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if *self.file.kind(self.db) == DocumentKind::Package {
+            return self.scheme(name, false);
+        }
+        let interned = types::Name::new(self.db, name);
+        if let Some(scheme) = self
+            .files
+            .map(|_| package_name(self.db, types::QueryName::new(self.db, interned)))
+            .and_then(|layer| self.layer_scheme(layer, interned))
+        {
+            return Some(scheme);
+        }
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+    }
+
+    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if *self.file.kind(self.db) == DocumentKind::Package {
+            return None;
+        }
+        let interned = types::Name::new(self.db, name);
+        self.layers(interned)
+            .find_map(|layer| self.layer_scheme(layer, interned))
+    }
+
+    fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
+        let library = stubs::stubs(self.db)?;
+        match library.schemes.get(name) {
+            Some(candidates) => Some(candidates.clone()),
+            None => library.known_exports.contains(name).then(Vec::new),
+        }
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
+        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
+        if candidates.len() < 2 {
+            return None;
+        }
         // A project definition shadows the stub set, disabling per-call overload selection.
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
-        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
-        (candidates.len() > 1).then(|| candidates.clone())
+        Some(candidates.clone())
     }
 
     fn type_definitions(
@@ -1451,6 +2164,14 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         visible_arithmetic_classes(self.db, self.file)
+    }
+
+    fn has_untracked_arithmetic_class(&self) -> bool {
+        *has_untracked_arithmetic_class(self.db, self.file)
+    }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
     }
 }
 
@@ -1491,55 +2212,9 @@ fn arithmetic_classes_among<'a>(names: impl Iterator<Item = &'a str>) -> FxHashS
     classes
 }
 
-/// Member names resolve from the round table, never through `global_scheme`, which would
-/// re-enter the group.
-struct SccGlobals<'db, 'a> {
-    base: &'a SalsaGlobals<'db>,
-    members: &'a FxHashMap<String, types::TypeScheme<'db>>,
-}
-
-impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
-    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        self.members
-            .get(name)
-            .cloned()
-            .or_else(|| self.base.scheme(name, deferred))
-    }
-
-    fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        self.members
-            .get(name)
-            .cloned()
-            .or_else(|| self.base.earlier_binding(name))
-    }
-
-    fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
-        if self.members.contains_key(name) {
-            return None;
-        }
-        self.base.overloads(name, deferred)
-    }
-
-    fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        self.members.contains_key(name) || self.base.defined_in_project(name, deferred)
-    }
-
-    fn type_definitions(
-        &self,
-    ) -> &'db FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
-        self.base.type_definitions()
-    }
-
-    /// Must delegate, not default: an empty set makes `Date + 1` in any recursive function
-    /// collapse the whole scheme to `Unknown`.
-    fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
-        self.base.arithmetic_classes()
-    }
-}
-
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
-/// `setGeneric` name string. Memoized so that a cold check reads it from another file without
-/// reparsing that file's evicted tree.
+/// `setGeneric` name string. Memoized so that a check reads it from another file without
+/// walking that file's tree.
 #[salsa::tracked(returns(copy))]
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let node = item_node(db, item)?;
@@ -1665,8 +2340,7 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use salsa::Setter as _;
+    use {super::*, salsa::Setter as _};
 
     fn function_item<'db>(db: &'db RootDatabase, file: SourceFile, name: &str) -> Item<'db> {
         Item::new(db, file, ItemKind::Function, Some(name.to_owned()), None, 0)
@@ -1678,6 +2352,9 @@ mod tests {
         let integer = types::scalar(&db, types::Atomic::Integer);
         let check = check::ItemCheck {
             expression_types: Default::default(),
+            pattern_types: Default::default(),
+            literal_expectations: Default::default(),
+            loop_variables: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
@@ -1685,6 +2362,7 @@ mod tests {
             masked_reads: Default::default(),
             column_misses: Default::default(),
             match_findings: Vec::new(),
+            callee_targets: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
@@ -1758,19 +2436,19 @@ mod tests {
         );
         let add = function_item(&db, file, "add");
         let before = item_hir(&db, add).clone().expect("add lowers");
-        let root = before.expression(before.root.expect("has root"));
-        let hir::ExpressionKind::Assign { value, .. } = &root.kind else {
+        let root = before.root.expect("has root");
+        let hir::ExpressionKind::Assign { value, .. } = before.kind(root) else {
             panic!("expected an assignment root, got {root:?}");
         };
-        let hir::ExpressionKind::Function { parameters, body } = &before.expression(*value).kind
-        else {
+        let hir::ExpressionKind::Function { parameters, body } = &before.kind(*value) else {
             panic!("expected a function value");
         };
+        let parameters = &before[parameters];
         assert_eq!(parameters.len(), 2);
         assert_eq!(parameters[0].name, "x");
         assert_eq!(parameters[1].name, "y");
         assert!(parameters[1].default.is_some());
-        let hir::ExpressionKind::Binary { operator, .. } = &before.expression(*body).kind else {
+        let hir::ExpressionKind::Binary { operator, .. } = &before.kind(*body) else {
             panic!("expected a binary body");
         };
         assert_eq!(*operator, hir::BinaryOperator::Add);

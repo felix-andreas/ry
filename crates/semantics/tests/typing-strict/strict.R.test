@@ -10,22 +10,20 @@ z <- 1L %then% 2L
 y: integer
 z: integer
 Any
+23..35 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+52..64 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+79..91 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- unsupported_constructs_are_origins
 special <- function(a, b) a %undeclared% b
 formula_model <- function() y ~ x
-elementwise <- function(a, b) a & b
 #++++
 special: <T, U> fn(a: T, b: U) -> Unknown
 formula_model: fn() -> Unknown
-elementwise: <T, U> fn(a: T, b: U) -> Unknown
 20..21 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
 23..24 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 26..42 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 71..76 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
-101..102 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
-104..105 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
-107..112 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- a_corpus_declared_operator_is_typed_and_no_origin
 member <- function(a, b) a %in% b
@@ -80,12 +78,12 @@ first <- value
 second <- value
 third <- value
 #++++
-frame: Unknown
+frame: data.frame
 value: Unknown
 first: Unknown
 second: Unknown
 third: Unknown
-9..26 error[strict] strict mode: could not determine the type of `frame`; add a type annotation
+36..43 error[strict] strict mode: could not determine the type of `value`; add a type annotation
 
 #==== directives
 #---- typing_comment_sets_the_mode
@@ -147,8 +145,8 @@ f <- function() {
   x[1L, 2L]
 }
 #++++
-f: Unknown
-36..45 error[type-mismatch] indexing with 2 indexes is not supported yet. ry does not model matrix and data.frame subsetting
+f: fn() -> Unknown
+36..45 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #==== recursion
 #---- self_recursion_is_attributed
@@ -194,3 +192,37 @@ earliest <- function() {
 earliest: fn() -> Any
 367..373 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
+
+#---- stop_is_strict_clean_in_either_position
+#~~~~ R/main.R
+#: fn(x: double) -> double
+checked <- function(x) {
+  if (x < 0) stop("negative: ", x)
+  x
+}
+#: fn(x: double) -> double
+chosen <- function(x) if (x < 0) stop("negative") else x
+#++++
+== R/main.R
+checked: fn(x: double) -> double
+chosen: fn(x: double) -> double
+
+#---- elementwise_logical_operators_are_typed
+#~~~~ R/main.R
+flags <- c(1L, 2L) >= 1L
+names_match <- c("a", "b") == "a"
+both <- flags & names_match
+either <- flags | TRUE
+single <- TRUE & FALSE
+elementwise <- function(a, b) a & b
+#++++
+== R/main.R
+flags: logical[]
+names_match: logical[]
+both: logical[]
+either: logical[]
+single: logical
+elementwise: <T, U> fn(a: T, b: U) -> Unknown
+157..158 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
+160..161 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
+163..168 error[strict] strict mode: this expression has an undetermined type (`Unknown`)

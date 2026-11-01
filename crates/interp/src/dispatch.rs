@@ -3,18 +3,20 @@
 //! reads (`class`, `oldClass`, `inherits`), and the hook `standardGeneric` calls once the methods
 //! package installs S4 dispatch.
 
-use crate::{
-    Frame,
-    builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
-    eval::{self, apply_closure, call_builtin, forced_promise, value_of},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
-        symbol_name, symbols, unbound,
+use {
+    crate::{
+        Frame,
+        builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
+        eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
+        interp,
+        unwind::{R, error},
+        values::{
+            self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
+            symbol_name, symbols, unbound,
+        },
     },
+    heap::object::{Sexp, SexpType, gp},
 };
-use heap::object::{Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     special("UseMethod", -1, do_usemethod).keep_visibility(),
@@ -359,7 +361,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
     } else {
-        dispatch_object(function, env)?
+        match dispatch_object(function, env)? {
+            // GNU R's `GetObject` falls back to the first supplied argument when the first
+            // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
+            object if object == nil() && first_formal_missing(function, env)? => {
+                first_supplied(promargs)?
+            }
+            object => object,
+        }
     };
     let def_env = match lookup_generic_definition(&generic_name, env, sys_parent)? {
         Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
@@ -387,17 +396,15 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
             .map(|(tag, _)| tag)
             .collect();
         for symbol in crate::heap().frame_symbols(env) {
-            if !formals.contains(&symbol) && !vars.iter().any(|(var, _)| *var == symbol) {
-                if let Some(cell) = crate::heap().frame_cell(env, symbol) {
-                    vars.push((symbol, cell.cdr()));
-                }
+            if !formals.contains(&symbol)
+                && !vars.iter().any(|(var, _)| *var == symbol)
+                && let Some(cell) = crate::heap().frame_cell(env, symbol)
+            {
+                vars.push((symbol, cell.cdr()));
             }
         }
     }
-    let args: Vec<Arg> = values::pairlist_items(promargs)
-        .into_iter()
-        .map(|(tag, value)| Arg { tag, value })
-        .collect();
+    let args = eval::unevaluated_args(promargs);
     let new_call = renamed_call(frame_call, found.method_name)?;
     let result = apply_method(new_call, found.method, &args, sys_parent, &vars)?;
     Err(crate::unwind::jump(crate::Jump::Return {
@@ -438,12 +445,49 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         }
         return Ok(nil());
     }
+    // GNU R dispatches on the first supplied argument, so a generic called without one, even
+    // where the formal has a default, dispatches on NULL.
+    if crate::heap()
+        .frame_cell(env, first)
+        .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
+    {
+        return Ok(nil());
+    }
     let value = eval::find_var_in_frame(first, env)?;
     // A generic called without its first argument dispatches as on NULL.
     if value == unbound() || value == missing_arg() {
         return Ok(nil());
     }
     value_of(value)
+}
+
+unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
+    let formals = function.car();
+    if formals.kind() != SexpType::Pairlist || formals.tag() == symbols().dots {
+        return Ok(false);
+    }
+    let first = formals.tag();
+    if crate::heap()
+        .frame_cell(env, first)
+        .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
+    {
+        return Ok(true);
+    }
+    let value = eval::find_var_in_frame(first, env)?;
+    Ok(value == missing_arg() || value == unbound())
+}
+
+/// The value of the first supplied argument among a call's matched arguments.
+unsafe fn first_supplied(promargs: Sexp) -> R<Sexp> {
+    if promargs.kind() != SexpType::Pairlist {
+        return Ok(nil());
+    }
+    // GNU R's GetObject takes the first argument even when it was left empty.
+    match promargs.car() {
+        value if value.kind() == SexpType::Dots => value_of(value.car()),
+        value if value == missing_arg() => Ok(nil()),
+        value => value_of(value),
+    }
 }
 
 unsafe fn apply_method(
@@ -619,10 +663,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     };
     // The arguments: the method's own, with each formal replaced by a promise of its current
     // value in the method's frame, so changes the method made are seen.
-    let mut args: Vec<Arg> = values::pairlist_items(promargs)
-        .into_iter()
-        .map(|(tag, value)| Arg { tag, value })
-        .collect();
+    let mut args = eval::unevaluated_args(promargs);
     if function.kind() == SexpType::Closure {
         let matched = eval::match_args(function.car(), &args, frame_call)?;
         let formals: Vec<Sexp> = values::pairlist_items(function.car())
@@ -640,11 +681,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     }
     // Named arguments passed to NextMethod replace or extend the method's arguments.
     for extra in call.args.iter().skip(2) {
-        if extra.tag != nil() {
-            if let Some(existing) = args.iter_mut().find(|arg| arg.tag == extra.tag) {
-                existing.value = extra.value;
-                continue;
-            }
+        if extra.tag != nil()
+            && let Some(existing) = args.iter_mut().find(|arg| arg.tag == extra.tag)
+        {
+            existing.value = extra.value;
+            continue;
         }
         args.push(*extra);
     }
@@ -721,6 +762,22 @@ pub unsafe fn try_builtin_dispatch(
     args: &[Arg],
     env: Sexp,
 ) -> R<Option<Sexp>> {
+    // From R 4.4 on, the matrix products count their arguments before they dispatch, so
+    // `` `%*%`(x) `` is an error even when `x` has a method.
+    if definition.generic == Generic::MatrixOps && crate::system::r_at_least(4, 4) {
+        let required = if definition.name == "%*%" { 2 } else { 1 };
+        let passed = args.len().min(2);
+        if passed < required {
+            let noun = if passed == 1 { "argument" } else { "arguments" };
+            return Err(crate::unwind::error_in(
+                call,
+                format!(
+                    "{passed} {noun} passed to '{}' which requires at least {required}",
+                    definition.name
+                ),
+            ));
+        }
+    }
     let Some(first) = args.first() else {
         return Ok(None);
     };
@@ -887,28 +944,31 @@ pub unsafe fn dispatch_or_eval(
     op: Sexp,
     arguments: Sexp,
     env: Sexp,
-) -> R<Result<Sexp, Vec<Arg>>> {
+    args: &mut Args,
+) -> R<Option<Sexp>> {
     let first = arguments.car();
     if arguments.kind() != SexpType::Pairlist || first == missing_arg() {
-        return Ok(Err(eval::evaluate_args(arguments, env, true, call)?));
+        eval::evaluate_args_into(arguments, env, true, call, args)?;
+        return Ok(None);
     }
     // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
     // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
     if first == symbols().dots {
         let promised = eval::promise_args(arguments, env)?;
         let Some(head) = promised.first() else {
-            return Ok(Err(promised));
+            return Ok(None);
         };
         if head.value == missing_arg() {
-            return Ok(Err(promised));
+            *args = promised;
+            return Ok(None);
         }
         let object = value_of(head.value)?;
         crate::heap().root(object);
-        return dispatch_promised(definition, call, op, promised, env);
+        return dispatch_promised(definition, call, op, &promised, env, args);
     }
     let object = eval::eval(first, env)?;
     crate::heap().root(object);
-    dispatch_evaluated_subject(definition, call, op, arguments, object, env)
+    dispatch_evaluated_subject(definition, call, op, arguments, object, env, args)
 }
 
 /// [`dispatch_or_eval`] after the first argument of `arguments` evaluated to `object`. A frame
@@ -920,73 +980,74 @@ pub unsafe fn dispatch_evaluated_subject(
     arguments: Sexp,
     object: Sexp,
     env: Sexp,
-) -> R<Result<Sexp, Vec<Arg>>> {
+    args: &mut Args,
+) -> R<Option<Sexp>> {
     if !object.is_object() {
-        let mut args = vec![Arg {
+        args.push(Arg {
             tag: arguments.tag(),
             value: object,
-        }];
-        args.extend(eval::evaluate_args(arguments.cdr(), env, true, call)?);
-        return Ok(Err(args));
+        });
+        eval::evaluate_args_into(arguments.cdr(), env, true, call, args)?;
+        return Ok(None);
     }
     if definition.name == "[" && crate::frame::is_frame(object) {
-        return crate::frame::run(call, object, env).map(Ok);
+        return crate::frame::run(call, object, env).map(Some);
     }
     if definition.name == "["
         && values::inherits(object, "data.table")
         && let Some(value) = crate::data_table::query(call, object, env)?
     {
-        return Ok(Ok(value));
+        return Ok(Some(value));
     }
-    let mut promised = vec![Arg {
+    let mut promised: Args = smallvec::smallvec![Arg {
         tag: arguments.tag(),
         value: forced_promise(arguments.car(), object)?,
     }];
     promised.extend(eval::promise_args(arguments.cdr(), env)?);
-    dispatch_promised(definition, call, op, promised, env)
+    dispatch_promised(definition, call, op, &promised, env, args)
 }
 
 unsafe fn dispatch_promised(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,
-    promised: Vec<Arg>,
+    promised: &Args,
     env: Sexp,
-) -> R<Result<Sexp, Vec<Arg>>> {
+    args: &mut Args,
+) -> R<Option<Sexp>> {
     let object = value_of(promised[0].value)?;
     if object.is_object() {
         // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4
         // object without one falls back to S3 methods of its class.
         let value = if object.has_gp(gp::S4_OBJECT)
-            && let Some(value) = s4_dispatch(op, call, &promised, env)?
+            && let Some(value) = s4_dispatch(op, call, promised, env)?
         {
             Some(value)
         } else if let Some(found) =
             find_s3_method(definition.name, object, env, values::base_namespace(), None)?
         {
-            Some(apply_internal_method(call, found, &promised, env)?)
+            Some(apply_internal_method(call, found, promised, env)?)
         } else {
             None
         };
         if let Some(value) = value {
             interp().visible = true;
-            return Ok(Ok(value));
+            return Ok(Some(value));
         }
     }
-    let mut forced = Vec::with_capacity(promised.len());
-    for arg in &promised {
+    for arg in promised {
         let value = if arg.value == missing_arg() || promise_of_missing(arg.value)? {
             missing_arg()
         } else {
             value_of(arg.value)?
         };
         crate::heap().root(value);
-        forced.push(Arg {
+        args.push(Arg {
             tag: arg.tag,
             value,
         });
     }
-    Ok(Err(forced))
+    Ok(None)
 }
 
 /// Whether `value` is an unforced promise of a symbol that is a missing argument where the
@@ -1061,12 +1122,12 @@ unsafe fn group_dispatch(
         (Some(Some(left)), Some(Some(right))) => {
             let left_name = symbol_name(left.method_name);
             let right_name = symbol_name(right.method_name);
-            // GNU R lets date-time arithmetic win over `Ops.difftime`, so a date plus a
-            // difftime stays a date.
+            // GNU R lets date-time arithmetic win over `Ops.difftime`, so `time + 2 * diff`
+            // shifts the time instead of warning about incompatible methods.
             let date_arithmetic = |name: &str, minus: bool| {
                 name == "+.POSIXt"
                     || name == "+.Date"
-                    || minus && (name == "-.POSIXt" || name == "-.Date")
+                    || (minus && (name == "-.POSIXt" || name == "-.Date"))
             };
             if left.method == right.method {
                 (0, 0)
@@ -1079,8 +1140,6 @@ unsafe fn group_dispatch(
             } else if choose_ops_method(call, args, right, left, true)? {
                 (1, 1)
             } else {
-                let left_name = symbol_name(left.method_name).into_owned();
-                let right_name = symbol_name(right.method_name).into_owned();
                 crate::conditions::warning_call(
                     call,
                     format!(
@@ -1538,15 +1597,29 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let what = call.arg(1);
     let which = values::as_logical_scalar(call.arg(2)) == 1;
-    // An object without a class attribute inherits only from what `class()`
-    // reports, not from the implicit dispatch classes such as "integer" for a
-    // matrix or "double" for a real vector.
-    let classes = if object.has_gp(gp::S4_OBJECT) {
-        s4_class_with_superclasses(object)?
-    } else if values::class_attr(object) == nil() {
-        class_of(object)?
+    // As in GNU R, an S4 object inherits from every class it extends, and anything else from
+    // what `class()` reports, which is not the implicit class `UseMethod` dispatches on. The
+    // names are byte strings, so an object without a class attribute allocates no R vector.
+    let class = values::class_attr(object);
+    let dim = get_attr(object, symbols().dim);
+    let class_vector;
+    let class_names: Vec<&[u8]> = if object.has_gp(gp::S4_OBJECT) || length(class) > 0 {
+        class_vector = if object.has_gp(gp::S4_OBJECT) {
+            s4_class_with_superclasses(object)?
+        } else {
+            class
+        };
+        (0..length(class_vector))
+            .map(|index| class_vector.element(index).bytes())
+            .collect()
+    } else if dim != nil() {
+        if length(dim) == 2 {
+            vec![b"matrix", b"array"]
+        } else {
+            vec![b"array"]
+        }
     } else {
-        implicit_class(object)?
+        vec![basic_class(object, false).as_bytes()]
     };
     // A class generator (an R6 or S4 generator, say) names its class through `nameOfClass()`.
     let what = if what.kind() == SexpType::String {
@@ -1563,9 +1636,6 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
         }
         name
     };
-    let class_names: Vec<&[u8]> = (0..length(classes))
-        .map(|index| classes.element(index).bytes())
-        .collect();
     if which {
         let result = values::alloc(SexpType::Integer, length(what))?;
         for index in 0..length(what) {
