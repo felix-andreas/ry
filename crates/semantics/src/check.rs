@@ -405,6 +405,7 @@ pub fn check_item_with_annotation<'db>(
         defaulted_formals: FxHashSet::default(),
         non_local_slots: FxHashMap::default(),
         string_values: FxHashMap::default(),
+        value_read_slots: None,
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -824,6 +825,8 @@ struct Checker<'db, 'a> {
     /// site, or a write of anything else, appears. Queries read it for column names given through a variable
     /// (`.SDcols = cols`, `(cols) := ...`).
     string_values: FxHashMap<BindingId, Option<StringWrite>>,
+    /// Slots read somewhere other than as a call head, built on first need.
+    value_read_slots: Option<FxHashSet<BindingId>>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -834,8 +837,8 @@ enum FunctionLookup<'db> {
     Found(Ty<'db>),
     /// The library's candidates, past every project binding of the name.
     Library(Symbol, Vec<TypeScheme<'db>>),
-    /// The nearest binding is an untyped value and an outer binding of the name holds a
-    /// function, so the call may reach either one and is not checked.
+    /// The nearest binding is untyped and also read as a value, and an outer binding of the
+    /// name holds a function, so the call may reach either one and is not checked.
     Undetermined,
 }
 
@@ -5115,15 +5118,20 @@ impl<'db> Checker<'db, '_> {
         if nearest_callable == Callable::Yes {
             return FunctionLookup::Found(nearest);
         }
+        // An untyped nearest binding that is only ever called is a callback, so it is the
+        // function. One that is also read as a value (`dir <- path; dir(dir)`) is as likely a
+        // plain value whose call R resolves past it, so a same-named function leaves the call
+        // undetermined.
+        let ambiguous = nearest_callable == Callable::Untyped && self.read_as_value(nearest_slot);
         let mut reaches_top_level = self.is_top_level_slot(nearest_slot);
         for slot in outer {
             reaches_top_level |= self.is_top_level_slot(slot);
             let ty = self.read_slot(callee, slot);
-            match (nearest_callable, self.callable(ty)) {
-                (_, Callable::No) => continue,
-                // An untyped value next to a function of the same name may be either one.
-                (Callable::Untyped, _) => return FunctionLookup::Undetermined,
-                (_, _) => {
+            match self.callable(ty) {
+                Callable::No => continue,
+                _ if ambiguous => return FunctionLookup::Undetermined,
+                _ if nearest_callable == Callable::Untyped => return FunctionLookup::Found(nearest),
+                _ => {
                     self.callee_targets.insert(callee, CalleeTarget::Slot(slot));
                     return FunctionLookup::Found(self.record(callee, ty));
                 }
@@ -5136,19 +5144,37 @@ impl<'db> Checker<'db, '_> {
         if let Some(scheme) = project
             && self.callable(scheme.body) != Callable::No
         {
-            if nearest_callable == Callable::Untyped {
+            if ambiguous {
                 return FunctionLookup::Undetermined;
+            }
+            if nearest_callable == Callable::Untyped {
+                return FunctionLookup::Found(nearest);
             }
             self.callee_targets.insert(callee, CalleeTarget::Project);
             let ty = self.instantiate(&scheme);
             return FunctionLookup::Found(self.record(callee, ty));
         }
         match self.library_function(name) {
-            Some(_) if nearest_callable == Callable::Untyped => FunctionLookup::Undetermined,
+            Some(_) if ambiguous => FunctionLookup::Undetermined,
+            Some(_) if nearest_callable == Callable::Untyped => FunctionLookup::Found(nearest),
             Some(candidates) => FunctionLookup::Library(name, candidates),
             // Nothing else is a function either: R reports the call, and so does the checker.
             None => FunctionLookup::Found(nearest),
         }
+    }
+
+    fn read_as_value(&mut self, slot: BindingId) -> bool {
+        let naming = self.naming;
+        self.value_read_slots
+            .get_or_insert_with(|| {
+                naming
+                    .resolutions
+                    .iter()
+                    .filter(|(read, _)| !naming.callee_fallbacks.contains_key(read))
+                    .map(|(_, slot)| *slot)
+                    .collect()
+            })
+            .contains(&slot)
     }
 
     fn is_top_level_slot(&self, slot: BindingId) -> bool {

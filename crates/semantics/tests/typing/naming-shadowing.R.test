@@ -87,6 +87,27 @@ apply_to <- function(x, callback) callback(x)
 == R/main.R
 apply_to: <T, U> fn(x: T, callback: fn(T) -> U) -> U
 
+#---- callback_named_like_a_library_function_is_called
+#~~~~ R/main.R
+apply1 <- function() {
+  call_with <- function(format) format(1L)
+  call_with(function(x) x + 1L)
+}
+#++++
+== R/main.R
+apply1: fn() -> integer
+
+#---- callback_named_like_a_project_function_is_called
+#~~~~ R/main.R
+helper <- function(x) "text"
+run <- function(helper) helper(1L)
+use <- function() run(function(x) x + 1L)
+#++++
+== R/main.R
+helper: <T> fn([x]: T) -> character
+run: <T> fn(helper: fn(integer) -> T) -> T
+use: fn() -> integer
+
 #---- value_with_no_function_of_its_name_is_reported
 #~~~~ R/main.R
 f <- function(x) {

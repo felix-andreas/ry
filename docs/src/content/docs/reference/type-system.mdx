@@ -2121,11 +2121,13 @@ upper_names <- function(x) {
   `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
 - A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
 - A binding with no type information yet, such as an unannotated parameter nothing has constrained
-  or a parameter annotated with a type parameter `T`, may hold anything. When an outer binding of
-  the same name is a function, the call could reach either one, so it types as `Unknown` and constrains neither: `function(x, names) names(x)` does not
-  make `names` a function parameter. With no function of that name further out, the call checks
-  against the binding as usual, so `function(x, callback) callback(x)` still infers `callback` as a
-  function.
+  or a parameter annotated with a type parameter `T`, may hold anything. When the body only ever
+  calls it, it is a callback, and the call checks against it as usual: both
+  `function(x, callback) callback(x)` and `function(format) format(1L)` infer the parameter as a
+  function, even though base has a `format`. When the body also reads it as a value and an outer
+  binding of the same name is a function, the call could reach either one, so it types as `Unknown`
+  and constrains neither. So `function(x, names) x[names(x) %in% names]` does not make `names` a
+  function parameter, and `dir <- path; dir(dir)` calls base's `dir` unchecked.
 - When no binding of the name is a function, R reports the call, and so does the checker: the error
   names the nearest binding's type.
 - Hover and go-to-definition on the called name follow the binding the call reaches.
