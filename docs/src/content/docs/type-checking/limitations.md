@@ -4,7 +4,7 @@ description: What ry does not check, and where it reports correct code
 ---
 
 When ry cannot determine a type, the value becomes `Unknown` and its checks are skipped, so most
-gaps on this page are silent. [Strict mode](/type-checking/strict-mode) shows where they occur. The last
+gaps on this page are silent. [Strict mode](/type-checking/strict-mode) shows most of the places they occur. The last
 section lists the places where ry reports correct code instead.
 
 ## Not checked

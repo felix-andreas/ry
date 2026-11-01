@@ -10,7 +10,8 @@ Their values are `Unknown`, which is compatible with everything. ry would rather
 report something false, so one unmodeled construct never causes a cascade of errors.
 
 The cost is that a clean run does not say how much was checked.
-[Strict mode](/type-checking/strict-mode) reports every place a value became `Unknown`.
+[Strict mode](/type-checking/strict-mode) reports the places a value became `Unknown`, with the
+exceptions listed under its [known gaps](/type-checking/strict-mode#known-gaps).
 
 ## Giving a value a type
 

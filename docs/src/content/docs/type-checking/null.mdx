@@ -9,7 +9,8 @@ Many R functions return `NULL` for "nothing", and code that forgets the case fai
 `NULL` came from. A value that may be `NULL` has a union type, such as `character | NULL`.
 
 The most common case is an optional argument that defaults to `NULL`. Its type says what a caller
-may pass instead:
+may pass instead. In the `fn(...)` form, brackets around a name such as `[label]` mark an optional
+argument:
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Comments">

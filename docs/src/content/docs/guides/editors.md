@@ -14,7 +14,7 @@ You get:
 
 - diagnostics as you type, the same ones `ry check` reports
 - hover with the inferred type of any expression
-- completion, including the fields of a list or record such as `person$`
+- completion, including the fields of a list such as `person$`
 - go-to-definition, find references, and rename
 - signature help and inlay hints
 - formatting with the same rules as `ry fmt`

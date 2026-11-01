@@ -83,11 +83,13 @@ A comment in a file, usually at the top, overrides the project setting for that 
 # typing: on
 ```
 
-The values are `on`, `off`, and `strict`, so you can switch type checking on file by file, or keep
+The values are `on`, `off`, and `strict` (which also requires a type everywhere, see
+[strict mode](/type-checking/strict-mode)), so you can switch type checking on file by file, or keep
 it on for the project and switch it off where a file is not ready.
 
 ## What is not checked
 
-What ry cannot model, such as `data.frame` columns and R6 objects, is skipped rather than reported,
-so a clean run proves less than it seems. [Unknown and Any](/type-checking/unknown) explains how to
+What ry cannot model, such as `data.frame` columns and R6 objects, gets the type `Unknown`, which is
+compatible with everything, so its checks are skipped rather than reported and a clean run proves
+less than it seems. `Any` is also compatible with everything, but marks a deliberate opt-out. [Unknown and Any](/type-checking/unknown) explains how to
 find and close these gaps.

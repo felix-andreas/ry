@@ -31,7 +31,9 @@ takes 6.6 s (see [Speed](#speed)).
 ## Running one command or a script
 
 `ry load` loads the package, runs something, and exits, which suits a quick check from the shell or
-a script in CI:
+a script in CI. Unlike `ry repl`, it runs the package on ry's own runtime by default, which is still
+incomplete, so pass `--runtime gnu-r` for code you rely on, as
+[Which R runs your package](#which-r-runs-your-package) explains:
 
 ```text
 $ ry load -e 'count_words("the quick fox")'
@@ -39,9 +41,7 @@ Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
 [1] 3
 ```
 
-`ry load -f run.R` runs a script instead of an expression. Unlike `ry repl`, `ry load` runs the
-package on ry's own runtime, which is still incomplete; add `--runtime gnu-r` if your package needs
-something it lacks ([Which R runs your package](#which-r-runs-your-package)).
+`ry load -f run.R` runs a script instead of an expression.
 
 ## From RStudio or plain R
 

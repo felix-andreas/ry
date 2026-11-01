@@ -63,9 +63,8 @@ shares a namespace, as R loads them, and every other `.R` file is a script read 
 `ry check` exits with status 1 when it finds anything, so the same command works in CI.
 [Checking code](/guides/checking) shows everything it finds without configuration.
 
-## Reload your package as you edit
-
-Start `ry repl` anywhere inside a package, as in the transcript above. The console runs the GNU R
+The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry repl`
+anywhere inside it, as in the transcript above. The console runs the GNU R
 installed on your machine, so it needs R; checking does not. In RStudio, put
 `source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as you do today.
 [Loading packages](/guides/loading-packages) has the details.

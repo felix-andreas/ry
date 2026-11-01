@@ -65,31 +65,31 @@ its own type. Braces mean a fixed shape (`list{...}`), and brackets mean any len
 <TabItem label="Comments">
 
 ```r
-pair   <- list(1L, "ok")                  # tuple-like:  list{integer, character}
-person <- list(name = "Ada", age = 36L)   # record-like: list{name: character, age: integer}
-sizes  <- lapply(words, nchar)            # list-like:   list[integer]
+pair   <- list(1L, "ok")                  # positional:  list{integer, character}
+person <- list(name = "Ada", age = 36L)   # named fields: list{name: character, age: integer}
+sizes  <- lapply(words, nchar)            # any length:   list[integer]
 
 #: list[named: integer]
-counts <- list(apples = 3L)               # dict-like:   list[named: integer]
+counts <- list(apples = 3L)               # by key:       list[named: integer]
 ```
 
 </TabItem>
 <TabItem label="Inline">
 
 ```r
-pair   <- list(1L, "ok")                  # tuple-like:  list{integer, character}
-person <- list(name = "Ada", age = 36L)   # record-like: list{name: character, age: integer}
-sizes  <- lapply(words, nchar)            # list-like:   list[integer]
+pair   <- list(1L, "ok")                  # positional:  list{integer, character}
+person <- list(name = "Ada", age = 36L)   # named fields: list{name: character, age: integer}
+sizes  <- lapply(words, nchar)            # any length:   list[integer]
 
-counts: list[named: integer] <- list(apples = 3L)   # dict-like
+counts: list[named: integer] <- list(apples = 3L)   # by key
 ```
 
 </TabItem>
 </Tabs>
 
-## Records and tuples
+## Fixed-shape lists
 
-A tuple-like or record-like list has a fixed shape, so ry knows each position and field and its type.
+A list of positional values or named fields has a fixed shape, so ry knows each position and field and its type.
 That makes `$` checkable, which matters because R answers a misspelled field with a silent `NULL`
 that fails somewhere else:
 
@@ -106,18 +106,18 @@ type-mismatch
    |        ^^^^
 ```
 
-A fixed shape is also exact, so a list with an extra field where a record is expected is an error,
+A fixed shape is also exact, so a list with an extra field where a fixed shape is expected is an error,
 because an unexpected field is usually a misspelled one.
 
 ## Lists of any length
 
-A list-like or dict-like list can have any length, so ry knows only its element type. Reading a key
+A list of any length, or one looked up by key, can have any length, so ry knows only its element type. Reading a key
 gives the element type or `NULL`, because the key may be missing:
 
 ```r
 counts[["pears"]]   # integer | NULL
 ```
 
-A `list(...)` literal infers as a record, so a dictionary that starts from a literal needs an
+A `list(...)` literal infers as a fixed shape, so a dictionary that starts from a literal needs an
 annotation, as `counts` does. An empty `list()` filled by computed keys, as in `d[[key]] <- value`,
 needs none.
