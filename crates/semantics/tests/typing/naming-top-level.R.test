@@ -74,7 +74,7 @@ character
 10..11 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
   = 0..1 the earlier binding is here.
 
-#---- assignment_rhs_resolves_to_final_global_binding
+#---- assignment_rhs_resolves_to_the_earlier_binding
 #~~~~ R/main.R
 x <- 1L
 x <- x
@@ -82,8 +82,8 @@ x
 #++++
 == R/main.R
 x: integer
-x: Unknown
-Unknown
+x: integer
+integer
 0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
   = 8..9 the later binding is here.
 8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.

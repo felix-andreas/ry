@@ -24,8 +24,8 @@ setGeneric : Any
 setMethod : Any
 setValidity : Any
 setRefClass : Any
-representation : Any
-signature : Any
+representation : @pure Any
+signature : @pure Any
 callNextMethod : Any
 getMethod : Any
 selectMethod : Any
@@ -42,6 +42,6 @@ extends : fn(class1: character, class2: character, [maybe]: Any, [fullInfo]: Any
 isGeneric : fn(f: Any, [where]: Any, [fdef]: Any, [getName]: logical) -> logical
 existsMethod : fn(f: Any, [signature]: Any, [where]: Any) -> logical
 hasMethod : fn(f: Any, [signature]: Any, [where]: Any) -> logical
-slot : fn(object: Any, name: character) -> Any
-slotNames : fn(x: Any) -> character[]
+slot : @pure fn(object: Any, name: character) -> Any
+slotNames : @pure fn(x: Any) -> character[]
 show : fn(object: Any) -> Any

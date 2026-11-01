@@ -1,0 +1,141 @@
+#==== allowed
+#---- definitions_imports_and_classes
+#~~~~ R/main.R
+#' @importFrom stats median
+NULL
+
+library(stats)
+requireNamespace("utils", quietly = TRUE)
+
+#: @alias Point = Record{x: double, y: double}
+origin <- function() list(x = 0, y = 0)
+.onLoad <- function(libname, pkgname) {
+  cat("loaded\n")
+  invisible(NULL)
+}
+
+setClass("Account", representation(balance = "numeric"))
+setGeneric("deposit", function(account, amount) standardGeneric("deposit"))
+setMethod("deposit", "Account", function(account, amount) account)
+Stack <- R6::R6Class("Stack", public = list(items = list()))
+
+if (getRversion() >= "2.15.1") utils::globalVariables(c("amount", "balance"))
+#++++
+== R/main.R
+definition: NULL
+definition: library(stats)
+definition: requireNamespace("utils", quietly = TRUE)
+definition: origin <- function() list(x = 0, y = 0)
+definition: .onLoad <- function(libname, pkgname) {
+definition: setClass("Account", representation(balance = "numeric"))
+definition: setGeneric("deposit", function(account, amount) standardGeneric("deposit"))
+definition: setMethod("deposit", "Account", function(account, amount) account)
+definition: Stack <- R6::R6Class("Stack", public = list(items = list()))
+definition: if (getRversion() >= "2.15.1") utils::globalVariables(c("amount", "balance"))
+
+#---- constants_that_call_only_pure_functions
+#~~~~ R/main.R
+version <- "1.2.0"
+limits <- c(low = 1, high = 10)
+labels <- paste0("item_", seq_len(3))
+table_name <- toupper(sprintf("%s_v%d", "prices", 2L))
+lookup <- list(a = 1, b = 2)
+inside <- "a" %in% names(lookup)
+model <- y ~ x + z
+cache <- new.env()
+a <- b <- 1
+expr <- quote(cat("not run"))
+#++++
+== R/main.R
+constant: version <- "1.2.0"
+constant: limits <- c(low = 1, high = 10)
+constant: labels <- paste0("item_", seq_len(3))
+constant: table_name <- toupper(sprintf("%s_v%d", "prices", 2L))
+constant: lookup <- list(a = 1, b = 2)
+constant: inside <- "a" %in% names(lookup)
+constant: model <- y ~ x + z
+constant: cache <- new.env()
+constant: a <- b <- 1
+constant: expr <- quote(cat("not run"))
+
+#---- local_may_build_a_value_in_steps
+#~~~~ R/main.R
+squares <- local({
+  out <- numeric(3)
+  for (i in seq_len(3)) out[i] <- i * i
+  names(out) <- c("a", "b", "c")
+  out
+})
+#++++
+== R/main.R
+constant: squares <- local({
+
+#---- functions_marked_pure_may_be_called
+#~~~~ R/main.R
+#: @pure
+scale_by <- function(x, factor) x * factor
+twice <- @pure function(x) x * 2
+halve <- @pure \(x) x / 2
+
+scaled <- scale_by(2, 3)
+doubled <- twice(halve(4))
+#++++
+== R/main.R
+definition (pure): scale_by <- function(x, factor) x * factor
+definition (pure): twice <- @pure function(x) x * 2
+definition (pure): halve <- @pure \(x) x / 2
+constant: scaled <- scale_by(2, 3)
+constant: doubled <- twice(halve(4))
+
+#---- stubs_declare_package_functions_pure
+#~~~~ R/main.R
+library(memoise)
+
+slow_square <- function(x) x * x
+#: @pure
+fast_square <- memoise(slow_square)
+qualified <- memoise::memoise(slow_square)
+#++++
+== R/main.R
+definition: library(memoise)
+definition: slow_square <- function(x) x * x
+constant (pure): fast_square <- memoise(slow_square)
+constant: qualified <- memoise::memoise(slow_square)
+
+#==== entry_files
+#---- tests_and_scripts_are_unrestricted
+#~~~~ tests/testthat/test-main.R
+cat("testing\n")
+for (i in 1:3) print(i)
+#~~~~ tests/testthat/helper-setup.R
+options(digits = 3)
+#~~~~ scripts/run.R
+x <- Sys.getenv("HOME")
+cat(x, "\n")
+#++++
+== tests/testthat/test-main.R
+effect: cat("testing\n")
+effect: for (i in 1:3) print(i)
+== tests/testthat/helper-setup.R
+effect: options(digits = 3)
+== scripts/run.R
+effect: x <- Sys.getenv("HOME")
+effect: cat(x, "\n")
+
+#---- destructuring_guarded_imports_and_formulas
+#~~~~ R/main.R
+c(low, high) %<-% list(1, 10)
+total <- local({
+  c(u, v) %<-% list(1, 2)
+  u + v
+})
+if (requireNamespace("utils", quietly = TRUE)) utils::globalVariables("x")
+if (!requireNamespace("stats", quietly = TRUE)) NULL
+shape <- ~ x + y
+#++++
+== R/main.R
+constant: c(low, high) %<-% list(1, 10)
+constant: total <- local({
+definition: if (requireNamespace("utils", quietly = TRUE)) utils::globalVariables("x")
+definition: if (!requireNamespace("stats", quietly = TRUE)) NULL
+constant: shape <- ~ x + y

@@ -97,6 +97,9 @@ const RAW: Mask = bit(SexpType::Raw);
 const NULL: Mask = bit(SexpType::Nil);
 const LIST: Mask = bit(SexpType::List);
 const FUNCTION: Mask = bit(SexpType::Closure) | bit(SexpType::Builtin) | bit(SexpType::Special);
+/// `Array<T>`: the value must carry the Array bit, and its storage must be one the item type
+/// admits (any storage when the item type is not decidable from storage).
+const ARRAY: Mask = 1 << 31;
 
 /// A signature is a list: the masks by slot, the annotation texts by slot, the formal names by
 /// formal position, and the definition's body.
@@ -216,7 +219,14 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
                     }
                 }
             } else if let Some(cell) = heap.frame_cell(env, formal.tag()) {
-                check_argument(call, signature, slot, cell.cdr(), depth)?;
+                let mut value = cell.cdr();
+                // A literal default is bound as a value rather than a promise, but it is checked
+                // only when the body uses it, so it gets the promise it would otherwise skip.
+                if cell.has_gp(gp::BINDING_MISSING) && value.kind() != SexpType::Promise {
+                    value = crate::eval::make_promise(value, env)?;
+                    heap.set_binding_value(cell, value)?;
+                }
+                check_argument(call, signature, slot, value, depth)?;
             }
         }
         formal = formal.cdr();
@@ -360,14 +370,20 @@ unsafe fn text_at(signature: Sexp, slot: usize) -> String {
 }
 
 unsafe fn admits(mask: Mask, value: Sexp) -> bool {
+    if mask & ARRAY != 0 {
+        let items = mask & !ARRAY;
+        return value.is_array() && (items == 0 || items & bit(value.kind()) != 0);
+    }
     mask & bit(value.kind()) != 0
 }
 
 /// A value's storage type as a reader of the annotation thinks of it.
-unsafe fn describe(value: Sexp) -> &'static str {
+unsafe fn describe(value: Sexp) -> String {
     match value.kind() {
-        SexpType::Closure | SexpType::Builtin | SexpType::Special => "function",
-        kind => kind.name(),
+        SexpType::List if value.is_array() => "Array".to_owned(),
+        kind if value.is_array() => format!("Array<{}>", kind.name()),
+        SexpType::Closure | SexpType::Builtin | SexpType::Special => "function".to_owned(),
+        kind => kind.name().to_owned(),
     }
 }
 
@@ -397,7 +413,8 @@ fn mask_of(node: &SyntaxNode) -> Mask {
             let mut mask = 0;
             for member in node.children() {
                 let member = mask_of(&member);
-                if member == 0 {
+                // An Array member's storage overlaps a vector's, so a mixed union stays unchecked.
+                if member == 0 || member & ARRAY != 0 {
                     return 0;
                 }
                 mask |= member;
@@ -418,6 +435,21 @@ fn mask_of(node: &SyntaxNode) -> Mask {
         }
         SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_LIST => LIST,
         SyntaxKind::TYPE_FUNCTION => FUNCTION,
+        SyntaxKind::TYPE_APPLY if applied_name(node).as_deref() == Some("Array") => {
+            let item = node
+                .children()
+                .find(|child| child.kind() == SyntaxKind::TYPE_ARG_LIST)
+                .and_then(|arguments| arguments.children().next())
+                .map_or(0, |item| mask_of(&item));
+            ARRAY | if item & ARRAY != 0 { LIST } else { item }
+        }
         _ => 0,
     }
+}
+
+/// The name a generic type applies, such as `Array` in `Array<double>`.
+fn applied_name(node: &SyntaxNode) -> Option<String> {
+    node.children()
+        .find(|child| child.kind() == SyntaxKind::NAME)
+        .map(|name| name.text().to_string().trim().to_owned())
 }

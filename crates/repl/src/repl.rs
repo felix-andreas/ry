@@ -142,32 +142,72 @@ pub struct RuntimeFlags {
     pub annotation_checks: bool,
     /// S4, R6 and Reference Class definitions in user code are allowed.
     pub object_systems: bool,
+    /// The project is in strict mode, so the package loader binds pure constants lazily.
+    pub strict: bool,
 }
 
 impl RuntimeFlags {
     fn bits(self) -> std::ffi::c_int {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
+            | (std::ffi::c_int::from(self.strict) << 2)
     }
 }
 
-/// Runs the interactive console on ry's own runtime instead of GNU R. Only the editor, the
-/// completer and the filter of `options` apply: ry's runtime has no `.Call` routines to register
-/// and runs no startup code.
+/// Runs the interactive console on ry's own runtime instead of GNU R. The runtime attaches the
+/// package loader and evaluates `startup` before the first prompt, and before each command it
+/// reloads a loaded package whose sources changed, so it brings its own `hooks` and refuses
+/// a caller's. `routines` does not apply: ry's runtime has no `.Call` routines to register.
 pub fn run_console_on_ry_runtime(
-    options: RunOptions,
+    mut options: RunOptions,
     flags: RuntimeFlags,
 ) -> Result<i32, ReplError> {
-    use std::ffi::{c_char, c_int, c_uchar};
+    use std::ffi::{CString, c_char, c_int, c_uchar};
+    if options.hooks.is_some() {
+        return Err(ReplError(
+            "ry's runtime watches for reloads itself and takes no console hooks".into(),
+        ));
+    }
     let library = ry_runtime()?;
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
-    type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
+    type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
+    let changed = runtime_entry::<unsafe extern "C" fn() -> c_int>(library, "ry_loader_changed")?;
+    let startup = match options.startup.is_empty() {
+        true => None,
+        false => Some(
+            CString::new(options.startup.join("\n"))
+                .map_err(|_| ReplError("the startup code contains a NUL byte".into()))?,
+        ),
+    };
+    options.hooks = Some(Box::new(RuntimeReloadWatcher { changed }));
     let banner = std::io::stdin()
         .is_terminal()
         .then(|| "ry console on ry's runtime. Type q() or Ctrl-D to quit.".to_owned());
     console::install_for_ry_runtime(options, banner)?;
-    Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
+    Ok(unsafe {
+        repl(
+            console::ry_read_console,
+            startup
+                .as_ref()
+                .map_or(std::ptr::null(), |startup| startup.as_ptr()),
+            flags.bits(),
+        )
+    })
+}
+
+/// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.
+struct RuntimeReloadWatcher {
+    changed: unsafe extern "C" fn() -> std::ffi::c_int,
+}
+
+impl ConsoleHooks for RuntimeReloadWatcher {
+    fn before_command(&mut self) -> Option<String> {
+        // SAFETY: the runtime is loaded for the life of the process, and the console calls its
+        // hooks on the runtime's thread between commands.
+        let changed = unsafe { (self.changed)() } != 0;
+        changed.then(|| ".ry_autoreload()".to_owned())
+    }
 }
 
 fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
@@ -186,7 +226,39 @@ fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
             library_path.display()
         ))
     })?;
-    Ok(Box::leak(Box::new(library)))
+    let library: &'static libloading::os::unix::Library = Box::leak(Box::new(library));
+    let built_from = runtime_id(library);
+    if built_from.as_deref() != Some(RUNTIME_ID) {
+        return Err(ReplError(stale_runtime_message(
+            &library_path,
+            built_from.as_deref(),
+        )));
+    }
+    Ok(library)
+}
+
+/// The identity of the sources `ry` was built from, which `libR.so` must have been built from
+/// too (`crates/libr/build_identity.rs` defines it).
+const RUNTIME_ID: &str = env!("RY_RUNTIME_ID");
+
+/// `None` for a library that exports no identity, which predates the check.
+fn runtime_id(library: &'static libloading::os::unix::Library) -> Option<String> {
+    type RuntimeId = unsafe extern "C" fn() -> *const std::ffi::c_char;
+    let id = runtime_entry::<RuntimeId>(library, "ry_runtime_id").ok()?;
+    let pointer = unsafe { id() };
+    (!pointer.is_null()).then(|| {
+        unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+fn stale_runtime_message(library_path: &std::path::Path, built_from: Option<&str>) -> String {
+    format!(
+        "ry's runtime ({}) is out of date: it has build {}, but this ry is build {RUNTIME_ID}; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)",
+        library_path.display(),
+        built_from.unwrap_or("unknown"),
+    )
 }
 
 fn runtime_entry<T: Copy>(

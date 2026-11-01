@@ -28,7 +28,7 @@ wrapper <- function(val$0ue) {
   value
 }
 #++++
-hover 11..71: fn(value: T) -> T
+hover 20..25: value: T
 definition 20..25
 references: 20..25*, 64..69
 rename: 2 edit(s)

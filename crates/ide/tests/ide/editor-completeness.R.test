@@ -1,0 +1,249 @@
+#==== editor_completeness
+#---- df_hover
+sa$0les <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+#++++
+hover 0..5: sales: DataFrame{region: character[], units: integer[]}
+hover-definition: global 0..5
+definition 0..5
+references: 0..5*
+rename: 1 edit(s)
+signature: none
+action: Add inferred type annotation for `sales`
+  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+completion (9): sales, sample, sample.int, sapply, save, save.image, savehistory, savePlot
+hint @5: DataFrame{region: character[], units: integer[]}
+
+#---- df_dollar_completion
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+sales$$0
+#++++
+hover 62..68: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+completion (2): region, units
+hint @5: DataFrame{region: character[], units: integer[]}
+
+#---- df_col_completion
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+x <- sales |> DataFrame.select(col("$0"))
+#++++
+hover 97..99: character
+definition: none
+references: none
+rename: none
+signature: fn(x: character, [as.factor]: logical) -> Expr (active)
+parameters: [x: character] | [as.factor]: logical
+signature: fn(x: Any, [as.factor]: logical) -> Any
+parameters: [x: Any] | [as.factor]: logical
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+completion (2): region, units
+hint @5: DataFrame{region: character[], units: integer[]}
+
+#---- df_verb_completion
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+x <- DataFrame.$0
+#++++
+hover 67..77: DataFrame.: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+completion (18): DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof, DataFrame.lazy
+hint @5: DataFrame{region: character[], units: integer[]}
+
+#---- df_column_hover_after_dollar
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+u <- sales$un$0its
+#++++
+hover 73..78: units: integer[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `u`
+  edit 62..62 -> "#: integer[]\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: DataFrame{region: character[], units: integer[]}\n"
+  edit 62..62 -> "#: integer[]\n"
+completion (1): units
+hint @5: DataFrame{region: character[], units: integer[]}
+hint @63: integer[]
+
+#---- record_field_rename_across_files
+#~~~~ R/a.R
+make_point <- function() (x = 1, y = 2)
+#~~~~ R/b.R
+p <- make_point()
+v <- p$x$0
+#++++
+hover 25..26: x: double
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `v`
+  edit 18..18 -> "#: double\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Record{x: double, y: double}\n"
+  edit 18..18 -> "#: double\n"
+completion (1): x
+hint @1: Record{x: double, y: double}
+hint @19: double
+
+#---- global_rename_across_files
+#~~~~ R/a.R
+helper <- function(value) value
+#~~~~ R/b.R
+r <- help$0er(1L)
+#~~~~ R/c.R
+s <- helper(2L)
+#++++
+hover 5..11: helper: fn(value: integer) -> integer
+hover-definition: global R/a.R:0..6
+definition R/a.R:0..6
+references: R/a.R:0..6*, R/b.R:5..11, R/c.R:5..11
+rename: 3 edit(s)
+signature: fn(value: integer) -> integer
+parameters: [value: integer]
+action: Add inferred type annotation for `r`
+  edit 0..0 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion (6): help, helper, help.request, help.search, help.start, .__C__MethodSelectionReport
+hint @1: integer
+
+#---- parameter_hover
+f <- function(al$0pha = 1L) alpha
+#++++
+hover 14..19: alpha: T
+definition 14..19
+references: 14..19*, 26..31
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `f`
+  edit 0..0 -> "#: <T> fn([alpha]: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn([alpha]: T) -> T\n"
+completion (22): alpha, alarm, alias, alist, all, all.equal, all.equal.character, all.equal.default
+hint @1: <T> fn([alpha]: T) -> T
+
+#---- loop_var_hover
+for (i$0 in seq_len(3L)) print(i)
+#++++
+hover 5..6: i: integer
+definition 5..6
+references: 5..6*, 29..30
+rename: 2 edit(s)
+signature: none
+completion (128+): i, I, if, in, Inf, iconv, iconvlist, icuGetCollate
+hint @6: integer
+
+#---- loop_var_use_hover
+for (i in seq_len(3L)) print(i$0)
+#++++
+hover 29..30: i: integer
+hover-definition: local 5..6
+definition 5..6
+references: 5..6*, 29..30
+rename: 2 edit(s)
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+completion (128+): i, I, if, in, Inf, iconv, iconvlist, icuGetCollate
+hint @6: integer
+
+#---- completion_argument_names
+helper <- function(first, second = 2L) first
+helper(1L, se$0)
+#++++
+hover 56..58: se: Unknown
+definition: none
+references: none
+rename: none
+signature: <T, U> fn(first: T, [second]: U) -> T
+parameters: first: T | [[second]: U]
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
+completion (80): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
+hint @6: <T, U> fn(first: T, [second]: U) -> T
+
+#---- completion_stdlib_namespace
+x <- Str.$0
+#++++
+hover 5..9: Str.: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+completion (32): Str.caseless_ascii_equals, Str.concat, Str.contains, Str.count_utf8_bytes, Str.drop_prefix, Str.drop_suffix, Str.ends_with, Str.from_utf8
+
+#---- completion_ranks_locals_before_keywords
+f <- function(value) {
+  result <- value
+  $0
+}
+#++++
+hover 21..45: T
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `f`
+  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn(value: T) -> T\n"
+completion (128+): result, value, f, break, else, FALSE, for, function
+hint @1: <T> fn(value: T) -> T
+
+#---- completion_skips_positionally_filled_parameter
+helper <- function(first, second = 2L, third = 3L) first
+helper(1L, $0)
+#++++
+hover 57..69: integer
+definition: none
+references: none
+rename: none
+signature: fn(first: integer, [second]: integer, [third]: integer) -> integer
+parameters: first: integer | [[second]: integer] | [third]: integer
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
+completion (128+): second = , third = , helper, break, else, FALSE, for, function
+hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
+
+#---- completion_skips_named_parameter
+helper <- function(first, second = 2L, third = 3L) first
+helper(third = 1L, $0)
+#++++
+hover 57..77: T
+definition: none
+references: none
+rename: none
+signature: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
+parameters: [first: T] | [second]: U | [third]: V
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
+completion (128+): first = , second = , helper, break, else, FALSE, for, function
+hint @6: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
+
+#---- completion_no_parameter_names_in_named_value
+helper <- function(first, second = 2L) first
+helper(second = $0)
+#++++
+hover 45..62: T
+definition: none
+references: none
+rename: none
+signature: <T, U> fn(first: T, [second]: U) -> T
+parameters: first: T | [[second]: U]
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
+completion (128+): helper, break, else, FALSE, for, function, if, in
+hint @6: <T, U> fn(first: T, [second]: U) -> T

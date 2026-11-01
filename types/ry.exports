@@ -1,7 +1,8 @@
 # Exports of ry's runtime package, `package:ry`: the standard library and the DataFrame API.
 # `test_standard_library.rs` keeps this list equal to what the runtime binds, except for the `as.*`
-# conversions: those are base builtins on ry's runtime, listed here only because `ry.Rtypes` declares
+# conversions and `is.Array`: those are base builtins on ry's runtime, listed here only because `ry.Rtypes` declares
 # them for the checker and the stub tests require every declaration to appear in its manifest.
+as.Array
 as.DataFrame
 as.record
 as.tag
@@ -15,6 +16,7 @@ DataFrame.group_by
 DataFrame.head
 DataFrame.height
 DataFrame.join
+DataFrame.join_asof
 DataFrame.lazy
 DataFrame.read_csv
 DataFrame.read_parquet
@@ -54,6 +56,7 @@ Expr.alias
 Expr.cor
 Expr.count
 Expr.first
+Expr.head
 Expr.if_else
 Expr.is_null
 Expr.last
@@ -66,6 +69,7 @@ Expr.std
 Expr.sum
 Expr.var
 GroupBy.agg
+is.Array
 is.DataFrame
 key
 LazyFrame.collect
@@ -74,6 +78,7 @@ LazyFrame.filter
 LazyFrame.group_by
 LazyFrame.head
 LazyFrame.join
+LazyFrame.join_asof
 LazyFrame.scan_csv
 LazyFrame.scan_parquet
 LazyFrame.select

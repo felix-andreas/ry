@@ -47,6 +47,8 @@ const SEEDS: &[&str] = &[
     "repeat { k <- k + 1; next }",
     "h <- \\(a) a |> sum(na.rm = TRUE)",
     "if (a) b else if (c) d else { e; f }",
+    "xs <- [1, 2.5, -3]; nested <- [[1L], [], [(x = 1,)]]",
+    "total <- function(v: Array<double>) -> double sum([v[[1]], 2][xs > 1])",
 ];
 
 #[test]
@@ -102,6 +104,9 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
                 "2147483647L",
                 "0",
                 "NA_integer_",
+                "[3L]",
+                "[-2.5, 1]",
+                "[TRUE]",
             ];
             let a = arguments[rng.below(arguments.len())];
             let b = arguments[rng.below(arguments.len())];

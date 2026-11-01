@@ -2,7 +2,7 @@
 //! plan emitter behind `ry load --emit-plan`, and the R code that installs `load_all()`.
 
 use {
-    crate::ANALYSIS_STACK_SIZE,
+    crate::{ANALYSIS_STACK_SIZE, config::Config},
     loader::{
         LoadError, LoadState, Loader,
         r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds},
@@ -12,27 +12,17 @@ use {
         libr::{self, CallRoutine, Sexp},
     },
     std::{
-        collections::HashMap,
         fmt, fs, io,
         panic::{AssertUnwindSafe, catch_unwind},
         path::{Path, PathBuf},
         sync::{LazyLock, Mutex, PoisonError},
         thread,
-        time::UNIX_EPOCH,
     },
 };
 
 /// The loader of this process's embedded R session, shared by the `.Call` routines and the
 /// watcher. R calls the routines on its one thread, so the lock is never contended.
-static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(Mutex::default);
-
-#[derive(Default)]
-struct Session {
-    loader: Loader,
-    /// Per root: the fingerprint of the sources a pending plan read, and of the ones the
-    /// session has loaded.
-    fingerprints: HashMap<PathBuf, (Option<u64>, Option<u64>)>,
-}
+static LOADER: LazyLock<Mutex<Loader>> = LazyLock::new(Mutex::default);
 
 /// R statements that install `load_all()` in `tools:ry`, talking to this process.
 pub fn embedded_runtime() -> String {
@@ -84,8 +74,31 @@ pub fn process_runtime() -> String {
 /// Installs the runtime in `tools:ry`. Its functions are byte-compiled once per runtime and R
 /// version and cached, because R would otherwise compile each one the first time it runs,
 /// which costs more than a typical reload.
+///
+/// The runtime also binds each name of ry's standard library that GNU R lacks to a function that
+/// explains the library runs only on ry's runtime, which reads better than GNU R's "could not
+/// find function". A name the session already has, such as `col` or data.table's `copy`, keeps
+/// its meaning.
 fn runtime(transport: &str) -> String {
-    let source = format!("{transport}\n{RUNTIME_GNUR}");
+    let names: Vec<String> = include_str!("../../../types/ry.exports")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    let source = format!(
+        r#"{transport}
+{RUNTIME_GNUR}
+.ry_standard_library_name <- function(name) {{
+  force(name)
+  function(...) stop(
+    "`", name, "()` is part of ry's standard library, which only ry's runtime provides, ",
+    "and this session runs on GNU R; run the code with `ry run` or `ry load` instead",
+    call. = FALSE
+  )
+}}
+.ry_standard_library_names <- c({names})"#,
+        names = names.join(", ")
+    );
     let cache = dirs::cache_dir()
         .map(|directory| directory.join("ry").to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -107,6 +120,10 @@ fn runtime(transport: &str) -> String {
       saved <- tryCatch({{ saveRDS(runtime, partial); TRUE }}, error = function(error) FALSE)
       if (saved) file.rename(partial, cache) else unlink(partial)
     }}
+  }}
+  # Decided per session, not cached: a name an attached package exports keeps its meaning.
+  for (name in runtime$.ry_standard_library_names) {{
+    if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
   }}
   runtime$.ry_packages <- new.env(parent = emptyenv())
   runtime$.ry_timing <- new.env(parent = emptyenv())
@@ -175,14 +192,10 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
         };
         let root = PathBuf::from(root);
         let value = on_analysis_thread(|| {
-            let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-            let fingerprint = source_fingerprint(&root);
-            match session.loader.plan(&root, full) {
-                Ok(plan) => {
-                    let entry = session.fingerprints.entry(plan.root.clone()).or_default();
-                    entry.0 = fingerprint;
-                    plan_value(&plan, true)
-                }
+            let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
+            loader.set_strict(strict_config(&root));
+            match loader.plan(&root, full) {
+                Ok(plan) => plan_value(&plan, true),
                 Err(error) => error_value(&error.to_string()),
             }
         });
@@ -201,12 +214,10 @@ extern "C" fn ry_loader_commit(root: Sexp) -> Sexp {
         // SAFETY: R passes R objects to a `.Call` routine.
         let root = unsafe { libr::string_argument(root) }?;
         let root = loader::find_package_root(Path::new(&root)).ok()?;
-        let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-        if session.loader.commit(&root)
-            && let Some(entry) = session.fingerprints.get_mut(&root)
-        {
-            entry.1 = entry.0;
-        }
+        LOADER
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .commit(&root);
         Some(())
     });
     if committed.is_err() {
@@ -234,47 +245,10 @@ pub struct ReloadWatcher;
 
 impl ConsoleHooks for ReloadWatcher {
     fn before_command(&mut self) -> Option<String> {
-        let mut session = SESSION.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut stale = false;
-        for (root, (_, loaded)) in session.fingerprints.iter_mut() {
-            let current = source_fingerprint(root);
-            if loaded.is_some() && current != *loaded {
-                // A reload that fails is not retried before every command, only after the
-                // next change on disk.
-                *loaded = current;
-                stale = true;
-            }
-        }
-        stale.then(|| ".ry_autoreload()".to_owned())
+        let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = !loader.changed_roots().is_empty();
+        changed.then(|| ".ry_autoreload()".to_owned())
     }
-}
-
-/// Of the names, sizes and modification times of everything a load reads, so a change is
-/// noticed without reading a file.
-fn source_fingerprint(root: &Path) -> Option<u64> {
-    let mut records = Vec::new();
-    let mut record = |path: &Path| {
-        if let Ok(metadata) = fs::metadata(path) {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |duration| duration.as_nanos());
-            records.push(format!(
-                "{}\0{}\0{modified}",
-                path.display(),
-                metadata.len()
-            ));
-        }
-    };
-    record(&root.join("DESCRIPTION"));
-    record(&root.join("NAMESPACE"));
-    let entries = fs::read_dir(root.join("R")).ok()?;
-    for entry in entries.flatten() {
-        record(&entry.path());
-    }
-    records.sort();
-    Some(semantics::load_index::fnv1a(records.join("\n").as_bytes()))
 }
 
 #[derive(Debug)]
@@ -310,6 +284,7 @@ pub fn emit_plan(
     full: bool,
 ) -> Result<(), EmitError> {
     let mut loader = Loader::default();
+    loader.set_strict(strict_config(path));
     if !full {
         match fs::read_to_string(state_file) {
             Ok(text) => {
@@ -359,4 +334,10 @@ pub fn current_package() -> Option<PathBuf> {
 /// For `ry load`'s error reporting.
 pub fn package_root(path: &Path) -> Result<PathBuf, LoadError> {
     loader::find_package_root(path)
+}
+
+/// Whether the configuration that governs `root` turns strict mode on. A broken config counts as
+/// not strict here, because the preflight that runs before every load reports it.
+fn strict_config(root: &Path) -> bool {
+    Config::discover(root).is_ok_and(|config| config.check.strict)
 }

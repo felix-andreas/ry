@@ -64,7 +64,7 @@ definition 10..11
 references: 10..11*, 27..28
 rename: 2 edit(s)
 signature: none
-completion (15): Any, character, complex, double, fn, integer, list, logical
+completion (16): Box, Any, character, complex, double, fn, integer, list
 
 #---- nominal_constructor_name_navigates
 type UserId = integer

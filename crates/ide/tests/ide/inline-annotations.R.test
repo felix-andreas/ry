@@ -55,7 +55,7 @@ definition 17..18
 references: 17..18*, 23..24, 29..30
 rename: 3 edit(s)
 signature: none
-completion (14): Any, character, complex, double, fn, integer, list, logical
+completion (15): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_parameter_colon
 #: @type Money {double}
@@ -67,7 +67,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (15): Any, character, complex, double, fn, integer, list, logical
+completion (16): Money, Any, character, complex, double, fn, integer, list
 
 #---- completion_after_a_binding_colon_before_the_type_exists
 #: @type Money {double}
@@ -121,4 +121,4 @@ definition 21..22
 references: 21..22*, 27..28, 33..34
 rename: 3 edit(s)
 signature: none
-completion (14): Any, character, complex, double, fn, integer, list, logical
+completion (15): Any, character, complex, double, fn, integer, list, logical
