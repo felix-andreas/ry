@@ -1394,7 +1394,13 @@ unsafe fn do_par(call: &NativeCall<'_>) -> R<Sexp> {
                             }
                             entries.push((name, found.unwrap_or(ParValue::Null)));
                         }
-                        None => entries.push((String::new(), ParValue::Null)),
+                        None => {
+                            warnings.push(format!(
+                                "argument {} does not name a graphical parameter",
+                                index + 1
+                            ));
+                            entries.push((String::new(), ParValue::Null));
+                        }
                     }
                 }
             }
