@@ -481,6 +481,18 @@ fn run_executes_annotated_code_on_both_runtimes() {
 }
 
 #[test]
+fn ry_runtime_admits_a_frame_for_a_frame_annotation() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let script = "total <- function(sales: frame{team: character, amount: double}) -> double sum(sales$amount)\n\
+        print(total(frame(team = \"a\", amount = 2)))\n";
+    let (status, stdout, stderr) = run_project("ry", &[("script.R", script)]);
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(stdout.contains("[1] 2"), "{stdout}");
+}
+
+#[test]
 fn ry_runtime_checks_arguments_and_returns_at_the_boundary() {
     if !ry_runtime_available() {
         return;

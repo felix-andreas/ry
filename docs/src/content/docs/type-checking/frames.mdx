@@ -5,15 +5,10 @@ description: ry's typed table, whose columns the checker knows
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-A frame is ry's built-in table. It is meant to replace `data.table`: queries use the same
-`frame[i, j, by]` syntax, and the checker knows every column, so a misspelled column or a join on a
-column that does not exist is reported before the query runs.
-
-:::caution
-Frames are checked but cannot run yet. `ry check` and the editor understand them in full, but
-neither GNU R nor `ry run` has a `frame()` that builds one. Use frames in code you are checking,
-not in code you execute today.
-:::
+A frame is ry's built-in table, queried with data.table's `frame[i, j, by]` syntax. The checker knows
+every column, so a misspelled column, a join on a column that does not exist, or a value a column
+cannot hold is reported before the query runs. The [Frames guide](/guides/frames) covers building
+and running them, which needs `ry run --runtime ry`.
 
 ```r
 sales <- frame(team = c("a", "b", "a"), amount = c(1, 2, 3))
@@ -46,6 +41,8 @@ unresolved
 
   ! the frame `sales` has no column `amuont`, and nothing else defines that name. Did you mean `amount`?
 ```
+
+Without the check, the same query stops at run time with `object 'amuont' not found`.
 
 Columns have types too. Using one wrongly is an ordinary type error, and so is writing a value that
 a column cannot hold:
@@ -102,8 +99,8 @@ type-mismatch
   x expected `frame{team: character[], amount: double[]}`, found `frame{team: character[], cost: double[]}`
 ```
 
-The columns must match exactly: a frame with an extra column is not accepted either. A bare `frame` accepts any frame and leaves its columns unknown. A frame also counts as a
-`data.frame`, so functions that expect one accept it.
+The columns must match exactly: a frame with an extra column is not accepted either. A bare `frame` accepts any frame and leaves its columns unknown. A frame is not a `data.frame`, so
+a `data.frame` parameter rejects it: convert with `as.data.frame()` first.
 
 The [typing reference](/reference/type-system/#frames) lists every form of query ry understands,
 including joins, `.SD`, `.SDcols` and `:=` with several columns.

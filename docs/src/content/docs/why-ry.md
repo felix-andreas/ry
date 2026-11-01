@@ -51,8 +51,8 @@ non-exhaustive-match
 code that nothing can check. A [standard library](/reference/standard-library) modeled on Roc's
 (`Result`, `List`, `Str`, `Num`, `Dict`, `Set`) returns these values instead of `NA` or a warning,
 and [frames](/type-checking/frames) are a built-in table whose columns the checker knows, so a
-misspelled column in a query is an error before the query runs. Records, tags and the library run on
-ry's own runtime (`ry run --runtime ry`) and not on GNU R. Frames are checked but cannot run yet.
+misspelled column in a query is an error before the query runs. All of this runs on
+ry's own runtime (`ry run --runtime ry`) and not on GNU R.
 
 ## Fast enough for every keystroke
 

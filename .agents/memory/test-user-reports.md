@@ -510,5 +510,9 @@ mistakes on purpose, and read the diagnostics. Four findings were small enough t
   `nearest_name`, one fixture in `scripts.R.test`).
 - **`as.record`, `as.tuple` and `as.tag` were reported `unresolved`** although the runtime binds them
   and `records-and-tags.mdx` documents them. They are declared in `ry.Rtypes` now.
-- **The docs had no page for frames.** `type-checking/frames.mdx` covers them, and says plainly that
-  they are checked but cannot run yet, because `frame()` is not wired into the interpreter.
+- **The docs had no page for the checker's side of frames.** `type-checking/frames.mdx` covers it and
+  links the run-time guide.
+- **A `frame{...}` parameter annotation rejected every frame at run time** (``must be `frame{...}`,
+  not `externalptr` ``), because the boundary check mapped any `{...}` type to list storage. A frame is
+  an external pointer, so `mask_of` now leaves it to the checker (`annotations.rs`, one test in
+  `test_repl_e2e.rs`).
