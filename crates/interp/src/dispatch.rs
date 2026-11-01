@@ -5,7 +5,7 @@
 
 use crate::{
     Frame,
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, special},
+    builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
     eval::{self, apply_closure, call_builtin, forced_promise, value_of},
     interp,
     unwind::{R, error},
@@ -662,7 +662,13 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
                 });
             }
             let primitive_call = renamed_call(frame_call, values::install(&generic_name)?)?;
-            call_builtin(definition, primitive_call, method, &forced, method_env)
+            // A special such as `$<-` dispatches by itself, which here would find the method
+            // that called `NextMethod` again.
+            let special = definition.kind == Kind::Special;
+            interp().skip_special_dispatch = special;
+            let result = call_builtin(definition, primitive_call, method, &forced, method_env);
+            interp().skip_special_dispatch = false;
+            result
         }
     }
 }
@@ -758,6 +764,9 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
 
 /// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
 pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    if std::mem::take(&mut interp().skip_special_dispatch) {
+        return Ok(None);
+    }
     if args.first().is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
         && let Some(op) = crate::builtins::primitive(name)
         && let Some(value) = s4_dispatch(op, call, args, env)?

@@ -553,10 +553,20 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
     Ok(result)
 }
 
+/// Which attributes a binary operation's result takes from its operands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// Arithmetic copies every attribute.
+    All,
+    /// Comparisons and `&`/`|` keep only dim, dimnames and names, and a time series' `tsp`
+    /// and class.
+    Structure,
+}
+
 /// The result attributes of a binary operation: dims must agree, names come from the operand
-/// as long as the result, and other attributes are copied from both, the first taking
-/// precedence.
-pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp) -> R<()> {
+/// as long as the result, and with `Keep::All` other attributes are copied from both, the
+/// first taking precedence.
+pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sexp, keep: Keep) -> R<()> {
     let left_dims = get_attr(left, symbols().dim);
     let right_dims = get_attr(right, symbols().dim);
     if left_dims != nil() && right_dims != nil() {
@@ -575,11 +585,22 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
     if !left_attributes && !right_attributes {
         return Ok(());
     }
-    if right_attributes && length(right) == result_length {
-        values::copy_most_attributes(right, result, false)?;
-    }
-    if left_attributes && length(left) == result_length {
-        values::copy_most_attributes(left, result, false)?;
+    if keep == Keep::All {
+        if right_attributes && length(right) == result_length {
+            values::copy_most_attributes(right, result, false)?;
+        }
+        if left_attributes && length(left) == result_length {
+            values::copy_most_attributes(left, result, false)?;
+        }
+    } else {
+        let tsp = values::install("tsp")?;
+        for operand in [right, left] {
+            let operand_tsp = get_attr(operand, tsp);
+            if operand_tsp != nil() && length(operand) == result_length {
+                values::set_attr(result, tsp, operand_tsp)?;
+                values::set_attr(result, symbols().class, get_attr(operand, symbols().class))?;
+            }
+        }
     }
     for symbol in [symbols().dim, symbols().dimnames] {
         let from_left = get_attr(left, symbol);
@@ -642,7 +663,7 @@ pub unsafe fn binary_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp) -> 
     } else {
         integer_arithmetic(call, op, left, right, count)?
     };
-    binary_attributes(left, right, result, call)?;
+    binary_attributes(left, right, result, call, Keep::All)?;
     Ok(result)
 }
 
@@ -1031,7 +1052,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
             }
         }
     }
-    binary_attributes(call.arg(0), call.arg(1), result, call.call)?;
+    binary_attributes(call.arg(0), call.arg(1), result, call.call, Keep::Structure)?;
     Ok(result)
 }
 
@@ -1106,7 +1127,7 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
             0
         };
     }
-    binary_attributes(left, right, result, call.call)?;
+    binary_attributes(left, right, result, call.call, Keep::Structure)?;
     Ok(result)
 }
 
@@ -2424,7 +2445,7 @@ unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
         let b = real_at(right, index % right_length);
         values::reals_mut(result)[index] = if is_na_real(a) || is_na_real(b) { NA_REAL } else { function(a, b) };
     }
-    binary_attributes(left, right, result, call.call)?;
+    binary_attributes(left, right, result, call.call, Keep::All)?;
     Ok(result)
 }
 
