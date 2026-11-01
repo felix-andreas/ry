@@ -4027,7 +4027,9 @@ explicit allocators".
   `crates/interp/src/platform.rs`, which has a Unix and a Windows `imp` with the same functions.
   Operating-system *calls* never happen outside it, so a new libc use shows up as a Windows build
   error in one file; platform *conventions* (`.Platform`, the platform string, `libs/x64`, the
-  routine table) still branch on `cfg!` where they are used. Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
+  routine table) still branch on `cfg!` where they are used. The heap's address-space
+  reservation has its own small seam (`virtual_memory` in `crates/heap/src/space.rs`: `mmap` or
+  `VirtualAlloc`). Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
   same interface `Riconv` exports.
 - **lld is required.** GNU ld 2.41 (Ubuntu's mingw-w64) emits a `HIGHLOW` base relocation for
   each `SECREL32` thread-local offset, so a relocated `R.dll` (ASLR, or a base-address collision)
