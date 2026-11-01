@@ -78,6 +78,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): sole owner of false reports. Dedupe against #135, then the backlog false reports, the 175 remaining CRAN errors, and `ry check` on the corpus packages' R sources with every finding triaged.
 - Editor tooling round 2 (session_0111kWqC2nSdtiQTHBsJihsP, Opus): remaining IDE gaps, then LSP latency (p50/p99 hover, completion, goto, references, rename, diagnostics) on the full-size code bases at rust-analyzer level. PR #138 (editor features for ry's syntax, precise blame on records/tags) merged as 54d0ca0.
 - Positioning (session_0111kWqC4b6STPYdoGhJV3zZ, Opus): rework the website and docs pitch per the user's feedback (one toolchain, type system, R++ runtime features, R-- strict mode, Venn diagram, three-column benchmark, four-step migration story, legacy R code in the agentic age); coordinates the benchmark with the JIT session.
+- DataFrame (session_0111kWqESwZBLCytfJFF7GT3, Opus, branch feat/dataframe-polars): per the user, new-world ry types are UpperCamelCase (`frame` -> `DataFrame`, Result, Dict, Set, List, Str) while R's types stay lowercase; a typed Polars-style DataFrame API with qualified names and `|>` (filter, select, with_columns, group_by/agg, sort, join, lazy); data.table syntax becomes compatibility only. Coordinates with the data.table and positioning sessions.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
