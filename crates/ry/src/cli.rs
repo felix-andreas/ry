@@ -8,7 +8,7 @@ use miette::{
     GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
     Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
 };
-use salsa::Database;
+use salsa::{Database, Durability};
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
@@ -240,9 +240,16 @@ pub(crate) fn analyze_project(
             .map(|stub| (stub.stem.clone(), stub.text.clone())),
     );
 
+    // A one-shot check changes one input after analysis starts: the attached namespaces,
+    // known only once every file is parsed. Every other input is high durability, so a memo
+    // that never read the attached set skips verification in the revision that sets it.
     let mut db = RootDatabase::one_shot();
-    StubSources::new(&db, stub_sources, shipped_export_manifests());
-    AnalysisSettings::new(&db, config.check.inline_annotations);
+    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
+        .durability(Durability::HIGH)
+        .new(&db);
+    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
+        .durability(Durability::HIGH)
+        .new(&db);
 
     // A broken override stub silently changes what every file checks against, so
     // its dropped declarations are reported as findings.
@@ -281,8 +288,7 @@ pub(crate) fn analyze_project(
         .as_deref()
         .map(parse_description_collate)
         .unwrap_or_default();
-    let metadata = PackageMetadata::new(
-        &db,
+    let metadata = PackageMetadata::builder(
         normalized_imports(&namespace_file.imports),
         dependencies,
         BTreeSet::new(),
@@ -290,7 +296,10 @@ pub(crate) fn analyze_project(
             .as_deref()
             .and_then(parse_description_package),
         namespace_file.native_symbols,
-    );
+    )
+    .durability(Durability::HIGH)
+    .attached_durability(Durability::LOW)
+    .new(&db);
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
@@ -320,13 +329,19 @@ pub(crate) fn analyze_project(
         let (path, source) = &mut checked[index];
         let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
-        let file = SourceFile::new(&db, mem::take(source), kind);
+        let file = SourceFile::builder(mem::take(source), kind)
+            .durability(Durability::HIGH)
+            .new(&db);
         files[index] = Some(file);
         project.push(file);
     }
     let files: Vec<SourceFile> = files.into_iter().flatten().collect();
-    ProjectFiles::new(&db, project.clone());
-    DataFiles::new(&db, scan_data_files(&root));
+    let _: ProjectFiles = ProjectFiles::builder(project.clone())
+        .durability(Durability::HIGH)
+        .new(&db);
+    let _: DataFiles = DataFiles::builder(scan_data_files(&root))
+        .durability(Durability::HIGH)
+        .new(&db);
     let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
     // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
     // Workers need the analysis stack: interface resolution recurses per dependency edge.
