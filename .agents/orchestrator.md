@@ -16,6 +16,7 @@ ry becomes a full, backwards-compatible reimplementation of R, extended with ry'
 - A built-in, typed table type replaces data.table and must outperform it. It may be backed by polars.
 - The performance bar is a JIT on the level of Bun.
 - Every R feature keeps working, including S4, R6 and Reference Classes, but ry discourages them: a lint warns on their use, and an option disables them. ry has its own records, tuples and tagged unions, in the style of Roc, as the recommended way to model data. They are a ry feature on top of R, like the built-in table type, not R data structures, so they need not support R or its quirks; plain R code still runs unchanged.
+- ry ships a standard library modeled on Roc's where it fits (`Result`, `List`, `Str`, `Dict` and so on), using plain qualified names such as `Result.map` rather than static dispatch.
 
 Most of the benchmark dependencies ship compiled C, C++ or Rust code written against R's C API (`SEXP`, memory protection, `.Call`). Full compatibility therefore means implementing that C API, not only R's language semantics. That interface shapes the architecture more than the JIT does, so it is designed first.
 
@@ -67,6 +68,8 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
 - Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
+- Standard library in the style of Roc (session_0111kWqD1BjWFRsQLrnpUHXu, Opus).
+- Docs: tabbed comment versus inline examples (session_0111kWqE4G4N1vc1KAKmpwZJ, Sonnet).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
