@@ -11,9 +11,8 @@ use semantics::stubs::{declaring_namespace, stub_declaration, stubs};
 use semantics::types::{FunctionType, Ty, TyKind, TypeScheme, contains_inference_var};
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
-    item_annotation, item_annotation_syntax, item_check, item_expression_annotations, item_hir,
-    item_name_range, item_naming, item_node, item_tree, package_definitions,
-    project_type_definitions,
+    item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range, item_naming,
+    item_node, item_tree, package_definitions, project_type_definitions,
 };
 use std::collections::BTreeSet;
 use std::iter::once;
@@ -422,13 +421,19 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
         };
         // Only a surviving payload types the binding: refused, definitions-only, and toggle-only
         // blocks leave it hintable.
-        let annotated = item_annotation(db, item).is_some_and(|annotation| {
-            annotation.declared.is_some() || annotation.new_nominal.is_some() || annotation.trusted
-        });
+        let annotated = item_annotations(db, item)
+            .root
+            .as_deref()
+            .is_some_and(|annotation| {
+                annotation.declared.is_some()
+                    || annotation.new_nominal.is_some()
+                    || annotation.trusted
+            });
         // A hint on an annotated nested statement would restate the line above.
-        let annotated_expressions: BTreeSet<ExprId> = item_expression_annotations(db, item)
-            .into_iter()
-            .map(|(id, _)| id)
+        let annotated_expressions: BTreeSet<ExprId> = item_annotations(db, item)
+            .expressions
+            .iter()
+            .map(|(id, _)| *id)
             .collect();
 
         for (index, expression) in hir.expressions.iter().enumerate() {
@@ -924,9 +929,10 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         let annotated = item_annotation_syntax(db, item)
             .is_some_and(|annotation| block_refusal(&annotation.syntax_node()).is_none())
             || statement_inline_site(&node).is_some();
-        let annotated_expressions: BTreeSet<ExprId> = item_expression_annotations(db, item)
-            .into_iter()
-            .map(|(id, _)| id)
+        let annotated_expressions: BTreeSet<ExprId> = item_annotations(db, item)
+            .expressions
+            .iter()
+            .map(|(id, _)| *id)
             .collect();
         for (index, expression) in hir.expressions.iter().enumerate() {
             let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
@@ -1113,7 +1119,10 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
         });
     }
     let root = semantics::parse(db, file).syntax_node();
-    for definition in root.children().filter(|node| node.kind() == TYPE_DEFINITION) {
+    for definition in root
+        .children()
+        .filter(|node| node.kind() == TYPE_DEFINITION)
+    {
         let keyword = type_definition_keyword(&definition);
         let kind = if keyword == "alias" {
             DocumentSymbolKind::AliasDefinition
