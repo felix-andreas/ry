@@ -30,8 +30,9 @@ illegal dependency unrepresentable.
 - **`semantics`** holds the salsa database and every analysis query: the per-item item tree and HIR,
   naming, interned types, Hindley-Milner inference, the stub corpus, the lints, and the point where
   diagnostics leave the analysis. It depends on `syntax` and salsa.
-- **`ide`** implements the editor features (hover, navigation, rename, completion, inlay hints,
-  signature help, code actions, and symbols) as pure reads of `semantics` queries at byte offsets.
+- **`ide`** implements the editor features (hover, navigation, rename, call hierarchy, completion,
+  inlay hints, signature help, code actions and fixes, symbols and the outline, folding, selection
+  ranges, and semantic tokens) as pure reads of `semantics` queries at byte offsets.
   Anything to do with the editor protocol lives in the server, never here.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
@@ -48,8 +49,8 @@ illegal dependency unrepresentable.
   `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
-  allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
-  environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
+  allocation in bitmap-managed pages, the non-moving generational collector and its roots,
+  `CHARSXP` interning, symbols, environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
   `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
@@ -274,9 +275,17 @@ memos, which cost every editor request about 35 ms right after a keystroke.
 A check never reads a project-wide map either. Each lookup it makes across items goes through a
 firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
 writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
-binder that an immediate or script read sees. A structural edit re-runs each firewall that a check
-read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
-its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+binder that an immediate or script read sees. The interface edges an item contributes to the group
+walk (`item_interface_edges`) go through `package_name` too. A structural edit re-runs each firewall
+that a check read, and an unchanged answer is backdated, so a new definition re-checks only the
+items that read its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
+
+A name being typed is a new top-level definition on every keystroke, so the folds that a new name
+changes are kept to one pass: `package_definition_index` folds each package file's definitions
+into the winners and, in the same loop, the names defined more than once. The duplicate check reads
+those through `duplicate_binding_map`, a copy that is empty in a healthy project and so backdates.
+Names in these maps are interned `Symbol`s whose hash was computed once at interning, so a fold
+hashes four bytes per name and never rereads the spelling.
 
 Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
@@ -288,20 +297,28 @@ decision log records that design.
 order plus the `NAMESPACE` and `DESCRIPTION` text, as separate fields so a `NAMESPACE` edit never
 re-derives an item. The index has three layers, and each depends only on the one below:
 
-- `item_load` gives one item's content hash (of the text R evaluates, with inline annotations
-  erased), whether it is a function definition, and the S4, R6 and S3 registrations it makes. It
-  reads only `item_syntax`, so it is the per-item firewall. `item_immediate_reads` gives the names a
-  statement reads while it runs, which excludes reads inside the functions it defines.
-- `file_items` joins one file's items with their positions in the erased text, which keeps every
-  line break, so line numbers match the file on disk.
-- `package_index` joins the files and decides which names are bound lazily: a name whose one writer
-  is a function definition.
+- `file_load_index` erases one file's inline annotations, keeping every line break so line numbers
+  match the file on disk, and records each item's position in that text. `file_items` then gives
+  each item its content hash (of its erased text), whether it is a function definition, the names
+  it writes and reads while it runs (`item_immediate_reads`, which excludes reads inside the
+  functions it defines), and the S4, R6 and S3 registrations it makes. Both read one file only.
+- `file_binds` reduces one file to the names it binds and how, and `package_bindings` joins those
+  into which names are bound lazily: a name whose one writer is a function definition. A body edit
+  leaves a file's binds equal, so salsa backdates them and the join, which is the firewall that
+  keeps an edit from reaching every file's bindings.
+- `package_index` joins the files and the bindings into what a plan diffs.
 
 A reload depends on all of a package's files, so salsa would revisit every file's memos after any
 edit. The loader avoids that with durability: a file starts at high durability and drops to low on
 its first edit, and salsa skips verifying memos that depend only on inputs at a durability nothing
 changed at. The diff then looks inside only the files whose hash changed, plus the eager code of
-every file, which is all an edit can reach. `test_incremental.rs` pins the per-item contract.
+every file, which is all an edit can reach. Lowering a file's durability makes its first edit verify
+every memo once (about 20 ms at 326,000 lines), and later edits of that file skip the check.
+`test_incremental.rs` pins the per-file contract.
+
+Before the console or `ry load` starts R for a package, it calls the loader's `prepare`, which reads
+the sources and derives this whole index on its own threads while base R loads. The first
+`load_all()` then waits for that to finish and only diffs.
 
 ### Diagnostics
 

@@ -656,7 +656,7 @@ reduce <- function(X, firstEig = NULL, lastEig = NULL) {
 }
 #++++
 first_rows: <T, U: scalar numeric, V: scalar numeric> fn(vectors: T, [firstEig]: U, [lastEig]: V) -> Unknown
-reduce: <T, U, V: scalar numeric> fn(X: T, [firstEig]: U | NULL, [lastEig]: V | NULL) -> Unknown
+reduce: <T, U, V> fn(X: T, [firstEig]: U | NULL, [lastEig]: V | NULL) -> Unknown
 
 #---- a_formal_shaped_by_an_is_null_test_passes_to_a_callback_parameter
 evaluate <- function(pars, fun, eqfun = NULL) c(fun(pars), eqfun(pars))
@@ -795,3 +795,466 @@ as_function: fn(x: Unknown) -> Any
 map: <T> fn(.x: Unknown, .f: T, ...: Any) -> Unknown
 g: <T> fn(xs: T) -> Unknown
 h: <T> fn(xs: T) -> Unknown
+
+#---- a_formal_read_only_after_an_early_return_is_optional
+rel <- function(is_abs, rc_ref, fo = "A1") {
+  if (fo == "A1") return("")
+  rc_ref
+}
+h <- function() rel(TRUE, fo = "A1")
+#++++
+rel: <T, U, V> fn([is_abs]: T, [rc_ref]: U, [fo]: V) -> character | U
+h: <T> fn() -> character | T
+
+#---- a_formal_read_before_an_early_return_is_required
+rel <- function(is_abs, rc_ref, fo = "A1") {
+  label <- paste(rc_ref)
+  if (fo == "A1") return(label)
+  rc_ref
+}
+h <- function() rel(TRUE, fo = "A1")
+#++++
+rel: <T, U, V> fn([is_abs]: T, rc_ref: U, [fo]: V) -> character | U
+h: Unknown
+129..132 error[type-mismatch] this call leaves out `rc_ref`, which the function requires
+
+#---- a_formal_read_after_a_stop_is_required
+pick <- function(flag, value) {
+  if (!flag) stop("no value")
+  value
+}
+h <- function() pick(TRUE)
+#++++
+pick: <T> fn(flag: logical, value: T) -> T
+h: Unknown
+88..92 error[type-mismatch] this call leaves out `value`, which the function requires
+
+#---- a_formal_read_on_the_right_of_a_null_coalesce_is_optional
+read_dcf <- function(file, text = NULL) {
+  contents <- text %||% readLines(file)
+  contents
+}
+h <- function() read_dcf(text = "a: 1")
+#++++
+read_dcf: <T, U> fn([file]: T, [text]: U) -> Unknown
+h: fn() -> Unknown
+
+#---- a_formal_tested_with_rlang_is_missing_is_optional
+container <- function(x, gap = NULL) {
+  if (rlang::is_missing(x)) return(gap)
+  x
+}
+h <- function() container()
+#++++
+container: <T, U> fn([x]: T, [gap]: U) -> U | T
+h: <T> fn() -> T | NULL
+
+#---- a_function_whose_formals_are_rewritten_takes_any_call
+make <- function(args) {
+  new_fun <- function() TRUE
+  formals(new_fun) <- args
+  new_fun
+}
+assert_x <- make(alist(x = , y = 1))
+h <- function() assert_x(1, 2)
+#++++
+make: <T> fn(args: T) -> Unknown
+assert_x: Unknown
+h: fn() -> Unknown
+
+#---- an_attribute_write_keeps_a_functions_signature
+make <- function() {
+  new_fun <- function() TRUE
+  attr(new_fun, "kind") <- "check"
+  new_fun
+}
+check <- make()
+h <- function() check(1)
+#++++
+make: fn() -> fn() -> logical
+check: fn() -> logical
+h: Unknown
+135..136 error[type-mismatch] this call passes 1 positional argument, but the function only takes 0
+
+#---- a_branch_that_writes_an_untyped_value_leaves_the_variable_untyped
+cache <- new.env()
+lookup <- function(in_memory, dir, id) {
+  if (in_memory) db <- cache else db <- list.files(dir)
+  entry <- db[[id]]
+  entry$hashes
+}
+#++++
+cache: environment
+lookup: <T, U> fn(in_memory: logical, [dir]: T, id: U) -> Unknown
+
+#---- a_branch_join_of_typed_values_still_checks_the_union
+pick <- function(flag) {
+  if (flag) x <- 1L else x <- "a"
+  x + 1L
+}
+#++++
+pick: Unknown
+61..62 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | integer`
+
+#---- a_factor_compares_with_a_number_by_its_labels
+groups <- as.factor(c(1L, 2L, 3L))
+first <- groups == 1
+#++++
+groups: factor
+first: logical
+
+#---- a_factor_still_rejects_an_ordering_comparison
+groups <- as.factor(c(1L, 2L, 3L))
+low <- groups < 2
+#++++
+groups: factor
+low: Unknown
+42..48 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `factor`
+
+#---- sort_with_index_return_is_not_a_vector
+order_of <- function(values) {
+  sorted <- sort(as.numeric(values), index.return = TRUE)
+  sorted$ix
+}
+#++++
+order_of: <T> fn(values: T) -> Any
+
+#---- sort_without_index_return_keeps_its_element_type
+sorted <- sort(c(3, 1, 2))
+#++++
+sorted: double[]
+
+#---- a_function_picked_by_an_argument_value_takes_any_members_call
+compat <- function(fn) {
+  switch(
+    fn,
+    is_interactive = return(function() interactive()),
+    warn = return(function(msg) warning(msg, call. = FALSE))
+  )
+  stop("unknown shim")
+}
+warn_header <- function(header) {
+  warn <- compat("warn")
+  warn(header)
+}
+#++++
+compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
+warn_header: <T> fn(header: T) -> Unknown
+
+#---- a_function_picked_by_an_argument_value_still_needs_one_member_to_fit
+compat <- function(fn) {
+  switch(
+    fn,
+    is_interactive = return(function() interactive()),
+    warn = return(function(msg) warning(msg, call. = FALSE))
+  )
+  stop("unknown shim")
+}
+warn_twice <- function(header) {
+  warn <- compat("warn")
+  warn(header, header, header)
+}
+#++++
+compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
+warn_twice: Unknown
+253..259 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 0
+
+#---- an_inferred_scalar_parameter_takes_a_vector_of_its_type
+rlength <- function(x) if (all(!x)) length(x) else min(which(x)) - 1L
+gaps <- rlength(c(1, 0, 2) > 0)
+#++++
+rlength: fn(x: logical) -> integer
+gaps: integer
+
+#---- a_condition_parameter_takes_a_number
+skip <- function(line.id) if (!line.id) 0L else 1L
+skipped <- skip(0L)
+#++++
+skip: fn(line.id: logical) -> integer
+skipped: integer
+
+#---- an_annotated_scalar_parameter_still_rejects_a_vector
+#: fn(flag: logical) -> double
+pick <- function(flag) if (flag) 1 else 2
+picked <- pick(c(1, 0, 2) > 0)
+#++++
+pick: fn(flag: logical) -> double
+picked: Unknown
+88..102 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- an_inferred_character_parameter_still_rejects_a_number
+matches <- function(pattern) grepl(pattern, "abc")
+matched <- matches(1)
+#++++
+matches: fn(pattern: character) -> logical
+matched: Unknown
+70..71 error[type-mismatch] expected `character`, found `double`
+
+#---- a_quoting_form_does_not_run_its_arguments
+label <- function() expression("density " * f[1] - f[2])
+call <- function() bquote("x" - .(y))
+#++++
+label: fn() -> Any
+call: fn() -> Any
+
+#---- a_project_function_named_like_a_quoting_form_still_checks_its_arguments
+expression <- function(x) x + 1
+label <- function() expression("a")
+#++++
+expression: <T: numeric> fn(x: T) -> double
+label: Unknown
+63..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- an_argument_named_dots_with_value_dots_forwards_the_dots
+skip_na <- function(x, FUN, ...) FUN(na.omit(x), ... = ...)
+total <- function(v) skip_na(v, FUN = function(x) cumsum(x))
+#++++
+skip_na: <T, U> fn(x: T, FUN: fn(Any, ...: Any) -> U, ...: Any) -> U
+total: <T, U> fn(v: T) -> U
+
+#---- a_callback_called_with_a_named_argument_still_needs_that_parameter
+apply_named <- function(x, FUN) FUN(x, scale = 2)
+scaled <- function(v) apply_named(v, FUN = function(x) x)
+#++++
+apply_named: <T, U> fn(x: T, FUN: fn(T, scale: double) -> U) -> U
+scaled: Unknown
+93..106 error[type-mismatch] expected `fn(T, scale: double) -> U`, found `fn(x: V) -> V`
+
+#---- a_number_is_a_valid_replacement_string
+progress <- function(total) sub(":total", round(total), ":total done")
+#++++
+progress: <T> fn(total: T) -> character
+
+#---- a_list_is_still_not_a_replacement_string
+labelled <- sub(":x", list(1), ":x done")
+#++++
+labelled: Unknown
+12..41 error[type-mismatch] no overload of `sub` matches these arguments. I tried all 2 declared signatures; the first candidate fails with: expected `character`, found `list{double}`
+
+#---- a_match_fun_helper_skips_a_mocking_placeholder
+nchar <- NULL
+widths <- function(words) vapply(words, nchar, integer(1))
+#++++
+nchar: NULL
+widths: <T> fn(words: list[T] | T[]) -> integer[]
+
+#---- a_placeholder_that_names_no_library_function_is_still_not_a_function
+my_helper <- NULL
+widths <- function(words) vapply(words, my_helper, integer(1))
+#++++
+my_helper: NULL
+widths: Unknown
+44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 4 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
+
+#---- a_branch_with_an_open_variable_inside_a_list_is_not_pinned_by_the_other_branch
+split_deps <- function(dp) if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)
+none <- split_deps(FALSE)
+#++++
+split_deps: <T> fn(dp: T) -> list{character[], character[]} | list{T, T}
+none: list{character[], character[]} | list{logical, logical}
+
+#---- a_list_branch_whose_variable_is_constrained_still_unifies
+pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
+#++++
+pair: fn(dp: integer) -> list{integer, integer}
+
+#---- unlink_takes_a_vector_as_its_recursive_flag
+remove_paths <- function(paths) unlink(paths, recursive = dir.exists(paths) & rep(TRUE, 2))
+#++++
+remove_paths: <T> fn(paths: T) -> integer
+
+#---- unlink_still_rejects_text_as_its_recursive_flag
+remove_paths <- function(paths) unlink(paths, recursive = "yes")
+#++++
+remove_paths: Unknown
+58..63 error[type-mismatch] expected `logical[]`, found `character`
+
+#---- a_numeric_binding_widens_to_a_union_of_numbers
+span <- function(from, to) to - from
+count_up <- function(fine) span(1L, if (fine) 2.5 else 2L)
+#++++
+span: <T: numeric> fn(from: T, to: T) -> T
+count_up: fn(fine: logical) -> double
+
+#---- a_numeric_binding_still_rejects_a_union_with_text
+span <- function(from, to) to - from
+count_up <- function(fine) span(1L, if (fine) 2.5 else "2")
+#++++
+span: <T: numeric> fn(from: T, to: T) -> T
+count_up: Unknown
+73..95 error[type-mismatch] expected `integer`, found `double | character`
+
+#---- a_union_operand_dispatches_to_a_class_method_per_member
+penalty <- function(m, first) {
+  total <- if (first) 0 else t(m) %*% m
+  total + t(m) %*% m
+}
+#++++
+penalty: <T> fn(m: T, first: logical) -> matrix
+
+#---- a_union_member_without_a_method_is_still_rejected
+penalty <- function(m, first) {
+  total <- if (first) "none" else t(m) %*% m
+  total + t(m) %*% m
+}
+#++++
+penalty: Unknown
+79..97 error[type-mismatch] `+` is not defined between `character` and `matrix`
+
+#---- a_callback_called_positionally_may_later_be_called_by_name
+step <- function(f, pars, arglist) {
+  base <- f(pars, arglist)
+  f(pars = pars + 1, arglist) - base
+}
+#++++
+step: <T: numeric, U, V: numeric> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> V
+
+#---- a_callback_called_by_name_still_takes_no_extra_argument
+step <- function(f, pars, arglist) {
+  base <- f(pars, arglist)
+  f(pars = pars + 1, arglist, 3) - base
+}
+#++++
+step: Unknown
+94..95 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- a_string_from_the_environment_is_a_condition
+flag_on <- function() {
+  enabled <- Sys.getenv("FLAG", unset = "TRUE")
+  if (enabled) 1L else 0L
+}
+#++++
+flag_on: fn() -> integer
+
+#---- a_string_literal_that_is_not_a_logical_spelling_is_still_rejected_as_a_condition
+pick <- function() if ("yes") 1L else 0L
+#++++
+pick: Unknown
+23..28 error[type-mismatch] expected `logical`, found `character`
+
+#---- an_element_write_widens_an_atomic_vector_to_the_written_type
+probabilities <- function(q) {
+  prob <- rep(NA, length(q))
+  prob[q > 0] <- 0.5
+  prob
+}
+#++++
+probabilities: <T> fn(q: T) -> double[]
+
+#---- an_element_write_of_text_makes_the_vector_text
+labelled <- function() {
+  x <- c(1, 2)
+  x[1] <- "a"
+  x + 1
+}
+#++++
+labelled: Unknown
+56..57 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character[]`
+
+#---- a_number_passed_to_a_helper_may_then_be_mapped_over
+# `half(n)` makes `n` a number, and a number vector still fits `lapply`'s `T[]` member.
+half <- function(n) if (n %% 2 == 1L) 0L else 1L
+halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
+#++++
+half: <T: numeric> fn(n: T) -> integer
+halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
+
+#---- a_mapped_number_still_rejects_text
+half <- function(n) if (n %% 2 == 1L) 0L else 1L
+halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
+wrong <- halves(c("a", "b"))
+#++++
+half: <T: numeric> fn(n: T) -> integer
+halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
+wrong: Unknown
+137..148 error[type-mismatch] expected `T[]`, found `character[]`
+
+#---- delayed_assign_binds_a_local_that_shadows_base
+read_header <- function(read_bytes) {
+  delayedAssign("length", read_bytes(2))
+  length * 2
+}
+#++++
+read_header: <T> fn(read_bytes: fn(double) -> T) -> Unknown
+
+#---- assign_into_another_environment_binds_no_local
+scaled <- function(n) {
+  assign("length", n, envir = globalenv())
+  length * 2
+}
+#++++
+scaled: Unknown
+69..75 error[type-mismatch] expected a numeric value (`integer` or `double`), found `fn(x: Any) -> integer`
+
+#---- a_callback_forwarding_dots_may_later_be_called_by_name
+# `.hessian(f, x, ...)` calls `f(x, ...)`, which declares one unnamed slot and `...`.
+hessian <- function(f, x, ...) f(x, ...)
+fit <- function(f, arglist) {
+  hessian(f, 1, arglist = arglist)
+  f(pars = 2, arglist = arglist)
+}
+#++++
+hessian: <T, U> fn(f: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
+fit: <T, U> fn(f: fn(double, ...: Any) -> T, [arglist]: U) -> T
+
+#---- a_callback_forwarding_dots_still_checks_its_positional_argument
+hessian <- function(f, x, ...) f(x, ...)
+fit <- function(f, arglist) {
+  hessian(f, 1, arglist = arglist)
+  f("a", arglist = arglist)
+}
+#++++
+hessian: <T, U> fn(f: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
+fit: Unknown
+110..113 error[type-mismatch] expected `double`, found `character`
+
+#---- a_number_meeting_a_union_of_numbers_keeps_the_whole_union
+#: fn(x: integer | double) -> double
+h <- function(x) 1
+g <- function(n) {
+  stopifnot(n + 1 > 0)
+  h(n)
+}
+r <- g(0.5)
+#++++
+h: fn(x: integer | double) -> double
+g: fn(n: integer | double) -> double
+r: double
+
+#---- a_name_on_an_inferred_callback_leaves_the_positional_slots_unchecked
+# R matches `b = "x"` first, so the `1` fills `a`, the first slot, not the second.
+g <- function(f) {
+  f(1, "x")
+  f(b = "x", 1)
+}
+#++++
+g: <T> fn(f: fn(double, character) -> T) -> T
+
+#---- a_string_operand_of_and_is_still_rejected
+f <- function() {
+  s <- paste0("a", "b")
+  if (s && TRUE) 1 else 2
+}
+#++++
+f: Unknown
+48..49 error[type-mismatch] expected `logical`, found `character`
+
+#---- assign_over_a_parameter_makes_it_untyped
+f <- function(value) {
+  assign("value", 1)
+  value + 1
+}
+r <- f("a")
+#++++
+f: <T> fn(value: T) -> Unknown
+r: Unknown
+
+#---- assign_over_a_local_makes_it_untyped
+f <- function() {
+  x <- "a"
+  assign("x", 1)
+  x + 1
+}
+#++++
+f: fn() -> Unknown
+20..21 warning[unused] `x` is assigned but never used.

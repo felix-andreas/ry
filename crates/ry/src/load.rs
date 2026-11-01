@@ -226,6 +226,24 @@ extern "C" fn ry_loader_commit(root: Sexp) -> Sexp {
     libr::null()
 }
 
+/// Starts analyzing the package at `root` on a thread of its own, so the analysis overlaps
+/// starting R and the `load_all()` that follows finds it done; that load waits for the
+/// loader while this holds it.
+pub fn prepare(root: PathBuf) {
+    let spawned = thread::Builder::new()
+        .name("ry-loader-prepare".to_owned())
+        .stack_size(ANALYSIS_STACK_SIZE)
+        .spawn(move || {
+            let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
+            loader.set_strict(strict_config(&root));
+            loader.prepare(&root);
+        });
+    if let Err(error) = spawned {
+        // Preparing only saves time: without the thread, the load derives everything itself.
+        drop(error);
+    }
+}
+
 /// Analysis recurses as deeply as the code nests, so it gets the analysis stack rather than
 /// R's thread's.
 fn on_analysis_thread<T: Send>(work: impl FnOnce() -> T + Send) -> T {

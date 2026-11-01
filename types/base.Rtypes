@@ -87,13 +87,15 @@ c.Date : fn(...: Date) -> Date
 [.Date : fn(x: Date, ...: Any) -> Date
 [[.Date : fn(x: Date, ...: Any) -> Date
 
-# A factor compares with `==` and `!=` against its labels or another factor; R
-# answers `<` on an unordered factor with `NA` and a warning, so it is left
-# undeclared and reported. Subsetting and combining keep the class.
-==.factor : fn(e1: factor, e2: factor | character[]) -> logical
-==.factor : fn(e1: character[], e2: factor) -> logical
-!=.factor : fn(e1: factor, e2: factor | character[]) -> logical
-!=.factor : fn(e1: character[], e2: factor) -> logical
+# A factor compares with `==` and `!=` against another factor or any atomic
+# vector, which R converts to character and matches against the labels, so
+# `fac == 1` is true where the label is "1". R answers `<` on an unordered
+# factor with `NA` and a warning, so it is left undeclared and reported.
+# Subsetting and combining keep the class.
+==.factor : fn(e1: factor, e2: factor | character[] | double[] | integer[] | logical[]) -> logical
+==.factor : fn(e1: character[] | double[] | integer[] | logical[], e2: factor) -> logical
+!=.factor : fn(e1: factor, e2: factor | character[] | double[] | integer[] | logical[]) -> logical
+!=.factor : fn(e1: character[] | double[] | integer[] | logical[], e2: factor) -> logical
 c.factor : fn(...: factor) -> factor
 [.factor : fn(x: factor, ...: Any) -> factor
 [[.factor : fn(x: factor, ...: Any) -> factor
@@ -275,12 +277,17 @@ formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [fl
 prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
-# used); the subject `x` is Any-param. Elementwise results are scalar-claim. `grep` returns indices or
-# values depending on `value =` (value-dependent). `regexpr` returns one match position per element
+# used); the subject `x` is Any-param. R coerces `replacement` with `as.character`, so a number
+# such as `round(total)` is a valid replacement. That is a second overload rather than a union, so
+# an open variable passed as `replacement` still binds to `character`. Elementwise results are
+# scalar-claim. `grep` returns indices or values depending on `value =` (value-dependent).
+# `regexpr` returns one match position per element
 # and `gregexpr` a list of position vectors (both carry match-length attributes, which `regmatches`
 # reads); `regexec`'s per-group structure and `regmatches` itself stay `Any`.
 gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+gsub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+sub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grep : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [value]: logical, [fixed]: logical, [useBytes]: logical, [invert]: logical) -> Any
 regexpr : @pure fn(pattern: character, text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> integer[]
@@ -412,6 +419,9 @@ trunc : @pure fn(x: Any, ...: Any) -> double
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for
 # the shapes the candidates cannot express. `order`/`which` genuinely produce integer index vectors.
 # `rank`'s result type depends on `ties.method` (double for averages, integer otherwise).
+# `index.return = TRUE` returns `list(x, ix)`, and a stub cannot tell `TRUE` from `FALSE`, so
+# a call that passes it at all is untyped.
+sort : fn(x: Any, [decreasing]: logical, [na.last]: Any, [method]: character, index.return: logical, ...: Any) -> Any
 sort : @pure <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
 sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
 sort : fn(x: Any, [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
@@ -667,7 +677,7 @@ within : Any
 # `logical.return` (value-dependent); `require`'s logical is genuine (`if (require(pkg))`).
 library : fn([package]: Any, [help]: Any, [pos]: Any, [lib.loc]: Any, [character.only]: logical, [logical.return]: logical, [warn.conflicts]: logical, [quietly]: logical, [verbose]: logical) -> Any
 require : fn([package]: Any, [lib.loc]: Any, [quietly]: logical, [warn.conflicts]: logical, [character.only]: logical) -> logical
-requireNamespace : fn(package: Any, [quietly]: logical) -> logical
+requireNamespace : fn(package: Any, ...: Any, [quietly]: logical) -> logical
 source : fn([file]: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [exprs]: Any, [spaced]: logical, [verbose]: logical, [prompt.echo]: character, [max.deparse.length]: Any, [width.cutoff]: Any, [deparseCtrl]: Any, [chdir]: logical, [catch.aborts]: logical, [encoding]: Any, [continue.echo]: character, [skip.echo]: Any, [keep.source]: logical) -> Any
 getOption : fn(x: character, [default]: Any) -> Any
 # `options(warn = 1, digits = 7)`: arbitrary option names as named arguments.
@@ -686,7 +696,9 @@ file.copy : fn(from: Any, to: Any, [overwrite]: logical, [recursive]: logical, [
 file.rename : fn(from: Any, to: Any) -> logical
 dir.exists : fn(paths: Any) -> logical
 dir.create : fn(path: Any, [showWarnings]: logical, [recursive]: logical, [mode]: character) -> logical
-unlink : fn(x: Any, [recursive]: logical, [force]: logical, [expand]: logical) -> integer
+# The C code reads the flags with asLogical, which takes the first element, so a vector such as
+# `file.info(paths)$isdir` is a valid flag.
+unlink : fn(x: Any, [recursive]: logical[], [force]: logical[], [expand]: logical[]) -> integer
 basename : @pure fn(path: Any) -> character
 dirname : @pure fn(path: Any) -> character
 normalizePath : fn(path: Any, [winslash]: character, [mustWork]: logical) -> character
@@ -752,7 +764,7 @@ diff : @pure fn(x: Any, [lag]: Any, [differences]: Any, ...: Any) -> Any
 # Interactive debugging. All side-effecting; `debug`/`trace` take the function object itself
 # (Any-param: any callable value is legal), and the returns follow R (`NULL` invisibly, except
 # `isdebugged`'s query and `trace`'s returned name).
-browser : fn([text]: character, [condition]: Any, [expr]: Any, [skipCalls]: integer) -> NULL
+browser : fn([text]: character, [condition]: Any, [expr]: Any, [skipCalls]: double | integer) -> NULL
 debug : fn(fun: Any, [text]: character, [condition]: Any, [signature]: Any) -> NULL
 debugonce : fn(fun: Any, [text]: character, [condition]: Any, [signature]: Any) -> NULL
 undebug : fn(fun: Any, [signature]: Any) -> NULL

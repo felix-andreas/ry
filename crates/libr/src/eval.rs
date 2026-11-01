@@ -27,7 +27,10 @@ use {
         native::Interface,
         unwind::park,
     },
-    std::ffi::{c_char, c_int, c_void},
+    std::{
+        ffi::{c_char, c_int, c_void},
+        path::PathBuf,
+    },
 };
 
 /// Runs a graphics callback inside a C context, so that an R error raised from C code in it
@@ -1271,8 +1274,10 @@ pub unsafe extern "C" fn ry_run(
         );
     }
     if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
-        outcome = match std::fs::read_to_string(path) {
-            Ok(text) => interp::session::run_text(&text, path),
+        outcome = match std::fs::read(path) {
+            Ok(bytes) => {
+                interp::session::run_text(&interp::values::escape_invalid_bytes(&bytes), path)
+            }
             Err(failure) => {
                 let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
                 crate::boundary::write_console(message.as_bytes(), true);
@@ -1413,6 +1418,19 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
+}
+
+/// Starts analyzing the package at or above `path` (a NUL-terminated path) in the background
+/// and returns at once, so a later `load_all()` of it finds the analysis done. `flags` are the
+/// `RUN_FLAG_*` bits the session will start with. The console and `ry load` call this before
+/// `ry_repl` or `ry_run`, which overlaps the analysis with loading base R.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
+    if path.is_null() {
+        return;
+    }
+    let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
+    loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

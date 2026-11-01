@@ -44,6 +44,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    std::ops::Range,
 };
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
@@ -208,6 +209,22 @@ pub unsafe fn closure_body(function: Sexp) -> Sexp {
     body
 }
 
+/// A closure's body compiled to byte code, compiling it now if it has not run often enough to
+/// compile yet. A body the compiler cannot handle stays an expression.
+pub unsafe fn compiled_body(function: Sexp) -> R<Sexp> {
+    let body = function.cdr();
+    if body.kind() == SexpType::Bytecode {
+        return Ok(body);
+    }
+    match compile(body, function)? {
+        Some(code) => {
+            crate::heap().set_cdr(function, code);
+            Ok(code)
+        }
+        None => Ok(body),
+    }
+}
+
 pub unsafe fn is_compiled(function: Sexp) -> bool {
     function.cdr().kind() == SexpType::Bytecode
 }
@@ -239,6 +256,15 @@ pub mod profile {
     /// The optimizing tier's state for this code, which only that tier interprets.
     pub const TIER_STATE: usize = 2;
     pub const LENGTH: usize = 3;
+}
+
+/// The body `function` was defined with, which a compiled closure keeps beside its code.
+pub unsafe fn source_body(function: Sexp) -> Sexp {
+    if is_compiled(function) {
+        source_of(function.cdr())
+    } else {
+        function.cdr()
+    }
 }
 
 unsafe fn source_of(code: Sexp) -> Sexp {
@@ -349,9 +375,14 @@ pub enum Op {
     /// `target <- f(target, ...)`, which may update the value of `target` in place
     /// (`eval::rebind_call`).
     CallRebinding,
+    /// `dst function call target`: the body's last call, `f(target, ...)` for a library builtin
+    /// that updates its first argument in place, where `target` is the first parameter. It may
+    /// update the parameter's value in place while a move into this frame lasts
+    /// (`eval::tail_update`).
+    CallTailUpdate,
 }
 
-pub const OPS: [Op; 28] = [
+pub const OPS: [Op; 29] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -380,6 +411,7 @@ pub const OPS: [Op; 28] = [
     Op::DispatchSubject,
     Op::EndStatement,
     Op::CallRebinding,
+    Op::CallTailUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -414,21 +446,36 @@ pub const ARITHS: [(Arith, &str); 11] = [
 
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
 /// length-one vector and a plain vector is any other; both have no attributes and are not
-/// ALTREP.
+/// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
+/// it promises what a plain vector does not (no NA, no attributes) and its operators differ.
 pub mod feedback {
-    pub const INTEGER_SCALAR: u8 = 1 << 0;
-    pub const DOUBLE_SCALAR: u8 = 1 << 1;
-    pub const LOGICAL_SCALAR: u8 = 1 << 2;
-    pub const INTEGER_VECTOR: u8 = 1 << 3;
-    pub const DOUBLE_VECTOR: u8 = 1 << 4;
-    pub const LOGICAL_VECTOR: u8 = 1 << 5;
-    pub const LIST: u8 = 1 << 6;
-    pub const OTHER: u8 = 1 << 7;
+    pub const INTEGER_SCALAR: u16 = 1 << 0;
+    pub const DOUBLE_SCALAR: u16 = 1 << 1;
+    pub const LOGICAL_SCALAR: u16 = 1 << 2;
+    pub const INTEGER_VECTOR: u16 = 1 << 3;
+    pub const DOUBLE_VECTOR: u16 = 1 << 4;
+    pub const LOGICAL_VECTOR: u16 = 1 << 5;
+    pub const LIST: u16 = 1 << 6;
+    pub const OTHER: u16 = 1 << 7;
+    pub const INTEGER_ARRAY: u16 = 1 << 8;
+    pub const DOUBLE_ARRAY: u16 = 1 << 9;
+    pub const LOGICAL_ARRAY: u16 = 1 << 10;
 }
 
 /// The [`feedback`] bit for `value`.
-pub unsafe fn value_kind(value: Sexp) -> u8 {
-    if values::has_attributes(value) || value.is_altrep() || value.is_array() {
+pub unsafe fn value_kind(value: Sexp) -> u16 {
+    if value.is_altrep() {
+        return feedback::OTHER;
+    }
+    if value.is_array() {
+        return match value.kind() {
+            SexpType::Integer => feedback::INTEGER_ARRAY,
+            SexpType::Real => feedback::DOUBLE_ARRAY,
+            SexpType::Logical => feedback::LOGICAL_ARRAY,
+            _ => feedback::OTHER,
+        };
+    }
+    if values::has_attributes(value) {
         return feedback::OTHER;
     }
     let scalar = value.length() == 1;
@@ -469,6 +516,10 @@ struct Compiler {
     /// The call `x <- f(x, ...)` assigns to `x`, while the compiler compiles that call, so a
     /// call of a closure becomes [`Op::CallRebinding`].
     rebinding: Option<(Sexp, Sexp)>,
+    /// The body's last call when it is `f(p, ...)` for a library builtin that updates its first
+    /// argument in place and `p` is the first parameter, with `p`: the call becomes
+    /// [`Op::CallTailUpdate`].
+    tail_update: Option<(Sexp, Sexp)>,
 }
 
 #[derive(Clone, Copy)]
@@ -500,6 +551,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
         enclosure: function.tag(),
         srcref: values::get_attr(function, symbols().srcref),
         rebinding: None,
+        tail_update: tail_update(body, function),
     };
     let result = compiler.allocate();
     compiler.expression(body, result)?;
@@ -514,8 +566,8 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
     values::reals_mut(epochs).fill(-1.0);
     heap.set_element(constants, EPOCHS, epochs);
-    let feedback = values::alloc(SexpType::Raw, compiler.code.len())?;
-    values::raws_mut(feedback).fill(0);
+    let feedback = values::alloc(SexpType::Integer, compiler.code.len())?;
+    values::ints_mut(feedback).fill(0);
     heap.set_element(constants, FEEDBACK, feedback);
     let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
     values::ints_mut(profile).fill(0);
@@ -645,6 +697,43 @@ unsafe fn rebinds_first_argument(expression: Sexp) -> bool {
         && value.cdr().kind() == SexpType::Pairlist
         && value.cdr().car() == target
         && value.cdr().tag() == nil()
+}
+
+/// The last call of `body`, the body itself or the last statement of a `{`, when it is
+/// `f(p, ...)` for a standard library builtin that updates its first argument in place and `p`
+/// is the first parameter of `function`, with `p`. A move into the frame leaves the parameter holding the
+/// only reference to the caller's value, and nothing runs in the frame after this call, so
+/// updating the parameter's value in place is invisible while the move lasts.
+unsafe fn tail_update(body: Sexp, function: Sexp) -> Option<(Sexp, Sexp)> {
+    let formals = function.car();
+    let mut last = body;
+    if last.kind() == SexpType::Language
+        && last.car().kind() == SexpType::Symbol
+        && &*symbol_name(last.car()) == "{"
+    {
+        let mut statement = last.cdr();
+        if statement.kind() != SexpType::Pairlist {
+            return None;
+        }
+        while statement.cdr().kind() == SexpType::Pairlist {
+            statement = statement.cdr();
+        }
+        last = statement.car();
+    }
+    if formals.kind() != SexpType::Pairlist
+        || last.kind() != SexpType::Language
+        || last.car().kind() != SexpType::Symbol
+        || !crate::standard_library::reuses_first_argument(&symbol_name(last.car()))
+    {
+        return None;
+    }
+    let parameter = formals.tag();
+    let arguments = last.cdr();
+    let matches = arguments.kind() == SexpType::Pairlist
+        && arguments.tag() == nil()
+        && arguments.car() == parameter
+        && !crate::moves::may_capture_frame(function);
+    matches.then_some((last, parameter))
 }
 
 /// Whether `expression` is `x <- f(x, ...)` for a standard library builtin that updates its
@@ -847,6 +936,19 @@ impl Compiler {
             if inlined {
                 return self.guarded(call, head, primitive, dst, &name, &args);
             }
+        } else if let Some(function) = self.library_function(head)? {
+            let args = values::pairlist_items(call.cdr());
+            // Registers do not count as references, so the later arguments must not update an
+            // earlier one in place, as for any builtin call.
+            let plain = args.iter().all(|(tag, value)| {
+                *tag == nil() && *value != symbols().dots && *value != missing_arg()
+            }) && !args
+                .iter()
+                .skip(1)
+                .any(|(_, value)| may_modify_in_place(*value));
+            if plain {
+                return self.library_call(call, head, function, dst, &args);
+            }
         }
         self.general_call(call, head, dst)
     }
@@ -981,22 +1083,105 @@ impl Compiler {
         let Some(expected) = expected else {
             return Ok(None);
         };
-        // A walk that forces no promise: compiling must not run code.
+        Ok(self
+            .enclosing_function(symbol)
+            .filter(|&value| value == expected))
+    }
+
+    /// The function `symbol` names from the closure's enclosure, found by a walk that forces no
+    /// promise, since compiling must not run code. `None` when a binding on the way is active
+    /// or an unforced promise.
+    unsafe fn enclosing_function(&self, symbol: Sexp) -> Option<Sexp> {
         let heap = crate::heap();
         let mut env = self.enclosure;
         while env != heap.known().empty_env {
             if let Some(cell) = heap.frame_cell(env, symbol) {
                 let value = forced_value(cell.cdr());
                 if cell.has_gp(gp::ACTIVE_BINDING) || value.kind() == SexpType::Promise {
-                    return Ok(None);
+                    return None;
                 }
                 if values::is_function(value) {
-                    return Ok((value == expected).then_some(expected));
+                    return Some(value);
                 }
             }
             env = env.enclosure();
         }
-        Ok(None)
+        None
+    }
+
+    /// The standard library builtin `symbol` names from the closure's enclosure, such as
+    /// `Dict.get` from `package:ry`.
+    unsafe fn library_function(&self, symbol: Sexp) -> R<Option<Sexp>> {
+        let Some(function) = self.enclosing_function(symbol) else {
+            return Ok(None);
+        };
+        if function.kind() != SexpType::Builtin {
+            return Ok(None);
+        }
+        let definition = eval::builtin_def(function)?;
+        Ok(
+            (definition.accepts_native && definition.kind == crate::builtins::Kind::Builtin)
+                .then_some(function),
+        )
+    }
+
+    /// A call to a standard library builtin resolved while compiling: a guard that the name
+    /// still finds that builtin, then the builtin called on the argument values, with no lookup
+    /// of the function, no promises and no dispatch. A name rebound since compiling falls back
+    /// to the evaluator.
+    unsafe fn library_call(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        function: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(function);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let call_constant = self.constant(call);
+        let mark = self.next_register;
+        let function_register = self.allocate();
+        self.emit(Op::Constant, &[function_register, expected]);
+        if let Some((_, target)) = self.tail_update.filter(|&(tail, _)| tail == call) {
+            let target = self.constant(target);
+            self.emit(
+                Op::CallTailUpdate,
+                &[dst, function_register, call_constant, target],
+            );
+            self.release_to(mark);
+            let done = self.emit_patchable(Op::Jump, &[0]);
+            self.patch(guard);
+            self.fallback(call, dst)?;
+            self.patch(done);
+            return Ok(());
+        }
+        let base = self.next_register;
+        for _ in args {
+            self.allocate();
+        }
+        for (index, (_, value)) in args.iter().enumerate() {
+            self.expression(*value, base + index as u32)?;
+        }
+        self.emit(
+            Op::CallBuiltin,
+            &[
+                dst,
+                function_register,
+                call_constant,
+                base,
+                args.len() as u32,
+            ],
+        );
+        self.release_to(mark);
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
     }
 
     unsafe fn guarded(
@@ -1455,7 +1640,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::BranchUnlessBuiltin => 2,
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
-        Op::CallRebinding => 4,
+        Op::CallRebinding | Op::CallTailUpdate => 4,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -1661,7 +1846,14 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     let constants = code.cdr();
     let symbol = constants.element(words[pc + 2] as usize);
     let local = crate::heap().frame_cell(env, symbol).is_some();
-    let value = lookup_variable(symbol, env, constants, code.tag(), words[pc + 3] as usize)?;
+    let value = lookup_variable(
+        symbol,
+        env,
+        constants,
+        code.tag(),
+        words[pc + 3] as usize,
+        0..0,
+    )?;
     record_feedback(constants, pc, value);
     Ok((value, local))
 }
@@ -1690,7 +1882,8 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             // value invisible, as `withCallingHandlers(expr)` relies on.
             interp().visible = true;
             let symbol = constants.element(operand(1));
-            let value = lookup_variable(symbol, env, constants, caches, operand(2))?;
+            let held = base..base + operand(0);
+            let value = lookup_variable(symbol, env, constants, caches, operand(2), held)?;
             record_feedback(constants, at, value);
             set(operand(0), value);
         }
@@ -1749,6 +1942,14 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let call = constants.element(operand(2));
             let target = constants.element(operand(3));
             let value = eval::rebind_call(call, function, target, env)?;
+            record_feedback(constants, at, value);
+            set(operand(0), value);
+        }
+        Op::CallTailUpdate => {
+            let function = register(operand(1));
+            let call = constants.element(operand(2));
+            let target = constants.element(operand(3));
+            let value = eval::tail_update(call, function, target, env)?;
             record_feedback(constants, at, value);
             set(operand(0), value);
         }
@@ -2010,7 +2211,7 @@ unsafe fn call_builtin(
 
 unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     let feedback = constants.element(FEEDBACK);
-    values::raws_mut(feedback)[pc] |= value_kind(value);
+    values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
 }
 
 /// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the
@@ -2101,20 +2302,20 @@ unsafe fn lookup_variable(
     constants: Sexp,
     caches: Sexp,
     slot: usize,
+    held: Range<usize>,
 ) -> R<Sexp> {
     let heap = crate::heap();
     if let Some(cell) = heap.frame_cell(env, symbol) {
         let value = cell.cdr();
         if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
-            return eval::eval_symbol(symbol, env);
+            return holding(held, || eval::eval_symbol(symbol, env));
         }
         if value.kind() == SexpType::Promise {
             // An argument: force it here rather than repeat the frame search `eval_symbol` does.
-            let forced = if value.car() == unbound() {
-                eval::force_promise(value)?
-            } else {
-                value.car()
-            };
+            if value.car() != unbound() {
+                return Ok(value.car());
+            }
+            let forced = holding(held, || eval::force_promise(value))?;
             heap.root(forced);
             return Ok(forced);
         }
@@ -2126,7 +2327,7 @@ unsafe fn lookup_variable(
     {
         let value = cell.cdr();
         if value.kind() == SexpType::Promise {
-            return eval::eval_symbol(symbol, env);
+            return holding(held, || eval::eval_symbol(symbol, env));
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);
@@ -2135,7 +2336,28 @@ unsafe fn lookup_variable(
     if let Some(cell) = resolve(symbol, enclosure, false)? {
         fill_cache(symbol, enclosure, cell, constants, caches, slot);
     }
-    eval::eval_symbol(symbol, env)
+    holding(held, || eval::eval_symbol(symbol, env))
+}
+
+/// Runs `run`, which forces a promise or an active binding and so runs code. The registers
+/// below the destination hold values of the expression being evaluated without counting as
+/// references, so they count as referenced while that code runs: in `x + y` where forcing `y`
+/// runs `x[] <- 1`, the assignment must copy `x` rather than change the left operand.
+unsafe fn holding(held: Range<usize>, run: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
+    let values: Vec<Sexp> = interp()
+        .bytecode
+        .registers
+        .get(held)
+        .map(<[Sexp]>::to_vec)
+        .unwrap_or_default();
+    for value in &values {
+        value.increment_refcount();
+    }
+    let result = run();
+    for value in &values {
+        value.decrement_refcount();
+    }
+    result
 }
 
 /// A function's value, with GNU R's rule that bindings to non-functions are skipped.

@@ -26,8 +26,8 @@ Reloaded tally: 1 definition rebound, in 3 ms.
 
 There is no `load_all()` to remember and no session to restart. A reload replaces exactly the
 definitions you changed and reruns only the top-level code that depends on them, so it stays fast on
-a large package: about 80 ms after an edit on a 326,000-line package, where `load_all()`
-takes 8.6 s (see [Speed](#speed)).
+a large package: in the `ry run` console, the command after an edit runs within 10 to 30 ms on a
+326,000-line package, where `load_all()` takes 8.6 s (see [Speed](#speed)).
 Under [strict mode](/type-checking/strict-mode), the package's pure constants are bound the same
 lazy way as its functions.
 
@@ -93,9 +93,11 @@ definitions you changed. On a generated package of 500 files, against `devtools:
 | cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
 | reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |
 
-In the `ry run` console, a command after a body edit takes 57 to 86 ms including the reload. On
-this package, `ry run` starts its console with the package loaded in 1.0 s, against 1.2 s for
-`ry R` (medians of seven runs, timed in turn on the same machine).
+In the `ry run` console, a command after a body edit prints its output 20 to 30 ms after you press
+Enter, reload included, the first time you edit a file, and about 10 ms on later edits of the same
+file. A command with nothing to reload takes under 2 ms. On this package, `ry run` starts its
+console with the package loaded in 0.74 s, against 1.0 s for `ry R` (medians of seven and three
+runs on the same machine), because it analyzes the package while base R loads.
 
 These are medians of five runs of `tools/loader-bench` (`load_all()` is `pkgload::load_all()`, which
 `devtools::load_all()` calls). The machine was shared and ry was built without link-time

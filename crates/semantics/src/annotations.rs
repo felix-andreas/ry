@@ -182,6 +182,7 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                 preceding_named: params.len(),
             }),
             ret: ret.unwrap_or_else(|| unknown(db)),
+            inferred: false,
         };
         annotation.declared = Some(TypeScheme {
             binders: forall,
@@ -311,6 +312,7 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
                 named,
                 variadic,
                 ret,
+                inferred: false,
             }),
         ),
     });
@@ -507,6 +509,7 @@ pub fn merge_annotations<'db>(
                     named,
                     variadic,
                     ret,
+                    inferred: false,
                 }),
             ),
         }),
@@ -1634,6 +1637,7 @@ impl<'db> Lowering<'db> {
                 named,
                 variadic,
                 ret,
+                inferred: false,
             }),
         )
     }

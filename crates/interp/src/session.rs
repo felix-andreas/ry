@@ -13,6 +13,7 @@ use {
         write_console,
     },
     heap::object::{Sexp, SexpType},
+    std::{cell::RefCell, rc::Rc},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[internal("mkUnbound", 1, do_mk_unbound).invisible()];
@@ -36,6 +37,11 @@ pub struct StartOptions {
 pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
+    // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
+    // functions must agree: iconv's `//TRANSLIT` and packages calling `mbrtowc` read
+    // LC_CTYPE, which stays "C" (ASCII) until something sets it. Numeric formatting keeps
+    // the C locale, so only LC_CTYPE changes. A system without C.UTF-8 keeps ASCII.
+    libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
     read_renviron();
     crate::system::init_locale();
     crate::envir::install_default_options()?;
@@ -98,7 +104,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     }
     eval_text(".First.sys()", global_env())?;
     crate::frame::attach_package()?;
-    conditions::print_warnings();
+    conditions::print_warnings()?;
     Ok(())
 }
 
@@ -246,35 +252,131 @@ pub enum Outcome {
 /// before it runs, so `options(keep.source = TRUE)` keeps source references for the expressions
 /// after it.
 pub unsafe fn run_text(text: &str, source_name: &str) -> Outcome {
-    let script = match crate::lower::parse_script(text, source_name) {
-        Ok(script) => script,
-        Err(Unwind::Error(failure)) => {
+    let text: Rc<str> = Rc::from(text);
+    let previous = SCRIPT_INPUT.with(|input| {
+        input.replace(Some(ScriptInput {
+            text: Rc::clone(&text),
+            position: 0,
+        }))
+    });
+    let outcome = run_script(&text, source_name);
+    SCRIPT_INPUT.with(|input| input.replace(previous));
+    outcome
+}
+
+/// A script being run, which is also what `stdin()` reads: GNU R reads a script as its console
+/// input, so `readLines(stdin())` in a script returns the script's next lines and the script
+/// carries on after them.
+struct ScriptInput {
+    text: Rc<str>,
+    /// Where the console reads next: the start of the line after the expression running now.
+    position: usize,
+}
+
+thread_local! {
+    static SCRIPT_INPUT: RefCell<Option<ScriptInput>> = const { RefCell::new(None) };
+}
+
+/// Reads the running script's next bytes into `buffer` for `stdin()`, or returns `None` when no
+/// script is running and `stdin()` is the process's standard input.
+pub fn read_script_input(buffer: &mut [u8]) -> Option<usize> {
+    SCRIPT_INPUT.with(|input| {
+        let mut input = input.borrow_mut();
+        let input = input.as_mut()?;
+        let mut count = 0;
+        while count < buffer.len() {
+            let text = &input.text;
+            let escaped = text
+                .get(input.position..)
+                .and_then(|rest| rest.chars().next())
+                .and_then(|character| {
+                    values::escaped_byte(character).map(|byte| (byte, character.len_utf8()))
+                });
+            let (byte, width) = match escaped {
+                Some(escaped) => escaped,
+                None => match text.as_bytes().get(input.position) {
+                    Some(&byte) => (byte, 1),
+                    None => break,
+                },
+            };
+            buffer[count] = byte;
+            count += 1;
+            input.position += width;
+        }
+        Some(count)
+    })
+}
+
+unsafe fn run_script(text: &str, source_name: &str) -> Outcome {
+    let mut start = 0;
+    let mut line_offset = 0;
+    'parse: loop {
+        let rest = &text[start..];
+        let (script, failure) = crate::lower::parse_script_prefix(rest);
+        for node in &script.expressions {
+            let end = usize::from(node.text_range().end()).min(rest.len());
+            let next_line = rest[end..]
+                .find('\n')
+                .map_or(rest.len(), |newline| end + newline + 1);
+            let cursor = start + next_line;
+            SCRIPT_INPUT.with(|input| {
+                if let Some(input) = input.borrow_mut().as_mut() {
+                    input.position = cursor;
+                }
+            });
+            let mark = crate::heap().handle_mark();
+            let succeeded =
+                match crate::lower::lower_script_expression(&script, node, keep_source()) {
+                    Ok(expression) => run_toplevel(expression),
+                    Err(unwind) => {
+                        report_toplevel(unwind);
+                        false
+                    }
+                };
+            crate::heap().release_handles(mark);
+            // A script stops at its first error unless `options(error =)` holds a handler, which
+            // GNU R runs and then carries on with the next expression.
+            if !succeeded && crate::envir::get_option("error") == nil() {
+                write_console(b"Execution halted\n", true);
+                return Outcome::Failed;
+            }
+            let position = SCRIPT_INPUT
+                .with(|input| input.borrow().as_ref().map(|input| input.position))
+                .unwrap_or(cursor);
+            if position != cursor {
+                // The expression read the script's next lines as data, so parsing resumes after
+                // them.
+                let mut resumed = position.min(text.len());
+                while !text.is_char_boundary(resumed) {
+                    resumed += 1;
+                }
+                line_offset += text[start..resumed].matches('\n').count();
+                start = resumed;
+                continue 'parse;
+            }
+        }
+        if let Some(failure) = failure {
+            if failure.condition.is_some() {
+                report_toplevel(crate::lower::syntax_failure_unwind(
+                    rest,
+                    &failure,
+                    source_name,
+                    "<input>",
+                    line_offset,
+                ));
+                write_console(b"Execution halted\n", true);
+                return Outcome::Failed;
+            }
+            let message =
+                crate::lower::syntax_failure_message(rest, &failure, source_name, line_offset);
             write_console(
-                format!("Error: {}\nExecution halted\n", failure.message).as_bytes(),
+                format!("Error: {message}\nExecution halted\n").as_bytes(),
                 true,
             );
             return Outcome::Failed;
         }
-        Err(_) => return Outcome::Failed,
-    };
-    for node in &script.expressions {
-        let mark = crate::heap().handle_mark();
-        let succeeded = match crate::lower::lower_script_expression(&script, node, keep_source()) {
-            Ok(expression) => run_toplevel(expression),
-            Err(unwind) => {
-                report_toplevel(unwind);
-                false
-            }
-        };
-        crate::heap().release_handles(mark);
-        // A script stops at its first error unless `options(error =)` holds a handler, which
-        // GNU R runs and then carries on with the next expression.
-        if !succeeded && crate::envir::get_option("error") == nil() {
-            write_console(b"Execution halted\n", true);
-            return Outcome::Failed;
-        }
+        return Outcome::Completed;
     }
-    Outcome::Completed
 }
 
 /// `getOption("keep.source")`: whether console input keeps its source references.
@@ -307,7 +409,7 @@ pub unsafe fn run_console(
         }
         let text = std::mem::take(&mut buffer);
         let mark = crate::heap().handle_mark();
-        match crate::lower::parse_script(&text, "<text>") {
+        match crate::lower::parse_script(&text, "<text>", "<input>") {
             Ok(script) => {
                 for node in &script.expressions {
                     let succeeded =
@@ -361,10 +463,18 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().visible = true;
     let mut value = nil();
     let result = eval::eval(expression, global_env()).and_then(|result| {
+        // A Ctrl-C that arrived after the last poll belongs to this command, not the next.
+        crate::unwind::poll_interrupt()?;
         value = result;
         crate::heap().root(value);
         let last = values::install(".Last.value")?;
         crate::heap().define(base_env(), last, value)?;
+        // GNU R's `.Last.value` does not count as a reference, so a value the user just
+        // bound stays unshared and `.Internal(refcnt())` reports what the user's own
+        // bindings hold.
+        if let Some(cell) = crate::heap().frame_cell(base_env(), last) {
+            crate::heap().untrack_references(cell);
+        }
         if interp().visible {
             print::print_value_top(value, global_env())?;
         }
@@ -381,7 +491,9 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();
-    conditions::print_warnings();
+    if let Err(unwind) = conditions::print_warnings() {
+        report_toplevel(unwind);
+    }
     // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
     let visible = interp().visible;
     if let Err(unwind) = (interp().hooks.run_task_callbacks)(expression, value, succeeded, visible)
@@ -391,7 +503,9 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;
     }
-    conditions::print_warnings();
+    if let Err(unwind) = conditions::print_warnings() {
+        report_toplevel(unwind);
+    }
     crate::heap().release_handles(mark);
     succeeded
 }

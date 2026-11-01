@@ -17,7 +17,7 @@ use {
         file_conditional_writers, file_definitions, file_typing_mode,
         load_index::{
             IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-            classify_constants, file_items, file_load_index, fnv1a, package_index,
+            classify_constants, file_binds, file_items, file_load_index, fnv1a, package_index,
         },
         metadata::{
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, PackageMetadata,
@@ -136,6 +136,9 @@ pub struct Plan {
     /// The export directives changed, so the exports need a resync even when nothing else
     /// does.
     pub exports_changed: bool,
+    /// Every binding the plan writes was already bound and none goes away, so the namespace
+    /// keeps the same names and a backend need not rescan them to resync its exports.
+    pub keeps_names: bool,
     pub run_on_load: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
@@ -251,6 +254,7 @@ impl Loader {
         let fingerprint = source_fingerprint(&root);
         let inputs = self.read(&root)?;
         let plan = self.plan_inputs(&root, inputs, full)?;
+
         if let Some(package) = self
             .packages
             .iter_mut()
@@ -261,6 +265,22 @@ impl Loader {
         Ok(plan)
     }
 
+    /// Derives the analysis a plan of the package at or above `path` reads, without planning,
+    /// so a plan made later, typically while the caller starts R, finds it memoized. A package
+    /// that cannot be found or read is left for that plan to report.
+    pub fn prepare(&mut self, path: &Path) {
+        let Ok(root) = find_package_root(path) else {
+            return;
+        };
+        let Ok(inputs) = self.read(&root) else {
+            return;
+        };
+        // A failure is the plan's to report: it reads the same sources.
+        if let Ok(position) = self.analyze(&root, inputs) {
+            package_index(&self.db, self.packages[position].sources);
+        }
+    }
+
     /// Plans a load of the package at `root` from sources the caller read.
     pub fn plan_inputs(
         &mut self,
@@ -269,27 +289,8 @@ impl Loader {
         full: bool,
     ) -> Result<Plan, LoadError> {
         let root = root.to_path_buf();
-        let (position, changed) = self.sync(
-            &root,
-            inputs.description,
-            inputs.namespace,
-            inputs.files,
-            inputs.strict,
-        )?;
-        self.warm(&changed, |db, file| {
-            file_items(db, file);
-            file_typing_mode(db, file);
-        });
-        if self.prepare_purity(position) {
-            // Classifying a constant resolves its callees through the project-wide definition
-            // maps, which join per-file facts that are cheaper to derive across cores first.
-            self.warm(&changed, |db, file| {
-                file_definitions(db, file);
-                file_conditional_writers(db, file);
-            });
-            let sources = self.packages[position].sources;
-            self.warm(&changed, |db, file| classify_constants(db, sources, file));
-        }
+        let (sysdata, compiled) = (inputs.sysdata, inputs.compiled);
+        let position = self.analyze(&root, inputs)?;
         let package = &self.packages[position];
         let index = package_index(&self.db, package.sources);
         if index.package.is_empty() {
@@ -305,8 +306,8 @@ impl Loader {
         let next = LoadState {
             root: root.clone(),
             index: index.clone(),
-            sysdata: inputs.sysdata,
-            compiled: inputs.compiled,
+            sysdata,
+            compiled,
         };
         let previous = if full {
             None
@@ -328,6 +329,37 @@ impl Loader {
         // Only `plan` knows what the caller's sources were read from, and it sets this after.
         package.pending_fingerprint = None;
         Ok(plan)
+    }
+
+    /// Syncs the package's sources into the analysis and derives every changed file's facts
+    /// across cores, returning the package's position.
+    fn analyze(&mut self, root: &Path, inputs: PackageInputs) -> Result<usize, LoadError> {
+        let (position, changed) = self.sync(
+            root,
+            inputs.description,
+            inputs.namespace,
+            inputs.files,
+            inputs.strict,
+        )?;
+        self.warm(&changed, |db, file| {
+            file_items(db, file);
+            file_typing_mode(db, file);
+        });
+        if self.prepare_purity(position) {
+            // Classifying a constant resolves its callees through the project-wide definition
+            // maps, which join per-file facts that are cheaper to derive across cores first.
+            self.warm(&changed, |db, file| {
+                file_definitions(db, file);
+                file_conditional_writers(db, file);
+            });
+            let sources = self.packages[position].sources;
+            self.warm(&changed, |db, file| classify_constants(db, sources, file));
+        }
+        let sources = self.packages[position].sources;
+        self.warm(&changed, |db, file| {
+            file_binds(db, sources, file);
+        });
+        Ok(position)
     }
 
     /// Records that the backend applied the pending plan for the package at `root`.
@@ -611,9 +643,10 @@ impl Loader {
             };
             files.push(PackageFile { path, file });
         }
-        package
-            .files
-            .retain(|path, _| files.iter().any(|file| &file.path == path));
+        if package.files.len() != files.len() {
+            let kept: FxHashSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
+            package.files.retain(|path, _| kept.contains(path.as_str()));
+        }
         let sources = package.sources;
         if sources.files(db) != &files {
             sources.set_files(db).to(files);
@@ -725,17 +758,17 @@ pub fn diff<'text>(
         .iter()
         .filter(|file| is_dirty(file, &new_hashes))
         .collect();
-    let dirty_items = |files: &[&'_ IndexedFile]| -> Vec<(String, IndexedItem)> {
+    fn dirty_items<'a>(files: &[&'a IndexedFile]) -> Vec<(&'a str, &'a IndexedItem)> {
         files
             .iter()
             .flat_map(|file| {
                 file.items
                     .items
                     .iter()
-                    .map(|item| (file.path.clone(), item.clone()))
+                    .map(|item| (file.path.as_str(), item))
             })
             .collect()
-    };
+    }
     let old_items = dirty_items(&old_dirty);
     let new_dirty_files: Vec<&IndexedFile> = index
         .files
@@ -748,14 +781,19 @@ pub fn diff<'text>(
 
     // Names whose laziness flipped: a second writer appeared or went away, or, for a constant
     // of a strict file, a name it mentions or a function it calls changed in another file.
-    // The latter can flip a name no dirty item writes, so every name is a candidate.
-    let flipped: FxHashSet<&str> = old
-        .names
-        .keys()
-        .chain(index.names.keys())
-        .map(String::as_str)
-        .filter(|name| old.is_lazy(name) != index.is_lazy(name))
-        .collect();
+    // The latter can flip a name no dirty item writes, so every name is a candidate, unless
+    // the analysis reused the whole map.
+    let flipped: FxHashSet<&str> = if Arc::ptr_eq(&old.bindings, &index.bindings) {
+        FxHashSet::default()
+    } else {
+        old.bindings
+            .names
+            .keys()
+            .chain(index.bindings.names.keys())
+            .map(String::as_str)
+            .filter(|name| old.is_lazy(name) != index.is_lazy(name))
+            .collect()
+    };
 
     let registers_s4 = |item: &IndexedItem| {
         item.registrations.iter().any(|registration| {
@@ -799,7 +837,7 @@ pub fn diff<'text>(
     // Lazy definitions are keyed by name, which only one item writes.
     let old_lazy: FxHashMap<&str, (&str, &IndexedItem)> = old_items
         .iter()
-        .filter_map(|(path, item)| Some((old.lazy_name(item)?, (path.as_str(), item))))
+        .filter_map(|&(path, item)| Some((old.lazy_name(item)?, (path, item))))
         .collect();
     let mut changed: FxHashSet<String> = FxHashSet::default();
     let mut bind = Vec::new();
@@ -816,7 +854,7 @@ pub fn diff<'text>(
                         .as_ref()
                         .map(|binding| (binding.value.line, binding.value.column))
                 };
-                *old_path != path.as_str() || position(previous) != position(item)
+                old_path != path || position(previous) != position(item)
             }
             _ => {
                 changed.insert(name.to_owned());
@@ -861,12 +899,15 @@ pub fn diff<'text>(
     let mut old_eager: FxHashMap<&str, Vec<&IndexedItem>> = FxHashMap::default();
     for (path, item) in &old_items {
         if old.lazy_name(item).is_none() {
-            old_eager.entry(path.as_str()).or_default().push(item);
+            old_eager.entry(path).or_default().push(item);
         }
     }
     let mut fresh: FxHashSet<(usize, usize)> = FxHashSet::default();
     let mut vanished: Vec<&IndexedItem> = Vec::new();
     for (file_position, (file, dirty)) in index.files.iter().zip(&new_dirty).enumerate() {
+        if !*dirty && flipped.is_empty() {
+            continue;
+        }
         let eager_positions: Vec<usize> = file
             .items
             .items
@@ -920,34 +961,19 @@ pub fn diff<'text>(
     // below that call counts too: a lazy function whose body mentions a changed name counts as
     // changed, transitively, and so does any function a statement reads.
     // A full load reruns everything, so it needs no call graph.
-    let functions: FxHashMap<&str, &IndexedItem> = if full {
-        FxHashMap::default()
-    } else {
-        index
-            .items()
-            .filter_map(|(_, item)| Some((index.lazy_name(item)?, item)))
-            .collect()
-    };
+    let functions = (!full).then_some(index);
     // A statement reruns when it is new, when it read a binding that changed (it captured the
     // old value), or when it writes one (the last writer in collation order must win again).
     // A rerun statement must also see what it saw at load: when it reads a name that it or a
     // later statement rewrites, as `f <- memoise(f)` does, the earlier writers of that name
     // rerun first. Otherwise it would read the final value and, here, memoise twice.
     let eager: Vec<(&str, &IndexedItem, bool)> = index
-        .files
+        .bindings
+        .eager
         .iter()
-        .enumerate()
-        .flat_map(|(file_position, file)| {
-            let fresh = &fresh;
-            file.items
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| index.lazy_name(item).is_none())
-                .map(move |(item_position, item)| {
-                    let is_fresh = fresh.contains(&(file_position, item_position));
-                    (file.path.as_str(), item, is_fresh)
-                })
+        .filter_map(|&at| {
+            let (path, item) = index.item_at(at)?;
+            Some((path, item, fresh.contains(&(at.0 as usize, at.1 as usize))))
         })
         .collect();
     let mut writers: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
@@ -963,16 +989,12 @@ pub fn diff<'text>(
         Vec::new()
     } else {
         index
-            .files
+            .bindings
+            .constants
             .iter()
-            .flat_map(|file| {
-                file.items.items.iter().filter_map(|item| {
-                    let binding = item.binding.as_ref()?;
-                    if binding.function {
-                        return None;
-                    }
-                    Some((file.path.as_str(), index.lazy_name(item)?, item))
-                })
+            .filter_map(|&at| {
+                let (path, item) = index.item_at(at)?;
+                Some((path, index.lazy_name(item)?, item))
             })
             .collect()
     };
@@ -983,7 +1005,7 @@ pub fn diff<'text>(
                 .iter()
                 .flat_map(|(_, item, _)| item.reads.iter().map(String::as_str))
                 .collect();
-            let reaching: Vec<String> = reaching_changed(&roots, &functions, &changed)
+            let reaching: Vec<String> = reaching_changed(&roots, functions, &changed)
                 .into_iter()
                 .filter(|name| !changed.contains(*name))
                 .map(str::to_owned)
@@ -996,7 +1018,7 @@ pub fn diff<'text>(
             if bound.contains(*name) {
                 continue;
             }
-            if reached_through_calls(&item.mentions, &functions)
+            if reached_through_calls(&item.mentions, functions)
                 .iter()
                 .any(|reached| changed.contains(*reached))
             {
@@ -1022,7 +1044,7 @@ pub fn diff<'text>(
                 continue;
             }
             changed.extend(item.binds.iter().cloned());
-            for name in reached_through_calls(&item.reads, &functions) {
+            for name in reached_through_calls(&item.reads, functions) {
                 let Some(positions) = writers.get(name) else {
                     continue;
                 };
@@ -1054,22 +1076,12 @@ pub fn diff<'text>(
     let mut remove = BTreeSet::new();
     for (_, item) in &old_items {
         if old.lazy_name(item).is_some() {
-            remove.extend(
-                item.binds
-                    .iter()
-                    .filter(|name| !index.names.contains_key(*name))
-                    .cloned(),
-            );
+            remove.extend(item.binds.iter().filter(|name| !index.binds(name)).cloned());
         }
     }
     let mut unregister = BTreeSet::new();
     for item in &vanished {
-        remove.extend(
-            item.binds
-                .iter()
-                .filter(|name| !index.names.contains_key(*name))
-                .cloned(),
-        );
+        remove.extend(item.binds.iter().filter(|name| !index.binds(name)).cloned());
         unregister.extend(
             item.registrations
                 .iter()
@@ -1099,10 +1111,16 @@ pub fn diff<'text>(
         .iter()
         .filter_map(|code| code.name.as_deref())
         .collect();
+    let (old_set, new_set): (FxHashSet<&S3MethodDirective>, FxHashSet<&S3MethodDirective>) =
+        if s3_changed {
+            (old_declared.iter().collect(), declared.iter().collect())
+        } else {
+            Default::default()
+        };
     let s3_register = declared
         .iter()
         .filter(|method| {
-            full || !old_declared.contains(method)
+            full || (s3_changed && !old_set.contains(method))
                 || changed.contains(&method.function)
                 || rebound.contains(method.function.as_str())
         })
@@ -1110,7 +1128,7 @@ pub fn diff<'text>(
         .collect();
     let s3_unregister = old_declared
         .iter()
-        .filter(|method| !declared.contains(method))
+        .filter(|method| s3_changed && !new_set.contains(method))
         .cloned()
         .collect();
 
@@ -1132,6 +1150,15 @@ pub fn diff<'text>(
             format!("NAMESPACE directive ignored, because ry cannot evaluate it: {directive}")
         })
         .collect();
+
+    let exports_changed = full || exports_differ(&index.namespace, &old.namespace);
+    let keeps_names = !full
+        && !exports_changed
+        && remove.is_empty()
+        && unregister.is_empty()
+        && bind
+            .iter()
+            .all(|code| code.name.as_ref().is_some_and(|name| old.binds(name)));
 
     Plan {
         package: index.package.clone(),
@@ -1159,7 +1186,8 @@ pub fn diff<'text>(
         dynamic_libraries: (full || compiled_changed)
             .then(|| index.namespace.dynamic_libraries.clone())
             .filter(|libraries| !libraries.is_empty() || !full),
-        exports_changed: full || exports_differ(&index.namespace, &old.namespace),
+        exports_changed,
+        keeps_names,
         namespace: index.namespace.clone(),
         warnings,
     }
@@ -1170,14 +1198,14 @@ pub fn diff<'text>(
 /// the changed names marks everything that reaches one; both visit each function once.
 fn reaching_changed<'a>(
     roots: &[&'a str],
-    functions: &FxHashMap<&'a str, &'a IndexedItem>,
+    functions: Option<&'a PackageIndex>,
     changed: &FxHashSet<String>,
 ) -> FxHashSet<&'a str> {
     let mut callers: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
     let mut seen: FxHashSet<&'a str> = roots.iter().copied().collect();
     let mut queue: Vec<&'a str> = roots.to_vec();
     while let Some(name) = queue.pop() {
-        let Some(item) = functions.get(name) else {
+        let Some(item) = functions.and_then(|index| index.lazy_item(name)) else {
             continue;
         };
         for mention in &item.mentions {
@@ -1208,13 +1236,13 @@ fn reaching_changed<'a>(
 /// a statement that calls them may read.
 fn reached_through_calls<'a>(
     reads: &'a [String],
-    functions: &FxHashMap<&'a str, &'a IndexedItem>,
+    functions: Option<&'a PackageIndex>,
 ) -> FxHashSet<&'a str> {
     let mut seen: FxHashSet<&'a str> = reads.iter().map(String::as_str).collect();
     let mut queue: Vec<&'a str> = seen.iter().copied().collect();
     while let Some(name) = queue.pop() {
         for mention in functions
-            .get(name)
+            .and_then(|index| index.lazy_item(name))
             .map_or(&[][..], |item| item.mentions.as_slice())
         {
             if seen.insert(mention) {
@@ -1304,6 +1332,7 @@ impl Plan {
             dynamic_libraries: None,
             namespace: state.index.namespace.clone(),
             exports_changed: false,
+            keeps_names: true,
             run_on_load: false,
             warnings: Vec::new(),
         }
