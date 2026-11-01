@@ -226,6 +226,9 @@ const REGRESSIONS: &[&str] = &[
     "x <- (y <- 1L)\n",
     "c(a, b) %<-% list(1L, 2L)\n",
     "frame <- data.frame(a = 1L)\nsetnames(frame, \"a\", \"b\")\n",
+    "dt <- 1\ndt[, `:=`(b = 2L)]\n",
+    "frame <- data.frame(a = 1L)\n`setnames`(frame, \"a\", \"b\")\n",
+    "setGeneric(\"area\", { y <- 1; function(obj) standardGeneric(\"area\") })\n",
     "x <- list(f = function() y <<- 1L)\n",
 ];
 

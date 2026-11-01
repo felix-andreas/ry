@@ -1738,7 +1738,7 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
                     .syntax_node()
                     .descendants_with_tokens()
                     .filter_map(|element| element.into_token())
-                    .any(|token| token.text() == "globalVariables")
+                    .any(|token| token.text().trim_matches('`') == "globalVariables")
             });
         if !spelled {
             continue;

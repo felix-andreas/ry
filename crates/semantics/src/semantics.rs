@@ -1332,9 +1332,6 @@ fn item_interface_edges<'db>(
     targets
 }
 
-/// The tokens that can write a binding in the item's own frame: assignment operators (an `=`
-/// only where it assigns, not where it names an argument) and `for`. A function body is a
-/// frame of its own, so its tokens do not count.
 /// Whether the item's top-level writes are at most its own binding, read off its syntax so the
 /// common case needs no naming pass.
 fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
@@ -1346,13 +1343,15 @@ fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
     }
     // Only a write evaluated in the top-level frame binds a top-level name, so an item whose
     // text holds no write besides its own binds its own name alone. Most value and statement
-    // items are of this shape (`x <- list(...)`, `library(pkg)`).
-    write_tokens(node) <= usize::from(item.name(db).is_some())
+    // items are of this shape (`x <- list(...)`, `library(pkg)`). A named item binds its name
+    // with a token only when it is an assignment: `setGeneric("f", ...)` writes none.
+    let own_write = item.name(db).is_some() && node.kind() == SyntaxKind::BINARY_EXPR;
+    write_tokens(node) <= usize::from(own_write)
 }
 
 /// The tokens outside nested functions that can start a write in naming: an assignment
-/// operator, `for`, a destructuring `%<-%` or `%->%`, and the by-reference `setnames` and
-/// `setcolorder`. It may overcount, which only costs a naming pass, but a write naming records
+/// operator, `for`, a destructuring `%<-%` or `%->%`, and the by-reference `:=` called by
+/// name, `setnames` and `setcolorder` (backticked or not). It may overcount, which only costs a naming pass, but a write naming records
 /// that this misses would drop a top-level binding.
 fn write_tokens(node: &SyntaxNode) -> usize {
     let mut count = 0;
@@ -1379,7 +1378,10 @@ fn write_tokens(node: &SyntaxNode) -> usize {
                         .parent()
                         .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR),
                     SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
-                    SyntaxKind::IDENT => matches!(token.text(), "setnames" | "setcolorder"),
+                    SyntaxKind::IDENT => matches!(
+                        token.text().trim_matches('`'),
+                        ":=" | "setnames" | "setcolorder"
+                    ),
                     _ => false,
                 };
                 count += usize::from(writes);
