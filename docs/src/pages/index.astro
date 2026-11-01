@@ -81,6 +81,91 @@ const analysisTabs = [
     },
 ];
 
+// The migration story. Each step's output is captured from the real binary
+// (`ry check` on a project with the matching ry.toml); re-capture rather than hand-edit.
+const migrationSteps = [
+    {
+        step: "1",
+        title: "It works on your code today",
+        note: "No configuration, nothing to annotate.",
+        href: "/guides/checking",
+        code: `net_price <- function(price, rate) {
+  price * (1 - ratee)
+}`,
+        kind: "warn",
+        name: "unresolved",
+        message: "I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?",
+    },
+    {
+        step: "2",
+        title: "Type your code",
+        note: "<code>#:</code> comments keep it plain R that GNU R runs.",
+        href: "/type-checking/overview",
+        code: `#: fn(price: double, rate: double) -> double
+net_price <- function(price, rate) {
+  price * (1 - rate)
+}
+net_price(100, "0.2")`,
+        kind: "err",
+        name: "type-mismatch",
+        message: "expected `double`, found `character`",
+    },
+    {
+        step: "3",
+        title: "Switch to inline types",
+        note: "Checked by the checker, and at run time on ry.",
+        href: "/type-checking/inline-annotations",
+        code: `net_price <- function(price: double, rate: double) -> double {
+  price * (1 - rate)
+}
+net_price(100, "0.2")`,
+        kind: "err",
+        name: "type-mismatch",
+        message: "expected `double`, found `character`",
+    },
+    {
+        step: "4",
+        title: "Move to ry's types",
+        note: "Records, tagged unions, a typed table, strict mode.",
+        href: "/type-checking/records-and-tags",
+        code: `alias Payment = :Paid(amount: double) | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+  }
+}`,
+        kind: "err",
+        name: "non-exhaustive-match",
+        message: "this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm",
+    },
+];
+
+const vennSvg = `<svg viewBox="0 0 660 400" role="img" aria-labelledby="ry-venn-home-title ry-venn-home-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:660px;height:auto;font-family:inherit">
+  <title id="ry-venn-home-title">R, ry's additions, and strict mode</title>
+  <desc id="ry-venn-home-desc">Two overlapping circles. The left circle is R: untyped code, S4, R6 and eval run but are not checked. The right circle is what ry adds: records, tags, frames, the standard library and inline types, which run on ry. The overlap is typed R written with #: comments, which is checked and also runs on GNU R. Both circles together are R++, everything ry runs. The right circle alone is strict mode, R−−, where only typed code is allowed.</desc>
+  <path d="M 70 50 V 40 H 590 V 50" stroke="currentColor" stroke-opacity="0.45" fill="none"/>
+  <text x="330" y="30" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">R++: everything ry runs</text>
+  <circle cx="245" cy="210" r="150" fill="#3b82f6" fill-opacity="0.16" stroke="#3b82f6" stroke-width="2"/>
+  <circle cx="415" cy="210" r="150" fill="#a855f7" fill-opacity="0.16" stroke="#a855f7" stroke-width="2" stroke-dasharray="7 5"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="175" y="165" font-size="22" font-weight="700">R</text>
+    <text x="175" y="198" font-size="13">untyped code</text>
+    <text x="175" y="217" font-size="13">S4, R6, eval</text>
+    <text x="175" y="246" font-size="12" fill-opacity="0.7">runs, not checked</text>
+    <text x="330" y="165" font-size="15" font-weight="700">typed R</text>
+    <text x="330" y="198" font-size="13" font-family="ui-monospace, monospace">#: comments</text>
+    <text x="330" y="246" font-size="12" fill-opacity="0.7">checked, and</text>
+    <text x="330" y="262" font-size="12" fill-opacity="0.7">runs on GNU R</text>
+    <text x="485" y="165" font-size="17" font-weight="700">ry additions</text>
+    <text x="485" y="198" font-size="13">records, tags</text>
+    <text x="485" y="217" font-size="13">frames, stdlib</text>
+    <text x="485" y="236" font-size="13">inline types</text>
+    <text x="485" y="262" font-size="12" fill-opacity="0.7">runs on ry</text>
+  </g>
+  <text x="485" y="385" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">strict mode (R−−): only this circle</text>
+</svg>`;
+
 const formatterTabs = [
     {
         key: "spacing",
@@ -285,11 +370,11 @@ const year = new Date().getFullYear();
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>
-            ry: a language server, type checker, and formatter for R
+            ry: one toolchain and a type system for R
         </title>
         <meta
             name="description"
-            content="ry is a toolchain for R, written in Rust: a language server, a linter, a type checker, and a formatter."
+            content="ry is one toolchain for R, written in Rust, with a type system on top of R: it checks the R code you have, adds records, tagged unions and a typed table, and runs it on its own runtime."
         />
         <link rel="icon" href="/favicon.svg" />
         <script is:inline>
@@ -435,6 +520,54 @@ const year = new Date().getFullYear();
                             ></path></svg
                         >
                     </div>
+                </div>
+            </section>
+
+            <section id="pitch" class="band showband accent-violet">
+                <div class="band-inner">
+                    <header class="band-head">
+                        <h2>One toolchain and a type system for R</h2>
+                        <p class="lede">
+                            Agents are now writing and changing old R code
+                            bases, and what they write needs checking that does
+                            not depend on someone reading every line. ry checks
+                            the R you have, adds types on top of it (R++), and
+                            lets strict mode keep only typed code (R&minus;&minus;).
+                        </p>
+                    </header>
+                    <div class="venn" set:html={vennSvg} />
+                    <ol class="migrate">
+                        {
+                            migrationSteps.map((step) => (
+                                <li class="mig-step">
+                                    <p class="step-label">
+                                        Step {step.step}
+                                    </p>
+                                    <h3>
+                                        <a href={step.href}>{step.title}</a>
+                                    </h3>
+                                    <p class="mig-note" set:html={step.note} />
+                                    <pre class="codeblock mig-code"><code>{step.code}</code></pre>
+                                    <div class="term mig-out">
+                                        <div class={`tl d${step.kind}`}>
+                                            {step.name}
+                                        </div>
+                                        <div class="tl msg">
+                                            <span class={`d${step.kind}`}>
+                                                {step.kind === "err" ? "x" : "!"}
+                                            </span>{" "}
+                                            <span class="dmsg">{step.message}</span>
+                                        </div>
+                                    </div>
+                                </li>
+                            ))
+                        }
+                    </ol>
+                    <p class="band-foot">
+                        <a class="doclink" href="/why-ry"
+                            >Why ry, with benchmarks <span aria-hidden="true">→</span></a
+                        >
+                    </p>
                 </div>
             </section>
 
@@ -3005,6 +3138,61 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 border-bottom-color: var(--foreground);
             }
 
+            .venn {
+                max-width: 660px;
+                margin: 0 auto 2.4rem;
+                color: var(--foreground);
+            }
+            .migrate {
+                list-style: none;
+                margin: 0;
+                padding: 0;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
+                gap: 1.4rem;
+            }
+            .mig-step {
+                display: flex;
+                flex-direction: column;
+                min-width: 0;
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: var(--radius);
+                padding: 1.1rem 1.2rem 1.2rem;
+                --code-size: 0.8rem;
+                --lh: 1.6;
+            }
+            .mig-step h3 {
+                margin: 0.2rem 0 0.3rem;
+                font-size: 1.15rem;
+                font-weight: 600;
+            }
+            .mig-step h3 a:hover {
+                text-decoration: underline;
+            }
+            .mig-note {
+                margin: 0;
+                color: var(--muted);
+                font-size: 0.92rem;
+            }
+            .mig-note code {
+                color: var(--foreground);
+            }
+            .mig-code {
+                margin-top: 0.9rem;
+                font-size: 0.76rem;
+                font-variant-ligatures: none;
+                line-height: 1.6;
+                padding: 0.8rem 0.95rem;
+                flex: 1;
+            }
+            .mig-out {
+                margin-top: 0.5rem;
+                padding: 0.6rem 0.2rem 0;
+            }
+            .mig-out .tl {
+                white-space: pre-wrap;
+            }
             .codeblock {
                 margin: 1.4rem 0 0;
                 background: var(--code-bg);
