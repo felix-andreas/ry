@@ -74,7 +74,7 @@ persistence <- function(object, pars, distribution = "norm") UseMethod("persiste
 f <- function(fit) persistence(fit)
 #++++
 persistence: <T, U, V> fn([object]: T, [pars]: U, [distribution]: V) -> Any
-f: <T> fn(fit: T) -> Any
+f: <T> fn([fit]: T) -> Any
 
 #---- a_generic_leaves_its_dispatch_formal_to_the_method
 describe <- function(x, ...) UseMethod("describe")
@@ -299,7 +299,7 @@ outer <- function(x, finally) inner(x, finally = finally)
 run <- function() outer(1)
 #++++
 inner: <T> fn([x]: T, [finally]: T) -> T
-outer: <T> fn(x: T, [finally]: T) -> T
+outer: <T> fn([x]: T, [finally]: T) -> T
 run: fn() -> double
 
 #---- vapply_promotes_an_integer_result_under_a_double_template
@@ -477,7 +477,7 @@ forecast <- function(omega, regressors, flag) {
 run <- function(m) forecast(c(1, 2), m, TRUE)
 #++++
 forecast: <T: numeric, U> fn(omega: T, [regressors]: U, flag: logical) -> Unknown
-run: <T> fn(m: T) -> Unknown
+run: <T> fn([m]: T) -> Unknown
 
 #---- a_matrix_scales_by_a_vector
 scale_rows <- function(m, weights) {
@@ -562,9 +562,16 @@ fast_svd <- function(m, tol) {
 pseudoinverse <- function(m, tol) fast_svd(m, tol)
 inverse <- function(m) pseudoinverse(m)
 #++++
+fast_svd: <T, U> fn(m: T, [tol]: U) -> Unknown
+pseudoinverse: <T, U> fn(m: T, [tol]: U) -> Unknown
+inverse: <T> fn(m: T) -> Unknown
 
 #---- forwarding_a_formal_to_a_required_parameter_still_requires_it
 scale_by <- function(m, factor) m * factor
 rescale <- function(m, factor) scale_by(m, factor)
 broken <- function(m) rescale(m)
 #++++
+scale_by: <T: numeric> fn(m: T, factor: T) -> T
+rescale: <T: numeric> fn(m: T, factor: T) -> T
+broken: Unknown
+116..123 error[type-mismatch] this call leaves out `factor`, which the function requires

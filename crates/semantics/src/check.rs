@@ -3960,8 +3960,8 @@ impl<'db> Checker<'db, '_> {
                 }
                 // `f(x = x)` hands the promise on unforced, and a closure the project defines
                 // decides for itself whether to read it, so forwarding a formal under its own
-                // name does not force it. A bare formal passed to a project function's optional
-                // parameter, as `fast.svd(m, tol)` passes `tol` to a callee that tests
+                // name does not force it. A bare formal passed to a project parameter the callee
+                // may leave unread, as `fast.svd(m, tol)` passes `tol` to a callee that tests
                 // `missing(tol)`, is not forced either. A library function such as `list`
                 // forces every argument.
                 self.collect_formal_uses(*callee, uses);
@@ -4001,7 +4001,9 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// For each argument of a call to the project function `name`, whether it binds a
-    /// parameter that the callee treats as optional. Names match exactly, and the remaining
+    /// parameter the callee may leave unread: optional without a default. A missing formal
+    /// passed on does not take the callee's default, so a defaulted parameter that the
+    /// callee reads still errors. Names match exactly, and the remaining
     /// arguments fill the unclaimed formals before `...` in order. An unknown callee yields no
     /// optional targets, so its arguments stay forced.
     fn optional_argument_targets(&self, name: &str, arguments: &[Argument]) -> Vec<bool> {
@@ -4010,6 +4012,9 @@ impl<'db> Checker<'db, '_> {
         };
         let TyKind::Function(function) = scheme.body.kind(self.db) else {
             return Vec::new();
+        };
+        let leaves_unread = |parameter: &Parameter<'db>| {
+            parameter.optional && parameter.default.is_none()
         };
         let mut claimed = vec![false; function.named.len()];
         let mut targets = vec![false; arguments.len()];
@@ -4021,7 +4026,7 @@ impl<'db> Checker<'db, '_> {
                 .position(|parameter| parameter.name.text(self.db) == argument_name.as_str())
             {
                 claimed[formal] = true;
-                targets[index] = function.named[formal].optional;
+                targets[index] = leaves_unread(&function.named[formal]);
             }
         }
         let pre_rest = function
@@ -4034,7 +4039,7 @@ impl<'db> Checker<'db, '_> {
                 continue;
             }
             let Some(formal) = unclaimed.next() else { break };
-            targets[index] = function.named[formal].optional;
+            targets[index] = leaves_unread(&function.named[formal]);
         }
         targets
     }
