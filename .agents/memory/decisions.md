@@ -4476,6 +4476,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   both kinds on, which teaches users to ignore it; ry's defaults must stay clean on a tidy codebase.
 - A fix that changes behavior on purpose (`x == NA` to `is.na(x)`, `&` to `&&`) is unsafe even when
   it is almost certainly what the author meant, because `ry check --fix` applies safe fixes unseen.
-  `redundant-return` is safe except when it unwraps an assignment, whose visibility differs.
+  `redundant-return` is safe: `return()` keeps its argument's visibility, so
+  `return(x <- 1)` and a trailing `x <- 1` are both invisible.
 - The lint fixtures render each fix (`safe fix a..b "text"`), so a fix's range and text are part of
   the contract.

@@ -1,6 +1,6 @@
 //! Range-formatting property tests: the invariant battery over every R source
 //! in the repository, every byte selection of a few short sources against an
-//! independent line oracle, plus the texts the fixture format cannot spell —
+//! independent line oracle, plus the texts the fixture format cannot spell:
 //! ones without a trailing newline, with CRLF endings, and the empty file.
 
 use {
@@ -34,8 +34,8 @@ fn program_corpus_holds_range_invariants() {
     }
 }
 
-/// The same sources re-indented the ways real files are — four spaces, tabs,
-/// and a mix of steps that leaves the commonest one to decide — because a
+/// The same sources re-indented the ways real files are (four spaces, tabs,
+/// and a mix of steps that leaves the commonest one to decide), because a
 /// selection is laid out at the step the file already uses, and the battery's
 /// convergence and composition checks are what prove that step stays put
 /// while a file is formatted piece by piece. The fixtures are written at the
@@ -190,7 +190,7 @@ fn auto_line_endings_of_a_file_without_code_come_from_its_first_line_break() {
 }
 
 /// Every selection, including ones that start or end mid-character and ones
-/// past the end, makes exactly the edits of the lines it touches — checked
+/// past the end, makes exactly the edits of the lines it touches, checked
 /// against an oracle that finds those lines by scanning for `\n` itself.
 #[test]
 fn every_byte_selection_takes_exactly_the_lines_it_touches() {

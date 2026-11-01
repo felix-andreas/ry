@@ -1180,6 +1180,15 @@ fn fmt_range_formats_only_the_lines_it_touches() {
         "{}",
         output.stderr
     );
+    let before = read();
+    let output = ry(directory.path(), &["fmt", "--range", "9", "part.R"]);
+    assert_ne!(output.code, 0, "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("--range starts at line 9"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(read(), before);
 }
 
 #[test]

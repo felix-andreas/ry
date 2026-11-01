@@ -67,7 +67,8 @@ ry fmt --range 3-8 R/report.R   # format only lines 3 to 8 of one file
 `--range` takes `LINE`, `START-END`, or `LINE:COLUMN-LINE:COLUMN`, counting from 1. It formats the
 lines the range touches exactly as formatting the whole file would, at the indentation the file
 already uses, and leaves every other line alone. A statement is laid out as one unit, so a line
-just outside the range changes when it belongs to a statement the range reaches into.
+just outside the range changes when it belongs to a statement the range reaches into. A range that
+starts past the file's last line is an error, and an end past it stops at the last line.
 
 `ry fmt` skips `.Rmd`, `.qmd`, and `.Rnw` files, because it rewrites a whole file's layout and must not
 touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies

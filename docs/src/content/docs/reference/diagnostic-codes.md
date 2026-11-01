@@ -58,7 +58,7 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `assignment-operator` | `=` to `<-` | safe |
 | `boolean-shorthand` | `T` to `TRUE`, `F` to `FALSE` | safe |
 | `trailing-comma` | remove the comma | safe |
-| `redundant-return` | `return(x)` to `x` (unsafe when `x` is an assignment, which `return()` prints and a last expression does not) | safe |
+| `redundant-return` | `return(x)` to `x` | safe |
 | `equals-na` | `x == NA` to `is.na(x)`, `x != NA` to `!is.na(x)` | unsafe |
 | `vector-logic` | `&` to `&&`, `|` to `||` | unsafe |
 | `length-sequence` | `1:length(x)` to `seq_along(x)`, `1:nrow(x)` to `seq_len(nrow(x))` | unsafe |

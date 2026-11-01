@@ -176,7 +176,7 @@ h <- function(x) return(y <- x)
 89..98 warning[redundant-return] This return() is redundant: a function returns the value of its last expression
   safe fix 89..98 "2"
 118..132 warning[redundant-return] This return() is redundant: a function returns the value of its last expression
-  unsafe fix 118..132 "y <- x"
+  safe fix 118..132 "y <- x"
 
 #---- early_return_and_bound_return_are_clean
 f <- function(x) {
@@ -195,3 +195,12 @@ f <- function(x) {
 }
 #++++
 0..6 warning[shadows-builtin] Top-level binding `return` shadows a builtin.
+
+#---- directives_and_prose_with_parentheses_are_clean
+y <- 3L # ry: allow(assignment-operator)
+# fmt: skip
+# nolint start
+# Returns (invisibly) the input
+f <- function(x) x
+#++++
+clean

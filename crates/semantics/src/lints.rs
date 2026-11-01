@@ -756,26 +756,6 @@ fn redundant_return_lint(
             SyntaxKind::IF_EXPR => pending.extend(tail.children().skip(1)),
             SyntaxKind::CALL_EXPR => {
                 if let Some(("return", value)) = single_argument_of(&tail, &["return"]) {
-                    // `return(x <- 1)` returns visibly but a trailing `x <- 1` is invisible, so
-                    // unwrapping an assignment changes what the console prints.
-                    let assigns = BinaryExpr::cast(value.clone())
-                        .and_then(|binary| binary.operator())
-                        .is_some_and(|operator| {
-                            matches!(
-                                operator.kind(),
-                                SyntaxKind::LESS_MINUS
-                                    | SyntaxKind::LESS2_MINUS
-                                    | SyntaxKind::MINUS_GREATER
-                                    | SyntaxKind::MINUS_GREATER2
-                                    | SyntaxKind::EQ
-                                    | SyntaxKind::COLON_EQ
-                            )
-                        });
-                    let applicability = if assigns {
-                        Applicability::Unsafe
-                    } else {
-                        Applicability::Safe
-                    };
                     push_lint(
                         &mut diagnostics,
                         config.redundant_return,
@@ -783,7 +763,11 @@ fn redundant_return_lint(
                         "redundant-return",
                         significant_range(&tail),
                         "This return() is redundant: a function returns the value of its last expression",
-                        Some((applicability, "Remove `return()`", significant_text(&value))),
+                        Some((
+                            Applicability::Safe,
+                            "Remove `return()`",
+                            significant_text(&value),
+                        )),
                     );
                 }
             }
@@ -814,7 +798,12 @@ fn commented_code_lint(
         return;
     }
     let code = after_hashes.trim();
-    if code.is_empty() {
+    // Suppression and formatter directives look like calls (`ry: allow(...)`).
+    if code.is_empty()
+        || ["ry:", "fmt:", "nolint"]
+            .iter()
+            .any(|directive| code.starts_with(directive))
+    {
         return;
     }
     let parsed = syntax::parse(code);
@@ -825,8 +814,14 @@ fn commented_code_lint(
         .syntax_node()
         .descendants()
         .any(|node| match node.kind() {
-            SyntaxKind::CALL_EXPR
-            | SyntaxKind::FUNCTION_DEF
+            // Prose such as `Returns (invisibly)` parses as a call, but code rarely puts a
+            // space between a function and its parenthesis.
+            SyntaxKind::CALL_EXPR => node
+                .children()
+                .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+                .and_then(|arguments| arguments.prev_sibling_or_token())
+                .is_none_or(|before| before.kind() != SyntaxKind::WHITESPACE),
+            SyntaxKind::FUNCTION_DEF
             | SyntaxKind::IF_EXPR
             | SyntaxKind::FOR_EXPR
             | SyntaxKind::WHILE_EXPR

@@ -1420,9 +1420,14 @@ impl std::str::FromStr for FormatRange {
 }
 
 impl FormatRange {
-    /// The byte range in `text`. Positions past a line's end or the file's
-    /// end clamp to it, the way an editor treats a stale selection.
-    fn in_text(self, text: &str) -> syntax::TextRange {
+    /// The byte range in `text`, or `None` when the range starts past the
+    /// last line, which on the command line is a typo rather than a request
+    /// to format the last line. A column past a line's end, or an end past
+    /// the file's end, clamps to it.
+    fn in_text(self, text: &str) -> Option<syntax::TextRange> {
+        if self.start.0 > line_count(text) {
+            return None;
+        }
         let index = LineIndex::new(text);
         let offset = |(line, column): (usize, Option<usize>), is_end: bool| {
             let line = u32::try_from(line - 1).unwrap_or(u32::MAX);
@@ -1443,8 +1448,14 @@ impl FormatRange {
             syntax::TextSize::try_from(line_start + within).unwrap_or_default()
         };
         let (start, end) = (offset(self.start, false), offset(self.end, true));
-        syntax::TextRange::new(start.min(end), start.max(end))
+        Some(syntax::TextRange::new(start.min(end), start.max(end)))
     }
+}
+
+/// The lines a person sees in `text`: a final line break ends the last line
+/// rather than starting an empty one, and an empty file still has line 1.
+fn line_count(text: &str) -> usize {
+    text.lines().count().max(1)
 }
 
 /// Files format on every core: each is independent, and the formatter does
@@ -1567,6 +1578,14 @@ pub fn fmt(
                 n_errors += 1;
                 error_because(&format!("failed to format: {}", path.display()), &err);
             }
+            FormatResult::RangeOutsideFile { line, line_count } => {
+                n_errors += 1;
+                let plural = if line_count == 1 { "" } else { "s" };
+                error(&format!(
+                    "--range starts at line {line}, but {} has only {line_count} line{plural}",
+                    path.display()
+                ));
+            }
         }
     }
 
@@ -1640,6 +1659,10 @@ enum FormatResult {
     },
     ReadFailed(std::io::Error),
     Refused(format::FormatError),
+    RangeOutsideFile {
+        line: usize,
+        line_count: usize,
+    },
 }
 
 fn format_file(
@@ -1654,8 +1677,16 @@ fn format_file(
     };
     let start = Instant::now();
     let formatted = match range {
-        Some(range) => format::format_range(&initial, config, range.in_text(&initial))
-            .map(|edits| format::apply_edits(&initial, &edits)),
+        Some(range) => {
+            let Some(selection) = range.in_text(&initial) else {
+                return FormatResult::RangeOutsideFile {
+                    line: range.start.0,
+                    line_count: line_count(&initial),
+                };
+            };
+            format::format_range(&initial, config, selection)
+                .map(|edits| format::apply_edits(&initial, &edits))
+        }
         None => format::format(&initial, config),
     };
     let elapsed = start.elapsed();

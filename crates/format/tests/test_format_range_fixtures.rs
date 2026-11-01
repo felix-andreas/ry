@@ -1,6 +1,6 @@
 //! Golden range-formatting fixtures: each case's source carries the selection
-//! as `$0` markers — two for a selection, one for a bare caret, none at all to
-//! select the whole file — and the expectation lists the edits it produces and
+//! as `$0` markers (two for a selection, one for a bare caret, none at all to
+//! select the whole file), and the expectation lists the edits it produces and
 //! shows the document they leave behind, with every replacement between `«`
 //! and `»`. `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs
 //! one case.
@@ -13,7 +13,7 @@
 
 use {
     format::{Config, TextEdit, format_range},
-    std::{fmt::Write as _, path::Path},
+    std::path::Path,
     syntax::{TextRange, TextSize},
 };
 
@@ -33,12 +33,11 @@ fn render(source: &str) -> String {
     }
     let mut output = String::new();
     for edit in &edits {
-        let _ = writeln!(
-            output,
-            "edit {}-{}",
+        output.push_str(&format!(
+            "edit {}-{}\n",
             position(&text, edit.range.start()),
             position(&text, edit.range.end())
-        );
+        ));
     }
     output.push_str("----\n");
     output.push_str(&marked(&text, &edits));

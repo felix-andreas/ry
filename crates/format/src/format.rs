@@ -173,7 +173,8 @@ fn layout(source: &str, config: Config, indent: &str) -> Result<Layout, FormatEr
     })
 }
 
-/// write there. An empty range is an insertion, empty text a deletion.
+/// One replacement for an editor to apply: the text in `range` becomes `new_text`, and nothing
+/// outside `range` changes. An empty range is an insertion, empty text a deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
     pub range: TextRange,
@@ -181,7 +182,7 @@ pub struct TextEdit {
 }
 
 /// The edits that carry `source` to its formatted form, each as small as the
-/// statements it changes allow — what an editor's "Format Document" applies,
+/// statements it changes allow. This is what an editor's "Format Document" applies,
 /// so that untouched lines keep their place rather than being rewritten.
 pub fn format_edits(source: &str, config: Config) -> Result<Vec<TextEdit>, FormatError> {
     let formatted = format(source, config)?;
@@ -233,7 +234,7 @@ pub fn format_range(
         // A span that only inserts covers no source text, so it touches the
         // selection when it lands inside it or on either edge. Counting the
         // far edge is what lets an insertion at the very end of the file be
-        // reached at all — no line starts there — so selecting the whole file
+        // reached at all (no line starts there), so selecting the whole file
         // always carries every edit whole-file formatting makes.
         .filter(|(in_source, _)| match in_source.is_empty() {
             true => selected.start() <= in_source.start() && in_source.start() <= selected.end(),
@@ -247,8 +248,8 @@ pub fn format_range(
 }
 
 /// `source` formatted as a whole, but with one level of indentation being
-/// the step the file already uses rather than `indent-width` — what a
-/// formatted selection is cut from.
+/// the step the file already uses rather than `indent-width`. A formatted
+/// selection is cut from this text.
 ///
 /// The step is read off the statements the formatter places: a statement it
 /// puts at level `n` and that the source indents by `n` copies of one string
@@ -291,7 +292,7 @@ fn format_in_place(source: &str, config: Config) -> Result<String, FormatError> 
     }
 }
 
-/// `source` with `edits` applied — the document the editor ends up with.
+/// `source` with `edits` applied: the document the editor ends up with.
 /// Edits are ordered and disjoint, so applying them back to front leaves every
 /// range still valid when its turn comes.
 pub fn apply_edits(source: &str, edits: &[TextEdit]) -> String {
@@ -308,8 +309,8 @@ pub fn apply_edits(source: &str, edits: &[TextEdit]) -> String {
 /// The whole lines `selection` touches, from the first one's start to the last
 /// one's end.
 ///
-/// A selection ending at the first column of a line covers none of that line —
-/// exactly what an editor sends for "these whole lines" — so the last line is
+/// A selection ending at the first column of a line covers none of that line
+/// (exactly what an editor sends for "these whole lines"), so the last line is
 /// the one holding the last selected character. An empty selection is a bare
 /// caret and takes the line it sits on; a caret after the final line break
 /// takes the last line, since there is no line after it to take. Offsets are
@@ -339,15 +340,15 @@ fn selected_lines(text: &str, selection: TextRange) -> TextRange {
 }
 
 /// Where the source and its formatted form differ, as pairs of whole-line
-/// ranges that hold the same code — the source text to replace, and the
+/// ranges that hold the same code: the source text to replace, and the
 /// formatted text to put there.
 ///
 /// The ranges come from splitting both texts at *corresponding* points rather
 /// than from diffing their lines. A line diff answers "which lines look
 /// different", which is not the question: it is free to pair up two lines that
 /// merely read alike, and a range cut that way can be text the formatter would
-/// never produce for any input. Pairing the two parse trees instead — walking
-/// them together and stopping wherever their shapes diverge — means a range
+/// never produce for any input. Pairing the two parse trees instead (walking
+/// them together and stopping wherever their shapes diverge) means a range
 /// always holds whole statements on both sides, so swapping one in yields a
 /// document that is still exactly this file, formatted a bit further.
 fn changed_spans(source: &str, formatted: &str) -> Vec<(TextRange, TextRange)> {
@@ -442,9 +443,9 @@ fn changed_spans(source: &str, formatted: &str) -> Vec<(TextRange, TextRange)> {
 /// out independently: it decides how to break a call or a block from that
 /// construct's *own* line structure, so swapping a formatted argument into a
 /// half-formatted call can flip the decision for the whole call and produce
-/// text neither form contains. Whole statements have no such coupling — every
+/// text neither form contains. Whole statements have no such coupling: every
 /// one starts its own line at a fixed indent, and nothing above it decides how
-/// it breaks — which is exactly the property that lets a selection be formatted
+/// it breaks. That is exactly the property that lets a selection be formatted
 /// at all. They nest, so a statement inside a function body is a unit of its
 /// own and selecting one line of a long function still rewrites only that
 /// line's statement.
@@ -453,7 +454,7 @@ fn changed_spans(source: &str, formatted: &str) -> Vec<(TextRange, TextRange)> {
 /// same order, so it cannot pair up constructs that are not each other. That is
 /// what rules out the formatter's structural rewrites: bracing a bare `if` body
 /// wraps it in a node the source has no counterpart for, and the walk stops at
-/// the `if` rather than pairing its body with the new block — the difference
+/// the `if` rather than pairing its body with the new block, so the difference
 /// then belongs to the `if` as a whole, which is the only way to describe it.
 fn paired_statements(
     source: &SyntaxNode,
@@ -461,13 +462,13 @@ fn paired_statements(
     pairs: &mut Vec<(TextSize, TextSize)>,
 ) {
     // A braced block is an expression in R, so the node kind is what marks a
-    // sequence of statements — not the position in the tree.
+    // sequence of statements, not the position in the tree.
     let sequence = matches!(
         source.kind(),
         SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
     );
     // Both lists are stepped together so that one running out while the other
-    // has more counts as a difference — pairing up what is left would pair
+    // has more counts as a difference: pairing up what is left would pair
     // constructs that are not each other.
     let mut source_children = members(source, sequence);
     let mut formatted_children = members(formatted, sequence);
@@ -498,8 +499,8 @@ fn paired_statements(
     }
 }
 
-/// The children [`paired_statements`] pairs up: every child node, and — in a
-/// statement sequence — every comment standing on its own between statements.
+/// The children [`paired_statements`] pairs up: every child node and, in a
+/// statement sequence, every comment standing on its own between statements.
 ///
 /// Such a comment is a unit like a statement: it holds its own line and nothing
 /// around it decides how it is laid out, so selecting it need not drag in the
@@ -558,24 +559,24 @@ pub fn check_format_invariants(input: &str) {
 /// selection is cut from. The contract every selection must hold:
 ///
 ///  1. determinism, and refusal exactly when whole-file formatting refuses;
-///  2. geometry — edits are ordered, disjoint, whole lines, and in bounds;
-///  3. preservation — applying them keeps every token, so no code is lost;
-///  4. convergence — the applied document still formats to what the original
+///  2. geometry: edits are ordered, disjoint, whole lines, and in bounds;
+///  3. preservation: applying them keeps every token, so no code is lost;
+///  4. convergence: the applied document still formats to what the original
 ///     formats to, both as a whole file and in place, which is the property
 ///     that makes formatting a selection safe to do repeatedly and in any
 ///     order;
-///  5. restriction — every edit is one formatting the whole file in place
+///  5. restriction: every edit is one formatting the whole file in place
 ///     would have made, so a selection can only ever do less, never something
 ///     else;
-///  6. completeness — selecting the whole file reproduces formatting it in
+///  6. completeness: selecting the whole file reproduces formatting it in
 ///     place byte for byte, and the whole-document edits reproduce whole-file
 ///     formatting byte for byte;
-///  7. stability — the region the edits produced is already laid out, so
+///  7. stability: the region the edits produced is already laid out, so
 ///     formatting the same selection again is a no-op;
-///  8. additivity — a selection of whole lines makes exactly the edits its
+///  8. additivity: a selection of whole lines makes exactly the edits its
 ///     lines make one at a time, so the result never depends on how a region
 ///     was selected;
-///  9. composition — formatting one line at a time, top to bottom and swept
+///  9. composition: formatting one line at a time, top to bottom and swept
 ///     until a sweep changes nothing, reaches formatting in place, and every
 ///     step on the way still formats to it.
 ///
@@ -792,7 +793,7 @@ fn probe_selections(text: &str) -> Vec<TextRange> {
         selections.push(TextRange::new(start, end));
         selections.push(TextRange::empty(start));
         // A caret in the middle of the line, and a span that starts and ends
-        // inside one — neither lands on a line boundary, and neither is
+        // inside one: neither lands on a line boundary, and neither is
         // required to land on a character boundary either.
         let middle = start + TextSize::new(u32::from(end - start) / 2);
         selections.push(TextRange::empty(middle));
