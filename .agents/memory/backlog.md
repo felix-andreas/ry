@@ -1828,6 +1828,22 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
+- **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
+  - `rawConnection` and `writeBin` are missing from the interpreter (libr has them, unregistered),
+    and cli renders every testthat failure through `rawConnection`, so about 21 packages stop there.
+  - About 12 packages (DBI, glue, withr, vctrs, lubridate, hms, readxl, later, lgr, tidyselect,
+    pkgbuild, blob) crash in the collector marking a dead handle, only in long runs. Reproduce
+    with `gctorture(TRUE)` on a profiling build.
+  - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
+    `rm()` and `gc()`, so it is finalized in a later block.
+  - Smaller classes: ALTREP in checkmate, `latin1` encoding in fastmap, `file_access` names in fs,
+    `gsub` with a Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in
+    Bessel's asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, and the
+    `parallel` package's DLL for doParallel.
+  - `eval(quote(next))` inside a loop reports no loop context.
+  - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
+    different order (`heap::env::Frame::listed_cells`).
+  - The graphics device keeps a display list but draws nothing.
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
