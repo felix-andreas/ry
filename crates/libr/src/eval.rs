@@ -1156,6 +1156,7 @@ pub unsafe extern "C" fn ry_run(
         };
     }
     crate::boundary::run_pending_finalizers();
+    crate::extptr::R_RunExitFinalizers();
     use std::io::Write;
     drop(std::io::stdout().flush());
     match outcome {

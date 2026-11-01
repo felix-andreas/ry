@@ -888,8 +888,9 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     }
     if base.is_nan() || exponent.is_nan() {
         // GNU R's result carries the exponent's payload when both are NaN, so `NA^NaN` is
-        // `NaN` and `NaN^NA` is `NA`; x86 addition keeps its first operand's payload.
-        return exponent + base;
+        // `NaN` and `NaN^NA` is `NA`. Choosing explicitly keeps that independent of which
+        // payload the compiled addition happens to propagate.
+        return if exponent.is_nan() { exponent } else { base };
     }
     if base.is_infinite() {
         if base > 0.0 {
@@ -2257,7 +2258,8 @@ unsafe fn all_any(call: &Call<'_>, is_all: bool) -> R<Sexp> {
     let (items, na_rm) = summary_args(call)?;
     let mut saw_na = false;
     for item in items {
-        if item == nil() {
+        // GNU R skips an empty list as it skips `NULL`.
+        if item == nil() || (item.kind() == SexpType::List && length(item) == 0) {
             continue;
         }
         if !matches!(

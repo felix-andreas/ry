@@ -825,7 +825,7 @@ pub unsafe fn dispatch_or_eval(
     }
     // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
     // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
-    let promised = if first == symbols().dots {
+    if first == symbols().dots {
         let promised = eval::promise_args(arguments, env)?;
         let Some(head) = promised.first() else {
             return Ok(Err(promised));
@@ -835,26 +835,49 @@ pub unsafe fn dispatch_or_eval(
         }
         let object = value_of(head.value)?;
         crate::heap().root(object);
-        promised
-    } else {
-        let object = eval::eval(first, env)?;
-        crate::heap().root(object);
-        let head = Arg {
+        return dispatch_promised(definition, call, op, promised, env);
+    }
+    let object = eval::eval(first, env)?;
+    crate::heap().root(object);
+    dispatch_evaluated_subject(definition, call, op, arguments, object, env)
+}
+
+/// [`dispatch_or_eval`] after the first argument of `arguments` evaluated to `object`. A frame
+/// subject runs its query here, because the query reads the other arguments as expressions.
+pub unsafe fn dispatch_evaluated_subject(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    arguments: Sexp,
+    object: Sexp,
+    env: Sexp,
+) -> R<Result<Sexp, Vec<Arg>>> {
+    if !object.is_object() {
+        let mut args = vec![Arg {
             tag: arguments.tag(),
             value: object,
-        };
-        if !object.is_object() {
-            let mut args = vec![head];
-            args.extend(eval::evaluate_args(arguments.cdr(), env, true, call)?);
-            return Ok(Err(args));
-        }
-        let mut promised = vec![Arg {
-            tag: head.tag,
-            value: forced_promise(first, object)?,
         }];
-        promised.extend(eval::promise_args(arguments.cdr(), env)?);
-        promised
-    };
+        args.extend(eval::evaluate_args(arguments.cdr(), env, true, call)?);
+        return Ok(Err(args));
+    }
+    if definition.name == "[" && crate::frame::is_frame(object) {
+        return crate::frame::run(call, object, env).map(Ok);
+    }
+    let mut promised = vec![Arg {
+        tag: arguments.tag(),
+        value: forced_promise(arguments.car(), object)?,
+    }];
+    promised.extend(eval::promise_args(arguments.cdr(), env)?);
+    dispatch_promised(definition, call, op, promised, env)
+}
+
+unsafe fn dispatch_promised(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    promised: Vec<Arg>,
+    env: Sexp,
+) -> R<Result<Sexp, Vec<Arg>>> {
     let object = value_of(promised[0].value)?;
     if object.is_object() {
         // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4

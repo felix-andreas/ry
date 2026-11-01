@@ -148,13 +148,22 @@ pub unsafe fn resolve_call(call: Sexp) -> Sexp {
     if call == crate::heap().known().unbound {
         current_call()
     } else {
-        call
+        match interp().assignment_call {
+            Some((replacement, whole, _)) if replacement == call => whole,
+            _ => call,
+        }
     }
 }
 
 /// The call of the innermost closure frame, or `NULL` at top level.
 pub unsafe fn current_call() -> Sexp {
-    interp()
+    let state = interp();
+    if let Some((_, whole, depth)) = state.assignment_call
+        && depth == state.frames.len()
+    {
+        return whole;
+    }
+    state
         .frames
         .last()
         .map_or(crate::heap().nil(), |frame| frame.call)

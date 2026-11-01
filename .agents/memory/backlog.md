@@ -1833,12 +1833,36 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the built-in frame
 
-- **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
-  `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
+- **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
+  needs R code (including under `.EACHI`) stop with an error.
+- **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
+  ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
+- **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
+  "update subset", 1e6 rows: about 0.11 s for both). From R it takes 0.10 to 0.14 s against the
+  engine's 0.085 s from Rust, so the interpreter's per-query cost (schema clone, lowering, fork
+  checks) shows here and is worth profiling.
+- **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
+  which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
+  take `frame` directly would let the compat go.
+- **R code evaluated while lowering can run twice.** A sub-expression that names no column is
+  evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
+  runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
+  leaves the IR built against the old schema.
+- **The bytecode compiles `[` as a generic call**, because it is a special, so a JIT-compiled loop
+  that subsets no longer runs `[` through `CallBuiltin`. Re-measure `tools/bench/jit` vector loops
+  and give plain subjects a fast path again if they regressed.
+- **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
+  reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
   `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
 - **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
   flagged although R allows it.
+- **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
+  `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
+  under ry's runtime an attached data.table still runs its own versions, which return a
+  `data.table` and reject a frame. The runtime needs these names routed to the engine
+  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
+  installs, before the checker's types are true at run time.
 - **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
@@ -1849,8 +1873,6 @@ The end-to-end guard rests on the corpus suites.
   type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
-- **Naming:** the interpreter must bind `frame` as the delegating closure `decisions.md` describes
-  ("the built-in frame"), ahead of `package:graphics`.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
@@ -1871,6 +1893,25 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
+- **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
+  - `rawConnection` and `writeBin` are missing from the interpreter (libr has them, unregistered),
+    and cli renders every testthat failure through `rawConnection`, so about 21 packages stop there.
+  - About 12 packages (DBI, glue, withr, vctrs, lubridate, hms, readxl, later, lgr, tidyselect,
+    pkgbuild, blob) crash in the collector marking a dead handle, only in long runs. Reproduce
+    with `gctorture(TRUE)` on a profiling build.
+  - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
+    `rm()` and `gc()`, so it is finalized in a later block.
+  - Smaller classes: ALTREP in checkmate, `latin1` encoding in fastmap, `file_access` names in fs,
+    `gsub` with a Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in
+    Bessel's asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, and the
+    `parallel` package's DLL for doParallel.
+  - `eval(quote(next))` inside a loop reports no loop context.
+  - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
+    different order (`heap::env::Frame::listed_cells`).
+  - The graphics device keeps a display list but draws nothing.
+- **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
+  differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
+  unimplemented one when it is called) or printer details (complex numbers, wide matrices).
 - **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
   (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
   optimum along a slightly different path, so values agree to about seven digits only.
@@ -2582,3 +2623,18 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   unresolved and the defining file reports it unused. Destructured names also lack declaration
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
+
+## Open: findings from the records, library and frame round
+
+- **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
+  as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
+  which makes a diagnostic differ from the user's own definition. Show the declaration order.
+- **`@Money(list(amount = "x", ...))` blames the whole `list(...)` call.** The wrong field's value is
+  the precise range.
+- **A join column missing from both frames is reported twice at one range**, once per frame
+  (`sales[ids, on = "teem"]`). One finding naming both frames would be quieter.
+- **Strict mode reports an `if (x < 0) stop(...)` guard** as an undetermined type (already on
+  `strict-mode.mdx`); a function that ends in `stop()` should type as `Never` there.
+- **`ry run` on a debug build is unusable for loops** (a 20M-iteration loop took over three minutes
+  against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
+  against a release build.

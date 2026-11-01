@@ -11,7 +11,7 @@ use crate::{
 use heap::{
     Collection, HeapError,
     arena::Arena,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+    object::{Header, NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
     strings::Encoding,
 };
 use std::ffi::{c_char, c_int, c_long, c_void};
@@ -554,11 +554,18 @@ pub unsafe extern "C" fn R_maxLength(vector: Sexp) -> R_xlen_t {
 // Protection.
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Rf_protect(object: Sexp) -> Sexp {
+pub unsafe extern "C" fn Rf_protect(object: *mut Header) -> *mut Header {
     enter(|| {
-        runtime().heap.roots.protect.protect(object)?;
+        runtime().heap.roots.protect.protect(protectable(object))?;
         Ok(object)
     })
+}
+
+/// GNU R's collector skips a C `NULL` on the protect stack, and packages rely on that: vctrs
+/// protects lazily filled pointers that are still `NULL`. Such a slot holds `R_NilValue` here,
+/// so it still counts toward `UNPROTECT` while every root stays a real object.
+unsafe fn protectable(object: *mut Header) -> Sexp {
+    Sexp::from_raw(object).unwrap_or_else(|| runtime().nil())
 }
 
 #[unsafe(no_mangle)]
@@ -577,22 +584,22 @@ pub unsafe extern "C" fn Rf_unprotect_ptr(object: Sexp) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_ProtectWithIndex(object: Sexp, index: *mut c_int) {
+pub unsafe extern "C" fn R_ProtectWithIndex(object: *mut Header, index: *mut c_int) {
     enter(|| {
-        let position = runtime().heap.roots.protect.protect(object)?;
+        let position = runtime().heap.roots.protect.protect(protectable(object))?;
         *index = position as c_int;
         Ok(())
     })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_Reprotect(object: Sexp, index: c_int) {
+pub unsafe extern "C" fn R_Reprotect(object: *mut Header, index: c_int) {
     enter(|| {
         Ok(runtime()
             .heap
             .roots
             .protect
-            .reprotect(object, index.max(0) as usize)?)
+            .reprotect(protectable(object), index.max(0) as usize)?)
     })
 }
 

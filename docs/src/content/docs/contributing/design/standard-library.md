@@ -40,10 +40,11 @@ The alternative, a namespace value that holds the functions, was declined for th
 
 ## Where the names live
 
-The functions are bound in an environment named `package:ry`, which sits on the search path just
-above `package:base`, so `search()` ends with `"package:ry"`, `"package:base"`. It is attached at
-startup and has no namespace, so `ry::List.map` is not supported: the bare name is the only
-spelling.
+The functions live in the `ry` namespace, which is attached at startup as `package:ry` in front of
+the default packages, beside the frame functions (`frame`, `setkey` and the rest), so `search()`
+starts with `".GlobalEnv"`, `"tools:ry"`, `"package:ry"`, `"package:stats"`. `ry::List.map` spells
+the same function after something else masks the bare name. (Without base R, as in the
+interpreter's own tests, the builtins bind them in a `package:ry` just above `package:base`.)
 
 Placing them there rather than in the base environment is what keeps R programs meaning what they
 meant. R looks a name up from the calling environment outwards: top-level code goes through the
@@ -53,7 +54,8 @@ every environment a program could have defined a name in comes before `package:r
 
 - A script that defines its own `List.map` keeps it, and so does a package.
 - A package that attaches a package which exports a `Str.trim` sees that one, because `library()`
-  attaches in front of `package:ry`.
+  attaches in front of `package:ry`. The default packages come after it, which is safe because
+  none of them exports a library name.
 - S3 dispatch only finds `Result.map` as a method when some code calls a generic `Result()` on an
   object of class `map`, and no shipped package has generics with these names.
 
