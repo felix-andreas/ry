@@ -12,6 +12,7 @@ use {
         },
         unwind::{R, error},
     },
+    heap::object::Sexp,
     std::{
         collections::BTreeMap,
         ffi::{CStr, c_char, c_int},
@@ -1457,6 +1458,14 @@ pub unsafe fn open_device(spec: DeviceSpec) -> R<()> {
     d.have_locator = 1;
     d.device_version = 0;
     d.device_clip = 0;
+    // Graphics systems call these whatever the device version, as grid's new page releases
+    // every pattern, clipping path and mask, so a device without them would crash.
+    d.set_pattern = Some(device_set_pattern);
+    d.release_pattern = Some(device_release);
+    d.set_clip_path = Some(device_set_definition);
+    d.release_clip_path = Some(device_release);
+    d.set_mask = Some(device_set_definition);
+    d.release_mask = Some(device_release);
     d.device_specific = Box::into_raw(Box::new(RenderDevice {
         format: spec.format,
         file: spec.file.clone(),
@@ -1477,6 +1486,20 @@ pub unsafe fn open_device(spec: DeviceSpec) -> R<()> {
     let dd = create_device(dev)?;
     add_device_named(dd, spec.name, spec.file.as_deref())
 }
+
+unsafe extern "C" fn device_set_pattern(_pattern: Sexp, _dd: *mut DevDesc) -> Option<Sexp> {
+    None
+}
+
+unsafe extern "C" fn device_set_definition(
+    _definition: Sexp,
+    _reference: Sexp,
+    _dd: *mut DevDesc,
+) -> Option<Sexp> {
+    None
+}
+
+unsafe extern "C" fn device_release(_reference: Sexp, _dd: *mut DevDesc) {}
 
 unsafe fn render_device<'a>(dd: *mut DevDesc) -> &'a mut RenderDevice {
     &mut *(*dd).device_specific.cast::<RenderDevice>()

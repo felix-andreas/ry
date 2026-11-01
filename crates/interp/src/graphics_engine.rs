@@ -806,7 +806,7 @@ unsafe fn register_one(dd: *mut GEDevDesc, index: usize, callback: SystemCallbac
     Ok(())
 }
 
-unsafe fn register_with_device(dd: *mut GEDevDesc) -> R<()> {
+pub unsafe fn register_with_device(dd: *mut GEDevDesc) -> R<()> {
     for (index, callback) in registered_systems() {
         register_one(dd, index, callback)?;
     }

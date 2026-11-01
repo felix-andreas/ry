@@ -1,20 +1,24 @@
-//! The graphics engine and device API.
-//!
-//! ry has no graphics engine yet (an open question in the runtime design), but packages that
-//! implement or use devices (ragg, systemfonts, textshaping) import the engine's names and must
-//! load, register their routines, and run the parts that do not draw. So every engine entry
-//! point is exported: the color and text helpers work, and anything that needs a device raises
-//! an R error that says graphics devices are not supported yet.
+//! The graphics engine and device API: the C entry points of R's graphics engine, over the
+//! engine in `interp::graphics_engine`, so that compiled graphics systems (grid) and devices
+//! (ragg) run unchanged.
 
 use {
     crate::{
+        Rboolean,
+        attributes::{get_attrib, inherits},
         boundary::{ApiResult, enter, error, raise},
+        globals::R_NamesSymbol,
         runtime,
         strings::{c_bytes, utf8_text},
-        vectors::{int_elt, real_elt, xlength},
+        vectors::{int_elt, real_elt, sexp_elt, xlength},
     },
     heap::object::{NA_INTEGER, Sexp, SexpType, is_na_real},
-    std::ffi::{c_char, c_int, c_uint},
+    interp::{
+        graphics,
+        graphics_engine::{self, DevDesc, GEContext, GEDevDesc, SystemCallback, Unit},
+        values,
+    },
+    std::ffi::{c_char, c_int, c_uint, c_void},
 };
 
 /// The graphics engine version ry presents: R 4.6's (`R_GE_fontVar`).
@@ -699,219 +703,844 @@ const COLOR_NAMES: &[(&str, u32)] = &[
     ("yellowgreen", 0x32CD9A),
 ];
 
-/// GNU R's limit on graphics systems (`MAX_GRAPHICS_SYSTEMS`).
-const MAX_GRAPHICS_SYSTEMS: usize = 24;
-
-/// The registered graphics systems' callbacks, as addresses. A system such as grid registers
-/// when its namespace loads. With no devices open there is no per-device state to create, so
-/// registering only claims a slot.
-static GRAPHICS_SYSTEMS: std::sync::Mutex<[usize; MAX_GRAPHICS_SYSTEMS]> =
-    std::sync::Mutex::new([0; MAX_GRAPHICS_SYSTEMS]);
-
-/// `GEregisterSystem(callback, &index)`: claims the first free slot for a graphics system.
+/// `GEregisterSystem(callback, &index)`: registers a graphics system such as grid with every
+/// open device and every device opened later.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
-    let claimed = {
-        let mut systems = GRAPHICS_SYSTEMS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let free = systems.iter().position(|&slot| slot == 0);
-        if let Some(free) = free {
-            systems[free] = callback;
+pub unsafe extern "C" fn GEregisterSystem(callback: Option<SystemCallback>, index: *mut c_int) {
+    enter(|| {
+        let callback = callback.ok_or_else(|| error("invalid graphics system callback"))?;
+        let claimed = graphics_engine::register_system(callback)?;
+        if !index.is_null() {
+            *index = claimed as c_int;
         }
-        free
-    };
-    match claimed {
-        Some(free) if !index.is_null() => *index = free as c_int,
-        Some(_) => {}
-        None => raise(error("too many graphics systems registered")),
-    }
+        Ok(())
+    })
 }
 
-/// `GEunregisterSystem(index)`: frees a graphics system's slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
-    let mut systems = GRAPHICS_SYSTEMS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match usize::try_from(index)
-        .ok()
-        .and_then(|index| systems.get_mut(index))
-    {
-        Some(slot) if *slot != 0 => *slot = 0,
-        _ => {
-            drop(systems);
-            raise(error("no graphics system to unregister"))
-        }
+    enter(|| graphics_engine::unregister_system(index))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEregisterWithDevice(dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::register_with_device(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEsystemState(dd: *mut GEDevDesc, index: c_int) -> *mut c_void {
+    match usize::try_from(index) {
+        Ok(index) => graphics_engine::system_state(dd, index),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
-fn unsupported_message() -> crate::boundary::Unwind {
-    error("graphics devices are not supported by ry yet")
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEhandleEvent(event: c_int, dev: *mut DevDesc, data: Sexp) -> Sexp {
+    enter(|| graphics_engine::handle_event(event, dev, data))
 }
 
-macro_rules! unsupported {
-    ($($name:ident),* $(,)?) => {
+/// `GEcreateDD()`: a zeroed device description for a device to fill in. GNU R allocates it
+/// with `calloc`, and devices free it with `free` when they fail to open, so this does too.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcreateDD() -> *mut DevDesc {
+    let dev = libc::calloc(1, std::mem::size_of::<DevDesc>()).cast::<DevDesc>();
+    if dev.is_null() {
+        raise(error(
+            "unable to allocate memory for the device description",
+        ));
+    }
+    dev
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEfreeDD(dev: *mut DevDesc) {
+    libc::free(dev.cast());
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcreateDevDesc(dev: *mut DevDesc) -> *mut GEDevDesc {
+    enter(|| graphics_engine::create_device(dev))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEdestroyDevDesc(dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::destroy_device(dd))
+}
+
+/// `GEaddDevice(dd)`: adds a device named by the `.Device` variable its opener set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEaddDevice(dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::add_device_from_dot_device(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEaddDevice2(dd: *mut GEDevDesc, name: *const c_char) {
+    enter(|| graphics_engine::add_device_named(dd, &text_of(name), None))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEaddDevice2f(
+    dd: *mut GEDevDesc,
+    name: *const c_char,
+    file: *const c_char,
+) {
+    enter(|| {
+        let file = (!file.is_null()).then(|| text_of(file));
+        graphics_engine::add_device_named(dd, &text_of(name), file.as_deref())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEkillDevice(dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::kill(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcurrentDevice() -> *mut GEDevDesc {
+    enter(|| graphics_engine::current_device())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GEgetDevice(number: c_int) -> *mut GEDevDesc {
+    match usize::try_from(number) {
+        Ok(number) if number < graphics_engine::MAX_DEVICES => graphics_engine::device(number),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GEdeviceNumber(dd: *mut GEDevDesc) -> c_int {
+    graphics_engine::device_number(dd) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_desc2GEDesc(dev: *mut DevDesc) -> *mut GEDevDesc {
+    graphics_engine::desc_to_device(dev)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_ndevNumber(dev: *mut DevDesc) -> c_int {
+    graphics_engine::device_number(graphics_engine::desc_to_device(dev)) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_killDevice(number: c_int) {
+    if let Ok(number) = usize::try_from(number) {
+        enter(|| graphics_engine::kill_device(number))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_KillAllDevices() {
+    enter(|| graphics_engine::kill_all_devices())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_nextDevice(from: c_int) -> c_int {
+    graphics_engine::next_device(usize::try_from(from).unwrap_or(0)) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_prevDevice(from: c_int) -> c_int {
+    graphics_engine::previous_device(usize::try_from(from).unwrap_or(0)) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_selectDevice(number: c_int) -> c_int {
+    let number = usize::try_from(number).unwrap_or(0);
+    enter(|| Ok(graphics_engine::select_device(number)? as c_int))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_NoDevices() -> c_int {
+    c_int::from(graphics_engine::no_devices())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_NumDevices() -> c_int {
+    graphics_engine::num_devices() as c_int
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_curDevice() -> c_int {
+    graphics_engine::current_number() as c_int
+}
+
+/// `R_CheckDeviceAvailable()`: an error when all 63 device slots are taken.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_CheckDeviceAvailable() {
+    enter(graphics_engine::check_device_available)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn R_CheckDeviceAvailableBool() -> crate::Rboolean {
+    crate::Rboolean::from(graphics_engine::device_available())
+}
+
+/// `NewFrameConfirm(dev)`: asks before a new page. A device that confirms itself does so, and
+/// ry's console does not prompt otherwise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_NewFrameConfirm(dev: *mut DevDesc) {
+    if let Some(confirm) = (*dev).new_frame_confirm {
+        confirm(dev);
+    }
+}
+
+/// Graphics events (`getGraphicsEvent`) are not supported, so a device's events are dropped.
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_doMouseEvent(
+    _dev: *mut DevDesc,
+    _event: c_int,
+    _buttons: c_int,
+    _x: f64,
+    _y: f64,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_doKeybd(_dev: *mut DevDesc, _key: c_int, _name: *const c_char) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_doIdle(_dev: *mut DevDesc) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_doesIdle(_dev: *mut DevDesc) -> crate::Rboolean {
+    0
+}
+
+/// `AdobeSymbol2utf8(out, in, nwork, usePUA)`: ry does not map the Adobe Symbol encoding, so
+/// the text is copied unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_AdobeSymbol2utf8(
+    out: *mut c_char,
+    input: *const c_char,
+    work: usize,
+    _use_pua: crate::Rboolean,
+) -> *mut c_void {
+    if work > 0 {
+        let bytes = c_bytes(input);
+        let length = bytes.len().min(work - 1);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), length);
+        *out.add(length) = 0;
+    }
+    out.cast()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_utf8toAdobeSymbol(out: *mut c_char, input: *const c_char) -> c_int {
+    let bytes = c_bytes(input);
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), bytes.len());
+    *out.add(bytes.len()) = 0;
+    bytes.len() as c_int
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn Rf_utf8ToLatin1AdobeSymbol2utf8(
+    input: *const c_char,
+    _use_pua: crate::Rboolean,
+) -> *const c_char {
+    input
+}
+
+/// `eval_with_gd(expr, rho, dd)`: evaluates `expr`. GNU R's version only differs in which
+/// device a graphics error names.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_eval_with_gd(expression: Sexp, env: Sexp, _dd: *mut GEDevDesc) -> Sexp {
+    crate::eval::Rf_eval(expression, env)
+}
+
+macro_rules! units {
+    ($($from:ident, $ge_from:ident, $to:ident, $ge_to:ident => $engine_from:ident, $engine_to:ident;)*) => {
         $(
-            /// Needs a graphics device, which ry does not have yet.
             #[unsafe(no_mangle)]
-            pub unsafe extern "C" fn $name() {
-                raise(unsupported_message())
+            pub unsafe extern "C" fn $from(value: f64, to: c_int, dd: *mut GEDevDesc) -> f64 {
+                graphics_engine::$engine_from(value, Unit::from_code(to), dd)
+            }
+
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $ge_from(value: f64, to: c_int, dd: *mut GEDevDesc) -> f64 {
+                graphics_engine::$engine_from(value, Unit::from_code(to), dd)
+            }
+
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $to(value: f64, from: c_int, dd: *mut GEDevDesc) -> f64 {
+                graphics_engine::$engine_to(value, Unit::from_code(from), dd)
+            }
+
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $ge_to(value: f64, from: c_int, dd: *mut GEDevDesc) -> f64 {
+                graphics_engine::$engine_to(value, Unit::from_code(from), dd)
             }
         )*
     };
 }
 
-unsupported!(
-    GEaddDevice,
-    GEaddDevice2,
-    GEaddDevice2f,
-    GECap,
-    GECircle,
-    GEcheckState,
-    GEcontourLines,
-    GEcopyDisplayList,
-    GEcreateDD,
-    GEcreateDevDesc,
-    GEcreateSnapshot,
-    GEcurrentDevice,
-    GEdestroyDevDesc,
-    GEdeviceDirty,
-    GEdeviceNumber,
-    GEdirtyDevice,
-    GEExpressionHeight,
-    GEExpressionMetric,
-    GEExpressionWidth,
-    GEFill,
-    GEFillStroke,
-    GEfreeDD,
-    GEgetDevice,
-    GEGlyph,
-    GEhandleEvent,
-    GEinitDisplayList,
-    GEkillDevice,
-    GELine,
-    GEMathText,
-    GEMetricInfo,
-    GEMode,
-    GENewPage,
-    GEonExit,
-    GEPath,
-    GEplayDisplayList,
-    GEplaySnapshot,
-    GEPolygon,
-    GEPolyline,
-    GEPretty,
-    GERaster,
-    GErecordGraphicOperation,
-    GErecording,
-    GERect,
-    GEregisterWithDevice,
-    GESetClip,
-    GEStrHeight,
-    GEStrMetric,
-    GEStrWidth,
-    GEStroke,
-    GESymbol,
-    GEsystemState,
-    GEText,
-    GEXspline,
-    Rf_GAxisPars,
-    Rf_CreateAtVector,
-    Rf_eval_with_gd,
-    Rf_desc2GEDesc,
-    fromDeviceHeight,
-    fromDeviceWidth,
-    fromDeviceX,
-    fromDeviceY,
-    GEfromDeviceHeight,
-    GEfromDeviceWidth,
-    GEfromDeviceX,
-    GEfromDeviceY,
-    toDeviceHeight,
-    toDeviceWidth,
-    toDeviceX,
-    toDeviceY,
-    GEtoDeviceHeight,
-    GEtoDeviceWidth,
-    GEtoDeviceX,
-    GEtoDeviceY,
-    R_GE_clipPathFillRule,
-    R_GE_glyphColour,
-    R_GE_glyphFont,
-    R_GE_glyphFontFamily,
-    R_GE_glyphFontFile,
-    R_GE_glyphFontIndex,
-    R_GE_glyphFontNumVar,
-    R_GE_glyphFontPSname,
-    R_GE_glyphFontStyle,
-    R_GE_glyphFontVarAxis,
-    R_GE_glyphFontVarFormatted,
-    R_GE_glyphFontVarValue,
-    R_GE_glyphFontWeight,
-    R_GE_glyphID,
-    R_GE_glyphInfoFonts,
-    R_GE_glyphInfoGlyphs,
-    R_GE_glyphRotation,
-    R_GE_glyphSize,
-    R_GE_glyphX,
-    R_GE_glyphY,
-    R_GE_hasGlyphRotation,
-    R_GE_isPattern,
-    R_GE_linearGradientColour,
-    R_GE_linearGradientExtend,
-    R_GE_linearGradientNumStops,
-    R_GE_linearGradientStop,
-    R_GE_linearGradientX1,
-    R_GE_linearGradientX2,
-    R_GE_linearGradientY1,
-    R_GE_linearGradientY2,
-    R_GE_maskType,
-    R_GE_patternType,
-    R_GE_radialGradientCX1,
-    R_GE_radialGradientCX2,
-    R_GE_radialGradientCY1,
-    R_GE_radialGradientCY2,
-    R_GE_radialGradientColour,
-    R_GE_radialGradientExtend,
-    R_GE_radialGradientNumStops,
-    R_GE_radialGradientR1,
-    R_GE_radialGradientR2,
-    R_GE_radialGradientStop,
-    R_GE_rasterInterpolate,
-    R_GE_rasterResizeForRotation,
-    R_GE_rasterRotate,
-    R_GE_rasterRotatedOffset,
-    R_GE_rasterRotatedSize,
-    R_GE_rasterScale,
-    R_GE_tilingPatternExtend,
-    R_GE_tilingPatternFunction,
-    R_GE_tilingPatternHeight,
-    R_GE_tilingPatternWidth,
-    R_GE_tilingPatternX,
-    R_GE_tilingPatternY,
-    GE_LENDget,
-    GE_LENDpar,
-    GE_LJOINget,
-    GE_LJOINpar,
-    GE_LTYget,
-    GE_LTYpar,
-    GEstring_to_pch,
-    Rf_killDevice,
-    Rf_nextDevice,
-    Rf_prevDevice,
-    Rf_selectDevice,
-    Rf_ndevNumber,
-    Rf_NewFrameConfirm,
-    Rf_doIdle,
-    Rf_doKeybd,
-    Rf_doMouseEvent,
-    Rf_doesIdle,
-    Rf_AdobeSymbol2utf8,
-    Rf_utf8toAdobeSymbol,
-    Rf_utf8ToLatin1AdobeSymbol2utf8,
-    Rf_KillAllDevices,
-);
+units! {
+    fromDeviceX, GEfromDeviceX, toDeviceX, GEtoDeviceX => from_device_x, to_device_x;
+    fromDeviceY, GEfromDeviceY, toDeviceY, GEtoDeviceY => from_device_y, to_device_y;
+    fromDeviceWidth, GEfromDeviceWidth, toDeviceWidth, GEtoDeviceWidth
+        => from_device_width, to_device_width;
+    fromDeviceHeight, GEfromDeviceHeight, toDeviceHeight, GEtoDeviceHeight
+        => from_device_height, to_device_height;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GE_LENDpar(value: Sexp, index: c_int) -> c_int {
+    enter(|| graphics_engine::lend_par(value, index_of(index)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GE_LENDget(lend: c_int) -> Sexp {
+    enter(|| values::string_vector(&[graphics_engine::lend_name(lend)?]))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GE_LJOINpar(value: Sexp, index: c_int) -> c_int {
+    enter(|| graphics_engine::ljoin_par(value, index_of(index)))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GE_LJOINget(ljoin: c_int) -> Sexp {
+    enter(|| values::string_vector(&[graphics_engine::ljoin_name(ljoin)?]))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GE_LTYpar(value: Sexp, index: c_int) -> c_uint {
+    enter(|| Ok(graphics_engine::lty_par(value, index_of(index))? as c_uint))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GE_LTYget(lty: c_uint) -> Sexp {
+    enter(|| values::string_vector(&[graphics_engine::lty_name(lty as c_int)]))
+}
+
+/// `GEstring_to_pch(chr)`: the plotting symbol a one-character string names.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEstring_to_pch(text: Sexp) -> c_int {
+    enter(|| {
+        if text == runtime().heap.known().na_string {
+            return graphics_engine::string_to_pch(None);
+        }
+        graphics_engine::string_to_pch(Some(&utf8_text(text)?))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GESetClip(x1: f64, y1: f64, x2: f64, y2: f64, dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::set_clip(x1, y1, x2, y2, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GENewPage(gc: *mut GEContext, dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::new_page(&*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GELine(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::line(x1, y1, x2, y2, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEPolyline(
+    count: c_int,
+    x: *mut f64,
+    y: *mut f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::polyline(slice(x, count), slice(y, count), &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEPolygon(
+    count: c_int,
+    x: *mut f64,
+    y: *mut f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::polygon(slice(x, count), slice(y, count), &mut *gc, dd))
+}
+
+/// `GEXspline(n, x, y, s, open, repEnds, draw, gc, dd)`: ry draws an X-spline through its
+/// control points as straight segments, and returns those points as `list(x, y)`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn GEXspline(
+    count: c_int,
+    x: *mut f64,
+    y: *mut f64,
+    _shape: *mut f64,
+    open: crate::Rboolean,
+    _repeat_ends: crate::Rboolean,
+    draw: crate::Rboolean,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) -> Sexp {
+    enter(|| {
+        let (x, y) = (slice(x, count), slice(y, count));
+        if draw != 0 {
+            if open != 0 {
+                graphics_engine::polyline(x, y, &*gc, dd)?;
+            } else {
+                graphics_engine::polygon(x, y, &mut *gc, dd)?;
+            }
+        }
+        let points = [values::real_vector(x)?, values::real_vector(y)?];
+        values::list_vector(&points)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GECircle(
+    x: f64,
+    y: f64,
+    radius: f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::circle(x, y, radius, &mut *gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GERect(
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::rect(x0, y0, x1, y1, &mut *gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEPath(
+    x: *mut f64,
+    y: *mut f64,
+    polygons: c_int,
+    counts: *mut c_int,
+    winding: crate::Rboolean,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| {
+        let counts = slice(counts, polygons);
+        let total: c_int = counts.iter().sum();
+        graphics_engine::path(
+            slice(x, total),
+            slice(y, total),
+            counts,
+            winding != 0,
+            &mut *gc,
+            dd,
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn GERaster(
+    raster: *mut c_uint,
+    columns: c_int,
+    rows: c_int,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    angle: f64,
+    interpolate: crate::Rboolean,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| {
+        let length = columns.max(0) as usize * rows.max(0) as usize;
+        let pixels = if raster.is_null() || length == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(raster, length)
+        };
+        graphics_engine::raster(
+            pixels,
+            columns,
+            rows,
+            x,
+            y,
+            width,
+            height,
+            angle,
+            interpolate != 0,
+            &*gc,
+            dd,
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GECap(dd: *mut GEDevDesc) -> Sexp {
+    enter(|| graphics_engine::capture(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEMode(mode: c_int, dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::mode(mode, dd))
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn GEText(
+    x: f64,
+    y: f64,
+    text: *const c_char,
+    encoding: c_int,
+    xc: f64,
+    yc: f64,
+    rotation: f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::text(x, y, &decode(text, encoding), xc, yc, rotation, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GESymbol(
+    x: f64,
+    y: f64,
+    pch: c_int,
+    size: f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::symbol(x, y, pch, size, &mut *gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEStroke(path: Sexp, gc: *mut GEContext, dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::stroke(path, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEFill(path: Sexp, rule: c_int, gc: *mut GEContext, dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::fill(path, rule, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEFillStroke(
+    path: Sexp,
+    rule: c_int,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::fill_stroke(path, rule, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn GEGlyph(
+    count: c_int,
+    glyphs: *mut c_int,
+    x: *mut f64,
+    y: *mut f64,
+    font: Sexp,
+    size: f64,
+    colour: c_int,
+    rotation: f64,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| {
+        graphics_engine::glyph(
+            slice_mut(glyphs, count),
+            slice_mut(x, count),
+            slice_mut(y, count),
+            font,
+            size,
+            colour,
+            rotation,
+            dd,
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEPretty(low: *mut f64, high: *mut f64, divisions: *mut c_int) {
+    enter(|| graphics_engine::pretty_axis(&mut *low, &mut *high, &mut *divisions))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEMetricInfo(
+    code: c_int,
+    gc: *mut GEContext,
+    ascent: *mut f64,
+    descent: *mut f64,
+    width: *mut f64,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| {
+        let metrics = graphics_engine::metric_info(code, &*gc, dd)?;
+        write_metrics(metrics, ascent, descent, width);
+        Ok(())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEStrWidth(
+    text: *const c_char,
+    encoding: c_int,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) -> f64 {
+    enter(|| graphics_engine::str_width(&decode(text, encoding), &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEStrHeight(
+    text: *const c_char,
+    encoding: c_int,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) -> f64 {
+    enter(|| graphics_engine::str_height(&decode(text, encoding), &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn GEStrMetric(
+    text: *const c_char,
+    encoding: c_int,
+    gc: *mut GEContext,
+    ascent: *mut f64,
+    descent: *mut f64,
+    width: *mut f64,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| {
+        let metrics = graphics_engine::str_metric(&decode(text, encoding), &*gc, dd)?;
+        write_metrics(metrics, ascent, descent, width);
+        Ok(())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEExpressionWidth(
+    expression: Sexp,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) -> f64 {
+    enter(|| graphics_engine::expression_width(expression, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEExpressionHeight(
+    expression: Sexp,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) -> f64 {
+    enter(|| graphics_engine::expression_height(expression, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEExpressionMetric(
+    expression: Sexp,
+    gc: *mut GEContext,
+    ascent: *mut f64,
+    descent: *mut f64,
+    width: *mut f64,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| {
+        let metrics = graphics_engine::expression_metric(expression, &*gc, dd)?;
+        write_metrics(metrics, ascent, descent, width);
+        Ok(())
+    })
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn GEMathText(
+    x: f64,
+    y: f64,
+    expression: Sexp,
+    xc: f64,
+    yc: f64,
+    rotation: f64,
+    gc: *mut GEContext,
+    dd: *mut GEDevDesc,
+) {
+    enter(|| graphics_engine::math_text(x, y, expression, xc, yc, rotation, &*gc, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEdeviceDirty(dd: *mut GEDevDesc) -> crate::Rboolean {
+    crate::Rboolean::from(graphics_engine::device_dirty(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEdirtyDevice(dd: *mut GEDevDesc) {
+    graphics_engine::dirty_device(dd)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcheckState(dd: *mut GEDevDesc) -> crate::Rboolean {
+    enter(|| Ok(crate::Rboolean::from(graphics_engine::check_state(dd)?)))
+}
+
+/// `GErecording(call, dd)`: whether an operation made by `call` goes on the display list.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GErecording(call: Sexp, dd: *mut GEDevDesc) -> crate::Rboolean {
+    crate::Rboolean::from(call != runtime().nil() && (*dd).record_graphics != 0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GErecordGraphicOperation(op: Sexp, args: Sexp, dd: *mut GEDevDesc) {
+    graphics_engine::record_operation(op, args, dd)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEinitDisplayList(dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::init_display_list(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEplayDisplayList(dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::play_display_list(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcopyDisplayList(from: c_int) {
+    enter(|| {
+        let from = usize::try_from(from).map_err(|_| error("invalid device"))?;
+        graphics_engine::copy_display_list(from)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcreateSnapshot(dd: *mut GEDevDesc) -> Sexp {
+    enter(|| graphics_engine::create_snapshot(dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEplaySnapshot(snapshot: Sexp, dd: *mut GEDevDesc) {
+    enter(|| graphics_engine::play_snapshot(snapshot, dd))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEonExit() {
+    enter(|| graphics_engine::on_exit())
+}
+
+/// `GEcontourLines(x, nx, y, ny, z, levels, nl)`: the contour lines as `contourLines()` returns
+/// them.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEcontourLines(
+    x: *mut f64,
+    columns: c_int,
+    y: *mut f64,
+    rows: c_int,
+    z: *mut f64,
+    levels: *mut f64,
+    level_count: c_int,
+) -> Sexp {
+    enter(|| {
+        let cells = columns.max(0).saturating_mul(rows.max(0));
+        graphics::contour_lines(
+            slice(x, columns),
+            slice(y, rows),
+            slice(z, cells),
+            slice(levels, level_count),
+        )
+    })
+}
+
+/// `GAxisPars(&min, &max, &n, log, axis)`: the first and last tick and the interval count of
+/// an axis over `[min, max]`, which are decades on a log axis.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_GAxisPars(
+    min: *mut f64,
+    max: *mut f64,
+    count: *mut c_int,
+    log: crate::Rboolean,
+    _axis: c_int,
+) {
+    let swap = *min > *max;
+    let (low, high) = if swap { (*max, *min) } else { (*min, *max) };
+    let (mut first, mut last, intervals) = if log != 0 {
+        graphics::log_axis(
+            10f64.powf(low.max(-307.0)),
+            10f64.powf(high.min(308.0)),
+            *count,
+        )
+    } else {
+        graphics::linear_axis(low, high, *count)
+    };
+    if swap {
+        std::mem::swap(&mut first, &mut last);
+    }
+    *min = first;
+    *max = last;
+    *count = intervals;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_CreateAtVector(
+    axp: *const f64,
+    usr: *const f64,
+    intervals: c_int,
+    log: crate::Rboolean,
+) -> Sexp {
+    enter(|| {
+        let axp = [*axp, *axp.add(1), *axp.add(2)];
+        let usr = [*usr, *usr.add(1)];
+        values::real_vector(&graphics::at_vector(axp, usr, intervals, log != 0))
+    })
+}
+
+const CE_LATIN1: c_int = 2;
+
+unsafe fn text_of(text: *const c_char) -> String {
+    String::from_utf8_lossy(c_bytes(text)).into_owned()
+}
+
+/// Decodes a string in the encoding (`cetype_t`) native code passes with it.
+unsafe fn decode(text: *const c_char, encoding: c_int) -> String {
+    let bytes = c_bytes(text);
+    if encoding == CE_LATIN1 {
+        bytes.iter().map(|&byte| char::from(byte)).collect()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+fn index_of(index: c_int) -> usize {
+    usize::try_from(index).unwrap_or(0)
+}
+
+unsafe fn slice<'a, T>(data: *const T, count: c_int) -> &'a [T] {
+    match usize::try_from(count) {
+        Ok(count) if count > 0 && !data.is_null() => std::slice::from_raw_parts(data, count),
+        _ => &[],
+    }
+}
+
+unsafe fn slice_mut<'a, T>(data: *mut T, count: c_int) -> &'a mut [T] {
+    match usize::try_from(count) {
+        Ok(count) if count > 0 && !data.is_null() => std::slice::from_raw_parts_mut(data, count),
+        _ => &mut [],
+    }
+}
+
+unsafe fn write_metrics([a, d, w]: [f64; 3], ascent: *mut f64, descent: *mut f64, width: *mut f64) {
+    *ascent = a;
+    *descent = d;
+    *width = w;
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn R_GE_getVersion() -> c_int {
@@ -929,31 +1558,566 @@ pub unsafe extern "C" fn R_GE_checkVersionOrDie(version: c_int) {
     }
 }
 
-/// `R_CheckDeviceAvailable()`: there is no device list to add a device to.
+// Patterns, clipping paths, masks and glyphs are plain lists and attributes built by grDevices
+// (`patterns.R`, `clippath.R`, `mask.R`, `glyph.R`), so their component positions are part of the
+// device API.
+const LINEAR_GRADIENT: c_int = 1;
+const RADIAL_GRADIENT: c_int = 2;
+const TILING_PATTERN: c_int = 3;
+
+const GLYPH_ROTATION: usize = 6;
+const FONT_VARIATIONS: usize = 6;
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn R_CheckDeviceAvailable() {
-    raise(unsupported_message())
+pub unsafe extern "C" fn R_GE_isPattern(value: Sexp) -> Rboolean {
+    enter(|| Ok(inherits(value, "Pattern")? as Rboolean))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn R_CheckDeviceAvailableBool() -> crate::Rboolean {
-    0
+pub unsafe extern "C" fn R_GE_patternType(pattern: Sexp) -> c_int {
+    enter(|| pattern_type(pattern))
 }
 
-/// Only the null device exists.
-#[unsafe(no_mangle)]
-pub extern "C" fn Rf_NoDevices() -> c_int {
-    1
+macro_rules! pattern_scalars {
+    ($($name:ident: $wanted:expr, $index:expr => $read:ident -> $output:ty;)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $name(pattern: Sexp) -> $output {
+                enter(|| $read(pattern_component(pattern, $wanted, $index)?, 0))
+            }
+        )*
+    };
+}
+
+pattern_scalars! {
+    R_GE_linearGradientX1: LINEAR_GRADIENT, 1 => real_at -> f64;
+    R_GE_linearGradientY1: LINEAR_GRADIENT, 2 => real_at -> f64;
+    R_GE_linearGradientX2: LINEAR_GRADIENT, 3 => real_at -> f64;
+    R_GE_linearGradientY2: LINEAR_GRADIENT, 4 => real_at -> f64;
+    R_GE_linearGradientExtend: LINEAR_GRADIENT, 7 => integer_at -> c_int;
+    R_GE_radialGradientCX1: RADIAL_GRADIENT, 1 => real_at -> f64;
+    R_GE_radialGradientCY1: RADIAL_GRADIENT, 2 => real_at -> f64;
+    R_GE_radialGradientR1: RADIAL_GRADIENT, 3 => real_at -> f64;
+    R_GE_radialGradientCX2: RADIAL_GRADIENT, 4 => real_at -> f64;
+    R_GE_radialGradientCY2: RADIAL_GRADIENT, 5 => real_at -> f64;
+    R_GE_radialGradientR2: RADIAL_GRADIENT, 6 => real_at -> f64;
+    R_GE_radialGradientExtend: RADIAL_GRADIENT, 9 => integer_at -> c_int;
+    R_GE_tilingPatternX: TILING_PATTERN, 2 => real_at -> f64;
+    R_GE_tilingPatternY: TILING_PATTERN, 3 => real_at -> f64;
+    R_GE_tilingPatternWidth: TILING_PATTERN, 4 => real_at -> f64;
+    R_GE_tilingPatternHeight: TILING_PATTERN, 5 => real_at -> f64;
+    R_GE_tilingPatternExtend: TILING_PATTERN, 6 => integer_at -> c_int;
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn Rf_NumDevices() -> c_int {
-    1
+pub unsafe extern "C" fn R_GE_linearGradientNumStops(pattern: Sexp) -> c_int {
+    enter(|| Ok(xlength(pattern_component(pattern, LINEAR_GRADIENT, 5)?)? as c_int))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn Rf_curDevice() -> c_int {
-    0
+pub unsafe extern "C" fn R_GE_linearGradientStop(pattern: Sexp, index: c_int) -> f64 {
+    enter(|| real_at(pattern_component(pattern, LINEAR_GRADIENT, 5)?, index))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_linearGradientColour(pattern: Sexp, index: c_int) -> RColor {
+    enter(|| {
+        let colours = pattern_component(pattern, LINEAR_GRADIENT, 6)?;
+        color_at(colours, index, TRANSPARENT_WHITE)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_radialGradientNumStops(pattern: Sexp) -> c_int {
+    enter(|| Ok(xlength(pattern_component(pattern, RADIAL_GRADIENT, 7)?)? as c_int))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_radialGradientStop(pattern: Sexp, index: c_int) -> f64 {
+    enter(|| real_at(pattern_component(pattern, RADIAL_GRADIENT, 7)?, index))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_radialGradientColour(pattern: Sexp, index: c_int) -> RColor {
+    enter(|| {
+        let colours = pattern_component(pattern, RADIAL_GRADIENT, 8)?;
+        color_at(colours, index, TRANSPARENT_WHITE)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_tilingPatternFunction(pattern: Sexp) -> Sexp {
+    enter(|| pattern_component(pattern, TILING_PATTERN, 1))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_clipPathFillRule(path: Sexp) -> c_int {
+    enter(|| {
+        let rule = runtime().heap.install(b"rule")?;
+        integer_at(get_attrib(path, rule)?, 0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_maskType(mask: Sexp) -> c_int {
+    enter(|| {
+        let kind = runtime().heap.install(b"type")?;
+        integer_at(get_attrib(mask, kind)?, 0)
+    })
+}
+
+macro_rules! list_components {
+    ($($name:ident($argument:ident): $index:expr;)*) => {
+        $(
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn $name($argument: Sexp) -> Sexp {
+                enter(|| component($argument, $index))
+            }
+        )*
+    };
+}
+
+list_components! {
+    R_GE_glyphInfoGlyphs(glyph_info): 0;
+    R_GE_glyphInfoFonts(glyph_info): 1;
+    R_GE_glyphID(glyphs): 0;
+    R_GE_glyphX(glyphs): 1;
+    R_GE_glyphY(glyphs): 2;
+    R_GE_glyphFont(glyphs): 3;
+    R_GE_glyphSize(glyphs): 4;
+    R_GE_glyphColour(glyphs): 5;
+    R_GE_glyphRotation(glyphs): GLYPH_ROTATION;
+}
+
+/// Glyph information from R before 4.6 has no rotation component, so a device asks first.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_hasGlyphRotation(glyphs: Sexp) -> Rboolean {
+    enter(|| Ok((xlength(glyphs)? > GLYPH_ROTATION as isize) as Rboolean))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontFile(font: Sexp) -> *const c_char {
+    enter(|| char_at(component(font, 0)?, 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontIndex(font: Sexp) -> c_int {
+    enter(|| integer_at(component(font, 1)?, 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontFamily(font: Sexp) -> *const c_char {
+    enter(|| char_at(component(font, 2)?, 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontWeight(font: Sexp) -> f64 {
+    enter(|| real_at(component(font, 3)?, 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontStyle(font: Sexp) -> c_int {
+    enter(|| integer_at(component(font, 4)?, 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontPSname(font: Sexp) -> *const c_char {
+    enter(|| char_at(component(font, 5)?, 0))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontNumVar(font: Sexp) -> c_int {
+    enter(|| Ok(xlength(component(font, FONT_VARIATIONS)?)? as c_int))
+}
+
+/// grDevices always names the font variations, so the axis names exist for every value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontVarAxis(font: Sexp, index: c_int) -> *const c_char {
+    enter(|| {
+        let variations = font_variations(font, index)?;
+        char_at(get_attrib(variations, R_NamesSymbol.get())?, index)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontVarValue(font: Sexp, index: c_int) -> f64 {
+    enter(|| real_at(font_variations(font, index)?, index))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_glyphFontVarFormatted(font: Sexp, index: c_int) -> *const c_char {
+    enter(|| {
+        let variations = font_variations(font, index)?;
+        let formatted = runtime().heap.install(b"formatted")?;
+        char_at(get_attrib(variations, formatted)?, index)
+    })
+}
+
+/// `R_GE_rasterScale(source, sw, sh, destination, dw, dh)`: nearest-neighbour scaling into a
+/// preallocated `dw` by `dh` image.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_rasterScale(
+    source: *mut c_uint,
+    source_width: c_int,
+    source_height: c_int,
+    destination: *mut c_uint,
+    destination_width: c_int,
+    destination_height: c_int,
+) {
+    let source_pixels = raster(source, source_width, source_height);
+    let destination_pixels = raster_mut(destination, destination_width, destination_height);
+    let (source_width, source_height) = (source_width as i64, source_height as i64);
+    let (width, height) = (destination_width as i64, destination_height as i64);
+    for (row, line) in destination_pixels
+        .chunks_exact_mut(width.max(1) as usize)
+        .enumerate()
+    {
+        let y = row as i64 * source_height / height;
+        for (column, slot) in line.iter_mut().enumerate() {
+            let x = column as i64 * source_width / width;
+            *slot = pixel_at(source_pixels, source_width, x, y);
+        }
+    }
+}
+
+/// `R_GE_rasterInterpolate(source, sw, sh, destination, dw, dh)`: bilinear scaling into a
+/// preallocated `dw` by `dh` image. Each destination pixel is split into 16 by 16 sub-pixels, and
+/// the four nearest source pixels are weighted by how many sub-pixels each covers, which is the
+/// scheme of leptonica's `scaleColorLILow`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_rasterInterpolate(
+    source: *mut c_uint,
+    source_width: c_int,
+    source_height: c_int,
+    destination: *mut c_uint,
+    destination_width: c_int,
+    destination_height: c_int,
+) {
+    let source_pixels = raster(source, source_width, source_height);
+    let destination_pixels = raster_mut(destination, destination_width, destination_height);
+    let scale_x = 16.0 * source_width as f64 / destination_width as f64;
+    let scale_y = 16.0 * source_height as f64 / destination_height as f64;
+    let source_width = source_width as i64;
+    let last_x = source_width - 2;
+    let last_y = source_height as i64 - 2;
+    let width = (destination_width as usize).max(1);
+    for (row, line) in destination_pixels.chunks_exact_mut(width).enumerate() {
+        let y_position = (scale_y * row as f64 - 8.0).max(0.0) as i64;
+        let (y, y_fraction) = (y_position >> 4, y_position & 0x0f);
+        for (column, slot) in line.iter_mut().enumerate() {
+            let x_position = (scale_x * column as f64 - 8.0).max(0.0) as i64;
+            let (x, x_fraction) = (x_position >> 4, x_position & 0x0f);
+            let pixel = |x, y| pixel_at(source_pixels, source_width, x, y);
+            let top_left = pixel(x, y);
+            // At the right and bottom edges the missing neighbours repeat the edge pixels.
+            let [top_right, bottom_left, bottom_right] = if x <= last_x && y <= last_y {
+                [pixel(x + 1, y), pixel(x, y + 1), pixel(x + 1, y + 1)]
+            } else if x <= last_x {
+                let right = pixel(x + 1, y);
+                [right, top_left, right]
+            } else if y <= last_y {
+                let below = pixel(x, y + 1);
+                [top_left, below, below]
+            } else {
+                [top_left; 3]
+            };
+            let corners = [top_left, top_right, bottom_left, bottom_right];
+            *slot = blend(corners, x_fraction as u32, y_fraction as u32, true);
+        }
+    }
+}
+
+/// `R_GE_rasterRotatedSize(w, h, angle, wnew, hnew)`: the size that holds the image rotated by
+/// `angle` radians, never smaller than the original.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_rasterRotatedSize(
+    width: c_int,
+    height: c_int,
+    angle: f64,
+    new_width: *mut c_int,
+    new_height: *mut c_int,
+) {
+    let (width_f, height_f) = (width as f64, height as f64);
+    let diagonal = (width_f * width_f + height_f * height_f).sqrt();
+    let theta = height_f.atan2(width_f);
+    let rotated_x = (diagonal * (theta + angle).cos())
+        .abs()
+        .max((diagonal * (theta - angle).cos()).abs());
+    let rotated_y = (diagonal * (theta + angle).sin())
+        .abs()
+        .max((diagonal * (angle - theta).sin()).abs());
+    *new_width = width.max((rotated_x + 0.5) as c_int);
+    *new_height = height.max((rotated_y + 0.5) as c_int);
+}
+
+/// `R_GE_rasterRotatedOffset(w, h, angle, botleft, xoff, yoff)`: where the bottom-left (or, when
+/// `botleft` is zero, the top-left) corner moves when the image turns by `angle` radians about
+/// its centre.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_rasterRotatedOffset(
+    width: c_int,
+    height: c_int,
+    angle: f64,
+    bottom_left: c_int,
+    x_offset: *mut f64,
+    y_offset: *mut f64,
+) {
+    let (width_f, height_f) = (width as f64, height as f64);
+    let half_diagonal = 0.5 * (width_f * width_f + height_f * height_f).sqrt();
+    let corner = height_f.atan2(width_f);
+    let theta = if bottom_left != 0 {
+        std::f64::consts::PI + corner
+    } else {
+        -std::f64::consts::PI - corner
+    };
+    // GNU R halves the integer sizes with integer division, which matters for odd sizes.
+    let half_width = (width / 2) as f64;
+    let half_height = (height / 2) as f64;
+    *x_offset = half_diagonal * (theta + angle).cos() + half_width;
+    let rise = half_diagonal * (theta + angle).sin();
+    *y_offset = if bottom_left != 0 {
+        rise + half_height
+    } else {
+        rise - half_height
+    };
+}
+
+/// `R_GE_rasterResizeForRotation(source, w, h, destination, wnew, hnew, gc)`: centres the image
+/// in a preallocated `wnew` by `hnew` image filled with `gc->fill`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_rasterResizeForRotation(
+    source: *mut c_uint,
+    width: c_int,
+    height: c_int,
+    destination: *mut c_uint,
+    new_width: c_int,
+    new_height: c_int,
+    context: *const GEContext,
+) {
+    let source_pixels = raster(source, width, height);
+    let destination_pixels = raster_mut(destination, new_width, new_height);
+    destination_pixels.fill((*context).fill as RColor);
+    let (width, height) = (width as i64, height as i64);
+    let (new_width, new_height) = (new_width as i64, new_height as i64);
+    let x_shift = (new_width - width) / 2;
+    let y_shift = (new_height - height) / 2;
+    for row in 0..height {
+        let target_row = row + y_shift;
+        if !(0..new_height).contains(&target_row) {
+            continue;
+        }
+        for column in 0..width {
+            let target_column = column + x_shift;
+            if !(0..new_width).contains(&target_column) {
+                continue;
+            }
+            let target = (target_row * new_width + target_column) as usize;
+            if let Some(slot) = destination_pixels.get_mut(target) {
+                *slot = pixel_at(source_pixels, width, column, row);
+            }
+        }
+    }
+}
+
+/// `R_GE_rasterRotate(source, w, h, angle, destination, gc, smoothAlpha)`: rotates the image
+/// anticlockwise by `angle` radians about its centre into a preallocated image of the same size,
+/// following leptonica's `rotateAMColorLow`. Pixels that come from outside the source take
+/// `gc->fill`. With `smoothAlpha` the alpha channel is interpolated like the colours; without it
+/// each pixel takes the largest alpha of its four neighbours, so fully transparent and fully
+/// opaque regions keep their alpha exactly.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_GE_rasterRotate(
+    source: *mut c_uint,
+    width: c_int,
+    height: c_int,
+    angle: f64,
+    destination: *mut c_uint,
+    context: *const GEContext,
+    smooth_alpha: Rboolean,
+) {
+    let source_pixels = raster(source, width, height);
+    let destination_pixels = raster_mut(destination, width, height);
+    let fill = (*context).fill as RColor;
+    // leptonica measures angles clockwise.
+    let angle = -angle;
+    let sine = 16.0 * angle.sin();
+    let cosine = 16.0 * angle.cos();
+    let width = width as i64;
+    let center_x = width / 2;
+    let center_y = height as i64 / 2;
+    let last_x = width - 2;
+    let last_y = height as i64 - 2;
+    for (row, line) in destination_pixels
+        .chunks_exact_mut(width.max(1) as usize)
+        .enumerate()
+    {
+        let y_distance = (center_y - row as i64) as f64;
+        for (column, slot) in line.iter_mut().enumerate() {
+            let x_distance = (center_x - column as i64) as f64;
+            let x_position = (-x_distance * cosine - y_distance * sine) as i64;
+            let y_position = (-y_distance * cosine + x_distance * sine) as i64;
+            let x = center_x + (x_position >> 4);
+            let y = center_y + (y_position >> 4);
+            if x < 0 || y < 0 || x > last_x || y > last_y {
+                *slot = fill;
+                continue;
+            }
+            let pixel = |x, y| pixel_at(source_pixels, width, x, y);
+            let corners = [
+                pixel(x, y),
+                pixel(x + 1, y),
+                pixel(x, y + 1),
+                pixel(x + 1, y + 1),
+            ];
+            *slot = blend(
+                corners,
+                (x_position & 0x0f) as u32,
+                (y_position & 0x0f) as u32,
+                smooth_alpha != 0,
+            );
+        }
+    }
+}
+
+unsafe fn pattern_type(pattern: Sexp) -> ApiResult<c_int> {
+    integer_at(component(pattern, 0)?, 0)
+}
+
+unsafe fn pattern_component(pattern: Sexp, wanted: c_int, index: usize) -> ApiResult<Sexp> {
+    if pattern_type(pattern)? != wanted {
+        let kind = match wanted {
+            LINEAR_GRADIENT => "a linear gradient",
+            RADIAL_GRADIENT => "a radial gradient",
+            _ => "a tiling pattern",
+        };
+        return Err(error(format!("pattern is not {kind}")));
+    }
+    component(pattern, index)
+}
+
+/// The font variations list, after checking that `index` names one of them.
+unsafe fn font_variations(font: Sexp, index: c_int) -> ApiResult<Sexp> {
+    let variations = component(font, FONT_VARIATIONS)?;
+    if index < 0 || index as isize >= xlength(variations)? {
+        return Err(error("Index out of bounds"));
+    }
+    Ok(variations)
+}
+
+unsafe fn component(list: Sexp, index: usize) -> ApiResult<Sexp> {
+    if list.kind() != SexpType::List {
+        return Err(error(format!(
+            "VECTOR_ELT() can only be applied to a 'list', not a '{}'",
+            list.kind().name()
+        )));
+    }
+    sexp_elt(list, checked(list, index as i64, "VECTOR_ELT")?)
+}
+
+/// GNU R reads these fields without a check, so a malformed object is undefined behaviour
+/// there. Here it raises the error the matching accessor would.
+unsafe fn integer_at(value: Sexp, index: c_int) -> ApiResult<c_int> {
+    if !matches!(value.kind(), SexpType::Integer | SexpType::Logical) {
+        return Err(error(format!(
+            "INTEGER() can only be applied to a 'integer', not a '{}'",
+            value.kind().name()
+        )));
+    }
+    int_elt(value, checked(value, index as i64, "INTEGER")?)
+}
+
+unsafe fn real_at(value: Sexp, index: c_int) -> ApiResult<f64> {
+    if value.kind() != SexpType::Real {
+        return Err(error(format!(
+            "REAL() can only be applied to a 'numeric', not a '{}'",
+            value.kind().name()
+        )));
+    }
+    real_elt(value, checked(value, index as i64, "REAL")?)
+}
+
+unsafe fn char_at(strings: Sexp, index: c_int) -> ApiResult<*const c_char> {
+    if strings.kind() != SexpType::String {
+        return Err(error(format!(
+            "STRING_ELT() can only be applied to a 'character vector', not a '{}'",
+            strings.kind().name()
+        )));
+    }
+    let element = sexp_elt(strings, checked(strings, index as i64, "STRING_ELT")?)?;
+    Ok(element.data() as *const c_char)
+}
+
+unsafe fn checked(value: Sexp, index: i64, accessor: &str) -> ApiResult<usize> {
+    let length = xlength(value)?;
+    if index < 0 || index >= length as i64 {
+        return Err(error(format!(
+            "attempt access index {index}/{length} in {accessor}"
+        )));
+    }
+    Ok(index as usize)
+}
+
+/// A device's raster buffer, empty when the size is not positive.
+unsafe fn raster<'a>(pixels: *const c_uint, width: c_int, height: c_int) -> &'a [RColor] {
+    match pixel_count(width, height) {
+        0 => &[],
+        count if !pixels.is_null() => std::slice::from_raw_parts(pixels, count),
+        _ => &[],
+    }
+}
+
+unsafe fn raster_mut<'a>(pixels: *mut c_uint, width: c_int, height: c_int) -> &'a mut [RColor] {
+    match pixel_count(width, height) {
+        0 => &mut [],
+        count if !pixels.is_null() => std::slice::from_raw_parts_mut(pixels, count),
+        _ => &mut [],
+    }
+}
+
+fn pixel_count(width: c_int, height: c_int) -> usize {
+    if width <= 0 || height <= 0 {
+        0
+    } else {
+        width as usize * height as usize
+    }
+}
+
+/// The pixel at column `x` and row `y`, or transparent black outside the image.
+fn pixel_at(pixels: &[RColor], width: i64, x: i64, y: i64) -> RColor {
+    if x < 0 || y < 0 || x >= width {
+        return 0;
+    }
+    usize::try_from(y * width + x)
+        .ok()
+        .and_then(|offset| pixels.get(offset))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Mixes the top-left, top-right, bottom-left and bottom-right pixels by the area a 16 by 16
+/// sub-pixel square at offset (`x_fraction`, `y_fraction`) covers in each. Without
+/// `smooth_alpha` the alpha channel is the corners' largest.
+fn blend(corners: [RColor; 4], x_fraction: u32, y_fraction: u32, smooth_alpha: bool) -> RColor {
+    let weights = [
+        (16 - x_fraction) * (16 - y_fraction),
+        x_fraction * (16 - y_fraction),
+        (16 - x_fraction) * y_fraction,
+        x_fraction * y_fraction,
+    ];
+    let channel = |shift: u32| {
+        let total: u32 = corners
+            .iter()
+            .zip(weights)
+            .map(|(corner, weight)| weight * ((corner >> shift) & 0xFF))
+            .sum();
+        ((total + 128) >> 8) & 0xFF
+    };
+    let alpha = if smooth_alpha {
+        channel(24)
+    } else {
+        corners.iter().map(|corner| corner >> 24).max().unwrap_or(0)
+    };
+    channel(0) | channel(8) << 8 | channel(16) << 16 | alpha << 24
 }
 
 /// ry's runtime always runs in a UTF-8 locale.

@@ -5768,7 +5768,7 @@ unsafe fn do_axis_pars(call: &NativeCall<'_>) -> R<Sexp> {
 }
 
 /// The ticks of a linear axis: the pretty values inside `[low, high]`.
-fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
+pub fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
     let pretty = crate::arith::pretty(low, high, intervals, 1, 0.25, [0.8, 1.7], 2, false);
     let unit = pretty.unit;
     let mut first = pretty.low;
@@ -5789,7 +5789,7 @@ fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
 
 /// The ticks of a log axis spanning `[low, high]` (not logged): decades with a tick code, or a
 /// linear axis with a negative count when the range is too short for decades.
-fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
+pub fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
     let (log_low, log_high) = (low.log10(), high.log10());
     let mut first = log_low.ceil();
     let mut last = log_high.floor();
@@ -5836,7 +5836,7 @@ unsafe fn do_create_at_vector(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&ticks)
 }
 
-fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64> {
+pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64> {
     let [first, last, code] = axp;
     let count = code.round() as i32;
     if !log || count < 0 {
@@ -5915,19 +5915,21 @@ unsafe fn do_contour_lines(call: &NativeCall<'_>) -> R<Sexp> {
         values::reals(y).to_vec(),
         values::reals(z).to_vec(),
     );
+    contour_lines(&x, &y, &z, values::reals(levels))
+}
+
+/// The contour lines of `z` over the grid `x` by `y` at each of `levels`, as a list with
+/// `level`, `x` and `y` per line.
+pub unsafe fn contour_lines(x: &[f64], y: &[f64], z: &[f64], levels: &[f64]) -> R<Sexp> {
     if x.len() < 2 || y.len() < 2 {
         return Err(error("insufficient 'x' or 'y' values"));
     }
     if z.len() != x.len() * y.len() {
         return Err(error("dimension mismatch"));
     }
-    let grid = Grid {
-        x: &x,
-        y: &y,
-        z: &z,
-    };
+    let grid = Grid { x, y, z };
     let mut lines = Vec::new();
-    for &level in values::reals(levels) {
+    for &level in levels {
         for line in contour_level(&grid, level) {
             let (xs, ys): (Vec<f64>, Vec<f64>) = line.into_iter().unzip();
             let entry = values::named_list(&[
