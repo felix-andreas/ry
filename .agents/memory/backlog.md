@@ -481,15 +481,6 @@ ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycl
 reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
 any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
 
-### A read waits for the idle job in flight
-
-Only a notification (an open, edit, save or watched-file change) cancels in-flight work; a request
-never does (`ServerState::notify` against `ServerState::read` in `crates/ry/src/server.rs`). A hover
-or completion that arrives while the worker warms a file therefore waits for that one file's
-analysis to finish, because idle work runs one file per job. Measure the
-worst single-file warm-up on a large package before adding read preemption; if it is well under the
-keystroke budget, delete this entry.
-
 ### Judged fast enough, so do not invent work here
 
 Single-package cold analysis is 1.9 s and 88 MiB peak for ggplot2's 68k lines, 1.3 s and 72 MiB for
@@ -2756,14 +2747,25 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
-## Open: editor gaps on ry's own syntax
+## Open: editor latency at 300,000 lines
 
-- **Hover still shows impossible vector members.** The inlay hint and the "add annotation" action
-  drop `Position[]` from `list[Position] | Position[]` (`without_impossible_vectors` in
-  `crates/ide/src/ide.rs`), but hover prints the full inferred union.
-- **Completion of a field name inside a record literal** offers R globals; it should offer the
-  expected record's missing fields.
-- **No payload-field completion in a tag constructor** such as `:Circle(ra|)`; patterns have it.
+Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .bench/finbench
+--quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
+table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
+about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
+
+- **Every request right after a keystroke pays about 35 ms of salsa verification**, against about
+  1 ms settled. The time goes to deep-verifying project-wide aggregates that read every item:
+  `conditional_slot_items` (through `package_name`), `interface_sccs` (through `interface_group`),
+  and `package_definitions` and `project_arithmetic_classes` (through `visible_arithmetic_classes`).
+  Each depends directly on per-item memos in every file, so once the edited file is `LOW` the
+  aggregate is too, and verifying it walks about 56,000 edges. Folding each aggregate over per-file
+  memos would let untouched files shallow-verify at `MEDIUM` and take the floor to a few
+  milliseconds. This is the salsa core, owned by the analysis performance work.
+- **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
+  lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
+  lints when the project is still cold, but that changes the two-wave contract on the architecture
+  page, so weigh it against making the cold naming pass faster.
 
 ## Open: false errors on real CRAN code
 

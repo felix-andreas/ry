@@ -17,7 +17,7 @@ use semantics::{
     item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range, item_naming,
     item_node, item_tree, package_definitions, project_type_definitions, visible_type_definitions,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::once;
 use syntax::SyntaxKind::{self, *};
 use syntax::kind::KEYWORDS;
@@ -1073,6 +1073,9 @@ pub fn completion(
         return finish_completions(items, &query);
     }
 
+    // Resolving a scheme can type-check its item, so call shapes are filled in only for the
+    // globals that survive truncation, not for every global that matches the query.
+    let mut globals: Vec<Item<'_>> = Vec::new();
     let items = match context {
         CompletionContext::Field => {
             spelled_completions(db, files, &query, AT_EXPR, CompletionSource::Field)
@@ -1125,42 +1128,26 @@ pub fn completion(
                 );
             }
             for &project_file in files.files(db) {
-                for &item in item_tree(db, project_file) {
-                    let kind = match *item.kind(db) {
-                        ItemKind::Function => CompletionKind::Function,
-                        ItemKind::Value => CompletionKind::Variable,
-                        // A statement item still creates top-level slots (a conditional write
-                        // inside a top-level `if`).
-                        ItemKind::Statement => {
-                            if let Some(naming) = item_naming(db, item) {
-                                items.extend(
-                                    naming
-                                        .bindings
-                                        .values()
-                                        .filter(|info| {
-                                            info.kind == BindingKind::TopLevel
-                                                && search_match(&info.name, &query).is_some()
-                                        })
-                                        .map(|info| {
-                                            CompletionItem::new(
-                                                info.name.to_string(),
-                                                CompletionKind::Variable,
-                                                CompletionSource::Global,
-                                            )
-                                        }),
-                                );
-                            }
-                            continue;
-                        }
-                    };
-                    if let Some(name) = item.name(db)
-                        && search_match(name, &query).is_some()
-                    {
-                        items.push(CompletionItem {
-                            takes_arguments: scheme_takes_arguments(db, &global_scheme(db, item)),
-                            ..CompletionItem::new(name.clone(), kind, CompletionSource::Global)
-                        });
+                for global in global_names(db, project_file) {
+                    if search_match(&global.name, &query).is_none() {
+                        continue;
                     }
+                    let kind = match global.item {
+                        Some(item) => {
+                            globals.push(item);
+                            if global.is_function {
+                                CompletionKind::Function
+                            } else {
+                                CompletionKind::Variable
+                            }
+                        }
+                        None => CompletionKind::Variable,
+                    };
+                    items.push(CompletionItem::new(
+                        global.name.clone(),
+                        kind,
+                        CompletionSource::Global,
+                    ));
                 }
             }
             // A project global outranks a same-named stub at deduplication, mirroring resolution.
@@ -1209,7 +1196,29 @@ pub fn completion(
         }
     };
 
-    finish_completions(items, &query)
+    let mut result = finish_completions(items, &query)?;
+    let mut unresolved: HashMap<&str, usize> = result
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.source == CompletionSource::Global)
+        .map(|(index, item)| (item.label.as_str(), index))
+        .collect();
+    let mut shapes = Vec::new();
+    // The first writer in project order is the one deduplication kept.
+    for item in globals {
+        if let Some(name) = item.name(db)
+            && let Some(index) = unresolved.remove(name.as_str())
+        {
+            shapes.push((index, scheme_takes_arguments(db, &global_scheme(db, item))));
+        }
+    }
+    for (index, takes_arguments) in shapes {
+        if let Some(item) = result.items.get_mut(index) {
+            item.takes_arguments = takes_arguments;
+        }
+    }
+    Some(result)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2642,20 +2651,113 @@ fn spelled_completions(
 ) -> Vec<CompletionItem> {
     let mut labels = BTreeSet::new();
     for &project_file in files.files(db) {
-        let root = semantics::parse(db, project_file).syntax_node();
-        // The lhs is an expression node, so the last bare NAME child is the field.
+        let spelled = spelled_names(db, project_file);
+        let names = match kind {
+            AT_EXPR => &spelled.at,
+            DOLLAR_EXPR => &spelled.dollar,
+            _ => &spelled.namespace,
+        };
         labels.extend(
-            root.descendants()
-                .filter(|node| node.kind() == kind)
-                .filter_map(|node| node.children().filter(|child| child.kind() == NAME).last())
-                .map(|name| name.text().to_string()),
+            names
+                .iter()
+                .filter(|label| search_match(label, query).is_some())
+                .map(String::as_str),
         );
     }
     labels
         .into_iter()
-        .filter(|label| search_match(label, query).is_some())
-        .map(|label| CompletionItem::new(label, CompletionKind::Field, source))
+        .map(|label| CompletionItem::new(label.to_owned(), CompletionKind::Field, source))
         .collect()
+}
+
+/// Fills the per-file indexes completion reads, so the first completion in a large project does
+/// not build them for every file at once.
+pub fn warm_completion_indexes(db: &dyn Db, file: SourceFile) {
+    global_names(db, file);
+    spelled_names(db, file);
+}
+
+/// A top-level name a file writes, in item order.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct GlobalName<'db> {
+    name: String,
+    is_function: bool,
+    /// `None` for a name a statement item writes (a conditional write inside a top-level `if`),
+    /// which completes as a plain variable.
+    item: Option<Item<'db>>,
+}
+
+/// Memoized per file: reading every item's salsa fields on each request costs milliseconds in
+/// a large project, and an edit recomputes only the edited file's names.
+#[salsa::tracked(returns(ref))]
+fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> {
+    let mut names = Vec::new();
+    for &item in item_tree(db, file) {
+        let is_function = match *item.kind(db) {
+            ItemKind::Function => true,
+            ItemKind::Value => false,
+            ItemKind::Statement => {
+                if let Some(naming) = item_naming(db, item) {
+                    names.extend(
+                        naming
+                            .bindings
+                            .values()
+                            .filter(|info| info.kind == BindingKind::TopLevel)
+                            .map(|info| GlobalName {
+                                name: info.name.to_string(),
+                                is_function: false,
+                                item: None,
+                            }),
+                    );
+                }
+                continue;
+            }
+        };
+        if let Some(name) = item.name(db) {
+            names.push(GlobalName {
+                name: name.clone(),
+                is_function,
+                item: Some(item),
+            });
+        }
+    }
+    names
+}
+
+/// The names a file spells after `@`, `$` and `::`, which untyped completion offers.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+struct SpelledNames {
+    at: Vec<String>,
+    dollar: Vec<String>,
+    namespace: Vec<String>,
+}
+
+/// Memoized per file, so completion does not re-walk every syntax tree in the project.
+#[salsa::tracked(returns(ref))]
+fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
+    let mut spelled = SpelledNames {
+        at: Vec::new(),
+        dollar: Vec::new(),
+        namespace: Vec::new(),
+    };
+    let root = semantics::parse(db, file).syntax_node();
+    for node in root.descendants() {
+        let names = match node.kind() {
+            AT_EXPR => &mut spelled.at,
+            DOLLAR_EXPR => &mut spelled.dollar,
+            NAMESPACE_EXPR => &mut spelled.namespace,
+            _ => continue,
+        };
+        // The lhs is an expression node, so the last bare NAME child is the spelled name.
+        if let Some(name) = node.children().filter(|child| child.kind() == NAME).last() {
+            names.push(name.text().to_string());
+        }
+    }
+    for names in [&mut spelled.at, &mut spelled.dollar, &mut spelled.namespace] {
+        names.sort_unstable();
+        names.dedup();
+    }
+    spelled
 }
 
 fn dollar_completions(
@@ -3369,19 +3471,45 @@ fn namespace_completions(
     spelled_completions(db, files, query, NAMESPACE_EXPR, CompletionSource::Global)
 }
 
-fn finish_completions(mut items: Vec<CompletionItem>, query: &str) -> Option<CompletionResult> {
-    let mut seen = BTreeSet::new();
-    items.retain(|item| seen.insert(item.label.clone()));
-    items.sort_by_cached_key(|item| {
-        (
-            search_match(&item.label, query),
-            item.source,
-            item.label.to_lowercase(),
-            item.label.clone(),
-        )
-    });
-    let is_incomplete = items.len() > COMPLETION_LIMIT;
-    items.truncate(COMPLETION_LIMIT);
+/// A one-letter query fuzzy-matches nearly every global in a large project, so only the
+/// first [`COMPLETION_LIMIT`] are selected and sorted, without allocating a key per candidate.
+fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<CompletionResult> {
+    let mut ranked: Vec<(Option<MatchScore>, usize)> = {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(items.len());
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| seen.insert(item.label.as_str()))
+            .map(|(index, item)| (search_match(&item.label, query), index))
+            .collect()
+    };
+    let order = |left: &(Option<MatchScore>, usize), right: &(Option<MatchScore>, usize)| {
+        let (Some(left_item), Some(right_item)) = (items.get(left.1), items.get(right.1)) else {
+            return left.1.cmp(&right.1);
+        };
+        left.0
+            .cmp(&right.0)
+            .then(left_item.source.cmp(&right_item.source))
+            .then_with(|| {
+                left_item
+                    .label
+                    .chars()
+                    .flat_map(char::to_lowercase)
+                    .cmp(right_item.label.chars().flat_map(char::to_lowercase))
+            })
+            .then_with(|| left_item.label.cmp(&right_item.label))
+    };
+    let is_incomplete = ranked.len() > COMPLETION_LIMIT;
+    if is_incomplete {
+        ranked.select_nth_unstable_by(COMPLETION_LIMIT, order);
+        ranked.truncate(COMPLETION_LIMIT);
+    }
+    ranked.sort_by(order);
+    let mut slots: Vec<Option<CompletionItem>> = items.into_iter().map(Some).collect();
+    let items: Vec<CompletionItem> = ranked
+        .into_iter()
+        .filter_map(|(_, index)| slots.get_mut(index).and_then(Option::take))
+        .collect();
     (!items.is_empty()).then_some(CompletionResult {
         items,
         is_incomplete,
@@ -3441,22 +3569,32 @@ const MIN_SUBSEQUENCE_QUERY_LEN: usize = 3;
 /// Smart case: case-insensitive unless the query has an uppercase character. An empty query
 /// matches everything.
 pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
-    if query.is_empty() {
+    let case_sensitive = query_is_case_sensitive(query);
+    // Most candidates are settled here, before the character scan below.
+    if prefix_under_case(candidate, query, case_sensitive) {
+        let tier = if equal_under_case(candidate, query, case_sensitive) {
+            MatchTier::Exact
+        } else {
+            MatchTier::Prefix
+        };
         return Some(MatchScore {
-            tier: MatchTier::Prefix,
+            tier,
             first_match_index: 0,
         });
     }
+    if query.chars().count() < MIN_SUBSEQUENCE_QUERY_LEN {
+        return None;
+    }
 
-    let case_sensitive = query_is_case_sensitive(query);
     let equal = |left: char, right: char| {
         if case_sensitive {
             left == right
+        } else if left.is_ascii() && right.is_ascii() {
+            left.eq_ignore_ascii_case(&right)
         } else {
             left.to_lowercase().eq(right.to_lowercase())
         }
     };
-
     let mut query_chars = query.chars().peekable();
     let mut first_match_index = None;
     for (index, candidate_char) in candidate.chars().enumerate() {
@@ -3473,19 +3611,11 @@ pub fn search_match(candidate: &str, query: &str) -> Option<MatchScore> {
     if query_chars.peek().is_some() {
         return None;
     }
-
-    let tier = if equal_under_case(candidate, query, case_sensitive) {
-        MatchTier::Exact
-    } else if prefix_under_case(candidate, query, case_sensitive) {
-        MatchTier::Prefix
-    } else if substring_under_case(candidate, query, case_sensitive) {
+    let tier = if substring_under_case(candidate, query, case_sensitive) {
         MatchTier::Substring
     } else {
         MatchTier::Subsequence
     };
-    if query.chars().count() < MIN_SUBSEQUENCE_QUERY_LEN && tier > MatchTier::Prefix {
-        return None;
-    }
     Some(MatchScore {
         tier,
         first_match_index: first_match_index.unwrap_or(0),
@@ -3508,13 +3638,23 @@ fn prefix_under_case(candidate: &str, query: &str, case_sensitive: bool) -> bool
     if case_sensitive {
         candidate.starts_with(query)
     } else {
-        candidate.to_lowercase().starts_with(&query.to_lowercase())
+        let mut candidate = candidate.chars().flat_map(char::to_lowercase);
+        query
+            .chars()
+            .flat_map(char::to_lowercase)
+            .all(|character| candidate.next() == Some(character))
     }
 }
 
 fn substring_under_case(candidate: &str, query: &str, case_sensitive: bool) -> bool {
     if case_sensitive {
         candidate.contains(query)
+    } else if candidate.is_ascii() && query.is_ascii() {
+        query.is_empty()
+            || candidate
+                .as_bytes()
+                .windows(query.len())
+                .any(|window| window.eq_ignore_ascii_case(query.as_bytes()))
     } else {
         candidate.to_lowercase().contains(&query.to_lowercase())
     }
@@ -3948,15 +4088,31 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         Target::TypeName(name) => result = type_name_occurrences(db, files, name),
         Target::S4 { name, kind } => {
             for &file in files.files(db) {
-                result.extend(s4_occurrences(db, file, name, *kind));
+                if file.text(db).contains(name.as_str()) {
+                    result.extend(s4_occurrences(db, file, name, *kind));
+                }
             }
         }
+        // Every occurrence spells the name, so a text search skips nearly all of a large
+        // project before any item is lowered or named.
         Target::Global(name) => {
             for &file in files.files(db) {
+                let text = file.text(db);
+                if !text.contains(name.as_str()) {
+                    continue;
+                }
                 result.extend(s4_occurrences(db, file, name, S4Kind::Generic));
                 for &item in item_tree(db, file) {
-                    let (Some(node), Some(naming)) = (item_node(db, item), item_naming(db, item))
-                    else {
+                    let Some(node) = item_node(db, item) else {
+                        continue;
+                    };
+                    let spells_name = text
+                        .get(std::ops::Range::<usize>::from(node.text_range()))
+                        .is_some_and(|source| source.contains(name.as_str()));
+                    if !spells_name {
+                        continue;
+                    }
+                    let Some(naming) = item_naming(db, item) else {
                         continue;
                     };
                     for (binding, info) in &naming.bindings {
@@ -4014,13 +4170,18 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
             }
         }
     }
-    let file_order = |file: SourceFile| {
-        files
-            .files(db)
-            .iter()
-            .position(|candidate| *candidate == file)
-    };
-    result.sort_by_key(|occurrence| (file_order(occurrence.file), occurrence.range.start()));
+    let file_order: HashMap<SourceFile, usize> = files
+        .files(db)
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (*file, index))
+        .collect();
+    result.sort_by_key(|occurrence| {
+        (
+            file_order.get(&occurrence.file).copied(),
+            occurrence.range.start(),
+        )
+    });
     result.dedup_by_key(|occurrence| (occurrence.file, occurrence.range));
     result
 }

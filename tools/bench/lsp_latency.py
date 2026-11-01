@@ -281,19 +281,25 @@ def main():
     request_files = [os.path.join(root, "R", name) for name in sorted(os.listdir(os.path.join(root, "R")))]
     generator.shuffle(request_files)
     opened_files = []
+    warm_open = ([], [])
     for request_path in request_files[: args.request_files]:
         if request_path == path:
             continue
         with open(request_path, encoding="utf-8") as handle:
             request_text = handle.read()
         request_uri = "file://" + request_path
+        # Opened once the server is idle, as when a user opens a file mid-session.
+        sent = time.perf_counter()
         client.notify(
             "textDocument/didOpen",
             {"textDocument": {"uri": request_uri, "languageId": "r", "version": 1, "text": request_text}},
         )
+        times = [received for received in client.drain(request_uri, args.quiet, 120) if received >= sent]
+        if times:
+            warm_open[0].append(times[0] - sent)
+            warm_open[1].append(times[-1] - sent)
         opened_files.append((request_uri, request_text))
     opened_files.append((uri, text))
-    client.drain(None, args.quiet, 120)
     positions = [
         (request_uri, position)
         for request_uri, request_text in opened_files
@@ -324,6 +330,8 @@ def main():
         "initialize_s": initialized,
         "cold_open_first_s": cold[0],
         "cold_open_settled_s": cold[1],
+        "warm_open_first": percentiles(warm_open[0]),
+        "warm_open_settled": percentiles(warm_open[1]),
     }
     for kind, (first, settled) in results.items():
         report[kind] = {
@@ -339,7 +347,9 @@ def main():
         print(json.dumps(report))
         return
     print(f"initialize {initialized * 1000:.0f} ms")
-    print(f"file {report['file']}: open {cold[0] * 1000:.0f} ms first publish, {cold[1] * 1000:.0f} ms settled")
+    print(f"file {report['file']}: open at startup {cold[0] * 1000:.0f} ms first publish, {cold[1] * 1000:.0f} ms settled")
+    print(summarize("open while idle, first publish", warm_open[0]))
+    print(summarize("open while idle, settled", warm_open[1]))
     for kind, (first, settled) in results.items():
         print(summarize(f"{kind} edit, first publish", first))
         print(summarize(f"{kind} edit, settled", settled))

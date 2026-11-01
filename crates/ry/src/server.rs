@@ -309,6 +309,10 @@ struct Worker {
     pending_semantic_publishes: Vec<PathBuf>,
     /// Results are never published.
     prime_queue: VecDeque<PathBuf>,
+    /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
+    /// whose durability drops, so the first LOW write to a file re-derives everything that
+    /// depends on it. Idle time pays that once, so the first keystroke does not.
+    pending_lowering: Vec<PathBuf>,
     /// Non-empty sets only. Kept current per synced or primed file, never by a
     /// whole-project sweep, so keystroke work stays O(open documents).
     attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
@@ -417,6 +421,7 @@ impl Worker {
             virtual_document_uris: HashMap::new(),
             pending_semantic_publishes: Vec::new(),
             prime_queue: VecDeque::new(),
+            pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
         };
         worker.install_stubs();
@@ -630,7 +635,9 @@ impl Worker {
     }
 
     fn has_idle_work(&self) -> bool {
-        !self.pending_semantic_publishes.is_empty() || !self.prime_queue.is_empty()
+        !self.pending_semantic_publishes.is_empty()
+            || !self.pending_lowering.is_empty()
+            || !self.prime_queue.is_empty()
     }
 
     fn run_idle_unit(&mut self) {
@@ -648,13 +655,26 @@ impl Worker {
             }
             return;
         }
+        if let Some(path) = self.pending_lowering.pop() {
+            if self.open_documents.contains(&path)
+                && let Some(&file) = self.files.get(&path)
+            {
+                let text = file.text(&self.db).to_owned();
+                file.set_text(&mut self.db)
+                    .with_durability(Durability::LOW)
+                    .to(text);
+                self.defer_semantic_publish(&path);
+            }
+            return;
+        }
         if let Some(path) = self.prime_queue.pop_front() {
             let Some(&file) = self.files.get(&path) else {
                 return;
             };
             let config = self.config.clone();
             let outcome = self.cancellable(|worker| {
-                let _ = document_diagnostics(&worker.db, file, &config);
+                drop(document_diagnostics(&worker.db, file, &config));
+                ide::warm_completion_indexes(&worker.db, file);
             });
             match outcome {
                 Ok(()) => {
@@ -886,8 +906,17 @@ impl Worker {
 
         let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
+            // Opening usually shows the text already on disk. Rewriting it anyway would be a
+            // MEDIUM write (a setter keeps the field's durability), which makes every memo in
+            // the project deep-verify before the first diagnostics.
             Some(&file) => {
-                file.set_text(&mut self.db).to(params.text_document.text);
+                if *file.text(&self.db) == params.text_document.text {
+                    self.pending_lowering.push(path.clone());
+                } else {
+                    file.set_text(&mut self.db)
+                        .with_durability(Durability::LOW)
+                        .to(params.text_document.text);
+                }
             }
             None => {
                 let file = SourceFile::new(&self.db, params.text_document.text, kind);
@@ -933,6 +962,7 @@ impl Worker {
             .expect("open documents are always tracked");
         let text = self.text(file);
         let updated = self.apply_content_changes(text, &params.content_changes);
+        self.pending_lowering.retain(|owed| owed != &path);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
             .to(updated);
@@ -1011,6 +1041,7 @@ impl Worker {
         }
         self.open_documents.remove(&path);
         self.pending_semantic_publishes.retain(|owed| owed != &path);
+        self.pending_lowering.retain(|owed| owed != &path);
 
         if self.is_project_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.

@@ -290,16 +290,26 @@ and all the documents, and the database handle deliberately never leaves it.
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** The worker first serves any settled publish it owes for the most
-  recently edited file. With nothing owed, it warms up the rest of the workspace one file at a time
-  and never publishes that work. Idle work that gets cancelled is requeued.
+  recently edited file. Next it lowers the durability of documents opened since (see below). With
+  nothing else to do, it warms up the rest of the workspace one file at a time and never publishes
+  that work. Idle work that gets cancelled is requeued.
+- **A request preempts idle work.** A request is queued first and then cancels the idle unit in
+  flight, if any, so a hover never waits for a background file to finish. A request never cancels
+  another request or a sync.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
 - **Only edited files change at low durability.** A workspace file enters the database at
-  `Durability::MEDIUM`, its first `didChange` lowers it to `LOW`, and closing it restores `MEDIUM`.
+  `Durability::MEDIUM`, an open document is lowered to `LOW`, and closing it restores `MEDIUM`.
   An edit then revalidates every memo that reads only other files by durability alone, without
   walking its dependencies, which took a fifth off the settled re-check on the benchmark code
   bases. A `test_incremental.rs` case pins that an edit never revisits the other files' trees.
+  Lowering is itself expensive once: salsa never backdates a memo whose durability drops, so the
+  first `LOW` write to a file re-derives everything that depends on it (about a second on a
+  300,000-line project). `didOpen` therefore leaves text that matches the disk untouched, which
+  would otherwise be a `MEDIUM` write that invalidates the whole project, and idle time rewrites it
+  at `LOW` so that the first keystroke does not pay. A setter that names no durability keeps the
+  field's current one, so every write to a source file names it.
 - **Positions convert only at the protocol edge**, against the target document's own text, in the
   negotiated encoding. That is UTF-16 by default, and UTF-8 when the client offers it. Signature-help
   label offsets are always UTF-16, as the LSP specification requires.

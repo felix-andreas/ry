@@ -14,6 +14,7 @@ use semantics::metadata::{
 };
 use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
 use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use salsa::Durability;
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs;
@@ -105,7 +106,11 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         let is_package = kind == DocumentKind::Package;
         package_count += usize::from(is_package);
         let start = Instant::now();
-        let file = SourceFile::new(&db, source.clone(), kind);
+        // As in the server: files change at MEDIUM until the user edits one, and an edit
+        // writes LOW, so the request timings below see the server's revalidation cost.
+        let file = SourceFile::builder(source.clone(), kind)
+            .durability(Durability::MEDIUM)
+            .new(&db);
         load_total += start.elapsed();
         records.push(FileRecord {
             file,
@@ -115,7 +120,10 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             typecheck: Duration::ZERO,
         });
     }
-    ProjectFiles::new(&db, records.iter().map(|record| record.file).collect());
+    // A singleton: queries reach it through `ProjectFiles::get`.
+    let _project = ProjectFiles::builder(records.iter().map(|record| record.file).collect())
+        .durability(Durability::MEDIUM)
+        .new(&db);
     let rss_after_load = proc_status_field("VmRSS:");
 
     // Memoization makes each stage's wall time its own marginal cost; package-wide
@@ -332,7 +340,7 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
         for &(file, offset) in &positions {
             settled.push(time_request(db, files, kind, file, offset));
             text.push('#');
-            edited.file.set_text(db).to(text.clone());
+            edited.file.set_text(db).with_durability(Durability::LOW).to(text.clone());
             after_edit.push(time_request(db, files, kind, file, offset));
         }
         settled.sort();
@@ -346,7 +354,7 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
             percentile(&after_edit, 99),
         );
     }
-    edited.file.set_text(db).to(edited.source.clone());
+    edited.file.set_text(db).with_durability(Durability::LOW).to(edited.source.clone());
     let _ = document_diagnostics(db, edited.file, config);
 }
 
@@ -493,7 +501,7 @@ fn typing_burst(
     for _ in 0..TYPING_BURST {
         text.push('#');
         let start = Instant::now();
-        record.file.set_text(db).to(text.clone());
+        record.file.set_text(db).with_durability(Durability::LOW).to(text.clone());
         let _ = document_diagnostics(db, record.file, config);
         keystroke_times.push(start.elapsed());
     }
@@ -553,7 +561,7 @@ fn typing_burst(
             parse_start.elapsed().as_secs_f64() * 1e3 / parses as f64
         );
     }
-    record.file.set_text(db).to(record.source.clone());
+    record.file.set_text(db).with_durability(Durability::LOW).to(record.source.clone());
     let _ = document_diagnostics(db, record.file, config);
 }
 
