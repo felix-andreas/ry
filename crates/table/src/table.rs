@@ -13,8 +13,10 @@
 pub mod convert;
 pub mod ffi;
 mod group;
+pub mod io;
 mod join;
 mod kernel;
+pub mod ops;
 pub mod query;
 
 #[cfg(feature = "runtime")]
@@ -52,6 +54,8 @@ pub enum Error {
     SchemaSyntax(String),
     #[error("invalid query: {0}")]
     Query(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Polars(#[from] polars::error::PolarsError),
 }

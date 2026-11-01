@@ -304,6 +304,10 @@ pub enum Warning {
     /// were parsed as R's `as.logical`, `as.integer` or `as.double` would. data.table warns on
     /// every such write, whatever the strings hold.
     Parsed { column: PlSmallStr, to: ColumnType },
+    /// `melt`'s measure columns had different types, so the value column holds the widest.
+    MeltCoerced { to: ColumnType },
+    /// `dcast` had no aggregate, but some cell got several values, so it counts them instead.
+    CastCounted,
 }
 
 impl fmt::Display for Warning {
@@ -327,6 +331,15 @@ impl fmt::Display for Warning {
                 formatter,
                 "column `{column}` holds {holds}, so the assigned strings were converted to {holds}",
                 holds = holds(*to)
+            ),
+            Warning::MeltCoerced { to } => write!(
+                formatter,
+                "the measure columns have different types, so the value column holds {}",
+                holds(*to)
+            ),
+            Warning::CastCounted => formatter.write_str(
+                "some cells get several values and no aggregate was given, so each cell counts \
+                 its values; pass `fun.aggregate` to choose another",
             ),
         }
     }
