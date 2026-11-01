@@ -5988,9 +5988,48 @@ impl<'db> Checker<'db, '_> {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
+        let callee_ty = match self.binds_parameter(callee) {
+            true => callee_ty,
+            false => self.without_null_beside_functions(callee_ty),
+        };
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
         self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+    }
+
+    fn binds_parameter(&self, callee: ExprId) -> bool {
+        self.naming
+            .resolutions
+            .get(&callee)
+            .and_then(|slot| self.naming.bindings.get(slot))
+            .is_some_and(|binding| binding.kind == BindingKind::Parameter)
+    }
+
+    /// A function that the body computes, from a `switch` without a default or a branch that
+    /// leaves it `NULL`, is `NULL` only on paths that the code presumably rules out, such as a
+    /// `switch` on a value `match.arg()` validated. A call there presumes the function. The
+    /// `NULL` that a parameter's default or declared type admits is the caller's to supply,
+    /// so a parameter keeps it and the call is reported.
+    fn without_null_beside_functions(&self, ty: Ty<'db>) -> Ty<'db> {
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        let TyKind::Union(members) = resolved.kind(self.db) else {
+            return ty;
+        };
+        let is_function = |member: Ty<'db>| {
+            matches!(
+                self.table.shallow_resolve(self.db, member).kind(self.db),
+                TyKind::Function(_)
+            )
+        };
+        if !members.iter().any(|&member| is_function(member)) {
+            return ty;
+        }
+        let kept: Vec<Ty<'db>> = members
+            .iter()
+            .copied()
+            .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+            .collect();
+        union_of(self.db, kept)
     }
 
     /// R looks a called name up as a function: a binding that holds no function is skipped,
