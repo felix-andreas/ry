@@ -1546,7 +1546,10 @@ compatibility with an array-like vector.
 An unannotated operand is left unconstrained, whatever the other operand is, so
 `function(x) x > 0` is `<T> fn(x: T) -> logical` and `function(a, b) a < b` is
 `<T, U> fn(a: T, b: U) -> logical`. A comparison against a number is often how R code tests a
-string or a flag, so it is not evidence that the operand is numeric.
+string or a flag, so it is not evidence that the operand is numeric. The cost is that a caller's
+mistake can pass unreported: with `f <- function(x) x > 0`, `f(function() 1)` is accepted, although
+R fails the comparison. Comparing a value whose type is known, as in `1 > function() 1`, is still a
+type error.
 
 The result is always `logical`: scalar-like when both operands are scalar-like, and array-like
 otherwise. So `1L == 1.5` and `1L < "a"` are `logical`, and `c(TRUE, FALSE) > 0` is `logical[]`.
