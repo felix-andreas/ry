@@ -488,7 +488,10 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     if format_count == 0 || arguments.iter().any(|argument| argument.length == 0) {
         return alloc(SexpType::String, 0);
     }
-    let kinds: Vec<SexpType> = arguments.iter().map(|argument| argument.value.kind()).collect();
+    let kinds: Vec<SexpType> = arguments
+        .iter()
+        .map(|argument| argument.value.kind())
+        .collect();
     let mut used = vec![false; arguments.len()];
     let mut parsed = Vec::with_capacity(format_count);
     for index in 0..format_count {
@@ -645,7 +648,10 @@ fn parse_format(format: &str, kinds: &[SexpType], used: &mut [bool]) -> R<Vec<Fo
         if !kind.is_some_and(|kind| CONVERSIONS.contains(&kind)) {
             // GNU R reads a specification up to the next conversion letter, and blames it on
             // the type of the argument it would have formatted.
-            let Some(letter) = chars[start + 1..].iter().position(|c| CONVERSIONS.contains(c)) else {
+            let Some(letter) = chars[start + 1..]
+                .iter()
+                .position(|c| CONVERSIONS.contains(c))
+            else {
                 let rest: String = chars[start..].iter().collect();
                 return Err(error(format!("unrecognised format specification '{rest}'")));
             };

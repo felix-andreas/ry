@@ -1,7 +1,6 @@
 //! Subsetting and subassignment (`[`, `[[`, `$`, `@` and their replacement forms), `c` and
 //! `unlist`, lengths, names, dims, and attributes.
 
-use rustc_hash::FxHashSet;
 use crate::{
     builtins::{
         Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
@@ -16,6 +15,7 @@ use crate::{
     },
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp};
+use rustc_hash::FxHashSet;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     special("[", -1, do_subset).dispatch_or_eval(),

@@ -1202,6 +1202,12 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
             scalar_integer(length)
         }
         "max.print" | "nwarnings" => {
+            if value.kind() == SexpType::Real
+                && length(value) > 0
+                && crate::arith::real_at(value, 0).abs() > f64::from(i32::MAX)
+            {
+                crate::conditions::warning("NAs introduced by coercion to integer range")?;
+            }
             let count = values::as_integer_scalar(value);
             if count < 1 {
                 return Err(error(&format!("invalid value for '{name}'")));

@@ -1636,7 +1636,11 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     if count > seconds.len() && year_names != nil() {
         let recycled = alloc(SexpType::String, count)?;
         for position in 0..count {
-            values::set_elt(recycled, position, year_names.element(position % length(year_names)));
+            values::set_elt(
+                recycled,
+                position,
+                year_names.element(position % length(year_names)),
+            );
         }
         values::set_attr(result, symbols().names, recycled)?;
     } else {

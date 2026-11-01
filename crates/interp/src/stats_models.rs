@@ -444,8 +444,12 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
             width *= match (code, kinds[variable]) {
                 (0, _) => 1.0,
                 (_, Variable::Numeric { columns: count }) => count as f64,
-                (1, Variable::Factor { .. }) => contrasts[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64),
-                (_, Variable::Factor { .. }) => full_codings[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64),
+                (1, Variable::Factor { .. }) => {
+                    contrasts[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64)
+                }
+                (_, Variable::Factor { .. }) => {
+                    full_codings[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64)
+                }
             };
         }
         if width > i32::MAX as f64 {

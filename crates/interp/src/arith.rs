@@ -3145,7 +3145,19 @@ unsafe fn do_rep_int(call: &Call<'_>) -> R<Sexp> {
     } else {
         return Err(call.error("invalid 'times' value"));
     }
-    crate::subset::select_elements(object, &indices)
+    let result = crate::subset::select_elements(object, &indices)?;
+    keep_factor(object, result)?;
+    Ok(result)
+}
+
+/// `rep.int` and `rep_len` drop attributes, but a factor stays a factor.
+unsafe fn keep_factor(object: Sexp, result: Sexp) -> R<()> {
+    if values::inherits(object, "factor") {
+        for symbol in [symbols().levels, symbols().class] {
+            values::set_attr(result, symbol, get_attr(object, symbol))?;
+        }
+    }
+    Ok(())
 }
 
 unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
@@ -3164,7 +3176,9 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
             }
         })
         .collect();
-    crate::subset::select_elements(object, &indices)
+    let result = crate::subset::select_elements(object, &indices)?;
+    keep_factor(object, result)?;
+    Ok(result)
 }
 
 // Two-argument math.

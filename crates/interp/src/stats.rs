@@ -11,10 +11,10 @@ use crate::{
     arith,
     builtin_libraries::{NativeCall, NativeFn, c_result},
     coerce::coerce_vector,
-    linalg,
+    distributions, linalg,
     long_double::LongDouble,
-    stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm, stats_optimize,
-    stats_port, stats_spline, stats_tests,
+    random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
+    stats_optimize, stats_port, stats_spline, stats_tests,
     unwind::{R, error},
     values::{self, length, scalar_bool, scalar_integer, symbols},
 };
@@ -79,6 +79,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("tukeyline", tukeyline),
     ("Rsm", tukey_smooth),
     ("cutree", stats_cluster::cutree),
+    ("rWishart", r_wishart),
     ("loess_raw", stats_loess::loess_raw),
     ("loess_dfit", stats_loess::loess_dfit),
     ("loess_dfitse", stats_loess::loess_dfitse),
@@ -3287,4 +3288,82 @@ fn robustness_weights(y: &[f64], fitted: &[f64]) -> Vec<f64> {
             }
         })
         .collect()
+}
+
+/// `rWishart(n, df, Sigma)`: `n` Wishart draws by the Bartlett decomposition. Each draw fills an
+/// upper triangular factor column by column (a chi-square root on the diagonal, then standard
+/// normals above it), which is the order GNU R draws in, so seeded streams agree.
+unsafe fn r_wishart(call: &NativeCall<'_>) -> R<Sexp> {
+    let count = values::as_integer_scalar(call.arg(0));
+    let count = if count == NA_INTEGER || count <= 0 {
+        1
+    } else {
+        count as usize
+    };
+    let df = values::as_real_scalar(call.arg(1));
+    let scale = call.arg(2);
+    let p = match values::dims(scale) {
+        Some(dims) if scale.kind() == SexpType::Real && dims.len() == 2 && dims[0] == dims[1] => {
+            dims[0]
+        }
+        _ => return Err(error("'scal' must be a square, real matrix")),
+    };
+    if p == 0 || df.is_nan() || df < p as f64 {
+        return Err(error("inconsistent degrees of freedom and dimension"));
+    }
+    let sigma = values::reals(scale);
+    let mut factor = vec![0.0; p * p];
+    for j in 0..p {
+        let mut diagonal = sigma[j + j * p];
+        for k in 0..j {
+            diagonal -= factor[k + j * p] * factor[k + j * p];
+        }
+        if diagonal <= 0.0 {
+            return Err(error("'scal' matrix is not positive-definite"));
+        }
+        let root = diagonal.sqrt();
+        factor[j + j * p] = root;
+        for i in j + 1..p {
+            let mut entry = sigma[j + i * p];
+            for k in 0..j {
+                entry -= factor[k + j * p] * factor[k + i * p];
+            }
+            factor[j + i * p] = entry / root;
+        }
+    }
+    let result = values::alloc(SexpType::Real, p * p * count)?;
+    let dims = [p as i32, p as i32, count as i32];
+    values::set_attr(result, symbols().dim, values::integer_vector(&dims)?)?;
+    random::get_rng_state()?;
+    let mut deviates = distributions::SessionDeviates;
+    let mut bartlett = vec![0.0; p * p];
+    let mut product = vec![0.0; p * p];
+    for draw in 0..count {
+        for j in 0..p {
+            bartlett[j + j * p] = distributions::rchisq(&mut deviates, df - j as f64)?.sqrt();
+            for i in 0..j {
+                bartlett[i + j * p] = random::norm_rand()?;
+                bartlett[j + i * p] = 0.0;
+            }
+        }
+        for j in 0..p {
+            for i in 0..p {
+                product[i + j * p] = (i..=j)
+                    .map(|k| bartlett[i + k * p] * factor[k + j * p])
+                    .sum();
+            }
+        }
+        let out = &mut values::reals_mut(result)[draw * p * p..(draw + 1) * p * p];
+        for j in 0..p {
+            for i in 0..=j {
+                let entry: f64 = (0..p)
+                    .map(|k| product[k + i * p] * product[k + j * p])
+                    .sum();
+                out[i + j * p] = entry;
+                out[j + i * p] = entry;
+            }
+        }
+    }
+    random::put_rng_state()?;
+    Ok(result)
 }

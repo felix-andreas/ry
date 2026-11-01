@@ -815,7 +815,11 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
         "e" => scientific_text(value, precision.unwrap_or(6)),
         "E" => scientific_text(value, precision.unwrap_or(6)).to_uppercase(),
         // formatC passes a negative `digits` to ask `fg` to keep trailing zeros.
-        "fg" => fixed_significant(value, digits.unsigned_abs().max(1) as usize, digits < 0 || flag.contains('#')),
+        "fg" => fixed_significant(
+            value,
+            digits.unsigned_abs().max(1) as usize,
+            digits < 0 || flag.contains('#'),
+        ),
         "g" | "G" => {
             let significant = precision.unwrap_or(6).max(1);
             let text = c_general(value, significant, flag.contains('#'));
