@@ -3532,6 +3532,7 @@ impl<'db> Checker<'db, '_> {
                 resolved
             }
             NumericOperand::AnyUnknown => unknown(self.db),
+            NumericOperand::Invalid if self.declares_arithmetic(resolved) => resolved,
             NumericOperand::Invalid => {
                 self.errors.push(TypeError {
                     range: operand_range,
@@ -3543,6 +3544,23 @@ impl<'db> Checker<'db, '_> {
                 unknown(self.db)
             }
         }
+    }
+
+    /// A class with arithmetic methods (`matrix`, `difftime`) negates to itself: R
+    /// dispatches unary `-` through the same `-.class`, `Arith.class` and `Ops.class`.
+    fn declares_arithmetic(&self, ty: Ty<'db>) -> bool {
+        let TyKind::Named(name, _) = ty.kind(self.db) else {
+            return false;
+        };
+        let Some(globals) = self.globals else {
+            return false;
+        };
+        let class = name.text(self.db);
+        ["-", "Arith", "Ops"].iter().any(|prefix| {
+            let method = format!("{prefix}.{class}");
+            globals.overloads(&method, false).is_some_and(|candidates| !candidates.is_empty())
+                || globals.scheme(&method, false).is_some()
+        })
     }
 
     fn infer_unary_not(&mut self, operand: ExprId) -> Ty<'db> {
@@ -3727,9 +3745,21 @@ impl<'db> Checker<'db, '_> {
         let globals = self.globals?;
         let spelling = operator_spelling(operator)?;
         let group = operator_group(operator)?;
+        // A generic bounded `numeric` probes as the `double` it may be.
+        let probe_operand = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+            TyKind::Rigid(name)
+                if matches!(
+                    self.table.rigid_constraints.get(name),
+                    Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                ) =>
+            {
+                scalar(self.db, Atomic::Double)
+            }
+            _ => ty,
+        };
         let arguments = [
-            self.operand_argument(lhs, left),
-            self.operand_argument(rhs, right),
+            self.operand_argument(lhs, probe_operand(left)),
+            self.operand_argument(rhs, probe_operand(right)),
         ];
         let class_of = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
             TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
@@ -3739,6 +3769,15 @@ impl<'db> Checker<'db, '_> {
             .into_iter()
             .flatten()
             .collect();
+        // An untyped operand (`omega + v %*% w` on a parameter) must not take the first
+        // candidate's class, which would reject the plain vector R accepts there. It is
+        // only required to be numeric, and the call types when every fit agrees.
+        let flexible: Vec<(TextRange, Ty<'db>)> = [(lhs, left), (rhs, right)]
+            .into_iter()
+            .map(|(operand, ty)| (self.blame_range(operand), self.table.shallow_resolve(self.db, ty)))
+            .filter(|(_, ty)| matches!(ty.kind(self.db), TyKind::Var(_)))
+            .collect();
+        let mut fitting_returns: Vec<Ty<'db>> = Vec::new();
         let mut declared_any = false;
         for class in &classes {
             for method in [
@@ -3763,11 +3802,27 @@ impl<'db> Checker<'db, '_> {
                         continue;
                     };
                     if self.match_arguments(range, function, &arguments).is_empty() {
-                        return Some(function.ret);
+                        if flexible.is_empty() {
+                            return Some(function.ret);
+                        }
+                        let ret = self.table.resolve(self.db, function.ret);
+                        self.table.rollback(snapshot);
+                        fitting_returns.push(ret);
+                        continue;
                     }
                     self.table.rollback(snapshot);
                 }
             }
+        }
+        if let Some(&first) = fitting_returns.first() {
+            for (operand_range, ty) in flexible {
+                self.constrain_numeric_flexible(operand_range, ty);
+            }
+            return Some(if fitting_returns.iter().all(|&ret| ret == first) {
+                first
+            } else {
+                unknown(self.db)
+            });
         }
         // A class that declares the operator but fits no candidate is a real contract
         // mismatch (`Date + Date` errors in R too).
@@ -5630,19 +5685,11 @@ impl<'db> Checker<'db, '_> {
             .collect()
     }
 
-    /// Overload results that differ only in container shape (`lapply` over an unchecked
-    /// vector) stay guessable; a differing `integer` against `double` would mislead.
-    fn is_numeric_result(&self, ty: Ty<'db>) -> bool {
-        match ty.kind(self.db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) => true,
-            TyKind::Vector(element) => {
-                matches!(
-                    element.kind(self.db),
-                    TyKind::Scalar(Atomic::Integer | Atomic::Double)
-                )
-            }
-            _ => false,
-        }
+    /// Overload results that differ only in list shape (`lapply` over an unchecked vector)
+    /// stay guessable; any other difference (`integer` against `double`, `factor` against
+    /// `T[]`) would mislead.
+    fn is_list_result(&self, ty: Ty<'db>) -> bool {
+        matches!(ty.kind(self.db), TyKind::List(_) | TyKind::NamedList(_))
     }
 
     fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
@@ -5946,7 +5993,7 @@ impl<'db> Checker<'db, '_> {
             && fits.iter().any(|(_, _, results)| results != first)
             && fits
                 .iter()
-                .any(|(_, _, results)| results.iter().any(|&result| self.is_numeric_result(result)))
+                .any(|(_, _, results)| results.iter().any(|&result| !self.is_list_result(result)))
         {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);

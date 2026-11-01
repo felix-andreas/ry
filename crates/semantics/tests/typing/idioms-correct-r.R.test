@@ -200,3 +200,26 @@ run <- function() registry$invoke()
 #++++
 registry: NULL
 run: fn() -> Unknown
+
+#---- an_unchecked_argument_does_not_pick_the_factor_overload
+f <- function(w) {
+  idx <- sort(unique(unlist(w)))
+  idx + 1
+}
+#++++
+f: <T> fn(w: T) -> Unknown
+
+#---- an_untyped_operand_of_matrix_arithmetic_stays_a_plain_vector
+f <- function(omega, v) {
+  omega <- omega + v %*% t(v)
+  omega[1]
+}
+f(c(1, 2), c(1, 2))
+#++++
+f: <T: numeric, U> fn(omega: T, v: U) -> Unknown
+Unknown
+
+#---- a_matrix_negates_to_a_matrix
+neg <- function(m) -(m %*% m)
+#++++
+neg: <T> fn(m: T) -> matrix
