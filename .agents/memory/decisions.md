@@ -2888,6 +2888,11 @@ first lines R had already read, leaving R mid-command.
   code, and ry on typed strict code. Typed code is not faster yet (`backlog.md`), and the pitch
   says so instead of implying that types buy speed. When typed runtime features do get faster, the
   third column shows it without a rewrite of the copy.
+- **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Works on your code
+  today" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Move to ry's
+  types" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.md` and the
+  sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
+  not moved, so every URL and cross-link keeps working.
 - **Rejected:** leading with editor features (rust-analyzer-style tooling is table stakes, not a
   reason to switch), and leading with "a reimplementation of R" (true, but a reader cannot use the
   incomplete runtime for real work today, so it is the destination, not the pitch).
