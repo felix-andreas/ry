@@ -600,6 +600,16 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     String::from_utf8_lossy(bytes)
 }
 
+/// Whether two distinct interned strings hold the same text, which happens only when one is
+/// marked latin1 and the other is not, as GNU R's `Seql` decides by translating both to UTF-8.
+pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
+    let latin1 = |charsxp: Sexp| charsxp.has_gp(gp::LATIN1);
+    if latin1(left) == latin1(right) || left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
+        return false;
+    }
+    char_str(left) == char_str(right)
+}
+
 /// The text of a symbol's name.
 pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
     char_str(symbol.car())

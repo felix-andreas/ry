@@ -2183,6 +2183,9 @@ impl Matcher {
             }
             let mut builder = RegexBuilder::new(&translated.pattern);
             builder.case_insensitive(options.ignore_case);
+            // The step budget counts over a whole scan, so the default of a million fails a
+            // plain `\s+` on a megabyte of text that TRE scans without complaint.
+            builder.backtrack_limit(usize::MAX);
             if longest {
                 builder.leftmost_longest(true);
             }

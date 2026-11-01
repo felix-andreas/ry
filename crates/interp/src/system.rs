@@ -13,7 +13,9 @@ use crate::{
 use heap::{
     GcStress,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+    strings::Encoding,
 };
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -46,7 +48,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("memory.profile", 0, |_| unsafe { values::integer_vector(&[]) }),
     internal("file.symlink", 2, |call| unsafe { link_paths(call, |from, to| std::os::unix::fs::symlink(from, to).is_ok()) }),
     internal("file.link", 2, |call| unsafe { link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok()) }),
-    internal("setFileTime", 2, |_| unsafe { scalar_bool(true) }),
     internal("file.show", 5, |call| unsafe {
         for index in 0..length(call.arg(0)) {
             if let Some(path) = values::string_at(call.arg(0), index) {
@@ -96,22 +97,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.rename", 2, do_file_rename),
     internal("file.create", 2, |call| unsafe { map_paths(call, |path| std::fs::write(path, b"").is_ok()) }),
     internal("file.append", 2, do_file_append),
-    internal("file.copy", 6, |call| unsafe { Err(call.error("file.copy is not supported")) }),
+    internal("file.copy", 6, do_file_copy),
     internal("dir.create", 4, do_dir_create).invisible(),
-    internal("file.access", 2, |call| unsafe { {
-        let paths = call.arg(0);
-        let result = alloc(SexpType::Integer, length(paths))?;
-        for index in 0..length(paths) {
-            let path = values::string_at(paths, index).map(|text| text.into_owned()).unwrap_or_default();
-            values::ints_mut(result)[index] = if Path::new(&crate::connections::expand_path(&path)).exists() { 0 } else { -1 };
-        }
-        Ok(result)
-    } }),
+    internal("file.access", 2, do_file_access),
     internal("getwd", 0, |_| unsafe { scalar_string(&std::env::current_dir().map(|path| path.display().to_string()).unwrap_or_default()) }),
     internal("setwd", 1, do_setwd).invisible(),
     internal("Sys.glob", 2, do_sys_glob),
     internal("Sys.readlink", 1, |call| unsafe { map_strings(call, |path| std::fs::read_link(path).map(|target| target.display().to_string()).unwrap_or_default()) }),
-    internal("Sys.chmod", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("Sys.chmod", 3, do_sys_chmod).invisible(),
     internal("Sys.umask", 1, |_| unsafe { scalar_integer(18) }),
     internal("Sys.getpid", 0, |_| unsafe { scalar_integer(std::process::id() as i32) }),
     internal("Sys.info", 0, do_sys_info),
@@ -146,13 +139,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
         crate::conditions::traceback_calls(values::as_integer_scalar(call.arg(0)).max(0) as usize)
     }),
     internal(".traceback", 1, |_| unsafe { Ok(nil()) }),
-    internal("Sys.setFileTime", 2, |_| unsafe { scalar_bool(true) }).invisible(),
+    internal("setFileTime", 2, do_sys_set_file_time).invisible(),
     internal("Encoding", 1, do_encoding),
-    internal("setEncoding", 2, |call| unsafe { Ok(call.arg(0)) }),
+    internal("setEncoding", 2, do_set_encoding),
     builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
     builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
-    internal("iconv", 6, |call| unsafe { Ok(call.arg(0)) }),
-    internal("validUTF8", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
+    internal("iconv", 6, do_iconv),
+    internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
@@ -307,6 +300,158 @@ unsafe fn do_file_append(call: &Call<'_>) -> R<Sexp> {
         values::ints_mut(result)[index] = appended as i32;
     }
     Ok(result)
+}
+
+/// `.Internal(file.copy(from, to, ...))`, which the R closure calls only when `to` is one existing
+/// directory: each source is copied into it under its own base name.
+unsafe fn do_file_copy(call: &Call<'_>) -> R<Sexp> {
+    let sources = call.arg(0);
+    let directory = values::require_string(call.arg(1), "to")?;
+    let overwrite = values::as_logical_scalar(call.arg(2)) == 1;
+    let recursive = values::as_logical_scalar(call.arg(3)) == 1;
+    let options = CopyOptions {
+        overwrite,
+        mode: values::as_logical_scalar(call.arg(4)) == 1,
+        date: values::as_logical_scalar(call.arg(5)) == 1,
+    };
+    let directory = PathBuf::from(crate::connections::expand_path(&directory));
+    let result = alloc(SexpType::Logical, length(sources))?;
+    for index in 0..length(sources) {
+        let copied = match values::string_at(sources, index) {
+            Some(source) => {
+                let source = PathBuf::from(crate::connections::expand_path(&source));
+                match source.file_name() {
+                    Some(name) if recursive || !source.is_dir() => {
+                        let target = directory.join(name);
+                        match copy_entry(&source, &target, &options) {
+                            Ok(()) => true,
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                            Err(error) => {
+                                let reason = match error.raw_os_error() {
+                                    Some(code) => std::ffi::CStr::from_ptr(libc::strerror(code)).to_string_lossy().into_owned(),
+                                    None => error.to_string(),
+                                };
+                                crate::conditions::warning(format!(
+                                    "problem copying {} to {}: {reason}",
+                                    source.display(),
+                                    target.display()
+                                ))?;
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                }
+            }
+            None => false,
+        };
+        values::ints_mut(result)[index] = copied as i32;
+    }
+    Ok(result)
+}
+
+struct CopyOptions {
+    overwrite: bool,
+    mode: bool,
+    date: bool,
+}
+
+/// Copies a file, or a directory with everything below it. Like GNU R, an existing target file is
+/// an error unless `overwrite` is set, while an existing target directory is merged into.
+fn copy_entry(source: &Path, target: &Path, options: &CopyOptions) -> std::io::Result<()> {
+    let metadata = std::fs::metadata(source)?;
+    if metadata.is_dir() {
+        if !target.is_dir() {
+            std::fs::create_dir(target)?;
+        }
+        let mut failure = None;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            if let Err(error) = copy_entry(&entry.path(), &target.join(entry.file_name()), options) {
+                failure = Some(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+    } else {
+        if target.exists() && !options.overwrite {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        std::fs::copy(source, target)?;
+        if !options.mode {
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o666 & !UMASK))?;
+        }
+    }
+    if options.mode && metadata.is_dir() {
+        std::fs::set_permissions(target, metadata.permissions())?;
+    }
+    if options.date {
+        let file = std::fs::File::options().write(!metadata.is_dir()).read(metadata.is_dir()).open(target)?;
+        file.set_modified(metadata.modified()?)?;
+    }
+    Ok(())
+}
+
+/// The umask `Sys.umask()` reports, applied wherever GNU R applies the process umask.
+const UMASK: u32 = 0o022;
+
+unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    let mode = values::as_integer_scalar(call.arg(1));
+    let result = alloc(SexpType::Integer, length(paths))?;
+    for index in 0..length(paths) {
+        let accessible = values::string_at(paths, index)
+            .and_then(|path| std::ffi::CString::new(crate::connections::expand_path(&path)).ok())
+            .is_some_and(|path| libc::access(path.as_ptr(), mode & 7) == 0);
+        values::ints_mut(result)[index] = if accessible { 0 } else { -1 };
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_chmod(call: &Call<'_>) -> R<Sexp> {
+    let (paths, modes) = (call.arg(0), crate::coerce::coerce_vector(call.arg(1), SexpType::Integer)?);
+    let use_umask = values::as_logical_scalar(call.arg(2)) == 1;
+    let result = alloc(SexpType::Logical, length(paths))?;
+    for index in 0..length(paths) {
+        let mode = match length(modes) {
+            0 => 0o777,
+            count => values::ints(modes).get(index % count).copied().unwrap_or(0o777) as u32,
+        };
+        let mode = if use_umask { mode & !UMASK } else { mode };
+        let changed = values::string_at(paths, index).is_some_and(|path| {
+            std::fs::set_permissions(crate::connections::expand_path(&path), std::fs::Permissions::from_mode(mode)).is_ok()
+        });
+        values::ints_mut(result)[index] = changed as i32;
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_set_file_time(call: &Call<'_>) -> R<Sexp> {
+    let (paths, times) = (call.arg(0), crate::coerce::coerce_vector(call.arg(1), SexpType::Real)?);
+    let result = alloc(SexpType::Logical, length(paths))?;
+    for index in 0..length(paths) {
+        let time = match length(times) {
+            0 => None,
+            count => values::reals(times).get(index % count).copied().filter(|time| time.is_finite()),
+        };
+        let changed = match (values::string_at(paths, index), time) {
+            (Some(path), Some(time)) => set_modified_time(&crate::connections::expand_path(&path), time).is_ok(),
+            _ => false,
+        };
+        values::ints_mut(result)[index] = changed as i32;
+    }
+    Ok(result)
+}
+
+fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
+    let time = if seconds >= 0.0 {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(seconds)
+    } else {
+        std::time::UNIX_EPOCH - std::time::Duration::from_secs_f64(-seconds)
+    };
+    let file = if Path::new(path).is_dir() { std::fs::File::open(path)? } else { std::fs::File::options().write(true).open(path)? };
+    file.set_times(std::fs::FileTimes::new().set_modified(time).set_accessed(time))
 }
 
 fn append_file(target: &str, source: &str) -> std::io::Result<()> {
@@ -914,7 +1059,6 @@ unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
             Ok(metadata) => {
                 values::reals_mut(size)[index] = metadata.len() as f64;
                 values::ints_mut(is_dir)[index] = metadata.is_dir() as i32;
-                use std::os::unix::fs::PermissionsExt;
                 values::ints_mut(mode)[index] = (metadata.permissions().mode() & 0o777) as i32;
                 values::reals_mut(mtime)[index] = metadata
                     .modified()
@@ -1378,6 +1522,205 @@ unsafe fn do_encoding(call: &Call<'_>) -> R<Sexp> {
         values::set_elt(result, index, values::mkchar(name)?);
     }
     Ok(result)
+}
+
+unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
+    let (strings, encodings) = (call.arg(0), call.arg(1));
+    if strings.kind() != SexpType::String {
+        return Err(call.error("a character vector argument expected"));
+    }
+    if encodings.kind() != SexpType::String || length(encodings) == 0 {
+        return Err(call.error("a character vector 'value' expected"));
+    }
+    let result = values::shallow_duplicate(strings)?;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        if charsxp == values::na_string() {
+            continue;
+        }
+        let encoding = match values::string_at(encodings, index % length(encodings)).as_deref() {
+            Some("latin1") => Encoding::Latin1,
+            Some("UTF-8") => Encoding::Utf8,
+            Some("bytes") => Encoding::Bytes,
+            _ => native_encoding(charsxp.bytes()),
+        };
+        values::set_elt(result, index, values::mkchar_bytes(charsxp.bytes(), encoding)?);
+    }
+    Ok(result)
+}
+
+unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("invalid 'x' argument"));
+    }
+    let result = alloc(SexpType::Logical, length(strings))?;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        let valid = charsxp == values::na_string() || std::str::from_utf8(charsxp.bytes()).is_ok();
+        values::ints_mut(result)[index] = valid as i32;
+    }
+    Ok(result)
+}
+
+/// `.Internal(iconv(x, from, to, sub, mark, toRaw))`, on top of the C library's `iconv`.
+unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
+    let input = call.arg(0);
+    let from = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
+    let to = values::first_string(call.arg(2)).map(|text| text.into_owned()).unwrap_or_default();
+    let substitute = values::first_string(call.arg(3)).map(|text| text.into_owned());
+    let mark = values::as_logical_scalar(call.arg(4)) == 1;
+    let to_raw = values::as_logical_scalar(call.arg(5)) == 1;
+    let is_list = input.kind() == SexpType::List;
+    if !is_list && input.kind() != SexpType::String {
+        return Err(call.error("'x' must be a character vector"));
+    }
+    let native = |name: &str| if name.is_empty() { "UTF-8".to_owned() } else { name.to_owned() };
+    let (from, to) = (native(&from), native(&to));
+    let converter = Converter::open(&from, &to)
+        .ok_or_else(|| error(format!("unsupported conversion from '{from}' to '{to}'")))?;
+    let target = to.split("//").next().unwrap_or("").to_ascii_uppercase();
+    let encoding = match target.as_str() {
+        _ if !mark => Encoding::Native,
+        "UTF-8" | "UTF8" => Encoding::Utf8,
+        "LATIN1" | "ISO-8859-1" | "ISO8859-1" | "ISO_8859-1" => Encoding::Latin1,
+        _ => Encoding::Native,
+    };
+    let from_utf8 = matches!(from.to_ascii_uppercase().as_str(), "UTF-8" | "UTF8");
+    let count = length(input);
+    let result = if to_raw {
+        alloc(SexpType::List, count)?
+    } else if is_list {
+        alloc(SexpType::String, count)?
+    } else {
+        values::shallow_duplicate(input)?
+    };
+    for index in 0..count {
+        let element = input.element(index);
+        let bytes: Option<&[u8]> = if is_list {
+            match element.kind() {
+                SexpType::Raw => Some(values::raws(element)),
+                SexpType::Nil => None,
+                _ => return Err(call.error("'x' must be a character vector or a list of NULL or raw vectors")),
+            }
+        } else if element == values::na_string() {
+            None
+        } else {
+            Some(element.bytes())
+        };
+        let converted = bytes.and_then(|bytes| converter.convert(bytes, substitute.as_deref(), from_utf8));
+        let value = match (converted, to_raw) {
+            (None, true) => nil(),
+            (None, false) => values::na_string(),
+            (Some(bytes), true) => {
+                let raw = alloc(SexpType::Raw, bytes.len())?;
+                values::raws_mut(raw).copy_from_slice(&bytes);
+                raw
+            }
+            (Some(bytes), false) => {
+                let encoding = if encoding == Encoding::Native { native_encoding(&bytes) } else { encoding };
+                values::mkchar_bytes(&bytes, encoding)?
+            }
+        };
+        values::set_elt(result, index, value);
+    }
+    Ok(result)
+}
+
+/// The mark for text in the native encoding. The native encoding is always UTF-8, and ry marks
+/// valid UTF-8 as such everywhere, so that equal text is one interned string; GNU R instead keeps
+/// it unmarked and translates when it compares.
+fn native_encoding(bytes: &[u8]) -> Encoding {
+    if std::str::from_utf8(bytes).is_ok() { Encoding::Utf8 } else { Encoding::Native }
+}
+
+/// An open `iconv_t` descriptor, closed on drop.
+struct Converter(libc::iconv_t);
+
+impl Converter {
+    fn open(from: &str, to: &str) -> Option<Converter> {
+        let (from, to) = (std::ffi::CString::new(from).ok()?, std::ffi::CString::new(to).ok()?);
+        let descriptor = unsafe { libc::iconv_open(to.as_ptr(), from.as_ptr()) };
+        (descriptor as isize != -1).then_some(Converter(descriptor))
+    }
+
+    /// Converts `input`, or returns `None` for input the target cannot represent when there is no
+    /// substitute. `substitute` follows `iconv(sub = )`: `"byte"` writes `<xx>`, `"Unicode"` writes
+    /// `<U+xxxx>` for a UTF-8 character, `"c99"` writes `\uxxxx`, and anything else is written as
+    /// given, once per unconvertible byte.
+    fn convert(&self, input: &[u8], substitute: Option<&str>, from_utf8: bool) -> Option<Vec<u8>> {
+        let mut output = Vec::with_capacity(input.len() + 16);
+        let mut buffer = [0u8; 4096];
+        let mut position = 0;
+        // Resets the shift state, so a descriptor reused across elements starts clean.
+        unsafe { libc::iconv(self.0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        loop {
+            let mut in_pointer = input[position..].as_ptr() as *mut libc::c_char;
+            let mut in_left = input.len() - position;
+            let mut out_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
+            let mut out_left = buffer.len();
+            let finished = in_left == 0;
+            let status = unsafe {
+                if finished {
+                    libc::iconv(self.0, std::ptr::null_mut(), std::ptr::null_mut(), &mut out_pointer, &mut out_left)
+                } else {
+                    libc::iconv(self.0, &mut in_pointer, &mut in_left, &mut out_pointer, &mut out_left)
+                }
+            };
+            let error = std::io::Error::last_os_error().raw_os_error();
+            output.extend_from_slice(&buffer[..buffer.len() - out_left]);
+            position = input.len() - in_left;
+            if status != usize::MAX {
+                if finished {
+                    return Some(output);
+                }
+                continue;
+            }
+            match error {
+                Some(libc::E2BIG) => continue,
+                Some(libc::EILSEQ) | Some(libc::EINVAL) => {
+                    let rest = &input[position..];
+                    let first = *rest.first()?;
+                    let character = from_utf8
+                        .then(|| utf8_character(rest))
+                        .flatten();
+                    let (text, consumed) = match (substitute?, character) {
+                        ("byte", _) => (format!("<{first:02x}>"), 1),
+                        ("Unicode", Some((code, width))) => (format!("<U+{code:04X}>"), width),
+                        ("c99", Some((code, width))) if code > 0xFFFF => (format!("\\U{code:08x}"), width),
+                        ("c99", Some((code, width))) => (format!("\\u{code:04x}"), width),
+                        ("Unicode" | "c99", None) => (format!("<{first:02x}>"), 1),
+                        (text, _) => (text.to_owned(), 1),
+                    };
+                    output.extend_from_slice(text.as_bytes());
+                    position += consumed;
+                    if position >= input.len() {
+                        return Some(output);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+impl Drop for Converter {
+    fn drop(&mut self) {
+        unsafe { libc::iconv_close(self.0) };
+    }
+}
+
+/// The code point and byte width of the UTF-8 character `bytes` starts with.
+fn utf8_character(bytes: &[u8]) -> Option<(u32, usize)> {
+    let width = match *bytes.first()? {
+        byte if byte < 0x80 => 1,
+        byte if byte >> 5 == 0b110 => 2,
+        byte if byte >> 4 == 0b1110 => 3,
+        byte if byte >> 3 == 0b11110 => 4,
+        _ => return None,
+    };
+    let character = std::str::from_utf8(bytes.get(..width)?).ok()?.chars().next()?;
+    Some((character as u32, width))
 }
 
 unsafe fn do_ngettext(call: &Call<'_>) -> R<Sexp> {
