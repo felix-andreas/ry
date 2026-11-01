@@ -1117,3 +1117,17 @@ step <- function(f, pars, arglist) {
 #++++
 step: Unknown
 94..95 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+
+#---- a_string_from_the_environment_is_a_condition
+flag_on <- function() {
+  enabled <- Sys.getenv("FLAG", unset = "TRUE")
+  if (enabled) 1L else 0L
+}
+#++++
+flag_on: fn() -> integer
+
+#---- a_string_literal_that_is_not_a_logical_spelling_is_still_rejected_as_a_condition
+pick <- function() if ("yes") 1L else 0L
+#++++
+pick: Unknown
+23..28 error[type-mismatch] expected `logical`, found `character`

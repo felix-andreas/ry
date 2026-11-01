@@ -1559,9 +1559,11 @@ scalar condition admits:
 - `logical` is the ordinary case.
 - `integer` and `double` are accepted, and coerce as R coerces them: zero is false, and anything else
   is true. That makes `if (length(x))`, `if (nrow(df))`, and `while (n)` ordinary R.
-- `character`, `complex`, and `raw` are type errors. R refuses `complex` and `raw` outright, and
-  accepts a `character` condition only when it spells `TRUE` or `FALSE` (such as `"T"` or `"true"`),
-  so `if ("yes")` is reported.
+- `complex` and `raw` are type errors, as R refuses them outright.
+- A `character` condition of `if` or `while` is accepted unless it is a string literal. R reads it
+  with `as.logical`, which accepts the spellings of `TRUE` and `FALSE` (such as `"T"` or `"true"`),
+  and the value of `Sys.getenv("FLAG", unset = "TRUE")` presumably is one. Only a literal shows its
+  text, so `if ("yes")` is reported and `if ("TRUE")` is not.
 - A vector is accepted, because a vector type carries no length, and the vector a test produces,
   such as `x >= 1` on a `double[]`, has length one at run time far more often than not. Only a
   `c()` call with two or more arguments is known to be longer than one, so `if (c(TRUE, FALSE))` is

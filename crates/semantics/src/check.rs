@@ -5801,6 +5801,24 @@ impl<'db> Checker<'db, '_> {
         {
             return;
         }
+        // `if` reads a string through `as.logical`, so `if (Sys.getenv("FLAG", unset = "TRUE"))`
+        // is ordinary R. Only a literal shows its text, and then only R's logical spellings pass.
+        if matches!(resolved.kind(self.db), TyKind::Scalar(Atomic::Character)) {
+            let mut operand = condition;
+            while let ExpressionKind::Paren(inner) = self.module.kind(operand) {
+                operand = *inner;
+            }
+            let reads_as_logical = match self.module.kind(operand) {
+                ExpressionKind::Literal(LiteralKind::String(text)) => matches!(
+                    &self.module[text],
+                    "TRUE" | "true" | "True" | "T" | "FALSE" | "false" | "False" | "F"
+                ),
+                _ => true,
+            };
+            if reads_as_logical {
+                return;
+            }
+        }
         // A `NULL` member is the "not supplied" path of an optional value, and R code tests such
         // a value once it holds one, so a union is a condition when its other members are. Its
         // open members (a parameter rebound on one path) are bound to `logical` as a lone open
