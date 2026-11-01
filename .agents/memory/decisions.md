@@ -2700,17 +2700,17 @@ first lines R had already read, leaving R mid-command.
   rare, and recompiles are capped per body. When the epoch has moved, each speculation is
   re-resolved from the environment its lookup started in, which for a function looked up inside an
   inlined or directly called closure is that closure's environment, not the compiled body's.
-- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
-  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
-  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
-  invisible when the callee cannot assign anything an argument reads before forcing it
-  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
-  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+- **A call to a speculated closure is direct and binds plain values.** Arguments that are
+  effect-free are evaluated eagerly in the caller and bound as values into the callee's frame,
+  skipping promises (`jit_call` in `crates/jit/src/runtime.rs`, `eval::bind_arguments`). Early
+  evaluation is only invisible when the callee cannot assign anything an argument reads before
+  forcing it (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must
+  be frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
   lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
-  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
-  the one accepted hole. A promise object is still
-  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
-  needs compiled-to-compiled calls that know the callee never reflects.
+  while a calling handler is established. A frame-safe callee cannot call `substitute()`,
+  `missing()` or `sys.call()`, so no promise is needed, and the frame records no argument list
+  because only `nargs`, method dispatch and `standardGeneric` read it. S3 dispatch from those
+  builtins on a classed argument is the one accepted hole.
 - **Small local closures inline.** A call of a closure defined by a function expression in the same
   body, whose arguments and body compute a scalar from scalars without effects, runs inline on
   unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
@@ -2729,6 +2729,18 @@ first lines R had already read, leaving R mid-command.
   Strict typing costs a little at run time instead (about 200 instructions per annotated call for
   the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
   is still the plan in `r-runtime.md`.
+- **A cold body waits instead of compiling with boxed guesses.** A hot body whose arithmetic reads
+  an operand with no feedback, or whose `for` loop never ran, refuses to compile as `COLD`
+  (`analysis::COLD`), which resets its counters without spending a compile. This is the recursive
+  case: `fib` turns hot on its way down, before any call has returned, so compiling then types
+  every call result as a boxed unknown. `TIER_STATE` counts compiles in its low byte and cold
+  refusals above it (`runtime::COLD_REFUSAL`); after three cold refusals the body compiles with
+  what it has, so a body that never fills its feedback still compiles.
+- **A declared return type is the call result's early profile.** When a direct call's site has no
+  feedback, its result type comes from the callee's declared return annotation
+  (`annotations::declared_return_type`). A declared `double` still admits an integer through
+  promotion, so this is a profile, not a proof, and the usual guards stay. Typed recursive code therefore compiles on
+  the first try instead of waiting.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
 
@@ -3348,7 +3360,11 @@ explicit allocators".
   `hashbrown::HashMap::new_in(&bump)` builds with hashbrown 0.16's `nightly` feature, which makes
   it take std's trait. So arenas are `bumpalo` through std's `Vec` and `Box`, maps stay on
   `hashbrown` (std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter), and the
-  earlier `allocator-api2` polyfill route is dropped: nothing needs it.
+  earlier `allocator-api2` polyfill route is dropped. One trap: in any build that also links
+  Cranelift, `bumpalo`'s `allocator_api` feature must stay off, because Cargo unifies it with the
+  `allocator-api2` feature `regalloc2` uses, and with both on `bumpalo` drops the `allocator-api2`
+  impl and `regalloc2` fails to compile. The JIT therefore wraps `&Bump` in its own std
+  `Allocator` (`Arena` in `crates/jit/src/analysis.rs`).
 - **The pin moves forward deliberately.** Bump the date in one commit that also fixes what the new
   nightly breaks (new lints, rustfmt changes), never by floating `nightly`, so a build is
   reproducible. `flake.nix` reads the channel from `rust-toolchain.toml`, so a bump also needs
