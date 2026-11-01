@@ -4,7 +4,7 @@
 use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     coerce::{self, coerce_vector},
-    conditions, distributions,
+    conditions, rmath,
     unwind::{R, error},
     values::{
         self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -220,8 +220,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),
     internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
-    internal("choose", 2, |call| unsafe { math2(call, distributions::choose) }),
-    internal("lchoose", 2, |call| unsafe { math2(call, distributions::lchoose) }),
+    internal("choose", 2, |call| unsafe { math2(call, rmath::choose) }),
+    internal("lchoose", 2, |call| unsafe { math2(call, rmath::lchoose) }),
     internal("beta", 2, |call| unsafe { math2(call, |a, b| (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()) }),
     internal("lbeta", 2, |call| unsafe { math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)) }),
     internal("bitwiseAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
@@ -1509,8 +1509,8 @@ fn math_value(function: Math, x: f64) -> f64 {
         Math::Atanh => x.atanh(),
         Math::Gamma => gamma_fn(x),
         Math::Lgamma => gamma_ln(x),
-        Math::Digamma => distributions::psigamma(x, 0.0),
-        Math::Trigamma => distributions::psigamma(x, 1.0),
+        Math::Digamma => rmath::psigamma(x, 0.0),
+        Math::Trigamma => rmath::psigamma(x, 1.0),
     }
 }
 
