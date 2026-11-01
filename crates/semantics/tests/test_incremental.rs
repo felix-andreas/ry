@@ -1,15 +1,15 @@
 use {
     salsa::{Database, Durability, Setter},
     semantics::{
-        AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, SourceFile,
+        AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{derive_from_syntax, file_diagnostics},
-        global_scheme, item_naming, item_tree, limit_resident_trees,
+        global_scheme, interface_sccs, item_naming, item_tree, limit_resident_trees,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
         package_definitions,
         stubs::install_shipped_stubs,
-        testing::ProbeDatabase,
+        testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar, unknown},
     },
     std::{collections::BTreeMap, thread},
@@ -597,5 +597,86 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
     assert_eq!(
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
         "data.table{id: integer[], price: double[], ticker: character[]}"
+    );
+}
+
+/// Renders every file, edits `files[edited]` to `text`, and renders again after editing it
+/// back. Breaking a cycle while a member's value stays the same re-executes that member with
+/// only older inputs, which salsa rejects unless the cycle never formed inside salsa.
+fn round_trip_edit(kind: DocumentKind, sources: &[&str], edited: usize, text: &str) {
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let files: Vec<SourceFile> = sources
+        .iter()
+        .map(|source| SourceFile::new(&db, (*source).to_owned(), kind))
+        .collect();
+    ProjectFiles::new(&db, files.clone());
+    let render_all = |db: &RootDatabase| -> Vec<String> {
+        files
+            .iter()
+            .map(|&file| render_semantics(db, file))
+            .collect()
+    };
+    let before = render_all(&db);
+    files[edited].set_text(&mut db).to(text.to_owned());
+    render_all(&db);
+    files[edited]
+        .set_text(&mut db)
+        .to(sources[edited].to_owned());
+    assert_eq!(
+        render_all(&db),
+        before,
+        "output not restored after editing back"
+    );
+}
+
+#[test]
+fn removing_a_cross_file_cycle_and_restoring_it_revalidates() {
+    // `g <- rev(g)` reads the other file's `g`, which reads itself; emptying that file makes
+    // the first `g` read itself instead.
+    round_trip_edit(
+        DocumentKind::Package,
+        &["g <- rev(g)\nf <- g$x\n", "g <- g + 1L\n"],
+        1,
+        "",
+    );
+}
+
+#[test]
+fn a_cycle_through_an_earlier_writer_revalidates() {
+    // The added last `g` is the winner the first one reads, and it reads the first one back
+    // as the earlier writer in its file: a cycle a graph of winners alone would miss.
+    round_trip_edit(
+        DocumentKind::Package,
+        &["g <- rev(g)\nf <- g$x\n"],
+        0,
+        "g <- rev(g)\nf <- g$x\ng <- g\n",
+    );
+}
+
+#[test]
+fn a_script_cycle_through_deferred_reads_revalidates() {
+    let source = "f <- function() rev(g())\nk <- f\ng <- function() h()\n";
+    let cyclic = "f <- function() rev(g())\nk <- f\ng <- function() f()\n";
+    round_trip_edit(DocumentKind::Script, &[source], 0, cyclic);
+    round_trip_edit(DocumentKind::Test, &[source], 0, cyclic);
+}
+
+#[test]
+fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
+    let db = ProbeDatabase::default();
+    let files = db.project(&["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"]);
+    let items = item_tree(&db, files[0]);
+    let sccs = interface_sccs(&db, ProjectFiles::get(&db));
+    assert!(
+        sccs.membership.contains_key(&items[1]),
+        "the loop reads the slot it writes, so the group fixpoint resolves it, not salsa"
+    );
+    assert!(!sccs.membership.contains_key(&items[0]));
+    round_trip_edit(
+        DocumentKind::Package,
+        &["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"],
+        0,
+        "while (b > 0L) b <- b - 1L\n",
     );
 }
