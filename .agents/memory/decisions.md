@@ -2123,9 +2123,9 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
   `group_by_stable` and a sort.
 - **ALTREP column exposure lives in `libr` (`crates/libr/src/frame_altrep.rs`), and `libr` links
-  Polars.** It once lived in `table` behind a `runtime` feature so that `libr` never compiled
-  Polars, but frames are now interpreter values, so `interp` depends on `table` and `libr` (which
-  depends on `interp`) links Polars either way. The dependency now points from the runtime to the
+  Polars.** Frames are interpreter values, so `interp` depends on `table`, and `libr` (which
+  depends on `interp`) links Polars either way; keeping ALTREP in `table` behind a feature would
+  only make the engine depend on the runtime. The dependency points from the runtime to the
   engine, and `libR.so` grows by the engine's size. An exposed column's `data1` owns the Arrow
   array and `data2` holds R's layout once something needs it; a column that R never materialized
   comes back from `import_column` as the same buffer.
@@ -2303,15 +2303,15 @@ first lines R had already read, leaving R mid-command.
   still exists for calls that arrive with evaluated arguments (`do.call`, `Map`).
 - **`[` dispatches to S3 methods lazily, as GNU R's `DispatchOrEval` does.** For any other object
   subject, `dispatch::dispatch_subset` passes the remaining arguments to the method as promises
-  (`...` expanded from its `DOTSXP`). Previously `[` evaluated every argument before dispatch, so
-  `[.data.table` received values instead of expressions and `DT[, sum(x), by = g]` failed with
+  (`...` expanded from its `DOTSXP`). Evaluating every argument before dispatch would hand
+  `[.data.table` values instead of expressions, so `DT[, sum(x), by = g]` would fail with
   "object 'x' not found". Builtins other than `[` still evaluate first; `[[` and `$` methods that
   need unevaluated arguments would take the same path.
-- **`Rf_GetOption1` reads the interpreter's `options()` when the interpreter is installed.** libr
-  kept a separate options environment, so C code saw no option R code had set, and data.table's
-  `alloccol` failed with "Has getOption('datatable.alloccol') somehow become unset?". The
-  `.Options` pairlist in base is the one source of truth; libr's own environment serves only
-  standalone use without the interpreter.
+- **libr's option reads (`Rf_GetOption1`, `Rf_GetOptionWidth`, `Rf_GetOptionDigits`) go to the
+  interpreter's `options()` when the interpreter is installed.** The `.Options` pairlist in base
+  is the one source of truth; libr's own options environment serves only standalone use without
+  the interpreter. With two stores, C code sees no option R code set, and data.table's `alloccol`
+  fails with "Has getOption('datatable.alloccol') somehow become unset?".
 - **Lowering first, R second.** `Lowering` turns `i`, `j` and `by` into the engine's IR; any part
   that returns `None` runs as R in a data mask that binds only the columns the expression
   mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
@@ -2325,8 +2325,9 @@ first lines R had already read, leaving R mid-command.
   `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
   so `ry::setkey` works after data.table masks the bare name. It holds the user-facing functions;
   `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
-  delegate to data.table for anything that is not a frame. S3 methods for generics outside the
-  package (`as.data.frame.frame`) are defined in base, because method lookup from the global
-  environment skips attached packages, as in GNU R. The checker's stubs are `types/ry.Rtypes`
+  delegate to data.table for anything that is not a frame. S3 methods for other packages' generics
+  are registered in the generic's methods table, as an installed package's `S3method()`
+  directives are; `as.data.table.frame` is registered from a data.table `onLoad` hook, because
+  data.table is not loaded at startup. The checker's stubs are `types/ry.Rtypes`
   and `types/ry.exports`, an always-active namespace.
 

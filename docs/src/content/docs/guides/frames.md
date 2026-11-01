@@ -42,9 +42,10 @@ and `by` or `keyby` groups. Joins take `on =`, `nomatch = NULL`, `mult =` and `r
 above is the column.
 
 Common aggregations (`sum`, `mean`, `min`, `max`, `median`, `sd`, `var`, `first`, `last`, `head`,
-`cor` and `.N`) and arithmetic, comparisons and `ifelse` on columns run inside the engine. Any
-other R function still works: ry evaluates it as R code, once per group, with the columns it
-mentions bound as vectors, so it is slower but correct.
+`cor` and `.N`) and arithmetic, comparisons and `ifelse` on columns run inside the engine. Most
+other R code still works: ry evaluates it as R code, once per group, with the columns it mentions
+bound as vectors, so it is slower but correct. A `by` that computes groups, `:=` with `by`, and a
+join whose `j` needs R code are not supported yet on that path and stop with an error saying so.
 
 ## Updating columns
 
@@ -61,12 +62,13 @@ names(before)   # "team" "amount"
 When nothing else refers to the frame, the update happens in place and costs only the new column.
 `setkey(x, col)` sorts and keys a frame, and `key(x)` reads the key. Attaching data.table masks
 ry's `setkey`, `setkeyv`, `key` and `copy`; data.table's versions do not accept a frame, so call
-`ry::setkey(x, col)` in that case, or attach data.table first.
+`ry::setkey(x, col)` then.
 
 ## Speed
 
 `tools/bench/table/` runs db-benchmark's group-by and join questions, `:=` update loops and a
 keyed rolling join, written as the same R script for data.table under GNU R and for frames under
-`ry run --runtime ry`. On 1 million rows with 4 threads, every question is faster on frames and
-both produce the same checksums: the group-by questions by 1.6 to 25 times, the joins by 1.7 to 6
-times, and the `:=` loops by 1.1 to 2.2 times. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
+`ry run --runtime ry`. On 1 million rows with 4 threads, both produce the same checksums, and frames
+are faster on every group-by question (2 to 39 times), every join (2 to 4 times), and the full and
+added-column `:=` loops (5 to 6 times). A filtered `:=` loop and the keyed rolling join run about
+as fast as data.table. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.

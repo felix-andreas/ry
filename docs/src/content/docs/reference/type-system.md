@@ -2037,8 +2037,10 @@ A column is always a vector, so a scalar column type broadens: `frame{id: intege
 `frame{id: integer[]}`. A bare `frame` is a frame whose columns are unknown, and every column
 reference on it is a silent `Unknown`. A frame is no `data.frame`: its run-time class is `"frame"`
 alone, so passing one to a `data.frame` parameter is a type error, and `as.data.frame()` and
-`as.frame()` convert between the two. A frame does satisfy a `list` parameter, because `as.list()`
-turns it into the list of its columns, which is how `lapply()` and `Map()` iterate it. The name is
+`as.frame()` convert between the two. A frame satisfies a `list` parameter, because `lapply()`, `Map()`
+and `Filter()` call `as.list()`, which turns it into the list of its columns. This is unsound for
+a function that indexes its `list` argument with `[`, which on a frame selects rows; overloads
+that take a frame directly would close the gap. The name is
 `frame`, not `table`, so that base `table()` keeps working.
 
 `frame()` builds one without any import. Each named argument becomes a column of its vector type, and

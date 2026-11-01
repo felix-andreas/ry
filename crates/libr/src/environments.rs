@@ -412,26 +412,25 @@ pub unsafe extern "C" fn R_IsPackageEnv(env: Sexp) -> Rboolean {
     })
 }
 
-/// `Rf_GetOption1`: the value of an option, or `NULL`. Under the interpreter, options are the
-/// ones R code sets with `options()`, so packages that configure their C code from R (as
-/// data.table does with `datatable.alloccol`) see the same values; without it, they live in an
-/// environment the runtime owns.
+/// `Rf_GetOption1`: the value of an option, or `NULL`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_GetOption1(tag: Sexp) -> Sexp {
-    enter(|| {
-        if interp::is_installed() && tag.kind() == SexpType::Symbol {
-            if let Ok(name) = std::str::from_utf8(tag.car().bytes()) {
-                return Ok(interp::envir::get_option(name));
-            }
-        }
-        let runtime = runtime();
-        let value = frame_value(runtime.options, tag);
-        if value == runtime.heap.known().unbound {
-            Ok(runtime.nil())
-        } else {
-            Ok(value)
-        }
-    })
+    enter(|| option_value(tag))
+}
+
+/// Under the interpreter, options are the ones R code sets with `options()` (the `.Options`
+/// pairlist in base), so packages that configure their C code from R, as data.table does with
+/// `datatable.alloccol`, see the same values. Without it, they live in an environment the
+/// runtime owns.
+unsafe fn option_value(tag: Sexp) -> ApiResult<Sexp> {
+    if interp::is_installed() {
+        let name = std::str::from_utf8(tag.car().bytes())
+            .map_err(|_| error("an option name must be valid UTF-8"))?;
+        return Ok(interp::envir::get_option(name));
+    }
+    let runtime = runtime();
+    let value = frame_value(runtime.options, tag);
+    Ok(if value == runtime.heap.known().unbound { runtime.nil() } else { value })
 }
 
 /// `R_BindingType_t`, with GNU R's numbering.
@@ -970,8 +969,8 @@ pub unsafe extern "C" fn Rf_GetOptionDigits() -> c_int {
 
 unsafe fn option_integer(name: &[u8], default: c_int) -> ApiResult<c_int> {
     let symbol = runtime().heap.install(name)?;
-    let value = frame_value(runtime().options, symbol);
-    if value == runtime().heap.known().unbound || value.kind() == SexpType::Nil {
+    let value = option_value(symbol)?;
+    if value.kind() == SexpType::Nil {
         return Ok(default);
     }
     let value = crate::vectors::as_integer(value)?;

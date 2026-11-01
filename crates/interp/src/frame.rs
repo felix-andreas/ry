@@ -8,9 +8,10 @@
 //! query IR, so the whole query runs as one Polars plan. Only an argument the IR cannot express
 //! runs as R code, evaluated in a data mask that binds the columns it mentions, once per group.
 //!
-//! Frames follow R's copy-on-modify rule rather than data.table's reference semantics. `:=` and
-//! `setkey` update the frame in place when nothing else refers to it, and otherwise update a
-//! fork and rebind the variable the call named, so an alias taken earlier keeps the old columns.
+//! Frames follow R's copy-on-modify rule rather than data.table's reference semantics. `:=`
+//! updates the frame in place when nothing else refers to it, and otherwise updates a fork and
+//! rebinds the variable the call named, so an alias taken earlier keeps the old columns. `setkey`
+//! always forks and rebinds.
 
 use crate::{
     builtins::{Arg, BuiltinDef, Call, builtin, special},
@@ -131,14 +132,23 @@ copy <- function(x) {
 }
 "#;
 
-/// S3 methods for generics outside `package:ry`. Method lookup from the global environment skips
-/// attached packages and ends in base, as in GNU R, so these live in the base environment.
+/// S3 methods for generics of other packages, registered in their generic's methods table as an
+/// installed package's `S3method()` directives are. data.table is not loaded at startup, so its
+/// method is registered when it loads, the way vctrs' `s3_register` does it.
 const METHODS: &str = r#"
-as.data.frame.frame <- function(x, ...) {
-  columns <- .frame_to_list(x)
-  structure(columns, class = "data.frame", row.names = .set_row_names(dim(x)[[1L]]))
-}
-as.data.table.frame <- function(x, ...) data.table::setDT(as.data.frame.frame(x))[]
+local({
+  ns <- asNamespace("ry")
+  to_data_frame <- function(x, ...) {
+    structure(.frame_to_list(x), class = "data.frame", row.names = .set_row_names(dim(x)[[1L]]))
+  }
+  environment(to_data_frame) <- ns
+  registerS3method("as.data.frame", "frame", to_data_frame, envir = ns)
+  to_data_table <- function(x, ...) data.table::setDT(to_data_frame(x))[]
+  environment(to_data_table) <- list2env(list(to_data_frame = to_data_frame), parent = ns)
+  setHook(packageEvent("data.table", "onLoad"), function(...) {
+    registerS3method("as.data.table", "frame", to_data_table, envir = asNamespace("data.table"))
+  })
+})
 "#;
 
 /// Attaches `package:ry` at position 2 of the search path.
@@ -146,7 +156,7 @@ pub unsafe fn attach_package() -> R<()> {
     let namespace = crate::session::eval_text(NAMESPACE, values::global_env())?;
     crate::session::eval_text(PACKAGE, namespace)?;
     crate::session::eval_text(ATTACH, values::global_env())?;
-    crate::session::eval_text(METHODS, values::base_env())?;
+    crate::session::eval_text(METHODS, values::global_env())?;
     Ok(())
 }
 
@@ -937,6 +947,8 @@ struct Piece {
 
 enum Source {
     Expression(Sexp, Sexp),
+    /// An unforced promise from `...`, forced (once) when its value is needed.
+    Promise(Sexp),
     Value(Sexp),
     Missing,
 }
@@ -945,6 +957,7 @@ impl Piece {
     unsafe fn value(&self) -> R<Sexp> {
         match self.source {
             Source::Expression(expression, env) => eval::eval(expression, env),
+            Source::Promise(promise) => eval::force_promise(promise),
             Source::Value(value) => Ok(value),
             Source::Missing => Ok(missing_arg()),
         }
@@ -953,6 +966,7 @@ impl Piece {
     fn expression(&self) -> Option<Sexp> {
         match self.source {
             Source::Expression(expression, _) => Some(expression),
+            Source::Promise(promise) => Some(unsafe { promise.cdr() }),
             _ => None,
         }
     }
@@ -1005,12 +1019,11 @@ unsafe fn promise_source(mut item: Sexp) -> Source {
         if item.car() != values::unbound() {
             return Source::Value(item.car());
         }
-        let code = item.cdr();
-        if code.kind() == SexpType::Promise {
-            item = code;
+        if item.cdr().kind() == SexpType::Promise {
+            item = item.cdr();
             continue;
         }
-        return Source::Expression(code, item.tag());
+        return Source::Promise(item);
     }
 }
 
@@ -1146,8 +1159,11 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
             .as_ref()
             .and_then(Piece::expression)
             .is_some_and(|expression| is_call_to(expression, ":="));
+    // The engine updates through a logical filter or every row; any other row selection under
+    // `:=` (positions, an order, a join) takes the R path.
+    let lowered_update = !assigns || matches!(rows, Some(Rows::All | Rows::Filter(_)));
     let result = match (rows, select, by) {
-        (Some(rows), Some(select), Some(by)) => {
+        (Some(rows), Some(select), Some(by)) if lowered_update => {
             let query = Query {
                 rows,
                 select,
@@ -1155,14 +1171,14 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
                 keyed: parts.keyed,
             };
             if assigns {
-                assign(subject, call, env, |table| {
+                assign(subject, table, call, env, |table| {
                     query::execute(table, query).map(|_| ()).map_err(|failure| table_error(call, failure))
                 })?
             } else {
                 finish(table, query, call)?
             }
         }
-        (rows, select, by) => fallback(subject, &parts, rows, select, by, &schema, call, env)?,
+        (rows, select, by) => fallback(subject, table, &parts, rows, select, by, &lowering)?,
     };
     interp().visible = !assigns;
     Ok(result)
@@ -1177,25 +1193,35 @@ unsafe fn finish(table: &mut Table, query: Query, call: Sexp) -> R<Sexp> {
     }
 }
 
-/// Applies an update to `subject` under copy-on-modify: in place when nothing else refers to the
-/// frame, and otherwise to a fork, which then replaces the variable the call's subject names.
+/// Applies an update to `subject`, whose table is `table`, under copy-on-modify: in place when
+/// the variable the call names is the frame's only reference, and otherwise to a fork, which then
+/// replaces that variable.
+///
+/// The subject must be a variable. A frame reached through an expression such as `lst$a` has no
+/// binding to rebind, and its single reference may be a slot in a list that is itself shared, so
+/// updating it in place would change every copy of the list.
 unsafe fn assign(
     subject: Sexp,
+    table: &mut Table,
     call: Sexp,
     env: Sexp,
     update: impl FnOnce(&mut Table) -> R<()>,
 ) -> R<Sexp> {
+    let name = call.cdr().car();
+    if name.kind() != SexpType::Symbol {
+        return Err(error_in(
+            call,
+            "`:=` updates a frame stored in a variable; assign it to one first, as in `y <- lst$a; y[, z := 1]`",
+        ));
+    }
     if subject.refcount() <= 1 {
-        update(table_of(subject)?)?;
+        update(table)?;
         return Ok(subject);
     }
-    let mut table = table_of(subject)?.fork();
-    update(&mut table)?;
-    let updated = wrap(table)?;
-    let name = call.cdr().car();
-    if name.kind() == SexpType::Symbol {
-        rebind(name, updated, env)?;
-    }
+    let mut fork = table.fork();
+    update(&mut fork)?;
+    let updated = wrap(fork)?;
+    rebind(name, updated, env)?;
     Ok(updated)
 }
 
@@ -1235,6 +1261,13 @@ impl Lowering<'_> {
         }
         if !self.mentions_columns(expression) {
             let value = eval::eval(expression, self.env)?;
+            return self.rows_from_value(value, parts).map(Some);
+        }
+        if !self.mentions(expression, false) {
+            // Only `.N` and its kin, as in `x[.N]` or `x[.N - 1]`: a row number, not a filter.
+            let mask = values::new_env(self.env)?;
+            eval::define(install(".N")?, scalar_integer(r_count(self.height)?)?, mask)?;
+            let value = eval::eval(expression, mask)?;
             return self.rows_from_value(value, parts).map(Some);
         }
         Ok(self.expr(expression)?.map(Rows::Filter))
@@ -1694,22 +1727,28 @@ impl Lowering<'_> {
     /// Whether `expression` reads a column or one of data.table's special symbols anywhere,
     /// which decides whether it runs inside the query or once in the caller's scope.
     unsafe fn mentions_columns(&self, expression: Sexp) -> bool {
+        self.mentions(expression, true)
+    }
+
+    /// Whether `expression` names a column, or, with `specials`, one of data.table's special
+    /// symbols such as `.N`.
+    unsafe fn mentions(&self, expression: Sexp, specials: bool) -> bool {
         match expression.kind() {
             SexpType::Symbol => {
                 let name = symbol_name(expression);
-                self.is_column(&name) || is_special_symbol(&name)
+                self.is_column(&name) || (specials && is_special_symbol(&name))
             }
             SexpType::Language => {
                 let mut cell = expression.cdr();
                 let head = expression.car();
-                if head.kind() == SexpType::Language && self.mentions_columns(head) {
+                if head.kind() == SexpType::Language && self.mentions(head, specials) {
                     return true;
                 }
                 if head.kind() == SexpType::Symbol && matches!(symbol_name(head).as_ref(), "$" | "@") {
-                    return self.mentions_columns(expression.cdr().car());
+                    return self.mentions(expression.cdr().car(), specials);
                 }
                 while cell.kind() == SexpType::Pairlist {
-                    if self.mentions_columns(cell.car()) {
+                    if self.mentions(cell.car(), specials) {
                         return true;
                     }
                     cell = cell.cdr();
@@ -1836,15 +1875,14 @@ unsafe fn roll(value: Sexp, call: Sexp) -> R<Roll> {
 #[allow(clippy::too_many_arguments)]
 unsafe fn fallback(
     subject: Sexp,
+    table: &mut Table,
     parts: &Parts,
     rows: Option<Rows>,
     select: Option<Select>,
     by: Option<Vec<(PlSmallStr, Expr)>>,
-    schema: &table::Schema,
-    call: Sexp,
-    env: Sexp,
+    lowering: &Lowering<'_>,
 ) -> R<Sexp> {
-    let table = table_of(subject)?;
+    let (call, env) = (lowering.call, lowering.env);
     let by = match by {
         Some(by) if by.iter().all(|(_, expr)| matches!(expr, Expr::Column(_))) => by,
         _ => return Err(error_in(call, "a computed group in `by` that ry cannot run as a query is not supported yet")),
@@ -1852,6 +1890,11 @@ unsafe fn fallback(
     let positions: Option<Vec<u32>> = match rows {
         Some(Rows::All) => None,
         Some(Rows::Positions(positions)) => Some(positions),
+        // R code in `j` would need `i`'s columns in its data mask too, and rows of `i` without
+        // a match have no position in `x`.
+        Some(Rows::Join(_)) => {
+            return Err(error_in(call, "a join whose `j` ry cannot run as a query is not supported yet"));
+        }
         Some(rows) => {
             // The IR selects the rows, and the positions follow from a row number column.
             Some(selected_positions(table, rows, call)?)
@@ -1898,7 +1941,7 @@ unsafe fn fallback(
             };
             columns.push((name, value));
         }
-        let result = assign(subject, call, env, |table| {
+        let result = assign(subject, table, call, env, |table| {
             for (name, column) in columns {
                 match column {
                     Some(column) => table.set_column(column),
@@ -1921,12 +1964,7 @@ unsafe fn fallback(
         return finish(&mut rows_table, Query { select, ..Query::default() }, call);
     }
     let group_names: Vec<PlSmallStr> = by.iter().map(|(name, _)| name.clone()).collect();
-    let sd_columns: Vec<PlSmallStr> = schema
-        .columns
-        .iter()
-        .map(|(name, _)| name.clone())
-        .filter(|name| !group_names.contains(name))
-        .collect();
+    let sd_columns = lowering.sd_columns(parts, &by)?;
     if group_names.is_empty() {
         let mask = data_mask(&rows_table, None, expression, env, &sd_columns, call)?;
         let value = eval::eval(expression, mask)?;

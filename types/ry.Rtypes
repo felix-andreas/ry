@@ -8,5 +8,5 @@ is.frame : fn(x: Any) -> logical
 frame_type : fn(x: frame) -> character
 frame_read_csv : fn(path: character, [strings_as_factors]: logical) -> frame
 frame_read_parquet : fn(path: character) -> frame
-frame_write_csv : fn(x: frame, path: character) -> NULL
-frame_write_parquet : fn(x: frame, path: character) -> NULL
+frame_write_csv : fn(x: frame, path: character) -> frame
+frame_write_parquet : fn(x: frame, path: character) -> frame

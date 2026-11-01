@@ -1781,8 +1781,19 @@ The end-to-end guard rests on the corpus suites.
   they run as R per group or fail.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop is only 1.2x data.table's subset assignment** (`tools/bench/table/ry.R`,
-  "update subset").
+- **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
+  "update subset", 1e6 rows: about 0.11 s for both). From R it takes 0.10 to 0.14 s against the
+  engine's 0.085 s from Rust, so the interpreter's per-query cost (schema clone, lowering, fork
+  checks) shows here and is worth profiling.
+- **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
+  which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
+  take `frame` directly would let the compat go.
+- **R code evaluated while lowering can run twice.** A sub-expression that names no column is
+  evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
+  runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
+  leaves the IR built against the old schema.
+- **`dispatch_subset` and `try_builtin_dispatch` both look up `[`'s S3 method** when none exists,
+  one redundant lookup per call on a classed subject without a `[` method.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
 - **No warning channel.** data.table warns when a value is truncated into an integer column and when
