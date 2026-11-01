@@ -1006,10 +1006,10 @@ label: Unknown
 63..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- an_argument_named_dots_with_value_dots_forwards_the_dots
-skip_na <- function(x, FUN = NULL, ...) FUN(na.omit(x), ... = ...)
+skip_na <- function(x, FUN, ...) FUN(na.omit(x), ... = ...)
 total <- function(v) skip_na(v, FUN = function(x) cumsum(x))
 #++++
-skip_na: <T, U> fn(x: T, [FUN]: fn(Any, ...: Any) -> U, ...: Any) -> U
+skip_na: <T, U> fn(x: T, FUN: fn(Any, ...: Any) -> U, ...: Any) -> U
 total: <T, U> fn(v: T) -> U
 
 #---- a_callback_called_with_a_named_argument_still_needs_that_parameter
