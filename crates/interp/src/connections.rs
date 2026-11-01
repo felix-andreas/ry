@@ -310,7 +310,12 @@ impl Table {
         }
         // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
         // `sink(file(path))` is not closed as unused while output still goes to it.
-        for slot in self.sinks.iter().map(|sink| sink.slot).chain([self.message_sink]) {
+        for slot in self
+            .sinks
+            .iter()
+            .map(|sink| sink.slot)
+            .chain([self.message_sink])
+        {
             let id = self
                 .entries
                 .get(slot)

@@ -33,10 +33,14 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("mc_exit", |call| unsafe { exit(call) }),
     ("mc_read_child", |call| unsafe { read_child(call) }),
     ("mc_read_children", |call| unsafe { read_children(call) }),
-    ("mc_select_children", |call| unsafe { select_children(call) }),
+    ("mc_select_children", |call| unsafe {
+        select_children(call)
+    }),
     ("mc_rm_child", |call| unsafe { remove_child(call) }),
     ("mc_kill", |call| unsafe { kill(call) }),
-    ("mc_send_child_stdin", |call| unsafe { send_child_stdin(call) }),
+    ("mc_send_child_stdin", |call| unsafe {
+        send_child_stdin(call)
+    }),
     ("mc_children", |_| unsafe {
         reap();
         let pids: Vec<i32> = forks().children.iter().map(|child| child.pid).collect();
@@ -213,7 +217,9 @@ unsafe fn send_master(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let bytes = values::raws(what);
     let length = bytes.len() as isize;
-    if write_all(master, &length.to_ne_bytes()).and_then(|()| write_all(master, bytes)).is_err()
+    if write_all(master, &length.to_ne_bytes())
+        .and_then(|()| write_all(master, bytes))
+        .is_err()
     {
         close_fd(master);
         state.master = None;
@@ -276,7 +282,11 @@ unsafe fn select_children(call: &NativeCall<'_>) -> R<Sexp> {
     let timeout = values::as_real_scalar(call.arg(0));
     let pids = coerce_vector(call.arg(1), SexpType::Integer)?;
     let pids = values::ints(pids).to_vec();
-    let only = if pids.is_empty() { None } else { Some(&pids[..]) };
+    let only = if pids.is_empty() {
+        None
+    } else {
+        Some(&pids[..])
+    };
     match wait_readable(only, timeout, call)? {
         Readiness::NoChildren => Ok(nil()),
         Readiness::TimedOut => scalar_bool(true),
@@ -314,7 +324,10 @@ unsafe fn send_child_stdin(call: &NativeCall<'_>) -> R<Sexp> {
     if what.kind() != SexpType::Raw {
         return Err(call.error("what must be a raw vector"));
     }
-    let Some(child) = forks().children.iter().find(|child| child.pid == pid && child.input >= 0)
+    let Some(child) = forks()
+        .children
+        .iter()
+        .find(|child| child.pid == pid && child.input >= 0)
     else {
         return Err(call.error(format!("child {pid} does not exist")));
     };
@@ -385,7 +398,9 @@ unsafe fn affinity(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn cleanup(call: &NativeCall<'_>) -> R<Sexp> {
     let signal_argument = call.arg(0);
     let signal = match signal_argument.kind() {
-        SexpType::Logical => (values::as_logical_scalar(signal_argument) == 1).then_some(libc::SIGTERM),
+        SexpType::Logical => {
+            (values::as_logical_scalar(signal_argument) == 1).then_some(libc::SIGTERM)
+        }
         SexpType::Integer | SexpType::Real => {
             Some(values::as_integer_scalar(signal_argument)).filter(|&signal| signal != NA_INTEGER)
         }
@@ -394,7 +409,8 @@ unsafe fn cleanup(call: &NativeCall<'_>) -> R<Sexp> {
     let detach = values::as_logical_scalar(call.arg(1)) == 1;
     let state = forks();
     let mark = state.marks.last().copied();
-    let in_scope = |child: &Child| mark.is_none_or(|mark| child.mark.is_some_and(|own| own >= mark));
+    let in_scope =
+        |child: &Child| mark.is_none_or(|mark| child.mark.is_some_and(|own| own >= mark));
     if let Some(signal) = signal {
         for child in state.children.iter().filter(|child| in_scope(child)) {
             libc::kill(child.pid, signal);
@@ -447,7 +463,11 @@ unsafe fn wait_readable(only: Option<&[i32]>, timeout: f64, call: &NativeCall<'_
     } else {
         (timeout * 1000.0).ceil().min(f64::from(i32::MAX)) as c_int
     };
-    let ready = libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, milliseconds);
+    let ready = libc::poll(
+        polled.as_mut_ptr(),
+        polled.len() as libc::nfds_t,
+        milliseconds,
+    );
     if ready < 0 {
         let failure = std::io::Error::last_os_error();
         if failure.kind() == std::io::ErrorKind::Interrupted {
@@ -462,7 +482,12 @@ unsafe fn wait_readable(only: Option<&[i32]>, timeout: f64, call: &NativeCall<'_
     let pids = polled
         .iter()
         .filter(|entry| entry.revents != 0)
-        .filter_map(|entry| forks().children.iter().find(|child| child.output == entry.fd))
+        .filter_map(|entry| {
+            forks()
+                .children
+                .iter()
+                .find(|child| child.output == entry.fd)
+        })
         .map(|child| child.pid)
         .collect();
     Ok(Readiness::Ready(pids))

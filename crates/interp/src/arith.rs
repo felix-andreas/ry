@@ -667,33 +667,48 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `.bincode(x, breaks, right, include.lowest)`.
+/// GNU R's `bincode`: a binary search over sorted breaks, so a value on a break falls in the bin
+/// that `right` closes, and only the outer border honours `include.lowest`.
 unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
-    let points = values::reals(call.arg(0)).to_vec();
-    let breaks = values::reals(call.arg(1)).to_vec();
-    let right = values::as_logical_scalar(call.arg(2)) == 1;
-    let lowest = values::as_logical_scalar(call.arg(3)) == 1;
-    let count = breaks.len();
-    let mut output = Vec::with_capacity(points.len());
-    for value in points {
-        let mut code = NA_INTEGER;
-        if !value.is_nan() && count >= 2 {
-            for bin in 0..count - 1 {
-                let (lower, upper) = (breaks[bin], breaks[bin + 1]);
-                let inside = if right {
-                    (value > lower || (lowest && bin == 0 && value == lower)) && value <= upper
+    let points = coerce_vector(call.arg(0), SexpType::Real)?;
+    let breaks = coerce_vector(call.arg(1), SexpType::Real)?;
+    let right = values::as_logical_scalar(call.arg(2));
+    let lowest = values::as_logical_scalar(call.arg(3));
+    if right == NA_LOGICAL {
+        return Err(error("invalid 'right' argument"));
+    }
+    if lowest == NA_LOGICAL {
+        return Err(error("invalid 'include.lowest' argument"));
+    }
+    let (left, include_border) = (right != 1, lowest == 1);
+    let breaks = values::reals(breaks);
+    if breaks.windows(2).any(|pair| pair[0] > pair[1]) {
+        return Err(error("'breaks' is not sorted"));
+    }
+    let last = breaks.len().saturating_sub(1);
+    let codes: Vec<i32> = values::reals(points)
+        .iter()
+        .map(|&value| {
+            if value.is_nan() || breaks.len() < 2 {
+                return NA_INTEGER;
+            }
+            let border = if left { breaks[last] } else { breaks[0] };
+            if value < breaks[0] || breaks[last] < value || (value == border && !include_border) {
+                return NA_INTEGER;
+            }
+            let (mut low, mut high) = (0, last);
+            while high - low >= 2 {
+                let middle = (high + low) / 2;
+                if value > breaks[middle] || (left && value == breaks[middle]) {
+                    low = middle;
                 } else {
-                    value >= lower
-                        && (value < upper || (lowest && bin == count - 2 && value == upper))
-                };
-                if inside {
-                    code = bin as i32 + 1;
-                    break;
+                    high = middle;
                 }
             }
-        }
-        output.push(code);
-    }
-    values::integer_vector(&output)
+            low as i32 + 1
+        })
+        .collect();
+    values::integer_vector(&codes)
 }
 
 // Arithmetic.
