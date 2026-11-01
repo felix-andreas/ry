@@ -1568,6 +1568,7 @@ pub static PROFILE_TICK: AtomicBool = AtomicBool::new(false);
 struct Profiler {
     output: BufWriter<File>,
     stop: Arc<AtomicBool>,
+    timer: std::thread::JoinHandle<()>,
 }
 
 thread_local! {
@@ -1606,7 +1607,7 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
     writeln!(output, "sample.interval={micros}").map_err(profile_write_error)?;
     let stop = Arc::new(AtomicBool::new(false));
     let timer_stop = stop.clone();
-    std::thread::Builder::new()
+    let timer = std::thread::Builder::new()
         .name("rprof".into())
         .spawn(move || {
             while !timer_stop.load(Ordering::Relaxed) {
@@ -1619,15 +1620,26 @@ unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
                 "Rprof: cannot start the profiling timer: {failure}"
             ))
         })?;
-    PROFILER.with_borrow_mut(|profiler| *profiler = Some(Profiler { output, stop }));
+    PROFILER.with_borrow_mut(|profiler| {
+        *profiler = Some(Profiler {
+            output,
+            stop,
+            timer,
+        })
+    });
     Ok(nil())
 }
 
-unsafe fn stop_profiler() -> R<()> {
+/// Stops a running profile and flushes its file. The session calls it on exit too, because the
+/// profiler lives in a thread local, whose destructor does not run for the main thread.
+pub unsafe fn stop_profiler() -> R<()> {
     let Some(mut profiler) = PROFILER.with_borrow_mut(Option::take) else {
         return Ok(());
     };
     profiler.stop.store(true, Ordering::Relaxed);
+    if profiler.timer.join().is_err() {
+        return Err(error("Rprof: the profiling timer panicked"));
+    }
     PROFILE_TICK.store(false, Ordering::Relaxed);
     profiler.output.flush().map_err(profile_write_error)
 }
@@ -1647,13 +1659,21 @@ pub unsafe fn record_profile_sample(innermost: Option<&str>) -> R<()> {
         return Ok(());
     }
     line.push('\n');
-    PROFILER.with_borrow_mut(|profiler| match profiler {
-        Some(profiler) => profiler
-            .output
-            .write_all(line.as_bytes())
-            .map_err(profile_write_error),
+    let written = PROFILER.with_borrow_mut(|profiler| match profiler {
+        Some(profiler) => profiler.output.write_all(line.as_bytes()),
         None => Ok(()),
-    })
+    });
+    // A failed sample must not fail the user's call, so profiling stops with a warning instead.
+    if let Err(failure) = written {
+        match stop_profiler() {
+            // A failed flush fails for the reason the warning already reports.
+            Ok(()) | Err(_) => {}
+        }
+        warning(format!(
+            "Rprof: cannot write the profile file, so profiling stopped: {failure}"
+        ))?;
+    }
+    Ok(())
 }
 
 /// The name a call's function gets in a profile, as in GNU R: the symbol it was called by,

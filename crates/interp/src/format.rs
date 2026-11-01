@@ -702,7 +702,6 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     let exponent: i32 = text
         .split_once('e')
         .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
-
     if exponent < -4 || exponent >= significant as i32 {
         let text = scientific_text(value, significant.saturating_sub(1));
         if keep_zeros {

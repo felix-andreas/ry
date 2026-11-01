@@ -1378,7 +1378,6 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         // reads them. One without stays without them: GNU R normalizes its wall clock as plain
         // calendar arithmetic and keeps its `isdst` and `tzone`.
         let tz = posixlt_zone(list)?;
-
         if length(list) >= 11 {
             let seconds = posixlt_instants(list, &tz)?;
             posixlt_from_seconds(&seconds, &tz)?

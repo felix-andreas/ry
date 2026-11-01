@@ -940,16 +940,17 @@ impl Heap {
         Ok(())
     }
 
-    /// Binds `symbol` in the frame of `env`, a function frame that does not bind it yet, and
-    /// returns the new cell. A closure call binds each formal this way: formals are distinct, and
-    /// the frame is new, so neither the probe nor the lock checks of [`Heap::define`] can matter.
+    /// Binds `symbol` in the frame of `env`, a new function frame, and returns the new cell. A
+    /// closure call binds each formal this way: the frame is new, so the lock checks of
+    /// [`Heap::define`] cannot matter, and its probe would only matter for duplicate formals,
+    /// where the frame keeps the first binding as GNU R does.
     pub unsafe fn define_fresh(
         &mut self,
         env: Sexp,
         symbol: Sexp,
         value: Sexp,
     ) -> HeapResult<Sexp> {
-        debug_assert!(env.has_gp(gp::FUNCTION_FRAME) && self.frame_cell(env, symbol).is_none());
+        debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
         self.write_barrier(env, cell);
@@ -1005,11 +1006,14 @@ impl Heap {
     /// base environment. GNU R keeps the same cache, because every free variable of top-level
     /// code and of functions defined there resolves along the search path, which in a session
     /// with many attached packages means many large frames to probe.
-    pub unsafe fn global_cell(&self, symbol: Sexp) -> Option<Sexp> {
+    ///
+    /// The flag says whether the cell may be cached under the symbol's stamp: it may not when
+    /// the walk passed a function frame, whose bindings come and go without moving the stamp.
+    pub unsafe fn global_cell(&self, symbol: Sexp) -> Option<(Sexp, bool)> {
         let payload = symbol.symbol_payload();
         let stamp = self.lookup_stamp(symbol);
         if payload.global_stamp.get() == stamp {
-            return payload.global_cell.get();
+            return payload.global_cell.get().map(|cell| (cell, true));
         }
         let mut env = self.known.global_env;
         let mut cacheable = true;
@@ -1020,7 +1024,7 @@ impl Heap {
                     payload.global_cell.set(Some(cell));
                     payload.global_stamp.set(stamp);
                 }
-                return Some(cell);
+                return Some((cell, cacheable));
             }
             env = env.enclosure();
         }
@@ -1102,7 +1106,11 @@ impl Heap {
     /// `R_PreserveObject`. Preserving twice needs two releases.
     pub fn preserve(&mut self, object: Sexp) {
         *self.roots.precious.entry(object).or_insert(0) += 1;
-        self.new_roots.push(object);
+        // An old object keeps its mark, so a minor collection would skip it anyway. The caller
+        // is preserving the object, so it is live.
+        if !unsafe { object.is_marked() } {
+            self.new_roots.push(object);
+        }
     }
 
     /// `R_ReleaseObject`. Releasing an object that is not preserved does nothing, as in GNU R.

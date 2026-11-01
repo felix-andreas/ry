@@ -138,7 +138,7 @@ pub unsafe fn find_cell(symbol: Sexp, mut env: Sexp) -> Option<Sexp> {
     let known = heap.known();
     while env != known.empty_env {
         if env == known.global_env {
-            return heap.global_cell(symbol);
+            return heap.global_cell(symbol).map(|(cell, _)| cell);
         }
         if let Some(cell) = heap.frame_cell(env, symbol) {
             return Some(cell);
@@ -204,7 +204,7 @@ pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp
         let cell = if env == known.global_env {
             // The first binding on the search path usually is the function; only when it is not
             // does the walk go on frame by frame, to skip it as GNU R does.
-            if let Some(cell) = heap.global_cell(symbol)
+            if let Some((cell, _)) = heap.global_cell(symbol)
                 && !cell.has_gp(gp::ACTIVE_BINDING)
             {
                 let mut value = cell.cdr();

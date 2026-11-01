@@ -3467,20 +3467,27 @@ explicit allocators".
 - **Goal.** Per-test time on the three benchmark code bases, without the JIT, at or below GNU R's.
   The cost was spread over the interpreter core (`step`, frame lookup, argument matching, an
   allocation per binding and promise), so the fixes are many small cuts rather than one redesign.
-- **A closure call allocates the environment and one cell per formal, nothing else on the Rust
-  heap.** Arguments and matched formals live in inline `SmallVec`s (`eval::Args`, `eval::Matched`),
-  callers fill a vector they own (`promise_args_into`, `evaluate_args_into`), and the frame lives
-  inside the environment object. A formal whose default is atomic or `NULL` binds that value
-  directly with `BINDING_MISSING` set, because a promise of a constant costs an allocation and a
-  force for the same value; `missing()` reads the bit, not the binding's type.
+- **A closure call's heap objects are the environment, one cell per formal, and the argument
+  promises with their pairlist; the bookkeeping stays off the Rust heap.** Arguments and matched
+  formals live in inline `SmallVec`s (`eval::Args` holds 10, `eval::Matched` 8, so a call with
+  more spills to one Rust allocation), callers fill a vector they own (`promise_args_into`,
+  `evaluate_args_into`), and the frame lives inside the environment object. A formal whose default
+  is atomic or `NULL` binds that value directly with `BINDING_MISSING` set, because a promise of a
+  constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
+  binding's type. A typed closure turns such a binding back into a promise on entry, because an
+  inline annotation checks a default only when the body uses it.
+- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_fresh`
+  skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
+  cell, as GNU R's frame list does.
 - **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
   `identical` has nine formals, and building a map per call cost more than scanning.
 - **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
   compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
   a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
-  it as a lazy-load promise, so the guard compares against the forced value); scalar `x[i]` and
-  `x[[i]]` on a plain vector skip general subscript resolution; and a function expression compiles
-  its body once per site, shared by every closure the site creates.
+  it as a lazy-load promise, so the guard compares against the forced value); and a function
+  expression compiles its body once per site, shared by every closure the site creates.
+- **Scalar `x[i]` and `x[[i]]` on a plain vector skip general subscript resolution**, in the
+  subset builtins (`subset.rs`) rather than the compiler, so both evaluators take it.
 - **A compiled read of a promise-bound variable forces the promise it found** instead of
   restarting the lookup through `eval_symbol`; only active, missing and unbound cells take the slow
   path.

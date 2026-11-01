@@ -228,9 +228,6 @@ pub unsafe fn coerce_vector_quiet(
         && kind.is_vector()
     {
         values::copy_attributes(object, result)?;
-        if kind.is_atomic() && source == SexpType::List {
-            // Classes of a list do not carry over to an atomic vector.
-        }
     }
     Ok(result)
 }

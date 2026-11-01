@@ -709,7 +709,6 @@ unsafe fn unary_arithmetic(call: &Call<'_>, op: Op, operand: Sexp) -> R<Sexp> {
             if op == Op::Add {
                 return Ok(operand);
             }
-
             values::shallow_duplicate(operand)?
         }
         _ => return Err(call.error("invalid argument to unary operator")),

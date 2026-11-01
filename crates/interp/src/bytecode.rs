@@ -188,7 +188,8 @@ pub unsafe fn run_body(function: Sexp, body: Sexp, env: Sexp) -> R<Sexp> {
         return eval::eval(body, env);
     }
     state.calls.remove(&body);
-    // A body the compiler cannot handle still runs correctly on the AST evaluator.
+    // A body the compiler rejects (an error is its way of saying so, such as for a `break`
+    // outside a loop) still runs correctly on the AST evaluator.
     match compile(body, function) {
         Ok(Some(code)) => {
             crate::heap().set_cdr(function, code);
@@ -1604,17 +1605,6 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     Ok((value, local))
 }
 
-/// The binding cell inline cache `slot` of `code` holds for lookups from `enclosure`, if it is
-/// still valid.
-pub unsafe fn cached_binding(
-    code: Sexp,
-    symbol: Sexp,
-    enclosure: Sexp,
-    slot: usize,
-) -> Option<Sexp> {
-    cached_cell(symbol, enclosure, code.cdr(), code.tag(), slot)
-}
-
 /// Runs one instruction. `Some(value)` means the body returned.
 unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
     let env = machine.env;
@@ -1883,10 +1873,14 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             // its inline caches and the optimizing tier both check the enclosure they were
             // filled for.
             if body.kind() != SexpType::Bytecode && worth_compiling(body) {
-                // A body the compiler cannot handle stays source, which the AST evaluator runs.
-                if let Ok(Some(code)) = compile(body, closure) {
-                    crate::heap().set_element(constants, operand(2), code);
-                    crate::heap().set_cdr(closure, code);
+                // A body the compiler rejects (an error is its way of saying so, such as for a
+                // `break` outside a loop) stays source, which the AST evaluator runs.
+                match compile(body, closure) {
+                    Ok(Some(code)) => {
+                        crate::heap().set_element(constants, operand(2), code);
+                        crate::heap().set_cdr(closure, code);
+                    }
+                    Ok(None) | Err(_) => {}
                 }
             }
             set(operand(0), closure);
@@ -2162,10 +2156,10 @@ unsafe fn resolve(symbol: Sexp, mut env: Sexp, function: bool) -> R<Option<Sexp>
             return Ok(None);
         }
         let cell = if env == heap.known().global_env {
-            let Some(cell) = heap.global_cell(symbol) else {
-                return Ok(None);
-            };
-            Some(cell)
+            match heap.global_cell(symbol) {
+                Some((cell, true)) => Some(cell),
+                _ => return Ok(None),
+            }
         } else {
             heap.frame_cell(env, symbol)
         };

@@ -419,7 +419,11 @@ unsafe fn scalar_position(call: &Call<'_>) -> Option<(Sexp, usize)> {
         return None;
     }
     let (object, index) = (object.value, index.value);
-    if object.is_altrep()
+    let vector =
+        object.kind().is_atomic() || matches!(object.kind(), SexpType::List | SexpType::Expression);
+    if !vector
+        || !matches!(index.kind(), SexpType::Integer | SexpType::Real)
+        || object.is_altrep()
         || index.is_altrep()
         || values::has_attributes(index)
         || length(index) != 1

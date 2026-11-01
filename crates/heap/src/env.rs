@@ -145,21 +145,23 @@ impl Frame {
         listed
     }
 
-    /// Adds a cell whose symbol the frame does not bind yet.
+    /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
+    /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
+    /// first match in GNU R's frame list does.
     pub(crate) unsafe fn insert(&mut self, cell: Sexp) {
         let position = self.cells.len() as u32;
         self.cells.push(cell);
         match &mut self.index {
             Some(index) => {
-                index.insert(unsafe { cell.car() }, position);
+                index.entry(unsafe { cell.car() }).or_insert(position);
             }
             None if self.cells.len() > INDEX_THRESHOLD => {
-                let index = self
-                    .cells
-                    .iter()
-                    .enumerate()
-                    .map(|(position, cell)| (unsafe { cell.car() }, position as u32))
-                    .collect();
+                let mut index = FxHashMap::default();
+                for (position, cell) in self.cells.iter().enumerate() {
+                    index
+                        .entry(unsafe { cell.car() })
+                        .or_insert(position as u32);
+                }
                 self.index = Some(index);
             }
             None => {}
