@@ -330,8 +330,6 @@ protects construction but nothing after it.
 
 - The runtime checks that atomic items share one type but not that ry-value items do, so
   `[(x = 1), [1]]` builds at run time; only the checker rejects it.
-- `c(x, x)` in an unannotated callback types as `Unknown`, so `List.map(xs, \(x) c(x, x))` passes
-  the `item` constraint and fails only at run time.
 - `List` functions added to `standard_library.rs` need an Array overload in `types/ry.Rtypes`, and
   any that reuse their first argument's storage must not reuse an Array's.
 - `class(xs)` is R's implicit class (`numeric`), and serialization (`saveRDS`) drops the flag, so

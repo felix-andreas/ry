@@ -3456,3 +3456,22 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## A function literal in a call argument is typed in context
+
+- **Before.** Every argument inferred before the callee was consulted, so a literal's formals were
+  open variables while its body was inferred. `c(x, x)` over an open `x` types as `Unknown`, so
+  `List.map(xs, \(x) c(x, x))` passed the `item` constraint and failed only at run time.
+- **Now.** `infer_call_arguments_against` (`check.rs`) infers the other arguments first, probes each
+  candidate signature with them in a rolled-back snapshot, and hands the literal the expected
+  function type's parameter types through `parameter_hints`. The literal is still inferred exactly
+  once, because a probe snapshot does not reverse environment or recorded-type writes.
+- **All or nothing.** A literal takes hints only when every formal without a default gets one. A
+  partial hint broke `Reduce(function(a, b) a + b, xs)`: with `b` fixed and `a` open, `a + b` no
+  longer ties the two together and the fold's result stayed generic.
+- **Overloads.** A hint survives only where every candidate that accepts the other arguments agrees,
+  so the list and Array overloads of `List.map` each hint their own item type.
+- **Findings.** An operand error on a hinted formal's use becomes `ContextualParameter`, which names
+  the formal and says the call supplied its type, and is reported on the use rather than the whole
+  literal.
+- The spec is "Function literals in call arguments" in `reference/type-system.mdx`.

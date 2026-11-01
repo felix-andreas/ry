@@ -1215,6 +1215,45 @@ This is a deliberate approximation. A union with the open formal type would make
 the value accept anything, while the normalized type is what the code after such a test assumes. A
 `NULL` write is not a normalization and joins as an ordinary branch write.
 
+### Function literals in call arguments
+
+A function literal passed as a call argument takes its parameter types from the function type the
+callee expects at that position. The other arguments are checked first, so the callee's type
+parameters are already bound when the literal's body is inferred:
+
+```r
+xs <- [1, 2]
+pairs <- List.map(xs, \(x) c(x, x))
+# error: this function must return an Array item (...), but it returns `double[]`
+```
+
+`List.map` expects `fn(T) -> U` with `T` bound to `double` by `xs`, so `x` is `double` inside the
+body, `c(x, x)` is `double[]`, and the `item` constraint on `U` refuses it. Without the expected
+type, `x` would be an open variable and `c(x, x)` could not be typed. The rule has these limits:
+
+- It applies only to a literal written directly as the argument, with no `#:` or inline annotation
+  on any of its formals. An annotated formal keeps its annotation, which is then checked against the
+  expected type.
+- Every formal without a default must receive a type, or none does. In
+  `Reduce(function(a, b) a + b, xs)` the accumulator's type is still open when the literal is
+  checked, so both formals stay open and are inferred from the body, as for any unannotated
+  function. A formal with a default is always left to inference.
+- With an overloaded callee, a formal takes a type only when every candidate that accepts the other
+  arguments expects the same one. The overload is then chosen as usual, with the literal's inferred
+  type among the arguments.
+- A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no
+  context.
+
+When the body uses such a parameter in a way its type does not allow, the finding is reported on that
+use and names the parameter:
+
+```r
+words <- ["a", "b"]
+bad <- List.map(words, \(w) w * 2)
+# error: `w` is used as a numeric value (`integer` or `double`) here, but the call passes this
+# function `character` for it
+```
+
 ### Named and positional parameters
 
 Parameter names in a function type are part of the call interface. A named parameter may be passed
