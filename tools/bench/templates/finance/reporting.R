@@ -1,7 +1,9 @@
 #@ weight 1
 #@ param ROWS int 3 20
 # Workbook and PDF reports for a position book.
+#: fn([rows]: integer) -> data.frame
 position_book_@ID@ <- function(rows = @ROWS@L) {
+  #: data.frame
   data.frame(
     instrument = sprintf("BOND%03d", seq_len(rows)),
     notional = seq_len(rows) * 1e5,
@@ -9,6 +11,7 @@ position_book_@ID@ <- function(rows = @ROWS@L) {
   )
 }
 
+#: fn(book: data.frame, path: character) -> character
 write_workbook_@ID@ <- function(book, path) {
   workbook <- openxlsx::createWorkbook()
   openxlsx::addWorksheet(workbook, "positions")
@@ -18,14 +21,17 @@ write_workbook_@ID@ <- function(book, path) {
   invisible(path)
 }
 
+#: fn(book: data.frame, path: character) -> character
 write_pdf_@ID@ <- function(book, path) {
   grDevices::pdf(path)
   on.exit(grDevices::dev.off())
   graphics::plot.new()
+  #: NULL
   graphics::text(0.5, 0.5, paste("Positions:", nrow(book)))
   invisible(path)
 }
 
+#: fn(path: character) -> character[]
 pdf_text_@ID@ <- function(path) {
   pdftools::pdf_text(path)
 }

@@ -166,6 +166,12 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
+- **`lapply`, `vapply` or `Filter` over a `data.frame`** (rprojroot, nlme, rmarkdown). The opaque
+  `data.frame` fits no `list` parameter, so `vapply(df, length, numeric(1))` reports "expected
+  `list[T] | T[]`, found `data.frame`". A trailing `data.frame` overload fixes the call but makes an
+  untyped argument narrow two ways, which turns `lapply(items, f)` on a `NULL`-defaulted parameter
+  and `vapply(xs, ...)` into `Unknown` (`items_of` in `realworld.R.test`). The fix is to give
+  `data.frame` its named-list representation rather than more overloads.
 - **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
   on as a placeholder, but the same signature declared reports the call, so the round-trip test
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
@@ -384,7 +390,6 @@ protects construction but nothing after it.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
 - The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
   would let compiled loops run strict arithmetic without the generic call.
-- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 - An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
   as well as the Array error, because the check runs after R's operator. Muffle the warning when the
@@ -398,9 +403,82 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 - **Calls to functions bound inside `local()`** are effects today, even when the local function is pure. Accept them when the local binding is a function literal whose body has no effect.
 - **`@pure` on a non-binding** (`#: @pure` above `cat(1)`) is ignored silently; warn instead.
 - **Evaluate pure constants once and cache them** with the bytecode, as Roc evaluates top-level constants at compile time.
-- **Bare-name stub purity is one flat set** (`StubLibrary::pure`): `callee_purity` consults it for any bare call whether or not the declaring package is attached, and a later stub that redeclares a name without `@pure` clears it for every package. Resolve a bare callee through the attached namespaces first.
-- **A replacement inside `local()` of an outer name** (`local({ cfg$a <- 2; cfg })`) is reported as changing `cfg`. That holds when `cfg` is an environment, but for an ordinary value R makes a local copy; with the outer value's type known, accept it.
-- **`.onLoad` writes** (`z <<- 5`) are invisible to the lazy-constant rule, so a lazy constant mentioning `z` that is forced after `.onLoad` sees the new value where an eager one saw the old. Count `<<-` targets of `.onLoad` as writers.
+
+## Open: strict-mode friction from typing finbench
+
+Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
+
+- **The loader never creates `PackageMetadata`** (`crates/loader/src/loader.rs`), so no namespace is active there and purity from conditional or qualified-only stubs (`tools::file_ext`) is invisible to load planning. Only an optimization is lost: such constants load eagerly.
+- **`seq(1, 10)` is typed `double[]`**, but R returns an integer vector when `by` is missing and the bounds are whole numbers. The stub cannot tell `1` from `1.5`, so a function declared `-> integer[]` returning it is refused.
+- **An overload set called with an `Any` argument is `Unknown`.** When no candidate is a catch-all, an `Any` argument (a forwarded `...` included) selects nothing, so the call is reported although every candidate accepts it. Joining the candidates' results was rejected (`decisions.md`, "An all-`Any` overload does not veto agreement among unchecked fits"); the open direction is a per-candidate result that does not depend on the unknown argument. The generator's `R/dependencies.R` registry avoids overloaded entry points for this reason (`function(...) YieldCurve::Nelson.Siegel(...)` and `digest::digest(...)` hit it), and it is why a callback parameter typed `Any` by its callee's stub poisons `sum(row)`.
+  ```r
+  #: fn(x: Any) -> double
+  f <- function(x) sum(x)
+  #: fn(...: Any) -> Any
+  first <- function(...) utils::head(...)
+  ```
+  Both report `` strict mode: this expression has an undetermined type (`Unknown`) ``, on `sum(x)` and on `utils::head(...)`.
+- **Calling a value declared bare `Any` is `Unknown`.** A stub line `t : @pure Any` is meant as an opt-out, but its call result is reported. Calling an `Any` should give `Any`, and `t` (also `formula`) should get real signatures. `#: fn(m: matrix) -> matrix` over `f <- function(m) { tm <- t(m); tm }` gives `` strict mode: could not determine the type of `tm`; add a type annotation ``.
+- **Operators do not dispatch per member of a union.** `m >= 0` works through `Compare.matrix` and `x >= 0` works for a double, but a `matrix | double` operand is refused, which matters because `PerformanceAnalytics::maxDrawdown` truly returns that union. `#: fn(x: matrix | double) -> logical` over `f <- function(x) x >= 0` gives `` expected a comparable value (numeric, `character`, or `logical`), found `matrix | double` ``.
+- **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
+  ```r
+  #: fn() -> double
+  f <- function() {
+    dt <- data.table::data.table(pnl = c(1, 2))
+    sum(dt$pnl)
+  }
+  ```
+  Reports `Unknown` twice, on `dt$pnl` and on the `sum(...)` around it.
+- **An annotation cannot attach to a lambda argument.** Every callback whose parameter needs a type, or whose callee types it `Any` (`apply`, `uniroot`), must first become its own binding. Let a `#:` line inside an argument list annotate the argument that follows.
+  ```r
+  #: fn(m: matrix) -> Any
+  f <- function(m) apply(
+    m, 1,
+    #: fn(row: double[]) -> double
+    function(row) sum(row)
+  )
+  ```
+  Gives `` A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. `` plus the `Unknown` on `sum(row)`.
+- **A lambda default gets no type from its declared parameter.** The parameter's declared function type should be the context for its default, as it is for a call argument.
+  ```r
+  #: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+  connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
+  ```
+  Gives `` strict mode: parameter `dsn` has no type. `` on the lambda's `dsn`.
+- **Stubs cannot declare a structural nominal or a subtype.** `@type DEoptim {list{bestmem: double[]}}` and `@type fs_path : character` both give `... is not a valid type name.`, so S3 list results become aliases that lose their class, and `xts` (class `c("xts", "zoo")`) is not a `zoo`: `#: fn(x: xts) -> zoo` over `f <- function(x) x` gives `` expected `zoo`, found `xts` ``. readr's `tbl_df` and fs's `fs_path` are declared as their parents for the same reason.
+- **One flat stub name map.** With rugarch imported, its `sigma` overloads replace `stats::sigma` even for a qualified call: `#: fn(fit: Any) -> double` over `f <- function(fit) stats::sigma(fit)` gives `` expected `double`, found `matrix` ``. Needs per-namespace stub tables.
+- **A formula is `Unknown`.** `~` should type as a `formula` nominal; inline as a `dcast` argument it cannot even be annotated. `shape <- id ~ n` gives `` strict mode: could not determine the type of `shape`; add a type annotation ``.
+- **`!!!` splice is `Unknown`.** In the `...` position it should splice the elements' type. `httr2::req_url_query(httr2::request(url), !!!query)` with `query: list[named: Any]` reports `Unknown` on `!!!query`.
+- **foreach's `%do%` body does not see the iterator.** `foreach::foreach(g = groups, .combine = c) %do% sum(g)` with `groups: list[integer[]]` reports `Unknown` on `sum(g)`. A stub attribute that binds a call's named arguments in the right operand of `%do%`/`%dopar%` would fix it.
+- **A chained `$` is reported at the innermost access, and `@if-unknown` on the statement does not clear it.** The user ends up annotating an intermediate they never named.
+  ```r
+  #: fn(v: environment, name: character) -> character
+  get_secret <- function(v, name) {
+    #: @if-unknown character
+    out <- v$secrets$get(name)$value
+    out
+  }
+  ```
+  Reports `Unknown` on `v$secrets` only.
+- **The `NULL`-default suggestion prints an unparenthesized function type.** `-> character | NULL` parses as the return type, which is right, but the fix it suggests is unparseable and pasting it reproduces the error; the printer must write `(fn(x: character) -> character) | NULL` inside a union. `#: fn(x: character, [f]: fn(x: character) -> character | NULL) -> character` over `apply_or <- function(x, f = NULL) if (is.null(f)) x else f(x)` gives `` `f` defaults to `NULL`, which its declared type `fn(x: character) -> character | NULL` does not admit. ... Declare it `fn(x: character) -> character | | NULL | NULL` ``.
+- **zeallot `%<-%` targets are silently untyped.** The targets are neither typed from the right-hand side nor reported, so a wrong return type passes.
+  ```r
+  #: fn(x: double[]) -> character
+  spread <- function(x) {
+    c(lo, hi) %<-% list(1, 2)
+    hi - lo
+  }
+  ```
+  With `importFrom(zeallot, "%<-%")`: `1 file checked, no problems`.
+- **A body annotation cannot name the signature's type parameter.** Bring the enclosing signature's type parameters into scope for annotations in the body. `#: <T> fn(fn: fn() -> T) -> T | NULL` over a body with `#: T | NULL` above `result <- tryCatch(fn(), error = function(e) NULL)` gives `` I do not know the type `T`. ``
+- **No record width subtyping.** An injected fake with extra fields is refused, so a dependency cannot be typed as "any record with at least `tick`". `#: @alias Ticker {list{tick: fn() -> NULL}}` and a call `run(list(tick = function() NULL, finished = TRUE))` give `` this list has a field `finished`, which is not expected here ``.
+- **A mismatch message leaks an uninstantiated type variable.** Against a field typed `fn([len]: double) -> Any`, `list(tick = function() invisible())` gives `` expected `fn([len]: double) -> Any` for field `tick`, found `fn() -> T` ``; the found type should not print the bare `T` of `invisible`'s signature.
+- **Recursive aliases are refused**, so chaining methods (lgr setters, `progress` `tick()`) return `Any`. `#: @alias Logger {list{set_threshold: fn(level: character) -> Logger}}` gives `` Type alias `Logger` expands in a cycle. ``, filed under `type-mismatch` and underlining the whole function that uses it. Allow recursive record aliases, or a `Self` type for R6-style records.
+- **No typed mutable environment.** A counter in `new.env()` cannot declare its fields: `calls <- new.env(); calls$count <- 0L; calls$count <- calls$count + 1L` reports `Unknown` on each `calls$count` read.
+- **S4 slots and generics are untyped.** A slot read is `Unknown` even on `Any` (`out <- b@v` with `b: Any` gives `` could not determine the type of `out` ``), slots of a class with a `representation` are not typed, and a generic made by `setGeneric("scale_by", ...)` is silently `Any` at its call sites (`out <- scale_by(q, 2)` returned as `double` checks clean).
+- **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
+- **The summary counts checked files, not files with problems.** A project with one finding in `R/a.R` and two clean files prints `1 problem in 3 files`.
+- **Vectorised and matrix math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, `[.matrix` is undeclared, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``, and `current <- rates[t, ]` gives `` could not determine the type of `current` ``.
 
 ## Open: the JIT
 
@@ -506,14 +584,6 @@ change that does not pay.
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
-6. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
-   through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
-   re-check. Target: hash the index, and sort by spelling only where output order is visible.
-   Check first which maps rely on string order for deterministic output.
-7. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
-   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
-   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
-   only alongside other work in that file.
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
@@ -2018,11 +2088,18 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
-  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
-  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
-  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
-  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
+- **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
+  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena
+  commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
+  questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
+  The delay is process-wide and trades resident memory in every R program, so it stays at
+  mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
+  targeted fixes.
+- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
+  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
+  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
+  31 s for the same file. A factor representation that keeps the levels as a plain string array
+  and maps them only on demand would remove the 6 s.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
@@ -2221,13 +2298,26 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
-  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
-  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
-  (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
-  ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
-  layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
-  case, and contour label placement, which picks slightly different positions than GNU R.
+- **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
+  packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
+  oracle cases; what is left:
+  - The built-in devices have no patterns, gradients, clipping paths, masks or groups (device
+    version 0), so grid's `clippaths`, `patterns`, `compositing`, `groups` and `paths` tests differ
+    from GNU R's pdf output, and compound paths fill their holes.
+  - Built-in devices ignore raster interpolation, and PostScript paints semi-transparent colours
+    opaque (its prolog ignores the PDF `gs` opacity), where GNU R leaves them out with a warning.
+  - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
+    with cairo's font, so `strwidth` on `png()` differs slightly.
+  - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey
+    fonts fall back to ordinary text, and the Adobe symbol conversions pass text through.
+  - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
+    points); open splines match GNU R value for value.
+  - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
+    (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
+  - Bitmap pages are written when the device closes rather than per page.
+  - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
+    warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
+  - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
   GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
   (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
@@ -2859,7 +2949,7 @@ typing on:
 | data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
 | biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions.md`, "HIR as struct-of-arrays") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 

@@ -27,15 +27,15 @@ is(1L, "integer")
 #++++
 Unknown
 
-#---- new_with_arbitrary_slot_names_is_unknown
+#---- new_with_arbitrary_slot_names_is_any
 new("Person", name = "bob")
 #++++
-Unknown
+Any
 
-#---- setClass_machinery_is_unknown
+#---- setClass_returns_a_generator
 setClass("Person", representation(name = "character"))
 #++++
-Unknown
+fn(...: Any) -> Any
 
 #---- validObject_is_unknown
 validObject(1L)

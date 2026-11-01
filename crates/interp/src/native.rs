@@ -12,7 +12,7 @@ use {
     crate::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        interp, linalg,
+        graphics_engine, interp, linalg,
         unwind::{R, error},
         values::{self, nil, scalar_bool, string_vector, symbols},
     },
@@ -32,10 +32,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
         foreign_call(call, Some(Interface::Fortran))
     }),
     builtin(".Call.graphics", -1, |call| unsafe {
-        foreign_call(call, None)
+        graphics_engine::graphics_call(call, || foreign_call(call, None))
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        foreign_call(call, None)
+        graphics_engine::graphics_call(call, || foreign_call(call, None))
     }),
     internal("dyn.load", 4, |call| unsafe {
         let path = values::require_string(call.arg(0), "x")?;
@@ -283,7 +283,7 @@ unsafe fn foreign_call(call: &Call<'_>, interface: Option<Interface>) -> R<Sexp>
     {
         return Ok(result);
     }
-    match builtin_libraries::try_call(call.call, call.args, call.env)? {
+    match builtin_libraries::try_call(call)? {
         Some(value) => Ok(value),
         None => no_host(call),
     }

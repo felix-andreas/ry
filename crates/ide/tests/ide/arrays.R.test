@@ -7,7 +7,7 @@ hover-definition: global 0..2
 definition 0..2
 references: 0..2*
 rename: 1 edit(s)
-type-definition: stub source 12 at `Array`
+type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `xs`
   edit 0..0 -> "#: Array<double>\n"
@@ -25,7 +25,7 @@ hover-definition: global 0..2
 definition 0..2
 references: 0..2*, 24..26
 rename: 2 edit(s)
-type-definition: stub source 12 at `Array`
+type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `first`
   edit 15..15 -> "#: integer\n"
@@ -44,7 +44,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*
 rename: 1 edit(s)
-type-definition: stub source 12 at `Array`
+type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `points`
   edit 0..0 -> "#: Array<Record{x: double, y: double}>\n"
