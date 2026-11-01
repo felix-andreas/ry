@@ -27,3 +27,7 @@ watched <- function(n) {
 for (k in 1:3) print(watched(3))
 roots <- function(n) { x <- 1; for (i in 1:n) { x <- x + 1; y <- sqrt(-x) }; x }
 for (k in 1:3) withCallingHandlers(print(roots(2)), warning = function(w) invokeRestart("muffleWarning"))
+# A scalar loaded on one branch is boxed where it meets a vector from the other; an element write
+# into that box must reach the frame.
+boxed_join <- function(x, flag) { if (flag) s <- x + 1 else x <- c(5, 6); x[1] <- 9; get("x") }
+for (k in 1:6) print(boxed_join(1, k %% 2 == 0))

@@ -593,7 +593,7 @@ unsafe fn counted_push(args: &[Arg]) {
 /// Wraps a closure's arguments in promises, expanding `...` into the promises it holds.
 pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
     let dots = symbols().dots;
-    let mut args = Vec::new();
+    let mut args = Vec::with_capacity(length(arguments));
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
         if expression == dots {
@@ -711,27 +711,29 @@ pub unsafe fn apply_closure(
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
     let formals = function.car();
-    let actuals = match_args(formals, args, call)?;
-    let env = new_env(function.tag())?;
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
-    let missing = missing_arg();
     let heap = crate::heap();
-    let mut formal = formals;
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let symbol = formal.tag();
-        let actual = actuals[index];
-        if actual == missing && formal.car() != missing {
-            let promise = make_promise(formal.car(), env)?;
-            heap.define(env, symbol, promise)?;
-            if let Some(cell) = heap.frame_cell(env, symbol) {
-                cell.set_gp_bits(gp::BINDING_MISSING, true);
-            }
-        } else {
-            heap.define(env, symbol, actual)?;
+    let env = heap.alloc_environment_with_capacity(function.tag(), values::length(formals))?;
+    heap.root(env);
+    env.set_gp_bits(gp::FUNCTION_FRAME, true);
+    if supplied.is_none() && positional(formals, args) {
+        // Most calls pass every argument by position to a function without `...`, which needs no
+        // matching table: argument `i` binds formal `i`, and the formals past the last argument
+        // are missing.
+        let mut formal = formals;
+        let mut index = 0;
+        while formal.kind() == SexpType::Pairlist {
+            let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
+            bind_formal(env, formal, actual)?;
+            formal = formal.cdr();
+            index += 1;
         }
-        formal = formal.cdr();
-        index += 1;
+    } else {
+        let actuals = match_args(formals, args, call)?;
+        let mut formal = formals;
+        for &actual in &actuals {
+            bind_formal(env, formal, actual)?;
+            formal = formal.cdr();
+        }
     }
     heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
@@ -743,6 +745,38 @@ pub unsafe fn apply_closure(
     }
     let promargs = args_pairlist(args)?;
     run_closure(call, function, env, sys_parent, promargs)
+}
+
+/// Whether every argument is untagged and the formals, which have no `...`, take them all.
+unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
+    let mut count = 0;
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == symbols().dots {
+            return false;
+        }
+        count += 1;
+        formal = formal.cdr();
+    }
+    args.len() <= count && args.iter().all(|arg| arg.tag == nil())
+}
+
+/// Binds the formal at the head of `formal` to its matched argument, or to a promise of its
+/// default when the argument is missing.
+unsafe fn bind_formal(env: Sexp, formal: Sexp, actual: Sexp) -> R<()> {
+    let heap = crate::heap();
+    let missing = missing_arg();
+    let symbol = formal.tag();
+    if actual == missing && formal.car() != missing {
+        let promise = make_promise(formal.car(), env)?;
+        heap.define(env, symbol, promise)?;
+        if let Some(cell) = heap.frame_cell(env, symbol) {
+            cell.set_gp_bits(gp::BINDING_MISSING, true);
+        }
+    } else {
+        heap.define(env, symbol, actual)?;
+    }
+    Ok(())
 }
 
 /// The arguments as a pairlist of their values or promises, which a frame records.
@@ -1833,6 +1867,13 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
 /// `count` arguments before its body runs. The apply family calls `FUN` this way, so a closure
 /// that captures its argument sees this iteration's element, not the last one.
 pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
+    force_and_call_with(call, count, env, None)
+}
+
+/// [`force_and_call`] where the caller already knows the first argument's value, so its
+/// promise starts out forced instead of evaluating its expression. The caller must only pass a
+/// value that evaluating the expression would produce without side effects.
+pub unsafe fn force_and_call_with(call: Sexp, count: usize, env: Sexp, first: Option<Sexp>) -> R<Sexp> {
     let head = call.car();
     let function = if head.kind() == SexpType::Symbol { find_called_fun(head, env, call)? } else { eval(head, env)? };
     crate::heap().root(function);
@@ -1840,6 +1881,15 @@ pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
         return apply_call(call, function, call.cdr(), env);
     }
     let args = promise_args(call.cdr(), env)?;
+    if let (Some(value), Some(arg)) = (first, args.first())
+        && arg.value.kind() == SexpType::Promise
+        && arg.value.car() == unbound()
+        && !arg.value.has_gp(gp::CHECKED_PROMISE)
+    {
+        let heap = crate::heap();
+        heap.set_car(arg.value, value);
+        heap.set_tag(arg.value, nil());
+    }
     for arg in args.iter().take(count) {
         if arg.value.kind() == SexpType::Promise {
             force_promise(arg.value)?;

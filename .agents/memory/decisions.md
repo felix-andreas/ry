@@ -325,6 +325,14 @@ incrementality holds.
 
 Refusing an unsupported construct loudly is acceptable policy. Mistyping one silently is not.
 
+`stop(...)` types as `Any`, not `NULL` or `Unknown`. There is no bottom type, and `Any` is the one
+type that fits every branch and return position without strict mode reporting it, so a
+`if (bad) stop(...)` guard costs strict users nothing. `&` and `|` are typed elementwise (logical
+scalar or vector) rather than opaque, so their operands resolve normally in naming. An operand
+whose type is still a variable is not unified with scalar `logical`, as `!`'s operand is, because
+`&` is mostly used on vectors and the unification made `h(c(TRUE, FALSE), TRUE)` an error; the
+operator is opaque for it instead.
+
 ## A reported column counts characters, and caret art counts terminal cells
 
 The CLI reported byte columns in the rendered header and in `--output json` alike, and padded the
@@ -2679,10 +2687,47 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **The default mode compiles only bodies with loops.** Measured on `micro/closures`, compiling
-  `function(a, b) a + b` made each call slower, because entering compiled code and forcing two
-  promises through helpers cost more than tier 0's dispatch. Straight-line bodies wait for direct
-  calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
+- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
+  compiled code meant forcing every argument through a promise helper, which made
+  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
+  loop-only rule went with it.
+- **Function speculation is validated by the binding epoch alone.** Compiling marks each
+  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
+  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
+  speculated binding). A call site then checks one integer instead of re-walking the environment
+  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
+  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
+  re-resolved from the environment its lookup started in, which for a function looked up inside an
+  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
+  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
+  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
+  invisible when the callee cannot assign anything an argument reads before forcing it
+  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
+  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
+  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
+  the one accepted hole. A promise object is still
+  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
+  needs compiled-to-compiled calls that know the callee never reflects.
+- **Small local closures inline.** A call of a closure defined by a function expression in the same
+  body, whose arguments and body compute a scalar from scalars without effects, runs inline on
+  unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
+- **Environment frames live inline in the environment object.** Small binding sets are stored
+  without a separate allocation, which cut a call's allocations, the dominant per-call cost.
+- **A value boxed on an edge into a join is dirty.** A slot that is an unboxed local on one path and
+  boxed on another gets a fresh box the frame does not hold, so the slot must be written back before
+  an in-place element write is visible to the frame (`x[1] <- 9; get("x")`). The oracle case in
+  `bytecode__hot_loops.R` pins it.
+- **A helper that cannot allocate parks the error.** Compiled code does not branch on a nil box;
+  later helpers return their fallback while an error is parked, and the return from compiled code
+  raises it.
+- **Static types do not remove guards.** A static `double` still admits an integer or a logical
+  through promotion, and stubs claim scalar results for functions that can return vectors, so a
+  static type proves neither the storage type nor the length the compiled code specializes on.
+  Strict typing costs a little at run time instead (about 200 instructions per annotated call for
+  the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
+  is still the plan in `r-runtime.md`.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
 
@@ -2727,6 +2772,7 @@ first lines R had already read, leaving R mid-command.
 
 - **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
 - **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **Bytecode.** A call of a dispatch-or-eval special (`bytecode.rs`, `subject_call`) evaluates the subject into a register, branches on `BranchIfObject` to `DispatchSubject` (which runs `dispatch::dispatch_evaluated_subject`, so a method still gets promises and the subject's expression), and otherwise evaluates the rest into registers and runs `CallBuiltin`, which the JIT turns into its element intrinsic. A `BranchUnlessPrimitive` guard sends a rebound `[` to the generic call. A formal in an index position takes the generic path too, because a register cannot hold the empty argument a missing formal stands for. Without this shape `x[i]` in a loop ran as a generic call and compiled loops fell to tier-0 speed.
 - **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
 
 ## libr reads options from base's `.Options`
@@ -3049,7 +3095,9 @@ first lines R had already read, leaving R mid-command.
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
   then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
-  purple one") beside the four steps as tabs. A reader has to want the features before a path to
+  purple one"). On wide screens the four steps and the selected step's code fill the left column
+  and the diagram sits on the right, so the code stays directly under the step that chose it while
+  the diagram follows along; on phones the diagram comes first. A reader has to want the features before a path to
   them matters, which is why the migration is the last part of the sell and not the opening.
 - **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
@@ -3127,6 +3175,45 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+# Decision record: editor responsiveness at 300,000 lines
+
+- **Previous shape.** Completion walked every item in the project per request, reading each item's
+  salsa fields, re-walked every file's syntax tree for untyped `$` fields, resolved a scheme (and
+  so possibly a type check) for every matching global, and sorted every candidate with an
+  allocated key before keeping 128. References for a global named and lowered every item in the
+  project. On finbench that was 30 ms p50 for completion and 300 ms p99 for references.
+- **Target shape.** Two per-file tracked indexes in `crates/ide/src/ide.rs`: `global_names` (the
+  top-level names a file writes, with their item) and `spelled_names` (the names spelled after
+  `$`, `@` and `::`). They are derived from the item tree and the syntax, so they cannot drift, and
+  an edit recomputes only the edited file's entry. Ranking selects the top results with
+  `select_nth_unstable_by` and compares labels case-insensitively without allocating, and call
+  shapes are resolved only for the results returned. References and rename skip a file, then an
+  item, whose source text does not contain the name, because every occurrence spells it.
+- **Requests preempt idle work.** A request cancels the idle unit in flight once the request is
+  queued (`CancelHandle::preempt_idle` in `crates/ry/src/server.rs`); it never cancels a sync.
+- **Durability.** A setter that names no durability keeps the field's current one, so the old
+  `didOpen` rewrote every opened file at `MEDIUM` and invalidated every memo in the project. It now
+  skips text that matches the disk and lowers the file to `LOW` in idle time, because salsa never
+  backdates a memo whose durability drops, and the first `LOW` write therefore re-derives the
+  file's dependents once.
+- **Project-wide maps fold per-file memos.** `package_definitions`, `conditional_slot_items`,
+  `interface_sccs` and their test-file twins read every item's projections directly. Once the
+  edited file was `LOW`, each map was too, and confirming it after a keystroke checked about 56,000
+  item memos, about 35 ms before any request could answer. They now read `file_definitions`,
+  `file_interface_reads` and `file_conditional_writers` (`crates/semantics/src/semantics.rs`), so
+  the check touches about 500 file memos and every untouched one passes on durability.
+  `project_arithmetic_classes` needed no change: it reads only `package_definitions`.
+- **Every host input but the open documents and the file list is `MEDIUM`.** The server and
+  `analysis-stats` created the stubs, settings, metadata and data files at the default `LOW`, and
+  nearly every memo reads the stubs, so no memo was ever `MEDIUM` and the file durabilities had no
+  effect. With those inputs at `MEDIUM`, the maps must be `LOW` before any file's first edit, since
+  a memo whose durability drops cannot backdate and the drop would re-execute every item check
+  (about 2 s on finbench). `ProjectFiles` is therefore `LOW`, which keeps the maps `LOW`.
+  `test_incremental.rs` pins both: an edit verifies only the edited file's items, and a file's
+  first edit re-checks only its own.
+- **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
+  right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
+  finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
 
 # Decision record: data-oriented design and explicit allocators
 
