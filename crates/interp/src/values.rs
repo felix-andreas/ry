@@ -307,6 +307,14 @@ pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
     Ok(object)
 }
 
+/// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.
+pub unsafe fn alloc_uninit(kind: SexpType, length: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let object = heap.alloc_vector_uninit(kind, length)?;
+    heap.root(object);
+    Ok(object)
+}
+
 pub unsafe fn cons(car: Sexp, cdr: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let object = heap.cons(car, cdr)?;
@@ -606,6 +614,11 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
 /// it compares their UTF-8 translations, and the session's native encoding is UTF-8.
 pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
     if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
+        return false;
+    }
+    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
+    // their bytes, which keeps `x == "a"` from decoding every element.
+    if [gp::LATIN1, gp::UTF8].iter().all(|&bit| left.has_gp(bit) == right.has_gp(bit)) {
         return false;
     }
     char_str(left) == char_str(right)
