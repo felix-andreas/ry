@@ -634,6 +634,27 @@ fn collection_kind(set: i32) -> NativeKind {
     }
 }
 
+/// The tag of a plain tag value, or -1 for anything else.
+pub unsafe extern "C" fn jit_plain_tag(value: *mut Header) -> i64 {
+    unsafe {
+        Sexp::from_raw(value)
+            .and_then(|value| interp::records::plain_tag(value))
+            .map_or(-1, i64::from)
+    }
+}
+
+/// 1 when `value` matches the literal pattern `pattern`, as a `match` arm tests it.
+pub unsafe extern "C" fn jit_literal_matches(value: *mut Header, pattern: *mut Header) -> i32 {
+    unsafe {
+        match (Sexp::from_raw(value), Sexp::from_raw(pattern)) {
+            (Some(value), Some(pattern)) => {
+                i32::from(interp::records::literal_matches(pattern, value))
+            }
+            _ => 0,
+        }
+    }
+}
+
 /// `Dict.len()` or `Set.len()`: the entry count, or -1 when tier 0 must run the call.
 pub unsafe extern "C" fn jit_collection_count(value: *mut Header, set: i32) -> i64 {
     unsafe {

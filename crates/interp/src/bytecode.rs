@@ -395,9 +395,28 @@ pub enum Op {
     /// vector caching the last record layout the site saw and the field's slot in it, so a
     /// record's field is one comparison and a slot read; anything else takes `$`'s own path.
     Field,
+    /// `dst src index shape target`: `src[[index]]` for a constant `index`, through `shape` as
+    /// for [`Op::Field`], when `src` is a plain record or tuple with that item; otherwise it
+    /// jumps to `target`, where `[[`'s own path runs.
+    Item,
+    /// `src layout target`: jumps unless `src` is a plain record, tuple or tag of `layout`, the
+    /// test of a compiled pattern whose syntax fixes the layout.
+    MatchShape,
+    /// `src tag target`: jumps unless `src` is a plain tag named `tag`, whatever its payload.
+    MatchTag,
+    /// `src pattern target`: jumps unless `src` matches the literal constant `pattern`.
+    MatchLiteral,
+    /// `dst src index layout`: slot `index` of `src`, which a [`Op::MatchShape`] showed has
+    /// `layout`.
+    Slot,
+    /// `src call`: no arm of a compiled `match` matched `src`.
+    MatchFail,
+    /// `dst layout base count`: the record, tuple or tag of `layout` whose slots are in registers
+    /// `base..base + count`.
+    Construct,
 }
 
-pub const OPS: [Op; 30] = [
+pub const OPS: [Op; 37] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -428,6 +447,13 @@ pub const OPS: [Op; 30] = [
     Op::CallRebinding,
     Op::CallTailUpdate,
     Op::Field,
+    Op::Item,
+    Op::MatchShape,
+    Op::MatchTag,
+    Op::MatchLiteral,
+    Op::Slot,
+    Op::MatchFail,
+    Op::Construct,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -663,6 +689,198 @@ unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
     Ok(simple.then_some(function))
 }
 
+/// The items of a `.ry_record`, `.ry_tuple` or `.ry_tag` call named `name`, the layout it
+/// builds and each item's slot, when its syntax fixes them and evaluating the items into
+/// registers is what the builtin's own evaluation would do.
+unsafe fn constructor<'a>(
+    name: &str,
+    args: &'a [(Sexp, Sexp)],
+) -> Option<(&'a [(Sexp, Sexp)], u32, Vec<usize>)> {
+    if args
+        .iter()
+        .any(|(_, value)| *value == symbols().dots || *value == missing_arg())
+        || args
+            .iter()
+            .skip(1)
+            .any(|(_, value)| may_modify_in_place(*value))
+    {
+        return None;
+    }
+    let (tag, items) = if name == ".ry_tag" {
+        let ((name_tag, tag), items) = args.split_first()?;
+        if *name_tag != nil() {
+            return None;
+        }
+        (Some(*tag), items)
+    } else {
+        (None, args)
+    };
+    let names: Vec<Sexp> = items.iter().map(|(tag, _)| *tag).collect();
+    let (layout, slots) = crate::records::constructor_layout(tag, &names, name == ".ry_record")?;
+    Some((items, layout, slots))
+}
+
+/// What a tuple, record or tag pattern tests.
+enum PatternShape {
+    /// `:Name(..)`: the tag, whatever its payload.
+    Tag(u32),
+    /// A pattern whose syntax fixes the layout, with each item's sub-pattern and slot.
+    Layout {
+        layout: u32,
+        items: Vec<(Sexp, usize)>,
+    },
+}
+
+/// The shape a `.ry_tuple`, `.ry_record` or `.ry_tag` pattern tests, or `None` when only the
+/// `match` special handles it: a `..` that leaves the layout open, or a pattern the special
+/// rejects with an error.
+unsafe fn pattern_shape(pattern: Sexp) -> Option<PatternShape> {
+    let head = pattern.car().car().bytes();
+    let items = values::pairlist_items(pattern.cdr());
+    let (tag, payload) = match head {
+        b".ry_tag" => {
+            let ((name_tag, name), payload) = items.split_first()?;
+            if *name_tag != nil() {
+                return None;
+            }
+            (Some(*name), payload)
+        }
+        b".ry_tuple" | b".ry_record" => (None, &items[..]),
+        _ => return None,
+    };
+    let rest = |item: Sexp| item.kind() == SexpType::Symbol && item.car().bytes() == b"..";
+    if let (Some(name), [(item_tag, item)]) = (tag, payload)
+        && *item_tag == nil()
+        && rest(*item)
+    {
+        return crate::records::tag_id(name).ok().map(PatternShape::Tag);
+    }
+    if payload.iter().any(|(_, item)| rest(*item)) {
+        return None;
+    }
+    let names: Vec<Sexp> = payload.iter().map(|(tag, _)| *tag).collect();
+    let (layout, slots) = crate::records::constructor_layout(tag, &names, head == b".ry_record")?;
+    let items = payload.iter().map(|(_, item)| *item).zip(slots).collect();
+    Some(PatternShape::Layout { layout, items })
+}
+
+/// Whether bytecode can run this `.ry_match` call's arms: every arm is `pattern => value` with
+/// no guard, and every pattern is one [`Compiler::pattern`] compiles. Anything else (a guard, an
+/// open record pattern, a pattern the special rejects) runs the whole `match` in the special.
+unsafe fn supported_match(args: &[(Sexp, Sexp)]) -> R<bool> {
+    let Some(((_, scrutinee), arms)) = args.split_first() else {
+        return Ok(false);
+    };
+    if args.iter().any(|(tag, _)| *tag != nil())
+        || *scrutinee == symbols().dots
+        || *scrutinee == missing_arg()
+    {
+        return Ok(false);
+    }
+    let arrow = values::install("=>")?;
+    Ok(arms.iter().all(|(_, arm)| {
+        if arm.kind() != SexpType::Language || arm.car() != arrow {
+            return false;
+        }
+        match values::pairlist_items(arm.cdr()).as_slice() {
+            [(pattern_tag, pattern), (body_tag, body)] => {
+                *pattern_tag == nil()
+                    && *body_tag == nil()
+                    && *body != symbols().dots
+                    && *body != missing_arg()
+                    && supported_pattern(*pattern)
+            }
+            _ => false,
+        }
+    }))
+}
+
+unsafe fn supported_pattern(pattern: Sexp) -> bool {
+    match pattern.kind() {
+        SexpType::Symbol => {
+            !matches!(pattern.car().bytes(), b".." | b"T" | b"F")
+                && pattern != symbols().dots
+                && pattern != missing_arg()
+                && eval::dot_dot_index(pattern).is_none()
+        }
+        SexpType::Language => {
+            if pattern.car().kind() != SexpType::Symbol {
+                return false;
+            }
+            let items = values::pairlist_items(pattern.cdr());
+            if items.iter().any(|(tag, _)| *tag != nil())
+                && !matches!(pattern.car().car().bytes(), b".ry_record" | b".ry_tag")
+            {
+                return false;
+            }
+            match pattern.car().car().bytes() {
+                b"(" => matches!(items.as_slice(), [(_, inner)] if supported_pattern(*inner)),
+                // The special keeps only the bindings of the alternative that matched, which
+                // the compiled tests do not track, so an alternative may not bind a name.
+                b"|" => matches!(items.as_slice(), [(_, left), (_, right)]
+                    if supported_pattern(*left)
+                        && supported_pattern(*right)
+                        && pattern_names(*left).is_empty()
+                        && pattern_names(*right).is_empty()),
+                _ => match pattern_shape(pattern) {
+                    Some(PatternShape::Tag(_)) => true,
+                    Some(PatternShape::Layout { items, .. }) => {
+                        items.iter().all(|(item, _)| supported_pattern(*item))
+                    }
+                    None => false,
+                },
+            }
+        }
+        SexpType::Nil
+        | SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::Complex
+        | SexpType::String => true,
+        _ => false,
+    }
+}
+
+/// The names a pattern may bind: every symbol in it other than `_` and `..`, never a call's
+/// head.
+unsafe fn pattern_names(pattern: Sexp) -> Vec<Sexp> {
+    let mut names = Vec::new();
+    collect_pattern_names(pattern, &mut names);
+    names
+}
+
+unsafe fn collect_pattern_names(pattern: Sexp, names: &mut Vec<Sexp>) {
+    match pattern.kind() {
+        SexpType::Symbol => {
+            if !matches!(pattern.car().bytes(), b"_" | b"..") {
+                names.push(pattern);
+            }
+        }
+        SexpType::Language => {
+            for (_, item) in values::pairlist_items(pattern.cdr()) {
+                collect_pattern_names(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `index` is a constant `[[` index a record or tuple item read can cache: one
+/// positive whole number or one string.
+unsafe fn constant_item(index: Sexp) -> bool {
+    if length(index) != 1 || values::has_attributes(index) {
+        return false;
+    }
+    match index.kind() {
+        SexpType::Integer | SexpType::Real => {
+            let position = values::as_real_scalar(index);
+            position >= 1.0 && position.fract() == 0.0 && position <= f64::from(i32::MAX)
+        }
+        SexpType::String => index.element(0) != values::na_string(),
+        _ => false,
+    }
+}
+
 /// Whether evaluating `expression` may modify a variable of the frame in place: it contains a
 /// replacement assignment such as `x[1] <- 9`, or code that evaluates other code in the frame.
 unsafe fn may_modify_in_place(expression: Sexp) -> bool {
@@ -796,6 +1014,14 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
         ) {
             return false;
         }
+        // A `match` arm binds its pattern's names in the frame.
+        if &*name == ".ry_match" {
+            for (_, arm) in values::pairlist_items(expression.cdr()).iter().skip(1) {
+                if arm.kind() == SexpType::Language {
+                    found.extend(pattern_names(arm.cdr().car()));
+                }
+            }
+        }
         if matches!(&*name, "<-" | "=" | "for") {
             let mut target = expression.cdr().car();
             while target.kind() == SexpType::Language {
@@ -924,11 +1150,27 @@ impl Compiler {
             {
                 return self.field(call, head, primitive, dst, *subject, *field);
             }
-            if name == "$" {
-                return self.general_call(call, head, dst);
+            match name.as_str() {
+                "$" => return self.general_call(call, head, dst),
+                ".ry_record" | ".ry_tuple" | ".ry_tag" => {
+                    return match constructor(&name, &args) {
+                        Some((items, layout, slots)) => {
+                            self.construct(call, head, primitive, dst, items, layout, &slots)
+                        }
+                        None => self.general_call(call, head, dst),
+                    };
+                }
+                ".ry_match" if supported_match(&args)? => {
+                    return self.compiled_match(call, head, primitive, dst, &args);
+                }
+                _ => {}
             }
             if self.eager_subject(primitive, &args)? {
-                return self.subject_call(call, head, primitive, dst, &args);
+                let item = name == "[["
+                    && args.len() == 2
+                    && args.iter().all(|(tag, _)| *tag == nil())
+                    && constant_item(args[1].1);
+                return self.subject_call(call, head, primitive, dst, &args, item);
             }
             let plain = args.iter().all(|(tag, _)| *tag == nil());
             let inlined = match (name.as_str(), args.len()) {
@@ -1098,6 +1340,10 @@ impl Compiler {
                 | ".Internal"
                 | "local"
                 | "$"
+                | ".ry_record"
+                | ".ry_tuple"
+                | ".ry_tag"
+                | ".ry_match"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1563,6 +1809,7 @@ impl Compiler {
         primitive: Sexp,
         dst: u32,
         args: &[(Sexp, Sexp)],
+        item: bool,
     ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
@@ -1577,6 +1824,18 @@ impl Compiler {
             self.allocate();
         }
         self.expression(args[0].1, base)?;
+        // A record or tuple item with a constant index reads its slot through the site's shape
+        // cache; anything else falls to `[[`'s path below.
+        let read = if item {
+            let index = self.constant(args[1].1);
+            let shape = self.shape()?;
+            let other = self.emit_patchable(Op::Item, &[dst, base, index, shape, 0]);
+            let read = self.emit_patchable(Op::Jump, &[0]);
+            self.patch(other);
+            Some(read)
+        } else {
+            None
+        };
         let object = self.emit_patchable(Op::BranchIfObject, &[base, 0]);
         for (index, (_, value)) in args.iter().enumerate().skip(1) {
             if *value == missing_arg() {
@@ -1598,7 +1857,167 @@ impl Compiler {
         self.emit(Op::CallGeneric, &[dst, function, call_constant]);
         self.patch(called);
         self.patch(dispatched);
+        if let Some(read) = read {
+            self.patch(read);
+        }
         self.release_to(mark);
+        Ok(())
+    }
+
+    /// A fresh shape cache for a [`Op::Field`] or [`Op::Item`] site.
+    unsafe fn shape(&mut self) -> R<u32> {
+        let shape = values::alloc(SexpType::Integer, 2)?;
+        values::ints_mut(shape).copy_from_slice(&[crate::records::NO_LAYOUT, 0]);
+        Ok(self.constant(shape))
+    }
+
+    /// A record, tuple or tag constructor whose syntax fixes the layout: the items evaluate in
+    /// order into the registers of their slots, and one instruction builds the value. A
+    /// payload-free tag or the empty tuple is one shared constant.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn construct(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        items: &[(Sexp, Sexp)],
+        layout: u32,
+        slots: &[usize],
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        if items.is_empty() {
+            let value = crate::records::construct(layout, &[])?;
+            let constant = self.constant(value);
+            self.emit(Op::Constant, &[dst, constant]);
+        } else {
+            let mark = self.next_register;
+            let base = self.next_register;
+            for _ in items {
+                self.allocate();
+            }
+            for ((_, value), slot) in items.iter().zip(slots) {
+                self.expression(*value, base + *slot as u32)?;
+            }
+            self.emit(Op::Construct, &[dst, layout, base, items.len() as u32]);
+            self.release_to(mark);
+        }
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
+    }
+
+    /// `match` whose arms [`supported_match`] accepts: the scrutinee evaluates once, each arm's
+    /// pattern compiles to tests that jump to the next arm, the names it binds are assigned once
+    /// the whole pattern matched (so a failed arm binds nothing, as in the special), and the body
+    /// compiles in place.
+    unsafe fn compiled_match(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
+        let symbol = self.constant(head);
+        let expected = self.constant(primitive);
+        let cache = self.cache();
+        let probe = self.frame_may_bind(head) as u32;
+        let guard = self.emit_patchable(Op::Guard, &[symbol, expected, cache, probe, 0]);
+        let call_constant = self.constant(call);
+        let mark = self.next_register;
+        let value = self.allocate();
+        self.expression(args[0].1, value)?;
+        let mut matched = Vec::new();
+        for (_, arm) in &args[1..] {
+            let parts = values::pairlist_items(arm.cdr());
+            let arm_mark = self.next_register;
+            let mut failed = Vec::new();
+            let mut bound = Vec::new();
+            self.pattern(parts[0].1, value, &mut failed, &mut bound)?;
+            for (name, register) in bound {
+                let name = self.constant(name);
+                self.emit(Op::SetVar, &[name, register]);
+            }
+            self.expression(parts[1].1, dst)?;
+            matched.push(self.emit_patchable(Op::Jump, &[0]));
+            for position in failed {
+                self.patch(position);
+            }
+            self.release_to(arm_mark);
+        }
+        self.emit(Op::MatchFail, &[value, call_constant]);
+        for position in matched {
+            self.patch(position);
+        }
+        self.release_to(mark);
+        let done = self.emit_patchable(Op::Jump, &[0]);
+        self.patch(guard);
+        self.fallback(call, dst)?;
+        self.patch(done);
+        Ok(())
+    }
+
+    /// The tests of one pattern against the value in register `value`: each failing test's
+    /// target operand goes to `failed`, and each name it binds, with the register holding the
+    /// value, to `bound`.
+    unsafe fn pattern(
+        &mut self,
+        pattern: Sexp,
+        value: u32,
+        failed: &mut Vec<usize>,
+        bound: &mut Vec<(Sexp, u32)>,
+    ) -> R<()> {
+        match pattern.kind() {
+            SexpType::Symbol => {
+                if pattern.car().bytes() != b"_" {
+                    bound.push((pattern, value));
+                }
+            }
+            SexpType::Language => {
+                let items = values::pairlist_items(pattern.cdr());
+                match pattern.car().car().bytes() {
+                    b"(" => self.pattern(items[0].1, value, failed, bound)?,
+                    b"|" => {
+                        let mut left = Vec::new();
+                        self.pattern(items[0].1, value, &mut left, bound)?;
+                        let either = self.emit_patchable(Op::Jump, &[0]);
+                        for position in left {
+                            self.patch(position);
+                        }
+                        self.pattern(items[1].1, value, failed, bound)?;
+                        self.patch(either);
+                    }
+                    _ => match pattern_shape(pattern) {
+                        Some(PatternShape::Tag(tag)) => {
+                            failed.push(self.emit_patchable(Op::MatchTag, &[value, tag, 0]));
+                        }
+                        Some(PatternShape::Layout { layout, items }) => {
+                            failed.push(self.emit_patchable(Op::MatchShape, &[value, layout, 0]));
+                            for (item, slot) in items {
+                                if item.kind() == SexpType::Symbol && item.car().bytes() == b"_" {
+                                    continue;
+                                }
+                                let register = self.allocate();
+                                self.emit(Op::Slot, &[register, value, slot as u32, layout]);
+                                self.pattern(item, register, failed, bound)?;
+                            }
+                        }
+                        None => panic!("a compiled `match` reached a pattern it does not support"),
+                    },
+                }
+            }
+            _ => {
+                let constant = self.constant(pattern);
+                failed.push(self.emit_patchable(Op::MatchLiteral, &[value, constant, 0]));
+            }
+        }
         Ok(())
     }
 
@@ -1617,9 +2036,7 @@ impl Compiler {
         let expected = self.constant(primitive);
         let call_constant = self.constant(call);
         let name_constant = self.constant(name);
-        let shape = values::alloc(SexpType::Integer, 2)?;
-        values::ints_mut(shape).copy_from_slice(&[crate::records::NO_LAYOUT, 0]);
-        let shape = self.constant(shape);
+        let shape = self.shape()?;
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
@@ -1712,7 +2129,10 @@ pub fn operand_count(op: Op) -> usize {
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
         Op::CallRebinding | Op::CallTailUpdate => 4,
-        Op::Field => 5,
+        Op::Field | Op::Item => 5,
+        Op::MatchShape | Op::MatchTag | Op::MatchLiteral => 3,
+        Op::Slot | Op::Construct => 4,
+        Op::MatchFail => 2,
         Op::Ast => 2,
         Op::Guard => 5,
         Op::Jump => 1,
@@ -2084,6 +2504,56 @@ unsafe fn step(
                 None => crate::subset::dollar_value(object, name.car(), call, env)?,
             };
             record_feedback(constants, at, value);
+            interp().visible = true;
+            set(operand(0), value);
+        }
+        Op::Item => {
+            let object = register(operand(1));
+            let index = constants.element(operand(2));
+            let shape = constants.element(operand(3));
+            match crate::records::cached_item(object, index, shape)? {
+                Some(value) => {
+                    decoded.record(at, value);
+                    interp().visible = true;
+                    set(operand(0), value);
+                }
+                None => {
+                    *pc = operand(4);
+                    return Ok(None);
+                }
+            }
+        }
+        Op::MatchShape => {
+            if !crate::records::has_layout(register(operand(0)), operand(1) as u32) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::MatchTag => {
+            if crate::records::plain_tag(register(operand(0))) != Some(operand(1) as u32) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::MatchLiteral => {
+            let pattern = constants.element(operand(1));
+            if !crate::records::literal_matches(pattern, register(operand(0))) {
+                *pc = operand(2);
+                return Ok(None);
+            }
+        }
+        Op::Slot => {
+            let value = crate::records::slot_value(register(operand(1)), operand(2))?;
+            decoded.record(at, value);
+            set(operand(0), value);
+        }
+        Op::MatchFail => {
+            let call = constants.element(operand(1));
+            return Err(crate::records::no_arm_matches(register(operand(0)), call));
+        }
+        Op::Construct => {
+            let slots = std::slice::from_raw_parts(registers.add(operand(2)), operand(3));
+            let value = crate::records::construct(operand(1) as u32, slots)?;
             interp().visible = true;
             set(operand(0), value);
         }
