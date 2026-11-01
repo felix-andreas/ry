@@ -32,7 +32,7 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let routines = std::mem::take(&mut options.routines);
     let startup = std::mem::take(&mut options.startup);
     let arguments = std::mem::take(&mut options.arguments);
-    install(options, false)?;
+    install(options, false, None)?;
     install_sigint_handler();
     // A batch run prints only what its code prints, and so does a console reading a pipe.
     let quiet = batch || !stdin().is_terminal();
@@ -65,8 +65,12 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
 
 /// Installs the console for ry's own runtime, whose console loop reads through
 /// [`ry_read_console`]. Every read it makes is at the top-level prompt.
-pub fn install_for_ry_runtime(options: RunOptions) -> Result<(), ReplError> {
-    install(options, true)
+/// `banner` is printed when the console first prompts, once the session has started.
+pub fn install_for_ry_runtime(
+    options: RunOptions,
+    banner: Option<String>,
+) -> Result<(), ReplError> {
+    install(options, true, banner)
 }
 
 /// The read hook ry's runtime calls: GNU R's `R_ReadConsole` without the history flag.
@@ -78,7 +82,7 @@ pub extern "C" fn ry_read_console(
     catch_unwind(|| read_console_inner(prompt, buffer, length)).unwrap_or(0)
 }
 
-fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
+fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Result<(), ReplError> {
     let completion_menu_binding = ReedlineEvent::UntilFound(vec![
         ReedlineEvent::Menu("completion_menu".to_owned()),
         ReedlineEvent::MenuNext,
@@ -171,6 +175,7 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
             held: false,
             ry_runtime,
             piped: !stdin().is_terminal(),
+            banner,
         });
     });
     Ok(())
@@ -214,6 +219,9 @@ struct Console {
     /// editor (which needs a terminal that answers cursor queries) and without a prompt, as
     /// `R --no-echo` reads a pipe.
     piped: bool,
+    /// Printed before the first prompt rather than before the session starts, so it appears
+    /// only once the console can take input.
+    banner: Option<String>,
 }
 
 /// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
@@ -261,6 +269,9 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         while console.pending.is_empty() {
             if console.batch {
                 return 0;
+            }
+            if let Some(banner) = console.banner.take() {
+                eprintln!("{banner}");
             }
             // R hands its hook a valid NUL-terminated prompt (or null).
             let prompt_text = match console.held {

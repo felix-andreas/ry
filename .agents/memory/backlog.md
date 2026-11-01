@@ -418,7 +418,11 @@ only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\
   overload set for `seq` and `seq_len` would remove that.
 - **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
   and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
-  `crates/ry/tests/test_repl_e2e.rs`). They pass alone; their timeouts need headroom.
+  `crates/ry/tests/test_repl_e2e.rs`, and `errors_come_back_on_the_error_stream`). They pass alone.
+  The load comes from the ry-runtime cases running beside them, each of which spends about 2.8 s of
+  CPU starting a debug `libR.so`; input typed while a console is still starting arrives as one
+  paste. Waiting for the prompt instead of the banner (ry's console now prints its banner at the
+  first prompt), or serializing the ry-runtime cases, would remove it.
 
 ## Open: data-oriented layouts and explicit allocators
 
