@@ -1515,7 +1515,9 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
 }
 
 /// File-absolute (edge-only, like [`item_node`]): the assignment target or the
-/// `setGeneric` name string.
+/// `setGeneric` name string. Memoized so that a cold check reads it from another file without
+/// reparsing that file's evicted tree.
+#[salsa::tracked(returns(copy))]
 pub fn item_name_range<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<TextRange> {
     let node = item_node(db, item)?;
     top_level_definition(&node).map(|definition| definition.name_range)

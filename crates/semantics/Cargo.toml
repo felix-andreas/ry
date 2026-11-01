@@ -8,7 +8,7 @@ publish = false
 path = "src/semantics.rs"
 
 [dependencies]
-boxcar = "0.2.14"
+boxcar.workspace = true
 rowan.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true

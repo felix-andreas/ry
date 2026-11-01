@@ -258,10 +258,25 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
 /// More files than the tree caches hold, so a cold pass really evicts trees. Each file has
 /// every kind of syntax a later pass reads: a lint, a `#:` comment, and a statement
 /// annotated both ways.
+/// Two files far apart both bind `shared`, so reporting the duplicate reads the other file's
+/// facts after its tree is evicted, and the trailing script reports an unused binding.
 fn evicting_project(db: &ProbeDatabase) -> Vec<SourceFile> {
-    let sources: Vec<String> = (0..200).map(evicting_project_source).collect();
-    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
-    db.project(&sources)
+    let mut files: Vec<SourceFile> = (0..200)
+        .map(|index| {
+            let mut source = evicting_project_source(index);
+            if index == 0 || index == 199 {
+                source.push_str("shared <- 1L\n");
+            }
+            SourceFile::new(db, source, DocumentKind::Package)
+        })
+        .collect();
+    files.push(SourceFile::new(
+        db,
+        "unused <- 1L\nunused <- 2L\nprint(unused)\n".to_owned(),
+        DocumentKind::Script,
+    ));
+    ProjectFiles::new(db, files.clone());
+    files
 }
 
 /// The order `ry check` runs in: derive from each tree and evict, name every item, then
@@ -271,6 +286,9 @@ fn cold_check(db: &mut ProbeDatabase, files: &[SourceFile], lints: &LintConfig) 
         derive_from_syntax(db, file, lints);
         db.trigger_lru_eviction();
     }
+    // `ry check` writes the attached namespaces here, so later passes verify memos over
+    // evicted trees instead of reusing them within one revision.
+    db.synthetic_write(Durability::LOW);
     for &file in files {
         for &item in item_tree(db, file) {
             item_naming(db, item);
@@ -295,6 +313,22 @@ fn a_cold_check_that_evicts_trees_parses_each_file_once() {
     let lints = LintConfig::default();
     cold_check(&mut db, &files, &lints);
     assert_eq!(db.executions_since(&["parse"]), [files.len()]);
+    let codes = |file: SourceFile| -> Vec<&'static str> {
+        file_diagnostics(&db, file)
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    };
+    assert!(
+        codes(files[0]).contains(&"duplicate"),
+        "{:?}",
+        codes(files[0])
+    );
+    assert!(
+        codes(files[200]).contains(&"unused"),
+        "{:?}",
+        codes(files[200])
+    );
     assert!(
         lint_file(&db, files[0], &lints)
             .iter()

@@ -2189,7 +2189,7 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   thousands of times), the setup phase was single-threaded, and the drop walked every
   allocation only to exit. Peak memory was about 1 GiB and the cold pass 6 s.
 - **Target shape.**
-  - `hir::Symbol` is a process-wide interned name: `Copy`, two words, leaked `&'static str`. HIR,
+  - `hir::Symbol` is a process-wide interned name: a `Copy` 4-byte index into a sharded table. HIR,
     naming and the check output carry `Symbol`. Project-level maps stay keyed by `String` so their
     lookups keep borrowing `str`, converting at the boundary.
   - HIR lists are boxed slices and `lower_item` shrinks the arena, so a memoized item holds no

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use std::{env, fmt, fs, iter, thread};
+use std::{env, fmt, fs, iter, mem, thread};
 use syntax::TextRange;
 use syntax::literate::{is_literate_extension, r_source_of_literate};
 
@@ -288,7 +288,7 @@ pub(crate) fn analyze_project(
             .and_then(parse_description_package),
     );
 
-    let mut checked: Vec<(PathBuf, Option<String>)> = Vec::with_capacity(paths.len());
+    let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
     for path in paths {
         let source = match fs::read_to_string(&path) {
@@ -303,7 +303,7 @@ pub(crate) fn analyze_project(
             .iter()
             .any(|target| path == *target || path.starts_with(target));
         reported.push(asked_about);
-        checked.push((path, Some(source)));
+        checked.push((path, source));
     }
 
     // Analysis follows the project order; diagnostics still print in discovery order.
@@ -319,8 +319,8 @@ pub(crate) fn analyze_project(
         } else {
             DocumentKind::Script
         };
-        let source = source.take().expect("each file is created once");
-        let file = SourceFile::new(&db, source, kind);
+        // `ordered` is a permutation, so each source is moved out exactly once.
+        let file = SourceFile::new(&db, mem::take(source), kind);
         files[index] = Some(file);
         project.push(file);
     }

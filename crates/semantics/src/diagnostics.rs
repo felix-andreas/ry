@@ -81,6 +81,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
+        let _ = item_name_range(db, item);
     }
 }
 

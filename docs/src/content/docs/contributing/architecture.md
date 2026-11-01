@@ -119,7 +119,7 @@ cold pass does not retain them. `limit_resident_trees` gives `parse` and the per
 and `item_annotation_syntax` salsa LRU capacities, and every query that reads a tree is a memoized
 query whose result is small: the
 item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references
-and agreement candidates in `diagnostics.rs`, and `lints::file_syntax_lints`. An evicted memo keeps
+and agreement candidates in `diagnostics.rs`, `item_name_range`, and `lints::file_syntax_lints`. An evicted memo keeps
 its dependency edges, so revalidating an untouched file after an edit elsewhere never re-parses it;
 only a file whose text changed is parsed again. A finding that also needs naming or the project's
 declarations is split in two: the syntax-only half is memoized, and a cheap step joins it with the
@@ -135,8 +135,10 @@ off the splice cache, which would otherwise keep the previous tree of every file
 `test_incremental.rs` case pins the one-parse property.
 
 The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
-bases, because LRU bookkeeping runs on every fetch and an evicted tree must be rebuilt whenever a
-memo's value is needed, while the memory it saves matters less in a long-lived process.
+bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
+tree must be rebuilt whenever a memo's value is needed. The memory it saves matters less in a
+long-lived process, so the server never calls `limit_resident_trees`, and the tree queries' `lru = 0`
+default leaves them unbounded with no per-fetch bookkeeping.
 
 ### From item to scheme
 
@@ -144,7 +146,7 @@ An item's green subtree lowers to HIR, with spans relative to the item. Its anno
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
 (`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
-in HIR and naming are interned `Symbol`s (two words, `Copy`), lists are boxed slices, and the arena
+in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id), lists are boxed slices, and the arena
 is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
