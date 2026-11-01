@@ -1314,7 +1314,7 @@ const FRAME_SAFE_BUILTINS: &[&str] = &[
 /// Whether `expression`, in the body of `function`, keeps `function` frame-safe (see
 /// `Builder::frame_safe`), collecting the speculation for every function it calls.
 unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut Vec<Speculation>) -> bool {
-    if expression.kind() != SexpType::Lang {
+    if expression.kind() != SexpType::Language {
         return true;
     }
     let head = expression.car();
@@ -1334,7 +1334,7 @@ unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut Vec<Spec
             // also calls the replacement builtin, and any other target could call a closure.
             Some("<-" | "=") => match arguments.first() {
                 Some(&(_, target)) if target.kind() == SexpType::Symbol => true,
-                Some(&(_, target)) if target.kind() == SexpType::Lang && target.car().kind() == SexpType::Symbol => {
+                Some(&(_, target)) if target.kind() == SexpType::Language && target.car().kind() == SexpType::Symbol => {
                     let index = values::symbol_name(target.car());
                     matches!(index.as_ref(), "[" | "[[")
                         && values::pairlist_items(target.cdr()).first().is_some_and(|&(_, value)| value.kind() == SexpType::Symbol)
