@@ -3,6 +3,7 @@ use crate::annotations::{
     lower_annotation, lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
+use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
 use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
@@ -10,8 +11,8 @@ use crate::metadata::{declared_dependency, imported_by_name, imports_every_name,
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FunctionType, InferenceVar, Name, RecordField, Ty, TyKind, TypeScheme,
-    map_child_types, substitute_rigid, union_of,
+    Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
+    TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
@@ -22,7 +23,8 @@ use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{iter, mem};
 use syntax::SyntaxNode;
-use syntax::{SyntaxKind, TextRange, is_syntactic_name};
+use syntax::ast::is_expression_kind;
+use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -110,7 +112,57 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     }
     diagnostics.extend(dangling_annotation_diagnostics(db, file));
     diagnostics.extend(inline_annotation_diagnostics(db, file));
+    diagnostics.extend(ry_syntax_diagnostics(db, file));
     diagnostics
+}
+
+/// Records, tuples, tags and `match` have no meaning in R, so a project that turned
+/// inline annotations off to stay runnable by R hears about each one. They are still
+/// typed, but `match` coverage is not counted.
+fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    let parsed = parse(db, file);
+    let sites: Vec<SyntaxNode> = parsed
+        .syntax_node()
+        .descendants()
+        .filter(|node| {
+            matches!(
+                node.kind(),
+                SyntaxKind::RECORD_EXPR
+                    | SyntaxKind::TUPLE_EXPR
+                    | SyntaxKind::TAG_EXPR
+                    | SyntaxKind::MATCH_EXPR
+            )
+        })
+        .collect();
+    if sites.is_empty() || inline_annotations_enabled(db) {
+        return Vec::new();
+    }
+    sites
+        .iter()
+        .map(|node| {
+            let (what, range) = match node.kind() {
+                SyntaxKind::RECORD_EXPR => ("record", node.text_range()),
+                SyntaxKind::TUPLE_EXPR => ("tuple", node.text_range()),
+                SyntaxKind::TAG_EXPR => ("tag", node.text_range()),
+                // The arms can be long, so the head `match (x)` stands for the expression.
+                _ => {
+                    let head_end = node
+                        .children()
+                        .find(|child| is_expression_kind(child.kind()))
+                        .map_or(node.text_range().end(), |scrutinee| scrutinee.text_range().end());
+                    ("`match`", TextRange::new(node.text_range().start(), head_end))
+                }
+            };
+            Diagnostic::new(
+                range,
+                Severity::Warning,
+                "ry-syntax",
+                format!(
+                    "this {what} is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on"
+                ),
+            )
+        })
+        .collect()
 }
 
 /// An inline annotation's lowering errors, like a `#:` block's. Turned off, each inline
@@ -275,6 +327,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 render_type_error_message(db, error),
             ));
         }
+        // Without inline annotations, records, tags and `match` are reported as `ry-syntax`
+        // and their coverage is not counted.
+        if !check.match_findings.is_empty() && inline_annotations_enabled(db) {
+            for finding in &check.match_findings {
+                diagnostics.push(match_finding_diagnostic(finding, offset));
+            }
+        }
         let Some(module) = item_hir(db, item) else {
             continue;
         };
@@ -312,6 +371,19 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 Severity::Error,
                 "syntax-error",
                 format!("this is a value, not a name, so nothing can be assigned to it{hint}"),
+            ));
+        }
+        // The arm body reads every name the pattern binds, so an alternative that leaves one
+        // out would run the body with that name unset or holding a stale value.
+        for mismatch in &naming.or_pattern_mismatches {
+            diagnostics.push(Diagnostic::new(
+                mismatch.range + offset,
+                Severity::Error,
+                "syntax-error",
+                format!(
+                    "this alternative does not bind `{}`, but another alternative of the `|` pattern does. Every alternative must bind the same names",
+                    mismatch.name
+                ),
             ));
         }
         // R errors on a read with no prior write. Local slots only: a top-level
@@ -2006,6 +2078,51 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *variable),
             renderer.render(db, *container)
         ),
+        TypeErrorKind::PatternNeverMatches { found } => format!(
+            "this pattern can never match: the value is `{}`",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ConflictingTags { first, second } => format!(
+            "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
+            renderer.render(db, *first),
+            renderer.render(db, *second)
+        ),
+    }
+}
+
+fn match_finding_diagnostic(finding: &MatchFinding, offset: TextSize) -> Diagnostic {
+    let range = finding.range + offset;
+    match &finding.kind {
+        MatchFindingKind::Unreachable => Diagnostic::new(
+            range,
+            Severity::Warning,
+            "unreachable-pattern",
+            "this arm is unreachable: the arms above it already match every value its pattern matches".to_owned(),
+        ),
+        MatchFindingKind::NonExhaustive { missing, more } => {
+            let message = if missing.iter().all(|case| case == "_") {
+                "this `match` does not handle every value: add a catch-all `_ => ...` arm".to_owned()
+            } else {
+                let mut cases: Vec<String> = missing.iter().map(|case| format!("`{case}`")).collect();
+                if *more {
+                    cases.push("more".to_owned());
+                }
+                let listed = match cases.split_last() {
+                    Some((last, [])) => last.clone(),
+                    Some((last, others)) => format!("{} and {last}", others.join(", ")),
+                    None => String::new(),
+                };
+                let (arm, pronoun) = if cases.len() == 1 {
+                    ("an arm", "it")
+                } else {
+                    ("arms", "them")
+                };
+                format!(
+                    "this `match` does not handle {listed}: add {arm} for {pronoun}, or a catch-all `_ => ...` arm"
+                )
+            };
+            Diagnostic::new(range, Severity::Error, "non-exhaustive-match", message)
+        }
     }
 }
 
@@ -2033,11 +2150,26 @@ impl<'db> TypeRenderer<'db> {
             TyKind::NamedVector(element) => format!("{}[named]", self.render(db, *element)),
             TyKind::List(element) => format!("list[{}]", self.render(db, *element)),
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
-            TyKind::Tuple(items) => {
-                let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
-                format!("list{{{}}}", items.join(", "))
-            }
+            TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
             TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
+            TyKind::NativeTuple(items) => format!("tuple{{{}}}", self.render_items(db, items)),
+            TyKind::NativeRecord(fields) => {
+                format!("record{{{}}}", self.render_native_fields(db, fields))
+            }
+            TyKind::Tag(name, payload) => {
+                let name = name.text(db);
+                match payload.map(|payload| payload.kind(db)) {
+                    None => format!(":{name}"),
+                    Some(TyKind::NativeTuple(items)) => {
+                        format!(":{name}({})", self.render_items(db, items))
+                    }
+                    Some(TyKind::NativeRecord(fields)) => {
+                        format!(":{name}({})", self.render_native_fields(db, fields))
+                    }
+                    Some(_) => format!(":{name}(Unknown)"),
+                }
+            }
+            TyKind::OtherTags => "..".to_owned(),
             TyKind::Frame(Some(columns)) => {
                 format!("frame{{{}}}", self.render_fields(db, columns))
             }
@@ -2098,6 +2230,26 @@ impl<'db> TypeRenderer<'db> {
             })
             .collect();
         Some(format!("<{}>", binders.join(", ")))
+    }
+
+    fn render_items(&mut self, db: &'db dyn Db, items: &[Ty<'db>]) -> String {
+        let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
+        items.join(", ")
+    }
+
+    fn render_native_fields(&mut self, db: &'db dyn Db, fields: &[NativeField<'db>]) -> String {
+        let fields: Vec<String> = fields
+            .iter()
+            .map(|field| {
+                let name = field.name.text(db);
+                if is_syntactic_name(name) {
+                    format!("{name}: {}", self.render(db, field.ty))
+                } else {
+                    format!("`{name}`: {}", self.render(db, field.ty))
+                }
+            })
+            .collect();
+        fields.join(", ")
     }
 
     fn render_fields(&mut self, db: &'db dyn Db, fields: &[RecordField<'db>]) -> String {

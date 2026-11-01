@@ -19,8 +19,20 @@ pub fn sexp_type(code: SEXPTYPE) -> ApiResult<SexpType> {
     SexpType::from_code(code).ok_or_else(|| error(format!("invalid type code {code}")))
 }
 
+/// Refuses a ry record, tuple or tag. C code sees such a value as an opaque object of type 27:
+/// it can move the handle through a list, but every accessor that would read it as R data
+/// raises the conversion error instead.
+pub unsafe fn refuse_native(object: Sexp) -> ApiResult<()> {
+    if object.kind() == SexpType::Record {
+        let kind = interp::records::native_kind(object);
+        return Err(error(interp::records::boundary_message("the value", kind)));
+    }
+    Ok(())
+}
+
 /// The length of a vector, `LENGTH`'s and `XLENGTH`'s answer.
 pub unsafe fn xlength(object: Sexp) -> ApiResult<R_xlen_t> {
+    refuse_native(object)?;
     if object.is_altrep() {
         return altrep::length(object);
     }
@@ -39,6 +51,7 @@ pub unsafe fn xlength(object: Sexp) -> ApiResult<R_xlen_t> {
 
 /// `Rf_xlength`, which also counts pairlist cells and environment bindings.
 pub unsafe fn generic_length(object: Sexp) -> ApiResult<R_xlen_t> {
+    refuse_native(object)?;
     if object.is_altrep() || object.kind().is_vector() {
         return xlength(object);
     }
@@ -64,6 +77,7 @@ pub unsafe fn generic_length(object: Sexp) -> ApiResult<R_xlen_t> {
 /// A vector's element storage. A writable pointer to handle elements escapes the write
 /// barrier, so the collector rescans such a vector from then on.
 pub unsafe fn data_pointer(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
+    refuse_native(object)?;
     if object.is_altrep() {
         return altrep::dataptr(object, writable);
     }
@@ -102,6 +116,7 @@ unsafe fn check_type(
     accessor: &str,
     wanted: &str,
 ) -> ApiResult<()> {
+    refuse_native(object)?;
     let kind = object.kind();
     if !accepted.contains(&kind) {
         return Err(error(format!(
@@ -1127,6 +1142,7 @@ or_null_api!(RAW_OR_NULL, u8, [SexpType::Raw], "RAW", "raw");
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
     enter(|| {
+        refuse_native(object)?;
         if object.kind() != SexpType::String {
             return Err(error(format!(
                 "STRING_ELT() can only be applied to a 'character vector', not a '{}'",
@@ -1140,6 +1156,7 @@ pub unsafe extern "C" fn STRING_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
     enter(|| {
+        refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
             return Err(error(format!(
                 "VECTOR_ELT() can only be applied to a 'list', not a '{}'",
@@ -1153,6 +1170,7 @@ pub unsafe extern "C" fn VECTOR_ELT(object: Sexp, index: R_xlen_t) -> Sexp {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Sexp) {
     enter(|| {
+        refuse_native(object)?;
         if object.kind() != SexpType::String {
             return Err(error(format!(
                 "SET_STRING_ELT() can only be applied to a 'character vector', not a '{}'",
@@ -1178,6 +1196,7 @@ pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Se
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SET_VECTOR_ELT(object: Sexp, index: R_xlen_t, value: Sexp) -> Sexp {
     enter(|| {
+        refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {
             return Err(error(format!(
                 "SET_VECTOR_ELT() can only be applied to a 'list', not a '{}'",

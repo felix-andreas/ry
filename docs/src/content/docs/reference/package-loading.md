@@ -21,6 +21,11 @@ This page is the exact behavior.
   [pkgbuild](https://pkgbuild.r-lib.org) and loaded, and `.onLoad` and `.onAttach` run.
 - **A syntax error stops the load before anything runs**, and names the file and line. A statement
   that fails at load time is reported with its file and line too.
+- **With [strict mode](/type-checking/strict-mode) on**, in `ry.toml` or in a file's
+  `# typing: strict` comment, `ry load` checks the package's `R/` files first, on either runtime.
+  If any has a strict-mode error, it prints the errors and exits with status 1 without loading
+  anything. The `R/` files are checked together, so a name one file defines resolves in the others.
+  A later `load_all()` in the same session, and the load `ry repl` makes, do not check.
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
 into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an

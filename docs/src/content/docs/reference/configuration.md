@@ -11,6 +11,7 @@ CI always agree. This is every key, with its default:
 typing = false           # report type errors
 strict = false           # report unknown types and untyped parameters (needs typing for type errors)
 inline-annotations = true  # type inline annotations such as `x: integer <- 1L`
+object-systems = true    # allow S4, R6 and Reference Classes; false makes each definition an error
 unused = true            # report values that are never read
 maybe-undefined = false  # report reads some path reaches before a write
 exclude = []             # gitignore-style patterns that ry check skips
@@ -24,6 +25,7 @@ unused-import = "off"         # a NAMESPACE importFrom nothing uses
 shadows-builtin = "off"       # a top-level name that hides a base function
 shadows-namespace = "off"     # a top-level name that hides another export
 # naming-style = "snake_case" # or "camelCase"; unset means not checked
+object-system = "warn"        # a class defined with S4, R6 or Reference Classes
 
 [format]
 indent-width = 2
@@ -62,6 +64,15 @@ loads `ry.toml`:
 ```text
 ! inline type annotations are turned off (`[check] inline-annotations = false`), so ry does not check them and reports each one it finds
 ```
+
+## `object-systems`
+
+S4, R6 and Reference Classes keep working, but ry recommends
+[records and tagged unions](/type-checking/records-and-tags), which it checks statically, so each
+class or method definition gets an `object-system` warning. Set `[lint] object-system = "off"` to
+silence it. A project that wants none of these classes sets `object-systems = false`, and every
+definition becomes an error, whatever the lint level says. Only definitions are reported, so a call
+to `new()` on a class from another package is not.
 
 ## `exclude`
 

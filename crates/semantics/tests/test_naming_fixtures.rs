@@ -137,6 +137,13 @@ fn render_item(output: &mut String, naming: &ItemNaming, module: &Module) {
     for target in &naming.invalid_assignment_targets {
         output.push_str(&format!("  invalid-target {}\n", span(target.range)));
     }
+    for mismatch in &naming.or_pattern_mismatches {
+        output.push_str(&format!(
+            "  or-pattern-missing {} {}\n",
+            mismatch.name,
+            span(mismatch.range)
+        ));
+    }
     for &expression in &naming.masked_subsets {
         output.push_str(&format!(
             "  masked-subset {}\n",
@@ -156,9 +163,13 @@ fn assignment_targets(module: &Module) -> BTreeSet<ExprId> {
     module
         .expressions
         .iter()
-        .filter_map(|expression| match expression.kind {
-            ExpressionKind::Assign { target, .. } => Some(target),
-            _ => None,
+        .flat_map(|expression| match &expression.kind {
+            ExpressionKind::Assign { target, .. } => vec![*target],
+            ExpressionKind::Match { arms, .. } => arms
+                .iter()
+                .flat_map(|arm| arm.bindings.iter().copied())
+                .collect(),
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -189,5 +200,6 @@ fn binding_kind(kind: BindingKind) -> &'static str {
         BindingKind::Local => "local",
         BindingKind::Parameter => "parameter",
         BindingKind::ForVariable => "for-variable",
+        BindingKind::PatternVariable => "pattern-variable",
     }
 }

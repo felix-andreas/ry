@@ -58,6 +58,18 @@ const TEMPLATES: &[&str] = &[
     "while ({m} > 0L) {n} <- {n} - 1L",
     "{n} <- function(...) list(...)",
     "{n} <- switch({m}, a = 1L, b = 2L)",
+    "{n} <- (x = {m}, y = 1L)",
+    "{n} <- ({m}, \"a\")",
+    "{n} <- ({m},)",
+    "{n} <- {m}$x + {m}[[1L]]",
+    "{n} <- if ({m}) :Some({m}) else :None",
+    "{n} <- :Rect(width = {m}, height = 2)",
+    "{n} <- match ({m}) {\n  :Some(v) if (v > 0L) => v\n  :Some(_) | :None => 0L\n}",
+    "{n} <- match ({m}) {\n  (x = a, ..) => a\n  (p, q) => p\n  _ => {m}\n}",
+    "{n} <- match ({m}) {\n  TRUE => 1L\n  FALSE => 2L\n}",
+    "#: fn(o: :Some(integer) | :None) -> integer\n{n} <- function(o) match (o) {\n  :Some(v) => v\n}",
+    "#: fn(r: :Ok(integer) | ..) -> integer\n{n} <- function(r) match (r) {\n  :Ok(v) => v\n  _ => {m}\n}",
+    "#: @alias Shape {:Circle(radius: double) | :Empty}\n\n#: Shape\n{n} <- :Circle(radius = {m})",
 ];
 
 const DIRECTIVES: &[&str] = &[
@@ -70,7 +82,7 @@ const DIRECTIVES: &[&str] = &[
 const SOUP: &[&str] = &[
     "x", "f", "(", ")", "{", "}", "[", "[[", "]", ",", "\n", " ", "<-", "+", "if", "else",
     "function", "1L", "\"s\"", "%in%", "|>", "~", "$", "::", "#:", "@type", "fn", "list{", "NULL",
-    "...", ":=", "<<-", "\\", "@new",
+    "...", ":=", "<<-", "\\", "@new", "match", "=>", ":Some", ":None", "_", "..", "|",
 ];
 
 fn iterations() -> usize {

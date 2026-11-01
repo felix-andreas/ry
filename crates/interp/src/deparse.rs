@@ -5,7 +5,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    format,
+    format, records,
     unwind::R,
     values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
 };
@@ -292,6 +292,7 @@ impl Deparser {
             SexpType::List => self.list(object, "list("),
             SexpType::Expression => self.list(object, "expression("),
             SexpType::Object => self.print("<S4 object of class structure>"),
+            SexpType::Record => self.native(object),
             kind if kind.is_atomic() => self.vector(object),
             _ => self.print("<unknown>"),
         }
@@ -408,6 +409,10 @@ impl Deparser {
             if head == symbols.repeat && argument_count == 1 {
                 self.print("repeat ");
                 self.deparse(arguments.car());
+                return;
+            }
+            if let Some(form) = ry_form(name, arguments) {
+                self.ry_call(form, arguments);
                 return;
             }
             if head == symbols.break_ && argument_count == 0 {
@@ -585,6 +590,205 @@ impl Deparser {
         self.arguments(arguments, false);
         self.in_list -= 1;
         self.print(")");
+    }
+
+    /// A record, tuple or tag value, in the syntax that builds it: `(x = 1, y = 2)`, `(1L,)`,
+    /// `()`, `:None` or `:Circle(radius = 2)`.
+    unsafe fn native(&mut self, object: Sexp) {
+        let layout = records::layout(object);
+        let count = layout.slot_count();
+        if let Some(tag) = layout.tag {
+            self.print(":");
+            self.print(&quote_name(&records::tag_name(tag)));
+            if count == 0 {
+                return;
+            }
+        }
+        self.print("(");
+        self.in_list += 1;
+        let mut broken = false;
+        for index in 0..count {
+            if let Some(name) = layout.names().get(index) {
+                self.print(&quote_name(&symbol_name(*name)));
+                self.print(" = ");
+            }
+            match records::slot_value(object, index) {
+                Ok(value) => self.deparse(value),
+                Err(_) => self.print("<unavailable>"),
+            }
+            if index + 1 < count {
+                self.print(", ");
+                self.line_break(&mut broken);
+            }
+        }
+        if broken {
+            self.indent -= 1;
+        }
+        self.in_list -= 1;
+        // `(x = 1)` is an assignment and `(1L)` a parenthesized number, so a one-item record or
+        // tuple keeps a trailing comma; a tag's payload parentheses are never ambiguous.
+        if count == 1 && layout.tag.is_none() {
+            self.print(",");
+        }
+        self.print(")");
+    }
+
+    /// The calls ry's own syntax lowers to, printed back in that syntax.
+    unsafe fn ry_call(&mut self, form: RyForm, arguments: Sexp) {
+        match form {
+            RyForm::Record | RyForm::Tuple => {
+                self.print("(");
+                self.in_list += 1;
+                self.arguments(arguments, false);
+                self.in_list -= 1;
+                if values::pairlist_length(arguments) == 1 {
+                    self.print(",");
+                }
+                self.print(")");
+            }
+            RyForm::Tag => {
+                self.print(":");
+                self.print(&quote_name(&char_str(arguments.car().element(0))));
+                let payload = arguments.cdr();
+                if payload != nil() {
+                    self.print("(");
+                    self.in_list += 1;
+                    self.arguments(payload, false);
+                    self.in_list -= 1;
+                    self.print(")");
+                }
+            }
+            RyForm::Match => {
+                let scrutinee = arguments.car();
+                self.print("match ");
+                // `match (a, b) {` puts a tuple scrutinee in the parentheses themselves.
+                if matches!(ry_call_form(scrutinee), Some(RyForm::Record | RyForm::Tuple))
+                    && values::pairlist_length(scrutinee.cdr()) > 1
+                {
+                    self.deparse(scrutinee);
+                } else {
+                    self.print("(");
+                    self.deparse(scrutinee);
+                    self.print(")");
+                }
+                self.print(" {");
+                self.in_curly += 1;
+                self.indent += 1;
+                self.write_line();
+                let mut arms = arguments.cdr();
+                while arms.kind() == SexpType::Pairlist {
+                    self.arm(arms.car());
+                    self.write_line();
+                    arms = arms.cdr();
+                }
+                self.indent -= 1;
+                self.print("}");
+                self.in_curly -= 1;
+            }
+        }
+    }
+
+    /// One `match` arm, `pattern => body` or `pattern if (guard) => body`.
+    unsafe fn arm(&mut self, arm: Sexp) {
+        let parts: Vec<Sexp> = values::pairlist_items(arm.cdr()).into_iter().map(|(_, part)| part).collect();
+        let (pattern, guard, body) = match parts.as_slice() {
+            [pattern, body] => (*pattern, None, *body),
+            [pattern, guard, body] => (*pattern, Some(*guard), *body),
+            _ => {
+                self.deparse(arm);
+                return;
+            }
+        };
+        self.pattern(pattern);
+        if let Some(guard) = guard {
+            self.print(" if (");
+            self.deparse(guard);
+            self.print(")");
+        }
+        self.print(" => ");
+        // A brace-less `if` in a block breaks across lines, and a line break ends the arm.
+        let flat = !is_curly(body);
+        if flat {
+            self.in_list += 1;
+        }
+        self.deparse(body);
+        if flat {
+            self.in_list -= 1;
+        }
+    }
+
+    /// A pattern, which shares the call encoding of the values it matches but prints `_` and
+    /// `..` bare.
+    unsafe fn pattern(&mut self, pattern: Sexp) {
+        match pattern.kind() {
+            SexpType::Symbol => {
+                let name = symbol_name(pattern);
+                if name == "_" || name == ".." {
+                    self.print(&name);
+                } else {
+                    self.print(&quote_name(&name));
+                }
+            }
+            SexpType::Language => {
+                let head = pattern.car();
+                let arguments = pattern.cdr();
+                let head_name = if head.kind() == SexpType::Symbol {
+                    symbol_name(head).into_owned()
+                } else {
+                    String::new()
+                };
+                match (head_name.as_str(), ry_call_form(pattern)) {
+                    (".ry_record" | ".ry_tuple", _) => {
+                        self.print("(");
+                        self.pattern_items(arguments);
+                        let items = values::pairlist_items(arguments);
+                        let rest = items
+                            .last()
+                            .is_some_and(|(_, item)| item.kind() == SexpType::Symbol && item.car().bytes() == b"..");
+                        if items.len() == 1 && !rest {
+                            self.print(",");
+                        }
+                        self.print(")");
+                    }
+                    (_, Some(RyForm::Tag)) => {
+                        self.print(":");
+                        self.print(&quote_name(&char_str(arguments.car().element(0))));
+                        if arguments.cdr() != nil() {
+                            self.print("(");
+                            self.pattern_items(arguments.cdr());
+                            self.print(")");
+                        }
+                    }
+                    ("|", _) if values::pairlist_length(arguments) == 2 => {
+                        self.pattern(arguments.car());
+                        self.print(" | ");
+                        self.pattern(arguments.cdr().car());
+                    }
+                    ("(", _) if values::pairlist_length(arguments) == 1 => {
+                        self.print("(");
+                        self.pattern(arguments.car());
+                        self.print(")");
+                    }
+                    _ => self.deparse(pattern),
+                }
+            }
+            _ => self.deparse(pattern),
+        }
+    }
+
+    unsafe fn pattern_items(&mut self, mut items: Sexp) {
+        while items.kind() == SexpType::Pairlist {
+            let tag = items.tag();
+            if tag != nil() && tag.kind() == SexpType::Symbol {
+                self.print(&quote_name(&symbol_name(tag)));
+                self.print(" = ");
+            }
+            self.pattern(items.car());
+            items = items.cdr();
+            if items.kind() == SexpType::Pairlist {
+                self.print(", ");
+            }
+        }
     }
 
     unsafe fn plain_call(&mut self, name: &str, arguments: Sexp) {
@@ -911,6 +1115,48 @@ unsafe fn has_shown_attributes(object: Sexp) -> bool {
         cell = cell.cdr();
     }
     false
+}
+
+/// The calls ry's own syntax lowers to.
+#[derive(Clone, Copy)]
+enum RyForm {
+    Record,
+    Tuple,
+    Tag,
+    Match,
+}
+
+/// Which ry form a call of `name` with `arguments` is, when its arguments have that form's
+/// shape; any other call of the same name prints as an ordinary call.
+unsafe fn ry_form(name: &[u8], arguments: Sexp) -> Option<RyForm> {
+    let items = values::pairlist_items(arguments);
+    let named = items.iter().filter(|(tag, _)| *tag != nil()).count();
+    match name {
+        b".ry_record" if !items.is_empty() && named == items.len() => Some(RyForm::Record),
+        b".ry_tuple" if named == 0 => Some(RyForm::Tuple),
+        b".ry_tag" => {
+            let (first_tag, first) = items.first()?;
+            (*first_tag == nil() && first.kind() == SexpType::String && length(*first) == 1)
+                .then_some(RyForm::Tag)
+        }
+        b".ry_match" if !items.is_empty() => {
+            let arms_ok = items[1..].iter().all(|(_, arm)| {
+                arm.kind() == SexpType::Language
+                    && arm.car().kind() == SexpType::Symbol
+                    && arm.car().car().bytes() == b"=>"
+                    && (2..=3).contains(&values::pairlist_length(arm.cdr()))
+            });
+            arms_ok.then_some(RyForm::Match)
+        }
+        _ => None,
+    }
+}
+
+unsafe fn ry_call_form(expression: Sexp) -> Option<RyForm> {
+    if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+        return None;
+    }
+    ry_form(expression.car().car().bytes(), expression.cdr())
 }
 
 unsafe fn is_curly(expression: Sexp) -> bool {

@@ -55,6 +55,15 @@ pub fn try_splice(
         return None;
     }
 
+    // An unterminated string in the prefix ends at its line break only because no closing quote
+    // follows it; a quote anywhere after it would extend it across the edit.
+    if old
+        .errors()
+        .iter()
+        .any(|error| error.range.start() < prefix_len && error.message.starts_with("unterminated"))
+    {
+        return None;
+    }
     let middle_text = &new_text[usize::from(prefix_len)..new_suffix_start];
     if middle_touches_annotation(middle_text) {
         return None;

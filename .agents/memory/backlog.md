@@ -27,6 +27,8 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **A package with `src/` does not load on ry's runtime**: pkgbuild's `check_build_tools` fails
   there (callr and friends hit interpreter gaps). `readDCF` and classed comparisons were the first two
   blockers. Until it works, `--runtime gnu-r` is the documented route.
+- **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
+  and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
   The loader has the byte range of every definition, so a srcref could be built from it once the
   interpreter carries srcrefs at all.
@@ -1870,8 +1872,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Explicitly out of scope for now
 
-- Tags and discriminated unions, through a stdlib `match` the checker knows about. Design it in
-  `contributing/design/open-questions.md` first.
 - Modelling S3 dispatch, meaning `UseMethod`. It is the prerequisite for an honest `print`,
   `summary` and `plot`.
 - Column-level typing for a data.frame, matrix dimensionality, and real S4 typing.

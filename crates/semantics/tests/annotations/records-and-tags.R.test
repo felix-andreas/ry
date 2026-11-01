@@ -1,0 +1,76 @@
+#==== native_types
+#---- record_type
+record{y: double, x: integer}
+#++++
+record{x: integer, y: double}
+
+#---- empty_record_type
+record{}
+#++++
+record{}
+
+#---- tuple_type
+tuple{integer, character}
+#++++
+tuple{integer, character}
+
+#---- empty_tuple_type
+tuple{}
+#++++
+tuple{}
+
+#---- record_type_needs_names
+record{integer, character}
+#++++
+error: a `record{...}` type names every field: write each one as `name: TYPE`, or use `tuple{...}` for unnamed items
+
+#---- tuple_type_takes_no_names
+tuple{x: integer}
+#++++
+error: a `tuple{...}` type lists its items without names: drop the names, or use `record{...}` for named fields
+
+#---- duplicate_record_field
+record{x: integer, x: double}
+#++++
+error: the field `x` appears twice in this `record{...}` type
+
+#==== tag_types
+#---- bare_tag
+:None
+#++++
+:None
+
+#---- positional_payload
+:Some(integer)
+#++++
+:Some(integer)
+
+#---- named_payload
+:Rect(width: double, height: double)
+#++++
+:Rect(height: double, width: double)
+
+#---- option_union
+:Some(integer) | :None
+#++++
+:Some(integer) | :None
+
+#---- open_union
+:Ok(integer) | .. | :Err(character)
+#++++
+:Ok(integer) | :Err(character) | ..
+
+#---- same_shape_tags_merge
+:Some(integer) | :Some(character)
+#++++
+:Some(integer | character)
+
+#---- different_shapes_conflict
+:Some(integer) | :Some(integer, integer)
+#++++
+error: `:Some(integer)` and `:Some(integer, integer)` give one tag two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart
+
+#---- generic_option_alias
+@alias Option<T> {:Some(T) | :None}
+#++++
+alias Option<T> = :Some(T) | :None

@@ -63,8 +63,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Runtime step 3 follow-up (session_0111kWqCeajgVo7m8XVxpfDk, Opus): stats natives, review fixes, GNU R `tests/*.R`, connection builtins, stringi, task callbacks.
 - Table performance (session_0111kWqB9LKMquDanx18xVTC, Opus): beat data.table on every db-benchmark query.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
-- Lazy loader on ry's interpreter (session_0111kWqEkieA316rHiKNpGxB, Opus).
-- Native records, tuples and tagged unions; S4/R6 discouraged (session_0111kWqDq53tu9KBVLAT5WSn, Opus).
+- Native records, tuples and tagged unions; S4/R6 discouraged (session_0111kWqDq53tu9KBVLAT5WSn, Opus): PR #115 merged as 702e629; session verifying main and closing two checker gaps on main.
 - Runtime step 7: the Cranelift JIT (session_0111kWqBQdpLjmrdiA5ajbhR, Opus).
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
