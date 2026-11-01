@@ -314,6 +314,20 @@ An independent review profiled before it proposed. Every number below was taken 
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
 
+### Project-wide aggregates verify every item after each keystroke (unverified here, reported by the IDE responsiveness work)
+
+- On the finance benchmark, any editor request right after a keystroke costs about 45 ms at p50,
+  against 0.5 to 1 ms settled, and edited-file diagnostics cost about 56 ms with no item rechecked.
+  The time is salsa deep verification under `item_check`.
+- Cause: `conditional_slot_items`, `interface_sccs`, `package_definitions` and
+  `project_arithmetic_classes` read per-item memos across all files directly. The edited file's
+  items make each aggregate `LOW`, so verifying it walks about 56K edges.
+- Fix shape: fold per-file tracked memos (for example `file_conditional_writers`,
+  `file_definitions`, `file_interface_reads`, `file_arithmetic_classes`), so an aggregate reads
+  about 500 file memos that verify at `MEDIUM` by durability and only the edited file's memo
+  re-verifies. Pin it in `test_incremental.rs` by counting edges re-verified after an edit. Keep
+  `ry check`'s naming pass warming these per item in parallel.
+
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
 This was framed as the interface fixpoint being superlinear in the size of the cyclic definition
