@@ -8,7 +8,7 @@ use crate::{
     coerce::{self, coerce_vector},
     conditions,
     eval::{self, value_of},
-    unwind::{R, error},
+    unwind::{R, Unwind, error},
     values::{
         self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
         string_vector, symbol_name, symbols, unbound,
@@ -713,18 +713,26 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         }
         return subset2(data, indices, exact, call);
     }
+    let subscript_count_fits =
+        indices.len() <= 1 || length(values::get_attr(object, symbols().dim)) == indices.len();
+    if object.kind() != SexpType::Environment
+        && subscript_count_fits
+        && (indices.is_empty() || indices.contains(&missing_arg()))
+    {
+        // GNU R attaches the object only when it is NULL.
+        let object_field = [("object", nil())];
+        let fields: &[(&str, Sexp)] = if object == nil() { &object_field } else { &[] };
+        return Err(missing_subscript(call, fields));
+    }
     if object == nil() {
         return Ok(nil());
     }
-    if indices.is_empty() || indices[0] == missing_arg() {
-        return Err(crate::unwind::error_in(call, "missing subscript"));
-    }
     if object.kind() == SexpType::Environment {
-        let index = indices[0];
+        let index = indices.first().copied().unwrap_or(nil());
         if index.kind() != SexpType::String || length(index) != 1 {
             return Err(crate::unwind::error_in(
                 call,
-                "wrong args for environment subassignment",
+                "wrong arguments for subsetting an environment",
             ));
         }
         let symbol = values::install_bytes(index.element(0).bytes())?;
@@ -1541,6 +1549,11 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         eval::define(symbol, value, object)?;
         return Ok(object);
     }
+    if indices.is_empty() || indices.contains(&missing_arg()) {
+        let object_field = [("object", object)];
+        let fields: &[(&str, Sexp)] = if object == nil() { &[] } else { &object_field };
+        return Err(missing_subscript(call, fields));
+    }
     if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
         let list = values::pairlist_to_list(object)?;
         let result = subassign2(list, indices, value, call)?;
@@ -1629,6 +1642,15 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         return Ok(result);
     }
     subassign(object, indices, value, call)
+}
+
+unsafe fn missing_subscript(call: Sexp, fields: &[(&str, Sexp)]) -> Unwind {
+    crate::conditions::classed_error(
+        call,
+        "missing subscript",
+        &["MissingSubscriptError", "error", "condition"],
+        fields,
+    )
 }
 
 unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {

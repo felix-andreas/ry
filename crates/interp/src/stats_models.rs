@@ -317,10 +317,15 @@ pub unsafe fn modelframe(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("invalid result from na.action"));
     }
     for index in 0..length(result) {
-        copy_most_attributes_no_ts(
+        // An na.action that keeps every row hands back the frame's own vectors, which keep
+        // their attributes, "ts" class included.
+        let (original, column) = (
             values::list_elt(data, index),
             values::list_elt(result, index),
-        )?;
+        );
+        if original != column {
+            copy_most_attributes_no_ts(original, column)?;
+        }
     }
     Ok(result)
 }

@@ -166,6 +166,33 @@ pub unsafe fn make_condition(message: &str, call: Sexp, classes: &[&str]) -> R<S
     Ok(condition)
 }
 
+/// Signals an error condition of `classes` that carries `fields` after its message and call,
+/// as `stop(condition)` would. GNU R raises a few errors this way, such as
+/// `MissingSubscriptError`, so that handlers can tell them apart. The result is the unwind to
+/// propagate.
+pub unsafe fn classed_error(
+    call: Sexp,
+    message: &str,
+    classes: &[&str],
+    fields: &[(&str, Sexp)],
+) -> Unwind {
+    let signal = || -> R<Unwind> {
+        let mut items = vec![
+            ("message", scalar_string(message)?),
+            ("call", resolve_call(call)),
+        ];
+        items.extend_from_slice(fields);
+        let condition = values::named_list(&items)?;
+        values::set_attr(condition, symbols().class, values::string_vector(classes)?)?;
+        let stop = values::call(values::install("stop")?, &[condition])?;
+        eval::eval(stop, values::base_namespace())?;
+        Ok(crate::unwind::error_in(call, message))
+    };
+    match signal() {
+        Ok(unwind) | Err(unwind) => unwind,
+    }
+}
+
 /// GNU R's default error handler: prints the message, then goes to top level.
 pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     let state = interp();
