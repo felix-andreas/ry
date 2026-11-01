@@ -297,7 +297,12 @@ the erased text parses cleanly, holds no inline annotation, and erases to itself
 The runtime is tested against models and against GNU R rather than with fixtures. The oracle's
 cases (`crates/oracle/cases/`, [Corpus and oracle](/contributing/corpus-and-oracle)) hold the
 R-level behavior, and `crates/interp/tests/test_fuzz.rs` fuzzes lowering and checks that the
-tier-0 bytecode agrees with the evaluator. `crates/interp/tests/test_linalg.rs` pins base R's linear
+tier-0 bytecode agrees with the evaluator. `crates/jit/tests/test_tiers.rs` does the same one tier
+up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
+forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
+backward jump), and every call must give the same value or error. Most generated programs must run
+to a value, so a generator that drifts into erroring early fails the test instead of passing
+without comparing anything. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, and `test_altrep.rs` there checks the columns as ALTREP
 vectors (feature `runtime`). `crates/heap/tests/test_gc.rs` builds random
