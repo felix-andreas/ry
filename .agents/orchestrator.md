@@ -74,8 +74,8 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
 - data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): route data.table's functions from R to the #131 kernels and close the setkey and dcast gaps. PR #133 (unchanged data.table queries on the engine, beating data.table on every 1e6-row question) merged as b89c852; #131 as c3b4a87.
 - Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
-- Analysis performance round 3 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): a parallel cold check well under 1 s with byte-identical findings, a false-positive audit of `ry check` on the full-size benchmark code bases, memory kept at or below round 2. PR #129 (peak RSS 795 to about 570 MiB, settled re-check about 39 to 49 ms) merged as 0cee236.
-- Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): backlog false reports worst first, then `ry check` on the corpus packages' R sources with every finding triaged.
+- Analysis performance round 4 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): performance only, halve per-file CPU toward a cold check under 1 s on 4 cores, findings byte-identical, memory at or below 520 MiB. PR #135 (cold check about 2.5 s, peak RSS about 520 MiB, CRAN false errors 669 to 175) merged as eebed45; #129 as 0cee236.
+- Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): sole owner of false reports. Dedupe against #135, then the backlog false reports, the 175 remaining CRAN errors, and `ry check` on the corpus packages' R sources with every finding triaged.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
