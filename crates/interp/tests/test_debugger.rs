@@ -69,6 +69,43 @@ exited 0
     );
 }
 
+// A function with a loop is compiled on its first call. Its compiled code restores the
+// enclosing srcref when each block ends, which starts no statement, so neither the `for` line
+// nor the function's own line stops again.
+#[test]
+fn compiled_code_stops_only_where_statements_start() {
+    let program = "\
+add <- function(n) {
+  total <- 0
+  for (i in seq_len(n)) {
+    total <- total + i
+  }
+  total
+}
+add(3)
+";
+    let transcript = scripted(
+        program,
+        &[1, 3],
+        vec![
+            request("stackTrace", json!({ "threadId": 1 })),
+            request("continue", json!({ "threadId": 1 })),
+            request("stackTrace", json!({ "threadId": 1 })),
+            request("continue", json!({ "threadId": 1 })),
+        ],
+    );
+    assert_eq!(
+        transcript,
+        "\
+stopped breakpoint
+stack <top level>@1
+stopped breakpoint
+stack add@3 <top level>@8
+exited 0
+"
+    );
+}
+
 #[test]
 fn stepping_over_into_and_out_of_calls() {
     let program = "\

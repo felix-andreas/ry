@@ -51,7 +51,7 @@ The VS Code extension runs your code on ry's runtime.
   after loading your package.
 - **Send to console**: `Ctrl+Enter` (`Cmd+Enter` on macOS) sends the selection, or the current line
   and moves to the next one, to a "ry console" terminal running `ry run`. `Ctrl+Alt+F` sends the
-  function around the cursor, and "ry: Source File" sends the whole file.
+  function around the cursor, and "ry: Source File in Console" sends the whole file.
 - **Debugging**: press `F5` in an R file, or click "Debug test" above a test. You get breakpoints,
   stepping in, over and out, the call stack, each frame's variables, and evaluation in the selected
   frame. `browser()` stops in the debugger, and so does an uncaught error, where it was raised.

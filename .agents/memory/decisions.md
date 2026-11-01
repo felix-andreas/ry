@@ -4448,9 +4448,13 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   frames messages on stdio and reaches the adapter through libR's `ry_debug_adapter`, because the
   interpreter lives in `libR.so`. A reader thread feeds a channel so the runtime can poll for a
   `pause` between statements without blocking on stdin.
-- **Hooks**: statement boundaries come from the srcrefs `{` already sets (`Op::SetSrcref` in
-  compiled code, `do_begin`/`eval_all` in the tree walker), so code without kept source pays
-  nothing; `browser()` and the uncaught-error handler stop through the same entry point.
+- **Hooks**: statements are located by the srcrefs `{` already sets (`Op::SetSrcref` in
+  compiled code, `do_begin`/`eval_all` in the tree walker). Without an attached adapter the hook
+  costs one `Option` check per statement. `SetSrcref` carries a flag, because the one that
+  restores the outer srcref after a block starts no statement and must not stop. `browser()` and
+  the uncaught-error handler stop through the same entry point.
+- **Rooting**: every object the variables view hands out a reference for is rooted until the
+  program resumes, because the debug console can drop its last other reference.
 - **Stdout**: the protocol owns stdout, so the adapter keeps a duplicate of it and points fd 1 at
   stderr; native code calling `printf` cannot corrupt the protocol.
 - **Package code**: the loader lowers lazy definitions without srcrefs for speed, and only while a
@@ -4458,6 +4462,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   held as the tree handle's protected value. Loading stays as fast as before outside the debugger.
 - **Testing**: `interp` `test_debugger` (transcripts and a seeded random client) and the
   `debug-*.scenario` journeys, which run the real `ry debug-adapter`.
+
 ## A conditional write of a formal covers the paths that run it
 
 - **Previous shape.** `FormalUses::assigned` held the names written on every path, so a read after

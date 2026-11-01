@@ -4,9 +4,9 @@
 //! inspection requests (the stack, scopes, variables, `evaluate`) from the live frames, so no
 //! interpreter state ever crosses a thread.
 //!
-//! The evaluator calls [`statement`] before each statement a `{` or a top-level loop runs with a
-//! srcref, but only while an adapter is attached, so a program run without one pays a single
-//! `Option` check per statement. A statement is located by its srcref: the srcfile's `filename`
+//! The evaluator calls [`statement`] before each statement a `{` or a top-level loop runs, but
+//! only while an adapter is attached, so a program run without one pays a single `Option` check
+//! per statement. A statement without a srcref has no location and never stops. A statement is located by its srcref: the srcfile's `filename`
 //! and the srcref's first line. The program itself is parsed with one srcfile for the whole
 //! file, so its srcrefs carry the file's own line numbers.
 
@@ -151,10 +151,12 @@ impl Adapter {
         }
     }
 
-    /// Answers requests until the client finishes configuring (`configurationDone`) after a
-    /// `launch`. `None` means the client left, or ended the session, before that.
+    /// Answers requests until the client has both launched and finished configuring
+    /// (`configurationDone`), in either order. `None` means the client left, or ended the
+    /// session, before that.
     pub fn configure(&mut self) -> Option<Launch> {
         let mut launch = None;
+        let mut configured = false;
         loop {
             let message = self.transport.receive(true)?;
             let Some(request) = Request::of(&message) else {
@@ -169,11 +171,16 @@ impl Adapter {
                     Ok(requested) => {
                         launch = Some(requested);
                         self.respond(&request, Ok(json!({})));
+                        if configured {
+                            return launch;
+                        }
                     }
                     Err(message) => self.respond(&request, Err(message)),
                 },
+                // The protocol lets a client finish configuring before it launches.
                 "configurationDone" => {
                     self.respond(&request, Ok(json!({})));
+                    configured = true;
                     if launch.is_some() {
                         return launch;
                     }
@@ -765,7 +772,10 @@ unsafe fn scopes(arguments: &Value, stopped: &mut Stopped) -> Result<Value, Stri
     Ok(json!({ "scopes": scopes }))
 }
 
-fn reference(stopped: &mut Stopped, object: Sexp) -> usize {
+/// The object is rooted until the program resumes (`stop` releases its handles), because code
+/// evaluated in the debug console can drop the last other reference to it.
+unsafe fn reference(stopped: &mut Stopped, object: Sexp) -> usize {
+    crate::heap().root(object);
     stopped.references.push(object);
     stopped.references.len()
 }
@@ -849,7 +859,7 @@ unsafe fn summary(value: Sexp) -> String {
                 None => "<environment>".to_owned(),
             };
         }
-        kind if (kind.is_atomic() || kind == SexpType::List) && length(value) > 20 => {
+        kind if (kind.is_atomic() || kind == SexpType::List) && !is_small(value, &mut 20) => {
             return format!("{}[{}]", crate::coerce::type_name(value), length(value));
         }
         _ => {}
@@ -866,6 +876,22 @@ unsafe fn summary(value: Sexp) -> String {
     }
 }
 
+/// Whether `value` holds at most `budget` elements, counting into nested lists, so a data frame
+/// of long columns is summarised rather than deparsed.
+unsafe fn is_small(value: Sexp, budget: &mut usize) -> bool {
+    let count = length(value);
+    if count > *budget {
+        return false;
+    }
+    *budget -= count;
+    value.kind() != SexpType::List
+        || (0..count).all(|index| {
+            let element = value.element(index);
+            !(element.kind().is_atomic() || element.kind() == SexpType::List)
+                || is_small(element, budget)
+        })
+}
+
 /// `evaluate`: runs the expression in the selected frame, or at the top level, and shows the
 /// value. Errors come back as a failed response rather than console output.
 unsafe fn evaluate(arguments: &Value, stopped: &mut Stopped) -> Result<Value, String> {
@@ -879,6 +905,9 @@ unsafe fn evaluate(arguments: &Value, stopped: &mut Stopped) -> Result<Value, St
     };
     let state = interp();
     let shown = std::mem::replace(&mut state.show_error_messages, false);
+    // Stopped on an uncaught error, the program is still inside its error handling, where a
+    // nested error writes to the console; an evaluation's error belongs in its response only.
+    let in_error = std::mem::replace(&mut state.in_error, 0);
     let srcref = state.srcref;
     let result = (|| {
         let expressions = lower::parse_text(expression, "<debug console>")?;
@@ -892,6 +921,7 @@ unsafe fn evaluate(arguments: &Value, stopped: &mut Stopped) -> Result<Value, St
     })();
     let state = interp();
     state.show_error_messages = shown;
+    state.in_error = in_error;
     state.srcref = srcref;
     match result {
         Ok(value) => {

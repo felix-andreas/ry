@@ -1355,6 +1355,7 @@ pub unsafe extern "C" fn ry_debug_adapter(
     });
     let mut adapter = Box::new(interp::debugger::Adapter::new(Box::new(channel)));
     let Some(launch) = adapter.configure() else {
+        runtime().console = Box::new(crate::boundary::default_console);
         return 2;
     };
     let mut command_args = vec![
@@ -1365,10 +1366,13 @@ pub unsafe extern "C" fn ry_debug_adapter(
     command_args.extend(launch.args.iter().cloned());
     if !start_script_session(command_args, flags) {
         adapter.fail("ry's runtime did not start");
+        runtime().console = Box::new(crate::boundary::default_console);
         return 2;
     }
     let status = adapter.run(&launch);
     finish_script_session();
+    // The console wrote through the host's `data`, which is only valid until this returns.
+    runtime().console = Box::new(crate::boundary::default_console);
     status
 }
 

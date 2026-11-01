@@ -391,6 +391,10 @@ fn worker_gone_error() -> ResponseError {
     ResponseError::new(ErrorCode::INTERNAL_ERROR, "analysis worker unavailable")
 }
 
+fn internal_error(error: impl std::fmt::Display) -> ResponseError {
+    ResponseError::new(ErrorCode::INTERNAL_ERROR, error.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PositionEncoding {
     Utf8,
@@ -2815,9 +2819,9 @@ impl LanguageServer for ServerState {
                 return Ok(lens);
             };
             let files = ProjectFiles::get(&worker.db);
-            let occurrences = worker
-                .cancellable(|worker| ide::references(&worker.db, files, file, offset, false))
-                .unwrap_or_default();
+            // A cancelled search fails the request as `ContentModified` instead of showing a
+            // count of zero.
+            let occurrences = ide::references(&worker.db, files, file, offset, false);
             let locations: Vec<lsp_types::Location> = occurrences
                 .into_iter()
                 .filter_map(|occurrence| {
@@ -2843,8 +2847,8 @@ impl LanguageServer for ServerState {
                     command: "ry.showReferences".to_owned(),
                     arguments: Some(vec![
                         serde_json::Value::String(uri.to_string()),
-                        serde_json::to_value(lens.range.start).unwrap_or_default(),
-                        serde_json::to_value(&locations).unwrap_or_default(),
+                        serde_json::to_value(lens.range.start).map_err(internal_error)?,
+                        serde_json::to_value(&locations).map_err(internal_error)?,
                     ]),
                 },
             };

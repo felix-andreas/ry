@@ -3004,8 +3004,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Hover does not read the console's environment: a value defined only in the "ry console" terminal
   has no type in the editor. It needs the console to publish its global bindings (a libR export
   read by the server), which the console's owners should design with it.
-- Debugger: a breakpoint on the same line as `browser()` stops twice there. The debugger cannot
-  attach to a running console yet, and `debugonce()`/`trace()` do not map onto it.
+- Debugger: it cannot attach to a running console yet, and `debugonce()`/`trace()` do not map
+  onto it. Columns come from the srcref's tab-expanded column, so they are off on lines with
+  tabs, and `browser()` in code without a srcref does not stop.
 - Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
   `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
