@@ -1861,12 +1861,10 @@ The end-to-end guard rests on the corpus suites.
 - **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
   `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
   under ry's runtime an attached data.table still runs its own versions, which return a
-  `data.table` and reject a frame. The runtime needs these names routed to the engine
-  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
-  installs, before the checker's types are true at run time. The `[` bridge
-  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
-  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
-  and decline to data.table otherwise.
+  `data.table` and reject a frame. Routing them to the engine was measured and rejected
+  (`decisions.md`, "data.table's helpers run data.table's own C"), so the fix is in the checker:
+  type a call that resolves to data.table's export as returning `data.table`, and keep frames for
+  `frame_read_csv` and the other `ry` functions.
 - **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
@@ -1875,6 +1873,16 @@ The end-to-end guard rests on the corpus suites.
   against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
   through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
   `ops::key_digits`, as `unique` does, would skip the general grouping.
+- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `dcast` takes 0.030 to
+  0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
+  bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
+  `setkey` is at parity (0.026 s on both).
+- **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
+  `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
+  against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
+  digits cover factors, integers and logicals only. A string digit from `ops::string_ranks` was
+  tried and was slower (ranking sorts the distinct strings), so a digit needs first-appearance
+  numbers taken during import, where each distinct CHARSXP is already numbered.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
