@@ -3,6 +3,8 @@ title: Custom types
 description: Declaring your own types, so values with the same shape stay apart
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 Every type so far is *structural*: two types are the same if they have the same shape. Any
 `list(name = "Ada")` is a `list{name: character}`, and every `double` is interchangeable with every
 other. That is the right default for R, where values are plain data, but it cannot tell Celsius from
@@ -11,7 +13,29 @@ Fahrenheit, or a user ID from an email address.
 ## Nominal types
 
 A *nominal* type is distinct by name, even from a type with the same shape. `@type` declares one,
-and `@new` marks the one place that creates its values:
+and `@new` marks the one place that creates its values. Both exist only as `#:` comments, because
+ry has no inline spelling for type definitions or for `@new`. Function signatures around them can
+still be written inline:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Money {list{amount: double, currency: character}}
+
+money <- function(amount: double, currency: character) -> Money {
+  if (amount < 0) stop("negative amount")
+  #: @new Money
+  structure(list(amount = amount, currency = currency), class = "Money")
+}
+
+amount_of <- function(m: Money) -> double m$amount
+
+amount_of(list(amount = 1, currency = "EUR"))
+```
+
+</TabItem>
+<TabItem label="Comments">
 
 ```r
 #: @type Money {list{amount: double, currency: character}}
@@ -28,6 +52,9 @@ amount_of <- function(m) m$amount
 
 amount_of(list(amount = 1, currency = "EUR"))
 ```
+
+</TabItem>
+</Tabs>
 
 ```text
 type-mismatch
@@ -49,10 +76,25 @@ Arithmetic gives the plain representation back: with `@type Celsius {double}`, t
 `Celsius` values is a `double`, because ry cannot assume that adding two temperatures gives a
 temperature. `Money` is a list, so `+` on it is an error until you declare the operator:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+`+.Money` <- function(a: Money, b: Money) -> Money {
+  money(a$amount + b$amount, a$currency)
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(a: Money, b: Money) -> Money
 `+.Money` <- function(a, b) money(a$amount + b$amount, a$currency)
 ```
+
+</TabItem>
+</Tabs>
 
 Now `money(1, "EUR") + money(2, "EUR")` is a `Money`. R finds `+.Money` through the class attribute,
 which is why the constructor sets one; ry itself needs no class to check the type.
@@ -72,6 +114,21 @@ For shared mutable state, inheritance, or method dispatch, R6 and S4 are still t
 objects are `Unknown`. To check who receives one, give it a nominal type over `Any` and wrap its
 constructor:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+#: @type Account {Any}
+
+new_account <- function() -> Account {
+  #: @new Account
+  AccountClass$new()
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: @type Account {Any}
 
@@ -81,3 +138,6 @@ new_account <- function() {
   AccountClass$new()
 }
 ```
+
+</TabItem>
+</Tabs>

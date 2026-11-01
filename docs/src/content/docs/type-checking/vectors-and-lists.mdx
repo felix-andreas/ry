@@ -3,6 +3,8 @@ title: Vectors and lists
 description: How ry tells a single value from a vector, and the four kinds of list
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 ## Scalars and vectors
 
 R has no scalars: `1L` is an integer vector of length one. But an `if` condition, an operand of
@@ -18,12 +20,27 @@ ages <- c(ada = 36L, bo = 4L)  # integer[named]: any length, with names
 A scalar is accepted where a vector is expected, but not the reverse, because a vector of unknown
 length may not have exactly one element:
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+label <- function(flag: logical) -> character if (flag) "yes" else "no"
+
+label(c(TRUE, FALSE))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 #: fn(flag: logical) -> character
 label <- function(flag) if (flag) "yes" else "no"
 
 label(c(TRUE, FALSE))
 ```
+
+</TabItem>
+</Tabs>
 
 ```text
 type-mismatch
@@ -40,6 +57,20 @@ is usually a bug, so ry asks for an explicit `as.character()`.
 R uses one list type for four different jobs, and each job has its own mistakes, so ry gives each
 its own type. At run time all four are the same R list, so your code does not change.
 
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+pair   <- list(1L, "ok")                  # tuple-like:  list{integer, character}
+person <- list(name = "Ada", age = 36L)   # record-like: list{name: character, age: integer}
+sizes  <- lapply(words, nchar)            # list-like:   list[integer]
+
+counts: list[named: integer] <- list(apples = 3L)   # dict-like
+```
+
+</TabItem>
+<TabItem label="Comments">
+
 ```r
 pair   <- list(1L, "ok")                  # tuple-like:  list{integer, character}
 person <- list(name = "Ada", age = 36L)   # record-like: list{name: character, age: integer}
@@ -48,6 +79,9 @@ sizes  <- lapply(words, nchar)            # list-like:   list[integer]
 #: list[named: integer]
 counts <- list(apples = 3L)               # dict-like:   list[named: integer]
 ```
+
+</TabItem>
+</Tabs>
 
 ## Records and tuples
 
