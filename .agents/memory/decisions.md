@@ -2658,6 +2658,12 @@ first lines R had already read, leaving R mid-command.
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
+- **Compile thresholds are 1000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
+  At 10 and 500, a package load compiled the methods package's bodies that each `setClass` runs a
+  few dozen times, and compiling took half of a large package's S4 definitions (callgrind) and
+  about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
+  benchmarks time the same. Lower them only together with a cheaper first tier or background
+  compilation.
 - **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
   (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
   `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
@@ -3085,6 +3091,13 @@ first lines R had already read, leaving R mid-command.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
 - **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
 
+## A computed function that may be `NULL` is called as the function
+
+- **Previous shape.** Calling a value typed `fn | NULL` was a `type-mismatch` finding wherever the `NULL` came from, including a local set by a `switch` without a default (testthat's `load <- switch(style, ...)` after `arg_match(style)`) or by an `if` whose other branch is correlated with the call's guard (nloptr's `eval_g_ineq_wrapper`). A union of functions and plain values (shiny's `ns <- NS(namespace)`) was "not a function".
+- **Target shape.** `infer_ordinary_call` drops `NULL` beside function members unless the callee names a parameter, and `dispatch_call` checks a union of functions and values against its function members only, with an `Unknown` result. A parameter's `NULL` comes from its default or its declared type, so the caller supplies it and the call is still reported.
+- **Why.** The rule in "The checker presumes R code is correct": the `NULL` path of a computed function is one the code presumably rules out, and R fails only on that path.
+- **Impact.** Loses the true positive of a `switch` on an unvalidated value. Incremental analysis is unchanged: the rule reads the item's own naming.
+
 # Decision record: editor features for ry's own syntax
 
 - **The checker records pattern types.** `ItemCheck::pattern_types` maps each `match` pattern to
@@ -3310,6 +3323,12 @@ first lines R had already read, leaving R mid-command.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
 
+## libR commits mimalloc arenas lazily, and handle vectors are not zeroed before their fill
+
+- **Previous shape.** `libR.so` declares its own mimalloc, separate from the `ry` binary's, and only the binary turned off eager arena commit. In `libR` an eagerly committed arena is backed by transparent huge pages, so after earlier work had purged parts of it, the next large vector faulted them back in and the kernel zeroed and compacted whole huge pages. Every `Rf_allocVector` also zeroed the whole vector, which GNU R does not do for numbers, and a character vector or list was zeroed and then filled.
+- **Target shape.** `libR` sets `mi_option_arena_eager_commit` to 0 from an `.init_array` constructor (`crates/libr/src/libr.rs`). `Rf_allocVector` allocates numeric vectors uninitialized through `Heap::alloc_vector_uninit`, and `Heap::alloc_vector` zeroes only the header of a vector it fills with handles. Purging stays on (`MIMALLOC_PURGE_DELAY=-1` shaves a little more, but resident memory would only grow).
+- **Impact.** In ops.R's sequence at 1e7 rows, `rbindlist`'s slow first calls dropped from 2 to 6 s to about 1.3 s (GNU R: 0.9 to 2.1 s). Run-to-run noise on the other questions is larger than any change. Package loading gains too: it plans on every core, every planning thread's arena paid the zeroing, and the plan of a 326,000-line package went from 680-990 ms to 330-440 ms.
+
 # Decision record: everything is fuzzable, simulatable and scriptable
 
 This is a user directive: robustness is the long-run priority, so the whole toolchain is designed to
@@ -3528,6 +3547,38 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+# Decision record: HIR as struct-of-arrays, lowered from the green tree
+
+- **Previous shape.** `Module` held `expressions: Vec<Expression { kind, range }>` and
+  `patterns: Vec<Pattern>`, and each composite kind owned its lists (`Box<[Argument]>`,
+  `Box<[Parameter]>`, `Box<[ExprId]>`, `Box<[MatchArm]>` and the pattern lists), one allocation
+  per list. Literal text was a `String`. Lowering walked rowan's red tree, which allocates and
+  frees a cursor node for every node it visits, and grew fresh vectors per item, then shrank them.
+- **What was weak.** About 60% of `item_hir`'s samples were red-cursor work, allocation was about
+  12% of cold-check CPU, and the grow-then-shrink pattern touched about twice the memory the memo
+  kept. Owned lists also made every kind non-`Copy`, so readers cloned lists to release a borrow.
+- **Target shape (`crates/semantics/src/hir.rs`).** An `ExprId` indexes separate `kinds` and
+  `ranges` arrays, because inference reads kinds and mostly only diagnostics read ranges. Each
+  list type has one side array in the module and a kind holds a `Span<T>` (`u32` start and
+  length) into it; `module[span]` is the slice. Literal text lives in a per-module text buffer that a
+  `Text` span addresses (`module[text]` is the `&str`), so every HIR kind is `Copy`. It is not a
+  `Symbol`, because the interner leaks by design: interning literals would keep every
+  intermediate spelling of a string literal typed in the editor for the life of the server. Children are visited with `Module::for_each_child` and `Module::any_child` instead of a
+  per-kind child vector. Lowering reads the green tree through `syntax::GreenNodeAt` (green node
+  plus absolute start), collects each list on a scratch stack and seals it into its side array
+  once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
+  the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
+  rule of the data-oriented record above.
+- **Kept deliberately.** `ExprId` allocation order is the old one, so ids, fixtures and every
+  downstream map are unchanged. `Module` still owns plain vectors and compares by value, so salsa
+  backdating works as before.
+- **Impact.** Findings are byte-identical on the three benchmark code bases. In interleaved runs
+  the cold check used 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS
+  than the list-owning HIR. The checker also records expression types in a vector indexed by
+  `ExprId` instead of a hash map (`RecordedTypes` in `check.rs`), since the memoized
+  `ExpressionTypes` was already dense. IDE scans that need both kind and range go through
+  `Module::expressions`, which zips the two arrays.
 
 # Decision record: the interpreter's call path, lookups and allocation
 

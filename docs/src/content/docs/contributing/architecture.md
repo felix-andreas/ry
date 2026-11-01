@@ -37,10 +37,13 @@ illegal dependency unrepresentable.
   that, it can never come to depend on an analysis result.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
   load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
-  backend hands the plan to R code running in the session. ry's own runtime does not take a plan yet.
+  backend hands the plan to R code as an RDS file, and its backend for ry's own runtime (behind the
+  `runtime` feature, which links `heap` and `interp`) builds the plan on the heap and binds each lazy
+  definition as a promise over the analysis's own syntax tree.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
-  and under another engine and compares the observable results. It depends on nothing else in the
-  workspace.
+  and under another engine and compares the observable results. It also generates the programs for
+  differential fuzzing and runs the corpus packages' own tests and installs. It depends only on
+  `syntax`.
 - **`repl`** is the R console behind `ry run` and `ry R`. It loads R at run time, so no crate,
   `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
@@ -49,14 +52,15 @@ illegal dependency unrepresentable.
   environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
-  `heap`, `interp` and `jit`. Its design is the draft at
+  `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
   [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/type-checking/inline-annotations) at function boundaries. It depends on
-  `heap` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows nothing
-  about C.
+  `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
+  nothing about C. The values that are ry's own live here too: records and tags, `Array`,
+  `DataFrame` and the standard library.
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -65,12 +69,16 @@ illegal dependency unrepresentable.
   the mode: `on` (the default), `off`, or `force`, which the tier tests and the `ry-jit` oracle
   engine use.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
-  `tbl[i, j, by]` to a lazy plan. Its `runtime` feature, which links `libr` and `heap`, exposes
-  columns to R as ALTREP vectors. No interpreter code calls it yet.
+  `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
+  data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
+  exposes a column to native code as an ALTREP vector, so the table holds only Arrow data.
+- **`sniff`** reads the layout of a delimited text file: separator, header and each column's R type.
+  The table engine's reader and the checker both use it, so the checker types a literal
+  `fread("prices.csv")` as exactly the columns the engine reads. It depends on `syntax` alone.
 - **`rcmd`** is ry's R home and the `R CMD` commands that build and install packages against
   ry's headers and `libR`. It depends on nothing else in the workspace; `libr`'s tests use it.
-- **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
-  `run`, `load`, and `debug` commands. It owns configuration, conversion between position encodings,
+- **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `run`,
+  `R`, `load`, and `debug` commands. It owns configuration, conversion between position encodings,
   assembling and publishing diagnostics, and suppression comments.
 
 ## The semantics database
@@ -180,8 +188,17 @@ An item's green subtree lowers to HIR, with spans relative to the item. Its anno
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
 (`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
-in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id), lists are boxed slices, and the arena
-is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity. Naming
+in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id). Literal text is not interned,
+because the interner never frees and an edit inside a string literal would otherwise keep every
+spelling it passed through; it lives in the module's own text buffer, addressed by a `Copy`
+`Text` span. The HIR module is
+struct-of-arrays: an `ExprId` indexes separate kind and range arrays, and every list (arguments,
+parameters, statements, record fields, match arms, pattern lists) lives in one side array per
+element type that the expression addresses with a `Span`, so every HIR kind is `Copy` and a scan
+over kinds never touches ranges. Lowering reads the green tree through `syntax::GreenNodeAt` and
+builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
+items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
+capacity and lowering allocates a handful of arrays per item. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.

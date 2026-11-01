@@ -453,7 +453,16 @@ impl Heap {
             return Err(HeapError::TooLong);
         }
         let size = object_size(kind, length as usize).ok_or(HeapError::TooLong)?;
-        let object = self.allocate(kind, size, &[])?;
+        // Vectors of handles are filled below, so only the header needs zeroing first.
+        let zeroed = if matches!(
+            kind,
+            SexpType::String | SexpType::List | SexpType::Expression
+        ) {
+            VECTOR_DATA_OFFSET
+        } else {
+            size
+        };
+        let object = self.allocate_with(kind, size, &[], zeroed)?;
         object.set_length_and_capacity(length, length);
         match kind {
             SexpType::String => {
