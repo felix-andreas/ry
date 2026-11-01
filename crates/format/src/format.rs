@@ -1360,7 +1360,7 @@ impl Formatter<'_> {
                 COMMA => {
                     let start = element.text_range().start();
                     if expand
-                        && (comment_before(node, start)
+                        && (self.ends_in_comment()
                             || previous.is_none_or(|previous| {
                                 previous.kind() == COMMA || previous.text_range().is_empty()
                             }))
@@ -2026,6 +2026,13 @@ impl Formatter<'_> {
         for _ in 0..level {
             self.out.push_str(&self.indent);
         }
+    }
+
+    /// Asks the output rather than the source, because auto-bracing can move
+    /// a comment that preceded a token in the source into the new braces.
+    fn ends_in_comment(&self) -> bool {
+        self.comment_end
+            .is_some_and(|end| !self.out[end..].contains('\n'))
     }
 
     fn space(&mut self) {

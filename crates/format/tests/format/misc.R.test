@@ -336,3 +336,16 @@ x[ [[1]]]
 #++++
 x[ [y[1]]]
 x[ [[1]]]
+
+#---- comma_after_an_auto_braced_body_ending_in_a_comment_joins_the_brace
+lapply(object, function(el, pSD)
+  if(!is.null(el)) resid(el)/pSD # else NULL
+, pSD = poolSD)
+#++++
+lapply(
+  object,
+  function(el, pSD) {
+    if (!is.null(el)) resid(el) / pSD # else NULL
+  },
+  pSD = poolSD
+)

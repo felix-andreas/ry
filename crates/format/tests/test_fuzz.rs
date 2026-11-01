@@ -278,3 +278,82 @@ fn run_seed_mutations(budget: usize) {
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
     }
 }
+
+/// The whole-file invariants over every R file under `RY_FORMAT_DIR`, for
+/// sweeping a real code base: `RY_FORMAT_DIR=path cargo test --release -p
+/// format --test test_fuzz format_directory -- --ignored --nocapture`. Real
+/// code should never refuse, so a refusal is reported like a broken invariant.
+#[test]
+#[ignore = "needs RY_FORMAT_DIR"]
+fn format_directory() {
+    let Some(root) = std::env::var_os("RY_FORMAT_DIR") else {
+        panic!("set RY_FORMAT_DIR to the directory to sweep");
+    };
+    let mut files = Vec::new();
+    let mut pending = vec![std::path::PathBuf::from(root)];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "R" || extension == "r")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::new());
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get());
+    std::panic::set_hook(Box::new(|_| {}));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(path) = files.get(index) else { break };
+                    let Ok(bytes) = std::fs::read(path) else {
+                        continue;
+                    };
+                    let source = String::from_utf8_lossy(&bytes);
+                    let problem = match catch_unwind(|| check_format_invariants(&source)) {
+                        Err(payload) => Some(
+                            payload
+                                .downcast_ref::<String>()
+                                .cloned()
+                                .unwrap_or_else(|| "panic".to_owned()),
+                        ),
+                        Ok(()) => format(&source, Config::default())
+                            .err()
+                            .map(|error| format!("refused: {error}")),
+                    };
+                    if let Some(problem) = problem {
+                        let problem: String = problem.chars().take(400).collect();
+                        failures
+                            .lock()
+                            .expect("no worker panics while holding the lock")
+                            .push(format!("{}: {problem}", path.display()));
+                    }
+                }
+            });
+        }
+    });
+    drop(std::panic::take_hook());
+    let mut failures = failures.into_inner().expect("the workers are done");
+    failures.sort();
+    for failure in &failures {
+        println!("{failure}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} files broke an invariant or refused",
+        failures.len(),
+        files.len()
+    );
+}
