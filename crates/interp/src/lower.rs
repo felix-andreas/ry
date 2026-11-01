@@ -273,7 +273,7 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
         }
         // `@Name(value)` runs as its `(value)`: the nominal type exists only for the checker.
         SyntaxKind::NEW_EXPR => match expression_children(node).first() {
-            Some(inner) => lower(inner),
+            Some(inner) => lower(inner, source),
             None => Err(error("expected `(` after the nominal type")),
         },
         SyntaxKind::BRACE_EXPR => {
