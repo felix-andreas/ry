@@ -519,6 +519,55 @@ fn a_reload_while_s4_definitions_are_held_back_keeps_them_working() {
 }
 
 #[test]
+fn a_second_load_reads_the_cached_index_and_an_edit_misses_it() {
+    if !r_available() {
+        return;
+    }
+    let root = package(SHAPES);
+    let cache = tempfile::tempdir().expect("temp dir");
+    let probe = "cat('probe:', area(Sq(side = 3)), perimeter(Sq(side = 2)), helper(), '\\n')";
+    let run = |code: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root.path())
+            .arg("-e")
+            .arg(code)
+            .env("XDG_CACHE_HOME", cache.path())
+            .output()
+            .expect("run ry load");
+        let printed = text(&output);
+        assert!(output.status.success(), "{printed}");
+        printed
+            .lines()
+            .find(|line| line.starts_with("probe:"))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("no probe line in {printed}"))
+    };
+    let cold = run(probe);
+    let entries = || {
+        fs::read_dir(cache.path().join("ry").join("load-index"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    assert_eq!(entries(), 1, "the first load writes one cache entry");
+    assert_eq!(run(probe), cold, "a cache hit behaves like the cold load");
+
+    let path = root.path().join("R/a.R");
+    let edited =
+        fs::read_to_string(&path)
+            .expect("read")
+            .replacen("shape@side^2", "shape@side^3", 1);
+    let reload = format!(
+        "writeLines({edited:?}, {path:?}); load_all({root:?}); {probe}",
+        path = path.display().to_string(),
+        root = root.path().display().to_string(),
+    );
+    let reloaded = run(&reload);
+    assert_ne!(reloaded, cold, "a reload after a cache hit sees the edit");
+    assert_eq!(run(probe), reloaded, "an edited package misses the cache");
+}
+
+#[test]
 fn source_references_point_into_the_file() {
     if !r_available() {
         return;

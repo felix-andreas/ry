@@ -30,12 +30,14 @@ use {
     std::{
         collections::BTreeSet,
         fmt, fs, io,
+        panic::AssertUnwindSafe,
         path::{Path, PathBuf},
         sync::Arc,
         thread,
         time::{SystemTime, UNIX_EPOCH},
     },
     syntax::Parse,
+    xxhash_rust::xxh3::{Xxh3, xxh3_64},
 };
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
@@ -84,6 +86,28 @@ struct LoadedPackage {
     committed_fingerprint: Option<u64>,
     /// [`source_fingerprint`] of what the pending plan read.
     pending_fingerprint: Option<u64>,
+    /// Whether the analysis has derived the facts of every file, which a load index read
+    /// from the cache spares it until a plan needs them.
+    analyzed: bool,
+    /// The load index an earlier process saved for exactly these sources, until the sources
+    /// change.
+    cached: Option<CachedIndex>,
+}
+
+/// A load index read from the cache, with the R text of each file whose R text is not its
+/// source text: erasing inline annotations takes a parse, which the cache exists to avoid.
+struct CachedIndex {
+    index: Arc<PackageIndex>,
+    r_texts: FxHashMap<String, String>,
+}
+
+/// A file's code as the loader hands it to a backend: the analysis's syntax tree when the
+/// analysis parsed the file, or else its text, of which a backend parses only the code it
+/// needs. Code offsets index either one.
+#[derive(Debug, Clone)]
+pub enum Source {
+    Tree(Parse),
+    Text(Arc<str>),
 }
 
 /// What is loaded for one package: the load index plus the inputs the analysis does not read.
@@ -309,8 +333,8 @@ impl Loader {
             return;
         };
         // A failure is the plan's to report: it reads the same sources.
-        if let Ok(position) = self.analyze(&root, inputs) {
-            package_index(&self.db, self.packages[position].sources);
+        if let Err(error) = self.index(&root, inputs) {
+            drop(error);
         }
     }
 
@@ -323,9 +347,8 @@ impl Loader {
     ) -> Result<Plan, LoadError> {
         let root = root.to_path_buf();
         let (sysdata, compiled) = (inputs.sysdata, inputs.compiled);
-        let position = self.analyze(&root, inputs)?;
+        let (position, index) = self.index(&root, inputs)?;
         let package = &self.packages[position];
-        let index = package_index(&self.db, package.sources);
         if index.package.is_empty() {
             return Err(LoadError::NoPackageName(root));
         }
@@ -352,6 +375,12 @@ impl Loader {
         };
         let db = &self.db;
         let plan = diff(previous, &next, &|path| {
+            if let Some(cached) = &package.cached {
+                if let Some(text) = cached.r_texts.get(path) {
+                    return text.as_str();
+                }
+                return package.files.get(path).map_or("", |&file| file.text(db));
+            }
             package
                 .files
                 .get(path)
@@ -364,35 +393,90 @@ impl Loader {
         Ok(plan)
     }
 
-    /// Syncs the package's sources into the analysis and derives every changed file's facts
-    /// across cores, returning the package's position.
-    fn analyze(&mut self, root: &Path, inputs: PackageInputs) -> Result<usize, LoadError> {
-        let (position, changed) = self.sync(
+    /// Syncs the package's sources into the analysis and returns its position and load index.
+    /// The first plan of a package in a process reads the index from the cache when an
+    /// earlier process saved one for exactly these sources, and saves the index it derives
+    /// otherwise; the index stays in use until the sources change.
+    fn index(
+        &mut self,
+        root: &Path,
+        inputs: PackageInputs,
+    ) -> Result<(usize, Arc<PackageIndex>), LoadError> {
+        let first = !self.packages.iter().any(|package| package.root == root);
+        let cache = if first {
+            index_cache(root, &inputs)
+        } else {
+            None
+        };
+        let (position, changed, inputs_changed) = self.sync(
             root,
             inputs.description,
             inputs.namespace,
             inputs.files,
             inputs.strict,
         )?;
-        self.warm(&changed, |db, file| {
+        if let Some(cache) = &cache
+            && let Some(cached) = read_index_cache(cache)
+        {
+            let index = cached.index.clone();
+            let package = &mut self.packages[position];
+            package.cached = Some(cached);
+            parse_detached(&self.db, package.files.values().copied().collect());
+            return Ok((position, index));
+        }
+        let package = &mut self.packages[position];
+        if !inputs_changed && let Some(cached) = &package.cached {
+            return Ok((position, cached.index.clone()));
+        }
+        package.cached = None;
+        let files = if package.analyzed {
+            changed
+        } else {
+            package.files.values().copied().collect()
+        };
+        self.analyze(position, &files);
+        let package = &mut self.packages[position];
+        package.analyzed = true;
+        let index = package_index(&self.db, package.sources);
+        if let Some(cache) = &cache {
+            let package = &self.packages[position];
+            let r_texts = package
+                .files
+                .iter()
+                .filter_map(|(path, &file)| {
+                    let text = &file_load_index(&self.db, file).text;
+                    (text != file.text(&self.db)).then(|| (path.clone(), text.clone()))
+                })
+                .collect();
+            // The cache only saves time, so a process that cannot write it derives the index
+            // again next time.
+            if let Err(error) = write_index_cache(cache, &index, &r_texts) {
+                drop(error);
+            }
+        }
+        Ok((position, index))
+    }
+
+    /// Derives the facts of `files` across cores.
+    fn analyze(&mut self, position: usize, files: &[SourceFile]) {
+        self.warm(files, |db, file| {
             file_items(db, file);
             file_typing_mode(db, file);
         });
         if self.prepare_purity(position) {
             // Classifying a constant resolves its callees through the project-wide definition
             // maps, which join per-file facts that are cheaper to derive across cores first.
-            self.warm(&changed, |db, file| {
+            self.warm(files, |db, file| {
                 file_definitions(db, file);
                 file_conditional_writers(db, file);
             });
             let sources = self.packages[position].sources;
-            self.warm(&changed, |db, file| classify_constants(db, sources, file));
+            self.warm(files, |db, file| classify_constants(db, sources, file));
         }
         let sources = self.packages[position].sources;
-        self.warm(&changed, |db, file| {
+        self.warm(files, |db, file| {
             file_binds(db, sources, file);
         });
-        Ok(position)
     }
 
     /// Records that the backend applied the pending plan for the package at `root`.
@@ -443,7 +527,7 @@ impl Loader {
     /// Adopts a state saved by an earlier process as what is loaded.
     pub fn restore(&mut self, state: LoadState) -> Result<(), LoadError> {
         let inputs = self.read(&state.root)?;
-        let (position, _) = self.sync(
+        let (position, _, _) = self.sync(
             &state.root,
             inputs.description,
             inputs.namespace,
@@ -454,12 +538,16 @@ impl Loader {
         Ok(())
     }
 
-    /// The analysis's syntax tree of the source file at `path` (relative to `root`), as the
-    /// last plan read it. A plan's [`Code::source_start`] and [`Code::source_end`] index it.
-    pub fn syntax(&self, root: &Path, path: &str) -> Option<Parse> {
+    /// The code of the source file at `path` (relative to `root`), as the last plan read it.
+    /// A plan's [`Code::source_start`] and [`Code::source_end`] index it.
+    pub fn source(&self, root: &Path, path: &str) -> Option<Source> {
         let package = self.packages.iter().find(|package| package.root == root)?;
         let &file = package.files.get(path)?;
-        Some(semantics::parse(&self.db, file))
+        Some(if package.analyzed {
+            Source::Tree(semantics::parse(&self.db, file))
+        } else {
+            Source::Text(Arc::from(file.text(&self.db)))
+        })
     }
 
     /// The roots of every package this loader has planned.
@@ -566,7 +654,7 @@ impl Loader {
     }
 
     /// Sets the analysis inputs to `files`, writing only what changed, and returns the
-    /// package's position and the files whose text is new.
+    /// package's position, the files whose text is new, and whether any input changed.
     ///
     /// Files load at high durability and drop to low on their first edit. Salsa skips
     /// verifying a memo that depends only on inputs of a durability nothing changed at, so a
@@ -578,7 +666,7 @@ impl Loader {
         namespace: String,
         texts: Vec<(String, Option<String>)>,
         strict: bool,
-    ) -> Result<(usize, Vec<SourceFile>), LoadError> {
+    ) -> Result<(usize, Vec<SourceFile>, bool), LoadError> {
         let position = match self
             .packages
             .iter()
@@ -604,6 +692,8 @@ impl Loader {
                     committed_fingerprint: None,
                     pending_fingerprint: None,
                     pending: None,
+                    analyzed: false,
+                    cached: None,
                 });
                 self.packages.len() - 1
             }
@@ -644,25 +734,30 @@ impl Loader {
             package.files.retain(|path, _| kept.contains(path.as_str()));
         }
         let sources = package.sources;
+        let mut inputs_changed = !changed.is_empty();
         if sources.files(db) != &files {
             sources.set_files(db).to(files);
+            inputs_changed = true;
         }
         if sources.namespace(db) != &namespace {
             sources
                 .set_namespace(db)
                 .with_durability(Durability::LOW)
                 .to(namespace);
+            inputs_changed = true;
         }
         if *sources.strict(db) != strict {
             sources.set_strict(db).to(strict);
+            inputs_changed = true;
         }
         if sources.description(db) != &description {
             sources
                 .set_description(db)
                 .with_durability(Durability::LOW)
                 .to(description);
+            inputs_changed = true;
         }
-        Ok((position, changed))
+        Ok((position, changed, inputs_changed))
     }
 }
 
@@ -1468,6 +1563,123 @@ impl Plan {
             && self.dynamic_libraries.is_none()
             && !self.exports_changed
     }
+}
+
+/// Parses `files` on threads of their own and returns at once, so the first reload of a
+/// package whose load index came from the cache finds the parses memoized. It leaves one core
+/// to the session, and an edit that reaches the analysis first cancels it.
+fn parse_detached(db: &RootDatabase, files: Vec<SourceFile>) {
+    let db = db.clone();
+    let spawned = thread::Builder::new()
+        .name("ry-loader-parse".to_owned())
+        .spawn(move || {
+            let workers = thread::available_parallelism()
+                .map_or(1, |count| count.get().saturating_sub(1).max(1))
+                .min(files.len());
+            thread::scope(|scope| {
+                for worker in 0..workers {
+                    let db = db.clone();
+                    let files = &files;
+                    let spawned = thread::Builder::new()
+                        .name("ry-loader-parse".to_owned())
+                        .stack_size(ANALYSIS_STACK_SIZE)
+                        .spawn_scoped(scope, move || {
+                            let parsed = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                                for &file in files.iter().skip(worker).step_by(workers) {
+                                    file_items(&db, file);
+                                    file_typing_mode(&db, file);
+                                }
+                            }));
+                            // A cancelled parse is redone by the plan that cancelled it.
+                            if let Err(cancelled) = parsed {
+                                drop(cancelled);
+                            }
+                        });
+                    // Parsing ahead only saves time: a plan parses what is left.
+                    if let Err(error) = spawned {
+                        drop(error);
+                    }
+                }
+            });
+        });
+    if let Err(error) = spawned {
+        drop(error);
+    }
+}
+
+/// Where a package's load index is cached, and the key of the sources it must match.
+struct IndexCache {
+    path: PathBuf,
+    key: u128,
+}
+
+/// The cache entry for `inputs`, which must hold the text of every file. The cache lives in
+/// the user's cache directory, one file per package root, and its key covers everything the
+/// load index is derived from: the sources, the strict setting, and the build of ry.
+fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
+    let directory = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))?;
+    let mut hasher = Xxh3::new();
+    let mut field = |bytes: &[u8]| {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    field(env!("RY_LOAD_INDEX_BUILD").as_bytes());
+    field(&[u8::from(inputs.strict)]);
+    field(inputs.description.as_bytes());
+    field(inputs.namespace.as_bytes());
+    for (path, text) in &inputs.files {
+        field(path.as_bytes());
+        field(text.as_ref()?.as_bytes());
+    }
+    let key = hasher.digest128();
+    let name = format!("{:016x}.bin", xxh3_64(root.as_os_str().as_encoded_bytes()));
+    Some(IndexCache {
+        path: directory.join("ry").join("load-index").join(name),
+        key,
+    })
+}
+
+/// The cached load index, when there is one for exactly the cache's key. An entry that is
+/// missing, stale or unreadable means deriving the index again.
+fn read_index_cache(cache: &IndexCache) -> Option<CachedIndex> {
+    let bytes = fs::read(&cache.path).ok()?;
+    let (key, body) = bytes.split_at_checked(16)?;
+    if u128::from_le_bytes(key.try_into().ok()?) != cache.key {
+        return None;
+    }
+    let ((index, r_texts), _): ((PackageIndex, FxHashMap<String, String>), usize) =
+        bincode::serde::decode_from_slice(body, bincode::config::standard()).ok()?;
+    Some(CachedIndex {
+        index: Arc::new(index),
+        r_texts,
+    })
+}
+
+/// Saves `index` under the cache's key. The entry is written beside its final path and
+/// renamed into place, so a process reading it never sees half of it.
+fn write_index_cache(
+    cache: &IndexCache,
+    index: &PackageIndex,
+    r_texts: &FxHashMap<String, String>,
+) -> io::Result<()> {
+    let body = bincode::serde::encode_to_vec((index, r_texts), bincode::config::standard())
+        .map_err(io::Error::other)?;
+    let mut bytes = Vec::with_capacity(16 + body.len());
+    bytes.extend_from_slice(&cache.key.to_le_bytes());
+    bytes.extend_from_slice(&body);
+    let directory = cache
+        .path
+        .parent()
+        .ok_or_else(|| io::Error::other("the cache path has no directory"))?;
+    fs::create_dir_all(directory)?;
+    let mut temporary = cache.path.clone().into_os_string();
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    fs::write(&temporary, &bytes)?;
+    fs::rename(&temporary, &cache.path)
 }
 
 /// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE` and the code

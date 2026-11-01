@@ -4592,3 +4592,27 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
   `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
 
+## A load holds back S4 definitions and caches its index across processes
+
+- **Deferred S4** (`loader::deferred_s4`, `.ry_force_s4` in `runtime.R`). Previously every top-level
+  `setClass`, `setGeneric`, `setMethod` and `setValidity` ran eagerly through the `methods` package,
+  about 300 ms on the 326,000-line bench package. On ry's runtime a package's S4 definitions are now
+  held back as one unit: each name they bind becomes a placeholder promise, and the interpreter's
+  class-cache miss and `R_getGeneric` hooks (`interp::methods`) force them. A force during the load
+  runs only the definitions before the current statement, so order is GNU R's. The unit is
+  all-or-nothing because S4 registration is global state (class tables, generic method tables) that
+  no per-name promise could reproduce; the rules that keep it eager (a method on a generic the package
+  does not define, a reference class, a definition reading a name bound later, a generator name that
+  is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
+  pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
+  no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
+- **The load-index cache** (`index_cache`, `read_index_cache`, `write_index_cache` in `loader.rs`).
+  Previously every cold start parsed all files and derived their facts (about 280 ms on 4 cores).
+  The whole `PackageIndex` is now cached per package root, keyed by an xxh3-128 over the build id
+  and every input (strictness, DESCRIPTION, NAMESPACE, each path and text). The cache is package-level,
+  not per file, because the per-file salsa queries all chain off the parse and cannot be fed a stored
+  result without re-parsing; a hit therefore skips salsa analysis entirely and the runtime parses
+  each item's slice of text when it is first forced (`Source::Text`). The build id is a hash of the
+  analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
+  invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
+  detached, cancellable db clone so the first reload does not pay for it.
