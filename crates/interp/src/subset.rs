@@ -1713,14 +1713,17 @@ impl Flattener {
                 match own_name(element_names, index) {
                     Some(name) if name.is_empty() => self.add_in(element, scope)?,
                     name => {
-                        // A named element starts a new base, so its leaves count afresh.
+                        // A named element starts a new base, so its leaves count afresh, but
+                        // they still take their places in the enclosing base's numbering.
                         let name = name.unwrap_or_else(|| "NA".to_owned());
                         let base = match scope.base.as_str() {
                             "" => name,
                             base => format!("{base}.{name}"),
                         };
                         let count = self.unnamed_leaves(element)?;
-                        self.add_in(element, &mut NameScope { base, count, position: 0 })?;
+                        let mut inner = NameScope { base, count, position: 0 };
+                        self.add_in(element, &mut inner)?;
+                        scope.position += inner.position;
                     }
                 }
             }
