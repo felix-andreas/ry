@@ -138,19 +138,49 @@ unsafe extern "C" fn capture_console(
         .extend_from_slice(bytes);
 }
 
-/// `cargo test` writes the crate's fresh shared library next to the test executable, in
-/// `target/<profile>/deps`; the copy one level up is only refreshed by `cargo build`.
-fn library_dir() -> PathBuf {
-    let executable = std::env::current_exe().expect("the test executable has a path");
-    executable
-        .parent()
-        .expect("the test executable lives in a directory")
-        .to_path_buf()
+/// The profile directory (`target/<profile>`) this test executable was built for.
+pub fn profile_directory() -> &'static Path {
+    static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+    DIRECTORY.get_or_init(|| {
+        let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .parent()
+            .expect("the target directory");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        executable
+            .ancestors()
+            .find(|directory| directory.parent() == Some(target))
+            .expect("the test executable lives under the target directory")
+            .to_path_buf()
+    })
+}
+
+/// This build's `libR.so`. Cargo gives an integration test no path to its own crate's cdylib,
+/// and nightly cargo keeps each unit's output in its own `build/<package>/<hash>/out`
+/// directory, so the library is built again (a no-op when it is fresh) with `cargo build`,
+/// which copies it into the profile directory.
+pub fn libr_path() -> &'static Path {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let profile_directory = profile_directory();
+        let mut build = Command::new(env!("CARGO"));
+        build.args(["build", "-q", "-p", "libr", "--lib"]);
+        if profile_directory
+            .file_name()
+            .is_some_and(|name| name == "release")
+        {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().expect("cargo build").success(),
+            "building libR.so failed"
+        );
+        profile_directory.join("libR.so")
+    })
 }
 
 fn session() -> &'static Session {
     SESSION.get_or_init(|| {
-        let path = library_dir().join("libR.so");
+        let path = libr_path();
         assert!(
             path.exists(),
             "{} does not exist; cargo builds it with the crate",
