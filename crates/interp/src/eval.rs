@@ -894,10 +894,7 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
         let value = if default.kind().is_atomic() || default == nil() {
             default
         } else {
-            let promise = make_promise(default, env)?;
-            // The promises of later defaults are allocated before this one is bound.
-            crate::heap().root(promise);
-            promise
+            make_promise(default, env)?
         };
         return Ok(Formal {
             symbol,

@@ -966,7 +966,7 @@ impl Heap {
         }
         let nil = self.known.nil;
         let frame = &mut *env.frame_ptr();
-        let mut last = None;
+        let mut first = true;
         for binding in bindings {
             let cell = self.allocate_uncollected(SexpType::Binding, size, 0)?;
             cell.set_car_unbarriered(binding.symbol);
@@ -979,12 +979,13 @@ impl Heap {
                 cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
             frame.insert(binding.symbol, cell);
-            last = Some(cell);
-        }
-        // A collection above may have made `env` old, and the cells are all young, so one
-        // barrier check covers every one of them.
-        if let Some(cell) = last {
-            self.write_barrier(env, cell);
+            // A collection above may have made `env` old, and the cells are all young, so the
+            // first cell's barrier check covers every one, including when a later allocation
+            // fails and leaves the cells before it in the frame.
+            if first {
+                self.write_barrier(env, cell);
+                first = false;
+            }
         }
         Ok(())
     }

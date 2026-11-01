@@ -2007,7 +2007,7 @@ The end-to-end guard rests on the corpus suites.
 - **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
   kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
   same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
-  is the fix used so far (the grouped median). libR now sets mimalloc's purge delay to never
+  is the fix used so far (the grouped median). libR sets mimalloc's purge delay to never
   (`crates/libr/src/libr.rs`), which removes the refaulting; resident memory stays at its peak.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,

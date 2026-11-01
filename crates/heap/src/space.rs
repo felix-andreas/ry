@@ -8,8 +8,8 @@
 //!
 //! Allocation takes a whole bitmap word of free slots at a time: the cursor of a size class
 //! claims every free slot of the word in the allocated bitmap, then hands them out with one
-//! trailing-zero count each. A claimed slot that is never handed out reads as an unmarked object
-//! at the next collection, which sweeps it like any dead one.
+//! trailing-zero count each. A sweep first gives back the slots a cursor claimed but never handed
+//! out, so they count as free rather than as freed objects.
 //!
 //! Objects never move, which the C API requires, and a mark is sticky between collections, so a
 //! marked object is an old one.
@@ -332,6 +332,7 @@ impl Space {
     /// Frees the unmarked objects of the pages allocated into since the last collection: the
     /// young ones, after a minor collection marked every survivor.
     pub unsafe fn sweep_young(&mut self, swept: &mut Swept) -> isize {
+        self.release_cursors();
         let touched = std::mem::take(&mut self.touched);
         let mut live_bytes = 0;
         for &page in &touched {
@@ -349,6 +350,7 @@ impl Space {
     /// Frees every unmarked object, after a major collection marked everything reachable.
     /// Returns the bytes the survivors take.
     pub unsafe fn sweep_all(&mut self, swept: &mut Swept) -> usize {
+        self.release_cursors();
         for available in &mut self.available {
             available.clear();
         }
@@ -427,6 +429,24 @@ impl Space {
             self.empty_pages.push(page);
         } else if live < PAGE_SIZE / SLOT_SIZES[class] {
             self.available[class].push(page);
+        }
+    }
+
+    /// Gives back the slots each cursor claimed but never handed out, so the sweep neither
+    /// counts them as freed objects nor reads them.
+    fn release_cursors(&mut self) {
+        for cursor in &mut self.cursors {
+            if cursor.page != NO_PAGE && cursor.free != 0 {
+                let word = cursor.next_word as usize - 1;
+                if let Some(allocated) = self
+                    .allocated
+                    .get_mut(cursor.page as usize)
+                    .and_then(|bitmap| bitmap.get_mut(word))
+                {
+                    *allocated &= !cursor.free;
+                }
+                cursor.free = 0;
+            }
         }
     }
 

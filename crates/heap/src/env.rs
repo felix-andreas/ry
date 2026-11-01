@@ -4,8 +4,7 @@
 //! redefinition, and it outlives its removal from the frame if compiled code still holds it.
 //!
 //! The frame keeps each cell's symbol beside it, so a lookup scans one contiguous array inside the
-//! environment object instead of loading every cell, which a profile showed stalling on a cache
-//! miss per binding.
+//! environment object instead of loading every cell, which would cost a cache miss per binding.
 //!
 //! The cells are kept in insertion order, and [`Frame::listed_cells`] derives from it the order
 //! GNU R lists a frame in (`ls(sorted = FALSE)`, `as.list`, `eapply`), which packages such as R6
@@ -204,8 +203,17 @@ impl Frame {
         // Removal keeps the insertion order, which the listing order is derived from.
         let cell = self.bindings.remove(position).cell;
         if let Some(index) = &mut self.index {
-            for (offset, moved) in self.bindings[position..].iter().enumerate() {
-                index.insert(moved.symbol, (position + offset) as u32);
+            for slot in index.values_mut() {
+                if *slot as usize > position {
+                    *slot -= 1;
+                }
+            }
+            // A duplicate formal behind the removed binding now answers for its symbol.
+            if let Some(offset) = self.bindings[position..]
+                .iter()
+                .position(|binding| binding.symbol == symbol)
+            {
+                index.insert(symbol, (position + offset) as u32);
             }
         }
         if position < self.formals as usize {
