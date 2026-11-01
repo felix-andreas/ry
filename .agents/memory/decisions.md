@@ -2576,6 +2576,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
   a known type compile to a slot load after one layout-id comparison, and tag tests are integer
   comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+- **Field read sites** (`bytecode::Op::Field`, `records::cached_field`). `x$name` with a symbol
+  field compiles to a `Field` instruction that carries a per-site shape constant, the integer
+  pair `[layout id, slot]` (`records::NO_LAYOUT` until a record is seen). Tier 0 compares the
+  layout id and reads the slot; any other object takes `subset::dollar_value`, `$`'s own path. The
+  JIT turns a filled cache into `Intrinsic::Field`: it guards record kind, no object flag and the
+  layout id, then loads the slot unboxed when the mask bit is set and the NaN-box prefix matches
+  the site's feedback, and hands off to tier 0 otherwise. `$` had to join `base_primitive`'s list,
+  or every site compiled as a general call. 5,000,000 iterations of `s <- s + p$x * p$y + p$z`
+  take 0.074 s on a record against 1.83 s on a list (0.055 s with locals), profiling build.
+  Tuple `[[i]]` and tag payloads read through `match` still take the generic path.
 - **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
   the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
   keeps its slot count in header padding, so the collector never reads the layout table.

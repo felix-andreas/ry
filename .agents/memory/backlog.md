@@ -375,6 +375,9 @@ protects construction but nothing after it.
   `Op::CallTailUpdate` stays off when the body may capture its frame. Allowing it needs proof
   that no created closure can read the parameter after the update.
 - `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
+- Tuple `t[[1L]]` and tag payload reads through `match` have no shape cache or JIT fast path;
+  `[[` on a tuple goes through `subset2`, and a JIT intrinsic needs per-site evidence that the
+  subject is a tuple of a known layout (the way `Op::Field` caches one for `$`).
 - The tail update covers only a body's last statement; `if (c) Dict.insert(d, k, 1) else d` and
   `return(Dict.insert(d, ...))` still copy.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
