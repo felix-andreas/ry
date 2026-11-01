@@ -48,3 +48,10 @@ replace R/ledger.R "balance(entries, opening = 1)" "balanse(entries, opening = 1
 expect diagnostics R/ledger.R "Did you mean `balance`?"
 fix R/ledger.R "balanse" "Change to `balance`"
 expect buffer R/ledger.R "  balance(entries, opening = 1)"
+
+# The fix-all action applies every safe fix at once and leaves the guesses alone.
+replace R/ledger.R "  balance(entries, opening = 1)" "  flag = T\n  c(balanse, 0,)"
+expect diagnostics R/ledger.R "Use TRUE, not T"
+fix R/ledger.R "flag" "Apply all safe fixes"
+expect buffer R/ledger.R "flag <- TRUE"
+expect buffer R/ledger.R "c(balanse, 0)"

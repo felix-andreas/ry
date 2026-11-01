@@ -122,6 +122,30 @@ Reference Class definition, because [records and tags](/type-checking/records-an
 with every field checked. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
 reason, and [configuration](/reference/configuration) shows how to turn each one on or off.
 
+## Fixing findings
+
+A finding with an obvious rewrite says so under its snippet. `ry check --fix` applies the safe ones
+to your files, which are the lints above, and then reports what is left:
+
+```text
+$ ry check --fix
+unresolved
+
+  ! I could not resolve `totl` in this package, its imports, or builtins. Did you mean `total`?
+   --[R/rates.R:4:7]
+ 3 | x <- c(1, 2)
+ 4 | print(totl)
+   |       ^^^^
+  help: Change to `total` (`ry check --fix --unsafe-fixes` applies it)
+
+applied 3 fixes
+1 problem in 1 file
+1 fixable with `ry check --fix --unsafe-fixes`
+```
+
+A spelling suggestion is a guess, so it needs `--unsafe-fixes` as well. Your editor offers the same
+fixes as quick fixes, and [Fixes](/reference/diagnostic-codes#fixes) lists which findings have one.
+
 ## Silencing one finding
 
 Every finding carries a code, and naming it in a comment silences it:

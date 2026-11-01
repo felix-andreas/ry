@@ -18,15 +18,21 @@ mod runtime;
 
 use {
     analysis::Refusal,
+    bumpalo::Bump,
     heap::object::{Header, Sexp, SexpType, gp},
     interp::{
-        bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
+        bytecode::{self, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
         heap, interp,
         unwind::{R, error},
         values,
     },
-    runtime::{Activation, Compiled, MAX_COMPILES},
-    std::{cell::Cell, ffi::c_void, panic::resume_unwind},
+    runtime::{Activation, Compiled, MAX_COLD_REFUSALS, MAX_COMPILES},
+    std::{
+        cell::{Cell, RefCell},
+        ffi::c_void,
+        panic::resume_unwind,
+        time::Instant,
+    },
 };
 
 /// How the JIT is configured for the session.
@@ -59,6 +65,10 @@ const BACK_EDGE_THRESHOLD: i32 = 10_000;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
+    static MODE: Cell<Mode> = const { Cell::new(Mode::On) };
+    /// The arena every compilation's plan lives in. It is reset after each compilation, which
+    /// keeps its largest chunk, so a compilation usually allocates nothing from the system.
+    static ARENA: RefCell<Bump> = RefCell::new(Bump::new());
 }
 
 /// Installs the JIT in the current interpreter, in the mode `RY_JIT` asks for.
@@ -78,6 +88,7 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1),
     };
     ENTRY_LIMIT.with(|limit| limit.set(entries));
+    MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
         back_edge,
@@ -88,14 +99,14 @@ pub fn install_mode(mode: Mode) {
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
     unsafe {
         let entries = values::ints(machine.code.cdr().element(PROFILE))[profile::ENTRIES];
-        let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get))?;
+        let compiled = compiled_for(machine, entries >= ENTRY_LIMIT.with(Cell::get), false)?;
         run(machine, compiled, 0)
     }
 }
 
 unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit> {
     unsafe {
-        let compiled = compiled_for(machine, true)?;
+        let compiled = compiled_for(machine, true, true)?;
         if !compiled.osr.contains(&target) {
             return None;
         }
@@ -104,7 +115,13 @@ unsafe fn back_edge(machine: &mut Machine<'_>, target: usize) -> Option<TierExit
 }
 
 /// The compiled code for the activation, compiling it now when `hot` and it has none.
-unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compiled> {
+/// `in_loop` says a backward jump asked: the loop is running in tier 0 right now, so waiting for
+/// the code after it to record its types would only keep the loop slow.
+unsafe fn compiled_for<'a>(
+    machine: &Machine<'_>,
+    hot: bool,
+    in_loop: bool,
+) -> Option<&'a Compiled> {
     unsafe {
         let constants = machine.code.cdr();
         let tier1 = constants.element(TIER1);
@@ -126,22 +143,35 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
             heap().set_element(constants, TIER1, values::nil());
         }
         let counters = values::ints_mut(constants.element(PROFILE));
-        if !hot || counters[profile::TIER_STATE] < 0 {
+        let state = counters[profile::TIER_STATE];
+        if !hot || state < 0 {
             return None;
         }
-        counters[profile::TIER_STATE] += 1;
-        if counters[profile::TIER_STATE] > MAX_COMPILES {
+        if runtime::compiles(state) >= MAX_COMPILES {
             counters[profile::TIER_STATE] = -1;
             return None;
         }
-        match compile(machine) {
-            Ok(compiled) => Some(compiled),
+        let patient = !in_loop && runtime::cold_refusals(state) < MAX_COLD_REFUSALS;
+        let result = compile(machine, patient);
+        // Compiling reads the profile too, so the counters are borrowed again afterwards.
+        let counters = values::ints_mut(constants.element(PROFILE));
+        match result {
+            Ok(compiled) => {
+                counters[profile::TIER_STATE] = state + 1;
+                Some(compiled)
+            }
             Err(Refusal(reason)) => {
                 if std::env::var_os("RY_JIT_LOG").is_some() {
                     eprintln!("jit: not compiling {}: {reason}", describe(machine.code));
                 }
-                if reason != analysis::COLD {
-                    values::ints_mut(constants.element(PROFILE))[profile::TIER_STATE] = -1;
+                if reason == analysis::COLD {
+                    // The next attempt waits for as many entries or backward jumps as this one did,
+                    // so the body runs long enough to record the types it is missing.
+                    counters[profile::TIER_STATE] = state + runtime::COLD_REFUSAL;
+                    counters[profile::ENTRIES] = 0;
+                    counters[profile::BACK_EDGES] = 0;
+                } else {
+                    counters[profile::TIER_STATE] = -1;
                 }
                 None
             }
@@ -159,23 +189,71 @@ unsafe fn describe(code: Sexp) -> String {
     }
 }
 
-unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
+unsafe fn compile<'a>(machine: &Machine<'_>, patient: bool) -> Result<&'a Compiled, Refusal> {
+    ARENA.with(|arena| match arena.try_borrow_mut() {
+        Ok(mut arena) => {
+            let compiled = compile_in(&arena, machine, patient);
+            arena.reset();
+            compiled
+        }
+        // Compilation never runs R code, so it does not nest; a fresh arena keeps it correct if
+        // that ever changes.
+        Err(_) => compile_in(&Bump::new(), machine, patient),
+    })
+}
+
+unsafe fn compile_in<'a>(
+    arena: &Bump,
+    machine: &Machine<'_>,
+    patient: bool,
+) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.env.enclosure();
-        let plan = analysis::plan(machine.code, machine.function.car(), enclosure)?;
+        let started = Instant::now();
+        let plan = analysis::plan(
+            analysis::Arena(arena),
+            machine.code,
+            machine.function.car(),
+            enclosure,
+            patient,
+        )?;
+        let planned = started.elapsed();
+        // Forced compilation keeps such bodies, so the differential tests cover the code that
+        // glues tier 0's steps together.
+        if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
+            return Err(Refusal(analysis::NOTHING_NATIVE));
+        }
         let entry = codegen::compile(&plan, machine.code)?;
+        let generated = started.elapsed() - planned;
         if std::env::var_os("RY_JIT_LOG").is_some() {
             // The instructions left to tier 0 are where compiled code is slow.
+            // A builtin call lists its argument types, which say why it was not an intrinsic.
             let steps: Vec<String> = plan
                 .insts
                 .iter()
                 .zip(&plan.actions)
-                .filter(|(_, action)| matches!(action, analysis::Action::Step { .. }))
-                .map(|(inst, _)| format!("{:?}@{}", inst.op, inst.pc))
+                .enumerate()
+                .filter(|(_, (_, action))| matches!(action, analysis::Action::Step { .. }))
+                .map(|(position, (inst, _))| {
+                    let arguments = match (inst.op, plan.before(position)) {
+                        (Op::CallBuiltin, Some(before)) => {
+                            let first = inst.operand(3);
+                            let types: Vec<String> = (first..first + inst.operand(4))
+                                .map(|register| format!("{:?}", before.registers[register]))
+                                .collect();
+                            format!("({})", types.join(", "))
+                        }
+                        _ => String::new(),
+                    };
+                    format!("{:?}@{}{arguments}", inst.op, inst.pc)
+                })
                 .collect();
             eprintln!(
-                "jit: compiled {} ({} speculations; tier 0 runs: {})",
+                "jit: compiled {} in {} us (analysis {} us, codegen {} us; {} speculations; tier 0 runs: {})",
                 describe(machine.code),
+                (planned + generated).as_micros(),
+                planned.as_micros(),
+                generated.as_micros(),
                 plan.speculations.len(),
                 if steps.is_empty() {
                     "nothing".to_string()
@@ -193,9 +271,9 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
             entry,
             enclosure,
             registers: plan.registers,
-            slots: plan.slots.clone(),
+            slots: plan.slots.to_vec(),
             loops: plan.loops,
-            speculations: plan.speculations.clone(),
+            speculations: plan.speculations.to_vec(),
             epoch: Cell::new(heap().binding_epoch()),
             osr,
         });

@@ -17,7 +17,10 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
         strings::Encoding,
     },
-    std::path::{Path, PathBuf},
+    std::{
+        path::{Path, PathBuf},
+        time::{Duration, Instant},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -184,10 +187,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
                 return Err(error("invalid 'time' value"));
             }
             if seconds.is_finite() && seconds > 0.0 {
-                std::thread::sleep(
-                    std::time::Duration::try_from_secs_f64(seconds)
-                        .unwrap_or(std::time::Duration::MAX),
-                );
+                let total = Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX);
+                // Slept in slices, so Ctrl-C stops the wait within one slice.
+                let slice = Duration::from_millis(20);
+                let start = Instant::now();
+                while let Some(left) = total
+                    .checked_sub(start.elapsed())
+                    .filter(|left| !left.is_zero())
+                {
+                    crate::unwind::poll_interrupt()?;
+                    std::thread::sleep(left.min(slice));
+                }
             }
             Ok(nil())
         }
@@ -2228,8 +2238,24 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
     let must_work = values::as_logical_scalar(call.arg(2));
     // Only Windows has a second separator to choose; elsewhere `winslash` is ignored, as in GNU R.
-    let separator =
-        values::first_string(call.arg(1)).map_or_else(|| "\\".to_owned(), |text| text.into_owned());
+    let separator = if cfg!(windows) {
+        let slash = call.arg(1);
+        if slash.kind() != SexpType::String || length(slash) != 1 {
+            return Err(call.error("'winslash' must be a character string"));
+        }
+        match values::string_at(slash, 0).as_deref() {
+            Some(text @ ("/" | "\\")) => text.to_owned(),
+            _ => return Err(call.error("'winslash' must be '/' or '\\\\'")),
+        }
+    } else {
+        String::new()
+    };
+    // GNU R reports the Windows system message for a path that does not exist.
+    let missing = if cfg!(windows) {
+        "The system cannot find the file specified"
+    } else {
+        "No such file or directory"
+    };
     let count = length(paths);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
@@ -2245,18 +2271,22 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
             Ok(canonical) => crate::platform::path_text(&canonical),
             Err(_) => {
                 if must_work == 1 {
-                    return Err(call.error(format!(
-                        "path[{}]=\"{path}\": No such file or directory",
-                        index + 1
-                    )));
+                    return Err(call.error(format!("path[{}]=\"{path}\": {missing}", index + 1)));
                 }
                 if must_work == NA_INTEGER {
                     crate::conditions::warning_call(
                         call.call,
-                        format!("path[{}]=\"{path}\": No such file or directory", index + 1),
+                        format!("path[{}]=\"{path}\": {missing}", index + 1),
                     )?;
                 }
-                expanded
+                // Windows makes a path that does not exist absolute, as GetFullPathName does;
+                // elsewhere it comes back as given, after tilde expansion.
+                match std::path::absolute(&expanded) {
+                    Ok(absolute) if cfg!(windows) => {
+                        crate::platform::path_text(&absolute).replace('\\', &separator)
+                    }
+                    _ => expanded,
+                }
             }
         };
         values::set_elt(result, index, values::mkchar(&normalized)?);
@@ -3385,8 +3415,7 @@ unsafe fn do_sys_set_file_time(call: &Call<'_>) -> R<Sexp> {
 fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
     let out_of_range =
         || std::io::Error::new(std::io::ErrorKind::InvalidInput, "time out of range");
-    let offset =
-        std::time::Duration::try_from_secs_f64(seconds.abs()).map_err(|_| out_of_range())?;
+    let offset = Duration::try_from_secs_f64(seconds.abs()).map_err(|_| out_of_range())?;
     let time = if seconds >= 0.0 {
         std::time::UNIX_EPOCH.checked_add(offset)
     } else {

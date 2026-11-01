@@ -23,7 +23,9 @@ use {
     },
     heap::object::{Rcomplex, Sexp, SexpType, gp},
     std::{
-        ffi::{CStr, c_char, c_void},
+        cell::Cell,
+        ffi::{CStr, c_char, c_int, c_void},
+        ops::Deref,
         sync::OnceLock,
     },
 };
@@ -1181,7 +1183,7 @@ unsafe fn qr_coef_real(qr_object: Sexp, b: Sexp) -> R<Sexp> {
     let factor = lapack_qr(qr_object, SexpType::Real, rows)?;
     let k = length(factor.tau) as i32;
     let (n, rhs) = (factor.rows as i32, rhs_count as i32);
-    multiply_by_q_real(lapack, &factor, result, c"T", n, rhs, k)?;
+    multiply_by_q_real(&lapack, &factor, result, c"T", n, rhs, k)?;
     let mut info = 0;
     (lapack.dtrtrs)(
         c"U".as_ptr(),
@@ -1211,7 +1213,7 @@ unsafe fn qr_coef_complex(qr_object: Sexp, b: Sexp) -> R<Sexp> {
     let factor = lapack_qr(qr_object, SexpType::Complex, rows)?;
     let k = length(factor.tau) as i32;
     let (n, rhs) = (factor.rows as i32, rhs_count as i32);
-    multiply_by_q_complex(lapack, &factor, result, c"C", n, rhs, k)?;
+    multiply_by_q_complex(&lapack, &factor, result, c"C", n, rhs, k)?;
     let mut info = 0;
     (lapack.ztrtrs)(
         c"U".as_ptr(),
@@ -1244,7 +1246,7 @@ unsafe fn qr_qy_real(qr_object: Sexp, b: Sexp, transpose: Sexp) -> R<Sexp> {
     let k = length(factor.tau) as i32;
     let trans = if transpose { c"T" } else { c"N" };
     multiply_by_q_real(
-        lapack,
+        &lapack,
         &factor,
         result,
         trans,
@@ -1267,7 +1269,7 @@ unsafe fn qr_qy_complex(qr_object: Sexp, b: Sexp, transpose: Sexp) -> R<Sexp> {
     let k = length(factor.tau) as i32;
     let trans = if transpose { c"C" } else { c"N" };
     multiply_by_q_complex(
-        lapack,
+        &lapack,
         &factor,
         result,
         trans,
@@ -2546,7 +2548,7 @@ pub unsafe fn dqrxb(args: &[Sexp]) -> R<()> {
 /// The shared arguments of the `dqr*` routines: a compact QR factor from `dqrdc2` with `n`
 /// rows and rank `k`, and the number of right-hand side columns.
 struct QrProblem<'a> {
-    blas: &'static Blas,
+    blas: DirectFortran<Blas>,
     qr: &'a mut [f64],
     n: usize,
     k: usize,
@@ -3059,16 +3061,61 @@ impl Blas {
 static BLAS: OnceLock<Result<Blas, String>> = OnceLock::new();
 static LAPACK: OnceLock<Result<Lapack, String>> = OnceLock::new();
 
-fn blas() -> R<&'static Blas> {
+fn blas() -> R<DirectFortran<Blas>> {
     // SAFETY: opening a library and reading its symbols has no preconditions.
     let library = BLAS.get_or_init(|| unsafe { Blas::open() });
-    library.as_ref().map_err(|message| error(message.clone()))
+    library
+        .as_ref()
+        .map(DirectFortran::new)
+        .map_err(|message| error(message.clone()))
 }
 
-fn lapack() -> R<&'static Lapack> {
+fn lapack() -> R<DirectFortran<Lapack>> {
     // SAFETY: as for `blas`.
     let library = LAPACK.get_or_init(|| unsafe { Lapack::open() });
-    library.as_ref().map_err(|message| error(message.clone()))
+    library
+        .as_ref()
+        .map(DirectFortran::new)
+        .map_err(|message| error(message.clone()))
+}
+
+thread_local! {
+    static DIRECT_FORTRAN_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// A BLAS or LAPACK library in use by Rust code. While one is alive, `xerbla_` (the routines'
+/// error handler, which R.dll exports on Windows) returns instead of raising an R error, because
+/// raising one would `longjmp` over the Rust frames between here and the innermost native
+/// context. Reference LAPACK then returns a negative `info`, which the caller reports itself.
+struct DirectFortran<T: 'static> {
+    library: &'static T,
+}
+
+impl<T> DirectFortran<T> {
+    fn new(library: &'static T) -> DirectFortran<T> {
+        DIRECT_FORTRAN_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        DirectFortran { library }
+    }
+}
+
+impl<T> Deref for DirectFortran<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.library
+    }
+}
+
+impl<T> Drop for DirectFortran<T> {
+    fn drop(&mut self) {
+        DIRECT_FORTRAN_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Whether Rust code is calling BLAS or LAPACK directly on this thread (see `DirectFortran`).
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_direct_fortran_active() -> c_int {
+    DIRECT_FORTRAN_DEPTH.with(|depth| c_int::from(depth.get() > 0))
 }
 
 unsafe fn open_library(candidates: &[&str], description: &str) -> Result<*mut c_void, String> {

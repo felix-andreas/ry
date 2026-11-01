@@ -6,8 +6,8 @@ use {
     semantics::{
         Db, Item, ItemKind, ProjectFiles, SourceFile,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
-        check::{CalleeTarget, ItemCheck},
-        diagnostics::{Diagnostic, TypeRenderer},
+        check::{ArgumentShape, ArgumentTarget, CalleeTarget, ItemCheck, argument_targets},
+        diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
             Argument, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId, PatternKind,
@@ -29,6 +29,7 @@ use {
         cmp::Reverse,
         collections::{BTreeSet, HashMap, HashSet},
         iter::once,
+        mem,
     },
     syntax::{
         SyntaxElement,
@@ -702,15 +703,182 @@ pub fn rename(
     (!occurrences.is_empty()).then_some(occurrences)
 }
 
+/// A project function in a call hierarchy, or the top-level statement or value a call sits in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallHierarchyItem {
+    pub name: String,
+    pub detail: Option<String>,
+    pub is_function: bool,
+    pub file: SourceFile,
+    pub range: TextRange,
+    pub selection: TextRange,
+}
+
+/// For incoming calls `item` is the caller, for outgoing calls the callee. `ranges` are the
+/// called names in the caller's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallHierarchyCall {
+    pub item: CallHierarchyItem,
+    pub ranges: Vec<TextRange>,
+}
+
+/// The project's top-level function named at `offset`, by its definition or any use. A function
+/// from a package has no callers in the project worth listing apart from its references, and no
+/// body to list calls from, so it is not an item.
+pub fn call_hierarchy_item(
+    db: &dyn Db,
+    files: ProjectFiles,
+    file: SourceFile,
+    offset: TextSize,
+) -> Option<CallHierarchyItem> {
+    let Target::Global(name) = target_at(db, files, file, offset)? else {
+        return None;
+    };
+    project_function_item(db, files, &name)
+}
+
+/// Grouped by caller in the order the references walk finds them. Only calls count: passing the
+/// function as a value, as in `lapply(xs, f)`, is a reference but not a call.
+pub fn incoming_calls(
+    db: &dyn Db,
+    files: ProjectFiles,
+    callee: &CallHierarchyItem,
+) -> Vec<CallHierarchyCall> {
+    let mut calls: Vec<CallHierarchyCall> = Vec::new();
+    for occurrence in occurrences(db, files, &Target::Global(callee.name.clone())) {
+        if occurrence.is_declaration || !is_call_head(db, occurrence.file, occurrence.range) {
+            continue;
+        }
+        let Some(caller) = enclosing_item(db, occurrence.file, occurrence.range.start()) else {
+            continue;
+        };
+        match calls.iter_mut().find(|call| call.item == caller) {
+            Some(call) => call.ranges.push(occurrence.range),
+            None => calls.push(CallHierarchyCall {
+                item: caller,
+                ranges: vec![occurrence.range],
+            }),
+        }
+    }
+    calls
+}
+
+/// The project functions `caller` calls by name, in the order of their first call.
+pub fn outgoing_calls(
+    db: &dyn Db,
+    files: ProjectFiles,
+    caller: &CallHierarchyItem,
+) -> Vec<CallHierarchyCall> {
+    let root = semantics::parse(db, caller.file).syntax_node();
+    let Some(body) = root
+        .descendants()
+        .find(|node| node.text_range() == caller.range)
+    else {
+        return Vec::new();
+    };
+    let mut calls: Vec<CallHierarchyCall> = Vec::new();
+    for call in body.descendants().filter(|node| node.kind() == CALL_EXPR) {
+        let Some(head) = call.first_child().filter(|head| head.kind() == NAME) else {
+            continue;
+        };
+        let range = head.text_range();
+        let Some(Target::Global(name)) = target_at(db, files, caller.file, range.start()) else {
+            continue;
+        };
+        let Some(callee) = project_function_item(db, files, &name) else {
+            continue;
+        };
+        match calls.iter_mut().find(|existing| existing.item == callee) {
+            Some(existing) => existing.ranges.push(range),
+            None => calls.push(CallHierarchyCall {
+                item: callee,
+                ranges: vec![range],
+            }),
+        }
+    }
+    calls
+}
+
+fn project_function_item(
+    db: &dyn Db,
+    files: ProjectFiles,
+    name: &str,
+) -> Option<CallHierarchyItem> {
+    let &item = package_definitions(db, files).get(&Symbol::lookup(name)?)?;
+    if !matches!(*item.kind(db), ItemKind::Function) {
+        return None;
+    }
+    hierarchy_item(db, item)
+}
+
+/// The top-level item around `offset`. A statement has no name of its own, so it is listed as
+/// the top level of its file.
+fn enclosing_item(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option<CallHierarchyItem> {
+    let item = item_tree(db, file)
+        .iter()
+        .copied()
+        .find(|item| item_node(db, *item).is_some_and(|node| node.text_range().contains(offset)))?;
+    hierarchy_item(db, item)
+}
+
+fn hierarchy_item(db: &dyn Db, item: Item<'_>) -> Option<CallHierarchyItem> {
+    let node = item_node(db, item)?;
+    let range = node.text_range();
+    let is_function = matches!(*item.kind(db), ItemKind::Function);
+    Some(CallHierarchyItem {
+        name: item
+            .name(db)
+            .clone()
+            .unwrap_or_else(|| "(top level)".to_owned()),
+        detail: if is_function {
+            function_detail(&node)
+        } else {
+            None
+        },
+        is_function,
+        file: *item.file(db),
+        range,
+        selection: item_name_range(db, item).unwrap_or(range),
+    })
+}
+
+/// Whether the name at `range` is the head of a call, `f` in `f(x)`.
+fn is_call_head(db: &dyn Db, file: SourceFile, range: TextRange) -> bool {
+    let root = semantics::parse(db, file).syntax_node();
+    if !root.text_range().contains_range(range) {
+        return false;
+    }
+    let name = match root.covering_element(range) {
+        SyntaxElement::Node(node) => Some(node),
+        SyntaxElement::Token(token) => token.parent(),
+    };
+    name.filter(|name| name.kind() == NAME)
+        .and_then(|name| {
+            let call = name.parent()?;
+            (call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&name)).then_some(())
+        })
+        .is_some()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlayHint {
     pub offset: TextSize,
     pub label: String,
+    pub kind: InlayHintKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlayHintKind {
+    /// `: T` after an assigned name or a loop variable.
+    Type,
+    /// `name = ` before a positional argument.
+    Parameter,
 }
 
 /// A function type is hinted when it contains no `Unknown`; any other type must be fully
 /// concrete, so partially inferred values show nothing.
 pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -> Vec<InlayHint> {
+    let text = file.text(db);
     let mut hints = Vec::new();
     for &item in item_tree(db, file) {
         let Some(node) = item_node(db, item) else {
@@ -755,6 +923,36 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                     hints.push(InlayHint {
                         offset: variable_range.end() + node.text_range().start(),
                         label: format!(": {}", TypeRenderer::default().render(db, ty)),
+                        kind: InlayHintKind::Type,
+                    });
+                }
+                continue;
+            }
+            // The one argument of a one-argument call is obvious from the call itself.
+            if let ExpressionKind::Call { callee, arguments } = kind
+                && hir[*arguments]
+                    .iter()
+                    .filter(|argument| argument.name.is_none() && argument.value.is_some())
+                    .count()
+                    > 1
+                && let Some(&callee_type) = check.expression_types.get(callee)
+                && let TyKind::Function(function) = callee_type.kind(db)
+            {
+                let offset = node.text_range().start();
+                for (value, name) in
+                    positional_parameters(db, function, &hir[*arguments], hir, *callee)
+                {
+                    let range = hir.range(value) + offset;
+                    let written = text
+                        .get(usize::from(range.start())..usize::from(range.end()))
+                        .unwrap_or_default();
+                    if parameter_hint_is_noise(name, written) {
+                        continue;
+                    }
+                    hints.push(InlayHint {
+                        offset: range.start(),
+                        label: format!("{name} = "),
+                        kind: InlayHintKind::Parameter,
                     });
                 }
                 continue;
@@ -779,11 +977,69 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             hints.push(InlayHint {
                 offset: hir.range(*target).end() + node.text_range().start(),
                 label: format!(": {label}"),
+                kind: InlayHintKind::Type,
             });
         }
     }
     hints.sort_by_key(|hint| hint.offset);
     hints
+}
+
+/// Each positional argument with the parameter it fills, matched the way the checker matches
+/// it, up to a forwarded `...`. A piped value is left out: it is written before the call, so a hint there would sit at
+/// the head of the chain.
+fn positional_parameters<'db>(
+    db: &'db dyn Db,
+    function: &FunctionType<'db>,
+    arguments: &[Argument],
+    hir: &Module,
+    callee: ExprId,
+) -> Vec<(ExprId, &'db str)> {
+    let names: Vec<Option<Symbol>> = arguments
+        .iter()
+        .map(|argument| hir.argument_name(argument))
+        .collect();
+    let shapes: Vec<ArgumentShape> = arguments
+        .iter()
+        .zip(&names)
+        .map(|(argument, name)| {
+            ArgumentShape {
+            name: name.as_deref(),
+            forwards_dots: name.is_none()
+                && argument.value.is_some_and(|value| {
+                    matches!(hir.kind(value), ExpressionKind::NameRef(name) if name == "...")
+                }),
+        }
+        })
+        .collect();
+    let callee_end = hir.range(callee).end();
+    // A forwarded `...` carries an unknown number of values, so later positions are guesses.
+    let known = shapes
+        .iter()
+        .position(|shape| shape.forwards_dots)
+        .unwrap_or(shapes.len());
+    argument_targets(db, function, &shapes)
+        .into_iter()
+        .zip(arguments)
+        .take(known)
+        .filter(|(_, argument)| argument.name.is_none())
+        .filter_map(|(target, argument)| {
+            let Some(ArgumentTarget::Named(slot)) = target else {
+                return None;
+            };
+            let value = argument.value?;
+            (hir.range(value).start() >= callee_end)
+                .then(|| Some((value, function.named.get(slot)?.name.text(db))))?
+        })
+        .collect()
+}
+
+/// A hint that tells the reader nothing: a one-letter parameter such as `x` or `.f`, or an
+/// argument that already spells the parameter's name.
+fn parameter_hint_is_noise(parameter: &str, argument: &str) -> bool {
+    parameter.trim_start_matches('.').chars().count() <= 1
+        || argument == parameter
+        || argument.ends_with(&format!("${parameter}"))
 }
 
 /// A value that already names its own type: a nominal constructor `@Money(1)`, whose hint would
@@ -817,6 +1073,10 @@ pub enum SemanticClass {
     Tag,
     /// A called name, or a name assigned a function literal.
     Function,
+    /// A called function that comes from a package or base R rather than the project: the
+    /// function half of `pkg::name`, or a call head that resolves only to a stub. Editors render
+    /// it as a function with the `defaultLibrary` modifier.
+    LibraryFunction,
     /// The package of `pkg::name`.
     Namespace,
 }
@@ -824,8 +1084,11 @@ pub enum SemanticClass {
 pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, SemanticClass)> {
     let root = semantics::parse(db, file).syntax_node();
     let mut spans = Vec::new();
-    // A read is a parameter only by resolution, which the syntax alone cannot tell.
+    // A read is a parameter, or a library function, only by resolution, which the syntax alone
+    // cannot tell.
     let mut parameter_reads: HashSet<TextSize> = HashSet::new();
+    let mut library_reads: HashSet<TextSize> = HashSet::new();
+    let files = ProjectFiles::try_get(db);
     for &item in item_tree(db, file) {
         let (Some(node), Some(hir), Some(naming)) = (
             item_node(db, item),
@@ -842,6 +1105,13 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 .is_some_and(|info| info.kind == BindingKind::Parameter)
             {
                 parameter_reads.insert(hir.range(*expression).start() + offset);
+            }
+        }
+        for (expression, name) in naming.non_locals.iter() {
+            let project_defines =
+                files.is_some_and(|files| global_declaration_exists(db, files, name));
+            if !project_defines && stub_declaration(db, name).is_some() {
+                library_reads.insert(hir.range(*expression).start() + offset);
             }
         }
     }
@@ -886,10 +1156,16 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 }
             }
             None => classify_ry_token(&token).or_else(|| {
-                if token.kind() == IDENT && parameter_reads.contains(&token.text_range().start()) {
+                let start = token.text_range().start();
+                if token.kind() == IDENT && parameter_reads.contains(&start) {
                     Some(SemanticClass::Parameter)
                 } else {
-                    classify_r_name(&token)
+                    classify_r_name(&token).map(|class| match class {
+                        SemanticClass::Function if library_reads.contains(&start) => {
+                            SemanticClass::LibraryFunction
+                        }
+                        class => class,
+                    })
                 }
             }),
         };
@@ -917,7 +1193,9 @@ pub fn classify_type_token(token: &SyntaxToken) -> Option<SemanticClass> {
     match token.kind() {
         IDENT => match owner_kind {
             Some(TYPE_BINDER) => Some(SemanticClass::TypeParameter),
-            Some(TYPE_FIELD | TYPE_FUNCTION) => Some(SemanticClass::Parameter),
+            // The only name a function type owns directly is its `fn`.
+            Some(TYPE_FUNCTION) => Some(SemanticClass::Keyword),
+            Some(TYPE_FIELD | TYPE_PARAMETER) => Some(SemanticClass::Parameter),
             Some(ANNOTATION_DIRECTIVE) => Some(SemanticClass::Decorator),
             _ => Some(SemanticClass::Type),
         },
@@ -964,7 +1242,7 @@ fn classify_r_name(token: &SyntaxToken) -> Option<SemanticClass> {
         NAMESPACE_EXPR => holder
             .parent()
             .filter(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder))
-            .map(|_| SemanticClass::Function),
+            .map(|_| SemanticClass::LibraryFunction),
         CALL_EXPR if is_first_child => Some(SemanticClass::Function),
         BINARY_EXPR if is_first_child => {
             let binary = BinaryExpr::cast(holder)?;
@@ -1445,8 +1723,11 @@ pub enum CodeActionKind {
     InsertInferredAnnotation,
     /// The whole-file source action covering every eligible binding.
     AddMissingAnnotations,
-    /// The mechanical fix a diagnostic carries, such as a suggested spelling.
-    DiagnosticFix,
+    /// The mechanical fix a diagnostic carries, such as a suggested spelling. Only a safe fix
+    /// is what an editor's "fix" shortcut may apply without a look.
+    DiagnosticFix(Applicability),
+    /// Every safe fix in the file at once, as `ry check --fix` applies them in one pass.
+    FixAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1611,7 +1892,7 @@ pub fn diagnostic_fixes(diagnostics: &[Diagnostic], viewport: TextRange) -> Vec<
             let fix = diagnostic.fix.as_ref()?;
             Some(CodeAction {
                 title: fix.title.clone(),
-                kind: CodeActionKind::DiagnosticFix,
+                kind: CodeActionKind::DiagnosticFix(fix.applicability),
                 edits: vec![TextEdit {
                     range: fix.range,
                     replacement: fix.replacement.clone(),
@@ -1619,6 +1900,26 @@ pub fn diagnostic_fixes(diagnostics: &[Diagnostic], viewport: TextRange) -> Vec<
             })
         })
         .collect()
+}
+
+/// `None` when the file has no safe fix. Overlapping fixes keep the first, so a fix this pass
+/// leaves out shows up again once the edit lands.
+pub fn fix_all(diagnostics: &[Diagnostic]) -> Option<CodeAction> {
+    let fixes = applicable_fixes(diagnostics, false);
+    if fixes.is_empty() {
+        return None;
+    }
+    Some(CodeAction {
+        title: "Apply all safe fixes".to_owned(),
+        kind: CodeActionKind::FixAll,
+        edits: fixes
+            .into_iter()
+            .map(|fix| TextEdit {
+                range: fix.range,
+                replacement: fix.replacement.clone(),
+            })
+            .collect(),
+    })
 }
 
 fn ranges_overlap(left: TextRange, right: TextRange) -> bool {
@@ -1812,41 +2113,73 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     }
     let text = file.text(db);
     let lines = Lines::new(text);
+    let mut scoped = Vec::new();
     for header in section_headers(&root, text, &lines) {
         // A bare `# ----` separator still ends the section above it, but a symbol needs a name.
-        if header.scope.is_some() || header.title.is_empty() {
+        if header.title.is_empty() {
             continue;
         }
-        symbols.push(DocumentSymbol {
+        let section = DocumentSymbol {
             name: header.title,
             kind: DocumentSymbolKind::Section,
             detail: None,
             range: TextRange::new(header.range.start(), lines.end_of(text, header.end_line)),
             selection: header.range,
             children: Vec::new(),
-        });
+        };
+        match header.scope {
+            None => symbols.push(section),
+            Some(_) => scoped.push(section),
+        }
     }
-    // Sections nest by containment: a section's range ends where the next header of the same or
-    // a higher level begins, so every symbol it contains sorts after it and before that header.
+    // A section inside a function body belongs to the innermost listed symbol around it. One in
+    // a block the outline does not list, such as a `test_that` body, has nowhere to go.
+    for section in scoped {
+        insert_scoped_section(&mut symbols, section);
+    }
+    nest_sections(symbols, TextSize::of(text) + TextSize::from(1))
+}
+
+fn insert_scoped_section(symbols: &mut [DocumentSymbol], section: DocumentSymbol) {
+    let Some(owner) = symbols.iter_mut().find(|symbol| {
+        symbol.kind != DocumentSymbolKind::Section && symbol.range.contains_range(section.range)
+    }) else {
+        return;
+    };
+    let inner = owner.children.iter().any(|child| {
+        child.kind != DocumentSymbolKind::Section && child.range.contains_range(section.range)
+    });
+    if inner {
+        insert_scoped_section(&mut owner.children, section);
+    } else {
+        owner.children.push(section);
+    }
+}
+
+/// Sections nest by containment: a section's range ends where the next header of the same or a
+/// higher level in its scope begins, so every symbol it contains sorts after it and before that
+/// header. Each symbol's own children nest the same way, which places the sections of a function
+/// body under that function.
+fn nest_sections(mut symbols: Vec<DocumentSymbol>, end: TextSize) -> Vec<DocumentSymbol> {
     symbols.sort_by_key(|symbol| (symbol.range.start(), Reverse(symbol.range.end())));
     let mut nested: Vec<DocumentSymbol> = Vec::new();
     let mut open: Vec<DocumentSymbol> = Vec::new();
-    for symbol in symbols {
+    for mut symbol in symbols {
         close_sections(&mut open, &mut nested, symbol.range.start());
         if symbol.kind == DocumentSymbolKind::Section {
             open.push(symbol);
         } else {
+            if !symbol.children.is_empty() {
+                let children = mem::take(&mut symbol.children);
+                symbol.children = nest_sections(children, symbol.range.end());
+            }
             match open.last_mut() {
                 Some(section) => section.children.push(symbol),
                 None => nested.push(symbol),
             }
         }
     }
-    close_sections(
-        &mut open,
-        &mut nested,
-        TextSize::of(text) + TextSize::from(1),
-    );
+    close_sections(&mut open, &mut nested, end);
     nested
 }
 
