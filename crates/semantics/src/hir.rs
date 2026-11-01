@@ -4,7 +4,7 @@
 use {
     rustc_hash::{FxHashMap, FxHasher},
     std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         fmt,
         hash::{Hash, Hasher},
         marker::PhantomData,
@@ -322,6 +322,20 @@ side_array!(PatId, pattern_lists);
 side_array!(PatternField, pattern_fields);
 
 impl Module {
+    fn clear(&mut self) {
+        self.kinds.clear();
+        self.ranges.clear();
+        self.patterns.clear();
+        self.arguments.clear();
+        self.parameters.clear();
+        self.expression_lists.clear();
+        self.record_fields.clear();
+        self.arms.clear();
+        self.pattern_lists.clear();
+        self.pattern_fields.clear();
+        self.root = None;
+    }
+
     pub fn kind(&self, id: ExprId) -> &ExpressionKind {
         &self.kinds[id.0 as usize]
     }
@@ -760,22 +774,32 @@ pub struct PatternField {
 
 pub fn lower_item(root: &SyntaxNode) -> Module {
     let green = root.green();
-    let mut lowering = Lowering::default();
+    let mut lowering = LOWERING.take();
     let root_id = lowering.lower_expression(GreenNodeAt::new(&green, root.text_range().start()));
-    let mut module = lowering.module;
-    module.root = Some(root_id);
-    // The module is kept for the life of the project, so the doubling slack is not free.
-    module.kinds.shrink_to_fit();
-    module.ranges.shrink_to_fit();
-    module.patterns.shrink_to_fit();
-    module.arguments.shrink_to_fit();
-    module.parameters.shrink_to_fit();
-    module.expression_lists.shrink_to_fit();
-    module.record_fields.shrink_to_fit();
-    module.arms.shrink_to_fit();
-    module.pattern_lists.shrink_to_fit();
-    module.pattern_fields.shrink_to_fit();
+    let scratch = &mut lowering.module;
+    // The module lives as long as the project, so it gets exact-size copies; the scratch
+    // arrays keep their capacity for the next item this thread lowers, which saves both the
+    // doubling slack and the reallocation churn of growing fresh vectors per item.
+    let module = Module {
+        kinds: scratch.kinds.as_slice().into(),
+        ranges: scratch.ranges.as_slice().into(),
+        patterns: scratch.patterns.as_slice().into(),
+        arguments: scratch.arguments.as_slice().into(),
+        parameters: scratch.parameters.as_slice().into(),
+        expression_lists: scratch.expression_lists.as_slice().into(),
+        record_fields: scratch.record_fields.as_slice().into(),
+        arms: scratch.arms.as_slice().into(),
+        pattern_lists: scratch.pattern_lists.as_slice().into(),
+        pattern_fields: scratch.pattern_fields.as_slice().into(),
+        root: Some(root_id),
+    };
+    scratch.clear();
+    LOWERING.set(lowering);
     module
+}
+
+thread_local! {
+    static LOWERING: Cell<Lowering> = Cell::default();
 }
 
 /// Lowering reads the green tree, so it builds no red nodes. A list's elements are lowered

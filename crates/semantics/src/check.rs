@@ -353,6 +353,23 @@ impl<'db> ExpressionTypes<'db> {
     }
 }
 
+/// The checker's working copy of [`ExpressionTypes`], before the inference table resolves it.
+struct RecordedTypes<'db>(Vec<Option<Ty<'db>>>);
+
+impl<'db> RecordedTypes<'db> {
+    fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
+        self.0.get(id.0 as usize)?.as_ref()
+    }
+
+    fn insert(&mut self, id: ExprId, ty: Ty<'db>) {
+        let slot = self
+            .0
+            .get_mut(id.0 as usize)
+            .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
+        *slot = Some(ty);
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
 pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
 
@@ -467,7 +484,7 @@ pub fn check_item_with_annotation<'db>(
         expression_annotations: expression_annotations.iter().cloned().collect(),
         environment: Environment::default(),
         scheme_arena: Vec::new(),
-        recorded: FxHashMap::default(),
+        recorded: RecordedTypes(vec![None; module.expression_count()]),
         recorded_patterns: FxHashMap::default(),
         recorded_expectations: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
@@ -620,14 +637,13 @@ pub fn check_item_with_annotation<'db>(
             }
         }
     }
-    let mut expression_types = vec![None; module.expression_count()];
-    for (&id, &ty) in &context.recorded {
-        let slot = expression_types
-            .get_mut(id.0 as usize)
-            .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
-        *slot = Some(context.table.resolve(context.db, ty));
-    }
-    let expression_types = ExpressionTypes(expression_types.into_boxed_slice());
+    let recorded = mem::take(&mut context.recorded.0);
+    let expression_types = ExpressionTypes(
+        recorded
+            .into_iter()
+            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+            .collect(),
+    );
     let mut pattern_types = vec![None; module.pattern_count()];
     for (&id, &ty) in &context.recorded_patterns {
         if let Some(slot) = pattern_types.get_mut(id.0 as usize) {
@@ -880,7 +896,7 @@ struct Checker<'db, 'a> {
     expression_annotations: FxHashMap<ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
-    recorded: FxHashMap<ExprId, Ty<'db>>,
+    recorded: RecordedTypes<'db>,
     recorded_patterns: FxHashMap<PatId, Ty<'db>>,
     recorded_expectations: FxHashMap<ExprId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
