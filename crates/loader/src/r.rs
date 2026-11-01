@@ -1,14 +1,19 @@
-//! The GNU R backend. A plan travels to R as an uncompressed RDS file, which `readRDS` reads
-//! without parsing any R code, and the R code in `runtime.R` applies it to the session.
+//! The loader's R side, which both runtimes share: `runtime.R` applies a plan to the session,
+//! and a plan reaches it as an R list ([`plan_value`]). On GNU R the list travels as an
+//! uncompressed RDS file ([`rds`]), which `readRDS` reads without parsing any R code; on ry's
+//! runtime [`crate::ry_runtime`] builds it on the heap.
 
 use crate::{Code, Plan, SysdataChange};
 use semantics::load_index::Registration;
 use semantics::metadata::{NamespaceImportDirective, S3MethodDirective};
 
-/// The R side of the loader. A host evaluates it once per session into the environment it
-/// attaches as `tools:ry`, after defining `.ry_request(root, plan_file, full)` and
+/// The R side for GNU R. A host evaluates it once per session into the environment it attaches
+/// as `tools:ry`, after defining `.ry_request(root, full)`, which returns the plan, and
 /// `.ry_commit(root)` there.
-pub const RUNTIME: &str = include_str!("runtime.R");
+pub const RUNTIME_GNUR: &str = concat!(include_str!("runtime.R"), "\n", include_str!("gnur.R"));
+
+/// The R side for ry's runtime, transport included.
+pub const RUNTIME_RY: &str = concat!(include_str!("runtime.R"), "\n", include_str!("ry.R"));
 
 /// The subset of R values a plan needs.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,7 +28,9 @@ pub enum RValue {
     Vector(Vec<RValue>),
 }
 
-pub fn plan_value(plan: &Plan) -> RValue {
+/// The plan as `runtime.R` reads it. `with_sources` includes the text of every new source
+/// file, which only a backend that parses in R needs.
+pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
     let strings = |values: &[String]| RValue::Character(values.to_vec());
     let column = |codes: &[Code], field: fn(&Code) -> String| {
         RValue::Character(codes.iter().map(field).collect())
@@ -80,21 +87,25 @@ pub fn plan_value(plan: &Plan) -> RValue {
         ),
         (
             "source_path".into(),
-            RValue::Character(
+            RValue::Character(if with_sources {
                 plan.sources
                     .iter()
                     .map(|source| source.path.clone())
-                    .collect(),
-            ),
+                    .collect()
+            } else {
+                Vec::new()
+            }),
         ),
         (
             "source_text".into(),
-            RValue::Character(
+            RValue::Character(if with_sources {
                 plan.sources
                     .iter()
                     .map(|source| source.text.clone())
-                    .collect(),
-            ),
+                    .collect()
+            } else {
+                Vec::new()
+            }),
         ),
         ("dropped_sources".into(), strings(&plan.dropped_sources)),
         ("remove".into(), strings(&plan.remove)),

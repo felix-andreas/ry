@@ -21,8 +21,17 @@ The quality bar is four things.
 
 ## Open: the package loader
 
-The loader works on the GNU R backend (`crates/loader`, `docs/.../guides/loading-packages.md`). Gaps,
-roughly in order of how often a real package hits them:
+The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
+`docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
+
+- **A package with `src/` does not load on ry's runtime**: pkgbuild's `check_build_tools` fails
+  there (callr and friends hit interpreter gaps). `readDCF` and classed comparisons were the first two
+  blockers. Until it works, `--runtime gnu-r` is the documented route.
+- **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
+  The loader has the byte range of every definition, so a srcref could be built from it once the
+  interpreter carries srcrefs at all.
+- **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
+  326,000-line bench package, shared by both runtimes; the next item is the fix.
 
 - **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
   read bundled files at load time (`.onLoad`) fail until this exists.
@@ -43,7 +52,7 @@ roughly in order of how often a real package hits them:
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 - **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
-  files' names (about 8 ms at 326,000 lines). A per-file name summary could make that O(changed).
+  files' names. A per-file name summary could make that O(changed).
 
 ## Open: false reports and gaps found by the documentation review
 
@@ -1858,6 +1867,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **`ry load` on ry's own runtime.** Lazy bindings are promises over the analysis's syntax trees, both runtimes apply the same plan, and `test_load.rs` runs on both. `decisions.md`, "the loader on ry's runtime".
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
 - **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry repl` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
 - **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.

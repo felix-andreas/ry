@@ -50,7 +50,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
             let flags = runtime_flags(preflight.config());
-            let on_ry_runtime = runtime.resolve() == Runtime::Ry;
+            let on_ry_runtime = runtime.resolve(Runtime::GnuR) == Runtime::Ry;
             let keybindings = match keybindings {
                 ReplKeybindings::Emacs => repl::Keybindings::Emacs,
                 ReplKeybindings::Vi => repl::Keybindings::Vi,
@@ -99,9 +99,9 @@ fn main() -> ExitCode {
             {
                 return ExitCode::from(1);
             }
-            if runtime.resolve() == Runtime::Ry {
+            if runtime.resolve(Runtime::GnuR) == Runtime::Ry {
                 let flags = runtime_flags(preflight.config());
-                return runtime_exit(repl::run_on_ry_runtime(file, arguments, flags));
+                return runtime_exit(repl::run_on_ry_runtime(Some(file), None, arguments, flags));
             }
             Some(repl::RunOptions {
                 routines: load::call_routines(),
@@ -116,6 +116,7 @@ fn main() -> ExitCode {
             path,
             expressions,
             file,
+            runtime,
             emit_plan: None,
             r_entry: false,
             ..
@@ -132,6 +133,18 @@ fn main() -> ExitCode {
             for expression in expressions {
                 input.push('\n');
                 input.push_str(expression);
+            }
+            if runtime.resolve(Runtime::Ry) == Runtime::Ry {
+                let Some(preflight) = Preflight::discover(&root, root.clone()) else {
+                    return ExitCode::from(2);
+                };
+                let flags = runtime_flags(preflight.config());
+                return runtime_exit(repl::run_on_ry_runtime(
+                    file.as_deref(),
+                    Some(&input),
+                    &[],
+                    flags,
+                ));
             }
             Some(repl::RunOptions {
                 routines: load::call_routines(),
@@ -349,6 +362,10 @@ enum Command {
         /// With `--emit-plan`, plan a full load whatever the state says
         #[clap(long, hide = true, default_value_t = false)]
         full: bool,
+        /// The R implementation that loads the package: ry's own runtime (the default), or GNU R
+        /// (also `RY_RUNTIME`)
+        #[clap(long, value_enum)]
+        runtime: Option<Runtime>,
         /// R code to run after loading (repeatable)
         #[clap(long = "expr", short = 'e')]
         expressions: Vec<String>,
@@ -393,17 +410,18 @@ enum Runtime {
 }
 
 trait ResolveRuntime {
-    fn resolve(&self) -> Runtime;
+    fn resolve(&self, default: Runtime) -> Runtime;
 }
 
 impl ResolveRuntime for Option<Runtime> {
-    /// The flag wins, then `RY_RUNTIME`, then GNU R.
-    fn resolve(&self) -> Runtime {
+    /// The flag wins, then `RY_RUNTIME`, then the command's default.
+    fn resolve(&self, default: Runtime) -> Runtime {
         match self {
             Some(runtime) => *runtime,
             None => match env::var("RY_RUNTIME").as_deref() {
                 Ok("ry") => Runtime::Ry,
-                _ => Runtime::GnuR,
+                Ok("gnu-r") => Runtime::GnuR,
+                _ => default,
             },
         }
     }
