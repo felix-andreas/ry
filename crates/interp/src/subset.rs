@@ -409,6 +409,13 @@ unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
 
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {
     let object = values::materialize(object)?;
+    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
+        let data = s4_data_part(object);
+        if data == nil() {
+            return Err(crate::unwind::error_in(call, "this S4 class is not subsettable"));
+        }
+        return subset(data, indices, drop, call);
+    }
     match object.kind() {
         SexpType::Nil => return Ok(nil()),
         SexpType::Environment => {
@@ -645,6 +652,17 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
     subset2(object, &indices, exact, call.call)
 }
 
+/// GNU R's `R_getS4DataSlot`: the data part of an S4 object whose class extends a basic type,
+/// held in `.Data` or, for an environment such as a reference class object, in `.xData`.
+/// `NULL` when the class extends none.
+unsafe fn s4_data_part(object: Sexp) -> Sexp {
+    let data = get_attr(object, symbols().dot_data);
+    if data != nil() {
+        return data;
+    }
+    get_attr(object, symbols().dot_xdata)
+}
+
 /// The position `name` matches among `names`: exactly, or with `exact == Some(false)` (or
 /// `None`, which also warns) by a unique partial match.
 unsafe fn match_name(names: Sexp, name: &[u8], exact: Option<bool>) -> R<Option<usize>> {
@@ -684,6 +702,13 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         return crate::records::subset2(object, indices, call);
     }
     let object = values::materialize(object)?;
+    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
+        let data = s4_data_part(object);
+        if data == nil() {
+            return Err(crate::unwind::error_in(call, "this S4 class is not subsettable"));
+        }
+        return subset2(data, indices, exact, call);
+    }
     if object == nil() {
         return Ok(nil());
     }
@@ -1428,6 +1453,18 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         return crate::records::subassign2(object, indices, value, call);
     }
     let object = values::materialize(object)?;
+    // A reference class object assigns into its environment and stays itself.
+    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
+        let data = s4_data_part(object);
+        if data.kind() != SexpType::Environment {
+            return Err(crate::unwind::error_in(
+                call,
+                "no method for assigning subsets of this S4 class",
+            ));
+        }
+        subassign2(data, indices, value, call)?;
+        return Ok(object);
+    }
     if object.kind() == SexpType::Environment {
         let index = indices.first().copied().unwrap_or(nil());
         if index.kind() != SexpType::String || length(index) != 1 {

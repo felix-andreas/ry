@@ -595,19 +595,27 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         SexpType::Closure => apply_closure(new_call, method, &args, method_env, Some(&vars)),
         _ => {
             let definition = eval::builtin_def(method)?;
+            // A special such as `$<-` evaluates its arguments itself, so it gets them quoted,
+            // and its call is named `<generic>.default`, which tells it not to dispatch again,
+            // as GNU R does. A dispatch-or-eval special's function already takes values.
+            let quote = method.kind() == SexpType::Special && !definition.is_dispatch_or_eval();
             let mut forced = Vec::with_capacity(args.len());
             for arg in &args {
-                let value = if arg.value == missing_arg() {
+                let mut value = if arg.value == missing_arg() {
                     arg.value
                 } else {
                     value_of(arg.value)?
                 };
+                if quote && value != missing_arg() {
+                    value = eval::quote_value(value)?;
+                }
                 forced.push(Arg {
                     tag: arg.tag,
                     value,
                 });
             }
-            let primitive_call = renamed_call(frame_call, values::install(&generic_name)?)?;
+            let head = if quote { format!("{generic_name}.default") } else { generic_name.clone() };
+            let primitive_call = renamed_call(frame_call, values::install(&head)?)?;
             call_builtin(definition, primitive_call, method, &forced, method_env)
         }
     }
@@ -724,8 +732,15 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
     Ok(result)
 }
 
-/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
+/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`). A call named
+/// `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
 pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
+    if call.kind() == SexpType::Language
+        && call.car().kind() == SexpType::Symbol
+        && symbol_name(call.car()).ends_with(".default")
+    {
+        return Ok(None);
+    }
     if args.first().is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
         && let Some(op) = crate::builtins::primitive(name)
         && let Some(value) = s4_dispatch(op, call, args, env)?
