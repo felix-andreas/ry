@@ -1867,6 +1867,10 @@ The end-to-end guard rests on the corpus suites.
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
   root only, because `SourceFile` carries no path.
+- **`dcast` with an aggregate runs at data.table's speed, not faster** (`crates/table/benches/ops_benchmark.rs`
+  against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
+  through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
+  `ops::key_digits`, as `unique` does, would skip the general grouping.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
