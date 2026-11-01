@@ -1770,7 +1770,11 @@ code 26, which GNU R leaves unused and native code never receives). A cell's add
 as long as anything references it, so compiled code can watch one and still hold it safely after
 `rm()`. The base environment and base namespace keep their cells on the symbols, as GNU R keeps
 base bindings in `SYMVALUE`, so a base lookup is one load. Small frames scan; above eight bindings a
-frame keeps a hash index.
+frame keeps a hash index. Every frame also keeps a 64-bit symbol filter (one bit per bound symbol,
+picked by a multiplicative hash of the symbol's address), so a lookup that walks through frames
+which do not bind the name costs one AND per frame instead of a scan. Removing a binding leaves its
+bit set, which only costs a scan. The filter took one inline binding slot (eight, not nine) to keep
+the frame in the 192-byte size class; it halved `frame_cell`'s cost per `sd(x)`.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
