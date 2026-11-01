@@ -1013,7 +1013,7 @@ impl<'db> InferenceTable<'db> {
         expected: &FunctionType<'db>,
         depth: usize,
     ) -> bool {
-        let Some(pairing) = pair_parameters(actual, expected) else {
+        let Some(pairing) = pair_parameters(db, actual, expected) else {
             return false;
         };
         for (expected_element, actual_element) in pairing.rest {
@@ -1039,7 +1039,7 @@ impl<'db> InferenceTable<'db> {
         actual: &FunctionType<'db>,
         expected: &FunctionType<'db>,
     ) -> Option<FunctionMismatch<'db>> {
-        let pairing = pair_parameters(actual, expected)?;
+        let pairing = pair_parameters(db, actual, expected)?;
         for pair in pairing.parameters {
             if self.compatible(db, pair.passed, pair.accepts) {
                 continue;
@@ -1243,11 +1243,18 @@ struct ParameterPair<'db> {
 
 /// Arity is a range: a function serves an interface when it accepts every call
 /// shape the interface allows, so extra parameters are fine when they default.
-/// A variadic interface pairs only with a variadic at the same formal position.
+/// A variadic interface pairs only with a variadic at the same formal position, unless its
+/// `...` takes `Any`: a callback called with forwarded dots (`function(f, ...) f(...)`) may
+/// receive any arguments, so any function serves it.
 fn pair_parameters<'db>(
+    db: &'db dyn Db,
     actual: &FunctionType<'db>,
     expected: &FunctionType<'db>,
 ) -> Option<Pairing<'db>> {
+    let forwards_anything = expected
+        .variadic
+        .as_ref()
+        .is_some_and(|rest| matches!(rest.element.kind(db), TyKind::Any));
     let mut rest = Vec::new();
     match (&actual.variadic, &expected.variadic) {
         (Some(actual_variadic), Some(expected_variadic)) => {
@@ -1259,6 +1266,7 @@ fn pair_parameters<'db>(
         // An interface without `...` never passes extras, so the function's own `...`
         // receives at most the leftovers paired below.
         (Some(_), None) | (None, None) => {}
+        (None, Some(_)) if forwards_anything => {}
         (None, Some(_)) => return None,
     }
     // R matches arguments to formals by name regardless of order; the rest pair
@@ -1307,7 +1315,7 @@ fn pair_parameters<'db>(
         actual_parameters.into_iter().zip(paired)
     {
         let Some((expected_parameter, expected_optional)) = slot else {
-            if actual_optional {
+            if actual_optional || forwards_anything {
                 continue;
             }
             return None;

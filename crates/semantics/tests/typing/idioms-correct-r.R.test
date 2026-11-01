@@ -457,3 +457,12 @@ any_duplicated <- function(columns) any(lapply(columns, anyDuplicated) > 0)
 #++++
 drop_nulls: <T> fn(parts: T) -> list[Any]
 any_duplicated: fn(columns: Unknown) -> logical
+
+#---- a_callback_called_with_forwarded_dots_takes_required_parameters
+with_progress <- function(callback) function(...) callback(...)
+cache_path <- function(path) paste0(path, "/cache")
+run <- function(paths) vapply(paths, with_progress(cache_path), "")
+#++++
+with_progress: <T> fn(callback: fn(...: Any) -> T) -> fn(...: Any) -> T
+cache_path: <T> fn(path: T) -> character
+run: <T> fn(paths: list[T] | T[]) -> character[]
