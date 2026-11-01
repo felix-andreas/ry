@@ -2342,7 +2342,46 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   NaN becomes NA silently, as in R. In a grouped join, `j` is typed against the joined rows, whose
   join columns carry `i`'s types.
   The wording is ry's. A narrowing `:=` skips the kernel, because detecting the loss needs the
-  value before the conversion; it is not a db-benchmark shape.
+  value before the conversion; it is not a db-benchmark shape. A third warning, `Parsed`, marks
+  strings written into a logical or numeric column: data.table warns on every such write, whatever
+  the strings hold, so the warning is decided from the types alone, and the strings are parsed as
+  `as.logical`, `as.integer` (through a double, so `"3.7"` is 3) or `as.double` would.
+- **Prefixed join columns are copies, not a second layout.** `x.t` and `i.lo` in `j` or `by` are
+  resolved before the join runs (`prefixed_copies` in `query.rs`): each side gains a copy of the
+  named column under the prefixed name, so the copy survives the join as an ordinary column and
+  every later stage (kernels, plans, `.EACHI`) needs no knowledge of prefixes. `join_layout` stays
+  the only description of the visible output; `result_type` drops the copies from `j = .SD`-like
+  results.
+- **Under `.EACHI`, an aggregate over a column of `i` alone sees the row's one value.** data.table
+  evaluates `j` with `i`'s columns of length one, so `sum(k)` is `k` and `mean(k)` is `k` as a
+  double even for an unmatched row. The rewrite (`single_value`) replaces such an aggregate with
+  the group's first value, using a hidden `FIRST_OF_ROW` mask where `na.rm` must see exactly one
+  value; an aggregate that also reads a column of `x` is left alone.
+- **The checker mirrors `join_layout`; it does not call it.** `semantics` must not depend on Polars,
+  so `join_columns` in `check.rs` reimplements the layout (names, order, `t.1` suffixes, `i.`
+  prefixes, `make.unique`), with the engine as the authority and the typing fixtures
+  (`frame_joins`) pinning both against data.table. Condition compatibility follows the engine's
+  `comparison_types`: numbers with numbers, strings with strings, logicals with logicals, and an
+  ordering never on strings. A factor column is `Any` to the checker, so it is not checked.
+- **Under `.EACHI` the checker types `i`'s columns as scalars inside `j`.** Each row of `i` runs
+  `j` once, so a column carrying `i`'s values (a compared column or an unused column of `i`) is its
+  element type in the scope, while `x`'s columns stay vectors. The groups are the compared columns
+  in condition order, matching `each_i` in the engine.
+- **A lossy `:=` is a type error, though data.table only warns.** Strings into a logical or numeric
+  column, or a fractional literal into an integer column, when the column keeps its type (partial,
+  grouped or literal write). The runtime result is almost always a bug (NA or a truncated value),
+  and an explicit `as.*()` call states the intent. A number into a string column converts without
+  loss and stays accepted, as R code relies on it.
+- **`lapply(.SD, f)` is typed once per column, not through `lapply`'s signature.** Typed through
+  `lapply`, `.SD` is a list of the union of its column types, so `f` is checked against that union
+  (a false error for any `f` that fits each column) and the result has one element type. Instead
+  `subset_apply` in `check.rs` types the call once per column with `.SD` read as a one-column list;
+  an overloaded `f` passed by name is called directly on each column through `overloaded_call`,
+  because an overload set has no single function type for `lapply` to use. A finding every column
+  causes is reported once; one only some columns cause names the column.
+- **A query result that repeats a column name has unknown columns.** data.table keeps both columns
+  (`.SDcols` naming a group column, or `.(g = x)` under `by = g`), but a `frame{...}` type cannot
+  hold two fields of one name, and annotations must round-trip.
 
 ## Records, tuples and tags are ry values, not R lists
 
@@ -2577,3 +2616,24 @@ first lines R had already read, leaving R mid-command.
   checker, hover, completion and goto-definition read the stub file like any other, so incremental
   analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
   the draft with open questions is `contributing/design/standard-library.md`.
+
+## The benchmark harness compares test by test through `ry load`
+
+- **Shape.** `oracle bench` (`crates/oracle/src/bench.rs`) runs a generated package's testthat suite as `ry load <package> --file bench.R`, once with `--runtime gnu-r` and once with `--runtime ry`. The loader plan is the same on both sides, so a difference is an evaluation difference, not a loading one. The driver (`bench.R`) writes one JSON line per `test_that()` block with its status, problems, a deparse of its value and its time.
+- **Why per test, not per file.** A whole-file pass rate hides progress: one missing native fails a file of 30 tests. Per-test results also give the failure messages that the tally groups into fix classes.
+- **GNU R runs twice.** A test whose value or problems GNU R does not reproduce (a UUID, a timestamp, a temp path) is compared by status alone, so only what GNU R itself reproduces counts against ry, and no hand-maintained ignore list is needed.
+
+## `[`, `[[`, `[<-` and `[[<-` dispatch before evaluating their other arguments
+
+- **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
+- **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
+
+## libr reads options from base's `.Options`
+
+- **Previous shape.** libr's `Runtime` held its own options environment that nothing wrote, so `Rf_GetOption1` always returned `NULL` and packages (data.table's `datatable.*` options) saw defaults only.
+- **Target shape.** `Rf_GetOption1` walks `interp::envir::options()`, the interpreter's `.Options` pairlist, which is the single store `options()` writes.
+
+## parallel's natives without fork
+
+- `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.

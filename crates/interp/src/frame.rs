@@ -1043,35 +1043,6 @@ unsafe fn tag_name(tag: Sexp) -> Option<String> {
     (!is_nil(tag) && tag.kind() == SexpType::Symbol).then(|| symbol_name(tag).into_owned())
 }
 
-/// What [`intercept`] did with a `[` call.
-pub enum Intercepted {
-    Value(Sexp),
-    Args(Vec<Arg>),
-}
-
-/// Evaluates a `[` call's subject once, then hands the call to [`query`] when it is a frame or to
-/// an S3 method with the other arguments unevaluated, and otherwise returns every argument
-/// evaluated for the `[` primitive.
-pub unsafe fn intercept(call: Sexp, arguments: Sexp, env: Sexp, keep_missing: bool) -> R<Intercepted> {
-    let first = arguments.car();
-    if arguments.kind() != SexpType::Pairlist || first == symbols().dots || first == missing_arg() {
-        return eval::evaluate_args(arguments, env, keep_missing, call).map(Intercepted::Args);
-    }
-    let subject = eval::eval(first, env)?;
-    if is_frame(subject) {
-        return run(call, subject, env).map(Intercepted::Value);
-    }
-    if let Some(value) = crate::dispatch::dispatch_subset(call, arguments, subject, env)? {
-        return Ok(Intercepted::Value(value));
-    }
-    let mut args = vec![Arg {
-        tag: arguments.tag(),
-        value: subject,
-    }];
-    args.extend(eval::evaluate_args(arguments.cdr(), env, keep_missing, call)?);
-    Ok(Intercepted::Args(args))
-}
-
 /// Runs a query in its own handle scope, signals an error it raised, and sets the visibility.
 pub unsafe fn run(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
     let result = scope(|| query(call, subject, env));

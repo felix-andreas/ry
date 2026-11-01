@@ -6,6 +6,8 @@
 //! script's own output to stdout, and must write the JSON report that `driver.R` defines.
 //! GNU R is one such engine, and ry's runtime will be another.
 
+pub mod bench;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};

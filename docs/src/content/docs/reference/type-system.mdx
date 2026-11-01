@@ -2365,7 +2365,8 @@ unresolved
 
 This is an `unresolved` warning rather than a type error, because R looks a non-column up in the
 enclosing scope, so only a name nothing defines is certainly wrong. `.N`, `.GRP`, and `.NGRP` are
-`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns. A called
+`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns, or the
+columns `.SDcols` selects (see [Every column at once](#every-column-at-once)). A called
 name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A
 `..name` read is the variable `name` from the enclosing scope, never a column, and a bare `..name`
 as `j` selects the columns it names, which makes the result a `frame` with unknown columns.
@@ -2381,9 +2382,10 @@ The result of the query follows from its arguments:
 | any `j` with `by` | the group columns first, then the `j` columns |
 | `f[, y := v]` | `f` with `y` added, or with its type replaced |
 
-In a `.()` or `list()` `j`, an unnamed bare column keeps its name, and any other unnamed item is named
-by its position, as data.table names it: `f[, .(id, price * 2)]` is `frame{id: integer[], V2: double[]}`.
-An unnamed computed `j` under `by` becomes the column `V1`. The groups can be written `by = g`,
+In a `.()` or `list()` `j`, an unnamed bare column keeps its name, `.N` becomes the column `N`, and
+any other unnamed item is named by its position, as data.table names it: `f[, .(id, price * 2)]` is
+`frame{id: integer[], V2: double[]}`. Under `by`, a bare `.N` as `j` is the column `N`, and any other
+unnamed computed `j` becomes the column `V1`. The groups can be written `by = g`,
 `by = .(g, h)`, `by = c("g", "h")`, or `by = "g"`, and `keyby` works the same way. A group named
 in a string must be a column, so a misspelled one is a type error:
 
@@ -2404,6 +2406,54 @@ chain, and each step sees the columns the step before it produced:
 sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 # frame{team: character[], total: double[]}
 ```
+
+#### Every column at once
+
+`f[, lapply(.SD, g)]` applies `g` to each column of `.SD`, so its result has one column per column
+of `.SD`, each typed as `g` applied to that column alone. Under `by`, the group columns come first:
+
+```r
+sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales[, lapply(.SD, sum), by = team]
+# frame{team: character[], units: integer[], price: double[]}
+sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
+# frame{price: double[]}
+```
+
+Because each column is checked on its own, a function that does not fit one column is reported
+with that column's name, not against the union of all column types:
+
+```text
+type-mismatch
+
+  x this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
+   --[main.R:2:27]
+ 1 | sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ 2 | print(sales[, lapply(.SD, function(v) v * 2)])
+   |                           ^^^^^^^^^^^^^^^^^
+```
+
+A finding that every column causes is about `g` itself, so it is reported once and without a
+column name.
+
+`.SDcols` selects `.SD`'s columns, in the frame's order, in any of these forms:
+
+| `.SDcols` | Columns of `.SD` |
+| --- | --- |
+| `"a"`, `c("a", "b")` | the named columns |
+| `a:b` | the columns from `a` to `b` |
+| `is.numeric`, `is.integer`, `is.double`, `is.character`, `is.logical` | the columns of that type |
+| any of the above after `!` or `-` | the other columns |
+
+A named column must exist, so a misspelled name in a string or a range is a type error on that
+name. `.SDcols` names `.SD`'s columns exactly, so a group column it names stays in `.SD`, and the
+result then repeats that column's name, as data.table repeats it. A frame type cannot hold two
+columns of one name, so such a result has unknown columns, as does any other `.SDcols` form, such
+as `patterns()` or column positions.
+
+`c("a", "b") := lapply(.SD, g)` assigns the applied columns to the named ones in order, and
+`(c("a", "b")) := ...` does the same. A left side that is a variable, such as `(cols) := ...`,
+names columns ry cannot see, so the updated frame has unknown columns.
 
 #### Column updates
 
@@ -2428,6 +2478,22 @@ replaces the whole column, as in `f[, price := 1:3]`, replaces its type, and a c
 creates takes the value's type. Only a literal counts as a single value: a call such as `sum(x)` also
 returns one value at runtime, but the checker types `f[, price := sum(id)]` as a replacement.
 
+A value the column keeps its type for must fit it. Strings written into a logical or numeric column
+are parsed, so a string that is no number becomes `NA`, and a literal with a fraction written into an
+integer column is truncated. data.table only warns about either, but each is a type error here:
+
+```text
+type-mismatch
+
+  x column `amount` holds `integer[]`, so this `character` value is parsed as a number, and a string that is not one becomes `NA`
+   --[a.R:7:27]
+ 7 | events[id > 1L, amount := "none"]
+   |                           ^^^^^^
+```
+
+A number written into a string column is converted without loss, so it is accepted, and a value that
+replaces the whole column, such as `f[, amount := as.character(id)]`, replaces its type instead.
+
 The rebinding applies only to a name the current scope already binds: any top-level name, or a
 function's own local or parameter. A `:=` on any other name, such as a global updated inside a
 function, creates no local binding, so the name keeps resolving to its original definition for
@@ -2446,15 +2512,80 @@ unchanged <- sales                # frame{team: character[], amount: double[]}
 
 #### Joins
 
-`x[y, on = keys]` joins two frames. The keys may be written `"id"`, `"a==b"`, `"a,b"`, `c("id")`,
-`c(a = "b")`, `.(id)`, or `.(a = b)`, and each one must be a column of the frame it names. The result
-has `x`'s columns, each key taking `y`'s key type, followed by `y`'s other columns; a column both
-frames have is renamed `i.name`, as data.table names it. Inside the join, `j` can also read either
-side by prefix: `x.price` is `x`'s `price` and `i.price` is the joined frame's, which works for a key
+`x[i, on = conditions]` joins two frames. Each condition pairs a column of `x` with a column of `i`
+through `==` or one of the orderings `<`, `<=`, `>`, `>=`, and every form data.table documents is
+typed:
+
+| Form | Conditions |
+| --- | --- |
+| `"id"`, `.(id)`, `c("id")` | `id == id` |
+| `"a==b"`, `.(a = b)`, `c(a = "b")` | `a == b` |
+| `"id,t>=lo"`, `c("id", "t>=lo")` | `id == id` and `t >= lo` |
+| `.(id, t >= lo, t < hi)` | `id == id`, `t >= lo`, and `t < hi` |
+
+Each column a condition names must exist on its side. A missing column is a type error, and in a
+condition string the error points at the name inside the string:
+
+```text
+type-mismatch
+
+  x the frame `windows` has no column `low`. Its columns are `id`, `lo`, `hi`
+   --[a.R:5:38]
+ 5 | print(events[windows, on = "id, t >= low"])
+   |                                      ^^^
+```
+
+The two columns of a condition must hold values the join can compare, as data.table requires: numbers
+with numbers (an integer column joins a double one), strings with strings, and logicals with
+logicals. Any other pair is a type error, and so is an ordering on a column of strings, because only
+`==` joins strings:
+
+```text
+type-mismatch
+
+  x the join condition `t > label` compares numbers, but `label` is `character[]`. Only `==` joins strings.
+   --[a.R:6:32]
+ 6 | print(events[names, on = .(t > label)])
+   |                                ^^^^^
+```
+
+A factor column is typed `Any`, so it is not checked. `roll =` keeps the type of the join, and
+combining it with an ordering condition is a type error, since a rolling join needs every condition
+to be `==`.
+
+The result follows data.table's layout. First come `x`'s columns, where a column a condition compares
+takes the values, and so the type, of `i`'s column in its first condition. A further condition on the
+same column `t` adds a column `t.1`, then `t.2`, carrying that condition's values of `i`. Last come the
+columns of `i` that no condition uses, renamed `i.name` when `x` has the same name. A name that still
+repeats takes the first free numeric suffix, as R's `make.unique` gives it:
+
+```r
+events <- frame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
+windows <- frame(id = 1:2, lo = c(0, 1), hi = c(2L, 5L))
+events[windows, on = .(id, t >= lo)]           # frame{id: integer[], t: double[], v: character[], hi: integer[]}
+events[windows, on = .(t >= lo, t < hi)]       # frame{id: integer[], t: double[], v: character[], t.1: integer[], i.id: integer[]}
+```
+
+Inside the join, `j` can also read either side by prefix: `x.t` is `x`'s own `t`, which the join
+replaced with `i`'s values, and `i.lo` is the joined frame's `lo`. This works for a compared column
 and for a column whose name does not clash. A prefixed name the side does not have is reported like
 any other missing column, and a prefixed name in a query that is no join ry can see is a silent
-`Unknown`. `roll =` does not change the type. A join whose `i` is not a frame, or whose `on` is some
-other form, is `Unknown`.
+`Unknown`. A join whose `i` is not a frame, or whose `on` is some other form, such as a variable
+holding the conditions, is `Unknown`.
+
+`by = .EACHI` runs `j` once per row of `i`. The result's group columns are the compared columns, in
+the order of their conditions and named as in the join's layout, followed by `j`'s columns. Within
+`j`, a column carrying `i`'s values is that row's single value, while a column of `x` is the vector of
+the rows the row matched, and `.N` counts those rows:
+
+```r
+counts <- frame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+counts[windows, on = .(t >= lo), .(n = .N, total = sum(v), wide = if (hi > 2L) "yes" else "no"), by = .EACHI]
+# frame{t: double[], n: integer[], total: integer[], wide: character[]}
+```
+
+The `if` on `hi` is accepted because `hi` is one value per row of `i`; the same `if` on `v` is a type
+error, since `v` is a vector.
 
 #### Columns
 

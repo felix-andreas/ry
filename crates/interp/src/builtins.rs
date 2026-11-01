@@ -142,6 +142,24 @@ impl BuiltinDef {
         BuiltinDef { generic, ..self }
     }
 
+    /// GNU R's `DispatchOrEval`, for the specials `[`, `[[`, `[<-` and `[[<-`: the evaluator
+    /// evaluates only the first argument before S3 dispatch, so a method receives the others as
+    /// unevaluated promises, and the function itself runs on evaluated arguments as a builtin's
+    /// does. `[.data.table` depends on this to evaluate `j` among the table's columns.
+    pub const fn dispatch_or_eval(self) -> BuiltinDef {
+        BuiltinDef {
+            kind: Kind::Special,
+            generic: Generic::Internal,
+            keep_missing: true,
+            ..self
+        }
+    }
+
+    /// Whether this special is a [`BuiltinDef::dispatch_or_eval`] one.
+    pub fn is_dispatch_or_eval(&self) -> bool {
+        self.kind == Kind::Special && self.generic == Generic::Internal
+    }
+
     pub const fn keep_missing(self) -> BuiltinDef {
         BuiltinDef {
             keep_missing: true,

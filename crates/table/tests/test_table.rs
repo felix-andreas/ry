@@ -2857,3 +2857,161 @@ fn a_join_keeps_its_output_names_unique() {
     let result = run_both(&mut x, query);
     assert_eq!(names(&result), ["k", "v", "i.v", "i.v.1"]);
 }
+
+#[test]
+fn prefixed_columns_read_either_side_of_a_join() {
+    use Comparison::{Equal, GreaterEqual};
+    let (mut x, i) = (non_equi_x(), non_equi_i());
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: Rows::Join(non_equi(
+                &i,
+                &[("id", Equal, "id"), ("t", GreaterEqual, "lo")],
+                Mult::All,
+            )),
+            select: Select::Columns(vec![
+                named("xt", column("x.t")),
+                named("ilo", column("i.lo")),
+                named("hi", column("hi")),
+                named("iid", column("i.id")),
+                named("xid", column("x.id")),
+            ]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["xt", "ilo", "hi", "iid", "xid"]);
+    assert_eq!(
+        read(&mut result, "xt"),
+        doubles(&[5.0, 4.0, NA_REAL, f64::NAN])
+    );
+    assert_eq!(
+        read(&mut result, "ilo"),
+        doubles(&[1.0, 1.0, NA_REAL, f64::NAN])
+    );
+    assert_eq!(read(&mut result, "hi"), doubles(&[10.0; 4]));
+    assert_eq!(read(&mut result, "iid"), ints(&[1, NA_INTEGER, 2, 1]));
+    assert_eq!(
+        read(&mut result, "xid"),
+        ints(&[1, NA_INTEGER, NA_INTEGER, 1])
+    );
+
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(&i, &[("t", GreaterEqual, "lo")], Mult::All)),
+            select: Select::Columns(vec![
+                named("s", aggregate(Aggregate::Sum, column("x.t"))),
+                named("n", Expr::Count),
+            ]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["t", "s", "n"]);
+    assert_eq!(
+        read(&mut result, "s"),
+        doubles(&[12.0, 12.0, NA_REAL, f64::NAN])
+    );
+    assert_eq!(read(&mut result, "n"), ints(&[3, 3, 1, 1]));
+}
+
+#[test]
+fn each_i_aggregates_a_column_of_i_as_its_single_value() {
+    let mut x = non_equi_x();
+    let i = frame(vec![
+        ("lo", doubles(&[1.0, 100.0, 2.0])),
+        ("k", ints(&[3, 5, NA_INTEGER])),
+    ]);
+    let na_rm = |function: Aggregate| Expr::Aggregate {
+        function,
+        arg: Box::new(column("k")),
+        na_rm: true,
+    };
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(
+                &i,
+                &[("t", Comparison::GreaterEqual, "lo")],
+                Mult::All,
+            )),
+            select: Select::Columns(vec![
+                named("s", aggregate(Aggregate::Sum, column("k"))),
+                named("sn", na_rm(Aggregate::Sum)),
+                named("m", aggregate(Aggregate::Mean, column("k"))),
+                named("n", Expr::Count),
+                named("md", aggregate(Aggregate::Median, column("k"))),
+                named("l", aggregate(Aggregate::Length, column("k"))),
+                named(
+                    "sv",
+                    aggregate(
+                        Aggregate::Sum,
+                        binary(BinaryOp::Multiply, column("v"), column("k")),
+                    ),
+                ),
+            ]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["t", "s", "sn", "m", "n", "md", "l", "sv"]);
+    assert_eq!(read(&mut result, "s"), ints(&[3, 5, NA_INTEGER]));
+    assert_eq!(read(&mut result, "sn"), ints(&[3, 5, 0]));
+    assert_eq!(read(&mut result, "m"), doubles(&[3.0, 5.0, NA_REAL]));
+    assert_eq!(read(&mut result, "n"), ints(&[3, 0, 3]));
+    assert_eq!(read(&mut result, "md"), ints(&[3, 5, NA_INTEGER]));
+    assert_eq!(read(&mut result, "l"), ints(&[1, 1, 1]));
+    assert_eq!(read(&mut result, "sv"), ints(&[24, NA_INTEGER, NA_INTEGER]));
+}
+
+#[test]
+fn assigning_strings_into_a_number_column_parses_them_with_a_warning() {
+    let x = frame(vec![
+        ("a", ints(&[1, 2, 3])),
+        ("d", doubles(&[1.0, 2.0, 3.0])),
+        ("b", RVector::Logical(vec![1, 0, 1])),
+    ]);
+    let assign = |name: &str, value: &str| Query {
+        rows: Rows::Filter(binary(BinaryOp::Greater, column("a"), Expr::Integer(1))),
+        select: Select::Assign(vec![set(name, Expr::Character(value.into()))]),
+        ..Query::default()
+    };
+    let cases = [
+        ("d", "3.5", doubles(&[1.0, 3.5, 3.5])),
+        ("d", "x", doubles(&[1.0, NA_REAL, NA_REAL])),
+        ("a", "7.9", ints(&[1, 7, 7])),
+        ("b", "T", RVector::Logical(vec![1, 1, 1])),
+        ("b", "false", RVector::Logical(vec![1, 0, 0])),
+        (
+            "b",
+            "yes",
+            RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER]),
+        ),
+    ];
+    for (name, value, expected) in cases {
+        let holds = match name {
+            "d" => "doubles",
+            "a" => "integers",
+            _ => "logicals",
+        };
+        assert_eq!(
+            warnings(&x, assign(name, value)),
+            [format!(
+                "column `{name}` holds {holds}, so the assigned strings were converted to {holds}"
+            )],
+            "{name} := {value:?}"
+        );
+        let mut updated = x.fork();
+        run(&mut updated, assign(name, value));
+        assert_eq!(read(&mut updated, name), expected, "{name} := {value:?}");
+    }
+    // A single string is recycled into the column rather than replacing it, so even without `i`
+    // it is parsed into the column's type, as data.table does.
+    let whole = Query {
+        select: Select::Assign(vec![set("d", Expr::Character("x".into()))]),
+        ..Query::default()
+    };
+    assert_eq!(
+        warnings(&x, whole),
+        ["column `d` holds doubles, so the assigned strings were converted to doubles"]
+    );
+}

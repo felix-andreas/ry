@@ -563,3 +563,14 @@ x <- 1 #: f(x) <- c("a
 b")
 #++++
 ERROR: Syntax error: unterminated string; expected a closing quote at line 1, column 21
+
+#---- semicolon_before_annotation_block
+;#: list{
+#:   a: integer
+#: }
+x <- list(a = 1L)
+#++++
+#: list{
+#:   a: integer
+#: }
+x <- list(a = 1L)

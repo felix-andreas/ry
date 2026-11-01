@@ -19,6 +19,17 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: the benchmark packages under ry's runtime
+
+`just bench-compare` gives the current numbers; `MEMORY.md` records them.
+
+- **`unz` connections** are missing (`.Internal(unz)`), which fails every openxlsx and readxl round trip.
+- **`grepRaw`** is missing, so renv's `.onLoad` fails.
+- **parallel cannot fork or open sockets.** `mc_fork` and the other fork routines error, so `mclapply` and `registerDoParallel(cores = 2)` fail, and `makeCluster` needs `.Internal(serverSocket)` (`decisions.md`, "parallel's natives without fork").
+- **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
+- **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
+- **Time and scale.** ry's suites run 1.7x to 2.1x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
+
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
@@ -1166,9 +1177,6 @@ The message says to add a type annotation, and no annotation form silences it. `
   idempotent, so it is deliberate, and it is undocumented.
 - **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
   annotations with a blank line" when there is only one annotation.**
-- **The deep formatter fuzz (`FUZZ_ITERS=300000`) still finds `l: :Sost$field`**, which the formatter
-  rewrites to `l::Sost$field`, turning two `:` tokens into one `::` and changing the code. The
-  default `fuzz_deep` budget passes.
 - **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
   definition may also be written inline as `type` or `alias`.
 - **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
@@ -1843,17 +1851,22 @@ The end-to-end guard rests on the corpus suites.
   one redundant lookup per call on a classed subject without a `[` method.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
-- **Warnings:** a `:=` that coerces a string into a number column does not warn, where data.table
-  does; only number narrowing does.
+- **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
+  variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
+- **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
+  name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
+  instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
+- **Engine:** under `.EACHI`, `sum(.N)` reads the raw group row count rather than the matched
+  count (`single_value` does not rewrite the argument), and `parse_strings` uses Polars' string
+  cast, which is unverified against R for padded (`" 3"`) and hex (`"0x1A"`) strings.
+- **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
+  so `lapply(.SD, sum)` over a character column is silent.
+- **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
+  checked. The engine refuses a factor joined to a number and a number written into a factor.
+- **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
+  type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
-- **Naming:** `package:ry`'s `frame()` masks `graphics::frame` and calls it when given no
-  arguments.
-- **Query gaps.** `j` cannot read `x.`-prefixed columns in a join. Under `.EACHI`, a column of `i`
-  inside an aggregate is the matched rows' values, where data.table gives the row's one value.
-  A non-equi join's extra condition columns are named `t.1` where data.table repeats `t`.
-- **Checker:** a non-equi `on =` and `by = .EACHI` give `Unknown`; the engine's `result_type`
-  already knows both results.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.

@@ -127,3 +127,27 @@ so the tests never touch a network. `just bench-test` runs a package's tests aga
 Because `polars` and `Rblpapi` cannot be installed, it tests a copy whose `Imports` omit the
 missing packages; the code reaches them only inside guarded or injectable branches. The three
 10,000-line packages pass all of their roughly 340 tests each under GNU R 4.3.3.
+
+## Benchmark pass rate
+
+```sh
+just bench-compare .bench/finbench .bench/dsbench .bench/biobench
+just bench-compare .bench/finbench --filter portfolio --verbose
+```
+
+`oracle bench` runs a generated package's testthat suite under GNU R and under ry's runtime and
+compares the two test by test. Both runs go through `ry load <package> --file bench.R`, once with
+`--runtime gnu-r` and once with `--runtime ry`, so the same loader plan loads the package on both
+sides and only evaluation differs. The driver (`crates/oracle/src/bench.R`) records every
+`test_that()` block: its status, the failed expectations, errors, warnings and skips it reported,
+a deparse of its value, and its run time. A test matches when everything but the time agrees.
+
+GNU R runs the suite twice. A test whose value or problems differ between those two runs (a
+fresh UUID, a timestamp in a message) is compared by status alone, so only what GNU R reproduces
+counts against ry. The table prints,
+per package, the matching tests, the rate, the tests that differ or that ry never reported, the
+tests ry passes, and both suites' run times; process wall time, which adds startup and loading
+the package, follows it. `--json` writes every comparison, and `--keep` keeps each runtime's
+report and stderr. Pass `--ry target/release/ry` for timings, with `libR.so` built beside it
+(`cargo build --release -p ry-lang -p libr`). `MEMORY.md` records the current rates.
+

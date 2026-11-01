@@ -60,6 +60,7 @@ pub mod stats_tests;
 pub mod strings;
 pub mod subset;
 pub mod system;
+pub mod parallel;
 pub mod tools;
 pub mod unwind;
 pub mod utils;

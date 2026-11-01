@@ -260,7 +260,7 @@ impl Formatter<'_> {
             BRACE_EXPR => self.braces(node, level, make_multiline),
             CALL_EXPR | SUBSET_EXPR | SUBSET2_EXPR => self.call_like(node, level),
             ARGUMENT_LIST | PARAMETER_LIST => self.argument_list(node, level),
-            DOLLAR_EXPR | AT_EXPR => self.field_access(node, level),
+            DOLLAR_EXPR | AT_EXPR | NAMESPACE_EXPR => self.field_access(node, level),
             FUNCTION_DEF => self.function_definition(node, level),
             IF_EXPR => self.conditional(node, level, make_multiline),
             WHILE_EXPR => self.conditional(node, level, true),
@@ -403,12 +403,16 @@ impl Formatter<'_> {
             return;
         };
         let operator = &elements[operator_index];
-        // `x : :None` keeps its spaces: `x::None` would lex as `::`.
+        // `x : :None` keeps its spaces: `x::None` would lex as `::`. The tag can
+        // also start a larger operand, as in `x : :None$field`.
         let has_spacing = !matches!(operator.kind(), COLON | CARET)
             || (operator.kind() == COLON
-                && elements[operator_index + 1..]
-                    .iter()
-                    .any(|element| element.kind() == TAG_EXPR));
+                && elements[operator_index + 1..].iter().any(|element| {
+                    element
+                        .as_node()
+                        .and_then(SyntaxNode::first_token)
+                        .is_some_and(|token| token.kind() == COLON)
+                }));
         let break_after_operator = elements[operator_index + 1..]
             .iter()
             .find(|element| element.as_node().is_some())
@@ -495,7 +499,7 @@ impl Formatter<'_> {
         let elements = child_elements(node);
         let operator = elements
             .iter()
-            .position(|element| matches!(element.kind(), DOLLAR | AT));
+            .position(|element| matches!(element.kind(), DOLLAR | AT | COLON2 | COLON3));
         // Skip comments trailing the operator: the field name's line decides.
         let is_multiline = operator.is_some_and(|operator| {
             let lhs = &elements[operator.saturating_sub(1)];
@@ -509,7 +513,7 @@ impl Formatter<'_> {
         for (previous, element) in with_previous(&elements) {
             match element.kind() {
                 COMMENT | ANNOTATION => self.place_comment(previous, element, level + 1, level),
-                DOLLAR | AT => {
+                DOLLAR | AT | COLON2 | COLON3 => {
                     self.element(element, level, false);
                     seen_operator = true;
                 }
@@ -621,6 +625,13 @@ impl Formatter<'_> {
                 }
                 COMMENT | ANNOTATION => self.continuation(element, level),
                 ARGUMENT_LIST => {
+                    // `:None (x)` calls a tag; hugged, `:None(x)` would be its payload.
+                    if let Some(tag) = previous.and_then(SyntaxElement::as_node)
+                        && tag.kind() == TAG_EXPR
+                        && tag.children().all(|child| child.kind() != ARGUMENT_LIST)
+                    {
+                        self.space();
+                    }
                     if let Some(list) = element.as_node() {
                         self.argument_list(list, level + usize::from(additional_indent));
                     }
@@ -834,7 +845,7 @@ impl Formatter<'_> {
     fn pattern(&mut self, node: &SyntaxNode) {
         if node
             .descendants_with_tokens()
-            .any(|element| element.kind() == COMMENT)
+            .any(|element| matches!(element.kind(), COMMENT | ANNOTATION))
         {
             self.out.push_str(&self.source[node.text_range()]);
             return;
@@ -870,8 +881,8 @@ impl Formatter<'_> {
         for (previous, element) in with_previous(&elements) {
             match element.kind() {
                 COMMENT | ANNOTATION => self.place_comment(previous, element, level, level),
-                EQ => self.out.push_str(" ="),
                 _ if previous.is_some_and(is_comment) => self.continuation(element, level),
+                EQ => self.out.push_str(" ="),
                 _ => {
                     if previous.is_some_and(|previous| previous.kind() == EQ) {
                         self.space();
@@ -1163,13 +1174,14 @@ impl Formatter<'_> {
         };
         let lines: Vec<String> = match groups {
             Some(groups) => {
+                // A leading `;` is dropped, so it does not make the head trail code.
                 // A head trailing code renders apart from its continuation
                 // lines, so they never indent relative to a column the
                 // formatter does not control.
                 let trailing_head =
                     !line_prefix(self.source, &self.line_starts, usize::from(range.start()))
                         .chars()
-                        .all(char::is_whitespace);
+                        .all(|character| character.is_whitespace() || character == ';');
                 let (head, rest) = groups.split_at(usize::from(trailing_head).min(groups.len()));
                 let mut lines = render_annotation_lines(head, &self.indent, "#: ", 0);
                 lines.extend(render_annotation_lines(rest, &self.indent, "#: ", 0));

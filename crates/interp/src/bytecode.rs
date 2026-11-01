@@ -306,11 +306,6 @@ pub enum Op {
     LogicRight,
     /// `dst formals body srcref`
     Closure,
-    /// `function src dst call target`: when `function` is the `[` builtin and `src` holds a
-    /// frame or an object with an S3 `[` method, runs `call` as a frame query or that method
-    /// into `dst` and jumps to `target`. Both read the remaining arguments unevaluated, because
-    /// a query names columns in them.
-    SubsetDispatch,
     /// `dst variable index value call double`: `variable[index] <- value` (or `[[` when
     /// `double` is 1), where `index` is a register that already holds the index's value and the
     /// assignment runs as `<-` would run it.
@@ -320,7 +315,7 @@ pub enum Op {
     SetSrcref,
 }
 
-pub const OPS: [Op; 24] = [
+pub const OPS: [Op; 23] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -342,7 +337,6 @@ pub const OPS: [Op; 24] = [
     Op::LogicLeft,
     Op::LogicRight,
     Op::Closure,
-    Op::SubsetDispatch,
     Op::SubAssign,
     Op::SetSrcref,
 ];
@@ -1036,20 +1030,12 @@ impl Compiler {
             for _ in &args {
                 self.allocate();
             }
-            let subset = head == symbols().bracket;
-            let mut subset_dispatch = None;
             for (index, (_, value)) in args.iter().enumerate() {
                 if *value == missing_arg() {
                     let constant = self.constant(missing_arg());
                     self.emit(Op::Constant, &[base + index as u32, constant]);
                 } else {
                     self.expression(*value, base + index as u32)?;
-                    if subset && index == 0 && args.len() > 1 {
-                        subset_dispatch = Some(self.emit_patchable(
-                            Op::SubsetDispatch,
-                            &[function, base, dst, call_constant, 0],
-                        ));
-                    }
                 }
             }
             self.emit(Op::CallBuiltin, &[dst, function, call_constant, base, args.len() as u32]);
@@ -1057,9 +1043,6 @@ impl Compiler {
             self.patch(generic);
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
             self.patch(done);
-            if let Some(position) = subset_dispatch {
-                self.patch(position);
-            }
         } else {
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
         }
@@ -1093,7 +1076,6 @@ pub fn operand_count(op: Op) -> usize {
         Op::LogicLeft => 5,
         Op::LogicRight => 5,
         Op::Closure => 4,
-        Op::SubsetDispatch => 5,
         Op::SubAssign => 6,
         Op::SetSrcref => 1,
     }
@@ -1277,23 +1259,6 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let symbol = constants.element(operand(1));
             let function = lookup_function(symbol, env, constants, caches, operand(2))?;
             set(operand(0), function);
-        }
-        Op::SubsetDispatch => {
-            let function = register(operand(0));
-            let subject = register(operand(1));
-            if subject.is_object() && eval::builtin_def(function)?.name == "[" {
-                let call = constants.element(operand(3));
-                let value = if crate::frame::is_frame(subject) {
-                    Some(crate::frame::run(call, subject, env)?)
-                } else {
-                    crate::dispatch::dispatch_subset(call, call.cdr(), subject, env)?
-                };
-                if let Some(value) = value {
-                    set(operand(2), value);
-                    *pc = operand(4);
-                    return Ok(None);
-                }
-            }
         }
         Op::BranchUnlessBuiltin => {
             if register(operand(0)).kind() != SexpType::Builtin {

@@ -1001,41 +1001,52 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
     } else if package.kind() == SexpType::List {
         interp::values::first_string(interp::values::list_get(package, "name"))
             .map(|text| text.into_owned())
+    } else if package.kind() == SexpType::ExternalPtr {
+        // A `DLLInfoReference`, the `info` pointer `getNativeSymbolInfo` passes for a DLLInfo,
+        // as `useDynLib(pkg, symbol)` does. A loaded library's points at its record, and a
+        // builtin library's carries its package name instead.
+        let address = package.external_address();
+        runtime()
+            .dlls
+            .iter()
+            .find(|dll| std::ptr::eq(&***dll, address.cast::<Dll>()))
+            .map(|dll| dll.name.clone())
+            .or_else(|| {
+                interp::values::first_string(package.external_protected()).map(|text| text.into_owned())
+            })
     } else {
         None
     };
     if let Some(info) = builtin_libraries::symbol_info(&name, package_name.as_deref())? {
         return Ok(info);
     }
-    for kind in [
-        RoutineKind::Call,
-        RoutineKind::External,
-        RoutineKind::C,
-        RoutineKind::Fortran,
-    ] {
-        if let Ok((function, arity)) = find_routine(&name, package_name.as_deref(), kind) {
-            let dll = runtime()
-                .dlls
-                .iter_mut()
-                .rev()
-                .find(|dll| {
-                    package_name
-                        .as_deref()
-                        .is_none_or(|package| dll.name == package)
-                })
-                .map(|dll| &mut **dll as *mut Dll);
-            let dll_object = match dll {
-                Some(dll) => dll_info(dll)?,
-                None => runtime().nil(),
-            };
-            let class = match kind {
-                RoutineKind::Call => "CallRoutine",
-                RoutineKind::External => "ExternalRoutine",
-                RoutineKind::C => "CRoutine",
-                RoutineKind::Fortran => "FortranRoutine",
-            };
-            return native_symbol(&name, function, arity.unwrap_or(-1), dll_object, class);
-        }
+    // Registered routines are found even in a library that forces symbols: that only forbids
+    // `.Call("name")` by string, while `useDynLib(pkg, name)` resolves names through here.
+    let packages: Vec<String> = match package_name {
+        Some(package) => vec![package],
+        None => runtime().dlls.iter().rev().map(|dll| dll.name.clone()).collect(),
+    };
+    for package in packages {
+        let Some((kind, function, arity)) = crate::dynload::registered_routine(&name, &package) else {
+            continue;
+        };
+        let dll = runtime()
+            .dlls
+            .iter_mut()
+            .rev()
+            .find(|dll| dll.name == package)
+            .map(|dll| &mut **dll as *mut Dll);
+        let dll_object = match dll {
+            Some(dll) => dll_info(dll)?,
+            None => runtime().nil(),
+        };
+        let class = match kind {
+            RoutineKind::Call => "CallRoutine",
+            RoutineKind::External => "ExternalRoutine",
+            RoutineKind::C => "CRoutine",
+            RoutineKind::Fortran => "FortranRoutine",
+        };
+        return native_symbol(&name, function, arity, dll_object, class);
     }
     Ok(runtime().nil())
 }

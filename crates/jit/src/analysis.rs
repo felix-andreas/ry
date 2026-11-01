@@ -272,9 +272,6 @@ pub enum Action {
     LogicRight { dst: usize, left: usize, right: usize, is_and: bool },
     /// `x[i] <- value` in place on a plain vector, with a generic path that copies or grows.
     SubAssign { dst: usize, slot: usize, index: usize, value: usize },
-    /// The check before `subject[...]` whether `[` runs a frame query or an S3 method: compiled
-    /// code falls through for a plain subject and hands an object to tier 0, which dispatches.
-    SubsetDispatch { subject: usize },
 }
 
 /// A function lookup compiled code assumes still resolves as it did at compile time.
@@ -784,8 +781,6 @@ impl Builder<'_> {
                 state.visible = Some(true);
                 Action::LogicRight { dst: operand(0), left: operand(1), right: operand(2), is_and: operand(4) == 1 }
             }
-            Op::SubsetDispatch if state.registers[operand(1)].is_plain() => Action::FallThrough,
-            Op::SubsetDispatch => Action::SubsetDispatch { subject: operand(1) },
             // The interpreter's own step sets the current srcref; it touches no register.
             Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
             Op::Closure => {
@@ -1050,11 +1045,6 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
         Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
         Op::SetVar => gen_(operand(1), live),
         Op::BranchUnlessBuiltin => gen_(operand(0), live),
-        // Tier 0 runs a handed-off dispatch, reading the function and the subject.
-        Op::SubsetDispatch => {
-            gen_(operand(0), live);
-            gen_(operand(1), live);
-        }
         Op::CallBuiltin => {
             kill(operand(0), live);
             gen_(operand(1), live);
