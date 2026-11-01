@@ -874,12 +874,27 @@ fn conditional_writers_of<'db>(
         if *file.kind(db) != kind {
             continue;
         }
-        for &item in item_tree(db, file) {
-            let own_name = item.name(db).clone();
-            for name in item_top_level_names(db, item) {
-                if own_name.as_deref() != Some(name.as_str()) {
-                    writers.entry(name.to_string()).or_default().push(item);
-                }
+        for &(name, item) in file_conditional_writers(db, file) {
+            writers.entry(name.to_string()).or_default().push(item);
+        }
+    }
+    writers
+}
+
+/// The file's share of [`conditional_slot_items`]. The project-wide walks fold these per-file
+/// memos rather than reading per-item ones: after an edit, salsa then verifies one memo per
+/// untouched file by durability instead of one edge per item in the project.
+#[salsa::tracked(returns(ref))]
+pub fn file_conditional_writers<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+) -> Vec<(Symbol, Item<'db>)> {
+    let mut writers = Vec::new();
+    for &item in item_tree(db, file) {
+        let own_name = item.name(db).clone();
+        for &name in item_top_level_names(db, item) {
+            if own_name.as_deref() != Some(name.as_str()) {
+                writers.push((name, item));
             }
         }
     }
@@ -997,15 +1012,32 @@ fn winners_of<'db>(
         if *file.kind(db) != kind {
             continue;
         }
-        for &item in item_tree(db, file) {
-            if matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                && let Some(name) = item.name(db).clone()
-            {
-                winners.insert(name, item);
-            }
+        for (name, item) in file_definitions(db, file) {
+            winners.insert(name.clone(), *item);
         }
     }
     winners
+}
+
+/// The file's named function and value items in item order, the candidates for
+/// [`package_definitions`]. Per file for the same reason as [`file_conditional_writers`].
+#[salsa::tracked(returns(ref))]
+pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(String, Item<'db>)> {
+    item_tree(db, file)
+        .iter()
+        .filter(|item| matches!(*item.kind(db), ItemKind::Function | ItemKind::Value))
+        .filter_map(|&item| Some((item.name(db).clone()?, item)))
+        .collect()
+}
+
+/// The read set of each of [`file_definitions`], in the same order: the file's share of the
+/// edges [`interface_sccs`] walks.
+#[salsa::tracked(returns(ref))]
+pub fn file_interface_reads(db: &dyn Db, file: SourceFile) -> Vec<Vec<Symbol>> {
+    file_definitions(db, file)
+        .iter()
+        .map(|&(_, item)| item_interface_reads(db, item).iter().copied().collect())
+        .collect()
 }
 
 /// `generic.class` split at the last dot (`as.character.myclass`), the generic being
@@ -1113,30 +1145,29 @@ pub struct InterfaceSccs<'db> {
 #[salsa::tracked(returns(ref))]
 pub fn interface_sccs<'db>(db: &'db dyn Db, files: ProjectFiles) -> InterfaceSccs<'db> {
     let winners = package_definitions(db, files);
+    let package_files: Vec<SourceFile> = files
+        .files(db)
+        .iter()
+        .copied()
+        .filter(|file| *file.kind(db) == DocumentKind::Package)
+        .collect();
     let mut nodes: Vec<Item<'db>> = Vec::new();
     let mut position: FxHashMap<Item<'db>, usize> = FxHashMap::default();
-    for &file in files.files(db) {
-        if *file.kind(db) != DocumentKind::Package {
-            continue;
-        }
-        for &item in item_tree(db, file) {
-            if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                || item.name(db).is_none()
-            {
-                continue;
-            }
+    for &file in &package_files {
+        for &(_, item) in file_definitions(db, file) {
             position.insert(item, nodes.len());
             nodes.push(item);
         }
     }
-    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    for (index, &item) in nodes.iter().enumerate() {
-        for name in item_interface_reads(db, item) {
-            if let Some(target) = winners.get(name.as_str())
-                && let Some(&target_index) = position.get(target)
-            {
-                edges[index].push(target_index);
-            }
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(nodes.len());
+    for &file in &package_files {
+        for reads in file_interface_reads(db, file) {
+            edges.push(
+                reads
+                    .iter()
+                    .filter_map(|name| position.get(winners.get(name.as_str())?).copied())
+                    .collect(),
+            );
         }
     }
 

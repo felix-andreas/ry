@@ -340,20 +340,6 @@ An independent review profiled before it proposed. Every number below was taken 
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
 
-### Project-wide aggregates verify every item after each keystroke (unverified here, reported by the IDE responsiveness work)
-
-- On the finance benchmark, any editor request right after a keystroke costs about 45 ms at p50,
-  against 0.5 to 1 ms settled, and edited-file diagnostics cost about 56 ms with no item rechecked.
-  The time is salsa deep verification under `item_check`.
-- Cause: `conditional_slot_items`, `interface_sccs`, `package_definitions` and
-  `project_arithmetic_classes` read per-item memos across all files directly. The edited file's
-  items make each aggregate `LOW`, so verifying it walks about 56K edges.
-- Fix shape: fold per-file tracked memos (for example `file_conditional_writers`,
-  `file_definitions`, `file_interface_reads`, `file_arithmetic_classes`), so an aggregate reads
-  about 500 file memos that verify at `MEDIUM` by durability and only the edited file's memo
-  re-verifies. Pin it in `test_incremental.rs` by counting edges re-verified after an edit. Keep
-  `ry check`'s naming pass warming these per item in parallel.
-
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
 This was framed as the interface fixpoint being superlinear in the size of the cyclic definition
@@ -2754,14 +2740,6 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
 
-- **Every request right after a keystroke pays about 35 ms of salsa verification**, against about
-  1 ms settled. The time goes to deep-verifying project-wide aggregates that read every item:
-  `conditional_slot_items` (through `package_name`), `interface_sccs` (through `interface_group`),
-  and `package_definitions` and `project_arithmetic_classes` (through `visible_arithmetic_classes`).
-  Each depends directly on per-item memos in every file, so once the edited file is `LOW` the
-  aggregate is too, and verifying it walks about 56,000 edges. Folding each aggregate over per-file
-  memos would let untouched files shallow-verify at `MEDIUM` and take the floor to a few
-  milliseconds. This is the salsa core, owned by the analysis performance work.
 - **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
   lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
   lints when the project is still cold, but that changes the two-wave contract on the architecture

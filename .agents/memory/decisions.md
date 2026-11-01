@@ -3077,8 +3077,21 @@ first lines R had already read, leaving R mid-command.
   skips text that matches the disk and lowers the file to `LOW` in idle time, because salsa never
   backdates a memo whose durability drops, and the first `LOW` write therefore re-derives the
   file's dependents once.
-- **Not done here.** The roughly 35 ms every request pays right after a keystroke is salsa
-  verifying project-wide aggregates over all items; the fix (folding them over per-file memos) is
-  in the analysis core (`backlog.md`, "Open: editor latency at 300,000 lines").
-- **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms. Incremental
-  analysis is unchanged for checks, since the new indexes are read only by editor features.
+- **Project-wide maps fold per-file memos.** `package_definitions`, `conditional_slot_items`,
+  `interface_sccs` and their test-file twins read every item's projections directly. Once the
+  edited file was `LOW`, each map was too, and confirming it after a keystroke checked about 56,000
+  item memos, about 35 ms before any request could answer. They now read `file_definitions`,
+  `file_interface_reads` and `file_conditional_writers` (`crates/semantics/src/semantics.rs`), so
+  the check touches about 500 file memos and every untouched one passes on durability.
+  `project_arithmetic_classes` needed no change: it reads only `package_definitions`.
+- **Every host input but the open documents and the file list is `MEDIUM`.** The server and
+  `analysis-stats` created the stubs, settings, metadata and data files at the default `LOW`, and
+  nearly every memo reads the stubs, so no memo was ever `MEDIUM` and the file durabilities had no
+  effect. With those inputs at `MEDIUM`, the maps must be `LOW` before any file's first edit, since
+  a memo whose durability drops cannot backdate and the drop would re-execute every item check
+  (about 2 s on finbench). `ProjectFiles` is therefore `LOW`, which keeps the maps `LOW`.
+  `test_incremental.rs` pins both: an edit verifies only the edited file's items, and a file's
+  first edit re-checks only its own.
+- **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
+  right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
+  finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.

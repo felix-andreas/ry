@@ -424,20 +424,28 @@ impl Worker {
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
         };
+        // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
+        // durable as its least durable input, and nearly every memo reads the stubs or the
+        // settings, so one LOW input would make a keystroke deep-verify the whole project.
         worker.install_stubs();
-        AnalysisSettings::new(&worker.db, worker.config.check.inline_annotations);
+        let _: AnalysisSettings = AnalysisSettings::builder(worker.config.check.inline_annotations)
+            .durability(Durability::MEDIUM)
+            .new(&worker.db);
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
-        PackageMetadata::new(
-            &worker.db,
+        let _: PackageMetadata = PackageMetadata::builder(
             metadata.imports,
             metadata.dependencies,
             Default::default(),
             metadata.package,
             metadata.native_symbols,
-        );
-        DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
+        )
+        .durability(Durability::MEDIUM)
+        .new(&worker.db);
+        let _: DataFiles = DataFiles::builder(scan_data_files(&worker.workspace_root))
+            .durability(Durability::MEDIUM)
+            .new(&worker.db);
         worker.load_workspace_sources();
 
         let result = initialize_result(encoding, worker.experimental_features);
@@ -461,7 +469,9 @@ impl Worker {
                 }
             }
         }
-        StubSources::new(&self.db, sources, shipped_export_manifests());
+        let _: StubSources = StubSources::builder(sources, shipped_export_manifests())
+            .durability(Durability::MEDIUM)
+            .new(&self.db);
     }
 
     /// The open NAMESPACE buffer wins over disk; DESCRIPTION is not a tracked
@@ -603,6 +613,12 @@ impl Worker {
     }
 
     /// In the order the last-writer-wins symbol index and the CLI agree on.
+    ///
+    /// The file list is LOW although the files start at MEDIUM. Every project-wide map reads
+    /// it, so those maps are LOW from the start, and a file's first edit (its drop from MEDIUM
+    /// to LOW) lets them backdate. Salsa never backdates a memo whose durability drops, so a
+    /// MEDIUM list would make that first edit re-execute every name lookup and item check in
+    /// the project.
     fn rebuild_project_files(&mut self) {
         let order = project_order(&self.workspace_root, &self.collate_order);
         let mut ordered: Vec<(&PathBuf, &SourceFile)> = self.files.iter().collect();
@@ -612,13 +628,13 @@ impl Worker {
             Some(project) => {
                 project
                     .set_files(&mut self.db)
-                    .with_durability(Durability::MEDIUM)
+                    .with_durability(Durability::LOW)
                     .to(files);
             }
             None => {
                 // A singleton: queries reach it through `ProjectFiles::get`.
                 let _project = ProjectFiles::builder(files)
-                    .durability(Durability::MEDIUM)
+                    .durability(Durability::LOW)
                     .new(&self.db);
             }
         }

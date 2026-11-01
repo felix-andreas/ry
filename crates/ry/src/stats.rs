@@ -4,6 +4,7 @@
 use crate::cli::{self, CommandError};
 use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
+use salsa::Durability;
 use semantics::check::CHECK_EXECUTIONS;
 use semantics::diagnostics::file_diagnostics;
 use semantics::infer::resolve_calls;
@@ -14,7 +15,6 @@ use semantics::metadata::{
 };
 use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
 use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use salsa::Durability;
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs;
@@ -77,10 +77,15 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
 
     let rss_baseline = proc_status_field("VmRSS:");
     let mut db = RootDatabase::default();
-    StubSources::new(&db, stub_sources, shipped_export_manifests());
-    AnalysisSettings::new(&db, config.check.inline_annotations);
-    let metadata = PackageMetadata::new(
-        &db,
+    // Every input is MEDIUM, as in the server, so the request timings below pay what the
+    // server pays to verify memos after a keystroke.
+    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
+        .durability(Durability::MEDIUM)
+        .new(&db);
+    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
+        .durability(Durability::MEDIUM)
+        .new(&db);
+    let metadata = PackageMetadata::builder(
         normalized_imports(&namespace_file.imports),
         description_source
             .as_deref()
@@ -89,7 +94,9 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         BTreeSet::new(),
         None,
         namespace_file.native_symbols,
-    );
+    )
+    .durability(Durability::MEDIUM)
+    .new(&db);
     let mut records: Vec<FileRecord> = Vec::with_capacity(paths.len());
     let mut package_count = 0usize;
     let mut load_total = Duration::ZERO;
@@ -120,9 +127,10 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             typecheck: Duration::ZERO,
         });
     }
-    // A singleton: queries reach it through `ProjectFiles::get`.
+    // A singleton that queries reach through `ProjectFiles::get`. LOW, as in the server, so a
+    // file's first edit does not re-execute the project.
     let _project = ProjectFiles::builder(records.iter().map(|record| record.file).collect())
-        .durability(Durability::MEDIUM)
+        .durability(Durability::LOW)
         .new(&db);
     let rss_after_load = proc_status_field("VmRSS:");
 
@@ -340,7 +348,11 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
         for &(file, offset) in &positions {
             settled.push(time_request(db, files, kind, file, offset));
             text.push('#');
-            edited.file.set_text(db).with_durability(Durability::LOW).to(text.clone());
+            edited
+                .file
+                .set_text(db)
+                .with_durability(Durability::LOW)
+                .to(text.clone());
             after_edit.push(time_request(db, files, kind, file, offset));
         }
         settled.sort();
@@ -354,7 +366,11 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
             percentile(&after_edit, 99),
         );
     }
-    edited.file.set_text(db).with_durability(Durability::LOW).to(edited.source.clone());
+    edited
+        .file
+        .set_text(db)
+        .with_durability(Durability::LOW)
+        .to(edited.source.clone());
     let _ = document_diagnostics(db, edited.file, config);
 }
 
@@ -406,7 +422,9 @@ fn time_request(
         RequestKind::Parse => drop(semantics::parse(db, file)),
         RequestKind::Hover => drop(ide::hover(db, files, file, offset)),
         // Mid-identifier, as while typing.
-        RequestKind::Completion => drop(ide::completion(db, files, file, offset + TextSize::from(1))),
+        RequestKind::Completion => {
+            drop(ide::completion(db, files, file, offset + TextSize::from(1)))
+        }
         RequestKind::Definition => drop(ide::definition(db, files, file, offset)),
         RequestKind::References => drop(ide::references(db, files, file, offset, true)),
         RequestKind::Rename => drop(ide::rename(db, files, file, offset)),
@@ -501,7 +519,11 @@ fn typing_burst(
     for _ in 0..TYPING_BURST {
         text.push('#');
         let start = Instant::now();
-        record.file.set_text(db).with_durability(Durability::LOW).to(text.clone());
+        record
+            .file
+            .set_text(db)
+            .with_durability(Durability::LOW)
+            .to(text.clone());
         let _ = document_diagnostics(db, record.file, config);
         keystroke_times.push(start.elapsed());
     }
@@ -561,7 +583,11 @@ fn typing_burst(
             parse_start.elapsed().as_secs_f64() * 1e3 / parses as f64
         );
     }
-    record.file.set_text(db).with_durability(Durability::LOW).to(record.source.clone());
+    record
+        .file
+        .set_text(db)
+        .with_durability(Durability::LOW)
+        .to(record.source.clone());
     let _ = document_diagnostics(db, record.file, config);
 }
 
