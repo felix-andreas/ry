@@ -12,23 +12,29 @@
 //! - The words after `ry` name the command (`check` or `run`) and its options: `typing`,
 //!   `strict`, any other `[check]` key as `key=value`, `runtime=ry` or `runtime=gnu-r`, `exact`,
 //!   `continue`, `dput`, and `tab=LABEL`.
+//! - A `text` block may open with a `$ ry run sales.R` line, which names the file and is not output.
 //!
 //! The landing page's samples in `docs/src/pages/index.astro` are checked too, without markers.
 //!
 //! `DOCS_PAGE=<substring>` checks only the pages whose path contains it, and `RY_BLESS=1`
 //! rewrites the expected output of exact blocks (excerpts are left to their author).
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
-use std::time::Instant;
-
-use similar::TextDiff;
+use {
+    similar::TextDiff,
+    std::{
+        collections::BTreeMap,
+        fs,
+        io::Read,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::Instant,
+    },
+};
 
 #[test]
 fn docs_examples_hold() {
@@ -382,7 +388,26 @@ fn parse_page(page: &str, text: &str) -> Result<Vec<Example>, String> {
                 if config.dput {
                     return Err(format!("{location}: `dput` applies to `#>` output only"));
                 }
-                let expected = join_lines(&body);
+                // A leading `$ ry run sales.R` line shows the reader the command; it names the
+                // file the code is written to, and it is not part of the output.
+                let (body, range) = match body.first().and_then(|line| line.strip_prefix("$ ")) {
+                    Some(command) => {
+                        if let Some(file) = command
+                            .split_whitespace()
+                            .last()
+                            .filter(|word| word.ends_with(".R"))
+                        {
+                            config.file = Some(file.to_owned());
+                        }
+                        let range = PageLines {
+                            start: range.start + 1,
+                            ..range
+                        };
+                        (&body[1..], range)
+                    }
+                    None => (&body[..], range),
+                };
+                let expected = join_lines(body);
                 if config.file.is_none() {
                     config.file = snippet_path(&expected);
                 }

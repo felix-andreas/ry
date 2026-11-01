@@ -10,8 +10,10 @@
 
 mod harness;
 
-use harness::*;
-use std::{collections::BTreeMap, io::Write, path::Path, process::Command};
+use {
+    harness::*,
+    std::{collections::BTreeMap, io::Write, path::Path, process::Command},
+};
 
 const CHILD_PACKAGE: &str = "RY_CORPUS_CHILD_PACKAGE";
 const CHILD_LIBRARIES: &str = "RY_CORPUS_CHILD_LIBRARIES";

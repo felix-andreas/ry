@@ -1,11 +1,14 @@
 //! The editor features' fuzz contract, shared by the in-tree harness and the coverage-guided
 //! `fuzz/` target so both check exactly the same properties.
 
-use crate::{DefinitionTarget, DocumentSymbol};
-use semantics::stubs::install_shipped_stubs;
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::collections::{BTreeSet, HashSet};
-use syntax::{SyntaxKind, TextRange, TextSize, lex};
+use {
+    crate::{DefinitionTarget, DocumentSymbol},
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile, stubs::install_shipped_stubs,
+    },
+    std::collections::{BTreeSet, HashSet},
+    syntax::{SyntaxKind, TextRange, TextSize, lex},
+};
 
 /// Runs every feature at sampled offsets of `source`: nothing may panic, every range must lie
 /// inside the text it indexes, and wherever the cursor sits on a name, every range a feature

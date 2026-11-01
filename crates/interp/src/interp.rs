@@ -40,8 +40,8 @@ pub mod eval;
 pub mod format;
 pub mod frame;
 pub mod graphics;
-pub mod linalg;
 pub mod graphics_render;
+pub mod linalg;
 pub mod lower;
 pub mod methods;
 pub mod native;
@@ -49,8 +49,8 @@ pub mod parallel;
 pub mod print;
 pub mod random;
 pub mod rd;
-pub mod rmath;
 pub mod records;
+pub mod rmath;
 pub mod serialize;
 pub mod session;
 pub mod sort;
@@ -74,16 +74,17 @@ pub mod unwind;
 pub mod utils;
 pub mod values;
 
-use crate::{
-    builtins::{BuiltinDef, Kind},
-    conditions::{HandlerStack, RestartStack},
-    unwind::R,
-};
-use heap::{Heap, Marker, RootSource, object::Sexp};
-use rustc_hash::FxHashMap;
-use std::{cell::UnsafeCell, rc::Rc};
-
 pub use crate::unwind::{Jump, RError};
+use {
+    crate::{
+        builtins::{BuiltinDef, Kind},
+        conditions::{HandlerStack, RestartStack},
+        unwind::R,
+    },
+    heap::{Heap, Marker, RootSource, object::Sexp},
+    rustc_hash::FxHashMap,
+    std::{cell::UnsafeCell, rc::Rc},
+};
 
 /// One closure call: GNU R's function context.
 pub struct Frame {

@@ -1,8 +1,10 @@
 //! Delimited files sniff under the contract in `sniff::check_sniff_invariants`, over seeds, byte
 //! mutations of them, and random bytes. `FUZZ_ITERS` scales the budget.
 
-use sniff::check_sniff_invariants;
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes, mutate_seed, random_bytes};
+use {
+    sniff::check_sniff_invariants,
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes, mutate_seed, random_bytes},
+};
 
 const SEEDS: &[&str] = &[
     "a,b,c\n1,2.5,TRUE\n2,,FALSE\n",

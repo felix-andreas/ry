@@ -6,12 +6,13 @@
 //! binding's value is its definition's text, and a statement stores its text plus the values it
 //! read, so a statement that should have rerun shows up as a stale value.
 
-use crate::{Loader, PackageInputs, Plan};
-use rustc_hash::{FxHashMap, FxHashSet};
-use semantics::load_index::{IndexedItem, PackageIndex, Registration};
-use std::collections::BTreeSet;
-use std::path::Path;
-use syntax::testing::Entropy;
+use {
+    crate::{Loader, PackageInputs, Plan},
+    rustc_hash::{FxHashMap, FxHashSet},
+    semantics::load_index::{IndexedItem, PackageIndex, Registration},
+    std::{collections::BTreeSet, path::Path},
+    syntax::testing::Entropy,
+};
 
 /// Any text as a package's only R file either refuses the load with a syntax error or indexes,
 /// and every span the index records lies inside that text.

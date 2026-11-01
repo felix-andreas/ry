@@ -12,11 +12,11 @@
 //! Every program is deterministic under GNU R: nothing reads the clock, addresses, the
 //! environment or an unseeded random number, and no environment or closure is ever printed.
 
-use std::path::Path;
-
-use syntax::testing::SplitMix64;
-
-use crate::{Engine, EngineError, Outcome, diff};
+use {
+    crate::{Engine, EngineError, Outcome, diff},
+    std::path::Path,
+    syntax::testing::SplitMix64,
+};
 
 /// The R program for `seed`. The same seed always gives the same text.
 pub fn program(seed: u64) -> String {
@@ -496,8 +496,12 @@ impl Generator {
     /// of keeping a reference to the loop value must see the value of its own iteration.
     fn loop_variable_aliasing(&mut self) -> String {
         let k = self.block;
-        let values = ["c(1.5, 2.5, 3.5)", "1:4", "c(TRUE, FALSE, NA)", "c(\"a\", \"b\")"]
-            [self.rng.below(4)];
+        let values = [
+            "c(1.5, 2.5, 3.5)",
+            "1:4",
+            "c(TRUE, FALSE, NA)",
+            "c(\"a\", \"b\")",
+        ][self.rng.below(4)];
         format!(
             "kept{k} <- list()\nclosures{k} <- list()\nfor (v in {values}) {{\n  kept{k}[[length(kept{k}) + 1L]] <- v\n  local({{ w <- v; closures{k}[[length(closures{k}) + 1L]] <<- function() w }})\n  alias{k} <- v\n}}\nstr(kept{k})\nstr(lapply(closures{k}, function(f) f()))\nprint(alias{k})\nprint(v)\nfor (v in {values}) {{ v <- rev(c(v, v)); last{k} <- v }}\nprint(last{k})\nenv{k} <- new.env()\nfor (v in {values}) assign(paste0(\"n\", length(ls(env{k}))), v, envir = env{k})\nstr(mget(sort(ls(env{k})), envir = env{k}))\n"
         )

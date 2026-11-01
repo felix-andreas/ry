@@ -9,16 +9,21 @@
 //!
 //! `SCENARIO=<name>` runs one scenario.
 
-use async_lsp::lsp_types::{self, Url};
-use ry::server::simulation::{
-    ClientOptions, Notification, RequestKind, Simulation, position_of, verify_against_fresh_start,
+use {
+    async_lsp::lsp_types::{self, Url},
+    ry::server::simulation::{
+        ClientOptions, Notification, RequestKind, Simulation, position_of,
+        verify_against_fresh_start,
+    },
+    serde_json::Value,
+    std::{
+        collections::BTreeMap,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
-use serde_json::Value;
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
 
 #[test]
 fn scenarios_hold() {
@@ -243,15 +248,19 @@ fn r_home() -> Result<&'static PathBuf, String> {
         if !status.success() {
             return Err("building ry-rcmd failed".to_owned());
         }
-        let gnu_r_bin =
-            which("Rscript").and_then(|rscript| rscript.parent().map(Path::to_path_buf));
+        // The home links GNU R's base packages, from `R RHOME`.
+        let gnu_r_home = Command::new("R")
+            .arg("RHOME")
+            .output()
+            .map_err(|error| format!("running `R RHOME`: {error}"))?;
+        let gnu_r_home = PathBuf::from(String::from_utf8_lossy(&gnu_r_home.stdout).trim());
         rcmd::assemble(
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("../libr/include"),
                 libr: &libr_path(),
                 rcmd: &profile_directory.join("ry-rcmd"),
-                gnu_r_bin: gnu_r_bin.as_deref(),
+                gnu_r_home: &gnu_r_home,
                 toolchain: rcmd::Toolchain::default(),
             },
         )

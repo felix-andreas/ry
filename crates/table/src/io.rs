@@ -16,24 +16,24 @@
 //! different: the string "NA" and a column of digit strings are unquoted, so they read back as
 //! `NA` and as numbers.
 
-use std::{
-    fs::File,
-    io::{BufWriter, Cursor, Write},
-    path::Path,
-    sync::Arc,
+use {
+    crate::{Error, Result, Table, convert::string_to_factor},
+    memmap2::Mmap,
+    polars::prelude::{
+        BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
+        Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
+        Schema as PolarsSchema, SerReader,
+    },
+    polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+    rayon::prelude::*,
+    sniff::{ColumnType as TextColumn, Guess, Layout},
+    std::{
+        fs::File,
+        io::{BufWriter, Cursor, Write},
+        path::Path,
+        sync::Arc,
+    },
 };
-
-use memmap2::Mmap;
-use polars::prelude::{
-    BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
-    Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
-    Schema as PolarsSchema, SerReader,
-};
-use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
-use rayon::prelude::*;
-use sniff::{ColumnType as TextColumn, Guess, Layout};
-
-use crate::{Error, Result, Table, convert::string_to_factor};
 
 /// Reads a delimited text file into a table, as `fread(path)` does.
 pub fn read_csv(path: &Path) -> Result<Table> {

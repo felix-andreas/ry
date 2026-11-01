@@ -5,20 +5,22 @@
 //! Base's `scan` lives here too, because `read.table` drives it together with
 //! `readtablehead` and `countfields`, and all three share one tokenizer.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    builtins::{Arg, BuiltinDef, Call, internal},
-    coerce::{coerce_vector, parse_real},
-    conditions::warning,
-    format::{format_complex_alone, format_real_alone_scipen},
-    unwind::{R, error},
-    values::{
-        self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
-        string_vector, symbols,
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        builtins::{Arg, BuiltinDef, Call, internal},
+        coerce::{coerce_vector, parse_real},
+        conditions::warning,
+        format::{format_complex_alone, format_real_alone_scipen},
+        unwind::{R, error},
+        values::{
+            self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
+            string_vector, symbols,
+        },
+        write_console,
     },
-    write_console,
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[internal("scan", 19, do_scan)];
 

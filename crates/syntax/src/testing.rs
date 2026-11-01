@@ -4,14 +4,17 @@
 //! The fuzz helpers live here too, so every crate's harness draws from one
 //! generator and one set of mutation operators.
 
-use rowan::NodeOrToken;
-use std::collections::HashSet;
-use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{env, fs};
-
-use crate::SyntaxNode;
+use {
+    crate::SyntaxNode,
+    rowan::NodeOrToken,
+    std::{
+        collections::HashSet,
+        env, fs,
+        ops::Range,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, Ordering},
+    },
+};
 
 static INVARIANTS: AtomicBool = AtomicBool::new(false);
 

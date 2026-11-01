@@ -2,9 +2,10 @@
 //! (`ry::config::check_config_invariants`, `ry::position::check_position_invariants`), over
 //! seeds, mutations of them, and random bytes. `FUZZ_ITERS` scales the budget.
 
-use ry::config::check_config_invariants;
-use ry::position::check_position_invariants;
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes, token_soup};
+use {
+    ry::{config::check_config_invariants, position::check_position_invariants},
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes, token_soup},
+};
 
 const CONFIG_SEEDS: &[&str] = &[
     "",

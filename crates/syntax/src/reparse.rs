@@ -2,10 +2,15 @@
 //! untouched top-level children are shared and only the edited middle is
 //! reparsed. Anything unanchorable falls back to a full parse.
 
-use crate::kind::SyntaxKind::{self, *};
-use crate::lexer::lex;
-use crate::{Parse, SyntaxElement, parse};
-use rowan::{GreenNode, NodeOrToken, TextRange, TextSize};
+use {
+    crate::{
+        Parse, SyntaxElement,
+        kind::SyntaxKind::{self, *},
+        lexer::lex,
+        parse,
+    },
+    rowan::{GreenNode, NodeOrToken, TextRange, TextSize},
+};
 
 pub fn try_splice(
     old: &Parse,
@@ -104,9 +109,11 @@ pub fn try_splice(
     // An error at the middle's end (trailing operator, dangling `else`), or one the middle's
     // end cut off wherever it is reported (`function(x)` whose body is on the next line), means
     // a full parse would continue across the suffix newline.
-    if middle.errors().iter().any(|error| {
-        error.incomplete || u32::from(error.range.end()) as usize == middle_text.len()
-    }) {
+    if middle
+        .errors()
+        .iter()
+        .any(|error| error.incomplete || u32::from(error.range.end()) as usize == middle_text.len())
+    {
         return None;
     }
     let new_children: Vec<_> = children[..prefix_end]

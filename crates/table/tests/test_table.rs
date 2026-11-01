@@ -2,17 +2,19 @@
 //! semantics (join layout, rolling matches, group order, `NA` handling) was read from data.table
 //! 1.17 under GNU R on the same inputs.
 
-use syntax::testing::{SplitMix64, fuzz_iterations};
-use table::{
-    ColumnType, Schema, Table,
-    convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
-    ffi, io, ops,
-    polars::prelude::{IntoColumn, PlSmallStr},
-    query::{
-        Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query, ResultType,
-        Roll, Rows, Select, SortKey, UnaryOp,
-        build::{aggregate, binary, column},
-        execute, execute_with_plans_only, plan, result_type,
+use {
+    syntax::testing::{SplitMix64, fuzz_iterations},
+    table::{
+        ColumnType, Schema, Table,
+        convert::{NA_INTEGER, NA_REAL, RVector, is_na_real, to_r, to_series},
+        ffi, io, ops,
+        polars::prelude::{IntoColumn, PlSmallStr},
+        query::{
+            Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query,
+            ResultType, Roll, Rows, Select, SortKey, UnaryOp,
+            build::{aggregate, binary, column},
+            execute, execute_with_plans_only, plan, result_type,
+        },
     },
 };
 
@@ -3213,7 +3215,10 @@ fn files_read_and_write_through_the_file_system() {
     std::fs::remove_file(&path).unwrap_or_else(|error| panic!("cannot remove: {error}"));
     assert_eq!(get(&mut back, "v"), ints(&[1, 2]));
     io::strings_as_factors(&mut back).unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(back.schema().to_string(), "DataFrame{k: factor, v: integer[]}");
+    assert_eq!(
+        back.schema().to_string(),
+        "DataFrame{k: factor, v: integer[]}"
+    );
 }
 
 fn column_of(name: &str, vector: RVector) -> table::polars::prelude::Column {

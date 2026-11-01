@@ -1,8 +1,10 @@
 //! Every feature runs at sampled offsets under the contract in `ide::testing`. `FUZZ_ITERS`
 //! scales the mutation budget.
 
-use ide::testing::check_ide_invariants as sweep;
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed};
+use {
+    ide::testing::check_ide_invariants as sweep,
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed},
+};
 
 const SEEDS: &[&str] = &[
     "x <- 1L\ny <- x + 1\n",

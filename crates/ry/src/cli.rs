@@ -1,38 +1,51 @@
-use crate::config::{self, ExperimentalFeatures};
-use crate::diagnostics::{apply_suppressions, document_diagnostics};
-use crate::namespace;
-use crate::position::LineIndex;
-use console::style;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use miette::{
-    GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
-    Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
+use {
+    crate::{
+        config::{self, ExperimentalFeatures},
+        diagnostics::{apply_suppressions, document_diagnostics},
+        namespace,
+        position::LineIndex,
+    },
+    console::style,
+    ignore::gitignore::{Gitignore, GitignoreBuilder},
+    miette::{
+        GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
+        Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
+    },
+    rustc_hash::FxHashSet,
+    salsa::{Database, Durability},
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax},
+        metadata::{
+            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_description_package, parse_namespace,
+        },
+        stubs::{
+            StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+            shipped_stub_sources, stub_source_problems,
+        },
+        test_document_kind,
+    },
+    std::{
+        cmp::Reverse,
+        collections::{BTreeMap, BTreeSet, HashMap},
+        env, fmt, fs,
+        io::Read,
+        iter, mem,
+        num::NonZero,
+        path::{Path, PathBuf},
+        sync::{
+            LazyLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    },
+    syntax::{
+        TextRange,
+        literate::{is_literate_extension, r_source_of_literate},
+    },
 };
-use salsa::{Database, Durability};
-use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
-use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace,
-};
-use semantics::stubs::{
-    StubSources, namespace_exports, namespace_known, shipped_export_manifests,
-    shipped_stub_sources, stub_source_problems,
-};
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-    test_document_kind,
-};
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Read;
-use std::num::NonZero;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use std::{env, fmt, fs, iter, mem, thread};
-use syntax::TextRange;
-use syntax::literate::{is_literate_extension, r_source_of_literate};
 
 /// A run summary: not a finding, so a plain line rather than a report.
 pub fn info(message: &str) {
@@ -357,12 +370,12 @@ pub(crate) fn analyze_project(
     // derived while they are resident.
     let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
-    let mut used_tokens = BTreeSet::new();
+    let mut used_tokens = FxHashSet::default();
     let tree_batch = workers * FILES_PER_WORKER_BATCH;
     for (_, tokens) in in_batches(&mut db, workers, &by_size, tree_batch, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
-        let mut tokens = BTreeSet::new();
+        let mut tokens = FxHashSet::default();
         if want_tokens {
             namespace::collect_used_tokens(
                 &semantics::parse(db, file).syntax_node(),
@@ -380,15 +393,17 @@ pub(crate) fn analyze_project(
         metadata.set_attached(&mut db).to(attached);
     }
 
-    // Per-item naming and the read sets derived from it run across cores first: inside the
-    // project-wide interface and slot walks they would serialize on one thread. This pass
-    // reads no tree and holds nothing evictable, so it runs as one batch with no barriers.
+    // Per-item naming and the per-file read sets derived from it run across cores first:
+    // inside the project-wide interface and slot walks they would serialize on one thread.
+    // This pass reads no tree and holds nothing evictable, so it runs as one batch with no
+    // barriers.
     in_batches(&mut db, workers, &by_size, by_size.len(), |db, index| {
-        for &item in semantics::item_tree(db, files[index]) {
-            let _ = semantics::item_naming(db, item);
-            let _ = semantics::item_interface_reads(db, item);
-            let _ = semantics::item_top_level_names(db, item);
+        let file = files[index];
+        for &item in semantics::item_tree(db, file) {
+            semantics::item_naming(db, item);
         }
+        semantics::file_interface_reads(db, file);
+        semantics::file_conditional_writers(db, file);
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
     // Reads no tree either, but evicting between larger batches still bounds the peak on a
@@ -460,7 +475,8 @@ pub(crate) fn analyze_project(
 
 /// Runs `work` for every index in `order` across `workers` threads, `batch_len` indices at
 /// a time. Between batches the least recently used trees are evicted, so a cold pass holds
-/// about a batch of them instead of the whole project's.
+/// about a batch of them instead of the whole project's. Nothing is evicted after the last
+/// batch: the next call evicts before its second batch, and the check exits after the last.
 fn in_batches<T: Send>(
     db: &mut RootDatabase,
     workers: usize,
@@ -469,7 +485,10 @@ fn in_batches<T: Send>(
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for batch in order.chunks(batch_len.max(1)) {
+    for (number, batch) in order.chunks(batch_len.max(1)).enumerate() {
+        if number > 0 {
+            db.trigger_lru_eviction();
+        }
         // Shared rather than dealt out: check times vary by orders of magnitude per file.
         let next = AtomicUsize::new(0);
         thread::scope(|scope| {
@@ -494,7 +513,6 @@ fn in_batches<T: Send>(
                 results.extend(handle.join().expect("check worker should not panic"));
             }
         });
-        db.trigger_lru_eviction();
     }
     results
 }
@@ -1438,8 +1456,10 @@ pub fn parse_experimental_flags(flags: &[impl AsRef<str>]) -> ExperimentalFeatur
 }
 
 fn print_diff(old: &str, new: &str) {
-    use console::Style;
-    use similar::{ChangeTag, TextDiff};
+    use {
+        console::Style,
+        similar::{ChangeTag, TextDiff},
+    };
 
     struct Line(Option<usize>);
     impl fmt::Display for Line {

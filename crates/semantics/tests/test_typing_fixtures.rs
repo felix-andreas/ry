@@ -1,22 +1,27 @@
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use salsa::Setter;
-use semantics::annotations::lower_annotation;
-use semantics::diagnostics::{Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics};
-use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
-    parse_description_package, parse_namespace,
+use {
+    salsa::Setter,
+    semantics::{
+        AnalysisSettings, DataFiles, DocumentKind, ItemKind, ProjectFiles, RootDatabase,
+        SourceFile,
+        annotations::lower_annotation,
+        diagnostics::{Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics},
+        file_typing_mode, item_check, item_hir, item_tree,
+        metadata::{
+            PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
+            parse_description_package, parse_namespace,
+        },
+        stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems},
+        test_document_kind,
+        testing::with_fixture_project,
+    },
+    std::{collections::BTreeMap, path::Path},
+    syntax::{
+        SyntaxKind,
+        testing::{run_fixture_suite, split_files},
+    },
 };
-use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
-use semantics::testing::with_fixture_project;
-use semantics::{
-    AnalysisSettings, DataFiles, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
-    file_typing_mode, item_check, item_hir, item_tree, test_document_kind,
-};
-use std::collections::BTreeMap;
-use std::path::Path;
-use syntax::SyntaxKind;
-use syntax::testing::{run_fixture_suite, split_files};
 
 fn render_case(
     source: &str,

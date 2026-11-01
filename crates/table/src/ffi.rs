@@ -5,15 +5,16 @@
 //! copying data. A single column travels as one array, and a whole frame as a struct array whose
 //! children are its columns, which is how `arrow::RecordBatch` and nanoarrow move a data frame.
 
-use crate::{Error, Result, Table};
-use polars::prelude::{CompatLevel, DataFrame, IntoColumn, PlSmallStr, Series};
-use polars_arrow::{
-    array::{Array, StructArray},
-    datatypes::{ArrowDataType, Field},
-    ffi::{export_array_to_c, export_field_to_c, import_array_from_c, import_field_from_c},
-};
-
 pub use polars_arrow::ffi::{ArrowArray, ArrowSchema};
+use {
+    crate::{Error, Result, Table},
+    polars::prelude::{CompatLevel, DataFrame, IntoColumn, PlSmallStr, Series},
+    polars_arrow::{
+        array::{Array, StructArray},
+        datatypes::{ArrowDataType, Field},
+        ffi::{export_array_to_c, export_field_to_c, import_array_from_c, import_field_from_c},
+    },
+};
 
 /// An exported array and the schema that describes it. The consumer takes ownership of both and
 /// calls their release callbacks when it is done, which drops the Arrow buffers on this side.

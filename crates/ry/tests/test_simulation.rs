@@ -7,9 +7,11 @@
 //! `SIMULATION_SEED=<seed>` replays exactly that session, and `FUZZ_ITERS` sets how many seeds
 //! run (`just simulate` runs many).
 
-use ry::server::simulation::run_session;
-use std::path::PathBuf;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    ry::server::simulation::run_session,
+    std::path::PathBuf,
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 const ACTIONS: usize = 60;
 

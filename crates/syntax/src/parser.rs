@@ -2,11 +2,15 @@
 //! groups and end a complete statement at top level and directly inside `{}`;
 //! `else` may follow a newline only when a group or brace encloses the `if`.
 
-use crate::kind::SyntaxKind::{self, *};
-use crate::lexer::{Token, lex};
-use crate::{Parse, SyntaxError};
-use rowan::{Checkpoint, GreenNodeBuilder, NodeCache, TextRange, TextSize};
-use std::cell::RefCell;
+use {
+    crate::{
+        Parse, SyntaxError,
+        kind::SyntaxKind::{self, *},
+        lexer::{Token, lex},
+    },
+    rowan::{Checkpoint, GreenNodeBuilder, NodeCache, TextRange, TextSize},
+    std::cell::RefCell,
+};
 
 /// Parses that share one node cache before it is dropped. Sharing makes identical tokens
 /// and small nodes (whitespace, punctuation, common names) one allocation across files;

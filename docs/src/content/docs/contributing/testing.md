@@ -354,12 +354,13 @@ libFuzzer targets `parse`, `format`, and `semantics`, each a thin wrapper around
 invariant batteries. The `semantics` target derives its document kind and an incremental edit from
 the input bytes, so a single byte stream drives the full battery, the splice cache included.
 
-It needs nightly. Run `cargo install cargo-fuzz`, then from `fuzz/`:
+It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
+cargo-fuzz`, then from `fuzz/`:
 
 ```sh
-cargo +nightly -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
-cargo +nightly fuzz run format -- -max_total_time=600 -print_final_stats=1
-cargo +nightly fuzz run parse  -- -max_total_time=600
+cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
+cargo fuzz run format -- -max_total_time=600 -print_final_stats=1
+cargo fuzz run parse  -- -max_total_time=600
 ```
 
 The seeder copies every fixture case's source in the repository into
@@ -367,11 +368,11 @@ The seeder copies every fixture case's source in the repository into
 The corpus and the artifacts are gitignored, because a durable regression belongs in the
 `REGRESSIONS` battery or in a fixture case, not in the corpus.
 
-When the fuzzer finds something, minimize it with `cargo +nightly fuzz tmin format <artifact>`, fix
+When the fuzzer finds something, minimize it with `cargo fuzz tmin format <artifact>`, fix
 the bug, replay the artifact, and add the minimized input to `REGRESSIONS`, plus a golden fixture
 case when the shape deserves a pinned rendering. To judge corpus quality, you can get a coverage
-report (it needs the llvm-tools component) with
-`cargo +nightly fuzz coverage format && cargo cov -- show`, as the
+report (the pinned toolchain includes the llvm-tools component it needs) with
+`cargo fuzz coverage format && cargo cov -- show`, as the
 [cargo-fuzz coverage guide](https://rust-fuzz.github.io/book/cargo-fuzz/coverage.html) describes.
 Deep runs are manual or scheduled work; the bounded in-tree batteries remain the gate in the default
 suite.
@@ -400,7 +401,15 @@ diff's ordering rules turns it red within a few hundred seeds.
 - per-file `# typing:` directives and suppression comments;
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
 - data-masked evaluation;
-- the formatter's `--check`, `--diff`, and in-place modes.
+- the formatter's `--check`, `--diff`, and in-place modes;
+- `ry run` and `ry R` without R: help output, usage errors, a missing script, and strict mode
+  refusing a script before any R starts.
+
+`crates/ry/tests/test_command_line.rs` property-tests and fuzzes argument parsing for `ry run`,
+`ry R` and the `ry repl` alias against a model: everything after the script reaches it verbatim,
+options resolve to the documented runtime and mode, and no argument vector panics the parser.
+`test_repl_e2e.rs` runs every entry point on both runtimes: script arguments, `-i`, piped consoles,
+and the earlier spellings (`--runtime`, `RY_RUNTIME`, `ry repl`).
 
 ### Docs examples
 
@@ -486,7 +495,7 @@ typing on, without markers.
 `crates/ry/tests/test_load.rs` runs `ry load` and plain `Rscript` against a real GNU R and checks
 the loaded result: `Collate` order, imports, S3 and S4 registration, `Depends`, `sysdata.rda`,
 source references, reloads that rebind, rerun and remove, undoing deleted S4 definitions, the error
-locations, and the `ry load --r-entry` entry point. `test_repl_e2e.rs` checks that `ry repl` loads
+locations, and the `ry load --r-entry` entry point. `test_repl_e2e.rs` checks that `ry R` loads
 the package it starts in and reloads an edit before the next command. Both skip without R.
 
 ### Native packages

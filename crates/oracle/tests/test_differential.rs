@@ -7,12 +7,18 @@
 //! skip when GNU R or ry's runtime (`target/debug/ry` with `libR.so` beside it) is missing, so
 //! build them first with `cargo build -p ry-lang -p libr`.
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-use oracle::fuzz::{SeedReport, check_seed, program, render_divergences};
-use oracle::{Engine, ProcessEngine, gnu_r_available, ry_runtime_available};
-use syntax::testing::fuzz_iterations;
+use {
+    oracle::{
+        Engine, ProcessEngine,
+        fuzz::{SeedReport, check_seed, program, render_divergences},
+        gnu_r_available, ry_runtime_available,
+    },
+    std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    },
+    syntax::testing::fuzz_iterations,
+};
 
 /// A debug build runs a fuzz program in a few seconds, so a run this long is a hang.
 const TIMEOUT: Duration = Duration::from_secs(120);

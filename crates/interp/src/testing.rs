@@ -2,10 +2,12 @@
 //! coverage-guided `fuzz/` targets so both check exactly the same properties. Each one runs
 //! without base R or libR, on an interpreter it installs on first use.
 
-use crate::{deparse, eval, lower, serialize, unwind::Unwind, values};
-use heap::{Heap, object::Sexp};
-use std::sync::{Mutex, Once};
-use syntax::testing::Entropy;
+use {
+    crate::{deparse, eval, lower, serialize, unwind::Unwind, values},
+    heap::{Heap, object::Sexp},
+    std::sync::{Mutex, Once},
+    syntax::testing::Entropy,
+};
 
 /// Runs `body` with the interpreter installed. The interpreter is single-threaded, so callers on
 /// different threads take turns.

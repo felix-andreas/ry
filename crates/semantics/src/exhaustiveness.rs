@@ -5,14 +5,18 @@
 //! `match` is exhaustive when a catch-all would not be useful against all of them. The
 //! witnesses of a catch-all's usefulness are the missing cases.
 
-use crate::Db;
-use crate::annotations::NamedDefinition;
-use crate::check::ExpressionTypes;
-use crate::hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind};
-use crate::infer::apply_definition;
-use crate::types::{Atomic, Name, Ty, TyKind, union_of, unknown};
-use rustc_hash::FxHashMap;
-use syntax::TextRange;
+use {
+    crate::{
+        Db,
+        annotations::NamedDefinition,
+        check::ExpressionTypes,
+        hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        infer::apply_definition,
+        types::{Atomic, Name, Ty, TyKind, union_of, unknown},
+    },
+    rustc_hash::FxHashMap,
+    syntax::TextRange,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct MatchFinding {

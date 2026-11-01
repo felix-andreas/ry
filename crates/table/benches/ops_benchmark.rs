@@ -6,17 +6,18 @@
 //! Usage: `cargo bench -p table --bench ops_benchmark -- <data-dir>`, where the directory holds
 //! `groupby.csv` from `tools/bench/table/datagen.R`.
 
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::ExitCode,
-    time::Instant,
-};
-
-use table::{
-    ColumnType, Table, io, ops,
-    polars::prelude::{Column, DataType, Float64Chunked, IntoColumn},
-    query::{Aggregate, Output},
+use {
+    std::{
+        env,
+        path::{Path, PathBuf},
+        process::ExitCode,
+        time::Instant,
+    },
+    table::{
+        ColumnType, Table, io, ops,
+        polars::prelude::{Column, DataType, Float64Chunked, IntoColumn},
+        query::{Aggregate, Output},
+    },
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

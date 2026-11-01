@@ -8,15 +8,19 @@
 
 pub mod bench;
 pub mod fuzz;
+pub mod install;
 
-use std::path::{Path, PathBuf};
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-
-use serde::Deserialize;
-use similar::TextDiff;
+use {
+    serde::Deserialize,
+    similar::TextDiff,
+    std::{
+        io::Read,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
+    },
+};
 
 pub mod packages;
 
@@ -140,7 +144,9 @@ impl ProcessEngine {
     pub fn ry_tier0() -> Self {
         let mut engine = ProcessEngine::ry();
         engine.name = "ry-tier0".to_string();
-        engine.environment.push(("RY_JIT".to_string(), "off".to_string()));
+        engine
+            .environment
+            .push(("RY_JIT".to_string(), "off".to_string()));
         engine
     }
 
@@ -151,7 +157,9 @@ impl ProcessEngine {
     pub fn ry_gc_torture() -> Self {
         let mut engine = ProcessEngine::ry();
         engine.name = "ry-gctorture".to_string();
-        engine.environment.push(("RY_GC_STRESS".to_string(), "1".to_string()));
+        engine
+            .environment
+            .push(("RY_GC_STRESS".to_string(), "1".to_string()));
         engine
     }
 
@@ -160,7 +168,9 @@ impl ProcessEngine {
     pub fn ry_jit() -> Self {
         let mut engine = ProcessEngine::ry();
         engine.name = "ry-jit".to_string();
-        engine.environment.push(("RY_JIT".to_string(), "force".to_string()));
+        engine
+            .environment
+            .push(("RY_JIT".to_string(), "force".to_string()));
         engine
     }
 
@@ -198,10 +208,13 @@ impl ProcessEngine {
 /// A relative `ORACLE_RY` resolves against the current directory, because the engines run
 /// each case from the case's own directory.
 pub fn ry_program() -> String {
-    let program = std::env::var("ORACLE_RY").map(PathBuf::from).unwrap_or_else(|_| {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry")
-    });
-    std::fs::canonicalize(&program).unwrap_or(program).display().to_string()
+    let program = std::env::var("ORACLE_RY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry"));
+    std::fs::canonicalize(&program)
+        .unwrap_or(program)
+        .display()
+        .to_string()
 }
 
 /// Whether ry's runtime can run here: the `ry` binary exists, and so does the `libR.so` it
@@ -313,7 +326,10 @@ struct CommandOutput {
 /// Runs `command` to completion, or kills it once `timeout` has passed. The pipes are drained
 /// on their own threads, because a child that fills a pipe nobody reads never exits.
 fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Result<CommandOutput> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -325,8 +341,18 @@ fn run_command(mut command: Command, timeout: Option<Duration>) -> std::io::Resu
             }
         })
     };
-    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
     let mut timed_out = false;
     let status = loop {
@@ -416,7 +442,11 @@ pub fn gnu_r_available() -> bool {
 
 /// The engine named by `ORACLE_ENGINE`, or the stub.
 pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE").ok().as_deref().and_then(ProcessEngine::named) {
+    match std::env::var("ORACLE_ENGINE")
+        .ok()
+        .as_deref()
+        .and_then(ProcessEngine::named)
+    {
         Some(engine) => Box::new(engine),
         None => Box::new(StubEngine),
     }

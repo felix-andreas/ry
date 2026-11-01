@@ -37,20 +37,22 @@
             renv
             devtools
           ];
+        # The compiler rustup builds with, from rust-toolchain.toml, plus what nix alone needs: the
+        # release cross targets and rust-analyzer for the dev shell.
         rustToolchain =
           pkgs:
-          pkgs.rust-bin.selectLatestNightlyWith (
-            toolchain:
-            toolchain.default.override {
-              targets = [
+          let
+            pinned = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
+          in
+          pkgs.rust-bin.fromRustupToolchain (
+            pinned
+            // {
+              targets = pinned.targets ++ [
                 "x86_64-unknown-linux-gnu"
                 "x86_64-pc-windows-gnu"
                 "aarch64-apple-darwin"
               ];
-              extensions = [
-                "rust-src"
-                "rust-analyzer"
-              ];
+              components = pinned.components ++ [ "rust-analyzer" ];
             }
           );
       };

@@ -10,11 +10,17 @@
 //!
 //! `FUZZ_ITERS` raises the budget.
 
-use interp::testing::{
-    check_bytecode_agreement, check_lowering_input, check_unserialize_input, with_interpreter,
+use {
+    interp::{
+        deparse, lower,
+        testing::{
+            check_bytecode_agreement, check_lowering_input, check_unserialize_input,
+            with_interpreter,
+        },
+        values,
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes},
 };
-use interp::{deparse, lower, values};
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes};
 
 const SEEDS: &[&str] = &[
     "f <- function(x, y = 2) { if (x > y) x - y else y * 2 }",
@@ -66,7 +72,10 @@ fn fuzz_unserialize_never_panics() {
 
 /// The streams GNU R wrote, recorded for libR's conformance tests.
 fn serialized_seeds() -> Vec<Vec<u8>> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../libr/tests/data/serialize/cases.tsv");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../libr/tests/data/serialize/cases.tsv"
+    );
     let text = std::fs::read_to_string(path).expect("the recorded serialize cases");
     text.lines()
         .filter_map(|line| line.split('\t').nth(3))
@@ -87,12 +96,14 @@ fn deparse_round_trips_lowered_seeds() {
             };
             for index in 0..values::length(expressions) {
                 let expression = expressions.element(index);
-                let text = deparse::deparse_lines(expression, 60, deparse::options::KEEP_INTEGER).join("\n");
+                let text = deparse::deparse_lines(expression, 60, deparse::options::KEEP_INTEGER)
+                    .join("\n");
                 let Ok(again) = lower::parse_text(&text, "<deparsed>") else {
                     panic!("{seed}: deparsed text does not parse: {text}");
                 };
                 let again = again.element(0);
-                let text_again = deparse::deparse_lines(again, 60, deparse::options::KEEP_INTEGER).join("\n");
+                let text_again =
+                    deparse::deparse_lines(again, 60, deparse::options::KEEP_INTEGER).join("\n");
                 assert_eq!(text, text_again, "{seed}: deparse is not stable");
             }
         }

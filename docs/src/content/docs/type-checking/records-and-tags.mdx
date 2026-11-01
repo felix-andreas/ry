@@ -13,7 +13,10 @@ checker knows exactly, and `match` reports the case you forgot:
 <TabItem label="Inline">
 
 ```r
-alias Shape = :Circle(radius: double) | :Rect(width: double, height: double) | :Empty
+alias Shape =
+  | :Circle(radius: double)
+  | :Rect(width: double, height: double)
+  | :Empty
 
 area <- function(s: Shape) -> double {
   match (s) {
@@ -27,7 +30,11 @@ area <- function(s: Shape) -> double {
 <TabItem label="Comments">
 
 ```r
-#: @alias Shape {:Circle(radius: double) | :Rect(width: double, height: double) | :Empty}
+#: @alias Shape {
+#:   | :Circle(radius: double)
+#:   | :Rect(width: double, height: double)
+#:   | :Empty
+#: }
 
 #: fn(s: Shape) -> double
 area <- function(s) {
@@ -50,82 +57,19 @@ non-exhaustive-match
 `match` and the tag, record and tuple syntax exist only in ry, so they have a single spelling.
 Only the annotations around them, including the definition of `Shape`, come in two styles.
 
-These are ry values, not R lists. R cannot run code that uses them, so they belong in code that only
-ry runs.
-
-## Structural or nominal
-
-Records and tuples combine values (product types), and tag unions choose between cases (sum types).
-Each kind comes in two flavors. A *structural* type matches any value of the same shape, and `alias`
-only gives that shape a name. A *nominal* type, declared with `type`, is distinct by name, so a value
-with the right shape is not one until its constructor `@Name(...)` creates it:
-
-| | Records and tuples | Tag unions |
-| --- | --- | --- |
-| **Structural** | `alias Point = Record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
-| **Nominal** | `type Celsius = Record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
-
-The comment spellings are `#: @alias Point {...}` and `#: @type Celsius {...}`. Structural is the
-default and usually right. Choose nominal when values have the same shape but must not mix, such as
-Celsius and Fahrenheit, or a user ID and an order ID, or when every value should come from one
-constructor that checks it:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
+These are ry values, not R lists. GNU R cannot parse code that uses them, so run it on ry's own
+runtime:
 
 ```r
-type Celsius = Record{degrees: double}
-type Fahrenheit = Record{degrees: double}
-type Shape = :Circle(radius: double) | :Square(side: double)
-
-boiling <- function() -> Celsius @Celsius(degrees = 100,)
-
-wrong: Fahrenheit <- boiling()
-bare: Shape <- :Circle(radius = 1)
+# points.R
+point <- (x = 1, y = 2)
+point$x + point$y
 ```
 
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: @type Celsius {Record{degrees: double}}
-
-#: @type Fahrenheit {Record{degrees: double}}
-
-#: @type Shape {:Circle(radius: double) | :Square(side: double)}
-
-#: fn() -> Celsius
-boiling <- function() {
-  #: @new Celsius
-  (degrees = 100,)
-}
-
-#: Fahrenheit
-wrong <- boiling()
-#: Shape
-bare <- :Circle(radius = 1)
+```text ry run runtime=ry exact
+$ ry run points.R
+[1] 3
 ```
-
-</TabItem>
-</Tabs>
-
-```text ry check typing
-type-mismatch
-
-  x expected `Fahrenheit`, found `Celsius`
-
-type-mismatch
-
-  x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is
-    a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
-```
-
-The parentheses of `@Name(...)` belong to the value inside, so `@Celsius(degrees = 100,)` is a
-one-field record, `@Pair(1L, "a")` a tuple, and `@Shape(:Circle(radius = 1))` a tag. Everything else
-works as it does for the structural form: `$` reads a field, `match` checks every case of a nominal
-union, a pattern binding keeps the nominal type, and a type can take parameters, as in
-`type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`. At run time `@Name(x)` is
-just `x`.
 
 ## Records and tuples
 
@@ -299,6 +243,76 @@ unreachable-pattern
 ry checks coverage only when it knows the type of the matched value, and not while inline annotations
 are turned off.
 
+## Structural or nominal
+
+Each of these types comes in two flavors, as [custom types](/type-checking/custom-types) explains:
+`alias` names a *structural* type, which any value of the same shape fits, and `type` declares a
+*nominal* one, which only its constructor `@Name(...)` creates. Choose nominal when values have the
+same shape but must not mix, such as Celsius and Fahrenheit, or a user ID and an order ID, or when
+every value should come from one constructor that checks it. The comment spellings are
+`#: @alias Point {...}` and `#: @type Celsius {...}`:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+type Shape =
+  | :Circle(radius: double)
+  | :Square(side: double)
+
+boiling <- function() -> Celsius @Celsius(degrees = 100,)
+
+wrong: Fahrenheit <- boiling()
+bare: Shape <- :Circle(radius = 1)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type Celsius {Record{degrees: double}}
+
+#: @type Fahrenheit {Record{degrees: double}}
+
+#: @type Shape {
+#:   | :Circle(radius: double)
+#:   | :Square(side: double)
+#: }
+
+#: fn() -> Celsius
+boiling <- function() {
+  #: @new Celsius
+  (degrees = 100,)
+}
+
+#: Fahrenheit
+wrong <- boiling()
+#: Shape
+bare <- :Circle(radius = 1)
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `Fahrenheit`, found `Celsius`
+
+type-mismatch
+
+  x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
+```
+
+The parentheses of `@Name(...)` belong to the value inside, so `@Celsius(degrees = 100,)` is a
+one-field record, `@Pair(1L, "a")` a tuple, and `@Shape(:Circle(radius = 1))` a tag. Everything else
+works as it does for the structural form: `$` reads a field, `match` checks every case of a nominal
+union, a pattern binding keeps the nominal type, and a type can take parameters, as in
+`type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`. At run time `@Name(x)` is
+just `x`.
+
 ## Passing them to R
 
 R functions and C code do not know these values, so passing one to an R function is an error:
@@ -321,10 +335,29 @@ still stops when it runs, with the same fix in the message:
 ```text ry run runtime=ry
 Error in sum(point) :
   `point` is a ry record, not an R object; convert it with `as.list()`
+Execution halted
 ```
 
 Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
 `as.record()`, `as.tuple()` and `as.tag()` turn a list back.
+
+## In the editor
+
+- Hover on a tag, in a value or in a pattern, shows its payload type, and go-to-definition,
+  references and rename follow a tag across the project. A tag spelled by the standard library, such
+  as `:Ok`, is not renamed. Inside a pattern, completion offers the tags the matched value can still
+  hold and the payload fields not yet named.
+- Hover on a field name, in a literal or in a pattern, shows the field's type, and `$` completes only
+  what the value really has. Inside a record literal, a tag's payload or an `@Name(...)` constructor,
+  completion offers the fields the expected type still lacks, so
+  `m: Record{amount: double, currency: character} <- (amount = 1, cu)` completes `currency`.
+- Go-to-definition on a type name or a type parameter such as `T` jumps to its definition, and a type
+  parameter renames within its definition or function.
+- A type error points at the one field or item that is wrong, and a pattern that can never match
+  points at the misspelled field or tag.
+- Semantic highlighting colors type names, type parameters, tags, the `match` keyword and `=>`, in
+  inline annotations, `#:` comments and `.Rtypes` stub files alike. An inlay hint is left out where
+  the code already spells the type, as with a payload-free tag or an `@Name(...)` constructor.
 
 ## The standard library
 

@@ -1,19 +1,25 @@
 //! `ry.toml` and the former `roughly.toml` are both looked for in a directory
 //! before walking to its parent, so a stale old-name file higher up never wins.
 
-use crate::cli::exclude_matcher;
-use miette::{
-    Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
-    SourceSpan,
+use {
+    crate::cli::exclude_matcher,
+    miette::{
+        Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, SourceCode,
+        SourceSpan,
+    },
+    semantics::lints::{LintConfig, NameStyle},
+    serde::{
+        Deserialize,
+        de::{self, DeserializeOwned, Deserializer, Visitor},
+        forward_to_deserialize_any,
+    },
+    std::{
+        fmt, fs, io,
+        iter::once,
+        path::{Component, Path, PathBuf, absolute},
+    },
+    thiserror::Error,
 };
-use semantics::lints::{LintConfig, NameStyle};
-use serde::de::{self, DeserializeOwned, Deserializer, Visitor};
-use serde::{Deserialize, forward_to_deserialize_any};
-use std::fs;
-use std::iter::once;
-use std::path::{Component, Path, PathBuf, absolute};
-use std::{fmt, io};
-use thiserror::Error;
 
 pub const CONFIG_FILE_NAME: &str = "ry.toml";
 
@@ -465,10 +471,7 @@ impl ExperimentalFeatures {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use format::LineEnding;
-    use indoc::indoc;
-    use semantics::lints::LintLevel;
+    use {super::*, format::LineEnding, indoc::indoc, semantics::lints::LintLevel};
 
     fn parse(text: &str) -> Config {
         Config::from_toml_str(text).unwrap()

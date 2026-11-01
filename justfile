@@ -1,8 +1,20 @@
 default:
     @just --list
 
+# Run ry from source, e.g. `just ry check` or `just ry run script.R`. ry's runtime (libR) is a
+# separate library that `ry run` loads at run time, so cargo would not build it for `cargo run`.
+# Build warnings show only when the build fails, so they do not bury ry's own output.
+# It runs in the directory you call it from, so relative paths mean what you typed.
+[no-cd]
+[no-exit-message]
 ry *args:
-    @cargo run -q -- {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! output=$(cargo build --color always -q --manifest-path "{{ justfile_directory() }}/Cargo.toml" -p ry-lang -p libr 2>&1); then
+    	printf '%s\n' "$output" >&2
+    	exit 1
+    fi
+    exec "${CARGO_TARGET_DIR:-{{ justfile_directory() }}/target}/debug/ry" {{ args }}
 
 test *args:
     cargo test -- --nocapture {{ args }}
@@ -44,26 +56,26 @@ docs-bless page="":
 fuzz-deep:
     cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
 
-# One libFuzzer target (`cargo +nightly fuzz list` names them all); seed with `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs`.
+# One libFuzzer target (`cargo fuzz list` names them all); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
-    cargo +nightly fuzz run {{ target }} {{ args }}
+    cargo fuzz run {{ target }} {{ args }}
 
 # Every libFuzzer target for `seconds` each, after seeding the corpora. The lockfile is seeded
 # from the workspace's, because a fresh resolution can pick a salsa-macro-rules that does not
 # match the pinned salsa. Stops at the first target that finds a failure.
 fuzz-all seconds="120":
     cp Cargo.lock fuzz/Cargo.lock
-    cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs
-    for target in $(cargo +nightly fuzz list); do \
+    cargo -Zscript scripts/seed-fuzz-corpus.rs
+    for target in $(cargo fuzz list); do \
         echo "== $target"; \
-        cargo +nightly fuzz run -O "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096 || exit 1; \
+        cargo fuzz run -O "$target" -- -max_total_time={{ seconds }} -timeout=30 -rss_limit_mb=4096 || exit 1; \
     done
 
 # Phase timings, memory and typing bursts for a workspace.
 stats path=".":
     cargo run -q -p ry-lang -- debug analysis-stats {{ path }}
 
-# Corpus perf and memory budgets; fetch with `cargo +nightly -Zscript scripts/fetch-corpus.rs`.
+# Corpus perf and memory budgets; fetch with `cargo -Zscript scripts/fetch-corpus.rs`.
 perf:
     cargo test -p semantics --release --test test_perf -- --ignored --nocapture
 
@@ -71,6 +83,11 @@ perf:
 bench *args:
     cargo build --release -p ry-lang
     python3 -I tools/bench/run.py {{ args }}
+
+# Regenerates the benchmark table in why-ry.mdx: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
+bench-why *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/why/run.py {{ args }}
 
 # Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
@@ -87,8 +104,9 @@ install-extension:
     just build-extension pre-release --out ../../release/dev/ry.vsix
     code --install-extension release/dev/ry.vsix
 
-build:
-    cargo build
+# Build every binary and ry's runtime (libR), e.g. `just build --release`.
+build *args:
+    cargo build --workspace --exclude zed_ry {{ args }}
 
 zigbuild $target *args:
     cargo zigbuild --target {{ target }} {{ args }}
@@ -281,6 +299,15 @@ corpus-sources:
 package-tests *args:
     cargo build -q --release -p ry-lang -p libr
     ORACLE_RY=target/release/ry cargo run -q --release -p oracle -- packages {{ args }}
+
+# Assemble ry's R home in .corpus/ry-home: bin/R, bin/Rscript and R CMD run on ry's runtime.
+ry-home:
+    cargo build -q --release -p libr -p rcmd
+    ./target/release/ry-rcmd assemble .corpus/ry-home --include crates/libr/include --libr target/release/libR.so
+
+# Install the closure from source on ry's runtime into .corpus/ry-library: `just corpus-ry-install [--jobs N] [PKG...]`.
+corpus-ry-install *args: ry-home
+    cargo run -q --release -p oracle -- install {{ args }}
 
 # The differential oracle: `just oracle verify`, `record`, `compare` or `show FILE`.
 oracle *args:

@@ -2,26 +2,31 @@
 //! databases installed packages keep their R objects in. Byte-compiled closures from GNU R are
 //! read back as their source expressions, which ry compiles itself.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal},
-    eval,
-    unwind::{R, error},
-    values::{self, alloc, length, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal},
+        eval,
+        unwind::{R, error},
+        values::{self, alloc, length, nil, symbols},
+    },
+    flate2::read::ZlibDecoder,
+    heap::{
+        object::{Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    rustc_hash::FxHashMap,
+    std::io::Read,
 };
-use flate2::read::ZlibDecoder;
-use heap::{
-    object::{Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use rustc_hash::FxHashMap;
-use std::io::Read;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("lazyLoadDBfetch", 4, do_lazy_load_fetch),
     internal("unserializeFromConn", 2, do_unserialize_from_conn),
     internal("unserialize", 2, do_unserialize),
-    internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
-    internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("lazyLoadDBflush", 1, |call| unsafe {
+        forget_database(&values::require_string(call.arg(0), "file")?);
+        Ok(nil())
+    })
+    .invisible(),
     internal("loadFromConn2", 3, do_load_from_conn).invisible(),
     internal("getVarsFromFrame", 3, do_get_vars_from_frame),
     internal("memCompress", 2, do_mem_compress),
@@ -138,7 +143,8 @@ impl Reader<'_> {
     fn string(&mut self, length: usize) -> R<Vec<u8>> {
         if self.format == Format::Ascii {
             let word = self.ascii_word()?;
-            return Ok(crate::lower::unescape_bytes(&word).map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
+            return Ok(crate::lower::unescape_bytes(&word)
+                .map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
         }
         Ok(self.take(length)?.to_vec())
     }
@@ -237,7 +243,8 @@ impl Reader<'_> {
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function = eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                let function =
+                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
                 // GNU R names the object being read when it knows it, else "<unknown>", which
                 // `..getNamespace` compares as a string when the namespace fails to load.
                 let location = values::scalar_string("<unknown>")?;
@@ -395,8 +402,8 @@ impl Reader<'_> {
                 let data = values::ints_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 4)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *slot = i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                        *slot = i32::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
@@ -411,10 +418,8 @@ impl Reader<'_> {
                 let data = values::reals_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 8)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(8)) {
-                        let mut array = [0u8; 8];
-                        array.copy_from_slice(chunk);
-                        *slot = f64::from_be_bytes(array);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                        *slot = f64::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
@@ -738,6 +743,59 @@ fn file_cache() -> &'static mut FxHashMap<String, Vec<u8>> {
     }
 }
 
+/// Drops a database file from the read cache, because the installer appends to it.
+pub fn forget_database(path: &str) {
+    file_cache().remove(path);
+}
+
+/// One lazy-load database record holding `stream`, as GNU R's `R_compress1`, `R_compress2` and
+/// `R_compress3` write it: the stream's length (big-endian), then for `kind` 1 a zlib stream, and
+/// for 2 and 3 a type byte and bzip2 or raw LZMA2 data, or `0` and the stream itself when
+/// compressing does not make it smaller. `kind` 0 is the stream alone.
+pub fn compress_record(stream: &[u8], kind: i32) -> R<Vec<u8>> {
+    use std::io::Write;
+    if kind == 0 {
+        return Ok(stream.to_vec());
+    }
+    let length = u32::try_from(stream.len())
+        .map_err(|_| error("a lazy-load database record cannot exceed 4GB"))?;
+    let mut record = length.to_be_bytes().to_vec();
+    fn failed(failure: impl std::fmt::Display) -> crate::unwind::Unwind {
+        error(format!("compression failed: {failure}"))
+    }
+    let packed = match kind {
+        2 => {
+            let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+            encoder.write_all(stream).map_err(failed)?;
+            Some((b'2', encoder.finish().map_err(failed)?))
+        }
+        3 => {
+            let options = lzma_rust2::Lzma2Options::with_preset(9);
+            let mut encoder = lzma_rust2::Lzma2Writer::new(Vec::new(), options);
+            encoder.write_all(stream).map_err(failed)?;
+            Some((b'Z', encoder.finish().map_err(failed)?))
+        }
+        _ => None,
+    };
+    match packed {
+        Some((_, data)) if data.len() >= stream.len() => {
+            record.push(b'0');
+            record.extend_from_slice(stream);
+        }
+        Some((method, data)) => {
+            record.push(method);
+            record.extend_from_slice(&data);
+        }
+        None => {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(record, flate2::Compression::default());
+            encoder.write_all(stream).map_err(failed)?;
+            record = encoder.finish().map_err(failed)?;
+        }
+    }
+    Ok(record)
+}
+
 /// The stream inside one lazy-load database record. `kind` is `lazyLoadDBfetch`'s `compressed`:
 /// `1` is a length and a zlib stream, `2` and `3` a length, a type byte and the data.
 pub fn decompress_record(record: &[u8], kind: i32) -> R<Vec<u8>> {
@@ -852,7 +910,6 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     values::string_vector(&names)
 }
 
-
 /// `getVarsFromFrame(vars, env, force)`: the named list of the bindings in `env`'s own frame.
 unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
@@ -872,7 +929,13 @@ unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
 
 /// The values bound to `names`, as `(symbol, value)` pairs. Each value stays reachable from
 /// `env`, which keeps it alive.
-pub unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
+pub unsafe fn saved_bindings(
+    call: &Call<'_>,
+    names: Sexp,
+    env: Sexp,
+    force: bool,
+    frame_only: bool,
+) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::with_capacity(length(names));
     for index in 0..length(names) {
         let name = values::string_at(names, index).unwrap_or_default();
@@ -900,20 +963,31 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
     let compressed = match values::as_integer_scalar(call.arg(1)) {
         1 => from.to_vec(),
         2 => {
-            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         3 => {
             let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         4 => {
             let options = lzma_rust2::XzOptions::with_preset(9);
-            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options).map_err(|failure| call.error(failure.to_string()))?;
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         _ => return Err(call.error("invalid 'type' argument")),
     };
@@ -942,10 +1016,16 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     let mut output = Vec::new();
     let outcome = match kind {
         1 => return raw_vector(from),
-        2 if gzip_header => flate2::read::MultiGzDecoder::new(from).read_to_end(&mut output).map(drop),
+        2 if gzip_header => flate2::read::MultiGzDecoder::new(from)
+            .read_to_end(&mut output)
+            .map(drop),
         2 => ZlibDecoder::new(from).read_to_end(&mut output).map(drop),
-        3 => bzip2::read::MultiBzDecoder::new(from).read_to_end(&mut output).map(drop),
-        4 => lzma_rust2::XzReader::new(from, true).read_to_end(&mut output).map(drop),
+        3 => bzip2::read::MultiBzDecoder::new(from)
+            .read_to_end(&mut output)
+            .map(drop),
+        4 => lzma_rust2::XzReader::new(from, true)
+            .read_to_end(&mut output)
+            .map(drop),
         _ => return Err(call.error("invalid 'type' argument")),
     };
     outcome.map_err(|_| call.error("internal error in memDecompress"))?;
@@ -958,7 +1038,6 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
     Ok(result)
 }
 
-
 unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
     if source.kind() == SexpType::Raw {
@@ -968,4 +1047,3 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     let bytes = crate::connections::read_binary(source)?;
     unserialize(&bytes, call.arg(1))
 }
-

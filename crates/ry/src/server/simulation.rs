@@ -14,18 +14,24 @@
 //! server started on the same disk and buffers, which is the from-scratch oracle: incremental
 //! state must never be distinguishable from a cold start.
 
-use super::{CancelHandle, Job, Outbox, ServerState, Worker, WorkerSeed, run_job};
-use crate::config::ExperimentalFeatures;
-use async_lsp::lsp_types::{self, Position, Url};
-use async_lsp::{LanguageServer, ResponseError};
-use futures::future::BoxFuture;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
-use std::task::{Context, Poll};
-use std::{fs, mem};
-use syntax::testing::Entropy;
+use {
+    super::{CancelHandle, Job, Outbox, ServerState, Worker, WorkerSeed, run_job},
+    crate::config::ExperimentalFeatures,
+    async_lsp::{
+        LanguageServer, ResponseError,
+        lsp_types::{self, Position, Url},
+    },
+    futures::future::BoxFuture,
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        fmt::Write as _,
+        fs, mem,
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex, mpsc},
+        task::{Context, Poll},
+    },
+    syntax::testing::Entropy,
+};
 
 /// One message the server sent to the client.
 #[derive(Debug, Clone)]

@@ -1,8 +1,10 @@
 //! Reload property and index robustness under the contracts in `loader::testing`. Packages and
 //! edits are random; `FUZZ_ITERS` scales the budget.
 
-use loader::testing::{check_load_index_input, check_random_reload};
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes};
+use {
+    loader::testing::{check_load_index_input, check_random_reload},
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes},
+};
 
 #[test]
 fn a_reload_matches_a_fresh_load() {

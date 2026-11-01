@@ -48,10 +48,12 @@ pub mod strings;
 pub mod utils;
 pub mod vectors;
 
-use crate::{boundary::Unwind, dynload::Dll};
-use heap::{Heap, arena::Arena, object::Sexp};
-use rustc_hash::FxHashMap;
-use std::{cell::UnsafeCell, ffi::c_int};
+use {
+    crate::{boundary::Unwind, dynload::Dll},
+    heap::{Heap, arena::Arena, object::Sexp},
+    rustc_hash::FxHashMap,
+    std::{cell::UnsafeCell, ffi::c_int},
+};
 
 pub type SEXP = Sexp;
 pub type SEXPTYPE = u32;

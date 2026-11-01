@@ -107,6 +107,30 @@ first if you rebuild while a long run is going.
 The pass rate counts the packages whose tests pass under GNU R, since a suite that fails there
 measures the container, not ry. `MEMORY.md` records the current rate.
 
+## Installing on ry
+
+```sh
+just ry-home                       # build release libR and ry-rcmd, assemble .corpus/ry-home
+just corpus-ry-install             # install the whole closure from source on ry
+just corpus-ry-install vctrs tibble   # only these, reusing what the library already holds
+just oracle packages --installed   # run the tests against ry's own installations
+```
+
+`oracle install` installs each package from its tarball in `.corpus/sources` with the R home's
+`bin/R CMD INSTALL`, so configure, compilation and the R-level steps (lazy-load database, `Meta/`,
+help) all run on ry, into `.corpus/ry-library`. A package starts once everything in its `Depends`,
+`Imports` and `LinkingTo` has installed, or is already in the library when it is not part of the
+run, and is skipped when one of them failed. After installing, it is loaded with `library()` in a
+fresh `bin/Rscript`. Logs go to `.corpus/ry-install/logs/<package>.{install,load}.log`, and
+`.corpus/ry-install/summary.tsv` keeps one row per package: a run replaces the rows of the
+packages it names and keeps the others.
+
+The R home holds a copy of `libR.so`, so after rebuilding run `just ry-home` again before
+installing. `oracle packages --installed` runs ry's side through `.corpus/ry-home/bin/Rscript`
+with `.corpus/ry-library` ahead of `.corpus/library` (which still supplies the `Suggests`), and
+records results under `ry-installed`, beside the `ry` results of `ry run --runtime ry`, with the
+table in `.corpus/tests/summary-installed.md`.
+
 ## Running against another GNU R
 
 The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,

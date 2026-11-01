@@ -36,7 +36,7 @@ recommendation against building them is superseded; it remains the record of the
 
 ### [REPL design](/contributing/design/repl/)
 
-How `ry repl` loads R at runtime instead of linking against it at build time, which keeps the rest
+How the console loads R at runtime instead of linking against it at build time, which keeps the rest
 of the workspace free of any dependency on R. The console has shipped, so most of the page records
 the design; the open part is feeding live-session facts and pre-evaluation diagnostics into it.
 

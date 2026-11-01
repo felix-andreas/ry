@@ -5,14 +5,17 @@
 //! stress (`ry-gctorture`) and must give what ry gives unstressed. `FUZZ_SEED` picks the
 //! subset and `FUZZ_ITERS` its size; `ORACLE_ENGINE=ry-gctorture` runs every case against GNU R.
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-use oracle::{
-    Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path, find_cases,
-    gnu_r_available, parse, render, ry_runtime_available,
+use {
+    oracle::{
+        Engine, EngineError, ProcessEngine, diff, engine_from_environment, expected_path,
+        find_cases, gnu_r_available, parse, render, ry_runtime_available,
+    },
+    std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 fn cases() -> Vec<PathBuf> {
     find_cases(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cases"))
