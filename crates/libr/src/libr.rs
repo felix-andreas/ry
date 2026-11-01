@@ -22,6 +22,28 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `mi_option_purge_delay` in mimalloc v2's `mi_option_e`, which `libmimalloc-sys` does not export
+/// as a constant.
+#[cfg(target_os = "linux")]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+/// By default mimalloc returns memory that stays free for 10 ms to the kernel, and the kernel
+/// zeroes each page again when it is next touched. The collector frees a nursery's worth of
+/// objects every few milliseconds and allocates into the same memory right after, so on the
+/// benchmark tests that zeroing (`clear_page_erms`) was 15% of the profile. Never purging costs
+/// a few percent of peak memory, because the freed memory is reused rather than returned.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static KEEP_FREED_MEMORY: extern "C" fn() = {
+    extern "C" fn keep_freed_memory() {
+        // SAFETY: setting an option has no preconditions, and mimalloc reads this one each time
+        // it considers a purge.
+        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, -1) }
+    }
+    keep_freed_memory
+};
+
 pub mod altrep;
 pub mod applic;
 pub mod arith;
