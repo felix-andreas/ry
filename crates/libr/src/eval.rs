@@ -1084,6 +1084,9 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return 0;
     }
+    if report_missing_r_home() {
+        return 2;
+    }
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         vanilla: true,
@@ -1127,6 +1130,9 @@ pub unsafe extern "C" fn ry_run(
         command_args.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
     }
     runtime();
+    if report_missing_r_home() {
+        return 2;
+    }
     let options = interp::session::StartOptions {
         command_args,
         vanilla: true,
@@ -1167,6 +1173,18 @@ pub unsafe extern "C" fn ry_run(
     }
 }
 
+/// Prints why no GNU R installation was found, and says whether one is missing. Base R's own R
+/// code comes from that installation, so a session cannot start without it.
+fn report_missing_r_home() -> bool {
+    match interp::system::missing_r_home() {
+        Some(message) => {
+            crate::boundary::write_console(message.as_bytes(), true);
+            true
+        }
+        None => false,
+    }
+}
+
 /// `ry_run` and `ry_repl` flag: inline type annotations become checks at function
 /// boundaries. Off when the project turns inline annotations off.
 pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
@@ -1196,6 +1214,9 @@ pub type ReadConsole = unsafe extern "C" fn(*const c_char, *mut u8, c_int) -> c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flags: c_int) -> c_int {
     apply_flags(flags);
+    if report_missing_r_home() {
+        return 2;
+    }
     let startup = (!startup.is_null())
         .then(|| String::from_utf8_lossy(crate::strings::c_bytes(startup)).into_owned());
     let options = interp::session::StartOptions {

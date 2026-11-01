@@ -199,33 +199,67 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// GNU R 4.3 load unchanged.
 const INTERNALS_ID: &str = "2fdf6c18-697a-4ba7-b8ef-11c0d92f1327";
 
-/// The R installation whose base and recommended packages the session loads.
+/// The R installation whose base and recommended packages the session loads. When none was
+/// found this is GNU R's usual home, so `R.home()` still answers; [`missing_r_home`] says why.
 pub fn r_home() -> String {
-    static mut HOME: Option<String> = None;
-    // SAFETY: single-threaded access, as for the rest of the interpreter.
-    #[allow(static_mut_refs)]
-    unsafe {
-        HOME.get_or_insert_with(find_r_home).clone()
-    }
+    located_r_home()
+        .clone()
+        .unwrap_or_else(|_| FALLBACK_R_HOME.to_owned())
 }
 
-fn find_r_home() -> String {
-    if let Ok(home) = std::env::var("R_HOME")
-        && Path::new(&home).join("library/base").exists()
-    {
-        return home;
-    }
-    for candidate in ["/usr/lib/R", "/usr/local/lib/R", "/opt/R/lib/R", "/usr/lib64/R"] {
-        if Path::new(candidate).join("library/base").exists() {
-            return candidate.to_owned();
+/// The message a host prints, before starting a session, when no GNU R installation was found:
+/// what ry looked for, where, and how to fix it.
+pub fn missing_r_home() -> Option<String> {
+    located_r_home().as_ref().err().cloned()
+}
+
+const FALLBACK_R_HOME: &str = "/usr/lib/R";
+
+const CANDIDATE_R_HOMES: &[&str] = &["/usr/lib/R", "/usr/local/lib/R", "/opt/R/lib/R", "/usr/lib64/R"];
+
+fn located_r_home() -> &'static Result<String, String> {
+    static HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(find_r_home)
+}
+
+/// An R home is usable when it holds base R's R code, which the session sources first. A set
+/// `R_HOME` is authoritative, as it is for GNU R, so an unusable one is not searched past.
+fn find_r_home() -> Result<String, String> {
+    let usable = |home: &str| Path::new(home).join("library/base/R/base").exists();
+    let fix = "install GNU R, or set R_HOME to the directory `R RHOME` prints; \
+               see https://ry-lang.org/installation/";
+    if let Ok(home) = std::env::var("R_HOME") {
+        if usable(&home) {
+            return Ok(home);
         }
+        return Err(format!(
+            "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {home}, \
+             which holds none (no library/base/R/base)\n  fix: {fix}\n"
+        ));
     }
-    if let Ok(output) = std::process::Command::new("R").arg("RHOME").output()
-        && output.status.success()
-    {
-        return String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let mut searched = vec!["R_HOME (not set)".to_owned()];
+    for candidate in CANDIDATE_R_HOMES {
+        if usable(candidate) {
+            return Ok((*candidate).to_owned());
+        }
+        searched.push((*candidate).to_owned());
     }
-    "/usr/lib/R".to_owned()
+    match std::process::Command::new("R").arg("RHOME").output() {
+        Ok(output) if output.status.success() => {
+            let home = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if usable(&home) {
+                return Ok(home);
+            }
+            searched.push(format!("`R RHOME` ({home}, which holds no base R)"));
+        }
+        Ok(_) => searched.push("`R RHOME` (it failed)".to_owned()),
+        Err(_) => searched.push("`R RHOME` (no `R` on PATH)".to_owned()),
+    }
+    Err(format!(
+        "ry: ry's runtime loads base R from a GNU R installation, and none was found\n  \
+         searched: {}\n  fix: {fix}\n",
+        searched.join(", ")
+    ))
 }
 
 fn temp_dir() -> String {

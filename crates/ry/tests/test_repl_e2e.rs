@@ -1064,3 +1064,29 @@ fn a_console_without_input_exits_zero_on_both_runtimes() {
         assert_eq!(stdout, "", "{runtime}: {stderr}");
     }
 }
+
+#[test]
+fn an_unusable_r_home_stops_ry_s_runtime_with_one_actionable_message() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("script.R"), "cat(1)\n").expect("write script");
+    let missing = directory.path().join("no-r-here");
+    let missing = missing.to_string_lossy();
+    for arguments in [&["run", "script.R"][..], &["run"][..]] {
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), arguments, &[("R_HOME", &missing)], "");
+        assert_eq!(status, Some(2), "{arguments:?}: {stderr}");
+        assert_eq!(stdout, "", "{arguments:?}");
+        assert_eq!(
+            stderr,
+            format!(
+                "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {missing}, \
+                 which holds none (no library/base/R/base)\n  fix: install GNU R, or set R_HOME to \
+                 the directory `R RHOME` prints; see https://ry-lang.org/installation/\n"
+            ),
+            "{arguments:?}"
+        );
+    }
+}
