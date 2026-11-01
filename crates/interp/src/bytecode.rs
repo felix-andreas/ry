@@ -271,16 +271,8 @@ pub enum Op {
     SetVar,
     /// `dst symbol cache`
     GetFun,
-    /// `function subset target`: jumps unless the function is a builtin (whose arguments are
-    /// values), or, when `subset` is 1, a special that dispatches on its evaluated first argument
-    /// (`[`, `[[`), for a call that runs [`Op::DispatchSubject`] after that argument.
+    /// `function target`: jumps unless the function is a builtin (whose arguments are values).
     BranchUnlessBuiltin,
-    /// `function subject dst call target`: when `function` is a dispatching special and the
-    /// value in `subject` is an object, runs `call` as GNU R's `DispatchOrEval` would after
-    /// evaluating it (a frame query or an S3 or S4 method, which read the remaining arguments
-    /// unevaluated) into `dst` and jumps to `target`. A plain subject falls through to the
-    /// builtin call.
-    DispatchSubject,
     /// `dst function call base count`: calls a builtin with the values in registers
     /// `base..base + count`, tagged as in `call`.
     CallBuiltin,
@@ -323,13 +315,12 @@ pub enum Op {
     SetSrcref,
 }
 
-pub const OPS: [Op; 24] = [
+pub const OPS: [Op; 23] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
     Op::GetFun,
     Op::BranchUnlessBuiltin,
-    Op::DispatchSubject,
     Op::CallBuiltin,
     Op::CallGeneric,
     Op::Ast,
@@ -1034,17 +1025,11 @@ impl Compiler {
         let simple = args.iter().all(|(_, value)| *value != symbols().dots)
             && !args.iter().skip(1).any(|(_, value)| may_modify_in_place(*value));
         if simple {
-            // `x[i]` evaluates `x` alone first, because an object subject dispatches with the
-            // other arguments unevaluated. A plain one takes the builtin path, which the JIT
-            // compiles to an element read.
-            let subset = (head == symbols().bracket || head == symbols().bracket2)
-                && args.first().is_some_and(|(_, value)| *value != missing_arg());
-            let generic = self.emit_patchable(Op::BranchUnlessBuiltin, &[function, subset as u32, 0]);
+            let generic = self.emit_patchable(Op::BranchUnlessBuiltin, &[function, 0]);
             let base = self.next_register;
             for _ in &args {
                 self.allocate();
             }
-            let mut dispatched = None;
             for (index, (_, value)) in args.iter().enumerate() {
                 if *value == missing_arg() {
                     let constant = self.constant(missing_arg());
@@ -1052,19 +1037,12 @@ impl Compiler {
                 } else {
                     self.expression(*value, base + index as u32)?;
                 }
-                if subset && index == 0 {
-                    dispatched =
-                        Some(self.emit_patchable(Op::DispatchSubject, &[function, base, dst, call_constant, 0]));
-                }
             }
             self.emit(Op::CallBuiltin, &[dst, function, call_constant, base, args.len() as u32]);
             let done = self.emit_patchable(Op::Jump, &[0]);
             self.patch(generic);
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
             self.patch(done);
-            if let Some(position) = dispatched {
-                self.patch(position);
-            }
         } else {
             self.emit(Op::CallGeneric, &[dst, function, call_constant]);
         }
@@ -1082,8 +1060,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::Constant => 2,
         Op::GetVar | Op::GetFun => 3,
         Op::SetVar => 2,
-        Op::BranchUnlessBuiltin => 3,
-        Op::DispatchSubject => 5,
+        Op::BranchUnlessBuiltin => 2,
         Op::CallBuiltin => 5,
         Op::CallGeneric => 3,
         Op::Ast => 2,
@@ -1284,30 +1261,8 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             set(operand(0), function);
         }
         Op::BranchUnlessBuiltin => {
-            let function = register(operand(0));
-            let eager = match function.kind() {
-                SexpType::Builtin => true,
-                SexpType::Special => operand(1) == 1 && eval::builtin_def(function)?.is_dispatch_or_eval(),
-                _ => false,
-            };
-            if !eager {
-                *pc = operand(2);
-                return Ok(None);
-            }
-        }
-        Op::DispatchSubject => {
-            let function = register(operand(0));
-            let subject = register(operand(1));
-            if function.kind() == SexpType::Special && subject.is_object() {
-                let definition = eval::builtin_def(function)?;
-                let call = constants.element(operand(3));
-                let value =
-                    match crate::dispatch::dispatch_evaluated_subject(definition, call, function, call.cdr(), subject, env)? {
-                        Ok(value) => value,
-                        Err(args) => call_builtin(definition, call, function, &args, env)?,
-                    };
-                set(operand(2), value);
-                *pc = operand(4);
+            if register(operand(0)).kind() != SexpType::Builtin {
+                *pc = operand(1);
                 return Ok(None);
             }
         }
@@ -1323,8 +1278,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
                 let value = register(first + index);
                 // Only an empty argument is an error: a promise may well evaluate to the empty
                 // symbol, as `X[[i]]` does for a formal without a default.
-                // `m[i, ]` passes its empty argument on, as `DispatchOrEval` does.
-                if cell.car() == missing_arg() && !definition.keep_missing && !definition.is_dispatch_or_eval() {
+                if cell.car() == missing_arg() && !definition.keep_missing {
                     return Err(error_in(call, format!("argument {} is empty", index + 1)));
                 }
                 args.push(Arg { tag: cell.tag(), value });

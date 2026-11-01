@@ -272,9 +272,6 @@ pub enum Action {
     LogicRight { dst: usize, left: usize, right: usize, is_and: bool },
     /// `x[i] <- value` in place on a plain vector, with a generic path that copies or grows.
     SubAssign { dst: usize, slot: usize, index: usize, value: usize },
-    /// The check after `x` in `x[i]` whether `[` dispatches: compiled code continues for a
-    /// plain subject and hands an object to tier 0, which runs the frame query or the method.
-    DispatchSubject { subject: usize },
 }
 
 /// A function lookup compiled code assumes still resolves as it did at compile time.
@@ -703,23 +700,14 @@ impl Builder<'_> {
             }
             Op::BranchUnlessBuiltin => match state.registers[operand(0)] {
                 Ty::Fun(function) if function.kind() == SexpType::Builtin => Action::FallThrough,
-                Ty::Fun(function) if operand(1) == 1 && dispatches_on_subject(function) => Action::FallThrough,
                 Ty::Fun(_) => {
-                    edges.push((operand(2), state.clone()));
+                    edges.push((operand(1), state.clone()));
                     return Ok((Action::Branch, edges));
                 }
-                // Compiled code takes the builtin path for builtins only, so a special reaches
-                // `CallGeneric` and the `DispatchSubject` that follows sees only builtins.
                 _ => {
-                    edges.push((operand(2), state.clone()));
+                    edges.push((operand(1), state.clone()));
                     Action::BranchUnlessBuiltin { function: operand(0) }
                 }
-            },
-            Op::DispatchSubject => match state.registers[operand(0)] {
-                Ty::Fun(function) if function.kind() == SexpType::Special && !state.registers[operand(1)].is_plain() => {
-                    Action::DispatchSubject { subject: operand(1) }
-                }
-                _ => Action::FallThrough,
             },
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
             Op::CallGeneric | Op::Ast => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), Vec::new(), Effect::Opaque),
@@ -987,13 +975,6 @@ unsafe fn constant_type(value: Sexp) -> Ty {
     }
 }
 
-/// Whether `function` is a special such as `[` that evaluates its first argument, dispatches on
-/// it, and otherwise runs as a builtin.
-unsafe fn dispatches_on_subject(function: Sexp) -> bool {
-    function.kind() == SexpType::Special
-        && interp::eval::builtin_def(function).is_ok_and(|definition| definition.is_dispatch_or_eval())
-}
-
 /// The intrinsic for a call of builtin `name` with arguments of these types, and its result.
 fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
     let numeric = |ty: Ty| if ty == Ty::Dbl { Numeric::Dbl } else { Numeric::Int };
@@ -1028,7 +1009,7 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
     match inst.op {
         Op::Jump => Some(inst.operands[0]),
         Op::JumpUnless => Some(inst.operands[2]),
-        Op::BranchUnlessBuiltin => Some(inst.operands[2]),
+        Op::BranchUnlessBuiltin => Some(inst.operands[1]),
         Op::ForStep => Some(inst.operands[3]),
         Op::LogicLeft => Some(inst.operands[4]),
         Op::Guard => Some(inst.operands[4]),
@@ -1064,11 +1045,6 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
         Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
         Op::SetVar => gen_(operand(1), live),
         Op::BranchUnlessBuiltin => gen_(operand(0), live),
-        // A handed-off dispatch reads the function and the subject in tier 0.
-        Op::DispatchSubject => {
-            gen_(operand(0), live);
-            gen_(operand(1), live);
-        }
         Op::CallBuiltin => {
             kill(operand(0), live);
             gen_(operand(1), live);
