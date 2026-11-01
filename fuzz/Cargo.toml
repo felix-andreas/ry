@@ -16,13 +16,19 @@ syntax = { path = "../crates/syntax" }
 format = { path = "../crates/format" }
 semantics = { path = "../crates/semantics" }
 ide = { path = "../crates/ide" }
-interp = { path = "../crates/interp" }
+interp = { path = "../crates/interp", optional = true }
 loader = { path = "../crates/loader" }
 sniff = { path = "../crates/sniff" }
-table = { path = "../crates/table" }
-libr = { path = "../crates/libr" }
+table = { path = "../crates/table", optional = true }
+libr = { path = "../crates/libr", optional = true }
 # Only the `ry` binary uses mimalloc, so the targets skip building it.
 ry-lang = { path = "../crates/ry", default-features = false }
+
+# The runtime targets link polars, whose build needs far more memory than the
+# analysis targets, so `--no-default-features` builds the analysis targets alone.
+[features]
+default = ["runtime"]
+runtime = ["dep:interp", "dep:table", "dep:libr"]
 
 [[bin]]
 name = "parse"
@@ -55,6 +61,7 @@ bench = false
 [[bin]]
 name = "interp_lower"
 path = "fuzz_targets/interp_lower.rs"
+required-features = ["runtime"]
 test = false
 doc = false
 bench = false
@@ -62,6 +69,7 @@ bench = false
 [[bin]]
 name = "interp_unserialize"
 path = "fuzz_targets/interp_unserialize.rs"
+required-features = ["runtime"]
 test = false
 doc = false
 bench = false
@@ -69,6 +77,7 @@ bench = false
 [[bin]]
 name = "bytecode"
 path = "fuzz_targets/bytecode.rs"
+required-features = ["runtime"]
 test = false
 doc = false
 bench = false
@@ -111,6 +120,7 @@ bench = false
 [[bin]]
 name = "unserialize"
 path = "fuzz_targets/unserialize.rs"
+required-features = ["runtime"]
 test = false
 doc = false
 bench = false
@@ -125,6 +135,7 @@ bench = false
 [[bin]]
 name = "csv"
 path = "fuzz_targets/csv.rs"
+required-features = ["runtime"]
 test = false
 doc = false
 bench = false
