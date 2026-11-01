@@ -1,0 +1,12 @@
+# memoise: a CONDITIONAL namespace, whose declarations join resolution only when the project
+# declares or attaches memoise.
+#
+# `memoise(f)` only wraps `f`: building the cache runs nothing, so a package may memoise a function
+# at its top level in strict mode.
+
+memoise : @pure <F> fn(f: F, ...: Any) -> F
+forget : fn(f: Any) -> logical
+is.memoised : fn(f: Any) -> logical
+has_cache : fn(f: Any) -> Any
+drop_cache : fn(f: Any) -> Any
+timeout : fn(seconds: double) -> double

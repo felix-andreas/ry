@@ -2,7 +2,7 @@
 //! plan emitter behind `ry load --emit-plan`, and the R code that installs `load_all()`.
 
 use {
-    crate::ANALYSIS_STACK_SIZE,
+    crate::{ANALYSIS_STACK_SIZE, config::Config},
     loader::{
         LoadError, LoadState, Loader,
         r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds},
@@ -166,6 +166,7 @@ extern "C" fn ry_loader_plan(root: Sexp, plan_file: Sexp, full: Sexp) -> Sexp {
         let root = PathBuf::from(root);
         let value = on_analysis_thread(|| {
             let mut loader = LOADER.lock().unwrap_or_else(PoisonError::into_inner);
+            loader.set_strict(strict_config(&root));
             match loader.plan(&root, full) {
                 Ok(plan) => plan_value(&plan, true),
                 Err(error) => error_value(&error.to_string()),
@@ -256,6 +257,7 @@ pub fn emit_plan(
     full: bool,
 ) -> Result<(), EmitError> {
     let mut loader = Loader::default();
+    loader.set_strict(strict_config(path));
     if !full {
         match fs::read_to_string(state_file) {
             Ok(text) => {
@@ -305,4 +307,10 @@ pub fn current_package() -> Option<PathBuf> {
 /// For `ry load`'s error reporting.
 pub fn package_root(path: &Path) -> Result<PathBuf, LoadError> {
     loader::find_package_root(path)
+}
+
+/// Whether the configuration that governs `root` turns strict mode on. A broken config counts as
+/// not strict here, because the preflight that runs before every load reports it.
+fn strict_config(root: &Path) -> bool {
+    Config::discover(root).is_ok_and(|config| config.check.strict)
 }

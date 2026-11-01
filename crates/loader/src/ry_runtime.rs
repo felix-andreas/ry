@@ -95,6 +95,11 @@ struct Pending {
     trees: FxHashMap<String, Parse>,
 }
 
+/// Whether the project is in strict mode, which the host reads from its `ry.toml`.
+pub fn set_strict(strict: bool) {
+    session().loader.set_strict(strict);
+}
+
 fn session() -> std::sync::MutexGuard<'static, Session> {
     SESSION.lock().unwrap_or_else(PoisonError::into_inner)
 }

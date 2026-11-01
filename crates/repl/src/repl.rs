@@ -142,12 +142,15 @@ pub struct RuntimeFlags {
     pub annotation_checks: bool,
     /// S4, R6 and Reference Class definitions in user code are allowed.
     pub object_systems: bool,
+    /// The project is in strict mode, so the package loader binds pure constants lazily.
+    pub strict: bool,
 }
 
 impl RuntimeFlags {
     fn bits(self) -> std::ffi::c_int {
         std::ffi::c_int::from(self.annotation_checks)
             | (std::ffi::c_int::from(self.object_systems) << 1)
+            | (std::ffi::c_int::from(self.strict) << 2)
     }
 }
 

@@ -2,18 +2,27 @@
 //! registrations as loading the edited package from scratch. Packages and edits are random,
 //! and a model executes both: a lazy binding's value is its definition's text, and a statement
 //! stores its text plus the values it read, so a statement that should have rerun shows up as
-//! a stale value. `FUZZ_ITERS` scales the budget.
+//! a stale value. A strict file binds its pure constants lazily, and the model forces every
+//! constant as soon as its binding lands, so a constant that should have been bound afresh
+//! keeps a stale forced value. `FUZZ_ITERS` scales the budget.
 
 use {
     loader::{Loader, PackageInputs, Plan},
     rustc_hash::{FxHashMap, FxHashSet},
     semantics::load_index::{IndexedItem, PackageIndex, Registration},
-    std::{collections::BTreeSet, path::Path},
+    std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+    },
     syntax::testing::{SplitMix64, fuzz_iterations},
 };
 
 #[test]
 fn a_reload_matches_a_fresh_load() {
+    // Two loaders serve every case under its own root, so the shipped stubs a strict package
+    // needs are parsed once rather than per case.
+    let mut loader = Loader::default();
+    let mut scratch = Loader::default();
     for seed in 0..fuzz_iterations(400) as u64 {
         let mut rng = SplitMix64(seed);
         let before = random_package(&mut rng);
@@ -21,7 +30,7 @@ fn a_reload_matches_a_fresh_load() {
         for _ in 0..1 + rng.below(4) {
             edit(&mut rng, &mut after);
         }
-        check(seed, &before, &after);
+        check(&mut loader, &mut scratch, seed, &before, &after);
     }
 }
 
@@ -53,8 +62,8 @@ fn arbitrary_text_never_breaks_the_index() {
         loader.commit(root);
         let characters = text.chars().count() as u32;
         for (_, item) in index.items() {
-            let spans =
-                std::iter::once(item.span).chain(item.function.as_ref().map(|(_, span)| *span));
+            let spans = std::iter::once(item.span)
+                .chain(item.binding.as_ref().map(|binding| binding.value));
             for span in spans {
                 assert!(
                     span.char_start <= span.char_end
@@ -76,7 +85,7 @@ fn random_statement(rng: &mut SplitMix64) -> String {
     let constant = |rng: &mut SplitMix64| format!("c{}", rng.below(3));
     let value = |rng: &mut SplitMix64| format!("v{}", rng.below(4));
     let number = rng.below(100);
-    match rng.below(10) {
+    match rng.below(12) {
         0..=2 => format!(
             "{} <- function(x) {}(x) + {number}",
             function(rng),
@@ -99,6 +108,12 @@ fn random_statement(rng: &mut SplitMix64) -> String {
             format!("{name} <- {name} + {}", constant(rng))
         }
         8 => format!("if (TRUE) {} <- function() {number}", function(rng)),
+        9 => format!(
+            "#: @pure\n{} <- function(x) {}(x) + {number}",
+            function(rng),
+            function(rng)
+        ),
+        10 => "# typing: strict".to_owned(),
         _ => format!(
             "setMethod(\"g{}\", \"C{}\", function(x) {number})",
             rng.below(2),
@@ -109,7 +124,14 @@ fn random_statement(rng: &mut SplitMix64) -> String {
 
 fn random_package(rng: &mut SplitMix64) -> Package {
     (0..FILES)
-        .map(|_| (0..rng.below(6)).map(|_| random_statement(rng)).collect())
+        .map(|_| {
+            let strict = rng.below(2) == 0;
+            let header = strict.then(|| "# typing: strict".to_owned());
+            header
+                .into_iter()
+                .chain((0..rng.below(6)).map(|_| random_statement(rng)))
+                .collect()
+        })
         .collect()
 }
 
@@ -168,11 +190,13 @@ fn inputs(package: &Package) -> PackageInputs {
 struct Model {
     bindings: FxHashMap<String, String>,
     registrations: BTreeSet<Registration>,
+    /// Each lazy constant's value as it was forced right after its binding landed.
+    forced: FxHashMap<String, String>,
 }
 
-fn check(seed: u64, before: &Package, after: &Package) {
-    let root = Path::new("/fuzz");
-    let mut loader = Loader::default();
+fn check(loader: &mut Loader, scratch: &mut Loader, seed: u64, before: &Package, after: &Package) {
+    let root = PathBuf::from(format!("/fuzz/{seed}"));
+    let root = root.as_path();
     loader
         .plan_inputs(root, inputs(before), false)
         .expect("the package plans");
@@ -186,7 +210,6 @@ fn check(seed: u64, before: &Package, after: &Package) {
         .expect("the edited package plans");
     let new_index = loader.pending(root).expect("pending").index.clone();
     let new_texts = texts(after);
-    let mut scratch = Loader::default();
     scratch
         .plan_inputs(root, inputs(after), false)
         .expect("the edited package plans from scratch");
@@ -230,7 +253,10 @@ fn slice(texts: &FxHashMap<String, String>, path: &str, start: u32, end: u32) ->
 fn fresh_load(index: &PackageIndex, texts: &FxHashMap<String, String>) -> Model {
     let mut model = Model::default();
     for (path, item) in index.items() {
-        if let (Some(name), Some((_, span))) = (index.lazy_name(item), &item.function) {
+        if let (Some(name), Some(span)) = (
+            index.lazy_name(item),
+            item.binding.as_ref().map(|binding| binding.value),
+        ) {
             model.bindings.insert(
                 name.to_owned(),
                 format!(
@@ -246,7 +272,39 @@ fn fresh_load(index: &PackageIndex, texts: &FxHashMap<String, String>) -> Model 
             run(&mut model, index, &order, texts, path, item);
         }
     }
+    let constants: Vec<String> = index
+        .items()
+        .filter_map(|(_, item)| lazy_constant(index, item))
+        .map(str::to_owned)
+        .collect();
+    force(&mut model, index, &order, &constants);
     model
+}
+
+fn lazy_constant<'a>(index: &PackageIndex, item: &'a IndexedItem) -> Option<&'a str> {
+    let binding = item.binding.as_ref()?;
+    (!binding.function && index.lazy_name(item).is_some()).then_some(binding.name.as_str())
+}
+
+/// Forces the named constants once the whole load or reload has run, which is when a session
+/// first reads them at the latest.
+fn force(model: &mut Model, index: &PackageIndex, order: &EagerOrder, names: &[String]) {
+    model.forced.retain(|name, _| {
+        index
+            .items()
+            .any(|(_, item)| lazy_constant(index, item) == Some(name.as_str()))
+    });
+    for name in names {
+        let value = deep_value(
+            model,
+            index,
+            order,
+            usize::MAX,
+            name,
+            &mut FxHashSet::default(),
+        );
+        model.forced.insert(name.clone(), value);
+    }
 }
 
 /// Each eager item's position, and per name the positions of its eager writers, in
@@ -395,6 +453,17 @@ fn apply(model: &mut Model, plan: &Plan, index: &PackageIndex, texts: &FxHashMap
         );
         run(model, index, &order, texts, &code.path, item);
     }
+    let rebound: Vec<String> = plan
+        .bind
+        .iter()
+        .filter_map(|code| code.name.clone())
+        .filter(|name| {
+            index
+                .items()
+                .any(|(_, item)| lazy_constant(index, item) == Some(name.as_str()))
+        })
+        .collect();
+    force(model, index, &order, &rebound);
 }
 
 /// What the console asks before each command: a disk edit to a loaded package is reported once,

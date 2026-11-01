@@ -281,7 +281,7 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
         .expect("write");
         // A command that does not parse still gets the reload in front of it.
         session.send("1 +* 2\r");
-        session.expect("Reloaded replpkg: 1 function rebound");
+        session.expect("Reloaded replpkg: 1 definition rebound");
         session.send("greet()\r");
         session.expect("second, edited version");
         // Nothing changed since, so the next command runs without a reload.
