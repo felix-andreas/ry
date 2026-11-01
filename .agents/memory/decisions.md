@@ -3931,6 +3931,13 @@ explicit allocators".
   binding. Without that the dead frame keeps the result shared and the next call copies. The
   heap does not count an environment's enclosure as a reference, so the environment's refcount
   cannot decide this the way GNU R's `R_CleanupEnvir` does.
+- **Holes the static check cannot see.** A variable that holds an environment can reach any
+  frame, so `$`, `[[` and their assignments on an environment end every move
+  (`moves::reaching_environment`, in `subset.rs`). A local assignment of the caller's variable's
+  name does not shadow it, since a read before the assignment, or on a path that skips it,
+  finds the caller's variable, so such a body is not movable; only a parameter shadows. A closure
+  created in the body captures the frame without entering a closure, so a body or default that
+  may create one gets no tail update and no frame release (`moves::may_capture_frame`).
 - **A shared start does not stick.** A value something else also holds, such as `.Last.value`
   holding the dict a top-level `d <- Dict.empty()` created, cannot move, but the call still runs
   tracked (`Move::shared`, binding untouched) so the dead frame is released and the next call
