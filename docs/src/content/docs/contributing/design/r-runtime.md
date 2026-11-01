@@ -958,10 +958,10 @@ Each step ends with something real running, and each one is a large, whole chang
 
    The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
    other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
-   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 47 of 66 end with GNU R's
-   exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
-   URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
-   `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
+   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
+   exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
+   (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
+   `reg-large` needs tens of gigabytes of memory. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
    implementation shared by the interpreter and `libR`. R's graphics engine runs on ry's runtime

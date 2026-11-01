@@ -77,7 +77,21 @@ local({
   info <- new.env(hash = TRUE, parent = baseenv())
   assign(".__NAMESPACE__.", info, envir = ns)
   info$spec <- c(name = "ry", version = "0.0.0")
-  info$path <- ""
+  # `packageDescription()`, which `sessionInfo()` calls for every loaded namespace, reads a
+  # DESCRIPTION from the namespace's path. ry has no installed package directory, so the path
+  # is a directory written on first use in the session's temporary directory.
+  makeActiveBinding("path", local({
+    path <- NULL
+    function() {
+      if (is.null(path)) {
+        path <<- file.path(tempdir(), "ry")
+        dir.create(path, showWarnings = FALSE)
+        writeLines(c("Package: ry", "Version: 0.0.0", "Title: The ry runtime", "License: UPL-1.0"),
+                   file.path(path, "DESCRIPTION"))
+      }
+      path
+    }
+  }), info)
   info$imports <- list(base = TRUE)
   info$dynlibs <- character()
   info$S3methods <- matrix(NA_character_, 0L, 4L)
@@ -96,9 +110,10 @@ const ATTACH: &str = r#"
 local({
   ns <- asNamespace("ry")
   library <- as.environment("package:ry")
-  for (name in ls(library, all.names = TRUE)) assign(name, get(name, envir = library), envir = ns)
+  builtins <- ls(library, all.names = TRUE)
+  for (name in builtins) assign(name, get(name, envir = library), envir = ns)
   detach("package:ry", character.only = TRUE)
-  functions <- ls(ns)
+  functions <- union(ls(ns), builtins)
   exports <- new.env(hash = TRUE, parent = baseenv())
   for (name in functions) assign(name, name, envir = exports)
   assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
