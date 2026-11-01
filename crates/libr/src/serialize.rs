@@ -355,6 +355,7 @@ pub unsafe fn serialize(
         buffer: Vec::new(),
         sink,
         refs: FxHashMap::default(),
+        remembered: 0,
         hook,
         known: *runtime().heap.known(),
     };
@@ -376,6 +377,10 @@ struct Writer<'s, 'h> {
     sink: &'s mut dyn FnMut(&[u8]) -> ApiResult<()>,
     /// The back-reference index of every remembered object.
     refs: FxHashMap<Sexp, usize>,
+    /// How many objects the reader will have remembered, which exceeds `refs.len()` once the
+    /// persistence hook names an object a second time: GNU R remembers it again under a new
+    /// index, and so does every reader.
+    remembered: usize,
     hook: Option<PersistHook<'h>>,
     known: WellKnown,
 }
@@ -493,8 +498,8 @@ impl Writer<'_, '_> {
     }
 
     fn remember(&mut self, object: Sexp) {
-        let index = self.refs.len() + 1;
-        self.refs.insert(object, index);
+        self.remembered += 1;
+        self.refs.insert(object, self.remembered);
     }
 
     unsafe fn write_item(&mut self, object: Sexp) -> ApiResult<()> {
