@@ -523,7 +523,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
-argument whose type violates a constraint is a type error at the call.
+argument whose type violates a constraint is a type error at the call. A union satisfies a
+constraint when every member does, so `double | integer` satisfies `numeric`.
 
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.
 Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. A body under a plain `<T>` that
@@ -1569,6 +1570,13 @@ to a scalar `double`, which matches how R treats bare numbers. An operand whose 
 counts as scalar-like here and in comparisons, by the same claim that
 [`[` on vectors](#-on-vectors-1) makes. A generic vector written `T[]` is the exception, and its
 operator results really are vectors.
+
+A union operand is checked member by member. A union of numeric types, such as `double | integer`,
+follows the rules above. A union that also holds an unannotated value or a class with arithmetic
+methods, such as `double | matrix` from `if (is.null(previous)) 1 else x %*% x`, requires its
+unannotated members to be numeric, and the result is `Unknown`, because R picks the result type per
+member at run time. A member that is neither, such as the `character` in `double | character`, is a
+type error.
 
 A `logical` argument satisfies the numeric requirement, because R promotes it, so
 `cost <- function(price, rate) price * rate` accepts `cost(TRUE, 0.5)` and `cost(1L, 0.5)`. Mixed
