@@ -8,3 +8,6 @@ publish = false
 
 [lib]
 path = "src/sniff.rs"
+
+[dev-dependencies]
+syntax = { path = "../syntax" }

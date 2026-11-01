@@ -7,7 +7,7 @@ hover-definition: global 0..2
 definition 0..2
 references: 0..2*
 rename: 1 edit(s)
-type-definition: stub source 11 at `Array`
+type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `xs`
   edit 0..0 -> "#: Array<double>\n"
@@ -25,7 +25,7 @@ hover-definition: global 0..2
 definition 0..2
 references: 0..2*, 24..26
 rename: 2 edit(s)
-type-definition: stub source 11 at `Array`
+type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `first`
   edit 15..15 -> "#: integer\n"
@@ -44,7 +44,7 @@ hover-definition: global 0..6
 definition 0..6
 references: 0..6*
 rename: 1 edit(s)
-type-definition: stub source 11 at `Array`
+type-definition: stub source ry at `Array`
 signature: none
 action: Add inferred type annotation for `points`
   edit 0..0 -> "#: Array<Record{x: double, y: double}>\n"
@@ -75,7 +75,7 @@ signature: fn(list: Array<double>, f: fn(double) -> T) -> Array<T> (active)
 parameters: list: Array<double> | [f: fn(double) -> T]
 signature: <T, U> fn(list: list[T], f: fn(T) -> U) -> list[U]
 parameters: list: list[T] | [f: fn(T) -> U]
-completion (102): F, FALSE, for, function, factanal, factor, factor.scope, factorial
+completion (103): F, f = , FALSE, for, function, factanal, factor, factor.scope
 
 #---- hover_on_the_for_variable
 for (item in ["a", "b"]) print(it$0em)
@@ -88,3 +88,4 @@ rename: 2 edit(s)
 signature: fn(x: character, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> character
 parameters: [x: character] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (1): item
+hint @9: character

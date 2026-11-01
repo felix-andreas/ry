@@ -21,8 +21,21 @@ namespaces <- c(
   # The meta-package needs its own manifest even though nearly every name it
   # offers comes from a member: without one, attaching it leaves its export set
   # unknowable, which is exactly what disables unresolved-name detection.
-  "tidyverse"
+  "tidyverse",
+  # The benchmark code bases' dependencies, typed in types/ so that ry checks them.
+  "abind", "assertthat", "azidentity", "AzureAuth", "AzureKeyVault", "AzureStor",
+  "AzureTableStor", "brio", "cachem", "callr", "cli", "DBI", "devtools", "digest",
+  "doParallel", "FLSSS", "foreach", "fs", "git2r", "httr", "httr2", "lgr", "memoise",
+  "NlcOptim", "odbc", "ompr", "ompr.roi", "openxlsx", "partitions", "pdftools",
+  "PerformanceAnalytics", "plumber", "pool", "progress", "quadprog", "rappdirs", "RcppDE",
+  "RcppSimdJson", "readxl", "renv", "Rglpk", "rmgarch", "rugarch", "rvest", "snakecase",
+  "tryCatchLog", "uuid", "withr", "xml2", "xts", "YieldCurve", "zoo"
 )
+# `Rscript scripts/export-manifests.R zoo xts` regenerates only the named manifests.
+requested <- commandArgs(trailingOnly = TRUE)
+if (length(requested) > 0) {
+  namespaces <- intersect(namespaces, requested)
+}
 
 exports_of <- function(namespace) {
   # `datasets` exports nothing through its namespace — its objects are lazy
@@ -63,7 +76,14 @@ write_manifest <- function(namespace, exports, note = NULL) {
 }
 
 for (namespace in namespaces) {
+  if (!requireNamespace(namespace, quietly = TRUE)) {
+    cat(sprintf("skipped %s: not installed\n", namespace))
+    next
+  }
   write_manifest(namespace, exports_of(namespace))
+}
+if (length(requested) > 0) {
+  quit(save = "no")
 }
 
 # `tidyverse` is a meta-package: it re-exports almost nothing itself and instead

@@ -1,0 +1,9 @@
+# rvest: scraping HTML, on top of xml2's document and node classes.
+
+minimal_html : @pure fn(html: character, [title]: character) -> xml_document
+read_html : fn(x: Any, [encoding]: character, ...: Any, [options]: character[]) -> xml_document
+html_elements : @pure fn(x: xml_document | xml_node | xml_nodeset, [css]: character, [xpath]: character) -> xml_nodeset
+html_text2 : @pure fn(x: xml_nodeset, [preserve_nbsp]: logical) -> character[]
+html_text2 : fn(x: xml_document | xml_node | xml_missing, [preserve_nbsp]: logical) -> character
+html_attr : @pure fn(x: xml_nodeset, name: character, [default]: character) -> character[]
+html_attr : fn(x: xml_document | xml_node | xml_missing, name: character, [default]: character) -> character

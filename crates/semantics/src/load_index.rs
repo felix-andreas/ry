@@ -15,7 +15,7 @@ use {
             parse_namespace_spec, string_content,
         },
         parse,
-        top_level::{TopLevel, item_top_level},
+        top_level::{TopLevel, item_super_assigned_names, item_top_level},
     },
     rowan::{GreenNodeData, Language, NodeOrToken},
     rustc_hash::{FxHashMap, FxHashSet},
@@ -294,6 +294,9 @@ pub struct IndexedItem {
     /// For a binding, the names its value mentions, which is what forcing a lazy constant, or
     /// calling a lazy function, may read.
     pub mentions: Vec<String>,
+    /// Names its `<<-` assignments write. The namespace locks once loading finishes, so these
+    /// writes can only land while `.onLoad`, or something it calls, runs.
+    pub load_writes: Vec<String>,
     pub registrations: Vec<Registration>,
 }
 
@@ -372,6 +375,10 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                     value,
                     function: load.function,
                 });
+            let load_writes = item_super_assigned_names(db, item)
+                .iter()
+                .map(|name| name.as_str().to_owned())
+                .collect();
             let (binds, reads) = match &binding {
                 Some(binding) if binding.function => (vec![binding.name.clone()], Vec::new()),
                 _ => (
@@ -397,6 +404,7 @@ pub fn file_items(db: &dyn Db, file: SourceFile) -> Arc<FileItems> {
                 binds,
                 reads,
                 mentions: load.mentions.clone(),
+                load_writes,
                 registrations: load.registrations.clone(),
             }
         })
@@ -426,6 +434,13 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
     for (position, item) in items.enumerate() {
         for name in &item.binds {
             writers.entry(name.as_str()).or_insert((0, position)).0 += 1;
+        }
+    }
+    // `.onLoad` runs after every top-level statement, so its writes come after them all, and
+    // a lazy constant forced after it would see the new value where an eager one saw the old.
+    for item in files.iter().flat_map(|file| &file.items.items) {
+        for name in &item.load_writes {
+            writers.entry(name.as_str()).or_insert((0, usize::MAX)).0 += 1;
         }
     }
     // Seen once and from a lazy definition: lazy. Seen again: eager.

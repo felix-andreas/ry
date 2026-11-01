@@ -4,9 +4,18 @@ description: The .Rtypes declaration format, overload sets, export manifests, an
 ---
 
 This page is for contributors who edit the shipped stub corpus, and for anyone writing a project's
-own stubs. The corpus lives in the repository's top-level `types/` directory: about 950 typed
-declarations in eleven `.Rtypes` files, plus an `.exports` [manifest](#export-manifests) for every
-namespace R ships and for fifteen CRAN namespaces. The typing rules the stubs feed are in the
+own stubs. The corpus lives in the repository's top-level `types/` directory: about 1,700 typed
+declarations in 77 `.Rtypes` files, plus an `.exports` [manifest](#export-manifests) for every
+namespace R ships and for every CRAN package in the benchmark dependency set.
+
+Shipping a package's types means dropping `types/<namespace>.Rtypes` (and its manifest) into that
+directory and nothing else: `crates/semantics/build.rs` embeds every file it finds there. R's own
+packages load first, in search-path order, then the CRAN namespaces alphabetically, then ry's
+standard library. Every namespace that is not one of R's own packages or the standard library is
+[conditional](#conditional-namespaces), so its names exist only in projects that use the package.
+The typed declarations of R's packages that R does not attach by default (`tools`, `parallel`,
+`compiler`, `grid`, `splines`, `stats4`, `tcltk`) are gated the same way, while their export
+manifests always answer `pkg::name`. The typing rules the stubs feed are in the
 [typing reference](/reference/type-system), and the user-facing introduction is
 [Stubs](/type-checking/stubs).
 
@@ -40,7 +49,9 @@ List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
 
 A declared `name` can be an R identifier, an infix operator such as `%in%` (or a project's own
 `%||%`), or an S3 operator method such as `+.Date`, `-.POSIXct`, `Arith.difftime`, `Compare.Date`,
-or `Ops.gg`. The operator spellings are how a stub gives a class arithmetic or comparison, and
+or `Ops.gg`, or a subset method such as `[.xts`, `[[.Date`, or `$.request`, which types `x[i]`,
+`x[[i]]`, or `x$name` on that class. The operator spellings are how a stub gives a class arithmetic
+or comparison, and
 [operator methods on a class](/reference/type-system#operator-methods-on-a-class) describes the
 dispatch order. The suffix is the nominal type's own name, so a project stub line
 `+.ggplot : fn(e1: ggplot, e2: Any) -> ggplot` is all a `+`-based DSL needs.
@@ -64,13 +75,13 @@ lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: 
 
 Besides values, a stub can declare a type. A line `@type NAME` declares an *opaque nominal type*: a
 named type with no inspectable representation, for standard-library values the type grammar cannot
-describe structurally, such as `data.frame`, `factor`, `connection`, or `Date`.
+describe structurally, such as `factor`, `connection`, or `Date`.
 
 An opaque nominal is compatible only with itself, and a value of it can only come from a function
 declared to return it. So `Sys.Date()` is a `Date`, and passing it where a `factor` is expected is a
 type error. The functions that *consume* such values usually keep `Any` parameters, because R
 coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an opaque
-nominal gives `Unknown` rather than an error, so `df$amount` and `df[rows, ]` stay usable, and strict
+nominal gives `Unknown` rather than an error, so value-dependent access stays usable, and strict
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
@@ -86,10 +97,19 @@ A stub can also declare a structural alias, written exactly like a project's `#:
 
 The alias then works in every annotation, as `Result<integer, :NotFound>`.
 
+A stub type may also declare a representation, written `@type NAME {REPRESENTATION}` exactly like
+a project's `#: @type`. `types/base.Rtypes` declares `@type data.frame {list[named: Unknown]}`, so
+a data frame passes wherever a named list is expected, as `lapply(frame, f)` needs, and `$` and
+`[[` read its columns as `Unknown`, which strict mode reports at the read. Unlike a project's own nominal type, a mismatch against a stub type does
+not suggest `@new`, because its values come from their own constructors such as `read.csv()`.
+Declare the class's operator and `[` methods beside it when R keeps or changes the class, as
+`[.data.frame` and `Arith.data.frame` do: dispatch looks at the declared class before the
+representation.
+
 A type name may contain an interior dot, as `data.frame` does, and a project's own `@type` or
-`@alias` of the same name shadows the stub's type. The structural form
-`@type NAME {REPRESENTATION}` cannot be written in `.Rtypes`: a stub's `@type` is always opaque,
-and a `@type` line whose name is not a plain identifier is reported as an error on its own line.
+`@alias` of the same name shadows the stub's type. A type declaration that does not load, such as a
+`@type` line whose name is not a plain identifier or whose representation does not parse, is
+reported as an error on its own line, and its name stays unknown to the rest of the file.
 
 ### Data-masking functions
 
@@ -222,10 +242,9 @@ overwrite a manifest recorded against a newer R than the running one, because re
 older R would silently drop the names the newer version added, and every use of one would become a
 false `unresolved` finding.
 
-A manifest does not need an `.Rtypes` file beside it. Fifteen namespaces have a manifest and no
-typed declarations at all, so every name from them is `Unknown`: `tibble`, `tidyr`, `readr`, `purrr`,
-`stringr`, `forcats`, `lubridate`, `magrittr`, `rlang`, `glue`, `scales`, `knitr`, `jsonlite`, `R6`,
-and `tidyverse`. What they contribute is a *known export set*. Attaching a package whose exports the
+A manifest does not need an `.Rtypes` file beside it. Some namespaces, such as `tibble`, `tidyr`,
+`forcats`, `magrittr`, `glue`, `scales`, `knitr` and `tidyverse`, have a manifest and no typed
+declarations at all, so every name from them is `Unknown`. What they contribute is a *known export set*. Attaching a package whose exports the
 checker cannot list turns off unresolved-name detection for the whole project, as the
 [typing reference](/reference/type-system#naming-and-scoping) specifies, so without its manifest a
 single `library(stringr)` would silence every typo. Adding typed declarations for any of these packages later is purely additive:
@@ -357,8 +376,8 @@ un-exports it from the namespace that declared it.
 ### Conditional namespaces
 
 Some shipped namespaces describe packages R does not attach by default: `data.table`, `dplyr`,
-`ggplot2`, and `testthat` come with types, and the [manifest-only](#export-manifests) CRAN set comes
-without. Folding them in unconditionally would let `fread`, `mutate`, or `str_to_upper` resolve in a
+`ggplot2`, `testthat` and the benchmark packages come with types, and the
+[manifest-only](#export-manifests) CRAN set comes without. Folding them in unconditionally would let `fread`, `mutate`, or `str_to_upper` resolve in a
 project that never uses them, stealing a typo warning. So a conditional namespace joins the library
 only when the project uses the package, and any one of these signals is enough:
 

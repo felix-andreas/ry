@@ -11,8 +11,8 @@ use {
     R::{
         runtime,
         serialize::{
-            Format, LazyLoadCompression, PersistHook, from_bytes, header_of, lazyload_fetch,
-            read_rds, to_bytes,
+            Format, LazyLoadCompression, PersistHook, check_unserialize_input, from_bytes,
+            header_of, lazyload_fetch, read_rds, to_bytes,
         },
     },
     heap::{
@@ -142,16 +142,64 @@ fn gnu_r_streams_read_back_and_write_identically() {
             Expected::Different => continue,
         };
         match unsafe { to_bytes(object, case.format, case.version) } {
-            Ok(written) if &written == expected => {}
-            Ok(written) => failures.push(format!(
-                "{label}: wrote\n{}\nexpected\n{}",
-                show(&written, case.format),
-                show(expected, case.format)
-            )),
+            Ok(written) => match with_recorded_writer_version(&written, case.format) {
+                Ok(normalized) if &normalized == expected => {}
+                Ok(normalized) => failures.push(format!(
+                    "{label}: wrote\n{}\nexpected\n{}",
+                    show(&normalized, case.format),
+                    show(expected, case.format)
+                )),
+                Err(problem) => failures.push(format!("{label}: {problem}")),
+            },
             Err(error) => failures.push(format!("{label}: cannot write: {error:?}")),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The writer version every recorded stream carries, whichever GNU R recorded it (`generate.R`
+/// overwrites the field with it).
+const RECORDED_WRITER_VERSION: i32 = 4 * 65536 + 6 * 256 + 2;
+
+/// Checks that a stream's header names the R version ry presents as the writer, then replaces
+/// that field with the recorded one, so the stream compares byte for byte with the recorded
+/// streams on whichever GNU R is linked. Only the field changes; the payload is untouched.
+fn with_recorded_writer_version(written: &[u8], format: Format) -> Result<Vec<u8>, String> {
+    let header =
+        unsafe { header_of(written) }.map_err(|error| format!("unreadable header: {error:?}"))?;
+    let presented = interp::system::r_version().code();
+    if header.writer_version != presented {
+        return Err(format!(
+            "the header names writer version {:#x}, not the presented {presented:#x}",
+            header.writer_version
+        ));
+    }
+    let mut normalized = written.to_vec();
+    match format {
+        Format::Ascii | Format::AsciiHex => {
+            // The lines are the magic, the version, then the writer version.
+            let mut starts = normalized
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'\n')
+                .map(|(at, _)| at + 1);
+            let (Some(_), Some(from), Some(to)) = (starts.next(), starts.next(), starts.next())
+            else {
+                return Err("an ASCII header with fewer than three lines".to_owned());
+            };
+            let field = format!("{RECORDED_WRITER_VERSION}\n");
+            normalized.splice(from..to, field.into_bytes());
+        }
+        Format::Xdr | Format::Binary => {
+            let bytes = if format == Format::Xdr {
+                RECORDED_WRITER_VERSION.to_be_bytes()
+            } else {
+                RECORDED_WRITER_VERSION.to_ne_bytes()
+            };
+            normalized[6..10].copy_from_slice(&bytes);
+        }
+    }
+    Ok(normalized)
 }
 
 fn case(name: &str, format: Format, version: i32) -> Vec<u8> {
@@ -786,7 +834,9 @@ fn installed_lazy_load_databases_read() {
     }
 }
 
-/// Corrupted streams fail with an error: never a panic, a crash or a runaway allocation.
+/// Corrupted streams fail with an error, or read into an object that writes back: never a panic,
+/// a crash or a runaway allocation. The contract is `serialize::check_unserialize_input`, which
+/// the coverage-guided `unserialize` target shares.
 #[test]
 fn corrupted_streams_fail_cleanly() {
     let _session = session();
@@ -811,17 +861,38 @@ fn corrupted_streams_fail_cleanly() {
                 _ => bytes.insert(at, rng.next_u64() as u8),
             }
         }
-        let mark = runtime().heap.handle_mark();
         if iteration % 64 == 63 {
             runtime().heap.policy_mut().stress = GcStress::EveryAllocation;
         }
-        let outcome = std::panic::catch_unwind(|| unsafe { from_bytes(&bytes) });
+        let outcome = std::panic::catch_unwind(|| unsafe { check_unserialize_input(&bytes) });
         runtime().heap.policy_mut().stress = GcStress::Off;
-        runtime().heap.release_handles(mark);
         assert!(
             outcome.is_ok(),
             "iteration {iteration} panicked on {}",
             show(&bytes, Format::Xdr)
+        );
+    }
+}
+
+/// The header normalization touches only the writer version, so a corrupted payload byte still
+/// makes a written stream differ from the recorded one, in every format.
+#[test]
+fn writer_version_normalization_keeps_the_payload_byte_exact() {
+    let _session = session();
+    for case in cases().iter().filter(|case| case.version == 3) {
+        let object = unsafe { from_bytes(&case.stream) }.expect("a readable stream");
+        let written = unsafe { to_bytes(object, case.format, case.version) }.expect("a write");
+        let normalized =
+            with_recorded_writer_version(&written, case.format).expect("a normalized header");
+        let last = normalized.len() - 1;
+        let mut corrupted = written.clone();
+        corrupted[last] ^= 1;
+        let corrupted =
+            with_recorded_writer_version(&corrupted, case.format).expect("a normalized header");
+        assert_ne!(
+            corrupted, normalized,
+            "{}: the payload byte was lost",
+            case.name
         );
     }
 }

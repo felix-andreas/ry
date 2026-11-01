@@ -20,7 +20,7 @@ f: fn(choices: character | character[]) -> integer
 options(error = recover)
 handler <- function() traceback()
 #++++
-Unknown
+list[named: Any]
 handler: fn() -> Any
 
 #---- manifest_only_exports_resolve
@@ -420,14 +420,22 @@ labels: character[]
 wrong: Unknown
 130..140 error[type-mismatch] expected `character[] | character`, found `double[]`
 
-#---- a_switch_result_that_may_be_null_reports_the_nullability
+#---- a_switch_result_without_a_default_is_called_as_the_function
 pick <- function(kind) {
   fn <- switch(kind, upper = toupper, lower = tolower)
   fn("Text")
 }
 #++++
-pick: Unknown
-82..84 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: Any) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch
+pick: <T> fn(kind: T) -> character
+
+#---- a_parameter_that_may_be_null_reports_the_nullability
+#: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
+apply_transform <- function(text, transform) {
+  transform(text)
+}
+#++++
+apply_transform: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
+136..145 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: character) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter
 
 #---- a_default_branch_makes_the_switch_result_callable
 pick <- function(kind) {

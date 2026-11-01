@@ -1,0 +1,4 @@
+# Rglpk: linear and mixed-integer programming through GLPK.
+# `mat` is a dense matrix, a numeric vector or a slam simple_triplet_matrix, which no stub names.
+# `solution_dual` and `auxiliary$dual` are a bare `NA` for an integer programme.
+Rglpk_solve_LP : fn(obj: double[], mat: Any, dir: character[], rhs: double[], [bounds]: list[named: Any] | NULL, [types]: character[] | NULL, [max]: logical, [control]: list[named: Any], ...: Any) -> list{optimum: double, solution: double[], status: integer, solution_dual: double[] | logical, auxiliary: list{primal: double[], dual: double[] | logical}, sensitivity_report: character[]}

@@ -55,6 +55,16 @@ pub const BUILTINS: &[BuiltinDef] = &[
         matrix_product(call, Product::Matrix)
     })
     .generic(Generic::MatrixOps),
+    // R 4.4 made `crossprod` and `tcrossprod` primitives in the `matrixOps` group; before that
+    // base R defined them as closures over the internals. Both exist so that either base loads.
+    builtin("crossprod", -1, |call| unsafe {
+        matrix_product(call, Product::Cross)
+    })
+    .generic(Generic::MatrixOps),
+    builtin("tcrossprod", -1, |call| unsafe {
+        matrix_product(call, Product::TransposedCross)
+    })
+    .generic(Generic::MatrixOps),
     internal("crossprod", 2, |call| unsafe {
         matrix_product(call, Product::Cross)
     }),
@@ -110,16 +120,27 @@ pub const BUILTINS: &[BuiltinDef] = &[
         la_dgecon(call.arg(0), call.arg(1))
     }),
     internal("La_dtrcon", 2, |call| unsafe {
-        la_dtrcon(call.arg(0), call.arg(1))
+        la_dtrcon(call.arg(0), call.arg(1), c"U")
+    }),
+    // R 4.4's `rcond(triangular = TRUE, uplo = "L")` and `.kappa_tri(uplo =)`.
+    internal("La_dtrcon3", 3, |call| unsafe {
+        la_dtrcon(call.arg(0), call.arg(1), uplo(call.arg(2))?)
     }),
     internal("La_zgecon", 2, |call| unsafe {
         la_zgecon(call.arg(0), call.arg(1))
     }),
     internal("La_ztrcon", 2, |call| unsafe {
-        la_ztrcon(call.arg(0), call.arg(1))
+        la_ztrcon(call.arg(0), call.arg(1), c"U")
+    }),
+    internal("La_ztrcon3", 3, |call| unsafe {
+        la_ztrcon(call.arg(0), call.arg(1), uplo(call.arg(2))?)
     }),
     internal("La_dlange", 2, |call| unsafe {
         la_dlange(call.arg(0), call.arg(1))
+    }),
+    // R 4.4's `norm()` of a complex matrix.
+    internal("La_zlange", 2, |call| unsafe {
+        la_zlange(call.arg(0), call.arg(1))
     }),
     internal("backsolve", 5, |call| unsafe { backsolve(call) }),
     internal("La_version", 0, |_| unsafe { la_version() }),
@@ -143,8 +164,11 @@ enum Product {
 /// optimized BLAS may not. Reference BLAS sums in the same order as that loop, so the loop also
 /// stands in for BLAS when the library is missing.
 unsafe fn matrix_product(call: &Call<'_>, product: Product) -> R<Sexp> {
+    let internal = crate::interp()
+        .builtin(call.op.primitive_index())
+        .is_some_and(|definition| definition.is_internal());
     let report = |message: &str| {
-        if product == Product::Matrix {
+        if !internal {
             call.error(message)
         } else {
             error(message)
@@ -2069,7 +2093,7 @@ unsafe fn la_dgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
 }
 
 /// `rcond(x, triangular = TRUE)`: `dtrcon` on the upper triangle.
-unsafe fn la_dtrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
+unsafe fn la_dtrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
     let lapack = lapack()?;
     if matrix_dims(a).is_none() {
         return Err(error("'A' must be a numeric matrix"));
@@ -2087,7 +2111,7 @@ unsafe fn la_dtrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
     let mut info = 0;
     (lapack.dtrcon)(
         kind.as_ptr(),
-        c"U".as_ptr(),
+        triangle.as_ptr(),
         c"N".as_ptr(),
         &order,
         reals(matrix).as_ptr(),
@@ -2164,7 +2188,7 @@ unsafe fn la_zgecon(a: Sexp, norm: Sexp) -> R<Sexp> {
     values::scalar_real(rcond)
 }
 
-unsafe fn la_ztrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
+unsafe fn la_ztrcon(a: Sexp, norm: Sexp, triangle: &CStr) -> R<Sexp> {
     let lapack = lapack()?;
     if matrix_dims(a).is_none() {
         return Err(error("'A' must be a complex matrix"));
@@ -2182,7 +2206,7 @@ unsafe fn la_ztrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
     let mut info = 0;
     (lapack.ztrcon)(
         kind.as_ptr(),
-        c"U".as_ptr(),
+        triangle.as_ptr(),
         c"N".as_ptr(),
         &order,
         complexes(matrix).as_ptr(),
@@ -2199,6 +2223,41 @@ unsafe fn la_ztrcon(a: Sexp, norm: Sexp) -> R<Sexp> {
         return Err(error(format!("error [{info}] from Lapack 'ztrcon()'")));
     }
     values::scalar_real(rcond)
+}
+
+/// The triangle `uplo` names, `"U"` or `"L"`.
+unsafe fn uplo(value: Sexp) -> R<&'static CStr> {
+    match values::first_string(value).as_deref() {
+        Some("U") => Ok(c"U"),
+        Some("L") => Ok(c"L"),
+        _ => Err(error("'uplo' must be \"U\" or \"L\"")),
+    }
+}
+
+/// `norm(x, type)` of a complex matrix, `zlange`.
+unsafe fn la_zlange(a: Sexp, norm: Sexp) -> R<Sexp> {
+    let lapack = lapack()?;
+    let Some((rows, cols)) = matrix_dims(a) else {
+        return Err(error("'A' must be a complex matrix"));
+    };
+    if norm.kind() != SexpType::String {
+        return Err(error("'type' must be a character string"));
+    }
+    let source = coerce_vector(a, SexpType::Complex)?;
+    let kind = norm_type(&first_text(norm), true)?;
+    let (m, n) = (rows as i32, cols as i32);
+    let mut work = vec![0.0; rows.max(1)];
+    let kind = [kind as c_char, 0];
+    let value = (lapack.zlange)(
+        kind.as_ptr(),
+        &m,
+        &n,
+        complexes(source).as_ptr(),
+        &m.max(1),
+        work.as_mut_ptr(),
+        1,
+    );
+    values::scalar_real(value)
 }
 
 /// The LAPACK norm letter `type` names: `M`, `O` (or `1`), `I`, `F` (or `E`); condition
@@ -2925,7 +2984,10 @@ macro_rules! fortran_library {
     };
 }
 
-fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib"], {
+// macOS has no `libblas.dylib` on the default search path; Accelerate's vecLib carries the
+// reference Fortran interface.
+fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib",
+    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib"], {
     dgemm: fn(Text, Text, Integer, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
     dgemv: fn(Text, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength);
     dsyrk: fn(Text, Text, Integer, Integer, Double, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
@@ -2938,7 +3000,8 @@ fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib"], 
     dscal: fn(Integer, Double, DoubleOut, Integer);
 });
 
-fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib"], {
+fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib",
+    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib"], {
     ilaver: fn(IntegerOut, IntegerOut, IntegerOut);
     dgesv: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, DoubleOut, Integer, IntegerOut);
     dgetrf: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, IntegerOut);

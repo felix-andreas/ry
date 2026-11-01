@@ -1,0 +1,7 @@
+# YieldCurve: Nelson-Siegel and Svensson term-structure fits. The fit has one row
+# per observation date and the columns beta_0, beta_1, beta_2 and lambda; an xts
+# input keeps its time index, anything else comes back as a matrix.
+Nelson.Siegel : @pure fn(rate: xts, maturity: double[]) -> xts
+Nelson.Siegel : fn(rate: matrix | double[], maturity: double[]) -> matrix
+# The fitted curve from a coefficient table, one column per maturity, always an xts.
+NSrates : @pure fn(Coeff: xts | matrix, maturity: double[]) -> xts

@@ -22,7 +22,7 @@ use {
     polars::prelude::{
         BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
         Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
-        Schema as PolarsSchema, SerReader,
+        Schema as PolarsSchema, SerReader, Series,
     },
     polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
     rayon::prelude::*,
@@ -81,6 +81,34 @@ pub fn csv_schema(path: &Path) -> Result<crate::Schema> {
 /// Reads delimited text held in memory, as `fread(text = ...)` does.
 pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
     read_bytes(bytes, &ReadOptions::default())
+}
+
+/// Any bytes either read into a table whose columns are the ones the sniffer promised, in its
+/// order, or fail with an error; a table that reads also writes. Nothing panics. Shared with the
+/// coverage-guided `fuzz/` target.
+pub fn check_csv_input(bytes: &[u8]) {
+    let Ok(table) = read_csv_bytes(bytes) else {
+        return;
+    };
+    let promised: Vec<String> = sniff::sniff(bytes)
+        .columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    let read: Vec<String> = table
+        .schema()
+        .columns
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    assert_eq!(
+        read, promised,
+        "the columns read differ from the sniffed ones for {bytes:?}"
+    );
+    let mut written = Vec::new();
+    if let Err(error) = write_csv_to(&table, &mut written) {
+        panic!("a table read from {bytes:?} does not write: {error}");
+    }
 }
 
 fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> Result<Table> {
@@ -381,17 +409,19 @@ fn write_text(buffer: &mut Vec<u8>, text: &str) {
 }
 
 /// Reads a column sniffed as character as a factor, as `fread(stringsAsFactors = TRUE)` does.
+/// The columns convert in parallel, since each one is a separate hash-and-sort.
 pub fn strings_as_factors(table: &mut Table) -> Result<()> {
-    let names: Vec<PlSmallStr> = table
+    let text: Vec<&Column> = table
         .frame()
         .columns()
         .iter()
         .filter(|column| column.dtype() == &DataType::String)
-        .map(|column| column.name().clone())
         .collect();
-    for name in names {
-        let column = table.take_column(&name)?;
-        let factor = string_to_factor(column.as_materialized_series())?;
+    let factors = text
+        .par_iter()
+        .map(|column| string_to_factor(column.as_materialized_series()))
+        .collect::<Result<Vec<Series>>>()?;
+    for factor in factors {
         table.put_column(factor.into_column())?;
     }
     Ok(())

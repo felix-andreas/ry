@@ -12,8 +12,12 @@ use {
     syntax::testing::fixture_case_sources,
 };
 
-/// `id :: name` schemes known not to round-trip; keep it empty.
-const KNOWN_UNWRITABLE: [&str; 0] = [];
+/// `id :: name` schemes known not to round-trip. Keep it to schemes whose written-back form
+/// is checked on purpose: an inferred `NULL` default passes on as a placeholder, while the same
+/// `NULL` once declared is checked at the call.
+const KNOWN_UNWRITABLE: [&str; 1] = [
+    "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
+];
 
 #[test]
 fn rendered_schemes_are_writable_annotations() {

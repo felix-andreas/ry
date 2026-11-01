@@ -45,9 +45,8 @@ two ry columns are measurement noise. The runtime is still incomplete (see [Stat
 ## From plain R to fully typed code in four steps
 
 In the diagram above, your code moves from the blue circle toward the purple one, one step at a
-time. Each step is
-optional, and you can stop after any of them, so you can adopt ry on a large code base without a
-rewrite. Steps 1 and 2 work with GNU R as it is. Steps 3 and 4 use what ry adds, and ry's own data
+time. Each step is optional, and you can stop after any of them, so you can adopt ry on a large
+code base without a rewrite. Steps 1 and 2 work with GNU R as it is. Steps 3 and 4 use what ry adds, and ry's own data
 types run only on ry's runtime, which is still incomplete (see [Status](#status)).
 
 ### 1. Check the code you have
@@ -165,7 +164,7 @@ non-exhaustive-match
    |   ^^^^^^^^^^^^^^^
 ```
 
-[Strict mode](/type-checking/strict-mode) (`strict = true`, kept beside `typing = true`) finishes the move: a value ry cannot
+[Strict mode](/type-checking/strict-mode) (`strict = true`) finishes the move: a value ry cannot
 type, or a parameter nothing constrains, is an error, and ry's run commands (`ry run`, `ry R`, `ry load` and the console) refuse to run code that has
 one.
 `object-systems = false` additionally rejects new S4, R6 and Reference Classes:

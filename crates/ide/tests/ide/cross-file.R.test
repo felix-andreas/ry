@@ -16,7 +16,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): helper, result, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- global_use_inside_function_helper_use
@@ -38,7 +38,7 @@ action: Add inferred type annotation for `wrapper`
   edit 0..0 -> "#: fn() -> integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn() -> integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): helper, wrapper, break, else, FALSE, for, function, if
 hint @7: fn() -> integer
 
 #==== definition_redefinition
@@ -60,7 +60,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- multi_file_redefinition_shadowed_declaration_is_local
@@ -81,7 +81,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @5: integer
 
 #==== definition_workspace
@@ -101,7 +101,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- updates_after_edit_after_edit_after_edit
@@ -121,7 +121,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): other, result, value, break, else, FALSE, for, function
 hint @6: integer
 
 #---- gone_after_delete_before_delete
@@ -140,7 +140,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #==== definition_s4
@@ -156,8 +156,12 @@ hover 19..27: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: f: character | [[signature]: character[]] | [definition]: Any | ...: Any
+action: Add inferred type annotations for the whole file
+  edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @48: fn() -> Any
 
 #---- class_reference_in_signature_resolves_to_setclass_generic_ref
 #~~~~ R/classes.R
@@ -171,8 +175,12 @@ hover 10..17: character
 definition R/classes.R:67..72
 references: R/classes.R:67..72*, R/classes.R:104..109, R/methods.R:11..16
 rename: 3 edit(s)
-signature: none
+signature: fn(f: character, [signature]: character[], [definition]: Any, ...: Any) -> character
+parameters: [f: character] | [signature]: character[] | [definition]: Any | ...: Any
+action: Add inferred type annotations for the whole file
+  edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @48: fn() -> Any
 
 #---- class_reference_in_signature_resolves_to_setclass_new_class_ref
 #~~~~ R/classes.R
@@ -186,8 +194,14 @@ hover 67..75: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> Any
+parameters: [Class: character] | ...: Any
+action: Add inferred type annotation for `make`
+  edit 44..44 -> "#: fn() -> Any\n"
+action: Add inferred type annotations for the whole file
+  edit 44..44 -> "#: fn() -> Any\n"
 completion: none
+hint @48: fn() -> Any
 
 #==== definition_annotation_type_names
 #---- cross_file_type_use_cross_file_use
@@ -221,7 +235,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- cross_file_use_updates_after_move_after_move_lookup
@@ -240,7 +254,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #==== references_globals
@@ -261,7 +275,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): other, result, value, break, else, FALSE, for, function
 hint @5: integer
 
 #---- cross_file_references_from_cross_file_use
@@ -282,7 +296,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 16..16 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): other, result, value, break, else, FALSE, for, function
 hint @6: integer
 hint @21: integer
 
@@ -307,7 +321,7 @@ action: Add inferred type annotation for `wrapper`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: fn() -> integer\n"
   edit 39..39 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): helper, result, wrapper, break, else, FALSE, for, function
 hint @7: fn() -> integer
 hint @45: integer
 
@@ -330,7 +344,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- multi_file_redefinition_from_shadowed_declaration
@@ -351,7 +365,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @5: integer
 
 #==== references_workspace
@@ -371,7 +385,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- updates_after_move_after_move_after_move
@@ -390,7 +404,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #==== references_global_with_same_named_local
@@ -414,7 +428,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): helper, result, value, break, else, FALSE, for, function
 hint @5: integer
 
 #---- global_excludes_same_named_local_from_local_declaration
@@ -441,7 +455,7 @@ action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 39..39 -> "  #: integer\n"
   edit 16..16 -> "#: fn() -> integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): value, helper, result, break, else, FALSE, for, function
 hint @6: integer
 hint @22: fn() -> integer
 hint @46: integer
@@ -458,7 +472,8 @@ hover 9..17: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> fn(...: Any) -> Any
+parameters: [Class: character] | ...: Any
 completion: none
 
 #==== type_names
@@ -515,7 +530,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @5: integer
 
 #==== rename_global_use_site
@@ -535,7 +550,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, value, break, else, FALSE, for, function, if
 hint @6: integer
 
 #---- function_from_callee_from_callee
@@ -555,7 +570,7 @@ action: Add inferred type annotation for `result`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): helper, result, break, else, FALSE, for, function, if
 hint @6: integer
 
 #==== rename_global_with_same_named_local
@@ -579,7 +594,7 @@ action: Add inferred type annotation for `value`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): helper, result, value, break, else, FALSE, for, function
 hint @5: integer
 
 #==== s4
@@ -594,5 +609,6 @@ hover 9..17: character
 definition R/classes.R:10..16
 references: R/classes.R:10..16*, R/methods.R:20..26, R/methods.R:68..74
 rename: 3 edit(s)
-signature: none
+signature: fn(Class: character, ...: Any) -> fn(...: Any) -> Any
+parameters: [Class: character] | ...: Any
 completion: none

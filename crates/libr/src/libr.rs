@@ -22,6 +22,44 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `mi_option_arena_eager_commit` and `mi_option_purge_delay` in mimalloc's `mi_option_e`, which
+/// `libmimalloc-sys` does not export as constants.
+#[cfg(target_os = "linux")]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+#[cfg(target_os = "linux")]
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+/// Two allocator defaults, set from a constructor that runs when the library loads because
+/// mimalloc reads them each time it reserves an arena or considers a purge. The environment
+/// variables `MIMALLOC_ARENA_EAGER_COMMIT` and `MIMALLOC_PURGE_DELAY` still override them.
+///
+/// An eagerly committed arena is backed by transparent huge pages, which the kernel zeroes in full
+/// when they are first touched or faulted back in after a purge, compacting memory to find them.
+/// Loading a package plans it on every core and every new arena paid for that zeroing, which made
+/// the plan of a large package take twice as long and vary from run to run; data.table's
+/// `rbindlist` on 1e7 rows went from about one second to six once earlier work had left purged
+/// arenas behind. The `ry` binary sets the same option for its own allocator in
+/// `crates/ry/src/main.rs`.
+///
+/// By default mimalloc also returns memory that stays free for 10 ms to the kernel, which zeroes
+/// each page again when it is next touched. Short-lived R values are freed and reallocated every
+/// few milliseconds, so on the benchmark tests that zeroing (`clear_page_erms`) was 15% of the
+/// profile. Never purging keeps resident memory at its peak, because freed memory is reused
+/// rather than returned.
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static ALLOCATOR_DEFAULTS: extern "C" fn() = {
+    extern "C" fn allocator_defaults() {
+        // SAFETY: setting an option's default has no preconditions.
+        unsafe {
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, -1);
+        }
+    }
+    allocator_defaults
+};
+
 pub mod altrep;
 pub mod applic;
 pub mod arith;
@@ -41,6 +79,7 @@ pub mod hashtab;
 pub mod legacy;
 pub mod linpack;
 pub mod lists;
+pub mod macho;
 pub mod memory;
 pub mod rmath;
 pub mod serialize;
@@ -61,8 +100,6 @@ pub type R_xlen_t = isize;
 pub type R_len_t = c_int;
 /// `Rboolean` is a C enum, so it has the size of `int`.
 pub type Rboolean = c_int;
-/// The R version ry presents, which `Rversion.h` and `R.version` report too.
-pub const R_VERSION_STRING: &str = "4.6.2";
 pub const TRUE: Rboolean = 1;
 pub const FALSE: Rboolean = 0;
 

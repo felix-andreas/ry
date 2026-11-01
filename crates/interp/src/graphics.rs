@@ -12,7 +12,10 @@ use {
         builtin_libraries::{NativeCall, NativeFn},
         coerce::coerce_vector,
         format::c_general,
-        graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages},
+        graphics_engine::{
+            self, DevDesc, Event, GEContext, GEDevDesc, Unit, guarded, guarded_sexp,
+        },
+        graphics_render::{self, Format, Rect, Shape, Stroke},
         unwind::{R, error},
         values::{
             self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
@@ -20,7 +23,10 @@ use {
         },
     },
     heap::object::{NA_INTEGER, Sexp, SexpType},
-    std::cell::{Cell, RefCell},
+    std::{
+        cell::{Cell, RefCell},
+        ffi::{c_int, c_uint},
+    },
 };
 
 pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
@@ -66,9 +72,9 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("X11", do_x11),
     ("savePlot", do_device_noop),
     ("devcap", do_dev_capabilities),
-    ("devcapture", |_| Ok(nil())),
+    ("devcapture", do_dev_capture),
     ("devcontrol", do_dev_control),
-    ("devcopy", do_device_noop),
+    ("devcopy", do_dev_copy),
     ("devdisplaylist", do_dev_display_list),
     ("devsize", do_dev_size),
     ("devUp", do_dev_up),
@@ -76,11 +82,11 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("playSnapshot", do_play_snapshot),
     ("getGraphicsEvent", no_events),
     ("setGraphicsEventEnv", no_events),
-    ("setPattern", do_device_noop),
-    ("setClipPath", do_device_noop),
-    ("setMask", do_device_noop),
-    ("defineGroup", do_device_noop),
-    ("useGroup", do_device_noop),
+    ("setPattern", do_set_pattern),
+    ("setClipPath", do_set_clip_path),
+    ("setMask", do_set_mask),
+    ("defineGroup", do_define_group),
+    ("useGroup", do_use_group),
 ];
 
 pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
@@ -124,68 +130,39 @@ pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     ("C_title", do_title),
 ];
 
-/// Binds `.Device` and `.Devices` in base as GNU R does at startup, for a session whose only
-/// device is the null device.
+/// Registers base graphics with the engine and binds `.Device` and `.Devices` in base as GNU R
+/// does at startup, for a session whose only device is the null device.
 pub unsafe fn define_device_variables() -> R<()> {
-    publish_devices()
+    if BASE_SYSTEM.get() == 0 {
+        graphics_engine::register_system(base_callback, |index| BASE_SYSTEM.set(index))?;
+    }
+    graphics_engine::publish_devices()
 }
-
-/// How many devices can be open at once, counting the null device, as in GNU R.
-const MAX_DEVICES: usize = 64;
-
-const NULL_DEVICE_NAME: &str = "null device";
 
 thread_local! {
-    static DEVICES: RefCell<DeviceTable> = RefCell::new(DeviceTable::new());
+    /// The index base graphics holds among the engine's graphics systems.
+    static BASE_SYSTEM: Cell<usize> = const { Cell::new(0) };
 }
 
-/// The open devices. Slot 0 is the null device, which always exists and is never stored, so
-/// a device's number is its slot plus one.
-struct DeviceTable {
-    slots: Vec<Option<Device>>,
-    current: usize,
-    /// The length of `.Devices`, which GNU R never shrinks: a closed device leaves `""`.
-    listed: usize,
-}
-
-impl DeviceTable {
-    fn new() -> Self {
-        DeviceTable {
-            slots: (0..MAX_DEVICES).map(|_| None).collect(),
-            current: 0,
-            listed: 1,
-        }
-    }
-}
-
-/// A device: the state R code can observe (its size, its text metrics and the base graphics
-/// parameters) and the pages drawn on it.
+/// Base graphics' state on one device, which the engine keeps as the system's state there:
+/// the graphics parameters, and the device whose extent and character size they lay out on.
 struct Device {
-    name: &'static str,
-    /// The file the device was opened on, as given, which `.Devices` reports as the entry's
-    /// `filepath` attribute. `pdf(NULL)` has none.
-    file: Option<String>,
-    /// Width and height in inches.
-    size: [f64; 2],
-    /// The size of a device unit in inches: a big point for vector devices, a pixel for
-    /// bitmap ones.
-    unit_inches: f64,
-    /// Whether device y coordinates grow downwards, as in a bitmap.
-    y_down: bool,
-    pointsize: f64,
-    display_list: bool,
+    dd: *mut GEDevDesc,
     /// Whether `plot.new` has run on this device, without which nothing can be drawn.
     started: bool,
     pars: Pars,
-    /// What closing the device writes to `file`; a device ry cannot render yet has none and
-    /// writes nothing.
-    format: Option<Format>,
-    /// The pages drawn so far, which `dev.off` renders.
-    pages: Vec<Page>,
+    /// The state the device's display list starts from, which a redraw restores before it
+    /// replays the list, and which a snapshot records.
+    saved: Saved,
     /// The region `clip()` set, until the next `plot.new`.
     clip: Option<Rect>,
-    /// The document title a PDF records.
-    title: String,
+}
+
+/// What a snapshot of base graphics holds.
+#[derive(Clone)]
+struct Saved {
+    pars: Pars,
+    started: bool,
 }
 
 /// The base graphics parameters of a device. GNU R keeps two copies, the defaults that
@@ -195,7 +172,6 @@ struct Device {
 struct Pars {
     adj: f64,
     ann: bool,
-    ask: bool,
     bg: Colour,
     bty: char,
     cex: f64,
@@ -378,7 +354,6 @@ impl Pars {
         Pars {
             adj: 0.5,
             ann: true,
-            ask: false,
             bg,
             bty: 'o',
             cex: 1.0,
@@ -448,9 +423,29 @@ const READ_ONLY_PARS: [&str; 6] = ["cin", "cra", "csi", "cxy", "din", "page"];
 // as in `par`.
 
 impl Device {
+    fn dev(&self) -> &DevDesc {
+        // SAFETY: base graphics' state lives as long as its device.
+        unsafe { &*(*self.dd).dev }
+    }
+
+    /// The device's width and height in inches.
+    fn size(&self) -> [f64; 2] {
+        let dev = self.dev();
+        [
+            (dev.right - dev.left).abs() * dev.ipr[0],
+            (dev.top - dev.bottom).abs() * dev.ipr[1],
+        ]
+    }
+
+    /// The size of a horizontal device unit in inches.
+    fn unit_inches(&self) -> f64 {
+        self.dev().ipr[0]
+    }
+
     /// `par("cin")`: the default character cell in inches.
     fn char_inches(&self) -> [f64; 2] {
-        [0.9 * self.pointsize / 72.0, 1.2 * self.pointsize / 72.0]
+        let dev = self.dev();
+        [dev.cra[0] * dev.ipr[0], dev.cra[1] * dev.ipr[1]]
     }
 
     /// `par("csi")`: the height of a margin line in inches, before `mex`.
@@ -459,7 +454,7 @@ impl Device {
     }
 
     fn outer_inches(&self) -> [f64; 4] {
-        let [width, height] = self.size;
+        let [width, height] = self.size();
         match self.pars.outer {
             OuterMargins::Lines(lines) => {
                 lines.map(|line| line * self.pars.mex * self.line_inches())
@@ -476,7 +471,7 @@ impl Device {
 
     /// `par("omd")`: the inner region as a fraction of the device.
     fn inner_region(&self) -> [f64; 4] {
-        let [width, height] = self.size;
+        let [width, height] = self.size();
         let [bottom, left, top, right] = self.outer_inches();
         [
             left / width,
@@ -488,7 +483,7 @@ impl Device {
 
     fn inner_size(&self) -> [f64; 2] {
         let [x0, x1, y0, y1] = self.inner_region();
-        [(x1 - x0) * self.size[0], (y1 - y0) * self.size[1]]
+        [(x1 - x0) * self.size()[0], (y1 - y0) * self.size()[1]]
     }
 
     /// `par("fig")`: the figure region as a fraction of the inner region.
@@ -594,12 +589,16 @@ impl Device {
 
     /// The device coordinates of the corners of the device.
     fn device_extent(&self) -> [f64; 4] {
-        let [width, height] = self.size.map(|inches| inches / self.unit_inches);
-        if self.y_down {
-            [0.0, width, height, 0.0]
-        } else {
-            [0.0, width, 0.0, height]
-        }
+        let dev = self.dev();
+        [dev.left, dev.right, dev.bottom, dev.top]
+    }
+
+    /// A point in inches from the device's bottom-left corner in device units.
+    fn to_device(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let dev = self.dev();
+        let x = dev.left + x / dev.ipr[0] * (dev.right - dev.left).signum();
+        let y = dev.bottom + y / dev.ipr[1] * (dev.top - dev.bottom).signum();
+        [x, y]
     }
 }
 
@@ -690,22 +689,13 @@ fn current_cell(layout: &Layout) -> [usize; 2] {
         })
 }
 
-// The device table and `.Devices`.
+// Base graphics as a graphics system of the engine.
 
-/// Runs `action` on the current device, opening the default device first when only the null
-/// device exists, as GNU R does for every routine that needs a device.
+/// Runs `action` on base graphics' state on the current device, opening the default device
+/// first when only the null device exists, as GNU R does for every routine that needs a device.
 unsafe fn with_device<T>(action: impl FnOnce(&mut Device) -> R<T>) -> R<T> {
-    if DEVICES.with(|devices| devices.borrow().current) == 0 {
-        open_default_device()?;
-    }
-    DEVICES.with(|devices| {
-        let mut devices = devices.borrow_mut();
-        let current = devices.current;
-        match devices.slots.get_mut(current).and_then(Option::as_mut) {
-            Some(device) => action(device),
-            None => Err(error("no active or default device")),
-        }
-    })
+    let dd = graphics_engine::current_device()?;
+    action(&mut *base_state(dd)?)
 }
 
 /// Like [`with_device`], for a routine that draws: drawing makes the next `plot.new` move to
@@ -728,101 +718,153 @@ unsafe fn with_started_plot<T>(action: impl FnOnce(&mut Device) -> R<T>) -> R<T>
     })
 }
 
-/// Calls `getOption("device")`, which is a device function or the name of one.
-unsafe fn open_default_device() -> R<()> {
-    let option = crate::envir::get_option("device");
-    let function = if values::is_function(option) {
-        option
-    } else if let Some(name) =
-        values::first_string(option).filter(|_| option.kind() == SexpType::String)
-    {
-        let lookup = values::call(values::install("match.fun")?, &[scalar_string(&name)?])?;
-        crate::heap().root(lookup);
-        crate::eval::eval(lookup, values::global_env())?
-    } else {
-        return Err(error("no active or default device"));
-    };
-    crate::heap().root(function);
-    crate::eval::apply(nil(), function, &[], values::global_env())?;
-    Ok(())
+/// Base graphics' state on `dd`.
+unsafe fn base_state(dd: *mut GEDevDesc) -> R<*mut Device> {
+    let state = graphics_engine::system_state(dd, BASE_SYSTEM.get()).cast::<Device>();
+    if state.is_null() {
+        return Err(error("base graphics is not registered with the device"));
+    }
+    Ok(state)
 }
 
-/// Adds `device` in the first free slot and makes it current.
-unsafe fn add_device(device: Device) -> R<()> {
-    DEVICES.with(|devices| {
-        let mut devices = devices.borrow_mut();
-        let Some(slot) = (1..MAX_DEVICES).find(|slot| devices.slots[*slot].is_none()) else {
-            return Err(error("too many open devices"));
-        };
-        devices.slots[slot] = Some(device);
-        devices.current = slot;
-        devices.listed = devices.listed.max(slot + 1);
-        Ok(())
-    })?;
-    publish_devices()
-}
-
-/// The next open device after slot `from`, wrapping around, or the null device.
-fn next_device(devices: &DeviceTable, from: usize) -> usize {
-    // The wrap includes `from` itself, so a lone open device is its own successor.
-    (from + 1..MAX_DEVICES)
-        .chain(1..(from + 1).min(MAX_DEVICES))
-        .find(|slot| devices.slots[*slot].is_some())
-        .unwrap_or(0)
-}
-
-fn previous_device(devices: &DeviceTable, from: usize) -> usize {
-    (1..from.min(MAX_DEVICES))
-        .rev()
-        .chain((from.max(1)..MAX_DEVICES).rev())
-        .find(|slot| devices.slots[*slot].is_some())
-        .unwrap_or(0)
-}
-
-/// Rebinds `.Devices` and `.Device` in base to the device table. Like GNU R's, `.Devices` is a
-/// pairlist of device names, and the name of a device opened on a file carries the file as
-/// its `filepath` attribute.
-unsafe fn publish_devices() -> R<()> {
-    let (entries, current) = DEVICES.with(|devices| {
-        let devices = devices.borrow();
-        let entries: Vec<(&'static str, Option<String>)> = (0..devices.listed)
-            .map(|slot| match devices.slots[slot].as_ref() {
-                _ if slot == 0 => (NULL_DEVICE_NAME, None),
-                Some(device) => (device.name, device.file.clone()),
-                None => ("", None),
-            })
-            .collect();
-        let current = entries
-            .get(devices.current)
-            .map_or(NULL_DEVICE_NAME, |(name, _)| name);
-        (entries, current)
-    });
-    let mut list = nil();
-    for (name, file) in entries.iter().rev() {
-        let entry = scalar_string(name)?;
-        if let Some(file) = file {
-            values::set_attr(entry, values::install("filepath")?, scalar_string(file)?)?;
+/// What the engine calls base graphics through: it keeps base graphics' state on each device,
+/// saves it where a display list starts, and restores it before a redraw replays the list.
+unsafe extern "C" fn base_callback(event: c_int, dd: *mut GEDevDesc, data: Sexp) -> Option<Sexp> {
+    match base_event(event, dd, data) {
+        Ok(value) => Some(value),
+        Err(unwind) => {
+            graphics_engine::fail_with(unwind);
+            None
         }
-        list = values::cons(entry, list)?;
-    }
-    let base = values::base_env();
-    crate::eval::define(values::install(".Devices")?, list, base)?;
-    crate::eval::define(symbols().dot_device, scalar_string(current)?, base)?;
-    Ok(())
-}
-
-/// A device argument as a device number from 1, the null device for anything else.
-unsafe fn device_number(value: Sexp) -> usize {
-    let number = values::as_integer_scalar(value);
-    if number == NA_INTEGER || number < 1 {
-        0
-    } else {
-        (number as usize - 1).min(MAX_DEVICES - 1)
     }
 }
 
-unsafe fn device_result(slot: usize) -> R<Sexp> {
-    scalar_integer(slot as i32 + 1)
+unsafe fn base_event(event: c_int, dd: *mut GEDevDesc, data: Sexp) -> R<Sexp> {
+    let index = BASE_SYSTEM.get();
+    let descriptor = (*dd)
+        .gesd
+        .get(index)
+        .copied()
+        .unwrap_or(std::ptr::null_mut());
+    if descriptor.is_null() {
+        return Ok(nil());
+    }
+    let state = (*descriptor).system_specific.cast::<Device>();
+    if event == Event::InitState as c_int {
+        let dev = &*(*dd).dev;
+        let pars = Pars::new(dev.startps, dev.startfill as Colour, dev.startcol as Colour);
+        let device = Device {
+            dd,
+            started: false,
+            saved: Saved {
+                pars: pars.clone(),
+                started: false,
+            },
+            pars,
+            clip: None,
+        };
+        (*descriptor).system_specific = Box::into_raw(Box::new(device)).cast();
+        return scalar_bool(true);
+    }
+    if state.is_null() {
+        return Ok(nil());
+    }
+    match event {
+        _ if event == Event::FinaliseState as c_int => {
+            (*descriptor).system_specific = std::ptr::null_mut();
+            drop(Box::from_raw(state));
+        }
+        _ if event == Event::SaveState as c_int => {
+            (*state).saved = Saved {
+                pars: (*state).pars.clone(),
+                started: (*state).started,
+            };
+        }
+        _ if event == Event::RestoreState as c_int => restore_saved(&mut *state),
+        _ if event == Event::CopyState as c_int => {
+            // The engine calls this on the device copied from, to hand its state to the
+            // current device.
+            let target = base_state(graphics_engine::current_device()?)?;
+            if target != state {
+                (*target).saved = (*state).saved.clone();
+                restore_saved(&mut *target);
+            }
+        }
+        _ if event == Event::SaveSnapshotState as c_int => {
+            return snapshot_state(&(*state).saved);
+        }
+        _ if event == Event::RestoreSnapshotState as c_int => {
+            if let Some(saved) = snapshot_saved(data)? {
+                (*state).saved = saved;
+                restore_saved(&mut *state);
+            }
+        }
+        _ if event == Event::CheckPlot as c_int => return scalar_bool(true),
+        _ => {}
+    }
+    Ok(nil())
+}
+
+fn restore_saved(device: &mut Device) {
+    device.pars = device.saved.pars.clone();
+    device.started = device.saved.started;
+    device.clip = None;
+}
+
+/// Base graphics' part of a `recordPlot()` snapshot: the saved state behind an external
+/// pointer tagged `graphics`, which carries `pkgName` as GNU R's raw vector does.
+unsafe fn snapshot_state(saved: &Saved) -> R<Sexp> {
+    let address = Box::into_raw(Box::new(saved.clone())).cast::<std::ffi::c_void>();
+    let heap = crate::heap();
+    let tag = values::install("graphics")?;
+    let value = match heap.alloc_external_ptr(address, tag, nil()) {
+        Ok(value) => value,
+        Err(failure) => {
+            drop(Box::from_raw(address.cast::<Saved>()));
+            return Err(failure.into());
+        }
+    };
+    heap.root(value);
+    heap.alloc_weak_ref(
+        value,
+        nil(),
+        nil(),
+        finalize_snapshot as *const () as usize,
+        false,
+    )?;
+    values::set_attr(
+        value,
+        values::install("pkgName")?,
+        scalar_string("graphics")?,
+    )?;
+    Ok(value)
+}
+
+unsafe extern "C" fn finalize_snapshot(value: Sexp) {
+    let address = value.external_address();
+    if !address.is_null() {
+        value.set_external_address(std::ptr::null_mut());
+        drop(Box::from_raw(address.cast::<Saved>()));
+    }
+}
+
+/// The base graphics state in a snapshot's list of system states, which follow its display
+/// list. A state ry did not record, such as one from a snapshot GNU R saved, is skipped.
+unsafe fn snapshot_saved(snapshot: Sexp) -> R<Option<Saved>> {
+    if snapshot.kind() != SexpType::List {
+        return Ok(None);
+    }
+    let tag = values::install("graphics")?;
+    for index in 1..length(snapshot) {
+        let state = snapshot.element(index);
+        if state.kind() == SexpType::ExternalPtr
+            && state.external_tag() == tag
+            && !state.external_address().is_null()
+        {
+            return Ok(Some((*state.external_address().cast::<Saved>()).clone()));
+        }
+    }
+    Ok(None)
 }
 
 // grDevices: opening devices.
@@ -876,64 +918,12 @@ unsafe fn device_file(file: Sexp) -> Option<String> {
         .map(|name| name.into_owned())
 }
 
-/// Where a device opened on `file` writes page `page`. A pipe (`|command`) writes no file.
-fn output_path(file: &str, page: usize) -> Option<String> {
-    (!file.starts_with('|')).then(|| file_for_page(file, page))
-}
-
-struct DeviceSpec {
-    name: &'static str,
-    file: Option<String>,
-    /// A bitmap device writes its file when a page is finished, so one that never draws
-    /// leaves no file; a vector device opens its file at once.
-    bitmap: bool,
-    format: Option<Format>,
-    size: [f64; 2],
-    unit_inches: f64,
-    y_down: bool,
-    pointsize: f64,
-    bg: Colour,
-    fg: Colour,
-    title: String,
-}
-
-unsafe fn open_device(spec: DeviceSpec) -> R<Sexp> {
-    if !(spec.size[0] > 0.0 && spec.size[1] > 0.0)
-        || !spec.pointsize.is_finite()
-        || spec.pointsize <= 0.0
-    {
-        return Err(error(format!("unable to start {} device", spec.name)));
-    }
-    if !spec.bitmap
-        && let Some(path) = spec.file.as_deref().and_then(|file| output_path(file, 1))
-    {
-        std::fs::File::create(&path).map_err(|_| error(format!("cannot open file '{path}'")))?;
-    }
-    add_device(Device {
-        name: spec.name,
-        file: spec.file,
-        size: spec.size,
-        unit_inches: spec.unit_inches,
-        y_down: spec.y_down,
-        pointsize: spec.pointsize,
-        display_list: false,
-        started: false,
-        pars: Pars::new(spec.pointsize, spec.bg, spec.fg),
-        format: spec.format,
-        pages: Vec::new(),
-        clip: None,
-        title: spec.title,
-    })?;
-    Ok(nil())
-}
-
 /// `pdf(file, paper, family, encoding, bg, fg, width, height, pointsize, ...)`.
 unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
     let size = paper_device_size(call.arg(1), call.arg(6), call.arg(7), false);
-    let spec = DeviceSpec {
+    let spec = graphics_render::DeviceSpec {
         name: "pdf",
         file: device_file(call.arg(0)),
-        bitmap: false,
         format: Some(Format::Pdf),
         size,
         unit_inches: 1.0 / 72.0,
@@ -943,19 +933,20 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
         fg: colour_arg(call.arg(5), BLACK)?,
         title: values::first_string(call.arg(11))
             .map_or_else(String::new, |title| title.into_owned()),
+        quality: 75,
     };
-    open_device(spec)
+    graphics_render::open_device(spec)?;
+    Ok(nil())
 }
 
 /// `postscript(file, paper, family, encoding, bg, fg, width, height, horizontal, pointsize,
 /// ...)`.
 unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
-    let spec = DeviceSpec {
+    let spec = graphics_render::DeviceSpec {
         name: "postscript",
         file: device_file(call.arg(0)),
-        bitmap: false,
-        format: None,
+        format: Some(Format::Postscript),
         size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -963,17 +954,18 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
         title: String::new(),
+        quality: 75,
     };
-    open_device(spec)
+    graphics_render::open_device(spec)?;
+    Ok(nil())
 }
 
 /// `xfig(file, paper, family, bg, fg, width, height, horizontal, pointsize, ...)`.
 unsafe fn do_xfig(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(7)) == 1;
-    let spec = DeviceSpec {
+    let spec = graphics_render::DeviceSpec {
         name: "xfig",
         file: device_file(call.arg(0)),
-        bitmap: false,
         format: None,
         size: paper_device_size(call.arg(1), call.arg(5), call.arg(6), horizontal),
         unit_inches: 1.0 / 72.0,
@@ -982,16 +974,17 @@ unsafe fn do_xfig(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(3), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(4), BLACK)?,
         title: String::new(),
+        quality: 75,
     };
-    open_device(spec)
+    graphics_render::open_device(spec)?;
+    Ok(nil())
 }
 
 /// `pictex(file, bg, fg, width, height, debug)`, whose text is always ten points.
 unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
-    let spec = DeviceSpec {
+    let spec = graphics_render::DeviceSpec {
         name: "pictex",
         file: device_file(call.arg(0)),
-        bitmap: false,
         format: None,
         size: [
             values::as_real_scalar(call.arg(3)),
@@ -1003,8 +996,10 @@ unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(1), WHITE)?,
         fg: colour_arg(call.arg(2), BLACK)?,
         title: String::new(),
+        quality: 75,
     };
-    open_device(spec)
+    graphics_render::open_device(spec)?;
+    Ok(nil())
 }
 
 /// `devCairo(file, type, width, height, pointsize, bg, res, ...)`: the bitmap devices take
@@ -1012,10 +1007,10 @@ unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
     let (name, bitmap, format) = match values::as_integer_scalar(call.arg(1)) {
         2 | 5 => ("png", true, Some(Format::Png)),
-        3 => ("jpeg", true, None),
+        3 => ("jpeg", true, Some(Format::Jpeg)),
         4 => ("svg", false, Some(Format::Svg)),
         6 => ("cairo_pdf", false, Some(Format::Pdf)),
-        7 => ("cairo_ps", false, None),
+        7 => ("cairo_ps", false, Some(Format::Postscript)),
         8 => ("tiff", true, Some(Format::Tiff)),
         9 => ("bmp", true, Some(Format::Bmp)),
         _ => return Err(error("invalid type for cairo device")),
@@ -1030,10 +1025,9 @@ unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
         values::as_real_scalar(call.arg(2)),
         values::as_real_scalar(call.arg(3)),
     ];
-    let spec = DeviceSpec {
+    let spec = graphics_render::DeviceSpec {
         name,
         file: device_file(call.arg(0)),
-        bitmap,
         format,
         size: pixels.map(|count| count / resolution),
         unit_inches: 1.0 / resolution,
@@ -1042,8 +1036,10 @@ unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(5), WHITE)?,
         fg: BLACK,
         title: String::new(),
+        quality: jpeg_quality(values::as_integer_scalar(call.arg(8))),
     };
-    open_device(spec)
+    graphics_render::open_device(spec)?;
+    Ok(nil())
 }
 
 /// `X11(display, width, height, pointsize, ..., bg, ..., res, ...)`: only the bitmap files
@@ -1057,15 +1053,21 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
     };
     let (name, format) = match kind {
         "png" => ("png", Some(Format::Png)),
-        "jpeg" => ("jpeg", None),
+        "jpeg" => ("jpeg", Some(Format::Jpeg)),
         "bmp" => ("bmp", Some(Format::Bmp)),
         "tiff" => ("tiff", Some(Format::Tiff)),
         _ => return Err(error("unable to start device X11")),
     };
-    let file = rest
-        .rsplit_once(':')
+    // `jpeg` and `tiff` put their quality or compression before the file name.
+    let (option, file) = rest
+        .split_once(':')
         .filter(|_| kind != "png" && kind != "bmp")
-        .map_or(rest, |(_, file)| file);
+        .unwrap_or(("", rest));
+    let quality = if kind == "jpeg" {
+        jpeg_quality(option.parse().unwrap_or(75))
+    } else {
+        75
+    };
     let resolution = values::as_real_scalar(call.arg(10));
     let resolution = if resolution.is_finite() && resolution > 0.0 {
         resolution
@@ -1076,10 +1078,9 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
         values::as_real_scalar(call.arg(1)),
         values::as_real_scalar(call.arg(2)),
     ];
-    let spec = DeviceSpec {
+    let spec = graphics_render::DeviceSpec {
         name,
         file: Some(file.to_owned()).filter(|file| !file.is_empty()),
-        bitmap: true,
         format,
         size: pixels.map(|count| count / resolution),
         unit_inches: 1.0 / resolution,
@@ -1088,209 +1089,322 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(7), WHITE)?,
         fg: BLACK,
         title: String::new(),
+        quality,
     };
-    open_device(spec)
+    graphics_render::open_device(spec)?;
+    Ok(nil())
+}
+
+/// A `quality` argument as a JPEG quality from 1 to 100, 75 when it is missing.
+fn jpeg_quality(quality: i32) -> u8 {
+    if quality == NA_INTEGER {
+        75
+    } else {
+        quality.clamp(1, 100) as u8
+    }
 }
 
 // grDevices: the device list.
 
+/// A device argument as a slot in the device table, the null device for anything else.
+unsafe fn device_slot(value: Sexp) -> usize {
+    let number = values::as_integer_scalar(value);
+    if number == NA_INTEGER || number < 1 {
+        0
+    } else {
+        (number as usize - 1).min(graphics_engine::MAX_DEVICES - 1)
+    }
+}
+
+unsafe fn device_result(slot: usize) -> R<Sexp> {
+    scalar_integer(slot as i32 + 1)
+}
+
 unsafe fn do_dev_cur(_: &NativeCall<'_>) -> R<Sexp> {
-    device_result(DEVICES.with(|devices| devices.borrow().current))
+    device_result(graphics_engine::current_number())
 }
 
 unsafe fn do_dev_next(call: &NativeCall<'_>) -> R<Sexp> {
-    let from = device_number(call.arg(0));
-    device_result(DEVICES.with(|devices| next_device(&devices.borrow(), from)))
+    if values::as_integer_scalar(call.arg(0)) == NA_INTEGER {
+        return Err(error("NA argument is invalid"));
+    }
+    device_result(graphics_engine::next_device(device_slot(call.arg(0))))
 }
 
 unsafe fn do_dev_prev(call: &NativeCall<'_>) -> R<Sexp> {
-    let from = device_number(call.arg(0));
-    device_result(DEVICES.with(|devices| previous_device(&devices.borrow(), from)))
+    if values::as_integer_scalar(call.arg(0)) == NA_INTEGER {
+        return Err(error("NA argument is invalid"));
+    }
+    device_result(graphics_engine::previous_device(device_slot(call.arg(0))))
 }
 
 /// `dev.set(which)`: makes `which` current, or the next open device after it when it is not
 /// open.
 unsafe fn do_dev_set(call: &NativeCall<'_>) -> R<Sexp> {
-    let wanted = device_number(call.arg(0));
-    let slot = DEVICES.with(|devices| {
-        let mut devices = devices.borrow_mut();
-        let slot = if wanted > 0 && devices.slots[wanted].is_some() {
-            wanted
-        } else {
-            next_device(&devices, wanted)
-        };
-        devices.current = slot;
-        slot
-    });
-    publish_devices()?;
-    if slot == 0 {
-        // GNU R selects the null device and then asks for the current device, which starts
-        // the default one, yet still reports the null device as the one selected.
-        open_default_device()?;
-    }
-    device_result(slot)
+    device_result(graphics_engine::select_device(device_slot(call.arg(0)))?)
 }
 
-/// `dev.off(which)`: closes `which` and writes what was drawn on it; when it was current,
-/// the next open device becomes current.
+/// `dev.off(which)`: closes `which`, which writes its file; when it was current, the next open
+/// device becomes current.
 unsafe fn do_dev_off(call: &NativeCall<'_>) -> R<Sexp> {
-    let which = device_number(call.arg(0));
-    let closed = DEVICES.with(|devices| {
-        let mut devices = devices.borrow_mut();
-        let closed = if which > 0 {
-            devices.slots[which].take()
-        } else {
-            None
-        };
-        if closed.is_some() && devices.current == which {
-            devices.current = next_device(&devices, which);
-        }
-        closed
-    });
-    publish_devices()?;
-    if let Some(device) = closed {
-        write_device(&device)?;
-    }
+    graphics_engine::kill_device(device_slot(call.arg(0)))?;
     Ok(nil())
 }
 
-/// Closes every open device, writing its pages, as GNU R does when a session ends.
-pub unsafe fn close_all_devices() -> R<()> {
-    let devices = DEVICES.with(|devices| {
-        let mut devices = devices.borrow_mut();
-        devices.current = 0;
-        devices
-            .slots
-            .iter_mut()
-            .filter_map(Option::take)
-            .collect::<Vec<_>>()
-    });
-    publish_devices()?;
-    for device in &devices {
-        write_device(device)?;
+/// The current device's extent `[left, right, bottom, top]` in device units, as its `size`
+/// callback reports it.
+unsafe fn device_extent() -> R<[f64; 4]> {
+    let dd = graphics_engine::current_device()?;
+    let dev = (*dd).dev;
+    let [mut left, mut right, mut bottom, mut top] =
+        [(*dev).left, (*dev).right, (*dev).bottom, (*dev).top];
+    if let Some(size) = (*dev).size {
+        guarded(|| size(&mut left, &mut right, &mut bottom, &mut top, dev))?;
     }
-    Ok(())
-}
-
-/// Renders a closed device's pages into its file. A PDF is written even without pages, as
-/// GNU R writes one for a device nothing was drawn on, but a bitmap device writes one file per
-/// page and so nothing when it has none.
-unsafe fn write_device(device: &Device) -> R<()> {
-    let (Some(format), Some(file)) = (device.format, device.file.as_deref()) else {
-        return Ok(());
-    };
-    if file.starts_with('|') {
-        return Ok(());
-    }
-    write_pages(
-        format,
-        file,
-        &device.pages,
-        device.size,
-        1.0 / device.unit_inches,
-        &device.title,
-    )
-    .map_err(|failure| {
-        error(format!(
-            "cannot write file '{}': {failure}",
-            file_for_page(file, 1)
-        ))
-    })
+    Ok([left, right, bottom, top])
 }
 
 /// `dev.size()`: the device's width and height in device units.
 unsafe fn do_dev_size(_: &NativeCall<'_>) -> R<Sexp> {
-    let size = with_device(|device| Ok(device.size.map(|inches| inches / device.unit_inches)))?;
-    values::real_vector(&size)
+    let [left, right, bottom, top] = device_extent()?;
+    values::real_vector(&[(right - left).abs(), (bottom - top).abs()])
 }
 
 unsafe fn do_dev_up(_: &NativeCall<'_>) -> R<Sexp> {
-    let up = with_device(|device| Ok(!device.y_down))?;
-    scalar_bool(up)
+    let [_, _, bottom, top] = device_extent()?;
+    scalar_bool(top > bottom)
 }
 
-/// `dev.control(enable)`: turns the display list on or off.
+/// `dev.control(enable)`: empties the display list and turns it on or off.
 unsafe fn do_dev_control(call: &NativeCall<'_>) -> R<Sexp> {
-    let enable = values::as_logical_scalar(call.arg(0)) == 1;
-    let old = with_device(|device| Ok(std::mem::replace(&mut device.display_list, enable)))?;
-    scalar_bool(old)
+    let enable = values::as_logical_scalar(call.arg(0));
+    if enable == NA_INTEGER {
+        return Err(error("invalid argument"));
+    }
+    let dd = graphics_engine::current_device()?;
+    graphics_engine::init_display_list(dd)?;
+    (*dd).display_list_on = c_int::from(enable != 0);
+    scalar_bool(enable != 0)
 }
 
 unsafe fn do_dev_display_list(_: &NativeCall<'_>) -> R<Sexp> {
-    let enabled = with_device(|device| Ok(device.display_list))?;
-    scalar_bool(enabled)
+    let dd = graphics_engine::current_device()?;
+    scalar_bool((*dd).display_list_on != 0)
 }
 
-/// `dev.capabilities()`: the codes `dev.capabilities` decodes, for a device that supports
-/// semi-transparency and rasters but none of the newer features, since ry never draws them.
-unsafe fn do_dev_capabilities(_: &NativeCall<'_>) -> R<Sexp> {
-    with_device(|_| Ok(()))?;
-    let codes: [&[i32]; 13] = [
-        &[2],
-        &[3],
-        &[2],
-        &[1],
-        &[1],
-        &[0, 0, 0, 0],
-        &[0],
-        &[0],
-        &[0],
-        &[0],
-        &[0],
-        &[0],
-        &[0],
+/// `dev.copy()`'s last step: replays device `which`'s display list on the current device.
+unsafe fn do_dev_copy(call: &NativeCall<'_>) -> R<Sexp> {
+    graphics_engine::copy_display_list(device_slot(call.arg(0)))?;
+    Ok(nil())
+}
+
+/// `dev.capabilities()`: fills the list `dev.capabilities` passes in, in the order of GNU R's
+/// `R_GE_capability_*` indices, with what the device declares; a device of a recent enough
+/// version then refines the list itself.
+unsafe fn do_dev_capabilities(call: &NativeCall<'_>) -> R<Sexp> {
+    const CAPABILITIES: usize = 13;
+    let dd = graphics_engine::current_device()?;
+    let dev = &*(*dd).dev;
+    let given = call.arg(0);
+    let capabilities = if given.kind() == SexpType::List && length(given) >= CAPABILITIES {
+        given
+    } else {
+        alloc(SexpType::List, CAPABILITIES)?
+    };
+    crate::heap().root(capabilities);
+    let declared = |present: bool, value: c_int| if present { value } else { 1 };
+    let group = if dev.device_version < graphics_engine::VERSION_GROUP {
+        0
+    } else {
+        NA_INTEGER
+    };
+    let glyphs = if dev.device_version < graphics_engine::VERSION_GLYPHS {
+        0
+    } else {
+        NA_INTEGER
+    };
+    let codes: [&[i32]; CAPABILITIES] = [
+        &[dev.have_transparency],
+        &[dev.have_transparent_bg],
+        &[declared(dev.raster.is_some(), dev.have_raster)],
+        &[declared(dev.cap.is_some(), dev.have_capture)],
+        &[declared(dev.locator.is_some(), dev.have_locator)],
+        &[
+            dev.can_gen_mouse_down,
+            dev.can_gen_mouse_move,
+            dev.can_gen_mouse_up,
+            dev.can_gen_keybd,
+        ],
+        &[NA_INTEGER],
+        &[NA_INTEGER],
+        &[NA_INTEGER],
+        &[group],
+        &[group],
+        &[group],
+        &[glyphs],
     ];
-    let result = alloc(SexpType::List, codes.len())?;
-    crate::heap().root(result);
     for (index, code) in codes.iter().enumerate() {
-        values::set_elt(result, index, values::integer_vector(code)?);
+        values::set_elt(capabilities, index, values::integer_vector(code)?);
     }
-    Ok(result)
+    match dev.capabilities {
+        Some(refine) if dev.device_version >= graphics_engine::VERSION_GROUP => {
+            guarded_sexp(|| refine(capabilities))
+        }
+        _ => Ok(capabilities),
+    }
 }
 
-/// GNU R 4.3's `R_GE_version`, which a recorded plot carries as `engineVersion`.
-const GRAPHICS_ENGINE_VERSION: i32 = 16;
+/// `dev.capture(native)`: the device's image as a `nativeRaster`, or as a matrix of colour
+/// names; `NULL` when the device cannot capture.
+unsafe fn do_dev_capture(call: &NativeCall<'_>) -> R<Sexp> {
+    let native = values::as_logical_scalar(call.arg(0)) == 1;
+    let dd = graphics_engine::current_device()?;
+    let raster = graphics_engine::capture(dd)?;
+    if raster == nil() {
+        return Ok(raster);
+    }
+    crate::heap().root(raster);
+    if native {
+        values::set_attr(raster, symbols().class, scalar_string("nativeRaster")?)?;
+        return Ok(raster);
+    }
+    let dim = values::get_attr(raster, symbols().dim);
+    let [rows, columns] = match values::ints(dim) {
+        [rows, columns] if *rows >= 0 && *columns >= 0 => [*rows as usize, *columns as usize],
+        _ => return Err(error("invalid captured raster")),
+    };
+    let pixels = values::ints(raster);
+    // A raster is stored by rows and a matrix by columns.
+    let mut names = vec![String::new(); rows * columns];
+    for (index, pixel) in pixels.iter().enumerate().take(rows * columns) {
+        let (row, column) = (index / columns, index % columns);
+        names[column * rows + row] = colour_name(*pixel as Colour);
+    }
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let image = string_vector(&names)?;
+    crate::heap().root(image);
+    values::set_attr(
+        image,
+        symbols().dim,
+        values::integer_vector(&[rows as i32, columns as i32])?,
+    )?;
+    Ok(image)
+}
 
-/// `recordPlot()`'s snapshot, shaped like GNU R's: the display list, then one raw vector of
-/// state per graphics system (only base graphics here), with the engine version attached.
-/// Nothing is ever drawn, so the display list is always `NULL`, which is how code such as
-/// evaluate's plot capture tells that no plot was made. The state is empty because replaying
-/// an empty display list restores nothing.
 unsafe fn do_get_snapshot(_: &NativeCall<'_>) -> R<Sexp> {
-    with_device(|_| Ok(()))?;
-    let state = alloc(SexpType::Raw, 0)?;
-    crate::heap().root(state);
-    values::set_attr(
-        state,
-        values::install("pkgName")?,
-        scalar_string("graphics")?,
-    )?;
-    let snapshot = values::list_vector(&[nil(), state])?;
-    crate::heap().root(snapshot);
-    values::set_attr(
-        snapshot,
-        values::install("engineVersion")?,
-        scalar_integer(GRAPHICS_ENGINE_VERSION)?,
-    )?;
-    Ok(snapshot)
+    graphics_engine::create_snapshot(graphics_engine::current_device()?)
 }
 
-/// `replayPlot(snapshot)`: replaying an empty display list draws nothing. A snapshot GNU R
-/// recorded with drawing on its display list cannot be replayed, since its state is GNU R's
-/// in-memory layout.
 unsafe fn do_play_snapshot(call: &NativeCall<'_>) -> R<Sexp> {
-    with_device(|_| Ok(()))?;
-    let snapshot = call.arg(0);
-    if snapshot.kind() == SexpType::List && length(snapshot) > 0 && snapshot.element(0) == nil() {
+    graphics_engine::play_snapshot(call.arg(0), graphics_engine::current_device()?)?;
+    Ok(nil())
+}
+
+/// `dev.hold()` and `dev.flush()`: the device's hold level after the change, 0 for a device
+/// that does not buffer.
+unsafe fn do_hold_flush(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    let dev = (*dd).dev;
+    let level = values::as_integer_scalar(call.arg(0));
+    let level = match (*dev).holdflush {
+        Some(holdflush) if level != NA_INTEGER => guarded(|| holdflush(dev, level))?,
+        _ => 0,
+    };
+    scalar_integer(level)
+}
+
+/// `devAskNewPage(ask)`: the current device's setting before the call.
+unsafe fn do_ask_new_page(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    let old = graphics_engine::ask(dd);
+    let ask = call.arg(0);
+    if ask == nil() {
+        crate::interp().visible = true;
+    } else {
+        let value = values::as_logical_scalar(ask);
+        if value == NA_INTEGER {
+            return Err(error("invalid 'ask' argument"));
+        }
+        graphics_engine::set_ask(dd, value == 1);
+        crate::interp().visible = false;
+    }
+    scalar_bool(old)
+}
+
+// grDevices: patterns, clipping paths, masks and groups, which the device implements. While
+// the device collects a path's outline, none of them applies.
+
+unsafe fn do_set_pattern(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    let dev = (*dd).dev;
+    match (*dev).set_pattern {
+        Some(set_pattern) if (*dd).appending == 0 => guarded_sexp(|| set_pattern(call.arg(0), dev)),
+        _ => Ok(nil()),
+    }
+}
+
+unsafe fn do_set_clip_path(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    if (*dd).appending != 0 {
+        crate::conditions::warning("Clipping path ignored (device is appending path)")?;
         return Ok(nil());
     }
-    Err(error(
-        "cannot replay a plot whose display list is not empty: ry does not draw yet",
-    ))
+    let dev = (*dd).dev;
+    let Some(set_clip_path) = (*dev).set_clip_path else {
+        return Ok(nil());
+    };
+    (*dd).appending = 1;
+    let result = guarded_sexp(|| set_clip_path(call.arg(0), call.arg(1), dev));
+    (*dd).appending = 0;
+    result
 }
 
-unsafe fn do_hold_flush(_: &NativeCall<'_>) -> R<Sexp> {
-    scalar_integer(0)
+unsafe fn do_set_mask(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    let mask = call.arg(0);
+    if (*dd).appending != 0 && mask != nil() {
+        crate::conditions::warning("Mask ignored (device is appending path)")?;
+        return Ok(nil());
+    }
+    let dev = (*dd).dev;
+    match (*dev).set_mask {
+        Some(set_mask) => guarded_sexp(|| set_mask(mask, call.arg(1), dev)),
+        None => Ok(nil()),
+    }
+}
+
+unsafe fn do_define_group(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    let dev = (*dd).dev;
+    if (*dev).device_version < graphics_engine::VERSION_GROUP {
+        return Ok(nil());
+    }
+    if (*dd).appending != 0 {
+        crate::conditions::warning("Group definition ignored (device is appending path)")?;
+        return Ok(nil());
+    }
+    let operator = values::as_integer_scalar(call.arg(1));
+    match (*dev).define_group {
+        Some(define_group) => {
+            guarded_sexp(|| define_group(call.arg(0), operator, call.arg(2), dev))
+        }
+        None => Ok(nil()),
+    }
+}
+
+unsafe fn do_use_group(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    let dev = (*dd).dev;
+    graphics_engine::mode(1, dd)?;
+    if (*dev).device_version >= graphics_engine::VERSION_GROUP {
+        if (*dd).appending != 0 {
+            crate::conditions::warning("Group use ignored (device is appending path)")?;
+        } else if let Some(use_group) = (*dev).use_group {
+            guarded(|| use_group(call.arg(0), call.arg(1), dev))?;
+        }
+    }
+    graphics_engine::mode(0, dd)?;
+    Ok(nil())
 }
 
 unsafe fn no_events(_: &NativeCall<'_>) -> R<Sexp> {
@@ -1430,7 +1544,8 @@ fn get_par(device: &Device, name: &str) -> Option<ParValue> {
         "ylog" => logical(pars.ylog),
         "adj" => real(&[pars.adj]),
         "ann" => logical(pars.ann),
-        "ask" => logical(pars.ask),
+        // SAFETY: base graphics' state lives as long as its device.
+        "ask" => logical(unsafe { graphics_engine::ask(device.dd) }),
         "bg" => text(colour_name(pars.bg)),
         "bty" => text(pars.bty.to_string()),
         "cex" => real(&[pars.cex]),
@@ -1447,7 +1562,7 @@ fn get_par(device: &Device, name: &str) -> Option<ParValue> {
         "cra" => real(
             &device
                 .char_inches()
-                .map(|inches| inches / device.unit_inches),
+                .map(|inches| inches / device.unit_inches()),
         ),
         "crt" => real(&[pars.crt]),
         "csi" => real(&[device.line_inches()]),
@@ -1457,7 +1572,7 @@ fn get_par(device: &Device, name: &str) -> Option<ParValue> {
             let extent = device.user_extent();
             real(&[cin[0] / pin[0] * extent[0], cin[1] / pin[1] * extent[1]])
         }
-        "din" => real(&device.size),
+        "din" => real(&device.size()),
         "err" => ParValue::Integer(vec![pars.err]),
         "family" => text(pars.family.clone()),
         "fg" => text(colour_name(pars.fg)),
@@ -1707,13 +1822,14 @@ unsafe fn set_par(
     warnings: &mut Vec<String>,
 ) -> R<()> {
     let background = device.pars.bg;
+    let dd = device.dd;
     let pars = &mut device.pars;
     match name {
         "xlog" => pars.xlog = par_flag(value, name)?,
         "ylog" => pars.ylog = par_flag(value, name)?,
         "adj" => pars.adj = par_real(value, name)?,
         "ann" => pars.ann = par_flag(value, name)?,
-        "ask" => pars.ask = par_flag(value, name)?,
+        "ask" => graphics_engine::set_ask(dd, par_flag(value, name)?),
         "bg" => {
             pars.bg = par_colour(value, name, background)?;
             pars.new = false;
@@ -1962,18 +2078,27 @@ unsafe fn par_font(value: Sexp, name: &str) -> R<i32> {
 
 /// `plot.new()`: moves to the next figure unless `par(new = TRUE)`, and resets the user
 /// coordinates to the unit square.
-unsafe fn do_plot_new(_: &NativeCall<'_>) -> R<Sexp> {
-    with_device(|device| {
+unsafe fn do_plot_new(call: &NativeCall<'_>) -> R<Sexp> {
+    let dd = graphics_engine::current_device()?;
+    // A replay of the display list calls with no call, and must neither empty nor extend it.
+    let recording = call.call != nil() && (*dd).record_graphics != 0;
+    let state = base_state(dd)?;
+    // A new page starts when the last figure of the layout is done, or on the first plot.
+    let layout = &(*state).pars.layout;
+    if !(*state).started || (!(*state).pars.new && layout.current == layout.figures) {
+        if recording {
+            graphics_engine::init_display_list(dd)?;
+        }
+        let mut gc = GEContext::new();
+        gc.fill = (*state).pars.bg as c_int;
+        graphics_engine::new_page(&gc, dd)?;
+    }
+    // Marking the device dirty keeps grid's first drawing from starting a page of its own.
+    graphics_engine::dirty_device(dd);
+    let device = &mut *state;
+    {
         // Over a plot kept with `par(new = TRUE)`, the regions stay as they were laid out,
         // even when `cex` or `pty` changed since.
-        // A new page starts when the last figure of the layout is done, or on the first plot.
-        let layout = &device.pars.layout;
-        if !device.started || (!device.pars.new && layout.current == layout.figures) {
-            device.pages.push(Page {
-                background: device.pars.bg,
-                items: Vec::new(),
-            });
-        }
         device.clip = None;
         if !device.pars.new || !device.started {
             let pars = &mut device.pars;
@@ -2011,8 +2136,8 @@ unsafe fn do_plot_new(_: &NativeCall<'_>) -> R<Sexp> {
         pars.usr = [x[0], x[1], y[0], y[1]];
         pars.xaxp = xaxp;
         pars.yaxp = yaxp;
-        Ok(())
-    })?;
+    }
+    graphics_engine::record_call(call.foreign, dd)?;
     Ok(nil())
 }
 
@@ -2313,28 +2438,462 @@ const HELVETICA_BOLD_WIDTHS: [u16; 95] = [
     278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
 ];
 
+/// The kerning pairs of Helvetica and Helvetica-Bold between printable ASCII characters, in
+/// thousandths of the font size and sorted by pair, from the same font metrics. GNU R's pdf and
+/// PostScript devices apply them to string widths.
+const HELVETICA_KERNING: [(u8, u8, i16); 215] = [
+    (32, 84, -50),
+    (32, 86, -50),
+    (32, 87, -40),
+    (32, 89, -90),
+    (32, 96, -60),
+    (39, 32, -70),
+    (39, 39, -57),
+    (39, 100, -50),
+    (39, 114, -50),
+    (39, 115, -50),
+    (44, 39, -100),
+    (46, 32, -60),
+    (46, 39, -100),
+    (58, 32, -50),
+    (59, 32, -50),
+    (65, 67, -30),
+    (65, 71, -30),
+    (65, 79, -30),
+    (65, 81, -30),
+    (65, 84, -120),
+    (65, 85, -50),
+    (65, 86, -70),
+    (65, 87, -50),
+    (65, 89, -100),
+    (65, 117, -30),
+    (65, 118, -40),
+    (65, 119, -40),
+    (65, 121, -40),
+    (66, 44, -20),
+    (66, 46, -20),
+    (66, 85, -10),
+    (67, 44, -30),
+    (67, 46, -30),
+    (68, 44, -70),
+    (68, 46, -70),
+    (68, 65, -40),
+    (68, 86, -70),
+    (68, 87, -40),
+    (68, 89, -90),
+    (70, 44, -150),
+    (70, 46, -150),
+    (70, 65, -80),
+    (70, 97, -50),
+    (70, 101, -30),
+    (70, 111, -30),
+    (70, 114, -45),
+    (74, 44, -30),
+    (74, 46, -30),
+    (74, 65, -20),
+    (74, 97, -20),
+    (74, 117, -20),
+    (75, 79, -50),
+    (75, 101, -40),
+    (75, 111, -40),
+    (75, 117, -30),
+    (75, 121, -50),
+    (76, 39, -160),
+    (76, 84, -110),
+    (76, 86, -110),
+    (76, 87, -70),
+    (76, 89, -140),
+    (76, 121, -30),
+    (79, 44, -40),
+    (79, 46, -40),
+    (79, 65, -20),
+    (79, 84, -40),
+    (79, 86, -50),
+    (79, 87, -30),
+    (79, 88, -60),
+    (79, 89, -70),
+    (80, 44, -180),
+    (80, 46, -180),
+    (80, 65, -120),
+    (80, 97, -40),
+    (80, 101, -50),
+    (80, 111, -50),
+    (81, 85, -10),
+    (82, 79, -20),
+    (82, 84, -30),
+    (82, 85, -40),
+    (82, 86, -50),
+    (82, 87, -30),
+    (82, 89, -50),
+    (83, 44, -20),
+    (83, 46, -20),
+    (84, 44, -120),
+    (84, 45, -140),
+    (84, 46, -120),
+    (84, 58, -20),
+    (84, 59, -20),
+    (84, 65, -120),
+    (84, 79, -40),
+    (84, 97, -120),
+    (84, 101, -120),
+    (84, 111, -120),
+    (84, 114, -120),
+    (84, 117, -120),
+    (84, 119, -120),
+    (84, 121, -120),
+    (85, 44, -40),
+    (85, 46, -40),
+    (85, 65, -40),
+    (86, 44, -125),
+    (86, 45, -80),
+    (86, 46, -125),
+    (86, 58, -40),
+    (86, 59, -40),
+    (86, 65, -80),
+    (86, 71, -40),
+    (86, 79, -40),
+    (86, 97, -70),
+    (86, 101, -80),
+    (86, 111, -80),
+    (86, 117, -70),
+    (87, 44, -80),
+    (87, 45, -40),
+    (87, 46, -80),
+    (87, 65, -50),
+    (87, 79, -20),
+    (87, 97, -40),
+    (87, 101, -30),
+    (87, 111, -30),
+    (87, 117, -30),
+    (87, 121, -20),
+    (89, 44, -140),
+    (89, 45, -140),
+    (89, 46, -140),
+    (89, 58, -60),
+    (89, 59, -60),
+    (89, 65, -110),
+    (89, 79, -85),
+    (89, 97, -140),
+    (89, 101, -140),
+    (89, 105, -20),
+    (89, 111, -140),
+    (89, 117, -110),
+    (96, 96, -57),
+    (97, 118, -20),
+    (97, 119, -20),
+    (97, 121, -30),
+    (98, 44, -40),
+    (98, 46, -40),
+    (98, 98, -10),
+    (98, 108, -20),
+    (98, 117, -20),
+    (98, 118, -20),
+    (98, 121, -20),
+    (99, 44, -15),
+    (99, 107, -20),
+    (101, 44, -15),
+    (101, 46, -15),
+    (101, 118, -30),
+    (101, 119, -20),
+    (101, 120, -30),
+    (101, 121, -20),
+    (102, 39, 50),
+    (102, 44, -30),
+    (102, 46, -30),
+    (102, 97, -30),
+    (102, 101, -30),
+    (102, 111, -30),
+    (103, 114, -10),
+    (104, 121, -30),
+    (107, 101, -20),
+    (107, 111, -20),
+    (109, 117, -10),
+    (109, 121, -15),
+    (110, 117, -10),
+    (110, 118, -20),
+    (110, 121, -15),
+    (111, 44, -40),
+    (111, 46, -40),
+    (111, 118, -15),
+    (111, 119, -15),
+    (111, 120, -30),
+    (111, 121, -30),
+    (112, 44, -35),
+    (112, 46, -35),
+    (112, 121, -30),
+    (114, 44, -50),
+    (114, 46, -50),
+    (114, 58, 30),
+    (114, 59, 30),
+    (114, 97, -10),
+    (114, 105, 15),
+    (114, 107, 15),
+    (114, 108, 15),
+    (114, 109, 25),
+    (114, 110, 25),
+    (114, 112, 30),
+    (114, 116, 40),
+    (114, 117, 15),
+    (114, 118, 30),
+    (114, 121, 30),
+    (115, 44, -15),
+    (115, 46, -15),
+    (115, 119, -30),
+    (118, 44, -80),
+    (118, 46, -80),
+    (118, 97, -25),
+    (118, 101, -25),
+    (118, 111, -25),
+    (119, 44, -60),
+    (119, 46, -60),
+    (119, 97, -15),
+    (119, 101, -10),
+    (119, 111, -10),
+    (120, 101, -30),
+    (121, 44, -100),
+    (121, 46, -100),
+    (121, 97, -20),
+    (121, 101, -20),
+    (121, 111, -20),
+    (122, 101, -15),
+    (122, 111, -15),
+];
+
+const HELVETICA_BOLD_KERNING: [(u8, u8, i16); 203] = [
+    (32, 84, -100),
+    (32, 86, -80),
+    (32, 87, -80),
+    (32, 89, -120),
+    (32, 96, -60),
+    (39, 32, -80),
+    (39, 39, -46),
+    (39, 100, -80),
+    (39, 108, -20),
+    (39, 114, -40),
+    (39, 115, -60),
+    (39, 118, -20),
+    (44, 32, -40),
+    (44, 39, -120),
+    (46, 32, -40),
+    (46, 39, -120),
+    (58, 32, -40),
+    (59, 32, -40),
+    (65, 67, -40),
+    (65, 71, -50),
+    (65, 79, -40),
+    (65, 81, -40),
+    (65, 84, -90),
+    (65, 85, -50),
+    (65, 86, -80),
+    (65, 87, -60),
+    (65, 89, -110),
+    (65, 117, -30),
+    (65, 118, -40),
+    (65, 119, -30),
+    (65, 121, -30),
+    (66, 65, -30),
+    (66, 85, -10),
+    (68, 44, -30),
+    (68, 46, -30),
+    (68, 65, -40),
+    (68, 86, -40),
+    (68, 87, -40),
+    (68, 89, -70),
+    (70, 44, -100),
+    (70, 46, -100),
+    (70, 65, -80),
+    (70, 97, -20),
+    (74, 44, -20),
+    (74, 46, -20),
+    (74, 65, -20),
+    (74, 117, -20),
+    (75, 79, -30),
+    (75, 101, -15),
+    (75, 111, -35),
+    (75, 117, -30),
+    (75, 121, -40),
+    (76, 39, -140),
+    (76, 84, -90),
+    (76, 86, -110),
+    (76, 87, -80),
+    (76, 89, -120),
+    (76, 121, -30),
+    (79, 44, -40),
+    (79, 46, -40),
+    (79, 65, -50),
+    (79, 84, -40),
+    (79, 86, -50),
+    (79, 87, -50),
+    (79, 88, -50),
+    (79, 89, -70),
+    (80, 44, -120),
+    (80, 46, -120),
+    (80, 65, -100),
+    (80, 97, -30),
+    (80, 101, -30),
+    (80, 111, -40),
+    (81, 44, 20),
+    (81, 46, 20),
+    (81, 85, -10),
+    (82, 79, -20),
+    (82, 84, -20),
+    (82, 85, -20),
+    (82, 86, -50),
+    (82, 87, -40),
+    (82, 89, -50),
+    (84, 44, -80),
+    (84, 45, -120),
+    (84, 46, -80),
+    (84, 58, -40),
+    (84, 59, -40),
+    (84, 65, -90),
+    (84, 79, -40),
+    (84, 97, -80),
+    (84, 101, -60),
+    (84, 111, -80),
+    (84, 114, -80),
+    (84, 117, -90),
+    (84, 119, -60),
+    (84, 121, -60),
+    (85, 44, -30),
+    (85, 46, -30),
+    (85, 65, -50),
+    (86, 44, -120),
+    (86, 45, -80),
+    (86, 46, -120),
+    (86, 58, -40),
+    (86, 59, -40),
+    (86, 65, -80),
+    (86, 71, -50),
+    (86, 79, -50),
+    (86, 97, -60),
+    (86, 101, -50),
+    (86, 111, -90),
+    (86, 117, -60),
+    (87, 44, -80),
+    (87, 45, -40),
+    (87, 46, -80),
+    (87, 58, -10),
+    (87, 59, -10),
+    (87, 65, -60),
+    (87, 79, -20),
+    (87, 97, -40),
+    (87, 101, -35),
+    (87, 111, -60),
+    (87, 117, -45),
+    (87, 121, -20),
+    (89, 44, -100),
+    (89, 46, -100),
+    (89, 58, -50),
+    (89, 59, -50),
+    (89, 65, -110),
+    (89, 79, -70),
+    (89, 97, -90),
+    (89, 101, -80),
+    (89, 111, -100),
+    (89, 117, -100),
+    (96, 96, -46),
+    (97, 103, -10),
+    (97, 118, -15),
+    (97, 119, -15),
+    (97, 121, -20),
+    (98, 108, -10),
+    (98, 117, -20),
+    (98, 118, -20),
+    (98, 121, -20),
+    (99, 104, -10),
+    (99, 107, -20),
+    (99, 108, -20),
+    (99, 121, -10),
+    (100, 100, -10),
+    (100, 118, -15),
+    (100, 119, -15),
+    (100, 121, -15),
+    (101, 44, 10),
+    (101, 46, 20),
+    (101, 118, -15),
+    (101, 119, -15),
+    (101, 120, -15),
+    (101, 121, -15),
+    (102, 39, 30),
+    (102, 44, -10),
+    (102, 46, -10),
+    (102, 101, -10),
+    (102, 111, -20),
+    (103, 101, 10),
+    (103, 103, -10),
+    (104, 121, -20),
+    (107, 111, -15),
+    (108, 119, -15),
+    (108, 121, -15),
+    (109, 117, -20),
+    (109, 121, -30),
+    (110, 117, -10),
+    (110, 118, -40),
+    (110, 121, -20),
+    (111, 118, -20),
+    (111, 119, -15),
+    (111, 120, -30),
+    (111, 121, -20),
+    (112, 121, -15),
+    (114, 44, -60),
+    (114, 45, -20),
+    (114, 46, -60),
+    (114, 99, -20),
+    (114, 100, -20),
+    (114, 103, -15),
+    (114, 111, -20),
+    (114, 113, -20),
+    (114, 115, -15),
+    (114, 116, 20),
+    (114, 118, 10),
+    (114, 121, 10),
+    (115, 119, -15),
+    (118, 44, -80),
+    (118, 46, -80),
+    (118, 97, -20),
+    (118, 111, -30),
+    (119, 44, -40),
+    (119, 46, -40),
+    (119, 111, -20),
+    (120, 101, -10),
+    (121, 44, -80),
+    (121, 46, -80),
+    (121, 97, -30),
+    (121, 101, -10),
+    (121, 111, -25),
+    (122, 101, 10),
+];
+
 /// The height of a capital letter in Helvetica, in thousandths of the font size.
 const HELVETICA_CAP_HEIGHT: f64 = 718.0;
 
 /// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
 /// are bold).
 pub(crate) fn text_width_ems(line: &str, font: i32) -> f64 {
-    let widths = if font == 2 || font == 4 {
-        &HELVETICA_BOLD_WIDTHS
+    let (widths, kerning): (&[u16; 95], &[(u8, u8, i16)]) = if font == 2 || font == 4 {
+        (&HELVETICA_BOLD_WIDTHS, &HELVETICA_BOLD_KERNING)
     } else {
-        &HELVETICA_WIDTHS
+        (&HELVETICA_WIDTHS, &HELVETICA_KERNING)
     };
-    line.chars()
-        .map(|character| {
-            let code = character as usize;
-            let width = if (32..127).contains(&code) {
-                widths[code - 32]
-            } else {
-                556
-            };
-            f64::from(width) / 1000.0
-        })
-        .sum()
+    let ascii = |character: char| {
+        u8::try_from(character)
+            .ok()
+            .filter(|code| (32..127).contains(code))
+    };
+    let mut total = 0i32;
+    let mut previous = None;
+    for character in line.chars() {
+        let code = ascii(character);
+        total += code.map_or(556, |code| i32::from(widths[usize::from(code - 32)]));
+        if let (Some(left), Some(right)) = (previous, code)
+            && let Ok(found) = kerning.binary_search_by_key(&(left, right), |&(a, b, _)| (a, b))
+        {
+            total += i32::from(kerning[found].2);
+        }
+        previous = code;
+    }
+    f64::from(total) / 1000.0
 }
 
 /// The lines of each label of a `strwidth` or `text` argument: strings line by line, other
@@ -2419,27 +2978,24 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
                 pars.usr[1] - pars.usr[0],
             )
         };
-        let sizes: Vec<f64> = labels
-            .iter()
-            .map(|lines| {
-                let inches = if height {
-                    let extra = lines.len().saturating_sub(1) as f64 * line_inches;
-                    extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
-                } else {
-                    lines
-                        .iter()
-                        .map(|line| text_width_ems(line, font))
-                        .fold(0.0, f64::max)
-                        * points
-                        / 72.0
-                };
-                match units {
-                    1 => inches / plot_inches * user_range,
-                    2 => inches / figure_inches,
-                    _ => inches,
+        let mut sizes = Vec::with_capacity(labels.len());
+        for lines in &labels {
+            let inches = if height {
+                let extra = lines.len().saturating_sub(1) as f64 * line_inches;
+                extra + HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0
+            } else {
+                let mut widest: f64 = 0.0;
+                for line in lines {
+                    widest = widest.max(text_inches(device, line, cex, font)?);
                 }
-            })
-            .collect();
+                widest
+            };
+            sizes.push(match units {
+                1 => inches / plot_inches * user_range,
+                2 => inches / figure_inches,
+                _ => inches,
+            });
+        }
         Ok(sizes)
     })?;
     values::real_vector(&sizes)
@@ -2514,7 +3070,7 @@ fn axis_frames(device: &Device, vertical: bool) -> AxisFrames {
             device.pars.xlog
         },
         device: pick(extent),
-        size: device.size[axis],
+        size: device.size()[axis],
         figure_inches: device.figure_size()[axis],
         line_inches: device.pars.mex * device.line_inches(),
         char_inches: device.char_inches()[1] * device.pars.cex,
@@ -2762,18 +3318,69 @@ unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `xspline(x, y, shape, open, repEnds, draw, ...)`: without drawing, the points of the
-/// spline, which ry approximates by its control points.
+/// `xspline(x, y, shape, open, repEnds, draw, col, border, ...)`: draws the X-spline, or
+/// without drawing returns its points in user coordinates.
 unsafe fn do_xspline(call: &NativeCall<'_>) -> R<Sexp> {
-    with_plot(|_| Ok(()))?;
-    if values::as_logical_scalar(call.arg(5)) == 1 {
-        return Ok(nil());
+    let x = reals_of(call.arg(0))?;
+    let y = reals_of(call.arg(1))?;
+    let shapes = reals_of(call.arg(2))?;
+    let open = values::as_logical_scalar(call.arg(3)) != 0;
+    let repeat_ends = values::as_logical_scalar(call.arg(4)) != 0;
+    let draw = values::as_logical_scalar(call.arg(5)) == 1;
+    let (col, border) = (call.arg(6), call.arg(7));
+    let points = with_inline_pars(call, 8, |device| {
+        let pars = device.pars.clone();
+        let [x_axis, y_axis] = user_axes(device);
+        let x_inches: Vec<f64> = x.iter().map(|value| x_axis.inches(*value)).collect();
+        let y_inches: Vec<f64> = y.iter().map(|value| y_axis.inches(*value)).collect();
+        let (xs, ys) = graphics_engine::xspline_points(
+            &x_inches,
+            &y_inches,
+            &shapes,
+            open,
+            repeat_ends,
+            [1.0, 1.0],
+        );
+        if !draw {
+            return Ok(Some((
+                xs.iter()
+                    .map(|value| x_axis.user(*value))
+                    .collect::<Vec<f64>>(),
+                ys.iter()
+                    .map(|value| y_axis.user(*value))
+                    .collect::<Vec<f64>>(),
+            )));
+        }
+        let clip = clip_rect(device);
+        let fill = if open {
+            TRANSPARENT_WHITE
+        } else {
+            colour_at(col, 0, TRANSPARENT_WHITE, pars.bg)?
+        };
+        let outline = colour_at(border, 0, pars.fg, pars.bg)?;
+        let stroke = stroke_with(&pars, outline, pars.lty, pars.lwd);
+        push_shape(
+            device,
+            clip,
+            Shape::Path {
+                points: xs.iter().zip(&ys).map(|(x, y)| [*x, *y]).collect(),
+                closed: !open,
+                fill,
+                stroke: Some(stroke),
+            },
+        )?;
+        Ok(None)
+    })?;
+    match points {
+        Some((xs, ys)) => {
+            let x = values::real_vector(&xs)?;
+            crate::heap().root(x);
+            let y = values::real_vector(&ys)?;
+            crate::heap().root(y);
+            values::named_list(&[("x", x), ("y", y)])
+        }
+        None => Ok(nil()),
     }
-    let x = coerce_vector(call.arg(0), SexpType::Real)?;
-    crate::heap().root(x);
-    let y = coerce_vector(call.arg(1), SexpType::Real)?;
-    crate::heap().root(y);
-    values::named_list(&[("x", x), ("y", y)])
 }
 
 /// `locator` and `identify` on a device without a pointer: nothing is located.
@@ -2848,7 +3455,7 @@ unsafe fn with_inline_pars<T>(
 /// A region of the current figure in device inches: the inner region (unit 7), the figure
 /// (8) or the plot region (17), as `grconvertX` numbers them.
 fn region_rect(device: &Device, unit: i32) -> Rect {
-    let [width, height] = device.size;
+    let [width, height] = device.size();
     Rect {
         x0: to_ndc(device, 0.0, unit, false) * width,
         x1: to_ndc(device, 1.0, unit, false) * width,
@@ -2860,9 +3467,9 @@ fn region_rect(device: &Device, unit: i32) -> Rect {
 fn device_rect(device: &Device) -> Rect {
     Rect {
         x0: 0.0,
-        x1: device.size[0],
+        x1: device.size()[0],
         y0: 0.0,
-        y1: device.size[1],
+        y1: device.size()[1],
     }
 }
 
@@ -2893,6 +3500,11 @@ impl UserAxis {
         let value = if self.log { value.log10() } else { value };
         self.origin + self.scale * value
     }
+
+    fn user(self, inches: f64) -> f64 {
+        let value = (inches - self.origin) / self.scale;
+        if self.log { 10f64.powf(value) } else { value }
+    }
 }
 
 fn user_axes(device: &Device) -> [UserAxis; 2] {
@@ -2904,7 +3516,7 @@ fn user_axes(device: &Device) -> [UserAxis; 2] {
                 lerp(frames.figure, lerp(frames.plot, fraction)),
             )
         };
-        let size = device.size[usize::from(vertical)];
+        let size = device.size()[usize::from(vertical)];
         let [low, high] = frames.usr;
         let (start, end) = (ndc(0.0) * size, ndc(1.0) * size);
         let scale = (end - start) / (high - low);
@@ -2949,16 +3561,92 @@ fn along_side(device: &Device, side: i32, at: f64, outer: bool) -> f64 {
     }
 }
 
-fn push_shape(device: &mut Device, clip: Rect, shape: Shape) {
-    if device.pages.is_empty() {
-        device.pages.push(Page {
-            background: device.pars.bg,
-            items: Vec::new(),
-        });
+/// Draws `shape`, in inches from the device's bottom-left corner, through the engine, clipped
+/// to `clip`.
+fn push_shape(device: &mut Device, clip: Rect, shape: Shape) -> R<()> {
+    let dd = device.dd;
+    let [x0, y0] = device.to_device([clip.x0, clip.y0]);
+    let [x1, y1] = device.to_device([clip.x1, clip.y1]);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(x0, y0, x1, y1, dd)?;
+        match shape {
+            Shape::Path {
+                points,
+                closed,
+                fill,
+                stroke,
+            } => {
+                let mut gc = shape_context(device, stroke.as_ref(), fill);
+                let (x, y): (Vec<f64>, Vec<f64>) = points
+                    .iter()
+                    .map(|point| {
+                        let [x, y] = device.to_device(*point);
+                        (x, y)
+                    })
+                    .unzip();
+                if closed {
+                    graphics_engine::polygon(&x, &y, &mut gc, dd)
+                } else {
+                    graphics_engine::polyline(&x, &y, &gc, dd)
+                }
+            }
+            Shape::Circle {
+                centre,
+                radius,
+                fill,
+                stroke,
+            } => {
+                let mut gc = shape_context(device, stroke.as_ref(), fill);
+                let [x, y] = device.to_device(centre);
+                graphics_engine::circle(x, y, radius / device.unit_inches(), &mut gc, dd)
+            }
+            Shape::Text { .. } => Ok(()),
+        }
     }
-    if let Some(page) = device.pages.last_mut() {
-        page.items.push(Item { clip, shape });
+}
+
+/// Draws a rectangle with corners in inches through the engine's rectangle primitive, as GNU
+/// R's `rect()` does, so a device renders it with its own rectangle callback.
+fn push_rect(
+    device: &mut Device,
+    clip: Rect,
+    [x0, y0, x1, y1]: [f64; 4],
+    fill: Colour,
+    stroke: &Stroke,
+) -> R<()> {
+    let dd = device.dd;
+    let [clip_x0, clip_y0] = device.to_device([clip.x0, clip.y0]);
+    let [clip_x1, clip_y1] = device.to_device([clip.x1, clip.y1]);
+    let [x0, y0] = device.to_device([x0, y0]);
+    let [x1, y1] = device.to_device([x1, y1]);
+    let mut gc = shape_context(device, Some(stroke), fill);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(clip_x0, clip_y0, clip_x1, clip_y1, dd)?;
+        graphics_engine::rect(x0, y0, x1, y1, &mut gc, dd)
     }
+}
+
+/// The engine's graphics context for a shape: base graphics numbers line ends and joins from
+/// 0, the engine from 1.
+fn shape_context(device: &Device, stroke: Option<&Stroke>, fill: Colour) -> GEContext {
+    let mut gc = GEContext::new();
+    gc.fill = fill as c_int;
+    gc.lineheight = device.pars.lheight;
+    match stroke {
+        Some(stroke) => {
+            gc.col = stroke.colour as c_int;
+            gc.lwd = stroke.lwd;
+            gc.lty = stroke.lty as c_int;
+            gc.lend = stroke.lend + 1;
+            gc.ljoin = stroke.ljoin + 1;
+            gc.lmitre = stroke.lmitre;
+        }
+        None => gc.col = TRANSPARENT_WHITE as c_int,
+    }
+    gc.set_family(&device.pars.family);
+    gc
 }
 
 fn stroke_with(pars: &Pars, colour: Colour, lty: u32, lwd: f64) -> Stroke {
@@ -2976,7 +3664,7 @@ fn par_stroke(pars: &Pars, colour: Colour) -> Stroke {
     stroke_with(pars, colour, pars.lty, pars.lwd)
 }
 
-fn push_line(device: &mut Device, clip: Rect, points: Vec<[f64; 2]>, stroke: Stroke) {
+fn push_line(device: &mut Device, clip: Rect, points: Vec<[f64; 2]>, stroke: Stroke) -> R<()> {
     if points.len() >= 2 {
         push_shape(
             device,
@@ -2987,8 +3675,9 @@ fn push_line(device: &mut Device, clip: Rect, points: Vec<[f64; 2]>, stroke: Str
                 fill: TRANSPARENT_WHITE,
                 stroke: Some(stroke),
             },
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// The size of text at character expansion `cex` in points, rounded to a whole point as the
@@ -2999,7 +3688,8 @@ fn text_points(pars: &Pars, cex: f64) -> f64 {
 
 /// Records the lines of a label anchored at `anchor`. `hadj` places the anchor along each
 /// line, 0 at its start and 1 at its end; `yadj` places it across the block of lines, 0 on
-/// the last line's baseline and 1 at the top of the first line's capitals.
+/// the last line's baseline and 1 at the top of the first line's capitals, and when it is
+/// not finite the engine centres the label on its glyphs' own extent.
 #[allow(clippy::too_many_arguments)]
 fn push_text(
     device: &mut Device,
@@ -3012,33 +3702,38 @@ fn push_text(
     cex: f64,
     font: i32,
     colour: Colour,
-) {
-    let points = text_points(&device.pars, cex);
-    let line_height = 1.2 * f64::from(device.pars.ps) * cex / 72.0 * device.pars.lheight;
-    let cap = HELVETICA_CAP_HEIGHT / 1000.0 * points / 72.0;
-    let (sin, cos) = rotation.to_radians().sin_cos();
-    let count = lines.len();
-    for (index, line) in lines.iter().enumerate() {
-        let up = ((count - 1) as f64 * (1.0 - yadj) - index as f64) * line_height - yadj * cap;
-        push_shape(
-            device,
-            clip,
-            Shape::Text {
-                origin: [anchor[0] - up * sin, anchor[1] + up * cos],
-                text: line.clone(),
-                points,
-                font,
-                rotation,
-                hadj,
-                colour,
-            },
-        );
+) -> R<()> {
+    let dd = device.dd;
+    let [x0, y0] = device.to_device([clip.x0, clip.y0]);
+    let [x1, y1] = device.to_device([clip.x1, clip.y1]);
+    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
+    gc.col = colour as c_int;
+    gc.ps = text_points(&device.pars, cex);
+    gc.fontface = font;
+    gc.lineheight = device.pars.lheight;
+    let [x, y] = device.to_device(anchor);
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        graphics_engine::set_clip(x0, y0, x1, y1, dd)?;
+        graphics_engine::text(x, y, &lines.join("\n"), hadj, yadj, rotation, &gc, dd)
     }
 }
 
-/// The width of a line of text in inches.
-fn text_inches(pars: &Pars, line: &str, cex: f64, font: i32) -> f64 {
-    text_width_ems(line, font) * text_points(pars, cex) / 72.0
+/// The width of a line of text in inches, measured by the device as GNU R's `GStrWidth` does,
+/// so a device with its own fonts (ragg) lays labels out by the glyphs it will draw.
+fn text_inches(device: &Device, line: &str, cex: f64, font: i32) -> R<f64> {
+    let mut gc = shape_context(device, None, TRANSPARENT_WHITE);
+    gc.ps = text_points(&device.pars, cex);
+    gc.fontface = font;
+    // SAFETY: base graphics' state lives as long as its device.
+    unsafe {
+        let width = graphics_engine::str_width(line, &gc, device.dd)?;
+        Ok(graphics_engine::from_device_width(
+            width,
+            Unit::Inches,
+            device.dd,
+        ))
+    }
 }
 
 /// Places a label in a margin as `mtext` and `axis` do: on line `line` of side `side` at
@@ -3059,7 +3754,7 @@ fn push_margin_text(
     cex: f64,
     font: i32,
     colour: Colour,
-) {
+) -> R<()> {
     let bias = device.pars.ylbias;
     let perpendicular = match side {
         1 | 3 => las == 2 || las == 3,
@@ -3083,7 +3778,8 @@ fn push_margin_text(
     };
     push_text(
         device, clip, anchor, lines, rotation, hadj, padj, cex, font, colour,
-    );
+    )?;
+    Ok(())
 }
 
 /// The elements of a vector argument, recycled: `default` when it is `NULL` or empty.
@@ -3223,7 +3919,7 @@ fn push_symbol(
     colour: Colour,
     fill: Colour,
     lwd: f64,
-) {
+) -> R<()> {
     let code = match pch {
         Pch::Text(text) if text == "." => {
             let half = 0.005 * cex;
@@ -3242,12 +3938,12 @@ fn push_symbol(
                     fill: colour,
                     stroke: None,
                 },
-            );
-            return;
+            )?;
+            return Ok(());
         }
         Pch::Text(text) => {
             if text.is_empty() {
-                return;
+                return Ok(());
             }
             let font = device.pars.font;
             push_text(
@@ -3261,20 +3957,20 @@ fn push_symbol(
                 cex * device.pars.cex,
                 font,
                 colour,
-            );
-            return;
+            )?;
+            return Ok(());
         }
         Pch::Code(code) => *code,
     };
     if code == NA_INTEGER {
-        return;
+        return Ok(());
     }
     if (32..=127).contains(&code)
         && let Some(character) = char::from_u32(code as u32)
     {
         let pch = Pch::Text(character.to_string());
-        push_symbol(device, clip, centre, &pch, size, cex, colour, fill, lwd);
-        return;
+        push_symbol(device, clip, centre, &pch, size, cex, colour, fill, lwd)?;
+        return Ok(());
     }
     let stroke = stroke_with(&device.pars, colour, LTY_SOLID, lwd);
     let radius = 0.375 * size;
@@ -3413,11 +4109,12 @@ fn push_symbol(
         _ => {}
     }
     for shape in shapes {
-        push_shape(device, clip, shape);
+        push_shape(device, clip, shape)?;
     }
     for line in lines {
-        push_line(device, clip, line, stroke);
+        push_line(device, clip, line, stroke)?;
     }
+    Ok(())
 }
 
 /// Half the character height in inches at the parameters' `cex`, the unit symbols scale by.
@@ -3471,7 +4168,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
         match kind {
             'l' | 'o' => {
                 for run in runs() {
-                    push_line(device, clip, run, line_stroke);
+                    push_line(device, clip, run, line_stroke)?;
                 }
             }
             'b' | 'c' => {
@@ -3492,7 +4189,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                                     [to[0] - gap * unit[0], to[1] - gap * unit[1]],
                                 ],
                                 line_stroke,
-                            );
+                            )?;
                         }
                     }
                 }
@@ -3512,7 +4209,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                     if let Some(last) = run.last() {
                         steps.push(*last);
                     }
-                    push_line(device, clip, steps, line_stroke);
+                    push_line(device, clip, steps, line_stroke)?;
                 }
             }
             'h' => {
@@ -3529,7 +4226,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                             line_type_at(lty, index, pars.lty)?,
                             real_at(lwd, index, pars.lwd),
                         );
-                        push_line(device, clip, vec![[point[0], base], *point], stroke);
+                        push_line(device, clip, vec![[point[0], base], *point], stroke)?;
                     }
                 }
             }
@@ -3555,7 +4252,7 @@ unsafe fn do_plot_xy(call: &NativeCall<'_>) -> R<Sexp> {
                     colour,
                     fill,
                     real_at(lwd, index, pars.lwd),
-                );
+                )?;
             }
         }
         Ok(())
@@ -3677,7 +4374,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                     clip,
                     vec![point(first.1, axis_across), point(last.1, axis_across)],
                     stroke_with(&pars, axis_colour, axis_lty, axis_lwd),
-                );
+                )?;
             }
             // Ticks point outwards for negative `tcl`; `tck`, when set, is a fraction of the
             // plot region's height or width instead.
@@ -3706,7 +4403,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                             point(*along, axis_across + inwards),
                         ],
                         stroke_with(&pars, ticks_colour, axis_lty, ticks_lwd),
-                    );
+                    )?;
                 }
             }
         }
@@ -3752,7 +4449,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
             0.25
         } else {
             1.0
-        } * text_inches(&pars, "m", label_cex, label_font);
+        } * text_inches(device, "m", label_cex, label_font)?;
         let mut last_end = f64::NEG_INFINITY;
         let ascending = shown
             .first()
@@ -3773,10 +4470,11 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 let line_height = 1.2 * f64::from(pars.ps) * label_cex / 72.0;
                 line_height * lines.len() as f64
             } else {
-                lines
-                    .iter()
-                    .map(|line| text_inches(&pars, line, label_cex, label_font))
-                    .fold(0.0, f64::max)
+                let mut widest: f64 = 0.0;
+                for line in lines {
+                    widest = widest.max(text_inches(device, line, label_cex, label_font)?);
+                }
+                widest
             };
             let start = along - extent * if perpendicular { 0.5 } else { hadj };
             if start < last_end + gap {
@@ -3797,7 +4495,7 @@ unsafe fn draw_axis(call: &NativeCall<'_>, side: i32, at: &[f64]) -> R<()> {
                 label_cex,
                 label_font,
                 label_colour,
-            );
+            )?;
         }
         Ok(())
     })
@@ -3848,7 +4546,7 @@ unsafe fn do_box(call: &NativeCall<'_>) -> R<Sexp> {
                     fill: TRANSPARENT_WHITE,
                     stroke: Some(stroke),
                 },
-            );
+            )?;
         }
         Ok(())
     })?;
@@ -3874,7 +4572,12 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
     let outer = values::as_logical_scalar(call.arg(5)) == 1;
     with_inline_pars(call, 6, |device| {
         let pars = device.pars.clone();
-        let clip = device_rect(device);
+        // GNU R clips titles to at least the figure region, and outer titles to the device.
+        let clip = if outer || !matches!(pars.xpd, 0 | 1) {
+            device_rect(device)
+        } else {
+            region_rect(device, 8)
+        };
         let region = region_rect(device, if outer { 7 } else { 17 });
         let along_x = lerp([region.x0, region.x1], pars.adj);
         let along_y = lerp([region.y0, region.y1], pars.adj);
@@ -3895,7 +4598,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                     cex,
                     pars.font_main,
                     pars.col_main,
-                );
+                )?;
             } else {
                 // The main title is centred on the middle line of the top margin.
                 let margin = if outer {
@@ -3915,7 +4618,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                     cex,
                     pars.font_main,
                     pars.col_main,
-                );
+                )?;
             }
         }
         if let Some(lines) = sub {
@@ -3938,7 +4641,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                 pars.cex_sub * pars.cex,
                 pars.font_sub,
                 pars.col_sub,
-            );
+            )?;
         }
         if let Some(lines) = xlab {
             let at = if line.is_finite() { line } else { pars.mgp[0] };
@@ -3956,7 +4659,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                 pars.cex_lab * pars.cex,
                 pars.font_lab,
                 pars.col_lab,
-            );
+            )?;
         }
         if let Some(lines) = ylab {
             let at = if line.is_finite() { line } else { pars.mgp[0] };
@@ -3974,7 +4677,7 @@ unsafe fn do_title(call: &NativeCall<'_>) -> R<Sexp> {
                 pars.cex_lab * pars.cex,
                 pars.font_lab,
                 pars.col_lab,
-            );
+            )?;
         }
         Ok(())
     })?;
@@ -4032,11 +4735,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
                 .copied()
                 .filter(|value| value.is_finite())
                 .unwrap_or(pars.adj);
-            let mut yadj = adj
-                .get(1)
-                .copied()
-                .filter(|value| value.is_finite())
-                .unwrap_or(0.5);
+            let mut yadj = adj.get(1).copied().unwrap_or(f64::NAN);
             let mut anchor = point;
             let position = real_at(pos, index, f64::NAN);
             if position.is_finite() {
@@ -4066,7 +4765,7 @@ unsafe fn do_text(call: &NativeCall<'_>) -> R<Sexp> {
             }
             push_text(
                 device, clip, anchor, lines, pars.srt, hadj, yadj, label_cex, label_font, colour,
-            );
+            )?;
         }
         Ok(())
     })?;
@@ -4143,7 +4842,7 @@ unsafe fn do_mtext(call: &NativeCall<'_>) -> R<Sexp> {
             push_margin_text(
                 device, clip, side, line, outer, along, lines, pars.las, adj, padj, cex, font,
                 colour,
-            );
+            )?;
         }
         Ok(())
     })?;
@@ -4180,16 +4879,7 @@ unsafe fn do_rect(call: &NativeCall<'_>) -> R<Sexp> {
                 line_type_at(lty, index, pars.lty)?,
                 real_at(lwd, index, pars.lwd),
             );
-            push_shape(
-                device,
-                clip,
-                Shape::Path {
-                    points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                    closed: true,
-                    fill,
-                    stroke: Some(stroke),
-                },
-            );
+            push_rect(device, clip, [x0, y0, x1, y1], fill, &stroke)?;
         }
         Ok(())
     })?;
@@ -4236,7 +4926,7 @@ unsafe fn do_polygon(call: &NativeCall<'_>) -> R<Sexp> {
                     fill,
                     stroke: Some(stroke),
                 },
-            );
+            )?;
         }
         Ok(())
     })?;
@@ -4276,7 +4966,7 @@ unsafe fn do_path(call: &NativeCall<'_>) -> R<Sexp> {
                     fill,
                     stroke: Some(stroke),
                 },
-            );
+            )?;
         }
         Ok(())
     })?;
@@ -4323,7 +5013,7 @@ unsafe fn draw_segments(call: &NativeCall<'_>, arrows: bool) -> R<Sexp> {
                 line_type_at(lty, index, pars.lty)?,
                 real_at(lwd, index, pars.lwd),
             );
-            push_line(device, clip, vec![from, to], stroke);
+            push_line(device, clip, vec![from, to], stroke)?;
             if !arrows {
                 continue;
             }
@@ -4353,10 +5043,10 @@ unsafe fn draw_segments(call: &NativeCall<'_>, arrows: bool) -> R<Sexp> {
                     clip,
                     head(from, direction + std::f64::consts::PI),
                     stroke,
-                );
+                )?;
             }
             if code & 2 != 0 {
-                push_line(device, clip, head(to, direction), stroke);
+                push_line(device, clip, head(to, direction), stroke)?;
             }
         }
         Ok(())
@@ -4432,14 +5122,14 @@ unsafe fn do_abline(call: &NativeCall<'_>) -> R<Sexp> {
                     .filter(|point| point.iter().all(|value| value.is_finite()))
                     .collect()
             };
-            push_line(device, clip, points, stroke);
+            push_line(device, clip, points, stroke)?;
         }
         for value in h {
             let stroke = next_stroke(&pars)?;
             let y = y_axis.inches(value);
             if y.is_finite() {
                 let points = vec![[x_inches(pars.usr[0]), y], [x_inches(pars.usr[1]), y]];
-                push_line(device, clip, points, stroke);
+                push_line(device, clip, points, stroke)?;
             }
         }
         for value in v {
@@ -4447,7 +5137,7 @@ unsafe fn do_abline(call: &NativeCall<'_>) -> R<Sexp> {
             let x = x_axis.inches(value);
             if x.is_finite() {
                 let points = vec![[x, y_inches(pars.usr[2])], [x, y_inches(pars.usr[3])]];
-                push_line(device, clip, points, stroke);
+                push_line(device, clip, points, stroke)?;
             }
         }
         Ok(())
@@ -4497,7 +5187,7 @@ unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
                         fill,
                         stroke: None,
                     },
-                );
+                )?;
             }
         }
         Ok(())
@@ -4505,8 +5195,8 @@ unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `rasterImage(image, xleft, ybottom, xright, ytop, angle, interpolate, ...)`: the raster's
-/// cells as filled rectangles, its first row at the top.
+/// `rasterImage(image, xleft, ybottom, xright, ytop, angle, interpolate, ...)`: hands the
+/// image, its first row at the top, to the device for each rectangle.
 unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
     let image = call.arg(0);
     let dim = values::get_attr(image, symbols().dim);
@@ -4520,10 +5210,10 @@ unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(error("invalid raster object"));
     };
     let native = image.kind() == SexpType::Integer;
-    let colours: Vec<Colour> = (0..rows * columns)
+    let mut pixels: Vec<c_uint> = (0..rows * columns)
         .map(|index| {
             if native {
-                Ok(values::ints(image)[index] as u32)
+                Ok(values::ints(image)[index] as c_uint)
             } else {
                 colour_element(image, index)
             }
@@ -4532,46 +5222,55 @@ unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
     let corners: Vec<Vec<f64>> = (1..5)
         .map(|index| reals_of(call.arg(index)))
         .collect::<R<_>>()?;
+    let angles = reals_of(call.arg(5))?;
+    let interpolate = values::as_logical_scalar(call.arg(6)) == 1;
     with_inline_pars(call, 7, |device| {
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
         let count = corners.iter().map(Vec::len).min().unwrap_or(0);
+        let gc = shape_context(device, None, TRANSPARENT_WHITE);
+        let dd = device.dd;
+        let [cx0, cy0] = device.to_device([clip.x0, clip.y0]);
+        let [cx1, cy1] = device.to_device([clip.x1, clip.y1]);
         for index in 0..count {
-            let (left, right) = (
+            let bottom_left = [
                 x_axis.inches(corners[0][index]),
-                x_axis.inches(corners[2][index]),
-            );
-            let (bottom, top) = (
                 y_axis.inches(corners[1][index]),
+            ];
+            let top_right = [
+                x_axis.inches(corners[2][index]),
                 y_axis.inches(corners[3][index]),
-            );
-            if [left, right, bottom, top]
+            ];
+            if bottom_left
                 .iter()
+                .chain(&top_right)
                 .any(|value| !value.is_finite())
             {
                 continue;
             }
-            for row in 0..rows {
-                for column in 0..columns {
-                    // Raster objects hold their cells row by row.
-                    let Some(&fill) = colours.get(row * columns + column) else {
-                        continue;
-                    };
-                    let x0 = lerp([left, right], column as f64 / columns as f64);
-                    let x1 = lerp([left, right], (column + 1) as f64 / columns as f64);
-                    let y1 = lerp([top, bottom], row as f64 / rows as f64);
-                    let y0 = lerp([top, bottom], (row + 1) as f64 / rows as f64);
-                    push_shape(
-                        device,
-                        clip,
-                        Shape::Path {
-                            points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                            closed: true,
-                            fill,
-                            stroke: None,
-                        },
-                    );
-                }
+            let [x0, y0] = device.to_device(bottom_left);
+            let [x1, y1] = device.to_device(top_right);
+            let angle = if angles.is_empty() {
+                0.0
+            } else {
+                angles[index % angles.len()]
+            };
+            // SAFETY: base graphics' state lives as long as its device.
+            unsafe {
+                graphics_engine::set_clip(cx0, cy0, cx1, cy1, dd)?;
+                graphics_engine::raster(
+                    &mut pixels,
+                    columns as c_int,
+                    rows as c_int,
+                    x0,
+                    y0,
+                    x1 - x0,
+                    y1 - y0,
+                    angle,
+                    interpolate,
+                    &gc,
+                    dd,
+                )?;
             }
         }
         Ok(())
@@ -4637,16 +5336,16 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                     .map(|(x, y)| [x_axis.inches(*x), y_axis.inches(*y)])
                     .collect();
                 let Some(label) = label.as_deref() else {
-                    push_line(device, clip, points, stroke);
+                    push_line(device, clip, points, stroke)?;
                     continue;
                 };
-                let width = text_inches(&pars, label, labcex, 1);
+                let width = text_inches(device, label, labcex, 1)?;
                 let height = HELVETICA_CAP_HEIGHT / 1000.0 * text_points(&pars, labcex) / 72.0;
                 match flattest_window(&points, width, height, &placed) {
                     Some(window) => {
                         placed.push(window.bounds);
-                        push_line(device, clip, window.before, stroke);
-                        push_line(device, clip, window.after, stroke);
+                        push_line(device, clip, window.before, stroke)?;
+                        push_line(device, clip, window.after, stroke)?;
                         push_text(
                             device,
                             clip,
@@ -4658,9 +5357,9 @@ unsafe fn do_contour(call: &NativeCall<'_>) -> R<Sexp> {
                             labcex,
                             1,
                             colour,
-                        );
+                        )?;
                     }
-                    None => push_line(device, clip, points, stroke),
+                    None => push_line(device, clip, points, stroke)?,
                 }
             }
         }
@@ -4846,7 +5545,7 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
                         fill,
                         stroke,
                     },
-                ),
+                )?,
                 2 | 3 if columns >= 1 => {
                     let half_width = size_inches(datum(0)) / 2.0;
                     let half_height = if kind == 3 && columns >= 2 {
@@ -4868,7 +5567,7 @@ unsafe fn do_symbols(call: &NativeCall<'_>) -> R<Sexp> {
                             fill,
                             stroke,
                         },
-                    );
+                    )?;
                 }
                 _ => {}
             }
@@ -4919,7 +5618,7 @@ unsafe fn do_erase(call: &NativeCall<'_>) -> R<Sexp> {
                 fill,
                 stroke: None,
             },
-        );
+        )?;
         Ok(())
     })?;
     Ok(nil())
@@ -4938,7 +5637,6 @@ const DEFAULT_PALETTE: [&str; 8] = [
 
 thread_local! {
     static PALETTE: RefCell<Vec<Colour>> = RefCell::new(default_palette());
-    static ASK_NEW_PAGE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn default_palette() -> Vec<Colour> {
@@ -4992,10 +5690,18 @@ fn colour_name(colour: Colour) -> String {
 /// A colour given as hex digits or a name, without palette indices.
 fn parse_colour_spec(text: &str) -> Result<Colour, String> {
     if let Some(digits) = text.strip_prefix('#') {
-        let valid =
-            matches!(digits.len(), 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
+        // The short forms `#RGB` and `#RGBA` arrived in R 4.4.
+        let short = crate::system::r_at_least(4, 4) && matches!(digits.len(), 3 | 4);
+        let valid = (short || matches!(digits.len(), 6 | 8))
+            && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
         if !valid {
             return Err("invalid RGB specification".to_owned());
+        }
+        if short {
+            let nibble =
+                |index: usize| 17 * u32::from_str_radix(&digits[index..=index], 16).unwrap_or(0);
+            let alpha = if digits.len() == 4 { nibble(3) } else { OPAQUE };
+            return Ok(rgba(nibble(0), nibble(1), nibble(2), alpha));
         }
         let byte = |index: usize| u32::from_str_radix(&digits[index..index + 2], 16).unwrap_or(0);
         let alpha = if digits.len() == 8 { byte(6) } else { OPAQUE };
@@ -5501,21 +6207,6 @@ unsafe fn do_bitmap_versions(_: &NativeCall<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `devAskNewPage(ask)`: the setting before the call, which only matters once a device exists.
-unsafe fn do_ask_new_page(call: &NativeCall<'_>) -> R<Sexp> {
-    let old = ASK_NEW_PAGE.with(Cell::get);
-    let ask = call.arg(0);
-    if ask != nil() {
-        let value = values::as_logical_scalar(ask);
-        if value == NA_INTEGER {
-            return Err(error("invalid 'ask' argument"));
-        }
-        ASK_NEW_PAGE.with(|setting| setting.set(value == 1));
-        crate::interp().visible = false;
-    }
-    scalar_bool(old)
-}
-
 /// `chull(x)`: the indices of the points of an n-by-2 matrix on its convex hull, without points
 /// that lie on an edge between two others and keeping the first of duplicated points.
 unsafe fn do_chull(call: &NativeCall<'_>) -> R<Sexp> {
@@ -5590,7 +6281,7 @@ unsafe fn do_axis_pars(call: &NativeCall<'_>) -> R<Sexp> {
 }
 
 /// The ticks of a linear axis: the pretty values inside `[low, high]`.
-fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
+pub fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
     let pretty = crate::arith::pretty(low, high, intervals, 1, 0.25, [0.8, 1.7], 2, false);
     let unit = pretty.unit;
     let mut first = pretty.low;
@@ -5611,7 +6302,7 @@ fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
 
 /// The ticks of a log axis spanning `[low, high]` (not logged): decades with a tick code, or a
 /// linear axis with a negative count when the range is too short for decades.
-fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
+pub fn log_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
     let (log_low, log_high) = (low.log10(), high.log10());
     let mut first = log_low.ceil();
     let mut last = log_high.floor();
@@ -5658,7 +6349,7 @@ unsafe fn do_create_at_vector(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&ticks)
 }
 
-fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64> {
+pub fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64> {
     let [first, last, code] = axp;
     let count = code.round() as i32;
     if !log || count < 0 {
@@ -5737,19 +6428,21 @@ unsafe fn do_contour_lines(call: &NativeCall<'_>) -> R<Sexp> {
         values::reals(y).to_vec(),
         values::reals(z).to_vec(),
     );
+    contour_lines(&x, &y, &z, values::reals(levels))
+}
+
+/// The contour lines of `z` over the grid `x` by `y` at each of `levels`, as a list with
+/// `level`, `x` and `y` per line.
+pub unsafe fn contour_lines(x: &[f64], y: &[f64], z: &[f64], levels: &[f64]) -> R<Sexp> {
     if x.len() < 2 || y.len() < 2 {
         return Err(error("insufficient 'x' or 'y' values"));
     }
     if z.len() != x.len() * y.len() {
         return Err(error("dimension mismatch"));
     }
-    let grid = Grid {
-        x: &x,
-        y: &y,
-        z: &z,
-    };
+    let grid = Grid { x, y, z };
     let mut lines = Vec::new();
-    for &level in values::reals(levels) {
+    for &level in levels {
         for line in contour_level(&grid, level) {
             let (xs, ys): (Vec<f64>, Vec<f64>) = line.into_iter().unzip();
             let entry = values::named_list(&[

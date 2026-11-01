@@ -37,10 +37,13 @@ illegal dependency unrepresentable.
   that, it can never come to depend on an analysis result.
 - **`loader`** is the package-development loader. It reads a package into the analysis, diffs the
   load index against what a session has loaded, and produces a backend-neutral plan. Its GNU R
-  backend hands the plan to R code running in the session. ry's own runtime does not take a plan yet.
+  backend hands the plan to R code as an RDS file, and its backend for ry's own runtime (behind the
+  `runtime` feature, which links `heap` and `interp`) builds the plan on the heap and binds each lazy
+  definition as a promise over the analysis's own syntax tree.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
-  and under another engine and compares the observable results. It depends on nothing else in the
-  workspace.
+  and under another engine and compares the observable results. It also generates the programs for
+  differential fuzzing and runs the corpus packages' own tests and installs. It depends only on
+  `syntax`.
 - **`repl`** is the R console behind `ry run` and `ry R`. It loads R at run time, so no crate,
   `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
@@ -49,14 +52,15 @@ illegal dependency unrepresentable.
   environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
-  `heap`, `interp` and `jit`. Its design is the draft at
+  `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
   [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
   dispatch, and base R's primitives and internals in Rust, plus the check of
   [inline annotations](/type-checking/inline-annotations) at function boundaries. It depends on
-  `heap` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows nothing
-  about C.
+  `heap`, `syntax` and `table`, and `libr` installs it through the `Evaluator` hook, so it knows
+  nothing about C. The values that are ry's own live here too: records and tags, `Array`,
+  `DataFrame` and the standard library.
 - **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
   Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
@@ -65,12 +69,16 @@ illegal dependency unrepresentable.
   the mode: `on` (the default), `off`, or `force`, which the tier tests and the `ry-jit` oracle
   engine use.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
-  `tbl[i, j, by]` to a lazy plan. Its `runtime` feature, which links `libr` and `heap`, exposes
-  columns to R as ALTREP vectors. No interpreter code calls it yet.
+  `tbl[i, j, by]` and the `DataFrame` verbs to a lazy plan, plus the readers, writers and
+  data.table helpers around it. `interp` owns the `DataFrame` value and calls the engine, and `libr`
+  exposes a column to native code as an ALTREP vector, so the table holds only Arrow data.
+- **`sniff`** reads the layout of a delimited text file: separator, header and each column's R type.
+  The table engine's reader and the checker both use it, so the checker types a literal
+  `fread("prices.csv")` as exactly the columns the engine reads. It depends on `syntax` alone.
 - **`rcmd`** is ry's R home and the `R CMD` commands that build and install packages against
   ry's headers and `libR`. It depends on nothing else in the workspace; `libr`'s tests use it.
-- **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `repl`,
-  `run`, `load`, and `debug` commands. It owns configuration, conversion between position encodings,
+- **`ry`** is the product: the LSP server and the CLI, with the `check`, `fmt`, `server`, `run`,
+  `R`, `load`, and `debug` commands. It owns configuration, conversion between position encodings,
   assembling and publishing diagnostics, and suppression comments.
 
 ## The semantics database
@@ -112,30 +120,29 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees are evicted
+### Syntax trees stay resident
 
-Rowan trees are the largest thing the analysis holds, and nothing past lowering needs them, so a
-cold pass does not retain them. `limit_resident_trees` gives `parse` and the per-item `item_syntax`
-and `item_annotation_syntax` salsa LRU capacities, and every query that reads a tree is a memoized
-query whose result is small: the
-item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references
-and agreement candidates in `diagnostics.rs`, `item_name_range`, and `lints::file_syntax_lints`. An evicted memo keeps
-its dependency edges, so revalidating an untouched file after an edit elsewhere never re-parses it;
-only a file whose text changed is parsed again. A finding that also needs naming or the project's
-declarations is split in two: the syntax-only half is memoized, and a cheap step joins it with the
-rest (a bare `setClass` call is reported only when the file does not bind `setClass` itself, and
-two annotations disagree only when their types differ once aliases expand).
+Every host keeps every rowan tree. Salsa's LRU would bound memory, but each read of an LRU query
+records its use under one mutex per query, and the cold check reads `item_syntax` often enough
+on all cores that the lock cost about a sixth of its wall time, for about 80 MB saved on a
+300,000-line package. Every query that reads a tree is still a memoized query whose result is
+small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
+annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
+`lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
+the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
+joins it with the rest (a bare `setClass` call is reported only when the file does not bind
+`setClass` itself, and two annotations disagree only when their types differ once aliases
+expand).
 
-The CLI's cold check leans on this to cap its peak. It runs three passes over the files, largest
-first, spread over the cores. The first pass works in batches and calls `trigger_lru_eviction`
-between them: `diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is
-resident. The second pass names every item and derives its interface and top-level read sets, and
-the third assembles the diagnostics. Neither later pass reads a tree. Naming runs as one batch
-with no barriers, and the diagnostics pass evicts between larger batches, which bounds the peak on
-a project with many findings. Each file is therefore parsed exactly once, and at most a few batches of trees
-are alive at a time. `RootDatabase::one_shot` also turns
-off the splice cache, which would otherwise keep the previous tree of every file. A
-`test_incremental.rs` case pins the one-parse property.
+The CLI's cold check runs three passes over the files, largest first, spread over the cores.
+The first computes every tree-derived fact (`diagnostics::derive_from_syntax`), including each
+file's share of the project-wide maps (`warm_project_folds`), so that no later check derives
+another file's facts on its own thread. The second names every item, so that two threads
+checking files that reach the same item do not block on one claim, and the third assembles the
+diagnostics. `RootDatabase::one_shot` turns off the splice cache, which would otherwise keep the
+previous tree of every file. A `test_incremental.rs` case pins that a cold check parses each file
+once.
 
 Most tree readers look for a handful of node kinds in a large file, and a red-tree walk pays for a
 red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
@@ -155,7 +162,9 @@ wall time. Several of them are worth knowing:
   `test_name` take only the name and read `ProjectFiles` themselves.
 - `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
   64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
-  compare and reading the kind is a field load. The entry stores the type's size, which the
+  compare and reading the kind is a field load. A direct-mapped per-thread cache sits in front of
+  the shards, because checkers intern the same few types over and over and those land on the same
+  shard mutexes. The entry stores the type's size, which the
   inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
   one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
   heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
@@ -166,13 +175,9 @@ wall time. Several of them are worth knowing:
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
-  huge pages that a short-lived process never touched.
-
-The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
-bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
-tree must be rebuilt whenever a memo's value is needed. The memory it saves matters less in a
-long-lived process, so the server never calls `limit_resident_trees`, and the tree queries' `lru = 0`
-default leaves them unbounded with no per-fetch bookkeeping.
+  huge pages that a short-lived process never touched. What allocation still costs is mostly
+  setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
+  and huge-page options measured no difference.
 
 ### From item to scheme
 
@@ -180,8 +185,20 @@ An item's green subtree lowers to HIR, with spans relative to the item. Its anno
 separately: a `#:` block and an inline annotation go through the same type lowering into the same
 `Annotation`, and a statement annotated both ways gets one merged annotation
 (`annotations::merge_annotations`), so the checker never knows which spelling it was given. Names
-in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id), lists are boxed slices, and the arena
-is shrunk after lowering, so a memoized item carries no spelling copies or spare capacity. Naming
+in HIR and naming are interned `Symbol`s (a 4-byte `Copy` id). Literal text is not interned,
+because the interner never frees and an edit inside a string literal would otherwise keep every
+spelling it passed through; it lives in the module's own text buffer, addressed by a `Copy`
+`Text` span. The HIR module is
+struct-of-arrays: an `ExprId` indexes separate kind and range arrays, and every list (arguments,
+parameters, statements, record fields, match arms, pattern lists) lives in one side array per
+element type that the expression addresses with a `Span`, so every HIR kind is `Copy` and a scan
+over kinds never touches ranges. A name written at a site with its own range (an argument name, a
+field after `$` or `@`, a loop variable, a tag) is a `NameId` into a `NameSite` side array that
+holds the symbol and its range together, and every id is a `NonZeroU32`, so an optional child costs
+no extra word. An expression kind is 16 bytes and an argument 8. Lowering reads the green tree through `syntax::GreenNodeAt` and
+builds no red nodes. It writes into a per-thread scratch module that keeps its capacity across
+items, and the memoized module gets exact-size copies, so it carries no spelling copies or spare
+capacity and lowering allocates a handful of arrays per item. Naming
 then runs the variable model, in which a variable is a mutable slot with reaching-write flow.
 Finally, the inference walk, `item_check`, produces the expression types, the type errors, the
 strict-mode origins, and the scheme the item exports.
@@ -204,14 +221,25 @@ When definitions refer to each other in a cycle, the package interface resolves 
 through one canonical fixpoint, so the result never depends on which member happened to be queried
 first:
 
-1. `interface_sccs` condenses the static graph of references from each item to the definition it
-   resolves to, using an iterative Tarjan walk in canonical project order.
-2. `scc_schemes` starts every member at `Unknown` and runs Jacobi rounds until the table of schemes
-   stops changing. If the round cap is reached, every member is pinned.
-3. `item_check` adopts the canonical scheme as the one exported truth.
+1. `interface_group` finds the cyclic group an item belongs to. `item_interface_edges` gives each
+   item, definition or top-level statement alike, the items its reads resolve to, following
+   exactly the resolution a check performs: the frame binder in the item's own file, then the
+   test and package layers, and every conditional writer of a name that has no unconditional
+   winner. An iterative Tarjan walk from the item visits only what it reaches, which is enough,
+   because a cycle through the item lies inside that reachable set. Members come back in
+   canonical project order, and the first one keys the group.
+2. `scc_exports` starts every member at `Unknown` and runs Jacobi rounds until the table of
+   exports (each member's scheme and the schemes of the top-level names it binds) stops changing.
+   If the round cap is reached, every member is pinned.
+3. `item_check` adopts the canonical exports as the one exported truth.
 
 A member check inside the fixpoint never re-enters `item_check`, so no salsa cycle forms. Salsa's own
 cycle recovery remains only as a backstop, for a reference the static graph cannot see.
+
+The graph must cover every edge a check can follow, not just the common ones. Salsa never backdates
+the memo of a query that took part in a cycle, so when an edit breaks a cycle the former members
+re-run with no cycle heads and salsa's backdating check panics on any member whose value did not
+change. A missing edge turns into exactly that panic on the edit that removes and restores it.
 
 That backstop has a trap of its own: **a cycle recovery must not pin a value that depends on the
 round that produced it.** Salsa stops iterating when a recovery returns the same value as last time,
@@ -223,15 +251,21 @@ the obvious one.
 
 ### Keeping project-wide work cheap
 
-A walk over the whole project reads small per-item projections instead of full naming results.
-`item_interface_reads` is the set of names an item reads, which feeds `interface_sccs`, and
-`item_top_level_names` is the set of names it binds, which feeds the resolution of conditional
-slots. Both are tiny tracked queries whose values survive an edit that only shifts ranges. The
-typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
-instead of running again.
+A check never names the whole project. The interface graph is walked per item, from the items a
+check reaches, and `item_interface_reads`, the set of items and names an item's reads resolve to, is
+a tiny tracked query whose value survives an edit that only shifts ranges.
 
-The walks reach those projections through one tracked memo per file (`file_definitions`,
-`file_interface_reads`, `file_conditional_writers`), never directly. After a keystroke salsa must
+The one map that does cover every package item is the set of conditional writers, the items that
+write a top-level name other than their own, which a read with no unconditional winner joins.
+`file_conditional_writers` builds a file's share by screening each item's syntax first: only an
+assignment operator, `for`, a destructuring `%<-%`, or a by-reference `setnames` outside a nested
+function can write a top-level name, so an item with no such token besides its own binding needs
+no naming pass. Only the rest go through `item_top_level_names`. The screen may pass too many items
+but never too few, and the fuzz battery checks it against naming on every generated program.
+
+The project-wide maps reach per-file data through one tracked memo per file (`file_definitions`,
+`file_conditional_writers`, `file_type_definitions` and the others `warm_project_folds` lists),
+never through per-item queries. After a keystroke salsa must
 confirm that a project-wide map is still valid, and it does so by checking the map's dependencies.
 Read per file, that is about 500 memos on a 300,000-line project, and every one outside the edited
 file passes on durability alone (see "The language server"). Read per item, it was about 56,000
@@ -305,10 +339,18 @@ and all the documents, and the database handle deliberately never leaves it.
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
   scans every file's `library()` and `require()` calls and applies the attached set once, then
-  derives every item's naming and the per-file folds behind the project-wide maps. Every semantic
-  wave reads those maps, and one thread would take seconds to derive them, so settled publishes
-  wait for it. After the warm-up the worker serves any settled publish it owes, most recently
-  edited file first. Next it lowers the durability of documents opened since (see below). With
+  derives the per-file folds behind the project-wide maps (`warm_project_folds`). Every semantic
+  wave reads those maps, and one thread would parse the whole project to derive them, so settled
+  publishes wait for it. The warm-up names no item: a file's check names only the items its
+  interface reaches, so a file opened at startup settles in about 200 ms on a 300,000-line
+  package. After the warm-up the worker rescans the `library()` calls of any file whose scan a
+  cancellation interrupted, because the edit that cancelled it may belong to another file and
+  nothing else would rescan this one. Then it serves any settled publish it owes, most recently
+  edited file first. Then it re-derives `project_global_names`, the set goto-definition and
+  references consult on every library call, whenever the warm-up or a durability drop left it
+  stale: salsa never backdates across a durability drop, so the fold re-runs once per opened file
+  (about 20 ms at 300,000 lines) and would otherwise land on the first request. Next it lowers the
+  durability of documents opened since (see below). With
   nothing else to do, it checks the rest of the workspace in parallel batches and never publishes
   that work. Idle work that gets cancelled is requeued.
 - **Parallel idle work stops between files.** It runs on one cloned database handle per core, and
@@ -318,6 +360,14 @@ and all the documents, and the database handle deliberately never leaves it.
 - **A request preempts idle work.** A request is queued first and then cancels the idle unit in
   flight, if any, so a hover never waits for a background file to finish. A request never cancels
   another request or a sync.
+- **Only package files stay loaded while closed.** At startup the server loads the files under `R/`,
+  and a closed or disk-changed file stays in the project only if it is one of them. Test, helper and
+  script files are analyzed while they are open, so a session never holds a file a fresh start would
+  not.
+- **The worker is deterministic and steppable.** Everything it sends the client goes through an
+  `Outbox`, which is the socket in production and a recorder in the
+  [simulator](/contributing/robustness/#the-language-server-simulator), and `run_job` is one step of
+  its loop. Collections whose order reaches the client are ordered.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
@@ -349,4 +399,6 @@ and all the documents, and the database handle deliberately never leaves it.
 The fixture suites are the correctness contract. `crates/semantics/tests/test_incremental.rs` pins
 the incrementality contracts by counting query executions after an edit, and
 `crates/semantics/tests/test_perf.rs` asserts wall-time, memory, and keystroke-latency budgets
-against a corpus of real files. [Testing](/contributing/testing) documents all of them.
+against a corpus of real files. [Testing](/contributing/testing) documents all of them, and
+[Robustness](/contributing/robustness) documents the simulator, the fuzzers and the scenario tests
+that check the whole toolchain against from-scratch runs and GNU R.

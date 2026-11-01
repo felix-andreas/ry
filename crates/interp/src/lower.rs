@@ -62,8 +62,477 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
         values::set_attr(result, symbols().srcref, srcrefs)?;
         values::set_attr(result, symbols().srcfile, srcfile)?;
         values::set_attr(result, symbols().whole_srcref, whole)?;
+        // Package loaders and installers turn parse data off; building it costs more than
+        // the parse itself on a large file.
+        let keep_data = crate::envir::get_option("keep.parse.data");
+        if keep_data == nil() || values::as_logical_scalar(keep_data) == 1 {
+            let data = parse_data(source, &script.root)?;
+            crate::heap().define(srcfile, install("parseData")?, data)?;
+        }
     }
     Ok(result)
+}
+
+/// GNU R's `parseData`, which `getParseData` reads from a srcfile: an integer matrix with a
+/// column per token and per grammar symbol (`expr` and a few others), holding its first line and
+/// column, last line and column, whether it is a token, R's token number, its id and its
+/// parent's id, with the token names and texts as attributes. Ids follow GNU R's order, in which
+/// a symbol's id is above its children's, though GNU R's ids skip numbers these do not.
+unsafe fn parse_data(source: &SourceMap, root: &SyntaxNode) -> R<Sexp> {
+    let mut builder = ParseDataBuilder { rows: Vec::new() };
+    for element in root.children_with_tokens() {
+        match element {
+            SyntaxElement::Token(token) => builder.top_level_token(&token),
+            SyntaxElement::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
+                builder.comment_lines(&node)
+            }
+            SyntaxElement::Node(node) if is_skipped(&node) => {}
+            SyntaxElement::Node(node) => {
+                builder.expression(&node);
+            }
+        }
+    }
+    let rows = builder.rows;
+    let lines: Vec<(i32, i32, i32, i32)> = rows
+        .iter()
+        .map(|row| {
+            let (first_line, _, first_column) = position(source, row.start);
+            let last = source.text[..row.end]
+                .chars()
+                .next_back()
+                .map_or(row.start, |character| row.end - character.len_utf8())
+                .max(row.start);
+            let (last_line, _, last_column) = position(source, last);
+            (first_line, first_column, last_line, last_column)
+        })
+        .collect();
+    let parents: Vec<i32> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| match row.parent {
+            Parent::Row(parent) => parent as i32 + 1,
+            Parent::TopLevel => 0,
+            Parent::Comment => comment_parent(&rows, &lines, index),
+        })
+        .collect();
+    let matrix = alloc(SexpType::Integer, 8 * rows.len())?;
+    let cells = values::ints_mut(matrix);
+    for (index, row) in rows.iter().enumerate() {
+        let (first_line, first_column, last_line, last_column) = lines[index];
+        cells[8 * index..8 * index + 8].copy_from_slice(&[
+            first_line,
+            first_column,
+            last_line,
+            last_column,
+            row.terminal as i32,
+            row.number,
+            index as i32 + 1,
+            parents[index],
+        ]);
+    }
+    let tokens: Vec<&str> = rows.iter().map(|row| row.token).collect();
+    let texts: Vec<&str> = rows
+        .iter()
+        .map(|row| {
+            if row.terminal {
+                &source.text[row.start..row.end]
+            } else {
+                ""
+            }
+        })
+        .collect();
+    values::set_attr(
+        matrix,
+        symbols().dim,
+        values::integer_vector(&[8, rows.len() as i32])?,
+    )?;
+    values::set_attr(matrix, install("tokens")?, values::string_vector(&tokens)?)?;
+    values::set_attr(matrix, install("text")?, values::string_vector(&texts)?)?;
+    values::set_attr(matrix, symbols().class, values::scalar_string("parseData")?)?;
+    Ok(matrix)
+}
+
+/// A comment's parent is the smallest grammar symbol around it. Outside every expression, GNU R
+/// gives it the negated id of the top-level expression that ends on its line or else of the next
+/// one, and 0 after the last.
+fn comment_parent(rows: &[ParseRow], lines: &[(i32, i32, i32, i32)], comment: usize) -> i32 {
+    let (start, end) = (rows[comment].start, rows[comment].end);
+    let enclosing = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !row.terminal && row.start <= start && end <= row.end)
+        .min_by_key(|(_, row)| row.end - row.start);
+    if let Some((index, _)) = enclosing {
+        return index as i32 + 1;
+    }
+    let line = lines[comment].0;
+    let top_level = || {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| !row.terminal && matches!(row.parent, Parent::TopLevel))
+    };
+    top_level()
+        .find(|(index, row)| row.end <= start && lines[*index].2 == line)
+        .or_else(|| top_level().find(|(_, row)| row.start >= end))
+        .map_or(0, |(index, _)| -(index as i32 + 1))
+}
+
+struct ParseRow {
+    start: usize,
+    end: usize,
+    token: &'static str,
+    number: i32,
+    terminal: bool,
+    parent: Parent,
+}
+
+#[derive(Clone, Copy)]
+enum Parent {
+    Row(usize),
+    TopLevel,
+    /// Decided once every row exists, from where the comment sits.
+    Comment,
+}
+
+/// Where a name or constant sits decides its token, and outside an ordinary expression it is
+/// not wrapped in an `expr` of its own.
+#[derive(Clone, Copy)]
+enum Role {
+    Callee,
+    Argument,
+    Formal,
+    Field,
+    Slot,
+    Package,
+    LoopVariable,
+}
+
+struct ParseDataBuilder {
+    rows: Vec<ParseRow>,
+}
+
+impl ParseDataBuilder {
+    fn push(
+        &mut self,
+        start: usize,
+        end: usize,
+        token: &'static str,
+        number: i32,
+        terminal: bool,
+        parent: Parent,
+    ) -> usize {
+        self.rows.push(ParseRow {
+            start,
+            end,
+            token,
+            number,
+            terminal,
+            parent,
+        });
+        self.rows.len() - 1
+    }
+
+    fn token(&mut self, token: &SyntaxToken, (name, number): (&'static str, i32)) -> usize {
+        let range = token.text_range();
+        self.push(
+            range.start().into(),
+            range.end().into(),
+            name,
+            number,
+            true,
+            Parent::TopLevel,
+        )
+    }
+
+    fn top_level_token(&mut self, token: &SyntaxToken) {
+        match token.kind() {
+            SyntaxKind::COMMENT => {
+                let row = self.token(token, ("COMMENT", 290));
+                self.rows[row].parent = Parent::Comment;
+            }
+            kind if kind.is_trivia() => {}
+            kind => {
+                self.token(token, parse_token(kind));
+            }
+        }
+    }
+
+    /// A `#:` annotation is a run of comments to R, one per line.
+    fn comment_lines(&mut self, node: &SyntaxNode) {
+        let start = usize::from(node.text_range().start());
+        let text = node.text().to_string();
+        let mut offset = start;
+        for line in text.split('\n') {
+            let trimmed = line.trim_end();
+            if let Some(hash) = trimmed.find('#') {
+                let row = self.push(
+                    offset + hash,
+                    offset + trimmed.len(),
+                    "COMMENT",
+                    290,
+                    true,
+                    Parent::Comment,
+                );
+                self.rows[row].parent = Parent::Comment;
+            }
+            offset += line.len() + 1;
+        }
+    }
+
+    /// Adds the rows of an expression and returns the row of its `expr`.
+    fn expression(&mut self, node: &SyntaxNode) -> usize {
+        let mut children = Vec::new();
+        let mut symbol = ("expr", 79);
+        match node.kind() {
+            SyntaxKind::NAME | SyntaxKind::LITERAL => {
+                if let Some(token) = significant_token(node) {
+                    children.push(self.token(&token, parse_token(token.kind())));
+                }
+            }
+            SyntaxKind::FOR_EXPR => {
+                // `(variable in sequence)` is GNU R's `forcond` symbol, and the variable is a
+                // bare symbol inside it.
+                let mut condition = None::<Vec<usize>>;
+                let mut closed = false;
+                for element in node.children_with_tokens() {
+                    match (&element, condition.as_mut()) {
+                        (SyntaxElement::Token(token), None)
+                            if !closed && token.kind() == SyntaxKind::L_PAREN =>
+                        {
+                            condition = Some(vec![self.token(token, parse_token(token.kind()))]);
+                        }
+                        (SyntaxElement::Token(token), Some(rows))
+                            if token.kind() == SyntaxKind::R_PAREN =>
+                        {
+                            rows.push(self.token(token, parse_token(token.kind())));
+                            let rows = std::mem::take(rows);
+                            children.push(self.symbol(("forcond", 82), &rows));
+                            condition = None;
+                            closed = true;
+                        }
+                        (SyntaxElement::Node(child), Some(rows))
+                            if rows.len() == 1 && child.kind() == SyntaxKind::NAME =>
+                        {
+                            let row = self.bare(child, Role::LoopVariable);
+                            rows.extend(row);
+                        }
+                        (_, Some(rows)) => self.element(&element, rows),
+                        (_, None) => self.element(&element, &mut children),
+                    }
+                }
+            }
+            kind => {
+                if kind == SyntaxKind::BINARY_EXPR
+                    && node
+                        .children_with_tokens()
+                        .any(|element| element.kind() == SyntaxKind::EQ)
+                {
+                    symbol = ("expr_or_assign_or_help", 77);
+                }
+                let mut nodes_seen = 0;
+                for element in node.children_with_tokens() {
+                    let SyntaxElement::Node(child) = &element else {
+                        self.element(&element, &mut children);
+                        continue;
+                    };
+                    let plain = matches!(child.kind(), SyntaxKind::NAME | SyntaxKind::LITERAL);
+                    let role = match (kind, nodes_seen) {
+                        (SyntaxKind::CALL_EXPR, 0) if child.kind() == SyntaxKind::NAME => {
+                            Some(Role::Callee)
+                        }
+                        (SyntaxKind::DOLLAR_EXPR, 1) if plain => Some(Role::Field),
+                        (SyntaxKind::AT_EXPR, 1) if plain => Some(Role::Slot),
+                        (SyntaxKind::NAMESPACE_EXPR, 0) if plain => Some(Role::Package),
+                        (SyntaxKind::NAMESPACE_EXPR, 1) if plain => Some(Role::Field),
+                        _ => None,
+                    };
+                    if !is_skipped(child) {
+                        nodes_seen += 1;
+                    }
+                    match role {
+                        // A called name keeps an `expr` of its own.
+                        Some(Role::Callee) => {
+                            let rows: Vec<usize> =
+                                self.bare(child, Role::Callee).into_iter().collect();
+                            children.push(self.symbol(("expr", 79), &rows));
+                        }
+                        Some(role) => children.extend(self.bare(child, role)),
+                        None => self.element(&element, &mut children),
+                    }
+                }
+            }
+        }
+        self.symbol(symbol, &children)
+    }
+
+    fn symbol(&mut self, symbol: (&'static str, i32), children: &[usize]) -> usize {
+        let start = children
+            .iter()
+            .map(|&child| self.rows[child].start)
+            .min()
+            .unwrap_or(0);
+        let end = children
+            .iter()
+            .map(|&child| self.rows[child].end)
+            .max()
+            .unwrap_or(start);
+        let row = self.push(start, end, symbol.0, symbol.1, false, Parent::TopLevel);
+        for &child in children {
+            self.rows[child].parent = Parent::Row(row);
+        }
+        row
+    }
+
+    /// The token of a name or constant in `role`, without an `expr` around it.
+    fn bare(&mut self, node: &SyntaxNode, role: Role) -> Option<usize> {
+        let token = significant_token(node)?;
+        let name = match (role, token.kind()) {
+            (_, SyntaxKind::STRING | SyntaxKind::RAW_STRING) => ("STR_CONST", 260),
+            (_, SyntaxKind::NULL_KW) => ("NULL_CONST", 262),
+            (Role::Callee, _) => ("SYMBOL_FUNCTION_CALL", 296),
+            (Role::Argument, _) => ("SYMBOL_SUB", 295),
+            (Role::Formal, _) => ("SYMBOL_FORMALS", 292),
+            (Role::Slot, _) => ("SLOT", 298),
+            (Role::Package, _) => ("SYMBOL_PACKAGE", 297),
+            (Role::Field | Role::LoopVariable, kind) => parse_token(kind),
+        };
+        Some(self.token(&token, name))
+    }
+
+    /// Adds the rows of one child of an expression to `children`, looking through the argument
+    /// and parameter lists, which GNU R's grammar does not wrap.
+    fn element(&mut self, element: &SyntaxElement, children: &mut Vec<usize>) {
+        match element {
+            SyntaxElement::Token(token) => match token.kind() {
+                SyntaxKind::COMMENT => {
+                    let row = self.token(token, ("COMMENT", 290));
+                    self.rows[row].parent = Parent::Comment;
+                }
+                kind if kind.is_trivia() => {}
+                kind => children.push(self.token(token, parse_token(kind))),
+            },
+            SyntaxElement::Node(node) => match node.kind() {
+                SyntaxKind::ANNOTATION => self.comment_lines(node),
+                _ if is_skipped(node) => {}
+                SyntaxKind::ARGUMENT_LIST | SyntaxKind::PARAMETER_LIST => {
+                    for child in node.children_with_tokens() {
+                        self.element(&child, children);
+                    }
+                }
+                SyntaxKind::ARGUMENT | SyntaxKind::PARAMETER => {
+                    let formal = node.kind() == SyntaxKind::PARAMETER;
+                    let named = node
+                        .children_with_tokens()
+                        .any(|child| child.kind() == SyntaxKind::EQ);
+                    let mut before_equals = true;
+                    for child in node.children_with_tokens() {
+                        match &child {
+                            SyntaxElement::Token(token) if token.kind() == SyntaxKind::EQ => {
+                                before_equals = false;
+                                let name = if formal {
+                                    ("EQ_FORMALS", 293)
+                                } else {
+                                    ("EQ_SUB", 294)
+                                };
+                                children.push(self.token(token, name));
+                            }
+                            SyntaxElement::Token(token)
+                                if formal
+                                    && matches!(
+                                        token.kind(),
+                                        SyntaxKind::IDENT | SyntaxKind::DOTS
+                                    ) =>
+                            {
+                                children.push(self.token(token, ("SYMBOL_FORMALS", 292)));
+                            }
+                            SyntaxElement::Node(name)
+                                if named
+                                    && before_equals
+                                    && !formal
+                                    && matches!(
+                                        name.kind(),
+                                        SyntaxKind::NAME | SyntaxKind::LITERAL
+                                    ) =>
+                            {
+                                children.extend(self.bare(name, Role::Argument));
+                            }
+                            _ => self.element(&child, children),
+                        }
+                    }
+                }
+                _ => children.push(self.expression(node)),
+            },
+        }
+    }
+}
+
+fn significant_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find(|token| !token.kind().is_trivia())
+}
+
+/// GNU R's name and number for a token: its character code for a one-character operator, and
+/// the grammar's numbering from 258 otherwise.
+fn parse_token(kind: SyntaxKind) -> (&'static str, i32) {
+    use SyntaxKind::*;
+    match kind {
+        IDENT | DOTS | DOTDOTI => ("SYMBOL", 263),
+        INTEGER | DOUBLE | COMPLEX | TRUE_KW | FALSE_KW | INF_KW | NAN_KW | NA_KW
+        | NA_INTEGER_KW | NA_REAL_KW | NA_COMPLEX_KW | NA_CHARACTER_KW => ("NUM_CONST", 261),
+        STRING | RAW_STRING => ("STR_CONST", 260),
+        NULL_KW => ("NULL_CONST", 262),
+        UNDERSCORE => ("PLACEHOLDER", 300),
+        FUNCTION_KW => ("FUNCTION", 264),
+        LESS_MINUS | LESS2_MINUS | COLON_EQ => ("LEFT_ASSIGN", 266),
+        EQ => ("EQ_ASSIGN", 267),
+        MINUS_GREATER | MINUS_GREATER2 => ("RIGHT_ASSIGN", 268),
+        L_BRACKET2 => ("LBB", 269),
+        FOR_KW => ("FOR", 270),
+        IN_KW => ("IN", 271),
+        IF_KW => ("IF", 272),
+        ELSE_KW => ("ELSE", 273),
+        WHILE_KW => ("WHILE", 274),
+        NEXT_KW => ("NEXT", 275),
+        BREAK_KW => ("BREAK", 276),
+        REPEAT_KW => ("REPEAT", 277),
+        GREATER => ("GT", 278),
+        GREATER_EQ => ("GE", 279),
+        LESS => ("LT", 280),
+        LESS_EQ => ("LE", 281),
+        EQ2 => ("EQ", 282),
+        BANG_EQ => ("NE", 283),
+        AMP => ("AND", 284),
+        PIPE => ("OR", 285),
+        AMP2 => ("AND2", 286),
+        PIPE2 => ("OR2", 287),
+        COLON2 => ("NS_GET", 288),
+        COLON3 => ("NS_GET_INT", 289),
+        COMMENT => ("COMMENT", 290),
+        PIPE_GREATER => ("PIPE", 299),
+        SPECIAL => ("SPECIAL", 306),
+        BANG => ("'!'", 33),
+        DOLLAR => ("'$'", 36),
+        L_PAREN => ("'('", 40),
+        R_PAREN => ("')'", 41),
+        STAR => ("'*'", 42),
+        PLUS => ("'+'", 43),
+        COMMA => ("','", 44),
+        MINUS => ("'-'", 45),
+        SLASH => ("'/'", 47),
+        COLON => ("':'", 58),
+        SEMICOLON => ("';'", 59),
+        QUESTION => ("'?'", 63),
+        AT => ("'@'", 64),
+        L_BRACKET => ("'['", 91),
+        BACKSLASH => ("'\\\\'", 92),
+        R_BRACKET => ("']'", 93),
+        CARET => ("'^'", 94),
+        L_BRACE => ("'{'", 123),
+        R_BRACE => ("'}'", 125),
+        TILDE => ("'~'", 126),
+        _ => ("ERROR", 259),
+    }
 }
 
 /// Source text that parsed without a syntax error, with its top-level expressions still to be
@@ -71,6 +540,7 @@ pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -
 /// between two of them.
 pub struct Script<'text> {
     text: &'text str,
+    root: SyntaxNode,
     pub expressions: Vec<SyntaxNode>,
 }
 
@@ -106,7 +576,11 @@ pub fn parse_script<'text>(text: &'text str, source_name: &str) -> R<Script<'tex
         }
         expressions.push(child);
     }
-    Ok(Script { text, expressions })
+    Ok(Script {
+        text,
+        root: parse.syntax_node(),
+        expressions,
+    })
 }
 
 /// Lowers one top-level expression of `script`. With `keep_source`, it keeps source references
@@ -369,7 +843,13 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
                 symbols().bracket2
             };
             let mut items = vec![(nil(), operator), (nil(), lower(object, source)?)];
-            items.extend(argument_list(arguments, source)?);
+            let subscripts = argument_list(arguments, source)?;
+            // R's grammar gives `x[]` and `x[[]]` one empty subscript, unlike `f()`, so
+            // `nargs()` in a `[<-` method counts it (`[<-.data.frame` relies on that).
+            if subscripts.is_empty() {
+                items.push((nil(), missing_arg()));
+            }
+            items.extend(subscripts);
             values::pairlist(&items, SexpType::Language)
         }
         SyntaxKind::DOLLAR_EXPR | SyntaxKind::AT_EXPR | SyntaxKind::NAMESPACE_EXPR => {

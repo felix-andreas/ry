@@ -25,8 +25,31 @@ use {
         ffi::c_void,
         fmt,
         ptr::NonNull,
+        sync::OnceLock,
     },
 };
+
+/// Reads and writes elements of ALTREP string and list vectors. Only the C API host knows the
+/// classes' methods, so it installs these; the heap and the interpreter then treat every vector
+/// alike.
+#[derive(Clone, Copy)]
+pub struct AltrepElements {
+    pub read: unsafe fn(Sexp, usize) -> Sexp,
+    pub write: unsafe fn(Sexp, usize, Sexp),
+}
+
+static ALTREP_ELEMENTS: OnceLock<AltrepElements> = OnceLock::new();
+
+/// Installs the accessors behind [`Sexp::element`] and `Heap::set_element` for ALTREP
+/// instances. Later calls keep the first.
+pub fn install_altrep_elements(elements: AltrepElements) {
+    ALTREP_ELEMENTS.get_or_init(|| elements);
+}
+
+/// The installed ALTREP accessors, for an object that has the ALTREP flag.
+pub(crate) fn altrep_elements() -> Option<&'static AltrepElements> {
+    ALTREP_ELEMENTS.get()
+}
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -311,13 +334,12 @@ pub mod gp {
 }
 
 pub(crate) mod gc_bits {
-    /// Reached by the current collection. Marks are sticky between collections, so a marked
-    /// object outside a collection belongs to the old generation.
+    /// The mark of a large object, which lives outside the small-object space and its mark
+    /// bitmaps. Marks are sticky between collections, so a marked object outside a collection
+    /// belongs to the old generation.
     pub const MARK: u8 = 1 << 0;
     /// In the remembered set: an old object that may point at young objects.
     pub const REMEMBERED: u8 = 1 << 1;
-    /// Allocated on its own instead of in a size-class page.
-    pub const LARGE: u8 = 1 << 2;
     /// A writable pointer to its elements was handed out (`STRING_PTR`, `DATAPTR` on a list),
     /// so stores into it bypass the write barrier and it is scanned at every minor collection.
     pub const ESCAPED: u8 = 1 << 3;
@@ -373,8 +395,11 @@ pub(crate) struct EnvironmentObject {
     /// allocation and no malloc while its bindings fit the frame's inline cells.
     pub frame: UnsafeCell<Frame>,
     pub enclosure: Cell<Sexp>,
-    pub spare: Cell<usize>,
 }
+
+// Every closure call allocates an environment, so growing the frame past this size class would
+// cost each call a larger slot to zero.
+const _: () = assert!(size_of::<EnvironmentObject>() <= 192);
 
 #[repr(C)]
 pub(crate) struct ExternalPtrObject {
@@ -629,10 +654,6 @@ impl Sexp {
         }
     }
 
-    pub(crate) unsafe fn is_marked(self) -> bool {
-        unsafe { self.gc_bits() & gc_bits::MARK != 0 }
-    }
-
     pub(crate) unsafe fn size_class(self) -> u8 {
         unsafe { self.header().size_class.get() }
     }
@@ -726,9 +747,17 @@ impl Sexp {
         unsafe { self.slice::<u8>() }
     }
 
-    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`.
+    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`. An ALTREP instance has no element
+    /// storage, so its class's `Elt` method answers through the accessor the host installed.
     pub unsafe fn element(self, index: usize) -> Sexp {
-        unsafe { *(self.data() as *const Sexp).add(index) }
+        unsafe {
+            if self.is_altrep()
+                && let Some(elements) = ALTREP_ELEMENTS.get()
+            {
+                return (elements.read)(self, index);
+            }
+            *(self.data() as *const Sexp).add(index)
+        }
     }
 
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {
@@ -933,11 +962,5 @@ impl Sexp {
 
     pub(crate) unsafe fn set_altrep_flag(self) {
         unsafe { self.set_flag(flag_bits::ALTREP, true) }
-    }
-
-    /// The raw kind byte, read without forming a reference to the header, so it is valid on a
-    /// free slot too.
-    pub(crate) unsafe fn kind_byte(self) -> u8 {
-        unsafe { *(self.0.as_ptr() as *const u8) }
     }
 }

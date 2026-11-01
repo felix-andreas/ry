@@ -10,11 +10,11 @@ use {
             TypeErrorKind, column_element,
         },
         exhaustiveness::{MatchFinding, MatchFindingKind},
-        file_syntax_sites, file_type_definitions,
+        file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-        item_tree,
+        item_syntax, item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
@@ -75,9 +75,9 @@ pub struct RelatedLocation {
     pub message: &'static str,
 }
 
-/// Derives every fact a later pass reads from the file's tree, while the tree is resident.
-/// A cold pass that evicts trees between batches calls this first, so checking a file never
-/// re-parses another one: past this point only the file's own diagnostics read its tree.
+/// Derives every fact a later pass reads from the file's tree. A cold pass calls this for
+/// every file across all cores first, so a later check that reaches another file finds its
+/// facts memoized instead of walking that file's tree on the checking thread.
 pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = crate::metadata::file_attached_namespaces(db, file);
     let _ = file_error_ranges(db, file);
@@ -86,8 +86,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = definition_agreement_candidates(db, file);
     let _ = crate::lints::file_syntax_lints(db, file, *lints);
     let _ = crate::file_typing_mode(db, file);
-    let _ = crate::file_type_definitions(db, file);
-    let _ = type_declaration_names(db, file);
+    warm_project_folds(db, file);
     let _ = parse_stage_diagnostics(db, file);
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
@@ -332,6 +331,18 @@ fn file_error_ranges(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
         .collect()
 }
 
+/// Derives the file's share of every project-wide map a single file's check folds, so a host
+/// can spread that work across cores before the first check. Without it, the first check
+/// derives the share of every file of the project on one thread.
+pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
+    file_definitions(db, file);
+    file_conditional_writers(db, file);
+    file_type_definitions(db, file);
+    top_level_binding_names(db, file);
+    type_declaration_names(db, file);
+    file_global_variable_declarations(db, file);
+}
+
 #[salsa::tracked(returns(clone))]
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = parse_stage_diagnostics(db, file);
@@ -434,7 +445,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if binding.kind == BindingKind::TopLevel {
                 continue;
             }
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -449,7 +460,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(message) = namespace_read_message(db, read) else {
                 continue;
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -465,11 +476,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             }
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             let display = display_name(name);
             let suggestion = suggestion
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
@@ -489,7 +500,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
@@ -501,7 +512,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 Some(frame) => format!("the frame `{frame}`"),
                 None => "this frame".to_owned(),
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -544,12 +555,13 @@ fn classify_non_local_read(
     check: &ItemCheck<'_>,
     naming: &ItemNaming,
     expression: &ExprId,
-    name: &str,
+    symbol: Symbol,
 ) -> NonLocalRead {
+    let name = symbol.as_str();
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if let Some(&earliest) = frame_slot_positions(db, file).get(name)
+    if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
             || naming.deferred_quiet_reads.contains(expression))
@@ -577,7 +589,7 @@ fn classify_non_local_read(
             let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
-        || super_globals(db, file).contains(name)
+        || super_globals(db, file).contains(&symbol)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -774,8 +786,7 @@ struct AnnotationReferences<'db> {
 
 /// Every annotation in the file lowered with file ranges (the `#:` blocks, and the inline
 /// sites unless inline annotations are turned off), keeping only those that reference a
-/// type or report a typing error. Memoized because it reads the tree, which a cold check
-/// evicts after its first pass.
+/// type or report a typing error. Memoized so that diagnostics never walk the tree again.
 #[salsa::tracked(returns(ref))]
 fn file_annotation_references<'db>(
     db: &'db dyn Db,
@@ -928,8 +939,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
 }
 
 /// A disagreement between a statement's inline annotation and its `#:` comment, found from
-/// syntax alone. Memoized because it reads the tree, which a cold check evicts after its
-/// first pass.
+/// syntax alone. Memoized so that diagnostics never walk the tree again.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum AgreementCandidate<'db> {
     /// Compared as written (a type-parameter constraint, a definition's kind or arity), so
@@ -1716,17 +1726,34 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
 fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     use crate::hir::LiteralKind;
     let mut declared = BTreeSet::new();
+    // Every file of the project is asked, so the common answer must not cost a tree walk.
+    if !file.text(db).contains("globalVariables") {
+        return declared;
+    }
     for &item in item_tree(db, file) {
+        // Lowering every item of the project to find a handful of calls would dominate a
+        // single file's check, so the name is matched on the syntax first.
+        let spelled = *item.kind(db) == ItemKind::Statement
+            && item_syntax(db, item).is_some_and(|syntax| {
+                syntax
+                    .syntax_node()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.text().trim_matches('`') == "globalVariables")
+            });
+        if !spelled {
+            continue;
+        }
         let Some(module) = item_hir(db, item) else {
             continue;
         };
         let Some(root) = module.root else {
             continue;
         };
-        let ExpressionKind::Call { callee, arguments } = &module.expression(root).kind else {
+        let ExpressionKind::Call { callee, arguments } = module.kind(root) else {
             continue;
         };
-        let is_global_variables = match &module.expression(*callee).kind {
+        let is_global_variables = match module.kind(*callee) {
             ExpressionKind::NameRef(name) => name == "globalVariables",
             ExpressionKind::Namespace { package, name, .. } => {
                 package.as_deref() == Some("utils") && name.as_deref() == Some("globalVariables")
@@ -1736,26 +1763,29 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
         if !is_global_variables {
             continue;
         }
-        let Some(first) = arguments.first().and_then(|argument| argument.value) else {
+        let Some(first) = module[arguments]
+            .first()
+            .and_then(|argument| argument.value)
+        else {
             continue;
         };
         let mut collect = |id| {
-            if let ExpressionKind::Literal(LiteralKind::String(value)) = &module.expression(id).kind
-                && !value.is_empty()
+            if let ExpressionKind::Literal(LiteralKind::String(value)) = module.kind(id)
+                && !module[value].is_empty()
             {
-                declared.insert(value.to_string());
+                declared.insert(module[value].to_string());
             }
         };
-        match &module.expression(first).kind {
+        match module.kind(first) {
             ExpressionKind::Call {
                 callee: inner,
                 arguments: entries,
             } if matches!(
-                &module.expression(*inner).kind,
+                module.kind(*inner),
                 ExpressionKind::NameRef(name) if name == "c"
             ) =>
             {
-                for entry in entries {
+                for entry in &module[entries] {
                     if let Some(value) = entry.value {
                         collect(value);
                     }
@@ -1799,11 +1829,11 @@ const DISPATCH_VARIABLES: [&str; 6] = [
 fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
     item_spans(db, file).iter().any(|span| {
         item_hir(db, span.item).as_ref().is_some_and(|module| {
-            module.expressions.iter().any(|expression| {
-                let ExpressionKind::Call { callee, .. } = &expression.kind else {
+            module.kinds().iter().any(|kind| {
+                let ExpressionKind::Call { callee, .. } = kind else {
                     return false;
                 };
-                match &module.expression(*callee).kind {
+                match module.kind(*callee) {
                     ExpressionKind::NameRef(name) => name == "R6Class",
                     ExpressionKind::Namespace { name, .. } => name.as_deref() == Some("R6Class"),
                     _ => false,
@@ -2001,7 +2031,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             && let Some(root) = module.root
             && let Some(name_range) = item_name_range(db, item)
         {
-            let root_range = module.expression(root).range;
+            let root_range = module.range(root);
             let statement_range = root_range + offset;
             // The finding goes on the name, but a syntax error anywhere in the statement
             // suppresses it.
@@ -2128,12 +2158,12 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         };
         for (expression, name) in &naming.non_locals {
             if !matches!(
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name),
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name),
                 NonLocalRead::Tolerated
             ) {
                 continue;
             }
-            diagnostics.push(Diagnostic::new(module.expression(*expression).range + offset, Severity::Error, "strict", format!(
+            diagnostics.push(Diagnostic::new(module.range(*expression) + offset, Severity::Error, "strict", format!(
                     "strict mode: nothing this project can see defines `{}`. It is silent only because an attached package's exports are unknown. Declare the package with a `.Rtypes` stub to check it",
                     display_name(name)
                 )));
@@ -2152,9 +2182,9 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let mut assignment_targets = FxHashMap::default();
-        for expression in &module.expressions {
-            if let ExpressionKind::Assign { target, value, .. } = &expression.kind
-                && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
+        for kind in module.kinds() {
+            if let ExpressionKind::Assign { target, value, .. } = kind
+                && let ExpressionKind::NameRef(name) = module.kind(*target)
             {
                 assignment_targets.insert(*value, *name);
             }
@@ -2395,7 +2425,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             }
         }
         TypeErrorKind::MaybeNullCallee { found } => format!(
-            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch",
+            "this may be `NULL` here (its type is `{}`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter",
             renderer.render(db, *found)
         ),
         TypeErrorKind::KnownTypeUnderIfUnknown { found } => format!(

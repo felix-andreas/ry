@@ -62,7 +62,7 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
@@ -74,7 +74,8 @@ it runs the driver through `ry run --runtime ry` with the workspace's debug buil
 `ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
 build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
-the compiled tier on every case. Without `--engine` or `ORACLE_ENGINE` the second engine
+the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
+`RY_GC_STRESS=1`, which collects before every allocation once the script starts. Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
@@ -130,6 +131,10 @@ with `.corpus/ry-library` ahead of `.corpus/library` (which still supplies the `
 records results under `ry-installed`, beside the `ry` results of `ry run --runtime ry`, with the
 table in `.corpus/tests/summary-installed.md`.
 
+GNU R's binaries of graphics devices refuse ry's graphics engine, which is one version newer than
+the one R 4.3.3 built them against, so a package whose tests plot through svglite needs svglite
+installed on ry: `just corpus-ry-install svglite` builds it from source.
+
 ## Running against another GNU R
 
 The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,
@@ -142,12 +147,25 @@ ORACLE_RSCRIPT=/opt/R/4.6.2/bin/Rscript just oracle packages   # the package cor
 ```
 
 `ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
-The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs: `verify` under
-4.6.2 passes 90 of 105 cases against 102 of 105 under 4.3.3, mostly in `stats`, `s4` and printing.
-Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing rig puts its
-`R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in `/usr/local/bin` to keep
-the system R as the default. Whether ry's own runtime can load the newer R's base library through
-`R_HOME` is untested.
+When `ORACLE_R` is set, the `ry` engine of `compare` also runs with `R_HOME` set to that R's home,
+so ry's runtime loads the same base library and emulates the same version as the GNU R it is
+compared with. That makes `compare` the check for a new R release:
+
+```sh
+ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
+```
+
+Under R 4.6.1, `compare` passes 118 of 125 cases, against 124 of 125 under 4.3.3. Four of the
+remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
+and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
+seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
+calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines
+and runs it. `stats__lbfgsb` differs under every version.
+
+The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
+`verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing
+rig puts its `R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in
+`/usr/local/bin` to keep the system R as the default.
 
 ## The benchmark generator
 
@@ -161,7 +179,11 @@ just bench-test .bench/finbench
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
-count (by default one file per 600 lines).
+count (by default one file per 600 lines). `--typed` keeps the templates' `#:` annotations and
+turns on strict mode in the generated `ry.toml`, so the package doubles as a strict-mode dogfood
+corpus; without it the annotations are stripped and the package is plain R. The line target counts
+code without annotations, so a typed and an untyped run with the same seed generate the same program. `--only` limits
+generation to the named templates, which is the quick way to iterate on one of them.
 
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is

@@ -1,5 +1,11 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
+//!
+//! The worker never touches the transport or a thread directly: its outgoing traffic goes
+//! through [`Outbox`] and its scheduling through [`run_job`], so [`simulation`] can drive the
+//! same code from one seed without a socket, a runtime or a second thread.
+
+pub mod simulation;
 
 use {
     crate::{
@@ -33,21 +39,22 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics},
-        file_conditional_writers, file_interface_reads, item_naming, item_tree,
+        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics, warm_project_folds},
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
             parse_namespace,
         },
+        project_global_names,
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
             shipped_stub_sources, stub_source_problems,
         },
     },
+    simulation::Outgoing,
     std::{
         cmp::Reverse,
-        collections::{BTreeSet, HashMap, HashSet},
+        collections::{BTreeSet, HashMap},
         env, fs,
         hash::{DefaultHasher, Hash, Hasher},
         mem,
@@ -79,11 +86,13 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
         let cancel = CancelHandle::default();
 
         let seed = WorkerSeed {
-            client: client.clone(),
+            outbox: Outbox::Client {
+                client: client.clone(),
+                runtime: runtime.clone(),
+            },
             experimental_features,
             debug,
             cancel: cancel.clone(),
-            runtime: runtime.clone(),
         };
         thread::Builder::new()
             .name("ry-analysis".to_owned())
@@ -223,61 +232,42 @@ enum Job {
 }
 
 struct WorkerSeed {
-    client: ClientSocket,
+    outbox: Outbox,
     experimental_features: ExperimentalFeatures,
     /// Surfaces internal analysis facts (hover debug sections). Deliberately not a
     /// `ry.toml` key: the config file is a user-facing contract.
     debug: bool,
     cancel: CancelHandle,
-    runtime: Handle,
+}
+
+/// Where the worker's server-to-client traffic goes. Every message the worker originates
+/// passes through here, which is what lets a simulation record the exact transcript.
+enum Outbox {
+    Client {
+        client: ClientSocket,
+        runtime: Handle,
+    },
+    Recorder(Arc<Mutex<Vec<simulation::Outgoing>>>),
 }
 
 fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
-    let cancel = seed.cancel.clone();
     let mut seed = Some(seed);
     let mut worker: Option<Worker> = None;
     loop {
         let job = if worker.as_ref().is_some_and(Worker::has_idle_work) {
             match receiver.try_recv() {
-                Ok(job) => {
-                    cancel.job_received();
-                    Some(job)
-                }
+                Ok(job) => Some(job),
                 Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }
         } else {
             match receiver.recv() {
-                Ok(job) => {
-                    cancel.job_received();
-                    Some(job)
-                }
+                Ok(job) => Some(job),
                 Err(_) => return,
             }
         };
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match job {
-            Some(Job::Initialize(params, reply)) => {
-                let seed = seed.take().expect("initialize arrives exactly once");
-                let (initialized, result) = Worker::initialize(seed, *params);
-                worker = Some(initialized);
-                // The receiver is gone only when the client cancelled the request.
-                reply.send(Ok(result)).ok();
-            }
-            job => match worker.as_mut() {
-                Some(worker) => {
-                    worker.refresh_cancellation();
-                    match job {
-                        Some(Job::Run(work)) => work(worker),
-                        _ => {
-                            worker.cancel.set_idle(true);
-                            worker.run_idle_unit();
-                            worker.cancel.set_idle(false);
-                        }
-                    }
-                }
-                // LSP allows dropping notifications before initialize.
-                None => tracing::warn!("dropping a job that arrived before initialize"),
-            },
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            run_job(&mut seed, &mut worker, job);
         }));
         if outcome.is_err() {
             // A read catches its own cancellation, so this is a coherence panic; serving a
@@ -285,6 +275,47 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
             tracing::error!("analysis worker panicked; exiting");
             process::exit(1);
         }
+    }
+}
+
+/// One scheduling step of the worker: a queued job, or one unit of idle work when `job` is
+/// `None`. The production loop and the simulator both schedule through this function, so the
+/// simulator exercises exactly the worker's own transitions.
+fn run_job(seed: &mut Option<WorkerSeed>, worker: &mut Option<Worker>, job: Option<Job>) {
+    // The seed holds the handle until initialize hands it to the worker.
+    let cancel = match (seed.as_ref(), worker.as_ref()) {
+        (Some(seed), _) => Some(&seed.cancel),
+        (None, Some(worker)) => Some(&worker.cancel),
+        (None, None) => None,
+    };
+    if job.is_some()
+        && let Some(cancel) = cancel
+    {
+        cancel.job_received();
+    }
+    match job {
+        Some(Job::Initialize(params, reply)) => {
+            let seed = seed.take().expect("initialize arrives exactly once");
+            let (initialized, result) = Worker::initialize(seed, *params);
+            *worker = Some(initialized);
+            // The receiver is gone only when the client cancelled the request.
+            reply.send(Ok(result)).ok();
+        }
+        job => match worker.as_mut() {
+            Some(worker) => {
+                worker.refresh_cancellation();
+                match job {
+                    Some(Job::Run(work)) => work(worker),
+                    _ => {
+                        worker.cancel.set_idle(true);
+                        worker.run_idle_unit();
+                        worker.cancel.set_idle(false);
+                    }
+                }
+            }
+            // LSP allows dropping notifications before initialize.
+            None => tracing::warn!("dropping a job that arrived before initialize"),
+        },
     }
 }
 
@@ -340,6 +371,10 @@ impl ServerState {
     }
 }
 
+fn record_outgoing(record: &Mutex<Vec<Outgoing>>, message: Outgoing) {
+    record.lock().expect("simulation outbox lock").push(message);
+}
+
 fn worker_gone_error() -> ResponseError {
     ResponseError::new(ErrorCode::INTERNAL_ERROR, "analysis worker unavailable")
 }
@@ -351,10 +386,13 @@ enum PositionEncoding {
 }
 
 struct Worker {
-    client: ClientSocket,
-    runtime: Handle,
+    outbox: Outbox,
     cancel: CancelHandle,
     current_token: salsa::CancellationToken,
+    /// Fault injection for the simulator: the cancellation token flips at the given
+    /// cancellable checkpoint of the current job, which is how a simulated edit lands while a
+    /// query is in flight. Always `None` outside a simulation.
+    cancel_at_checkpoint: Option<usize>,
     experimental_features: ExperimentalFeatures,
     debug: bool,
     encoding: PositionEncoding,
@@ -367,7 +405,8 @@ struct Worker {
     pending_config_error: Option<String>,
     db: RootDatabase,
     files: HashMap<PathBuf, SourceFile>,
-    open_documents: HashSet<PathBuf>,
+    /// Ordered, because a refresh walks it and the order of the publishes it owes is observable.
+    open_documents: BTreeSet<PathBuf>,
     stub_documents: HashMap<PathBuf, String>,
     /// Aligned with the `StubSources` order: shipped sources point at materialized
     /// cache copies, overrides at their real files. `None` when materialization failed.
@@ -387,6 +426,8 @@ struct Worker {
     unwarmed: Vec<PathBuf>,
     /// Results are never published.
     prime_queue: Vec<PathBuf>,
+    /// Set when [`project_global_names`] must re-run before the next editor request.
+    editor_folds_stale: bool,
     /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
     /// whose durability drops, so the first LOW write to a file re-derives everything that
     /// depends on it. Idle time pays that once, so the first keystroke does not.
@@ -394,6 +435,9 @@ struct Worker {
     /// Non-empty sets only. Kept current per synced or primed file, never by a
     /// whole-project sweep, so keystroke work stays O(open documents).
     attached_by_file: HashMap<PathBuf, BTreeSet<String>>,
+    /// Files whose `library()` scan a cancellation interrupted. The edit that cancelled it may
+    /// be to another file, so nothing else would rescan this one: idle time owes it.
+    pending_attached_scans: BTreeSet<PathBuf>,
 }
 
 struct WorkspaceMetadata {
@@ -475,10 +519,10 @@ impl Worker {
         seed.cancel.install(current_token.clone());
 
         let mut worker = Worker {
-            client: seed.client,
-            runtime: seed.runtime,
+            outbox: seed.outbox,
             cancel: seed.cancel,
             current_token,
+            cancel_at_checkpoint: None,
             experimental_features: seed.experimental_features,
             debug: seed.debug,
             encoding,
@@ -491,7 +535,7 @@ impl Worker {
             pending_config_error: pending_config_error.as_ref().map(config_message),
             db,
             files: HashMap::new(),
-            open_documents: HashSet::new(),
+            open_documents: BTreeSet::new(),
             stub_documents: HashMap::new(),
             stub_source_paths: Vec::new(),
             namespace_documents: HashMap::new(),
@@ -501,8 +545,10 @@ impl Worker {
             unscanned: Vec::new(),
             unwarmed: Vec::new(),
             prime_queue: Vec::new(),
+            editor_folds_stale: false,
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
+            pending_attached_scans: BTreeSet::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
         // durable as its least durable input, and nearly every memo reads the stubs or the
@@ -599,16 +645,19 @@ impl Worker {
     }
 
     /// When the project-wide attach union moves, every file's resolution universe
-    /// changes, so all diagnostics refresh. Returns false when the scan was cancelled. A sync
-    /// can ignore that, because the edit that cancelled it re-scans in its own sync, but an
-    /// idle caller must requeue the file: a request preempts idle work without re-scanning.
-    fn refresh_attached(&mut self, path: &Path) -> bool {
+    /// changes, so all diagnostics refresh. A cancelled scan is queued as idle work, because
+    /// the edit that cancelled it may belong to another file and re-scan only that one.
+    fn refresh_attached(&mut self, path: &Path) {
+        self.pending_attached_scans.remove(path);
         let scanned = match self.files.get(path) {
             Some(&file) => {
                 let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
                 match scan {
                     Ok(scanned) => scanned,
-                    Err(_) => return false,
+                    Err(_) => {
+                        self.pending_attached_scans.insert(path.to_owned());
+                        return;
+                    }
                 }
             }
             None => Default::default(),
@@ -622,10 +671,9 @@ impl Worker {
             false
         };
         if !changed || !self.unscanned.is_empty() {
-            return true;
+            return;
         }
         self.apply_attached_union();
-        true
     }
 
     fn apply_attached_union(&mut self) {
@@ -748,9 +796,11 @@ impl Worker {
 
     fn has_idle_work(&self) -> bool {
         !self.unwarmed.is_empty()
+            || !self.pending_attached_scans.is_empty()
             || !self.pending_semantic_publishes.is_empty()
             || !self.pending_lowering.is_empty()
             || !self.prime_queue.is_empty()
+            || self.editor_folds_stale
     }
 
     fn run_idle_unit(&mut self) {
@@ -758,6 +808,11 @@ impl Worker {
         // thread it would derive the same maps several times slower.
         if !self.unwarmed.is_empty() {
             self.warm_up();
+            return;
+        }
+        // Next, because a changed attach set refreshes every document's diagnostics.
+        if let Some(path) = self.pending_attached_scans.pop_first() {
+            self.refresh_attached(&path);
             return;
         }
         if let Some(path) = self.pending_semantic_publishes.pop() {
@@ -774,6 +829,21 @@ impl Worker {
             }
             return;
         }
+        if self.editor_folds_stale {
+            // Goto and references consult this fold for every library call. Lowering an open
+            // file drops its durability, and salsa never backdates across that drop, so the
+            // fold re-runs once (about 20 ms at 300,000 lines) and the first request would
+            // otherwise pay for it.
+            self.editor_folds_stale = false;
+            if let Some(files) = ProjectFiles::try_get(&self.db)
+                && self
+                    .cancellable(|worker| project_global_names(&worker.db, files).len())
+                    .is_err()
+            {
+                self.editor_folds_stale = true;
+            }
+            return;
+        }
         if let Some(path) = self.pending_lowering.pop() {
             if self.open_documents.contains(&path)
                 && let Some(&file) = self.files.get(&path)
@@ -783,6 +853,7 @@ impl Worker {
                     .with_durability(Durability::LOW)
                     .to(text);
                 self.defer_semantic_publish(&path);
+                self.editor_folds_stale = true;
             }
             return;
         }
@@ -798,8 +869,9 @@ impl Worker {
         }
     }
 
-    /// Scans every file's attach facts and applies their union once, then derives every
-    /// item's naming and the per-file folds the project-wide maps read, across all cores.
+    /// Scans every file's attach facts and applies their union once, then derives the per-file
+    /// folds the project-wide maps read, across all cores. Naming every item is left to the
+    /// prime queue: a file's check names only the items its interface reaches.
     fn warm_up(&mut self) {
         if !self.unscanned.is_empty() {
             let paths = mem::take(&mut self.unscanned);
@@ -816,22 +888,18 @@ impl Worker {
             if !self.unscanned.is_empty() {
                 return;
             }
-            // Before naming: every memo that reads the attach set would re-run after it.
+            // Before the folds: every memo that reads the attach set would re-run after it.
             self.apply_attached_union();
         }
         let paths = mem::take(&mut self.unwarmed);
         let cancel = self.cancel.clone();
-        // A cancel can be lost to salsa's uncancel between two items, so a large file
-        // also checks the queue per item and is requeued when it stopped early.
+        // A cancel can be lost to salsa's uncancel between two files, so each file checks the
+        // queue and is requeued when it stopped early.
         let (done, mut rest) = self.in_parallel(paths, |db, file| {
-            for &item in item_tree(db, file) {
-                if cancel.has_queued_jobs() {
-                    return false;
-                }
-                item_naming(db, item);
+            if cancel.has_queued_jobs() {
+                return false;
             }
-            file_interface_reads(db, file);
-            file_conditional_writers(db, file);
+            warm_project_folds(db, file);
             true
         });
         rest.extend(
@@ -841,6 +909,7 @@ impl Worker {
         );
         self.unwarmed = rest;
         if self.unwarmed.is_empty() {
+            self.editor_folds_stale = true;
             // Open files so far published only their parse diagnostics.
             self.refresh_all_diagnostics();
         }
@@ -926,6 +995,14 @@ impl Worker {
         &mut self,
         body: impl FnOnce(&mut Worker) -> T,
     ) -> Result<T, salsa::Cancelled> {
+        if let Some(remaining) = self.cancel_at_checkpoint.as_mut() {
+            if *remaining == 0 {
+                self.cancel_at_checkpoint = None;
+                self.cancel.cancel();
+            } else {
+                *remaining -= 1;
+            }
+        }
         salsa::Cancelled::catch(AssertUnwindSafe(|| body(self)))
     }
 
@@ -973,8 +1050,12 @@ impl Worker {
     }
 
     /// Package and test files are read from disk, so a closed or changed one reloads.
-    fn is_project_path(&self, path: &Path) -> bool {
-        document_kind(path, &self.workspace_root) != DocumentKind::Script
+    /// Whether a file belongs to the package namespace, the set the server loads from disk at
+    /// startup and keeps loaded while it is closed. Test and helper files are analyzed only
+    /// while open, so closing one or seeing it change on disk must not pull it into the
+    /// project, or the session would diverge from a server started fresh on the same disk.
+    fn is_package_path(&self, path: &Path) -> bool {
+        document_kind(path, &self.workspace_root) == DocumentKind::Package
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -1146,11 +1227,12 @@ impl Worker {
 
         let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
-            // Opening usually shows the text already on disk. Rewriting it anyway would be a
-            // MEDIUM write (a setter keeps the field's durability), which makes every memo in
-            // the project deep-verify before the first diagnostics.
+            // Opening usually shows the text already on disk, so lowering its durability
+            // waits for idle time: the drop defeats backdating, and everything derived from
+            // the file re-runs once. Before the warm-up has derived anything from it, the drop
+            // is cheap, and lowering at once spares a second check of the file.
             Some(&file) => {
-                if *file.text(&self.db) == params.text_document.text {
+                if *file.text(&self.db) == params.text_document.text && self.unwarmed.is_empty() {
                     self.pending_lowering.push(path.clone());
                 } else {
                     file.set_text(&mut self.db)
@@ -1283,7 +1365,7 @@ impl Worker {
         self.pending_semantic_publishes.retain(|owed| owed != &path);
         self.pending_lowering.retain(|owed| owed != &path);
 
-        if self.is_project_path(&path) {
+        if self.is_package_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
             match fs::read_to_string(&path) {
                 Ok(text) => {
@@ -1364,7 +1446,7 @@ impl Worker {
                         self.publish_config_diagnostics(Some(&error));
                     }
                 }
-            } else if self.is_project_path(&path)
+            } else if self.is_package_path(&path)
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "R" || extension == "r")
@@ -1476,17 +1558,22 @@ impl Worker {
                 .expect("watcher options serialize"),
             ),
         };
-        let mut client = self.client.clone();
-        self.runtime.spawn(async move {
-            if let Err(error) = client
-                .register_capability(lsp_types::RegistrationParams {
-                    registrations: vec![registration],
-                })
-                .await
-            {
-                tracing::error!("file watcher registration failed: {error}");
+        let params = lsp_types::RegistrationParams {
+            registrations: vec![registration],
+        };
+        match &self.outbox {
+            Outbox::Client { client, runtime } => {
+                let mut client = client.clone();
+                runtime.spawn(async move {
+                    if let Err(error) = client.register_capability(params).await {
+                        tracing::error!("file watcher registration failed: {error}");
+                    }
+                });
             }
-        });
+            Outbox::Recorder(record) => {
+                record_outgoing(record, Outgoing::RegisterCapability(params))
+            }
+        }
     }
 
     fn publish(
@@ -1495,10 +1582,16 @@ impl Worker {
         diagnostics: Vec<lsp_types::Diagnostic>,
         version: Option<i32>,
     ) {
-        let mut client = self.client.clone();
         let params = lsp_types::PublishDiagnosticsParams::new(uri, diagnostics, version);
-        if let Err(error) = client.publish_diagnostics(params) {
-            tracing::error!("publishing diagnostics failed: {error}");
+        match &self.outbox {
+            Outbox::Client { client, .. } => {
+                if let Err(error) = client.clone().publish_diagnostics(params) {
+                    tracing::error!("publishing diagnostics failed: {error}");
+                }
+            }
+            Outbox::Recorder(record) => {
+                record_outgoing(record, Outgoing::PublishDiagnostics(params))
+            }
         }
     }
 
@@ -1658,12 +1751,19 @@ impl Worker {
     fn refresh_all_diagnostics(&mut self) {
         if self.supports_pull_diagnostics {
             if self.supports_diagnostic_refresh {
-                let mut client = self.client.clone();
-                self.runtime.spawn(async move {
-                    if let Err(error) = client.workspace_diagnostic_refresh(()).await {
-                        tracing::warn!("diagnostic refresh request failed: {error}");
+                match &self.outbox {
+                    Outbox::Client { client, runtime } => {
+                        let mut client = client.clone();
+                        runtime.spawn(async move {
+                            if let Err(error) = client.workspace_diagnostic_refresh(()).await {
+                                tracing::warn!("diagnostic refresh request failed: {error}");
+                            }
+                        });
                     }
-                });
+                    Outbox::Recorder(record) => {
+                        record_outgoing(record, Outgoing::DiagnosticRefresh)
+                    }
+                }
             }
             return;
         }
@@ -1683,9 +1783,14 @@ impl Worker {
     }
 
     fn show_message(&self, typ: lsp_types::MessageType, message: String) {
-        let mut client = self.client.clone();
-        if let Err(error) = client.show_message(lsp_types::ShowMessageParams { typ, message }) {
-            tracing::error!("showing a message failed: {error}");
+        let params = lsp_types::ShowMessageParams { typ, message };
+        match &self.outbox {
+            Outbox::Client { client, .. } => {
+                if let Err(error) = client.clone().show_message(params) {
+                    tracing::error!("showing a message failed: {error}");
+                }
+            }
+            Outbox::Recorder(record) => record_outgoing(record, Outgoing::ShowMessage(params)),
         }
     }
 
@@ -2118,7 +2223,10 @@ impl LanguageServer for ServerState {
                 let items = result
                     .items
                     .into_iter()
-                    .map(|item| convert_completion_item(item, worker.supports_snippets))
+                    .enumerate()
+                    .map(|(rank, item)| {
+                        convert_completion_item(item, rank, worker.supports_snippets)
+                    })
                     .collect();
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete: result.is_incomplete,
@@ -2246,10 +2354,9 @@ impl LanguageServer for ServerState {
             };
             match format::format(&text, worker.config.format) {
                 Ok(formatted) => {
-                    let index = LineIndex::new(&text);
-                    let end_line = index.line_count() - 1;
-                    let end =
-                        lsp_types::Position::new(end_line, index.line_length(end_line, &text));
+                    // The negotiated encoding counts the last line's columns, so a final line
+                    // with non-ASCII text and no newline ends where the client thinks it does.
+                    let end = worker.to_position(&text, TextSize::of(text.as_str()));
                     Ok(Some(vec![lsp_types::TextEdit {
                         range: lsp_types::Range {
                             start: lsp_types::Position::new(0, 0),
@@ -2541,7 +2648,13 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     }
 }
 
-fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
+/// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
+/// label, which puts `break` ahead of the local the user is about to type.
+fn convert_completion_item(
+    item: CompletionItem,
+    rank: usize,
+    snippets: bool,
+) -> lsp_types::CompletionItem {
     let kind = match item.kind {
         CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
         CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
@@ -2552,6 +2665,7 @@ fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::C
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
         kind: Some(kind),
+        sort_text: Some(format!("{rank:04}")),
         detail: item.detail,
         documentation: item.documentation.map(|documentation| {
             lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {

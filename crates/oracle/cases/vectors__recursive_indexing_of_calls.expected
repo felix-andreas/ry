@@ -1,0 +1,19 @@
+[stdout]
+| h(c, d)
+| c
+| [1] 1
+| y
+| f(a, g(b, h(zz, d)))
+| function(x, y = Z) {
+|     x
+|     y
+| }
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| function(x, y = Z) {
+|     x
+|     y
+| }
