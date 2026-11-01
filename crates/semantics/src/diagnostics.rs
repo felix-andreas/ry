@@ -465,7 +465,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             }
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
@@ -489,7 +489,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
@@ -544,12 +544,13 @@ fn classify_non_local_read(
     check: &ItemCheck<'_>,
     naming: &ItemNaming,
     expression: &ExprId,
-    name: &str,
+    symbol: Symbol,
 ) -> NonLocalRead {
+    let name = symbol.as_str();
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if let Some(&earliest) = frame_slot_positions(db, file).get(name)
+    if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
             || naming.deferred_quiet_reads.contains(expression))
@@ -577,7 +578,7 @@ fn classify_non_local_read(
             let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
-        || super_globals(db, file).contains(name)
+        || super_globals(db, file).contains(&symbol)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -2131,7 +2132,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         };
         for (expression, name) in &naming.non_locals {
             if !matches!(
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name),
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name),
                 NonLocalRead::Tolerated
             ) {
                 continue;

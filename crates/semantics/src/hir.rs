@@ -58,10 +58,22 @@ impl Symbol {
         symbol
     }
 
+    /// The symbol for `text` if any item has interned it, without interning it: a spelling
+    /// nothing has interned cannot key a map of symbols, and a probe must not grow the
+    /// process-wide table.
+    pub fn lookup(text: &str) -> Option<Symbol> {
+        if let Some(symbol) = LOCAL_SYMBOL_IDS.with_borrow(|local| local.get(text).copied()) {
+            return Some(symbol);
+        }
+        symbol_shard(text)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(text)
+            .copied()
+    }
+
     fn new_shared(text: &str) -> Symbol {
-        let mut hasher = FxHasher::default();
-        text.hash(&mut hasher);
-        let shard = &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS];
+        let shard = symbol_shard(text);
         // A poisoned shard means another thread died mid-insert; the map is still a valid
         // map of leaked strings, so keep serving it.
         let mut shard = shard
@@ -94,6 +106,12 @@ impl Symbol {
             .get(self.0.get() as usize - 1)
             .expect("a symbol indexes the table that minted it")
     }
+}
+
+fn symbol_shard(text: &str) -> &'static Mutex<FxHashMap<&'static str, Symbol>> {
+    let mut hasher = FxHasher::default();
+    text.hash(&mut hasher);
+    &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS]
 }
 
 impl ops::Deref for Symbol {
@@ -153,9 +171,12 @@ impl PartialEq<String> for Symbol {
     }
 }
 
+// Hashing the index keeps a lookup off the spelling's bytes. It makes hash-map iteration
+// order depend on interning order, which varies between runs, so anything that reports in
+// map order must sort first; `Ord` stays by spelling for exactly that.
 impl Hash for Symbol {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state);
+        self.0.hash(state);
     }
 }
 
@@ -168,12 +189,6 @@ impl PartialOrd for Symbol {
 impl Ord for Symbol {
     fn cmp(&self, other: &Symbol) -> std::cmp::Ordering {
         self.as_str().cmp(other.as_str())
-    }
-}
-
-impl std::borrow::Borrow<str> for Symbol {
-    fn borrow(&self) -> &str {
-        self.as_str()
     }
 }
 
