@@ -42,8 +42,8 @@ Reloaded tally: 1 definition rebound, in 3 ms.
 [1] 3
 ```
 
-The same tool formats your code and powers your editor, all configured by one `ry.toml`. This page takes you through the first two of the
-[four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,
+The same tool formats your code and powers your editor, all configured by one `ry.toml`. This page
+takes you through the first two of the [four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,
 then turning on types.
 
 ## Install
@@ -54,7 +54,6 @@ then turning on types.
 - **Command line:** download the binary for your platform from
   [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta), or build it with
   `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
-
 - **From a clone of the repository:** `just try` builds ry and its runtime, then runs each command
   on this page, and more, in a demo project.
 

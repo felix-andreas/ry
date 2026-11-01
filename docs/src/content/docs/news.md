@@ -17,8 +17,8 @@ that runtime runs.
 - **Records, tuples, tagged unions and `match`**, checked for exhaustiveness, are ry's recommended
   way to model data.
 - **`DataFrame`** is a typed table with a Polars-style API that runs on the Polars engine.
-- **`ry load`** loads the package you are developing from source, lazily, and the `ry R` console
-  reloads what you edited before each command.
+- **`ry load`** loads the package you are developing from source, lazily, and the `ry run` and `ry R`
+  consoles reload what you edited before each command.
 
 Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
 aarch64) and macOS (Apple silicon and Intel). The Windows archive holds the checker, formatter and

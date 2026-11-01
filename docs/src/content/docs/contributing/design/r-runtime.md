@@ -432,6 +432,19 @@ Package libraries load with `dlopen`, then `R_init_<pkg>` runs and registers its
 package and name. ry builds source packages itself (`R CMD INSTALL` semantics, `Makevars`, the
 compiler flags `R CMD config` reports), and installs prebuilt binaries when the platform matches.
 
+A package library built by GNU R must bind its API calls to ry's `libR`, not GNU R's. On Linux it
+names its dependency by soname, `libR.so`, and ry's library carries that soname and is loaded with
+`RTLD_GLOBAL` first, so the dynamic loader reuses it. Mach-O binds each symbol to a named library
+instead (the two-level namespace), and CRAN's binaries name
+`/Library/Frameworks/R.framework/Versions/4.x-arm64/Resources/lib/libR.dylib` while Homebrew's name
+its own `libR.dylib`. ry therefore loads a copy of each such library whose `libR` load command is
+rewritten in place to `@rpath/libR.dylib`, the install name of ry's `libR.dylib`, and re-signed ad
+hoc (`crates/libr/src/macho.rs`, `crates/libr/src/dynload.rs`). dyld matches that load command
+against the already loaded image with the same install name, so the package binds to ry. Packages
+that `rcmd` builds on macOS link with `-undefined dynamic_lookup` and record no `libR` at all, so
+the same build loads under ry and under GNU R. `decisions.md` ("macOS packages bind to ry's libR")
+has the reasoning.
+
 ### Threads
 
 R's API is single-threaded, and so is ry's R-level evaluation. Packages such as `RcppParallel`,
@@ -521,8 +534,10 @@ that the gain over a good interpreter is real but modest.
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
-  tenth entry, and a running loop compiles after 500 backward jumps and continues in compiled code
-  at the loop header (on-stack replacement).
+  1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
+  code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
+  optimizing compiler: a lower one compiled the methods package's code that a package load runs
+  only a few dozen times, which made the load slower.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -976,6 +991,13 @@ Each step ends with something real running, and each one is a large, whole chang
    runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
    helpers to it is next.
 
+9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
+   `@rpath/libR.dylib` and the full export list, GNU R's package binaries are rebound to it (section
+   4), and `rcmd` reads its toolchain from GNU R's `Makeconf`. All of this is verified by
+   cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
+   the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
+   Windows is next (section 11).
+
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
 break every package. The C API and the object model are designed first, as section 2 argues, and the
@@ -986,8 +1008,21 @@ JIT fits around them.
 - **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
   alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
   benchmark's test suites.
-- **Windows.** The C layer and the `dlopen` path need a Windows equivalent; the REPL's Windows work
-  (`contributing/design/repl.md`) is the starting point.
+- **Windows runtime.** Designed, not built. The design:
+  - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
+    so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has
+    loaded it, with no rewriting.
+  - Exports come from a generated `.def` file holding the same names as the Linux version script,
+    and `libr`'s build emits the matching import library for packages that `rcmd` builds.
+  - The headers' `LibExtern` becomes `__declspec(dllimport) extern` under `_WIN32`, because data
+    exports such as `R_NilValue` need an import thunk on Windows.
+  - Package DLLs load with `LoadLibraryExW` and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own
+    dependent DLLs in its `libs/x64/` resolve.
+
+  The gap: the interpreter uses about 70 Unix-only libc items (`iconv`, `glob`, `popen`, signals,
+  `getpwuid` and others), and `libr`'s C layer includes `dlfcn.h` and `sys/select.h`, so neither
+  compiles for Windows yet. R home discovery from the registry and Program Files exists and serves
+  `ry R` today.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,
   but it costs install time.

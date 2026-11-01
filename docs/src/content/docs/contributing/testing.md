@@ -317,8 +317,8 @@ without comparing anything. The test interpreter has no base R closures (`numeri
 meant to fail. Behavior that needs base R, such as a warning handler watching a compiled loop,
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
-against values read from data.table, and `test_altrep.rs` there checks the columns as ALTREP
-vectors (feature `runtime`). `crates/heap/tests/test_gc.rs` builds random
+against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
+`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
 collection checks each object the model still reaches. It also re-interns every string ever made,
@@ -386,7 +386,8 @@ runtime targets link polars, so `cargo fuzz build --no-default-features` builds 
 targets on a machine with little memory.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
-cargo-fuzz`, then from `fuzz/`:
+cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` runs every target
+for two minutes each after seeding the corpora. Without `just`, from `fuzz/`:
 
 ```sh
 cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources

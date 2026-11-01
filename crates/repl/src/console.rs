@@ -7,11 +7,14 @@ use {
         ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
         libr::{self, RApi},
     },
-    crossterm::terminal,
+    crossterm::{
+        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        terminal,
+    },
     nu_ansi_term::{Color, Style},
     reedline::{
-        ColumnarMenu, Completer, DefaultHinter, EditMode, Emacs, FileBackedHistory, Highlighter,
-        KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+        ColumnarMenu, Completer, DefaultHinter, EditCommand, EditMode, Emacs, FileBackedHistory,
+        Highlighter, HistoryItem, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
         PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
         Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
         default_vi_insert_keybindings, default_vi_normal_keybindings,
@@ -27,6 +30,7 @@ use {
         path::PathBuf,
         slice,
         sync::{Arc, Mutex, PoisonError},
+        time::Duration,
     },
     syntax::{
         SyntaxKind::{self, *},
@@ -175,6 +179,8 @@ fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Res
         *slot.borrow_mut() = Some(Console {
             editor,
             pending,
+            typeahead: VecDeque::new(),
+            typeahead_partial: String::new(),
             hook_bytes: 0,
             batch: options.batch,
             completer,
@@ -213,6 +219,11 @@ struct Console {
     editor: Reedline,
     /// Accepted input R has not consumed; handed over in buffer-sized chunks.
     pending: VecDeque<u8>,
+    /// Lines typed while no prompt was up, run in order before the editor prompts again.
+    typeahead: VecDeque<String>,
+    /// The unfinished last typed-ahead line. It stays here, not in the editor, until the editor
+    /// prompts, so text typed after it joins it instead of running ahead of it.
+    typeahead_partial: String,
     /// How many bytes at the front of `pending` are a hook's code, which R must receive as a
     /// chunk of its own: ry's runtime parses a chunk whole, so a syntax error in the typed line
     /// would otherwise cancel the hook's code too, and shift the line's error position.
@@ -292,9 +303,41 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
             };
             // Input for `readline()`, `menu()` or the browser must reach them untouched.
             let at_top_level = console.ry_runtime || libr::at_top_level();
+            if !console.piped && console.typeahead.is_empty() {
+                let text = std::mem::take(&mut console.typeahead_partial) + &take_typeahead();
+                // A pasted `\r\n` ends one line, not two.
+                let mut lines: Vec<String> = text
+                    .replace("\r\n", "\n")
+                    .split(['\n', '\r'])
+                    .map(str::to_owned)
+                    .collect();
+                console.typeahead_partial = lines.pop().unwrap_or_default();
+                console.typeahead.extend(lines);
+            }
             let signal = if console.piped {
                 Ok(read_piped_line())
+            } else if let Some(line) = console.typeahead.pop_front() {
+                // R prints its output in cooked mode, where `\n` returns the carriage. A failure
+                // leaves output misaligned and nothing to report it to.
+                terminal::disable_raw_mode().ok();
+                // The terminal echoed the line where the cursor was when it was typed; showing
+                // it again at its prompt keeps the transcript in the order things ran.
+                println!("{prompt_text}{line}");
+                stdout().flush().ok();
+                // History is a convenience: a line that fails to save still runs.
+                console
+                    .editor
+                    .history_mut()
+                    .save(HistoryItem::from_command_line(line.clone()))
+                    .ok();
+                Ok(Signal::Success(line))
             } else {
+                let partial = std::mem::take(&mut console.typeahead_partial);
+                if !partial.is_empty() {
+                    console
+                        .editor
+                        .run_edit_commands(&[EditCommand::InsertString(partial)]);
+                }
                 console.editor.read_line(&RPrompt { text: prompt_text })
             };
             match signal {
@@ -350,6 +393,51 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         unsafe { *buffer.add(written) = 0 };
         1
     })
+}
+
+/// Takes what was typed while the editor did not hold the terminal. The terminal keeps such
+/// typeahead in its cooked-mode buffer, where each Enter has already become `\n`; the editor
+/// reads in raw mode, where `\n` is Ctrl-J, so left to the editor every typed-ahead line would be
+/// lost. Raw mode also releases an unfinished line, which cooked mode withholds until Enter.
+///
+/// It reads through crossterm's event reader rather than the descriptor, because the editor
+/// leaves the keys that followed its last submitted line in that reader's queue, and they were
+/// typed before anything still in the descriptor. The reader also parses escape sequences, so an
+/// arrow key pressed ahead of the prompt is dropped whole instead of leaving `[A` in the line.
+fn take_typeahead() -> String {
+    if terminal::enable_raw_mode().is_err() {
+        return String::new();
+    }
+    let mut text = String::new();
+    while matches!(event::poll(Duration::ZERO), Ok(true)) {
+        let Ok(event) = event::read() else {
+            break;
+        };
+        match event {
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            }) => match code {
+                KeyCode::Enter => text.push('\n'),
+                KeyCode::Tab => text.push('\t'),
+                KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => text.push('\n'),
+                KeyCode::Char(character) if (modifiers - KeyModifiers::SHIFT).is_empty() => {
+                    text.push(character)
+                }
+                _ => {}
+            },
+            Event::Paste(pasted) => text.extend(pasted.chars().filter(|character| {
+                !character.is_control() || matches!(character, '\t' | '\n' | '\r')
+            })),
+            _ => {}
+        }
+    }
+    // The terminal stays raw, as the editor needs it: in cooked mode, a line typed before the
+    // editor took over would end in `\n` again, and the editor submits only the first line of
+    // a batch that arrives together.
+    text
 }
 
 /// One line of piped input, or end-of-input when the pipe closes or cannot be read.

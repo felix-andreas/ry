@@ -2,6 +2,10 @@
 //! format strings, file permissions and processes. Rd parsing lives in `rd`; LaTeX parsing and
 //! the help server are not available yet and fail with a clear error.
 
+#[cfg(target_os = "linux")]
+use libc::__errno_location as errno_location;
+#[cfg(target_os = "macos")]
+use libc::__error as errno_location;
 use {
     crate::{
         builtin_libraries::{NativeCall, NativeFn},
@@ -625,9 +629,9 @@ unsafe fn do_ps_priority(call: &NativeCall<'_>) -> R<Sexp> {
             continue;
         }
         // getpriority may return -1 legitimately, so success is told apart through errno.
-        *libc::__errno_location() = 0;
+        *errno_location() = 0;
         let current = libc::getpriority(libc::PRIO_PROCESS, pid as libc::id_t);
-        if current == -1 && *libc::__errno_location() != 0 {
+        if current == -1 && *errno_location() != 0 {
             niceness.push(NA_INTEGER);
             continue;
         }
