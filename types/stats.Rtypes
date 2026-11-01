@@ -12,21 +12,21 @@ sd : fn(x: Any, [na.rm]: logical) -> double
 var : fn(x: Any, [y]: Any, [na.rm]: logical, [use]: character) -> Any
 cor : fn(x: Any, [y]: Any, [use]: character, [method]: character) -> Any
 cov : fn(x: Any, [y]: Any, [use]: character, [method]: character) -> Any
-median : fn(x: Any, [na.rm]: logical) -> Any
-weighted.mean : fn(x: Any, [w]: Any, [na.rm]: logical) -> double
+median : fn(x: Any, [na.rm]: logical, ...: Any) -> Any
+weighted.mean : fn(x: Any, [w]: Any, [na.rm]: logical, ...: Any) -> double
 mad : fn(x: Any, [center]: Any, [constant]: Any, [na.rm]: logical, [low]: logical, [high]: logical) -> double
 IQR : fn(x: Any, [na.rm]: logical, [type]: Any) -> double
 # `quantile`'s second positional is `probs` (not `na.rm`). The default interpolating types always
 # return double; types 1/3 can preserve integer input — a rare edge accepted for a precise default.
-quantile : fn(x: Any, [probs]: Any, [na.rm]: logical, [names]: logical, [type]: Any, [digits]: Any) -> double[]
+quantile : fn(x: Any, [probs]: Any, [na.rm]: logical, [names]: logical, [type]: Any, [digits]: Any, ...: Any) -> double[]
 fivenum : fn(x: Any, [na.rm]: logical) -> double[]
 
 # `setNames` returns its first argument with names attached: a genuine generic.
-setNames : <T> fn(object: T, nm: Any) -> T
+setNames : <T> fn([object]: T, nm: Any) -> T
 
 # NA handling. `na.omit` mirrors its input (type-preserving). `complete.cases` is one logical per row
 # (scalar-claim).
-na.omit : fn(object: Any) -> Any
+na.omit : fn(object: Any, ...: Any) -> Any
 complete.cases : fn(...: Any) -> logical
 
 # Model fitting and prediction: the result is a model object whose shape depends on the formula and

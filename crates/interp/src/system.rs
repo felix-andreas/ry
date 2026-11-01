@@ -15,6 +15,7 @@ use heap::{
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
     strings::Encoding,
 };
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -47,7 +48,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("memory.profile", 0, |_| unsafe { values::integer_vector(&[]) }),
     internal("file.symlink", 2, |call| unsafe { link_paths(call, |from, to| std::os::unix::fs::symlink(from, to).is_ok()) }),
     internal("file.link", 2, |call| unsafe { link_paths(call, |from, to| std::fs::hard_link(from, to).is_ok()) }),
-    internal("setFileTime", 2, |_| unsafe { scalar_bool(true) }),
+    internal("setFileTime", 2, do_sys_set_file_time).invisible(),
     internal("file.show", 5, |call| unsafe {
         for index in 0..length(call.arg(0)) {
             if let Some(path) = values::string_at(call.arg(0), index) {
@@ -103,31 +104,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.append", 2, do_file_append),
     internal("file.copy", 6, do_file_copy),
     internal("dir.create", 4, do_dir_create).invisible(),
-    internal("file.access", 2, |call| unsafe { {
-        let paths = call.arg(0);
-        let result = alloc(SexpType::Integer, length(paths))?;
-        for index in 0..length(paths) {
-            let path = values::string_at(paths, index).map(|text| text.into_owned()).unwrap_or_default();
-            values::ints_mut(result)[index] = if Path::new(&crate::connections::expand_path(&path)).exists() { 0 } else { -1 };
-        }
-        Ok(result)
-    } }),
+    internal("file.access", 2, do_file_access),
     internal("getwd", 0, |_| unsafe { scalar_string(&std::env::current_dir().map(|path| path.display().to_string()).unwrap_or_default()) }),
     internal("setwd", 1, do_setwd).invisible(),
     internal("Sys.glob", 2, do_sys_glob),
     internal("Sys.readlink", 1, |call| unsafe { map_strings(call, |path| std::fs::read_link(path).map(|target| target.display().to_string()).unwrap_or_default()) }),
-    internal("Sys.chmod", 3, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("Sys.chmod", 3, do_sys_chmod).invisible(),
     internal("Sys.umask", 1, |_| unsafe { scalar_integer(18) }),
     internal("Sys.getpid", 0, |_| unsafe { scalar_integer(std::process::id() as i32) }),
     internal("Sys.info", 0, do_sys_info),
     internal("Sys.setlocale", 2, do_sys_setlocale),
-    internal("Sys.getlocale", 1, |_| unsafe { scalar_string("LC_CTYPE=C.UTF-8;LC_NUMERIC=C;LC_TIME=C.UTF-8;LC_COLLATE=C.UTF-8;LC_MONETARY=C.UTF-8;LC_MESSAGES=C.UTF-8;LC_PAPER=C.UTF-8;LC_NAME=C;LC_ADDRESS=C;LC_TELEPHONE=C;LC_MEASUREMENT=C.UTF-8;LC_IDENTIFICATION=C") }),
+    internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
     internal("Sys.localeconv", 0, |_| unsafe { values::named_list(&[]) }),
     internal("Sys.sleep", 1, |call| unsafe { {
         let seconds = values::as_real_scalar(call.arg(0));
         if seconds.is_finite() && seconds > 0.0 {
-            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            std::thread::sleep(std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX));
         }
         Ok(nil())
     } }).invisible(),
@@ -157,7 +150,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
     builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
     internal("iconv", 6, do_iconv),
-    internal("validUTF8", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
+    internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe { map_strings_bool(call, |_| true) }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
@@ -561,7 +554,13 @@ impl Zone {
                 return instant - correction + fraction - shift;
             }
             AmbiguousOffset::Gap { before, after } => if isdst == 0 { before } else { after },
-            AmbiguousOffset::Fold { before, after } => if isdst == 0 { after } else { before },
+            // glibc's `mktime` resolves a repeated time with the offset in force at the wall
+            // clock read as UTC, so Berlin's 02:30 reads as CET and New York's 01:30 as EDT.
+            AmbiguousOffset::Fold { before, after } => match isdst {
+                0 => after,
+                1 => before,
+                _ => self.rules.to_offset(timestamp(local)),
+            },
         };
         local.floor() - offset.seconds() as f64 + fraction - shift
     }
@@ -594,6 +593,8 @@ impl Zone {
 /// The zone `tz` names, where the empty name is the session's zone: `TZ`, or else the system's.
 fn resolve_zone(tz: &str) -> Zone {
     let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    // glibc reads `TZ=":Europe/Berlin"` as the zone file name after the colon.
+    let name = name.strip_prefix(':').map_or(name.clone(), str::to_owned);
     if name.is_empty() {
         return Zone { rules: jiff::tz::TimeZone::system(), unknown: None };
     }
@@ -728,10 +729,22 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             characters.next();
             width = Some(width.unwrap_or(0) * 10 + digit as usize);
         }
-        let Some(spec) = characters.next() else {
+        let Some(mut spec) = characters.next() else {
             output.push('%');
             break;
         };
+        // The POSIX `E` and `O` modifiers ask for a locale's alternative forms, which the C
+        // locale does not have, so they print the plain field; only `%OS` means something else.
+        if spec == 'E' || (spec == 'O' && characters.peek() != Some(&'S')) {
+            match characters.next() {
+                Some(base) => spec = base,
+                None => {
+                    output.push('%');
+                    output.push(spec);
+                    break;
+                }
+            }
+        }
         let start = output.len();
         match spec {
             'Y' => output.push_str(&time.year.to_string()),
@@ -889,6 +902,8 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         })
         .collect::<R<_>>()?;
     let zone = resolve_zone(tz);
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    let utc = name == "UTC" || name == "GMT";
     for (index, &value) in seconds.iter().enumerate() {
         if !value.is_finite() {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
@@ -897,8 +912,10 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
                 values::ints_mut(fields[field])[index] = NA_INTEGER;
             }
             values::ints_mut(fields[8])[index] = -1;
-            values::set_elt(fields[9], index, values::mkchar("")?);
-            values::ints_mut(fields[10])[index] = NA_INTEGER;
+            // UTC and GMT name themselves and have a known offset even for a missing time.
+            let (zone_name, offset) = if utc { (name.as_str(), 0) } else { ("", NA_INTEGER) };
+            values::set_elt(fields[9], index, values::mkchar(zone_name)?);
+            values::ints_mut(fields[10])[index] = offset;
             continue;
         }
         let (offset, dst, abbreviation) = zone.offset_at(value);
@@ -923,8 +940,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     // UTC and GMT keep their bare name; every other zone, the session's included, adds its
     // standard and daylight-saving abbreviations.
     let tzone = values::install("tzone")?;
-    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
-    let names = if name == "UTC" || name == "GMT" {
+    let names = if utc {
         scalar_string(&name)?
     } else {
         let (standard, daylight) = zone.abbreviations();
@@ -1207,87 +1223,42 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The parsed time as whole seconds since the epoch and the fraction of a second apart, so
-/// that the fraction keeps every digit the text gave it.
-fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f64, f64)> {
-    let mut year = 1970i64;
-    let mut month = 1i64;
-    let mut day = 1i64;
-    let mut hour = 0i64;
-    let mut minute = 0i64;
-    let mut second = 0f64;
-    let mut yearday = None;
-    let mut input = text.trim_start();
-    let mut format_characters = format.chars();
-    let number = |input: &mut &str, max_digits: usize| -> Option<i64> {
-        let trimmed = input.trim_start();
-        let (sign, rest) = match trimmed.strip_prefix('-') {
-            Some(rest) => (-1, rest),
-            None => (1, trimmed),
-        };
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).take(max_digits).collect();
-        if digits.is_empty() {
-            return None;
-        }
-        *input = &rest[digits.len()..];
-        digits.parse::<i64>().ok().map(|value| sign * value)
-    };
-    while let Some(character) = format_characters.next() {
-        if character != '%' {
-            if character.is_whitespace() {
-                input = input.trim_start();
-                continue;
-            }
-            input = input.strip_prefix(character)?;
-            continue;
-        }
-        match format_characters.next()? {
-            'Y' => year = number(&mut input, 4)?,
-            'y' => {
-                let value = number(&mut input, 2)?;
-                year = if value < 69 { 2000 + value } else { 1900 + value };
-            }
-            'm' => month = number(&mut input, 2)?,
-            'd' | 'e' => day = number(&mut input, 2)?,
-            'H' => hour = number(&mut input, 2)?,
-            'M' => minute = number(&mut input, 2)?,
-            'S' => second = number(&mut input, 2)? as f64,
-            'O' => {
-                if format_characters.next()? == 'S' {
-                    let trimmed = input.trim_start();
-                    let length = trimmed.chars().take_while(|c| c.is_ascii_digit() || *c == '.').count();
-                    second = trimmed[..length].parse().ok()?;
-                    input = &trimmed[length..];
-                }
-            }
-            'j' => yearday = Some(number(&mut input, 3)?),
-            'B' | 'b' | 'h' => {
-                let lower = input.to_lowercase();
-                let found = MONTHS.iter().position(|name| lower.starts_with(&name.to_lowercase()))
-                    .map(|position| (position, MONTHS[position].len()))
-                    .or_else(|| MONTHS.iter().position(|name| lower.starts_with(&name[..3].to_lowercase())).map(|position| (position, 3)))?;
-                month = found.0 as i64 + 1;
-                input = &input[found.1..];
-            }
-            'F' => {
-                year = number(&mut input, 4)?;
-                input = input.strip_prefix('-')?;
-                month = number(&mut input, 2)?;
-                input = input.strip_prefix('-')?;
-                day = number(&mut input, 2)?;
-            }
-            'T' => {
-                hour = number(&mut input, 2)?;
-                input = input.strip_prefix(':')?;
-                minute = number(&mut input, 2)?;
-                input = input.strip_prefix(':')?;
-                second = number(&mut input, 2)? as f64;
-            }
-            '%' => input = input.strip_prefix('%')?,
-            _ => {}
-        }
+/// A parsed time: whole wall-clock seconds since the epoch read as UTC, the fraction of a second
+/// apart so that it keeps every digit the text gave, and the UTC offset a `%z` gave.
+struct ParsedTime {
+    whole: f64,
+    fraction: f64,
+    offset: Option<i64>,
+}
+
+/// Parses `text` with a `strptime` format.
+fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<ParsedTime> {
+    let mut fields = Parsed::default();
+    let mut input = text;
+    parse_with(&mut fields, &mut input, format)?;
+    // GNU R fills an unspecified year, month or day from today's date, except that a month
+    // without a day is invalid, since today's day need not exist in that month.
+    if fields.month.is_some() && fields.day.is_none() && fields.yearday.is_none() {
+        return None;
     }
-    if let Some(yearday) = yearday {
+    let (this_year, this_month, this_day) =
+        if fields.year.is_some() && fields.month.is_some() && fields.day.is_some() {
+            (0, 0, 0)
+        } else {
+            let now = now_seconds().floor();
+            let (offset, _, _) = resolve_zone("").offset_at(now);
+            civil_from_days((now as i64 + offset as i64).div_euclid(86400))
+        };
+    let mut year = fields.year.unwrap_or(this_year);
+    if let Some(century) = fields.century {
+        year = century * 100 + year.rem_euclid(100);
+    }
+    let mut hour = fields.hour;
+    if let (Some(afternoon), true) = (fields.afternoon, fields.twelve_hour) {
+        hour = hour % 12 + if afternoon { 12 } else { 0 };
+    }
+    let (mut month, mut day) = (fields.month.unwrap_or(this_month), fields.day.unwrap_or(this_day));
+    if let Some(yearday) = fields.yearday {
         if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
             if yearday == 366 {
                 warnings.push(format!("day-of-year 366 in year {year} is invalid"));
@@ -1296,17 +1267,218 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f
         }
         month = 1;
         day = yearday;
+    } else {
+        if !(1..=12).contains(&month) {
+            return None;
+        }
+        let month_days = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if day < 1 || day > month_days[(month - 1) as usize] {
+            return None;
+        }
     }
-    if !(1..=12).contains(&month) {
-        return None;
-    }
-    let month_days = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    if day < 1 || day > month_days[(month - 1) as usize] && format.contains("%d") {
+    if hour > 24 || fields.minute > 59 || fields.second > 61.0 {
         return None;
     }
     let days = days_from_civil(year, month, 1) + day - 1;
-    let whole = second.floor();
-    Some((days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + whole, second - whole))
+    let whole = fields.second.floor();
+    Some(ParsedTime {
+        whole: days as f64 * 86400.0 + hour as f64 * 3600.0 + fields.minute as f64 * 60.0 + whole,
+        fraction: fields.second - whole,
+        offset: fields.offset,
+    })
+}
+
+#[derive(Default)]
+struct Parsed {
+    year: Option<i64>,
+    century: Option<i64>,
+    month: Option<i64>,
+    day: Option<i64>,
+    hour: i64,
+    minute: i64,
+    second: f64,
+    yearday: Option<i64>,
+    afternoon: Option<bool>,
+    /// `%p` adjusts only an hour read with `%I` or `%l`.
+    twelve_hour: bool,
+    offset: Option<i64>,
+}
+
+/// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
+/// format matches any run of whitespace, including none, and numeric fields skip leading blanks,
+/// as in glibc's `strptime`.
+fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()> {
+    let mut characters = format.chars();
+    while let Some(character) = characters.next() {
+        if character.is_whitespace() {
+            *input = input.trim_start();
+            continue;
+        }
+        if character != '%' {
+            *input = input.strip_prefix(character)?;
+            continue;
+        }
+        let mut spec = characters.next()?;
+        if spec == 'E' || spec == 'O' {
+            let base = characters.next()?;
+            if spec == 'O' && base == 'S' {
+                // `%OS` reads seconds with an optional fraction; `%OSn` is for output only, so on
+                // input its digit is a literal the text must contain.
+                let trimmed = input.trim_start();
+                let integer = trimmed
+                    .chars()
+                    .take(2)
+                    .take_while(char::is_ascii_digit)
+                    .count();
+                if integer == 0 {
+                    return None;
+                }
+                let fraction = match trimmed[integer..].strip_prefix(['.', ',']) {
+                    Some(rest) => 1 + rest.chars().take_while(char::is_ascii_digit).count(),
+                    None => 0,
+                };
+                fields.second = trimmed[..integer + fraction]
+                    .replace(',', ".")
+                    .parse()
+                    .ok()?;
+                *input = &trimmed[integer + fraction..];
+                continue;
+            }
+            spec = base;
+        }
+        match spec {
+            'Y' => {
+                fields.year = Some(signed_number(input, 4)?);
+                fields.century = None;
+            }
+            'y' => {
+                let value = number(input, 2)?;
+                fields.year = Some(if value < 69 {
+                    2000 + value
+                } else {
+                    1900 + value
+                });
+            }
+            'C' => fields.century = Some(number(input, 2)?),
+            'm' => fields.month = Some(number(input, 2)?),
+            'd' | 'e' => fields.day = Some(number(input, 2)?),
+            'H' | 'k' => {
+                fields.hour = number(input, 2)?;
+                fields.twelve_hour = false;
+            }
+            'I' | 'l' => {
+                fields.hour = number(input, 2)?;
+                fields.twelve_hour = true;
+                if !(1..=12).contains(&fields.hour) {
+                    return None;
+                }
+            }
+            'M' => fields.minute = number(input, 2)?,
+            'S' => fields.second = number(input, 2)? as f64,
+            'j' => fields.yearday = Some(number(input, 3)?),
+            'p' | 'P' => {
+                let lower = input.trim_start().to_ascii_lowercase();
+                fields.afternoon = Some(match lower.get(..2) {
+                    Some("am") => false,
+                    Some("pm") => true,
+                    _ => return None,
+                });
+                *input = &input.trim_start()[2..];
+            }
+            'B' | 'b' | 'h' => {
+                let found = match_name(input, &MONTHS)?;
+                fields.month = Some(found as i64 + 1);
+            }
+            'A' | 'a' => {
+                match_name(input, &WEEKDAYS)?;
+            }
+            'u' | 'w' => {
+                number(input, 1)?;
+            }
+            'U' | 'V' | 'W' => {
+                number(input, 2)?;
+            }
+            'z' => fields.offset = Some(parse_offset(input)?),
+            'Z' => return None,
+            'n' | 't' => *input = input.trim_start(),
+            '%' => *input = input.trim_start().strip_prefix('%')?,
+            'F' => parse_with(fields, input, "%Y-%m-%d")?,
+            'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
+            'D' | 'x' => parse_with(fields, input, "%m/%d/%y")?,
+            'R' => parse_with(fields, input, "%H:%M")?,
+            'r' => parse_with(fields, input, "%I:%M:%S %p")?,
+            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// A month or weekday name, in full or abbreviated to three letters, ignoring case. Returns its
+/// position in `names`.
+fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
+    let trimmed = input.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let full = names
+        .iter()
+        .position(|name| lower.starts_with(&name.to_ascii_lowercase()));
+    let (position, consumed) = match full {
+        Some(position) => (position, names[position].len()),
+        None => (
+            names
+                .iter()
+                .position(|name| lower.starts_with(&name[..3].to_ascii_lowercase()))?,
+            3,
+        ),
+    };
+    *input = &trimmed[consumed..];
+    Some(position)
+}
+
+/// A field of at most `max_digits` digits, after leading blanks.
+fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
+    let trimmed = input.trim_start();
+    let digits = trimmed
+        .chars()
+        .take(max_digits)
+        .take_while(char::is_ascii_digit)
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    *input = &trimmed[digits..];
+    trimmed[..digits].parse().ok()
+}
+
+fn signed_number(input: &mut &str, max_digits: usize) -> Option<i64> {
+    let trimmed = input.trim_start();
+    match trimmed.strip_prefix('-') {
+        Some(mut rest) => {
+            let value = number(&mut rest, max_digits)?;
+            *input = rest;
+            Some(-value)
+        }
+        None => number(input, max_digits),
+    }
+}
+
+fn parse_offset(input: &mut &str) -> Option<i64> {
+    let trimmed = input.trim_start();
+    let sign = match trimmed.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let digits = trimmed
+        .get(1..5)
+        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))?;
+    let value = digits.parse::<i64>().ok()?;
+    let (hours, minutes) = (value / 100, value % 100);
+    if value > 1400 || minutes > 59 {
+        return None;
+    }
+    *input = &trimmed[5..];
+    Some(sign * (hours * 3600 + minutes * 60))
 }
 
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
@@ -1314,30 +1486,68 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let formats = call.arg(1);
     let tz = values::first_string(call.arg(2)).map(|text| text.into_owned()).unwrap_or_default();
     let count = length(texts);
-    let mut seconds = Vec::with_capacity(count);
-    let mut fractions = Vec::with_capacity(count);
     let zone = resolve_zone(&tz);
+    let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
+    let utc = name == "UTC" || name == "GMT";
+    for index in 0..length(formats) {
+        let format = values::string_at(formats, index).unwrap_or_default();
+        if format.replace("%%", "").contains("%Z") {
+            return Err(error("use of %Z for input is not supported"));
+        }
+    }
+    let mut parsed = Vec::with_capacity(count);
     let mut warnings = Vec::new();
     for index in 0..count {
         let format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let (whole, fraction) = values::string_at(texts, index)
-            .and_then(|text| parse_time(&text, &format, &mut warnings))
-            .unwrap_or((NA_REAL, 0.0));
-        seconds.push(zone.local_to_utc(whole, -1));
-        fractions.push(fraction);
+        parsed.push(values::string_at(texts, index).and_then(|text| parse_time(&text, &format, &mut warnings)));
     }
+    let seconds: Vec<f64> = parsed
+        .iter()
+        .map(|time| match time {
+            None => NA_REAL,
+            Some(time) => match time.offset {
+                Some(offset) => time.whole - offset as f64,
+                None => zone.local_to_utc(time.whole, -1),
+            },
+        })
+        .collect();
     let result = posixlt_from_seconds(&seconds, &tz)?;
-    let second_field = values::list_elt(result, 0);
-    for (second, fraction) in values::reals_mut(second_field).iter_mut().zip(&fractions) {
-        *second += fraction;
+    let fields: Vec<Sexp> = (0..11).map(|field| values::list_elt(result, field)).collect();
+    for (index, time) in parsed.iter().enumerate() {
+        let Some(time) = time else { continue };
+        values::reals_mut(fields[0])[index] += time.fraction;
+        if utc {
+            continue;
+        }
+        // GNU R's strptime fills the fields from the text rather than from an instant, so the
+        // UTC offset stays unknown outside UTC, and a time with an explicit offset carries no
+        // abbreviation either.
+        values::ints_mut(fields[10])[index] = NA_INTEGER;
+        if time.offset.is_some() {
+            values::set_elt(fields[9], index, values::mkchar("")?);
+            continue;
+        }
+        let (offset, _, _) = zone.offset_at(seconds[index]);
+        if seconds[index] + offset as f64 != time.whole {
+            // A time in a spring-forward gap keeps its wall-clock fields and reports the zone
+            // in force after the gap, where the wall clock read with the earlier offset lands.
+            let (_, dst, abbreviation) = zone.offset_at(time.whole - offset as f64);
+            let wall = broken_down(time.whole);
+            values::ints_mut(fields[1])[index] = wall.minute as i32;
+            values::ints_mut(fields[2])[index] = wall.hour as i32;
+            values::ints_mut(fields[3])[index] = wall.day as i32;
+            values::ints_mut(fields[4])[index] = wall.month as i32 - 1;
+            values::ints_mut(fields[5])[index] = wall.year as i32 - 1900;
+            values::ints_mut(fields[6])[index] = wall.weekday as i32;
+            values::ints_mut(fields[7])[index] = wall.yearday as i32;
+            values::ints_mut(fields[8])[index] = dst as i32;
+            values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+        }
     }
-    // GNU R's strptime leaves the UTC offset unknown outside UTC, because it fills the fields
-    // from the text rather than from an instant.
-    let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
-    if name != "UTC" && name != "GMT" {
-        values::ints_mut(values::list_elt(result, 10)).fill(NA_INTEGER);
+    if !utc {
+        values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
     set_year_names(result, values::names(texts))?;
     for message in warnings {
@@ -1394,7 +1604,6 @@ unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
             Ok(metadata) => {
                 values::reals_mut(size)[index] = metadata.len() as f64;
                 values::ints_mut(is_dir)[index] = metadata.is_dir() as i32;
-                use std::os::unix::fs::PermissionsExt;
                 values::ints_mut(mode)[index] = (metadata.permissions().mode() & 0o777) as i32;
                 values::reals_mut(mtime)[index] = metadata
                     .modified()
@@ -1636,38 +1845,6 @@ unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
     scalar_string(&previous)
 }
 
-unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
-    let patterns = call.arg(0);
-    let mut matches = Vec::new();
-    for index in 0..length(patterns) {
-        let Some(pattern) = values::string_at(patterns, index) else {
-            continue;
-        };
-        let pattern = crate::connections::expand_path(&pattern);
-        let (directory, file_pattern) = match pattern.rfind('/') {
-            Some(position) => (pattern[..position].to_owned(), pattern[position + 1..].to_owned()),
-            None => (".".to_owned(), pattern.clone()),
-        };
-        let regex_text = format!(
-            "^{}$",
-            regex::escape(&file_pattern).replace("\\*", ".*").replace("\\?", ".")
-        );
-        let Ok(regex) = regex::Regex::new(&regex_text) else {
-            continue;
-        };
-        if let Ok(entries) = std::fs::read_dir(&directory) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if regex.is_match(&name) && !name.starts_with('.') {
-                    matches.push(if pattern.contains('/') { format!("{directory}/{name}") } else { name });
-                }
-            }
-        }
-    }
-    crate::sort::sort_strings(&mut matches);
-    string_vector(&matches)
-}
-
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     let mut name: libc::utsname = std::mem::zeroed();
     libc::uname(&mut name);
@@ -1690,17 +1867,6 @@ unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
     let names = string_vector(&["sysname", "release", "version", "nodename", "machine", "login", "user", "effective_user"])?;
     values::set_attr(result, symbols().names, names)?;
     Ok(result)
-}
-
-/// The runtime always runs in the C.UTF-8 locale, so setting a locale only reports the name
-/// asked for, the way GNU R reports a locale it switched to; an empty name means the default.
-unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
-    let locale = values::first_string(call.arg(1)).map_or_else(String::new, |name| name.into_owned());
-    if locale.is_empty() {
-        scalar_string("C.UTF-8")
-    } else {
-        scalar_string(&locale)
-    }
 }
 
 unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
@@ -2242,3 +2408,248 @@ unsafe fn link_paths(call: &Call<'_>, function: impl Fn(&str, &str) -> bool) -> 
     }
     Ok(result)
 }
+
+/// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
+/// component and each pattern's matches stay in pattern order, sorted only among themselves.
+unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
+    let patterns = call.arg(0);
+    if patterns.kind() != SexpType::String {
+        return Err(error("invalid 'paths' argument"));
+    }
+    let dirmark = values::as_logical_scalar(call.arg(1));
+    if dirmark == NA_LOGICAL {
+        return Err(error("invalid 'dirmark' argument"));
+    }
+    let mut buffer: libc::glob_t = std::mem::zeroed();
+    let mut appended = false;
+    for index in 0..length(patterns) {
+        let Some(pattern) = values::string_at(patterns, index) else {
+            continue;
+        };
+        let Ok(pattern) = std::ffi::CString::new(crate::connections::expand_path(&pattern)) else {
+            continue;
+        };
+        let mut flags = if dirmark != 0 { libc::GLOB_MARK } else { 0 };
+        if appended {
+            flags |= libc::GLOB_APPEND;
+        }
+        match libc::glob(pattern.as_ptr(), flags, None, &mut buffer) {
+            0 => appended = true,
+            libc::GLOB_NOMATCH => {}
+            libc::GLOB_NOSPACE => {
+                libc::globfree(&mut buffer);
+                return Err(error("internal out-of-memory condition"));
+            }
+            libc::GLOB_ABORTED => crate::conditions::warning("read error on directory")?,
+            _ => {}
+        }
+    }
+    let matches: Vec<String> = if appended {
+        (0..buffer.gl_pathc)
+            .map(|index| {
+                std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    libc::globfree(&mut buffer);
+    string_vector(&matches)
+}
+
+unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
+    let number = values::as_integer_scalar(call.arg(0));
+    let category = locale_category(number).ok_or_else(|| error("invalid 'category' argument"))?;
+    let locale = call.arg(1);
+    let Some(name) = (locale.kind() == SexpType::String && length(locale) == 1)
+        .then(|| values::string_at(locale, 0))
+        .flatten()
+    else {
+        return Err(error("invalid 'locale' argument"));
+    };
+    let Ok(text) = std::ffi::CString::new(name.as_bytes()) else {
+        return Err(error("invalid 'locale' argument"));
+    };
+    let honoured = if category == libc::LC_ALL {
+        // As in GNU R, LC_ALL sets the categories R uses but leaves LC_NUMERIC at C.
+        let honoured = !libc::setlocale(libc::LC_CTYPE, text.as_ptr()).is_null();
+        if honoured {
+            for category in [libc::LC_COLLATE, libc::LC_MONETARY, libc::LC_TIME] {
+                libc::setlocale(category, text.as_ptr());
+            }
+        }
+        honoured
+    } else {
+        if category == libc::LC_NUMERIC {
+            crate::conditions::warning("setting 'LC_NUMERIC' may cause R to function strangely")?;
+        }
+        !libc::setlocale(category, text.as_ptr()).is_null()
+    };
+    crate::sort::refresh_collation();
+    if !honoured {
+        crate::conditions::warning(format!(
+            "OS reports request to set locale to \"{name}\" cannot be honored"
+        ))?;
+        return scalar_string("");
+    }
+    scalar_string(&current_locale(category))
+}
+
+unsafe fn do_sys_getlocale(call: &Call<'_>) -> R<Sexp> {
+    let category = locale_category(values::as_integer_scalar(call.arg(0)))
+        .ok_or_else(|| error("invalid 'category' argument"))?;
+    scalar_string(&current_locale(category))
+}
+
+/// Takes the locale of the categories GNU R uses from the environment, as it does at startup;
+/// numbers and the rest stay in the C locale.
+pub unsafe fn init_locale() {
+    for category in [
+        libc::LC_CTYPE,
+        libc::LC_COLLATE,
+        libc::LC_TIME,
+        libc::LC_MONETARY,
+        libc::LC_MESSAGES,
+        libc::LC_PAPER,
+        libc::LC_MEASUREMENT,
+    ] {
+        libc::setlocale(category, c"".as_ptr());
+    }
+    crate::sort::refresh_collation();
+}
+
+/// The C library category for `Sys.setlocale`'s category number, which indexes
+/// `c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
+/// "LC_MESSAGES", "LC_PAPER", "LC_MEASUREMENT")`.
+fn locale_category(number: i32) -> Option<libc::c_int> {
+    Some(match number {
+        1 => libc::LC_ALL,
+        2 => libc::LC_COLLATE,
+        3 => libc::LC_CTYPE,
+        4 => libc::LC_MONETARY,
+        5 => libc::LC_NUMERIC,
+        6 => libc::LC_TIME,
+        7 => libc::LC_MESSAGES,
+        8 => libc::LC_PAPER,
+        9 => libc::LC_MEASUREMENT,
+        _ => return None,
+    })
+}
+
+unsafe fn current_locale(category: libc::c_int) -> String {
+    let current = libc::setlocale(category, std::ptr::null());
+    if current.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(current)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+unsafe fn do_file_access(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    let mode = values::as_integer_scalar(call.arg(1));
+    let result = alloc(SexpType::Integer, length(paths))?;
+    for index in 0..length(paths) {
+        let accessible = values::string_at(paths, index)
+            .and_then(|path| std::ffi::CString::new(crate::connections::expand_path(&path)).ok())
+            .is_some_and(|path| libc::access(path.as_ptr(), mode & 7) == 0);
+        values::ints_mut(result)[index] = if accessible { 0 } else { -1 };
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_chmod(call: &Call<'_>) -> R<Sexp> {
+    let (paths, modes) = (
+        call.arg(0),
+        crate::coerce::coerce_vector(call.arg(1), SexpType::Integer)?,
+    );
+    let use_umask = values::as_logical_scalar(call.arg(2)) == 1;
+    let result = alloc(SexpType::Logical, length(paths))?;
+    for index in 0..length(paths) {
+        let mode = match length(modes) {
+            0 => 0o777,
+            count => values::ints(modes)
+                .get(index % count)
+                .copied()
+                .unwrap_or(0o777) as u32,
+        };
+        let mode = if use_umask { mode & !UMASK } else { mode };
+        let changed = values::string_at(paths, index).is_some_and(|path| {
+            std::fs::set_permissions(
+                crate::connections::expand_path(&path),
+                std::fs::Permissions::from_mode(mode),
+            )
+            .is_ok()
+        });
+        values::ints_mut(result)[index] = changed as i32;
+    }
+    Ok(result)
+}
+
+unsafe fn do_sys_set_file_time(call: &Call<'_>) -> R<Sexp> {
+    let (paths, times) = (
+        call.arg(0),
+        crate::coerce::coerce_vector(call.arg(1), SexpType::Real)?,
+    );
+    let result = alloc(SexpType::Logical, length(paths))?;
+    for index in 0..length(paths) {
+        let time = match length(times) {
+            0 => None,
+            count => values::reals(times)
+                .get(index % count)
+                .copied()
+                .filter(|time| time.is_finite()),
+        };
+        let changed = match (values::string_at(paths, index), time) {
+            (Some(path), Some(time)) => {
+                set_modified_time(&crate::connections::expand_path(&path), time).is_ok()
+            }
+            _ => false,
+        };
+        values::ints_mut(result)[index] = changed as i32;
+    }
+    Ok(result)
+}
+
+fn set_modified_time(path: &str, seconds: f64) -> std::io::Result<()> {
+    let out_of_range =
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, "time out of range");
+    let offset =
+        std::time::Duration::try_from_secs_f64(seconds.abs()).map_err(|_| out_of_range())?;
+    let time = if seconds >= 0.0 {
+        std::time::UNIX_EPOCH.checked_add(offset)
+    } else {
+        std::time::UNIX_EPOCH.checked_sub(offset)
+    }
+    .ok_or_else(out_of_range)?;
+    let file = if Path::new(path).is_dir() {
+        std::fs::File::open(path)?
+    } else {
+        std::fs::File::options().write(true).open(path)?
+    };
+    file.set_times(
+        std::fs::FileTimes::new()
+            .set_modified(time)
+            .set_accessed(time),
+    )
+}
+
+unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(call.error("invalid 'x' argument"));
+    }
+    let result = alloc(SexpType::Logical, length(strings))?;
+    for index in 0..length(strings) {
+        let charsxp = strings.element(index);
+        let valid = charsxp == values::na_string() || std::str::from_utf8(charsxp.bytes()).is_ok();
+        values::ints_mut(result)[index] = valid as i32;
+    }
+    Ok(result)
+}
+
+const UMASK: u32 = 0o022;

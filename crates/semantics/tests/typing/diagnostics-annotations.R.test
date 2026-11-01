@@ -232,7 +232,7 @@ boxed: Box<integer>
 value <- list(name = "bob")
 #++++
 value: Person
-60..78 error[type-mismatch] expected `Person`, found `list{name: character}`
+60..78 error[type-mismatch] expected `Person`, found `list{name: character}`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- expanded_optional_param_no_default_rejected
 #: @param count {integer}

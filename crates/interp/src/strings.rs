@@ -86,29 +86,30 @@ pub fn translate_regex(pattern: &str, extended: bool) -> String {
 
 unsafe fn do_paste(call: &Call<'_>) -> R<Sexp> {
     let separator = call.arg(1);
-    let separator = match values::first_string(separator) {
-        Some(text) if separator.kind() == SexpType::String => text.into_owned(),
-        _ => return Err(error("invalid separator")),
-    };
-    paste(call, &separator, call.arg(2), call.arg(3))
+    if separator.kind() != SexpType::String || length(separator) == 0 || separator.element(0) == na_string() {
+        return Err(error("invalid separator"));
+    }
+    paste(call, Some(separator.element(0)), call.arg(2), call.arg(3))
 }
 
 unsafe fn do_paste0(call: &Call<'_>) -> R<Sexp> {
-    paste(call, "", call.arg(1), call.arg(2))
+    paste(call, None, call.arg(1), call.arg(2))
 }
 
-unsafe fn paste(call: &Call<'_>, separator: &str, collapse: Sexp, recycle_zero: Sexp) -> R<Sexp> {
+/// `paste` joins bytes, not text, because a native string may hold bytes that are not UTF-8.
+/// As in GNU R, the result is marked "bytes" when any piece is, UTF-8 when any piece is UTF-8
+/// or latin1 (which is translated), and native otherwise.
+unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycle_zero: Sexp) -> R<Sexp> {
     let list = call.arg(0);
     if list.kind() != SexpType::List {
         return Err(error("invalid first argument"));
     }
     let collapse = if collapse == nil() {
         None
+    } else if collapse.kind() == SexpType::String && length(collapse) > 0 && collapse.element(0) != na_string() {
+        Some(collapse.element(0))
     } else {
-        match values::first_string(collapse) {
-            Some(text) if collapse.kind() == SexpType::String => Some(text.into_owned()),
-            _ => return Err(error("invalid 'collapse' argument")),
-        }
+        return Err(error("invalid 'collapse' argument"));
     };
     let recycle_zero = flag(recycle_zero);
     let mut columns = Vec::with_capacity(length(list));
@@ -120,27 +121,53 @@ unsafe fn paste(call: &Call<'_>, separator: &str, collapse: Sexp, recycle_zero: 
     if recycle_zero && lengths.contains(&0) {
         count = 0;
     }
+    let mut encoding = Encoding::Native;
+    let mut append = |bytes: &mut Vec<u8>, charsxp: Sexp| {
+        if charsxp == na_string() {
+            bytes.extend_from_slice(b"NA");
+        } else if charsxp.has_gp(gp::BYTES) {
+            encoding = Encoding::Bytes;
+            bytes.extend_from_slice(charsxp.bytes());
+        } else if charsxp.has_gp(gp::LATIN1) {
+            if encoding != Encoding::Bytes {
+                encoding = Encoding::Utf8;
+            }
+            bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
+        } else {
+            if charsxp.has_gp(gp::UTF8) && encoding == Encoding::Native {
+                encoding = Encoding::Utf8;
+            }
+            bytes.extend_from_slice(charsxp.bytes());
+        }
+    };
     let mut pieces = Vec::with_capacity(count);
     for row in 0..count {
-        let mut text = String::new();
+        let mut bytes = Vec::new();
         for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
-            if position > 0 {
-                text.push_str(separator);
+            if position > 0 && let Some(separator) = separator {
+                append(&mut bytes, separator);
             }
             if column_length > 0 {
-                text.push_str(
-                    string_at(column, row % column_length)
-                        .as_deref()
-                        .unwrap_or("NA"),
-                );
+                append(&mut bytes, column.element(row % column_length));
             }
         }
-        pieces.push(text);
+        pieces.push(bytes);
     }
-    match collapse {
-        Some(collapse) => scalar_string(&pieces.join(&collapse)),
-        None => string_vector(&pieces),
+    if let Some(collapse) = collapse {
+        let mut joined = Vec::new();
+        for (index, piece) in pieces.iter().enumerate() {
+            if index > 0 {
+                append(&mut joined, collapse);
+            }
+            joined.extend_from_slice(piece);
+        }
+        pieces = vec![joined];
     }
+    let result = alloc(SexpType::String, pieces.len())?;
+    for (index, piece) in pieces.iter().enumerate() {
+        set_elt(result, index, values::mkchar_bytes(piece, encoding)?);
+    }
+    Ok(result)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2284,6 +2311,9 @@ impl Matcher {
             }
             let mut builder = RegexBuilder::new(&translated.pattern);
             builder.case_insensitive(options.ignore_case);
+            // The step budget counts over a whole scan, so the default of a million fails a
+            // plain `\s+` on a megabyte of text that TRE scans without complaint.
+            builder.backtrack_limit(usize::MAX);
             if longest {
                 builder.leftmost_longest(true);
             }
@@ -2399,7 +2429,10 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
         && (0..chars.len()).any(|index| {
             (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
         });
-    let mut groups: Vec<usize> = Vec::new();
+    // Where each open group starts in `output`, and whether it is a lookaround assertion.
+    let mut groups: Vec<(usize, bool)> = Vec::new();
+    // Where the assertion that just closed starts, while a quantifier may still apply to it.
+    let mut assertion: Option<usize> = None;
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
     let mut quantified = false;
@@ -2407,6 +2440,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     while index < chars.len() {
         let character = chars[index];
         let start = output.len();
+        let quantifiable_assertion = assertion.take();
         match character {
             '\\' => {
                 index = translate_escape(&chars, index, dialect, &mut output, &mut problem);
@@ -2423,7 +2457,9 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
             '(' if syntax == Syntax::Perl && chars.get(index + 1) == Some(&'?') => {
                 let (next, opens_group) = translate_group_prefix(&chars, index, &mut output);
                 if opens_group {
-                    groups.push(start);
+                    let lookaround = matches!(chars.get(index + 2), Some('=' | '!'))
+                        || (chars.get(index + 2) == Some(&'<') && matches!(chars.get(index + 3), Some('=' | '!')));
+                    groups.push((start, lookaround));
                 }
                 atom = None;
                 quantified = false;
@@ -2438,7 +2474,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
                         if close == ':' {
-                            groups.push(start);
+                            groups.push((start, false));
                         }
                         atom = None;
                         quantified = false;
@@ -2446,7 +2482,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                         continue;
                     }
                     _ => {
-                        groups.push(start);
+                        groups.push((start, false));
                         output.push('(');
                         atom = None;
                         quantified = false;
@@ -2458,15 +2494,30 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                 continue;
             }
             '(' => {
-                groups.push(start);
+                groups.push((start, false));
                 output.push('(');
                 atom = None;
                 quantified = false;
             }
             ')' => {
                 output.push(')');
-                atom = Some(groups.pop().unwrap_or(start));
+                let (group_start, lookaround) = groups.pop().unwrap_or((start, false));
+                atom = Some(group_start);
+                assertion = lookaround.then_some(group_start);
                 quantified = false;
+            }
+            // PCRE obeys a repeated assertion at most once, and one that may repeat zero times
+            // can never fail the match, so it is dropped; fancy-regex refuses either.
+            '*' | '+' | '?' if quantifiable_assertion.is_some() => {
+                if character != '+'
+                    && let Some(assertion_start) = quantifiable_assertion
+                {
+                    output.truncate(assertion_start);
+                    atom = None;
+                }
+                if matches!(chars.get(index + 1), Some('?' | '+')) {
+                    index += 1;
+                }
             }
             '|' => {
                 output.push('|');

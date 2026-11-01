@@ -7,7 +7,7 @@
 //! GNU R lists a frame in (`ls(sorted = FALSE)`, `as.list`, `eapply`), which packages such as R6
 //! depend on. An unhashed frame is a cons list there, so it lists the newest binding first, after
 //! which come a closure's formals in their own order. A hashed one lists its buckets in index
-//! order, each newest first, with the buckets fixed by GNU R's PJW string hash.
+//! order, each newest first, with the buckets fixed by GNU R's PJW string hash and its growth rule.
 //!
 //! The base environment and the base namespace have no `Frame`: their cells hang off the symbols
 //! themselves, so a lookup of a base function is one load from the interned symbol.
@@ -86,14 +86,26 @@ impl Frame {
             let (formals, locals) = self.cells.split_at(formals);
             return locals.iter().rev().chain(formals).copied().collect();
         }
-        // GNU R prepends a new binding to its bucket. It also grows the table as it fills, by a
-        // rule not reproduced here, so a frame with many bindings can list in another order.
-        let size = self.hash_size as usize;
+        // Replays GNU R's chained table, measured against its output: an insert prepends to its
+        // bucket and counts one, and once the count passes 85% of the size the table grows to
+        // `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry
+        // prepended, after which the count restarts at the number of occupied buckets.
+        let mut size = self.hash_size as usize;
         let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
-        for (position, cell) in self.cells.iter().enumerate() {
-            let hash = unsafe { pjw_hash(cell.car().car().bytes()) } as usize;
-            if let Some(bucket) = buckets.get_mut(hash % size) {
-                bucket.insert(0, position);
+        let mut count = 0;
+        let hashes: Vec<usize> =
+            self.cells.iter().map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize).collect();
+        for (position, hash) in hashes.iter().enumerate() {
+            buckets[hash % size].insert(0, position);
+            count += 1;
+            if count as f64 > size as f64 * 0.85 {
+                size = (size as f64 * 1.2) as usize + 1;
+                let mut grown: Vec<Vec<usize>> = vec![Vec::new(); size];
+                for &moved in buckets.iter().flatten() {
+                    grown[hashes[moved] % size].insert(0, moved);
+                }
+                count = grown.iter().filter(|bucket| !bucket.is_empty()).count();
+                buckets = grown;
             }
         }
         buckets.iter().flatten().map(|&position| self.cells[position]).collect()

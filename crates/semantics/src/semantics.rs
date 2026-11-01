@@ -15,13 +15,14 @@ pub mod types;
 
 use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
 use syntax::ast::{self, BinaryExpr};
 use syntax::{
-    Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, matching_nodes, paired_comment_definition,
+    GreenEvent, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, matching_nodes,
+    paired_comment_definition,
 };
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
@@ -274,6 +275,138 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     spans
 }
 
+/// The sparse nodes the per-file passes look for, in preorder, from one walk of the green
+/// tree: each pass reading the tree itself would walk every node once per pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct SyntaxSites(Vec<SyntaxSite>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SyntaxSite {
+    kind: SyntaxKind,
+    range: TextRange,
+    roles: u8,
+}
+
+/// What a recorded site is to the passes that read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteRole {
+    /// A `#:` block.
+    Annotation,
+    TypeDefinition,
+    /// A `#:` block or an inline type definition: everything that can declare a type.
+    Declaration,
+    /// A record, tuple, tag or `match`, which R cannot run.
+    RySyntax,
+    /// A node carrying an inline annotation, as [`annotations::is_green_inline_site`].
+    InlineSite,
+    /// An inline annotation itself, as [`syntax::is_green_inline_annotation`].
+    InlineAnnotation,
+    /// The file or a brace body with a `#:` block among its statements.
+    AnnotatedSequence,
+    /// A call that attaches a namespace, as [`metadata::is_green_attach_call`].
+    AttachCall,
+}
+
+impl SiteRole {
+    fn bit(self) -> u8 {
+        match self {
+            SiteRole::InlineSite => 1,
+            SiteRole::InlineAnnotation => 2,
+            SiteRole::AnnotatedSequence => 4,
+            SiteRole::AttachCall => 8,
+            SiteRole::Annotation
+            | SiteRole::TypeDefinition
+            | SiteRole::Declaration
+            | SiteRole::RySyntax => 0,
+        }
+    }
+
+    fn holds(self, site: &SyntaxSite) -> bool {
+        match self {
+            SiteRole::Annotation => site.kind == SyntaxKind::ANNOTATION,
+            SiteRole::TypeDefinition => site.kind == SyntaxKind::TYPE_DEFINITION,
+            SiteRole::Declaration => matches!(
+                site.kind,
+                SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION
+            ),
+            SiteRole::RySyntax => is_ry_syntax(site.kind),
+            SiteRole::InlineSite
+            | SiteRole::InlineAnnotation
+            | SiteRole::AnnotatedSequence
+            | SiteRole::AttachCall => site.roles & self.bit() != 0,
+        }
+    }
+}
+
+impl SyntaxSites {
+    pub fn any(&self, role: SiteRole) -> bool {
+        self.0.iter().any(|site| role.holds(site))
+    }
+
+    /// The sites with `role` as nodes of `root`, the tree the sites were recorded from.
+    pub fn nodes(&self, root: &SyntaxNode, role: SiteRole) -> Vec<SyntaxNode> {
+        self.0
+            .iter()
+            .filter(|site| role.holds(site))
+            .map(|site| match syntax::node_at(root, site.kind, site.range) {
+                Some(node) => node,
+                None => panic!(
+                    "a recorded syntax site at {:?} is not in its tree",
+                    site.range
+                ),
+            })
+            .collect()
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
+    let mut sites = Vec::new();
+    syntax::walk_green(&parse(db, file).syntax_node(), |event| {
+        let GreenEvent::Enter {
+            node,
+            parent,
+            range,
+        } = event
+        else {
+            return;
+        };
+        let kind = node.kind();
+        let mut roles = 0;
+        if annotations::is_green_inline_site(node) {
+            roles |= SiteRole::InlineSite.bit();
+        }
+        if syntax::is_green_inline_annotation(kind, parent.map(syntax::GreenRef::kind)) {
+            roles |= SiteRole::InlineAnnotation.bit();
+        }
+        if (parent.is_none() || kind == SyntaxKind::BRACE_EXPR)
+            && node.has_child(SyntaxKind::ANNOTATION)
+        {
+            roles |= SiteRole::AnnotatedSequence.bit();
+        }
+        if metadata::is_green_attach_call(node) {
+            roles |= SiteRole::AttachCall.bit();
+        }
+        if roles != 0
+            || matches!(kind, SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION)
+            || is_ry_syntax(kind)
+        {
+            sites.push(SyntaxSite { kind, range, roles });
+        }
+    });
+    SyntaxSites(sites)
+}
+
+fn is_ry_syntax(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::RECORD_EXPR
+            | SyntaxKind::TUPLE_EXPR
+            | SyntaxKind::TAG_EXPR
+            | SyntaxKind::MATCH_EXPR
+    )
+}
+
 /// Absolute offsets, for the rendering edge and position-addressed IDE features
 /// only; derived per-item values must use `item_syntax` to keep cutting off.
 pub fn item_node<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<SyntaxNode> {
@@ -341,10 +474,7 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db).is_some_and(|files| {
-        package_definitions(db, files).contains_key(name)
-            || conditional_slot_items(db, files).contains_key(name)
-    }) {
+    if ProjectFiles::try_get(db).is_some_and(|files| package_binds(db, files, name)) {
         return true;
     }
     stubs::stubs(db).is_some_and(|library| {
@@ -486,7 +616,15 @@ fn expression_annotations<'db>(
     // Each annotated statement once, in source order, with its `#:` block if it has one.
     let mut targets: Vec<(SyntaxNode, Option<SyntaxNode>)> = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
+    // One walk for both kinds of site; the item tree is position-free, so the file's
+    // recorded sites cannot stand in for it.
+    let (comments, inline_sites): (Vec<SyntaxNode>, Vec<SyntaxNode>) =
+        matching_nodes(&root, |node, _| {
+            node.kind() == SyntaxKind::ANNOTATION || annotations::is_green_inline_site(node)
+        })
+        .into_iter()
+        .partition(|node| node.kind() == SyntaxKind::ANNOTATION);
+    for node in comments {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -500,7 +638,6 @@ fn expression_annotations<'db>(
             }
         }
     }
-    let inline_sites = matching_nodes(&root, |node, _| annotations::is_green_inline_site(node));
     let inline_enabled = !inline_sites.is_empty() && inline_annotations_enabled(db);
     if inline_enabled {
         for site in inline_sites {
@@ -701,6 +838,13 @@ pub fn project_type_definitions<'db>(
     definitions
 }
 
+/// Whether any package file binds `name` at top level, including the inner targets of
+/// `a <- b <- value` and conditional writes.
+pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
+    package_definitions(db, files).contains_key(name)
+        || conditional_slot_items(db, files).contains_key(name)
+}
+
 /// Items writing a top-level name other than their own (conditionally, or nested as in
 /// `y <- (x <- 1L)`); cross-item reads with no unconditional winner join their types.
 #[salsa::tracked(returns(ref))]
@@ -751,11 +895,10 @@ pub struct PackageName<'db> {
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn package_name<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: types::Name<'db>,
-) -> PackageName<'db> {
+pub fn package_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName<'db> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return PackageName::default();
+    };
     let text = name.text(db);
     PackageName {
         winner: package_definitions(db, files).get(text).copied(),
@@ -768,11 +911,10 @@ pub fn package_name<'db>(
 
 /// The test files' counterpart of [`package_name`].
 #[salsa::tracked(returns(ref))]
-pub fn test_name<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    name: types::Name<'db>,
-) -> PackageName<'db> {
+pub fn test_name<'db>(db: &'db dyn Db, name: types::Name<'db>) -> PackageName<'db> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return PackageName::default();
+    };
     let text = name.text(db);
     PackageName {
         winner: test_definitions(db, files).get(text).copied(),
@@ -1336,14 +1478,18 @@ struct SalsaGlobals<'db> {
     file: SourceFile,
     // A body reads the same few globals many times, and each salsa read pays for interning
     // its key and verifying the memo, so a check looks each one up once.
+    names: RefCell<FxHashMap<Box<str>, types::Name<'db>>>,
+    schemes: RefCell<FxHashMap<(types::Name<'db>, bool), Option<types::TypeScheme<'db>>>>,
+    item_frame_binders: OnceCell<&'db FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)>>,
     frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
     package_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
+    test_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
 }
 
 /// A script's own declarations are visible to itself alone and shadow project names.
 /// Memoized per file so the merge runs once per file, not once per checked item.
 #[salsa::tracked(returns(ref))]
-fn visible_type_definitions<'db>(
+pub fn visible_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
 ) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
@@ -1413,8 +1559,46 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
+    frame_binder_of(db, item, name.text(db), deferred)
+}
+
+/// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
+/// `(immediate, deferred)`. One query per item replaces a query per item and name, each of
+/// which interned a key and kept a memo, and its value still changes only when a binder of
+/// one of the item's own names does.
+#[salsa::tracked(returns(ref))]
+fn item_frame_binders<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> FxHashMap<Symbol, (Option<Item<'db>>, Option<Item<'db>>)> {
+    let mut binders = FxHashMap::default();
+    let Some(naming) = item_naming(db, item) else {
+        return binders;
+    };
+    let names = naming
+        .non_locals
+        .values()
+        .chain(naming.quiet_reads.values())
+        .chain(naming.quiet_operator_reads.iter());
+    for &name in names {
+        binders.entry(name).or_insert_with(|| {
+            (
+                frame_binder_of(db, item, name.as_str(), false),
+                frame_binder_of(db, item, name.as_str(), true),
+            )
+        });
+    }
+    binders
+}
+
+fn frame_binder_of<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    name: &str,
+    deferred: bool,
+) -> Option<Item<'db>> {
     let file = *item.file(db);
-    let binders = file_binders(db, file).get(name.text(db))?;
+    let binders = file_binders(db, file).get(name)?;
     if deferred
         && matches!(
             *file.kind(db),
@@ -1444,14 +1628,35 @@ impl<'db> SalsaGlobals<'db> {
             item,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            names: RefCell::default(),
+            schemes: RefCell::default(),
+            item_frame_binders: OnceCell::new(),
             frame_binders: RefCell::default(),
             package_names: RefCell::default(),
+            test_names: RefCell::default(),
         }
+    }
+
+    fn intern(&self, name: &str) -> types::Name<'db> {
+        if let Some(&interned) = self.names.borrow().get(name) {
+            return interned;
+        }
+        let interned = types::Name::new(self.db, name);
+        self.names.borrow_mut().insert(name.into(), interned);
+        interned
     }
 
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
         if deferred && *self.file.kind(self.db) == DocumentKind::Package {
             return None;
+        }
+        let text = name.text(self.db);
+        if let Some(&(immediate, later)) = self
+            .item_frame_binders
+            .get_or_init(|| item_frame_binders(self.db, self.item))
+            .get(&Symbol::new(text))
+        {
+            return if deferred { later } else { immediate };
         }
         *self
             .frame_binders
@@ -1471,13 +1676,19 @@ impl<'db> SalsaGlobals<'db> {
                     DocumentKind::Test | DocumentKind::TestHelper
                 )
             })
-            .map(|files| test_name(self.db, files, name));
-        let package = files.map(|files| {
+            .map(|_| {
+                *self
+                    .test_names
+                    .borrow_mut()
+                    .entry(name)
+                    .or_insert_with(|| test_name(self.db, name))
+            });
+        let package = files.map(|_| {
             *self
                 .package_names
                 .borrow_mut()
                 .entry(name)
-                .or_insert_with(|| package_name(self.db, files, name))
+                .or_insert_with(|| package_name(self.db, name))
         });
         test.into_iter().chain(package)
     }
@@ -1519,14 +1730,12 @@ impl<'db> SalsaGlobals<'db> {
         statement_binding_scheme(self.db, item, name)
     }
 
-    fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
-        self.layers(name).find_map(|layer| layer.winner)
-    }
-}
-
-impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
-    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name);
+    fn lookup_scheme(
+        &self,
+        name: &str,
+        interned: types::Name<'db>,
+        deferred: bool,
+    ) -> Option<types::TypeScheme<'db>> {
         if let Some(item) = self.frame_definition(interned, deferred)
             && let Some(scheme) = self.binder_scheme(item, interned)
         {
@@ -1546,8 +1755,26 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         library.schemes.get(name)?.last().cloned()
     }
 
+    fn winner(&self, name: types::Name<'db>) -> Option<Item<'db>> {
+        self.layers(name).find_map(|layer| layer.winner)
+    }
+}
+
+impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
+    fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
+        let interned = self.intern(name);
+        if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
+            return scheme.clone();
+        }
+        let scheme = self.lookup_scheme(name, interned, deferred);
+        self.schemes
+            .borrow_mut()
+            .insert((interned, deferred), scheme.clone());
+        scheme
+    }
+
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        let interned = types::Name::new(self.db, name);
+        let interned = self.intern(name);
         self.frame_definition(interned, deferred).is_some()
             || self
                 .layers(interned)
@@ -1555,7 +1782,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name);
+        let interned = self.intern(name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
@@ -1566,11 +1793,8 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return self.scheme(name, false);
         }
-        let interned = types::Name::new(self.db, name.to_owned());
-        if let Some(layer) = self
-            .files
-            .map(|files| package_name(self.db, files, interned))
-        {
+        let interned = self.intern(name);
+        if let Some(layer) = self.files.map(|_| package_name(self.db, interned)) {
             if let Some(item) = layer.winner {
                 return Some(global_scheme(self.db, item));
             }
@@ -1585,7 +1809,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = self.intern(name);
         self.layers(interned).find_map(|layer| {
             layer
                 .winner
@@ -1608,7 +1832,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return None;
         }
         // A project definition shadows the stub set, disabling per-call overload selection.
-        let interned = types::Name::new(self.db, name);
+        let interned = self.intern(name);
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
@@ -1623,6 +1847,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         visible_arithmetic_classes(self.db, self.file)
+    }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
     }
 }
 
@@ -1731,6 +1959,10 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
     /// collapse the whole scheme to `Unknown`.
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         self.base.arithmetic_classes()
+    }
+
+    fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        self.base.stub_scheme(name)
     }
 }
 
@@ -1875,6 +2107,7 @@ mod tests {
         let integer = types::scalar(&db, types::Atomic::Integer);
         let check = check::ItemCheck {
             expression_types: Default::default(),
+            pattern_types: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),

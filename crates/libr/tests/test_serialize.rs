@@ -640,7 +640,7 @@ fn persistence_hooks_replace_and_restore_objects() {
             Ok(())
         };
         let hook: PersistHook = &mut name_env;
-        R::serialize::serialize(list, Format::Xdr, 3, &mut sink, Some(hook)).expect("written");
+        R::serialize::serialize(list, Format::Xdr, 3, &mut sink, Some(hook), R::serialize::Chunking::Buffered).expect("written");
         assert_eq!(named, 2, "the hook names every occurrence, as in GNU R");
         assert!(from_bytes(&bytes).is_err(), "restoring needs a hook");
         let mut restored = 0;

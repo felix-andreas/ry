@@ -52,7 +52,7 @@ counts: list[named: integer]
 person: Person <- list(name = "Ada")
 #++++
 person: Person
-58..76 error[type-mismatch] expected `Person`, found `list{name: character}`
+58..76 error[type-mismatch] expected `Person`, found `list{name: character}`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #==== inline_signatures
 #---- parameter_and_return_types

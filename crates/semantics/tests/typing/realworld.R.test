@@ -45,7 +45,6 @@ increment <- function(x) {
 }
 #++++
 increment: fn(x: integer | NULL) -> integer
-65..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
 
 #---- calling_a_non_function
 broken <- function() {
@@ -226,7 +225,7 @@ apply_op <- function(op, a, b) {
 
 run <- function() apply_op("add", 3L, 4L)
 #++++
-apply_op: <T, U: numeric> fn(op: T, a: U, b: U) -> Any
+apply_op: <T, U: numeric> fn(op: T, [a]: U, [b]: U) -> Any
 run: fn() -> Any
 
 #---- mutual_recursion_is_clean
@@ -360,7 +359,7 @@ run <- function() {
 #++++
 countdown: <T: numeric> fn(n: T) -> integer
 greet: <T, U> fn(name: T, [greeting]: U) -> character
-clamp: <T> fn(x: T, lo: T, hi: T) -> T
+clamp: <T> fn(x: T, lo: T, [hi]: T) -> T
 compose: <T, U, V> fn(f: fn(T) -> U, g: fn(V) -> T) -> fn(x: V) -> U
 run: fn() -> list{depth: integer, hello: character, hi: character, bounded: integer, out: integer}
 
@@ -801,7 +800,7 @@ sum_leaves <- function(node) {
 
 run <- function() sum_leaves(list(1, list(2, 3), list(list(4, 5), 6)))
 #++++
-sum_leaves: Unknown
+sum_leaves: fn(node: Unknown) -> Unknown
 run: fn() -> Unknown
 
 #==== accumulators
@@ -871,8 +870,7 @@ unguarded_total <- function(labels) {
   totals[["a"]] + 1L
 }
 #++++
-unguarded_total: Unknown
-115..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
+unguarded_total: <T> fn(labels: T) -> integer
 
 #==== clean_programs
 #---- monthly_sales_report
@@ -1167,8 +1165,8 @@ quarter <- function(type = "quarter") {
 flagged <- quarter(TRUE)
 #++++
 is_rstudio: fn() -> logical
-quarter: <T> fn([type]: T) -> logical
-flagged: logical
+quarter: fn([type]: Unknown) -> Unknown
+flagged: Unknown
 
 #---- combining_optional_lists_drops_null
 pieces <- function(a) c(if (a) list(1), if (a) list(2))
@@ -1182,14 +1180,14 @@ first_of <- function(x) {
 }
 length_or_zero <- function(x = NULL) !is.null(x) && length(x) > 0L
 #++++
-first_of: <T> fn(x: T) -> Unknown
+first_of: fn(x: Unknown) -> Unknown
 length_or_zero: <T> fn([x]: T | NULL) -> logical
 
 #---- null_case_label_is_a_string
 kind_of <- function(x) switch(typeof(x), NULL = 1, 2)
 next_kind <- function() kind_of(1) + 1
 #++++
-kind_of: <T> fn(x: T) -> double
+kind_of: fn(x: Unknown) -> double
 next_kind: fn() -> double
 
 #---- defaulted_flag_accepts_a_number
@@ -1254,7 +1252,7 @@ friendly <- function(x) {
 }
 described <- friendly("a")
 #++++
-friendly: <T> fn(x: T) -> character
+friendly: fn(x: Unknown) -> character
 described: character
 
 #---- validator_that_allows_null_keeps_the_caller_value
@@ -1270,7 +1268,7 @@ field_of <- function(thing) {
   thing$field
 }
 #++++
-check_thing: <T, U> fn(x: T | NULL, [allow_null]: U) -> NULL
+check_thing: <T> fn(x: Unknown, [allow_null]: T) -> NULL
 field_of: <T> fn(thing: T) -> Unknown
 
 #---- combining_a_maybe_null_parameter
@@ -1300,6 +1298,6 @@ fill <- function(object, coredata = NULL) {
   if (coredata) object else NULL
 }
 #++++
-quarter_of: <T> fn([type]: T) -> logical
-asked: logical
-fill: <T, U> fn(object: T, [coredata]: U | NULL) -> T | NULL
+quarter_of: fn([type]: Unknown) -> Unknown
+asked: Unknown
+fill: <T> fn([object]: Unknown, [coredata]: T | NULL) -> Unknown

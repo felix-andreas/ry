@@ -111,28 +111,28 @@ hint @29: integer
 data <- 1L
 result <- data$field$0
 #++++
-hover 21..31: Unknown
+hover 26..31: field: Unknown
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (1): field
+completion: none
 hint @4: integer
 
 #---- dollar_field_name
 data <- 1L
 result <- data$fie$0ld
 #++++
-hover 21..31: Unknown
+hover 26..31: field: Unknown
 definition: none
 references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (1): field
+completion: none
 hint @4: integer
 
 #---- block_expression

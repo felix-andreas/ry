@@ -8,12 +8,11 @@ use miette::{
     GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
     Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
 };
-use salsa::Database;
+use salsa::{Database, Durability};
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_exports,
-    parse_namespace_imports, parse_native_symbols,
+    parse_description_dependencies, parse_description_package, parse_namespace,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -241,9 +240,16 @@ pub(crate) fn analyze_project(
             .map(|stub| (stub.stem.clone(), stub.text.clone())),
     );
 
+    // A one-shot check changes one input after analysis starts: the attached namespaces,
+    // known only once every file is parsed. Every other input is high durability, so a memo
+    // that never read the attached set skips verification in the revision that sets it.
     let mut db = RootDatabase::one_shot();
-    StubSources::new(&db, stub_sources, shipped_export_manifests());
-    AnalysisSettings::new(&db, config.check.inline_annotations);
+    let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
+        .durability(Durability::HIGH)
+        .new(&db);
+    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
+        .durability(Durability::HIGH)
+        .new(&db);
 
     // A broken override stub silently changes what every file checks against, so
     // its dropped declarations are reported as findings.
@@ -269,9 +275,9 @@ pub(crate) fn analyze_project(
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
-    let namespace_imports = namespace_source
+    let namespace_file = namespace_source
         .as_deref()
-        .map(parse_namespace_imports)
+        .map(parse_namespace)
         .unwrap_or_default();
     let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let dependencies = description_source
@@ -282,19 +288,18 @@ pub(crate) fn analyze_project(
         .as_deref()
         .map(parse_description_collate)
         .unwrap_or_default();
-    let metadata = PackageMetadata::new(
-        &db,
-        normalized_imports(&namespace_imports),
+    let metadata = PackageMetadata::builder(
+        normalized_imports(&namespace_file.imports),
         dependencies,
         BTreeSet::new(),
         description_source
             .as_deref()
             .and_then(parse_description_package),
-        namespace_source
-            .as_deref()
-            .map(parse_native_symbols)
-            .unwrap_or_default(),
-    );
+        namespace_file.native_symbols,
+    )
+    .durability(Durability::HIGH)
+    .attached_durability(Durability::LOW)
+    .new(&db);
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
@@ -324,13 +329,19 @@ pub(crate) fn analyze_project(
         let (path, source) = &mut checked[index];
         let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
-        let file = SourceFile::new(&db, mem::take(source), kind);
+        let file = SourceFile::builder(mem::take(source), kind)
+            .durability(Durability::HIGH)
+            .new(&db);
         files[index] = Some(file);
         project.push(file);
     }
     let files: Vec<SourceFile> = files.into_iter().flatten().collect();
-    ProjectFiles::new(&db, project.clone());
-    DataFiles::new(&db, scan_data_files(&root));
+    let _: ProjectFiles = ProjectFiles::builder(project.clone())
+        .durability(Durability::HIGH)
+        .new(&db);
+    let _: DataFiles = DataFiles::builder(scan_data_files(&root))
+        .durability(Durability::HIGH)
+        .new(&db);
     let paths: Vec<PathBuf> = checked.into_iter().map(|(path, _)| path).collect();
     // Salsa storage-handle clones share memos, so threads compute disjoint files concurrently.
     // Workers need the analysis stack: interface resolution recurses per dependency edge.
@@ -344,14 +355,20 @@ pub(crate) fn analyze_project(
 
     // Trees are evicted batch by batch, so everything later phases read from them is
     // derived while they are resident.
-    let want_tokens = namespace_source.is_some();
+    let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
+    let want_tokens = namespace_source.is_some() && !imported.is_empty();
     let mut used_tokens = BTreeSet::new();
-    for (_, tokens) in in_batches(&mut db, workers, &by_size, |db, index| {
+    let tree_batch = workers * FILES_PER_WORKER_BATCH;
+    for (_, tokens) in in_batches(&mut db, workers, &by_size, tree_batch, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
         let mut tokens = BTreeSet::new();
         if want_tokens {
-            namespace::collect_used_tokens(&semantics::parse(db, file).syntax_node(), &mut tokens);
+            namespace::collect_used_tokens(
+                &semantics::parse(db, file).syntax_node(),
+                &imported,
+                &mut tokens,
+            );
         }
         tokens
     }) {
@@ -363,18 +380,30 @@ pub(crate) fn analyze_project(
         metadata.set_attached(&mut db).to(attached);
     }
 
-    // Per-item naming runs across cores first: inside the project-wide interface walk it
-    // would serialize on one thread.
-    in_batches(&mut db, workers, &by_size, |db, index| {
+    // Per-item naming and the read sets derived from it run across cores first: inside the
+    // project-wide interface and slot walks they would serialize on one thread. This pass
+    // reads no tree and holds nothing evictable, so it runs as one batch with no barriers.
+    in_batches(&mut db, workers, &by_size, by_size.len(), |db, index| {
         for &item in semantics::item_tree(db, files[index]) {
             let _ = semantics::item_naming(db, item);
+            let _ = semantics::item_interface_reads(db, item);
+            let _ = semantics::item_top_level_names(db, item);
         }
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
-    for (index, diagnostics) in in_batches(&mut db, workers, &by_size, |db, index| {
-        let rendered = document_diagnostics(db, files[index], &config);
-        apply_suppressions(rendered, files[index].text(db))
-    }) {
+    // Reads no tree either, but evicting between larger batches still bounds the peak on a
+    // project with many findings.
+    let diagnostics_batch = tree_batch * 4;
+    for (index, diagnostics) in in_batches(
+        &mut db,
+        workers,
+        &by_size,
+        diagnostics_batch,
+        |db, index| {
+            let rendered = document_diagnostics(db, files[index], &config);
+            apply_suppressions(rendered, files[index].text(db))
+        },
+    ) {
         per_file[index] = diagnostics;
     }
     // Computed last so the `unused-import` lint sees the whole package.
@@ -383,23 +412,25 @@ pub(crate) fn analyze_project(
         let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
-            namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
-        // A conditional or chained write (`a <- b <- function() ...`) defines `b` as well.
+            namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
+        // R resolves an export with `exists()` from the namespace, which inherits through base
+        // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
         let defines = |name: &str| {
-            ProjectFiles::try_get(&db).is_some_and(|files| {
-                semantics::package_definitions(&db, files).contains_key(name)
-                    || semantics::conditional_slot_items(&db, files).contains_key(name)
-            })
+            ProjectFiles::try_get(&db).is_some_and(|files| semantics::package_binds(&db, files, name))
+                || semantics::check::DEFAULT_SEARCH_PATH
+                    .iter()
+                    .any(|package| namespace_exports(&db, package, name))
         };
         problems.extend(namespace::namespace_export_problems(
-            &parse_namespace_exports(namespace_source),
-            &namespace_imports,
+            &namespace_file.exports,
+            &namespace_file.imports,
             &defines,
             &knows,
             &exports,
+            &used_tokens,
         ));
         problems.extend(namespace::unused_import_diagnostics(
-            &namespace_imports,
+            &namespace_file.imports,
             &used_tokens,
             config.lint.unused_import,
         ));
@@ -426,17 +457,18 @@ pub(crate) fn analyze_project(
     })
 }
 
-/// Runs `work` for every index in `order` across `workers` threads, a batch at a time.
-/// Between batches the least recently used trees are evicted, so a cold pass holds about a
-/// batch of them instead of the whole project's.
+/// Runs `work` for every index in `order` across `workers` threads, `batch_len` indices at
+/// a time. Between batches the least recently used trees are evicted, so a cold pass holds
+/// about a batch of them instead of the whole project's.
 fn in_batches<T: Send>(
     db: &mut RootDatabase,
     workers: usize,
     order: &[usize],
+    batch_len: usize,
     work: impl Fn(&RootDatabase, usize) -> T + Sync,
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
-    for batch in order.chunks(workers * FILES_PER_WORKER_BATCH) {
+    for batch in order.chunks(batch_len.max(1)) {
         // Shared rather than dealt out: check times vary by orders of magnitude per file.
         let next = AtomicUsize::new(0);
         thread::scope(|scope| {
@@ -757,8 +789,11 @@ pub(crate) fn render_findings<'a>(
     diagnostics: &[Diagnostic],
     resolve_note: &dyn Fn(&RelatedLocation) -> Option<RelatedNote<'a>>,
 ) -> usize {
-    let line_index = LineIndex::new(source);
-    let snippet_lines = LineStarts::new(source);
+    if diagnostics.is_empty() {
+        return 0;
+    }
+    let mut line_index = None;
+    let mut snippet_lines = None;
     let mut rendered = 0;
     for diagnostic in diagnostics {
         if min_severity == MinSeverity::Error && diagnostic.severity != Severity::Error {
@@ -769,10 +804,12 @@ pub(crate) fn render_findings<'a>(
             diagnostic.related.iter().filter_map(resolve_note).collect();
         match output {
             OutputFormat::Human => {
-                render_human_diagnostic(path, source, &snippet_lines, diagnostic, &related)
+                let lines = snippet_lines.get_or_insert_with(|| LineStarts::new(source));
+                render_human_diagnostic(path, source, lines, diagnostic, &related)
             }
             OutputFormat::Json => {
-                render_json_diagnostic(path, source, &line_index, diagnostic, &related)
+                let index = line_index.get_or_insert_with(|| LineIndex::new(source));
+                render_json_diagnostic(path, source, index, diagnostic, &related)
             }
         }
     }

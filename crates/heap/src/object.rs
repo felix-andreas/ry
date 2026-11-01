@@ -277,6 +277,12 @@ pub mod gp {
     pub const ASCII: u16 = 1 << 6;
     /// The encoding bits that distinguish two interned strings with the same bytes.
     pub const ENCODING: u16 = BYTES | LATIN1 | UTF8;
+    /// A binding cell for a formal bound to its default, which `missing()` reads.
+    pub const BINDING_MISSING: u16 = 1 << 0;
+    /// A binding cell for an S4 method's formal whose argument was missing from the generic's
+    /// call (GNU R's `MISSING == 1`). Unlike a plain default it stays missing when the method
+    /// passes it on, so `missing()` in a callee sees it.
+    pub const BINDING_ABSENT: u16 = 1 << 1;
     pub const BINDING_LOCKED: u16 = 1 << 14;
     pub const ACTIVE_BINDING: u16 = 1 << 15;
     pub const FRAME_LOCKED: u16 = 1 << 14;

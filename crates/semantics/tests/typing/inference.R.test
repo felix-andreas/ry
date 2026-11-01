@@ -263,7 +263,7 @@ k: <T: scalar numeric> fn(n: T) -> double[]
 f <- function(a, b) a && b
 g <- function() c(TRUE, FALSE) && TRUE
 #++++
-f: fn(a: logical, b: logical) -> logical
+f: fn(a: logical, [b]: logical) -> logical
 g: Unknown
 43..57 error[type-mismatch] expected `logical`, found `logical[]`
 

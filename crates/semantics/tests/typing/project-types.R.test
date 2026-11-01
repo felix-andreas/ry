@@ -29,7 +29,7 @@ result <- get_name(list(name = "bob"))
 get_name: fn(value: Person) -> character
 == R/b.R
 result: Unknown
-19..37 error[type-mismatch] expected `Person`, found `list{name: character}`
+19..37 error[type-mismatch] expected `Person`, found `list{name: character}`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- forward_type_reference_across_files
 #~~~~ R/a.R

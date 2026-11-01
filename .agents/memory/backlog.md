@@ -76,16 +76,10 @@ behavior below truthfully, most of it under "Where correct code is reported" in
 
 False reports on correct R, worst first:
 
-- **An inferred numeric parameter rejects a `logical`.** `f(TRUE, 0.5)` for `function(price, rate)
-  price * rate` is refused, while mixed `integer` and `double` widen (`InferenceTable::widen_numeric_binding`).
-  Promotion has to live in the type, not the binding (see "Promotion needs to live in the type").
-- **`pkg::name` does not activate a conditional namespace.** `dplyr::mutate()` or
-  `jsonlite::fromJSON()` in a script without `library()` or `DESCRIPTION` reports an unknown
-  namespace. The read names its package, so it should activate the namespace (or at least validate
-  against the shipped manifest). `metadata::namespace_active` and `diagnostics::namespace_read_message`.
-- **Positional append on `list()` infers dict-like.** `res <- list(); for (i in ...) res[[i]] <- x;
-  res[[1]]` reports `position 1 does not exist in list{} | list[named: integer]`. An integer index
-  write should infer list-like.
+- **`pkg::name` on an inactive shipped namespace is not validated.** `dplyr::mutat` in a script with
+  no `library(dplyr)` and no `DESCRIPTION` passes as `Unknown`. The read is accepted because R's
+  `::` loads without attaching; validating it against the shipped manifest and stub types without
+  activating the namespace for bare names would finish the job (`diagnostics::namespace_read_message`).
 - **A trailing comma inside rlang's dynamic dots.** `mutate(d, y = 1, )` runs in dplyr, because
   rlang's `list2()` drops a trailing empty argument, but `trailing-comma` reports it as an error.
   The lint should skip calls to functions the stubs mark as taking dynamic dots (the `@masked`
@@ -97,15 +91,8 @@ False reports on correct R, worst first:
 - **`source()` is not followed.** `source("utils.R"); util_fn(1)` reports `util_fn` as unresolved in
   the caller and unused in `utils.R`. Following a literal `source()` path would remove both; until
   then, limitations.md recommends moving shared helpers into `R/`.
-- **The loop variable after a `for` loop.** At the top level of a file, `for (i in xs) {}; print(i)`
-  reports `i` as unresolved, although R keeps the last value. Inside a function the read is
-  `Unknown` and not reported.
-- **A non-function binding in call position.** After `mean <- 3`, `mean(x)` reports calling a
-  `double`, but R's function lookup skips non-function bindings.
 - **tidyselect and masking columns of export-list-only packages.** With `library(tidyr)`, `pivot_longer(d, cols =
   c(a, b))` reports `a` and `b` unresolved, because only typed stubs mark masked parameters.
-- **A vector operand pins its partner to a scalar.** On `function(x) x + c(1L, 2L)`, the call
-  `f(c(1, 2))` reports `expected double, found double[]`.
 - **Strict mode ignores `@trust`, `@if-unknown`, and plain `#:` on a binding.** `#: @trust double`
   above `amount <- df$amount` still reports the origin and tells the user to "add a type
   annotation"; only `# ry: allow(strict)` clears it.
@@ -116,6 +103,10 @@ False reports on correct R, worst first:
 
 Smaller gaps:
 
+- Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
+  unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
+  message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
+  "did you mean".
 - After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
   finding.
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
@@ -147,6 +138,38 @@ Smaller gaps:
 - The Zed extension's binary download asks for the latest non-pre-release, which is `0.1.1` with
   `roughly-*` assets, so it fails; `editors/zed/src/lib.rs`. The install page tells users to put
   `ry` on `PATH` meanwhile.
+
+## Open: what `ry check` still reports on the GNU R corpus
+
+Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
+went from 3,112 errors to 624 after the false-report fixes listed in `limitations.md` and the
+reference. A random sample of the rest is still almost entirely false reports on correct R. The
+classes, largest first:
+
+- **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
+  `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
+  caller then passing `double[]` or a matrix is reported (`expected double, found double[]`,
+  `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
+  has not been isolated yet. The likely fix is leniency for shape-only mismatches at calls to
+  unannotated project functions, which needs the callee's annotation provenance at the argument check.
+- **Inferred unions in conditions.** `T | logical | NULL` and `logical | NULL` reach `if` and `&&`
+  after `if (is.null(x)) x <- ...` rebinds (processx `conn_connect_fifo`, data.table, lattice).
+- **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
+  an `if` without `else` assigns the value (httr2 `sprintf(type, kind)`, `gsub` replacement).
+- **Callbacks whose arity the interface fixes.** purrr `.fmap(.x, function(x) ...)` against
+  `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
+  named parameters.
+- **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics),
+  xtable's string `+` method, `*` between `double[]` and a matrix.
+- **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
+  (httr `oauth_listener(url)$code`, rlang `trace$call`).
+- One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
+  and no such function exists.
+- Singletons: `lapply` over `as.data.frame(x)`, an infinite-type error
+  in pkgdown `news_search_index`, `Sys.getenv()` value passed to a `logical` helper (renv `not`).
+
+To reproduce, give each package a `ry.toml` with `[check]` `typing = true` (typing is off by
+default) and run `ry check --output json R` inside it.
 
 ## Open: where findings point, and what the type system still refuses
 
@@ -285,8 +308,6 @@ protects construction but nothing after it.
   error; the checker rejects it statically, so only `Unknown` code reaches it.
 - The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
   touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
-- `serialize()` fails on ry's runtime for every value ("5 arguments passed to .Internal(serialize)
-  which requires 6"); `saveRDS()` works and refuses dicts and sets as intended.
 
 ## Open: the JIT
 
@@ -345,6 +366,20 @@ protects construction but nothing after it.
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
+
+### Project-wide aggregates verify every item after each keystroke (unverified here, reported by the IDE responsiveness work)
+
+- On the finance benchmark, any editor request right after a keystroke costs about 45 ms at p50,
+  against 0.5 to 1 ms settled, and edited-file diagnostics cost about 56 ms with no item rechecked.
+  The time is salsa deep verification under `item_check`.
+- Cause: `conditional_slot_items`, `interface_sccs`, `package_definitions` and
+  `project_arithmetic_classes` read per-item memos across all files directly. The edited file's
+  items make each aggregate `LOW`, so verifying it walks about 56K edges.
+- Fix shape: fold per-file tracked memos (for example `file_conditional_writers`,
+  `file_definitions`, `file_interface_reads`, `file_arithmetic_classes`), so an aggregate reads
+  about 500 file memos that verify at `MEDIUM` by durability and only the edited file's memo
+  re-verifies. Pin it in `test_incremental.rs` by counting edges re-verified after an edit. Keep
+  `ry check`'s naming pass warming these per item in parallel.
 
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
@@ -1933,17 +1968,37 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - `rawConnection` and `writeBin` are missing from the interpreter (libr has them, unregistered),
-    and cli renders every testthat failure through `rawConnection`, so about 21 packages stop there.
-  - About 12 packages (DBI, glue, withr, vctrs, lubridate, hms, readxl, later, lgr, tidyselect,
-    pkgbuild, blob) crash in the collector marking a dead handle, only in long runs. Reproduce
-    with `gctorture(TRUE)` on a profiling build.
+  - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
+    full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
+    was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
   - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
     `rm()` and `gc()`, so it is finalized in a later block.
-  - Smaller classes: ALTREP in checkmate, `latin1` encoding in fastmap, `file_access` names in fs,
-    `gsub` with a Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in
-    Bessel's asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, and the
-    `parallel` package's DLL for doParallel.
+  - `getParseData` returns `NULL` (see the source-references item below), and cli's
+    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
+  - Regular expressions fancy-regex cannot compile: rcmdcheck's `(?<q>...)\g{q}` backreference,
+    and lubridate's quantified lookahead `(?=\D+)?`. A non-constant-size pattern runs on
+    fancy-regex's backtracking VM because of `leftmost_longest`; a DFA leftmost-longest search
+    (regex-automata's `MatchKind::All`, anchored at the leftmost-first start) would avoid it.
+  - Two unserializers: `interp::serialize`'s reader and libr's `R_Unserialize`. The writer is
+    already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
+    same way.
+  - Gaps a review of the date-time and regex work found, none yet hit by a corpus test:
+    - `as.POSIXct(lt)` ignores an explicit `isdst` when the zone has a single offset.
+    - POSIX rule strings in `TZ` (`"EST5"`, `"JST-9"`, `"<+03>-3"`) and daylight rules after 2100.
+    - `strptime` input: `%%` skipping blanks, no warning for an out-of-range `%z`, and
+      `format`/`strptime` do not recycle the format.
+    - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
+      reports an error; quantified lookarounds and lookarounds in non-capturing groups.
+    - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
+  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
+    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
+  - withr: `RNGkind` lacks "Marsaglia-Multicarry", "Buggy Kinderman-Ramage" and "Rounding", and
+    the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
+  - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
+    Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
+    asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
+    package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
+    alternative in mvtnorm, and `NextMethod` in xts.
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).
@@ -2633,11 +2688,11 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 2.4-2.5 s | 515 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
-| data science | 2.5-2.7 s | 520 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
-| biostatistics | 2.5-2.7 s | 528 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
+| finance | 1.6-1.7 s | 438 MiB | 1005 `unused` (genuine), 848 `object-system` | 1 / 44 ms | 2 / 39 ms |
+| data science | 1.7-1.85 s | 435 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
+| biostatistics | 1.7-1.8 s | 447 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (6.3 s on one core, 3.8 times faster on four), so per-file constant costs set its wall time; the remaining profile is item checking (about 3 s of CPU, half of it `infer_call_arguments`), parse, item HIR and lints. Before the green-tree searches, per-check caches and lazy arena commit, main measured 3.3-3.7 s and about 780-795 MiB on finance. Ideas not yet tried: fuse the per-file green walks into one tracked "syntax sites" query, cut type interning in `fresh_ty`, `literal_ty` and `substitute_rigid_memo`, and compute `interface_sccs` and `conditional_slot_items` before the third pass instead of inside its first batch. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.8 s of CPU on four cores, 2.9 times its wall time). The profile is now flat: item checking is about 45% of CPU at roughly 1.5 µs per expression, with no expression inferred twice, and the rest is HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries. No single query or helper is above 5% exclusive. Reaching the 1 s target needs the checker's per-expression cost cut structurally, most likely a type representation that does not go through salsa interning (`Ty::intern_id` alone is 4% of samples, allocation 12%). Smaller measured levers: lowering HIR on the green tree (red-node creation is 3 to 4 points of `item_hir`) and the serial `parse_namespace` at start (about 0.1 s). Tried without gain: a per-check cache of common scalar types, larger syntax batches (+15 MiB for about 0.05 s), and freeing evicted trees on a background thread (mimalloc's cross-thread frees cost what the serial drop saved). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
@@ -2682,8 +2737,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
   as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
   which makes a diagnostic differ from the user's own definition. Show the declaration order.
-- **`@Money(list(amount = "x", ...))` blames the whole `list(...)` call.** The wrong field's value is
-  the precise range.
+- **`@Money(list(amount = 1, ...))` is a kind mismatch with no hint.** A `list(...)` never fits a
+  record, so blaming the whole call is right, but the message should suggest the native literal
+  `(amount = 1, ...)`.
 - **A join column missing from both frames is reported twice at one range**, once per frame
   (`sales[ids, on = "teem"]`). One finding naming both frames would be quieter.
 - **Strict mode reports an `if (x < 0) stop(...)` guard** as an undetermined type (already on
@@ -2692,11 +2748,14 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
-## Open: findings from the developer-workflow round
+## Open: editor gaps on ry's own syntax
 
-- **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
-  function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
-  Position[]`; the second member is the vector view of the same element type and adds noise.
+- **Hover still shows impossible vector members.** The inlay hint and the "add annotation" action
+  drop `Position[]` from `list[Position] | Position[]` (`without_impossible_vectors` in
+  `crates/ide/src/ide.rs`), but hover prints the full inferred union.
+- **Completion of a field name inside a record literal** offers R globals; it should offer the
+  expected record's missing fields.
+- **No payload-field completion in a tag constructor** such as `:Circle(ra|)`; patterns have it.
 
 ## Open: false errors on real CRAN code
 

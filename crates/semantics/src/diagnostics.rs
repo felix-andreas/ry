@@ -1,6 +1,6 @@
 use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_green_inline_site,
-    is_type_kind, lower_annotation, lower_inline_annotation, statement_inline_site,
+    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind, lower_annotation,
+    lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{
     ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
@@ -15,25 +15,23 @@ use crate::metadata::{
     declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
 };
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::{namespace_exports, namespace_known, stubs};
+use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
     TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
-    AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
-    inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-    item_tree, parse, project_type_definitions, statement_annotations,
+    AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
+    file_syntax_sites, file_type_definitions, inline_annotations_enabled, item_check, item_hir,
+    item_name_range, item_naming, item_spans, item_tree, parse, project_type_definitions,
+    statement_annotations,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use syntax::SyntaxNode;
 use syntax::ast::is_expression_kind;
-use syntax::{
-    GreenRef, SyntaxKind, TextRange, TextSize, is_green_inline_annotation, is_syntactic_name,
-    matching_nodes, paired_comment_definition,
-};
+use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -118,7 +116,8 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     }
 
     let root = parsed.syntax_node();
-    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
+    let sites = file_syntax_sites(db, file);
+    for node in sites.nodes(&root, SiteRole::Annotation) {
         let annotation = lower_annotation(db, &node);
         for (message, range) in &annotation.errors {
             diagnostics.push(Diagnostic::new(
@@ -137,7 +136,8 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
     }
-    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::TYPE_DEFINITION)
+    for node in sites
+        .nodes(&root, SiteRole::TypeDefinition)
         .into_iter()
         .filter(|node| node.parent().as_ref() != Some(&root))
     {
@@ -158,19 +158,11 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 /// inline annotations off to stay runnable by R hears about each one. They are still
 /// typed, but `match` coverage is not counted.
 fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let parsed = parse(db, file);
-    let sites = matching_nodes(&parsed.syntax_node(), |node, _| {
-        matches!(
-            node.kind(),
-            SyntaxKind::RECORD_EXPR
-                | SyntaxKind::TUPLE_EXPR
-                | SyntaxKind::TAG_EXPR
-                | SyntaxKind::MATCH_EXPR
-        )
-    });
-    if sites.is_empty() || inline_annotations_enabled(db) {
+    let sites = file_syntax_sites(db, file);
+    if !sites.any(SiteRole::RySyntax) || inline_annotations_enabled(db) {
         return Vec::new();
     }
+    let sites = sites.nodes(&parse(db, file).syntax_node(), SiteRole::RySyntax);
     sites
         .iter()
         .map(|node| {
@@ -203,16 +195,14 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// annotation instead warns that it types nothing, because the code still cannot run
 /// under R and the author should know the annotation is not checked.
 fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let parsed = parse(db, file);
-    let sites = matching_nodes(&parsed.syntax_node(), |node, _| is_green_inline_site(node));
-    if sites.is_empty() {
+    let recorded = file_syntax_sites(db, file);
+    if !recorded.any(SiteRole::InlineSite) {
         return Vec::new();
     }
+    let root = parse(db, file).syntax_node();
     let mut diagnostics = Vec::new();
     if !inline_annotations_enabled(db) {
-        for node in matching_nodes(&parsed.syntax_node(), |node, parent| {
-            is_green_inline_annotation(node.kind(), parent.map(GreenRef::kind))
-        }) {
+        for node in recorded.nodes(&root, SiteRole::InlineAnnotation) {
             diagnostics.push(Diagnostic::new(
                 node.text_range(),
                 Severity::Warning,
@@ -222,7 +212,7 @@ fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
         }
         return diagnostics;
     }
-    for site in &sites {
+    for site in &recorded.nodes(&root, SiteRole::InlineSite) {
         for (message, range) in lower_inline_annotation(db, site).errors {
             diagnostics.push(Diagnostic::new(
                 range,
@@ -242,14 +232,12 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let parsed = parse(db, file);
     let root = parsed.syntax_node();
     let mut diagnostics = Vec::new();
+    let sites = file_syntax_sites(db, file);
     // Only a sequence with an annotation among its statements can hold a dangling one.
-    let sequences = matching_nodes(&root, |node, parent| {
-        (parent.is_none() || node.kind() == SyntaxKind::BRACE_EXPR)
-            && node.has_child(SyntaxKind::ANNOTATION)
-    });
+    let sequences = sites.nodes(&root, SiteRole::AnnotatedSequence);
     for (node, target) in sequences
         .iter()
-        .flat_map(|parent| crate::statement_annotations(&parent))
+        .flat_map(|parent| statement_annotations(parent))
     {
         let annotation = lower_annotation(db, &node);
         if !annotation.definitions.is_empty()
@@ -282,7 +270,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             message.to_owned(),
         ));
     }
-    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
+    for node in sites.nodes(&root, SiteRole::Annotation) {
         if node.parent().map(|parent| parent.kind()) != Some(SyntaxKind::ARGUMENT_LIST) {
             continue;
         }
@@ -574,8 +562,8 @@ fn classify_non_local_read(
         )
     });
     if crate::package_scheme_exists(db, name)
-        || test_files.is_some_and(|files| {
-            let binding = crate::test_name(db, files, Name::new(db, name));
+        || test_files.is_some_and(|_| {
+            let binding = crate::test_name(db, Name::new(db, name));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
         || super_globals(db, file).contains(name)
@@ -657,27 +645,9 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     let definitions = visible_type_definitions(db, file);
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
-    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
-    if let Some(files) = ProjectFiles::try_get(db) {
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for &project_file in files.files(db) {
-            if *project_file.kind(db) != DocumentKind::Package {
-                continue;
-            }
-            for (name, _) in type_declaration_sites(db, project_file) {
-                *counts.entry(name.as_str()).or_default() += 1;
-            }
-        }
-        ambiguous.extend(
-            counts
-                .into_iter()
-                .filter(|(_, count)| *count >= 2)
-                .map(|(name, _)| name.to_owned()),
-        );
-    }
-    let stub_nominals: BTreeSet<String> = stubs(db)
-        .map(|library| library.nominals.iter().cloned().collect())
-        .unwrap_or_default();
+    let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
+    let no_nominals = FxHashSet::default();
+    let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
 
     for annotation in file_annotation_references(db, file) {
         for (message, range) in &annotation.typing_errors {
@@ -689,7 +659,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
         for (element, range) in &annotation.vector_elements {
-            if vector_element_atomic(db, *element, &definitions, &stub_nominals) {
+            if vector_element_atomic(db, *element, &definitions, stub_nominals) {
                 continue;
             }
             let mut renderer = TypeRenderer::default();
@@ -758,7 +728,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             }
         }
         if let Some((name, range)) = &annotation.new_nominal
-            && !ambiguous.contains(name.text(db))
+            && !ambiguous.is_some_and(|ambiguous| ambiguous.contains_key(name.text(db)))
             && definitions
                 .get(name.text(db))
                 .is_some_and(|definition| definition.alias)
@@ -800,14 +770,19 @@ fn file_annotation_references<'db>(
     file: SourceFile,
 ) -> Vec<AnnotationReferences<'db>> {
     let root = parse(db, file).syntax_node();
-    let mut annotations: Vec<Annotation<'db>> =
-        matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION)
-            .iter()
-            .map(|node| lower_annotation(db, node))
-            .collect();
-    let sites = matching_nodes(&root, |node, _| is_green_inline_site(node));
-    if !sites.is_empty() && inline_annotations_enabled(db) {
-        annotations.extend(sites.iter().map(|site| lower_inline_annotation(db, site)));
+    let sites = file_syntax_sites(db, file);
+    let mut annotations: Vec<Annotation<'db>> = sites
+        .nodes(&root, SiteRole::Annotation)
+        .iter()
+        .map(|node| lower_annotation(db, node))
+        .collect();
+    if sites.any(SiteRole::InlineSite) && inline_annotations_enabled(db) {
+        annotations.extend(
+            sites
+                .nodes(&root, SiteRole::InlineSite)
+                .iter()
+                .map(|site| lower_inline_annotation(db, site)),
+        );
     }
     annotations
         .into_iter()
@@ -982,15 +957,14 @@ struct SlotPair<'db> {
 
 #[salsa::tracked(returns(ref))]
 fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<AgreementCandidate<'db>> {
-    let root = parse(db, file).syntax_node();
-    if matching_nodes(&root, |node, _| is_green_inline_site(node)).is_empty()
-        || !inline_annotations_enabled(db)
-    {
+    let sites = file_syntax_sites(db, file);
+    if !sites.any(SiteRole::InlineSite) || !inline_annotations_enabled(db) {
         return Vec::new();
     }
+    let root = parse(db, file).syntax_node();
     let mut candidates = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
+    for node in sites.nodes(&root, SiteRole::Annotation) {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -1357,7 +1331,7 @@ fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
     definitions: &BTreeMap<String, NamedDefinition<'db>>,
-    stub_nominals: &BTreeSet<String>,
+    stub_nominals: &FxHashSet<String>,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
     let mut current = element;
@@ -1526,14 +1500,9 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
 
 #[salsa::tracked(returns(ref))]
 fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
-    let parsed = parse(db, file);
     let mut sites: Vec<(String, TextRange)> = Vec::new();
-    let declarations = matching_nodes(&parsed.syntax_node(), |node, _| {
-        matches!(
-            node.kind(),
-            SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION
-        )
-    });
+    let declarations =
+        file_syntax_sites(db, file).nodes(&parse(db, file).syntax_node(), SiteRole::Declaration);
     for node in declarations {
         let annotation = match node.kind() {
             SyntaxKind::ANNOTATION => lower_annotation(db, &node),
@@ -1690,8 +1659,15 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed.
-        false if declared_dependency(db, &read.package) => None,
+        // A declared dependency without stubs is real, just undescribed. A shipped package
+        // the project neither declares nor attaches is real too: `pkg::name` loads it
+        // without attaching it, so a script may use it that way alone.
+        false
+            if declared_dependency(db, &read.package)
+                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
+        {
+            None
+        }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
             let name = read.name.as_ref()?;
@@ -1704,8 +1680,8 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     }
 }
 
-/// Names written by `<<-` with no enclosing binding anywhere in the file: R
-/// creates them in the global environment, so reads of them resolve.
+/// Names the file's items create in the global environment as a side effect (see
+/// `ItemNaming::super_globals`), so reads of them resolve.
 #[salsa::tracked(returns(ref))]
 fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
@@ -2224,6 +2200,21 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *expected),
             renderer.render(db, *found)
         ),
+        TypeErrorKind::AssignmentForRecord { field, expected } => format!(
+            "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
+            renderer.render(db, *expected)
+        ),
+        TypeErrorKind::UnwrappedNominal { nominal, found } => {
+            let name = match nominal.kind(db) {
+                TyKind::Named(name, _) => name.text(db).to_owned(),
+                _ => renderer.render(db, *nominal),
+            };
+            format!(
+                "expected `{}`, found `{}`. The value has the right shape, but `{name}` is a nominal type, so only `@{name}(...)` or `#: @new {name}` creates one",
+                renderer.render(db, *nominal),
+                renderer.render(db, *found)
+            )
+        }
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
         ),
@@ -2403,13 +2394,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "a vector cannot be indexed by `{}`. Expected a numeric, logical, or character index",
             renderer.render(db, *index)
         ),
-        TypeErrorKind::UnsupportedIndexShape { index_count } => match index_count {
-            0 => "indexing with an empty index (`x[]`) is not supported yet".to_owned(),
-            1 => "indexing with a named index argument is not supported yet".to_owned(),
-            count => format!(
-                "indexing with {count} indexes is not supported yet. ry does not model matrix and data.frame subsetting"
-            ),
-        },
         TypeErrorKind::PositionDoesNotExist {
             position,
             container,

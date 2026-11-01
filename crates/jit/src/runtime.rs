@@ -161,9 +161,11 @@ unsafe fn guarded<T>(activation: *mut Activation, fallback: T, body: impl FnOnce
 }
 
 /// Runs `body` with the handle stack restored afterwards. Tier 0 releases the handles an
-/// activation pushed on every backward jump; compiled loops have no such point, so each
-/// helper that can run interpreter code releases what it pushed. Anything still needed is
-/// held by a register or the environment by then.
+/// activation pushed on every backward jump; compiled loops have no such point, so every
+/// helper that can allocate releases what it pushed, including the boxing helpers, because
+/// each interpreter constructor roots its result. Anything still needed is held by a register
+/// or the environment by then: compiled code stores a helper's result in the register window
+/// before it allocates again.
 unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     let mark = heap().handle_mark();
     let value = body();
@@ -480,7 +482,7 @@ pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, d
         guarded(activation, std::ptr::null_mut(), |activation| {
             let cell = slot_cell(activation, slot);
             let old = *cell;
-            match values::shallow_duplicate(old) {
+            match scoped(|| values::shallow_duplicate(old)) {
                 Ok(copy) => {
                     copy.increment_refcount();
                     *cell = copy;
@@ -500,7 +502,7 @@ pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, d
 
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {
-        guarded(activation, values::nil().as_ptr(), |activation| match make() {
+        guarded(activation, values::nil().as_ptr(), |activation| match scoped(make) {
             Ok(value) => value.as_ptr(),
             // Only an exhausted heap gets here. The next helper sees the parked error.
             Err(unwind) => {
@@ -521,13 +523,6 @@ pub unsafe extern "C" fn jit_box_double(activation: *mut Activation, value: f64)
 
 pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32) -> *mut Header {
     unsafe { boxed(activation, || values::scalar_logical(value)) }
-}
-
-/// Releases the handles the activation pushed, as tier 0 does on every backward jump. Compiled
-/// code calls it on each loop back edge, where every boxed value it still needs is in the register
-/// window, so without it each object a loop allocates would stay rooted until the call returns.
-pub unsafe extern "C" fn jit_release_handles(activation: *mut Activation) {
-    unsafe { heap().release_handles(machine(&*activation).mark) }
 }
 
 /// Whether a calling handler is established, so a warning would run R code.

@@ -18,7 +18,9 @@ use crate::{
     },
 };
 use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real},
+    object::{
+        NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+    },
     records::NativeKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
@@ -27,6 +29,7 @@ use std::{
     cell::Cell,
     cmp::Ordering,
     hash::{Hash, Hasher},
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -71,17 +74,24 @@ pub fn collate(left: &str, right: &str) -> Ordering {
         .then_with(|| left.cmp(right))
 }
 
-/// Whether the session collates by code point: `LC_ALL`, then `LC_COLLATE`, then `LANG` is `C` or
-/// `POSIX`.
+/// Whether the C library's `LC_COLLATE` is `C` or `POSIX`, so strings collate by code point.
+/// The C library owns the locale; this mirrors it so a comparison need not ask, and
+/// `refresh_collation` runs wherever the session changes the locale.
+static C_COLLATION: AtomicBool = AtomicBool::new(true);
+
 fn c_collation() -> bool {
-    static C_COLLATION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *C_COLLATION.get_or_init(|| {
-        let locale = ["LC_ALL", "LC_COLLATE", "LANG"]
-            .iter()
-            .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
-            .unwrap_or_else(|| "C".to_owned());
-        locale == "C" || locale == "POSIX"
-    })
+    C_COLLATION.load(AtomicOrdering::Relaxed)
+}
+
+pub fn refresh_collation() {
+    // SAFETY: querying with a null locale only reads the current setting.
+    let current = unsafe { libc::setlocale(libc::LC_COLLATE, std::ptr::null()) };
+    let c = current.is_null() || {
+        // SAFETY: a non-null result is a NUL-terminated string the C library owns.
+        let name = unsafe { std::ffi::CStr::from_ptr(current) }.to_bytes();
+        name == b"C" || name == b"POSIX"
+    };
+    C_COLLATION.store(c, AtomicOrdering::Relaxed);
 }
 
 /// The root collation's primary weight of a character, as a (group, value) pair.
@@ -638,9 +648,15 @@ unsafe fn do_rowsum_matrix(call: &Call<'_>) -> R<Sexp> {
         let output = column * groups.count..(column + 1) * groups.count;
         group_sums(call, x, input, result, output, &groups)?;
     }
-    values::set_attr(result, symbols().dim, values::integer_vector(&[groups.count as i32, columns as i32])?)?;
+    values::set_attr(
+        result,
+        symbols().dim,
+        values::integer_vector(&[groups.count as i32, columns as i32])?,
+    )?;
     let column_names = match values::get_attr(x, symbols().dimnames) {
-        dimnames if dimnames.kind() == SexpType::List && length(dimnames) == 2 => dimnames.element(1),
+        dimnames if dimnames.kind() == SexpType::List && length(dimnames) == 2 => {
+            dimnames.element(1)
+        }
         _ => nil(),
     };
     let dimnames = alloc(SexpType::List, 2)?;
@@ -658,18 +674,41 @@ unsafe fn do_rowsum_data_frame(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::List, length(frame))?;
     for index in 0..length(frame) {
         let column = values::materialize(frame.element(index))?;
-        if !matches!(column.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real) || values::inherits(column, "factor") {
+        if !matches!(
+            column.kind(),
+            SexpType::Logical | SexpType::Integer | SexpType::Real
+        ) || values::inherits(column, "factor")
+        {
             return Err(call.error("non-numeric data frame in rowsum"));
         }
-        let kind = if column.kind() == SexpType::Real { SexpType::Real } else { SexpType::Integer };
+        let kind = if column.kind() == SexpType::Real {
+            SexpType::Real
+        } else {
+            SexpType::Integer
+        };
         let column = coerce_vector(column, kind)?;
         let sums = alloc(kind, groups.count)?;
         values::set_elt(result, index, sums);
-        group_sums(call, column, 0..length(column), sums, 0..groups.count, &groups)?;
+        group_sums(
+            call,
+            column,
+            0..length(column),
+            sums,
+            0..groups.count,
+            &groups,
+        )?;
     }
-    values::set_attr(result, symbols().names, values::get_attr(frame, symbols().names))?;
+    values::set_attr(
+        result,
+        symbols().names,
+        values::get_attr(frame, symbols().names),
+    )?;
     values::set_attr(result, symbols().row_names, call.arg(4))?;
-    values::set_attr(result, symbols().class, values::scalar_string("data.frame")?)?;
+    values::set_attr(
+        result,
+        symbols().class,
+        values::scalar_string("data.frame")?,
+    )?;
     Ok(result)
 }
 
@@ -698,9 +737,17 @@ unsafe fn group_positions(call: &Call<'_>) -> R<Groups> {
     }
     let positions = element_keys(group)
         .into_iter()
-        .map(|key| table.get(&key).copied().ok_or_else(|| call.error("'ugroup' does not contain every group")))
+        .map(|key| {
+            table
+                .get(&key)
+                .copied()
+                .ok_or_else(|| call.error("'ugroup' does not contain every group"))
+        })
         .collect::<R<Vec<usize>>>()?;
-    Ok(Groups { positions, count: length(unique) })
+    Ok(Groups {
+        positions,
+        count: length(unique),
+    })
 }
 
 /// Adds `x[input]` into `result[output]` by group. An integer sum that overflows is `NA`, without
@@ -861,6 +908,9 @@ enum Column<'a> {
     Real(&'a [f64]),
     Complex(&'a [Rcomplex]),
     String(Vec<Option<Cow<'a, str>>>),
+    /// Strings the radix sort orders: GNU R's radix sort compares bytes, as in the C locale,
+    /// whatever the session's collation.
+    Bytes(Vec<Option<Cow<'a, str>>>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
     /// `decreasing` and `na.last` say.
@@ -896,7 +946,10 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                 .collect();
             Some(Column::Grouped(codes))
         }
-        _ => column(vector),
+        _ => match column(vector) {
+            Some(Column::String(items)) => Some(Column::Bytes(items)),
+            other => other,
+        },
     }
 }
 
@@ -906,7 +959,7 @@ impl Column<'_> {
             Column::Integer(items) => items[index] == NA_INTEGER,
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
-            Column::String(items) => items[index].is_none(),
+            Column::String(items) | Column::Bytes(items) => items[index].is_none(),
             Column::Grouped(_) => false,
         }
     }
@@ -930,6 +983,7 @@ impl Column<'_> {
                 (Some(left), Some(right)) => collate(left, right),
                 _ => Ordering::Equal,
             },
+            Column::Bytes(items) => items[left].cmp(&items[right]),
         }
     }
 
@@ -1522,23 +1576,29 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         }
         SexpType::Char => chars_equal(x, y),
         SexpType::Object => true,
-        SexpType::Record if matches!(records::native_kind(x), NativeKind::Dict | NativeKind::Set) => {
-            x.record_layout() == y.record_layout() && standard_library::collections_identical(x, y, flags)
+        SexpType::Record
+            if matches!(records::native_kind(x), NativeKind::Dict | NativeKind::Set) =>
+        {
+            x.record_layout() == y.record_layout()
+                && standard_library::collections_identical(x, y, flags)
         }
         SexpType::Record => {
             x.record_layout() == y.record_layout()
-                && (0..x.record_slot_count()).all(|index| match (x.record_slot(index), y.record_slot(index)) {
-                    (Slot::Handle(left), Slot::Handle(right)) => identical(left, right, flags),
-                    (Slot::Real(left), Slot::Real(right)) => reals_identical(left, right, flags),
-                    (Slot::Integer(left), Slot::Integer(right)) | (Slot::Logical(left), Slot::Logical(right)) => {
-                        left == right
+                && (0..x.record_slot_count()).all(|index| {
+                    match (x.record_slot(index), y.record_slot(index)) {
+                        (Slot::Handle(left), Slot::Handle(right)) => identical(left, right, flags),
+                        (Slot::Real(left), Slot::Real(right)) => {
+                            reals_identical(left, right, flags)
+                        }
+                        (Slot::Integer(left), Slot::Integer(right))
+                        | (Slot::Logical(left), Slot::Logical(right)) => left == right,
+                        // A scalar is boxed only when it could not be stored raw (an ALTREP value, or
+                        // a double whose bits collide with the raw encoding), so compare contents.
+                        (Slot::Handle(handle), raw) | (raw, Slot::Handle(handle)) => {
+                            raw_slot_identical(raw, handle, flags)
+                        }
+                        _ => false,
                     }
-                    // A scalar is boxed only when it could not be stored raw (an ALTREP value, or
-                    // a double whose bits collide with the raw encoding), so compare contents.
-                    (Slot::Handle(handle), raw) | (raw, Slot::Handle(handle)) => {
-                        raw_slot_identical(raw, handle, flags)
-                    }
-                    _ => false,
                 })
         }
         _ => false,
@@ -1553,7 +1613,9 @@ unsafe fn raw_slot_identical(raw: Slot, handle: Sexp, flags: &IdenticalFlags) ->
         return false;
     };
     match (raw, handle.kind()) {
-        (Slot::Real(value), SexpType::Real) => reals_identical(value, values::reals(handle)[0], flags),
+        (Slot::Real(value), SexpType::Real) => {
+            reals_identical(value, values::reals(handle)[0], flags)
+        }
         (Slot::Integer(value), SexpType::Integer) | (Slot::Logical(value), SexpType::Logical) => {
             values::ints(handle)[0] == value
         }
