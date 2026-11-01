@@ -1004,3 +1004,29 @@ label <- function() expression("a")
 expression: <T: numeric> fn(x: T) -> double
 label: Unknown
 63..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- an_argument_named_dots_with_value_dots_forwards_the_dots
+skip_na <- function(x, FUN = NULL, ...) FUN(na.omit(x), ... = ...)
+total <- function(v) skip_na(v, FUN = function(x) cumsum(x))
+#++++
+skip_na: <T, U> fn(x: T, [FUN]: fn(Any, ...: Any) -> U, ...: Any) -> U
+total: <T, U> fn(v: T) -> U
+
+#---- a_callback_called_with_a_named_argument_still_needs_that_parameter
+apply_named <- function(x, FUN) FUN(x, scale = 2)
+scaled <- function(v) apply_named(v, FUN = function(x) x)
+#++++
+apply_named: <T, U> fn(x: T, FUN: fn(T, scale: double) -> U) -> U
+scaled: Unknown
+93..106 error[type-mismatch] expected `fn(T, scale: double) -> U`, found `fn(x: V) -> V`
+
+#---- a_number_is_a_valid_replacement_string
+progress <- function(total) sub(":total", round(total), ":total done")
+#++++
+progress: <T> fn(total: T) -> character
+
+#---- a_list_is_still_not_a_replacement_string
+labelled <- sub(":x", list(1), ":x done")
+#++++
+labelled: Unknown
+12..41 error[type-mismatch] no overload of `sub` matches these arguments. I tried all 2 declared signatures; the first candidate fails with: expected `character`, found `list{double}`

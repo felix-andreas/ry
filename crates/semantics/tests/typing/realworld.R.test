@@ -1120,7 +1120,7 @@ report <- function() {
   length(stats$cleaned) + length(stats$lengths)
 }
 #++++
-normalize_words: fn(words: Unknown) -> list{cleaned: Unknown, lengths: list[named: integer]}
+normalize_words: fn(words: Unknown) -> list{cleaned: list[character], lengths: Unknown}
 report: fn() -> integer
 
 #==== cran_idioms

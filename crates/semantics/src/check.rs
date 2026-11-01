@@ -9185,7 +9185,9 @@ impl<'db> Checker<'db, '_> {
         let whole_double = argument
             .value
             .is_some_and(|value| self.is_whole_double(value));
-        let forwards_dots = argument.name.is_none()
+        // R expands an argument whose value is `...` whatever its tag, so PerformanceAnalytics'
+        // `FUN(nx, ... = ...)` forwards the dots like `FUN(nx, ...)`.
+        let forwards_dots = argument.name.is_none_or(|name| name == "...")
             && argument.value.is_some_and(|value| {
                 matches!(
                     &self.module.expression(value).kind,
@@ -9193,7 +9195,10 @@ impl<'db> Checker<'db, '_> {
                 )
             });
         CallArgument {
-            name: argument.name.map(|name| name.to_string()),
+            name: argument
+                .name
+                .filter(|_| !forwards_dots)
+                .map(|name| name.to_string()),
             name_range: argument.name_range,
             ty,
             range: argument_range,

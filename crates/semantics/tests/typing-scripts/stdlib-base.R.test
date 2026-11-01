@@ -845,8 +845,8 @@ words <- c("alpha", "beta")
 lapply(words, gsub, pattern = 1L, replacement = "o")
 #++++
 words: character[]
-Unknown
-42..46 error[type-mismatch] expected `fn(character) -> T`, found `fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character`
+list[Unknown]
+58..60 error[type-mismatch] expected `character`, found `integer`
 
 #==== missing_guarded_formals
 #---- missing_tested_formal_is_optional_at_call_sites

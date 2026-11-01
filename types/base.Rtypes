@@ -272,11 +272,15 @@ formatC : @pure fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [fl
 prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 
 # Regex family: `pattern`/`replacement` are genuinely scalar strings in R (only the first element is
-# used); the subject `x` is Any-param. Elementwise results are scalar-claim. `grep` returns indices or
+# used); the subject `x` is Any-param. R coerces `replacement` with `as.character`, so a number
+# such as `round(total)` is a valid replacement. That is a second overload rather than a union, so
+# an open variable passed as `replacement` still binds to `character`. Elementwise results are scalar-claim. `grep` returns indices or
 # values depending on `value =` (value-dependent), and the match-data functions return position
 # structures consumed by `regmatches`, so those stay `Any`.
 gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+gsub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+sub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grep : @pure Any
 regexpr : @pure Any
@@ -734,7 +738,7 @@ diff : @pure fn(x: Any, [lag]: Any, [differences]: Any, ...: Any) -> Any
 # Interactive debugging. All side-effecting; `debug`/`trace` take the function object itself
 # (Any-param: any callable value is legal), and the returns follow R (`NULL` invisibly, except
 # `isdebugged`'s query and `trace`'s returned name).
-browser : fn([text]: character, [condition]: Any, [expr]: Any, [skipCalls]: integer) -> NULL
+browser : fn([text]: character, [condition]: Any, [expr]: Any, [skipCalls]: double | integer) -> NULL
 debug : fn(fun: Any, [text]: character, [condition]: Any, [signature]: Any) -> NULL
 debugonce : fn(fun: Any, [text]: character, [condition]: Any, [signature]: Any) -> NULL
 undebug : fn(fun: Any, [signature]: Any) -> NULL
