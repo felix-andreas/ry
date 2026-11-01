@@ -14,7 +14,7 @@ pub mod types;
 
 use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
 use syntax::ast::{self, BinaryExpr};
@@ -488,6 +488,29 @@ pub fn inline_annotations_enabled(db: &dyn Db) -> bool {
 pub struct ProjectFiles {
     #[returns(ref)]
     pub files: Vec<SourceFile>,
+}
+
+/// The layouts of the project's delimited data files (`.csv`, `.tsv`), keyed by their path
+/// relative to the project root with `/` separators. Hosts sniff each file's head with
+/// [`sniff::sniff_head`], so `fread("data/prices.csv")` types with the columns the file has.
+#[salsa::input(singleton, debug)]
+pub struct DataFiles {
+    #[returns(ref)]
+    pub layouts: BTreeMap<String, sniff::Layout>,
+}
+
+#[salsa::interned(debug)]
+pub struct DataPath<'db> {
+    #[returns(ref)]
+    pub text: String,
+}
+
+/// Per path, so editing one data file re-checks only the reads of that file: salsa backdates
+/// every other path's unchanged layout.
+#[salsa::tracked(returns(ref))]
+pub fn data_file_layout<'db>(db: &'db dyn Db, path: DataPath<'db>) -> Option<sniff::Layout> {
+    let files = DataFiles::try_get(db)?;
+    files.layouts(db).get(path.text(db).as_str()).cloned()
 }
 
 /// Set by a file's `# typing:` comments and `#: @strict` directives, the last winning.

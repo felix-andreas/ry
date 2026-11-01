@@ -10,9 +10,10 @@ use semantics::metadata::{
 use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
 use semantics::{
-    AnalysisSettings, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
+    AnalysisSettings, DataFiles, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
     file_typing_mode, item_check, item_hir, item_tree,
 };
+use std::collections::BTreeMap;
 use std::path::Path;
 use syntax::SyntaxKind;
 use syntax::testing::{run_fixture_suite, split_files};
@@ -159,6 +160,43 @@ fn render_with_strict(source: &str) -> String {
         render_diagnostics(&mut output, &strict_diagnostics(db, file));
         output
     })
+}
+
+/// A case is one script or several `#~~~~ path` files. A file whose path does not end in `.R`
+/// is a data file, sniffed exactly as the hosts sniff a project's `.csv` files, and each case
+/// gets a fresh database because the data-file and metadata inputs are singletons.
+fn render_with_data_files(source: &str) -> String {
+    let files = split_files(source).unwrap_or_else(|| vec![("main.R".to_owned(), source.to_owned())]);
+    let mut db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let mut layouts = BTreeMap::new();
+    let mut sources = Vec::new();
+    for (path, text) in &files {
+        if path.ends_with(".R") {
+            sources.push((path, SourceFile::new(&db, text.clone(), DocumentKind::Script)));
+        } else {
+            layouts.insert(path.clone(), sniff::sniff_head(text.as_bytes()));
+        }
+    }
+    DataFiles::new(&db, layouts);
+    ProjectFiles::new(&db, sources.iter().map(|(_, file)| *file).collect());
+    let attached = attached_union(&db, sources.iter().map(|(_, file)| *file));
+    let metadata = PackageMetadata::new(&db, Vec::new(), Default::default(), Default::default(), None);
+    metadata.set_attached(&mut db).to(attached);
+    let mut output = String::new();
+    for (path, file) in &sources {
+        if sources.len() > 1 {
+            output.push_str(&format!("== {path}\n"));
+        }
+        output.push_str(&render_file(&db, *file));
+    }
+    output
+}
+
+#[test]
+fn typing_table_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/typing-tables");
+    run_fixture_suite(&suite, &render_with_data_files);
 }
 
 #[test]

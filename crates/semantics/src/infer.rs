@@ -823,9 +823,11 @@ impl<'db> InferenceTable<'db> {
                 })
             }
             // A frame's run-time class is `c("frame", "data.frame")`, and it is a list of
-            // its columns.
+            // its columns. ry's table runs data.table's query language and functions, so a frame stands
+            // in for a `data.table` too.
             (TyKind::Frame(_), TyKind::Named(name, arguments))
-                if arguments.is_empty() && name.text(db) == "data.frame" =>
+                if arguments.is_empty()
+                    && matches!(name.text(db), "data.frame" | "data.table") =>
             {
                 true
             }

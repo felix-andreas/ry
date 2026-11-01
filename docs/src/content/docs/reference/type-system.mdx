@@ -2615,6 +2615,46 @@ type-mismatch
    |             ^^^^^^
 ```
 
+#### Reading files and data.table's functions
+
+ry's table replaces data.table, so `fread`, `rbindlist`, `melt` and `dcast` return frames, and a frame
+satisfies a `data.table` parameter. The checker sharpens their columns from the arguments it can see.
+
+`fread("data/prices.csv")` types with the columns the file has. ry sniffs the head of every `.csv` and
+`.tsv` file in the project (gitignored ones included) with the same rules as the runtime's reader,
+which follow `fread`: the header, the separator, and each column's type out of `logical`, `integer`,
+`double` and `character`. The path is relative to the project root. `fread(text = "...")`, and an input
+holding a line break, sniff the literal itself.
+
+```r
+prices <- fread("data/prices.csv")   # frame{id: integer[], ticker: character[], price: double[]}
+cheap <- prices[prce < 10]           # warning: the frame `prices` has no column `prce`, ... Did you mean `price`?
+```
+
+`select`, `col.names` and `stringsAsFactors = TRUE` are applied to the sniffed columns. A computed
+path, a file the project does not have, and any other argument that changes the columns (such as
+`colClasses` or `skip`) give a frame with unknown columns.
+
+The other functions follow data.table's rules:
+
+| Call | Type |
+| --- | --- |
+| `setnames(f, old, new)`, `setnames(f, new)` | renames the columns of `f` from here on; `old` must name columns of `f` unless `skip_absent = TRUE`, and `new` alone must name every column |
+| `setcolorder(f, c("b", "a"))` | moves the named columns of `f` to the front from here on |
+| `setkey(f, a, b)`, `setorder(f, a, -b)`, `setkeyv(f, cols)`, `setorderv(f, cols)` | `f` unchanged; each named column must exist |
+| `rbindlist(list(f, g))` | binds by position; each column takes the widest type of its pieces (`logical` < `integer` < `double` < `character`, and a factor with strings stays a factor) |
+| `rbindlist(..., use.names = TRUE)`, `rbindlist(..., fill = TRUE)` | binds by name; `fill` adds the columns only some pieces have |
+| `rbindlist(..., idcol = "source")` | adds a first column of each piece's name (`character[]`), or its position (`integer[]`) when the list is unnamed |
+| `melt(f, id.vars, measure.vars)` | the id columns, `variable: factor` (`character[]` with `variable.factor = FALSE`), and `value` of the measures' widest type; either list defaults to every other column |
+| `dcast(...)` | `frame` |
+| `fifelse(test, yes, no, na)` | a vector of the type `yes`, `no` and `na` share; integers and doubles widen to doubles, a bare `NA` fits any type, and any other mix is a type error |
+| `shift(x)`, `nafill(x)`, `fcoalesce(x, ...)` | the type of `x` |
+| `rleid(...)`, `x %chin% table`, `between(x, lower, upper)`, `uniqueN(x)` | `integer[]`, `logical[]`, `logical[]`, `integer` |
+| `tstrsplit(x, split)` | `list[character[]]` |
+
+`setnames` and `setcolorder` change their subject by reference, so ry treats them like `:=`: the name
+holds the new columns after the call.
+
 ### Conditional stub namespaces: data.table, dplyr, ggplot2 and testthat
 
 Four packages have shipped stubs that do not join name resolution by default:

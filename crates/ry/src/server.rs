@@ -1,7 +1,10 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
-use crate::cli::{project_order, project_stub_paths, shares_a_namespace};
+use crate::cli::{
+    data_file_key, project_order, project_stub_paths, scan_data_files, shares_a_namespace,
+    sniff_data_file,
+};
 use crate::config::{
     CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
     INLINE_ANNOTATIONS_OFF, suggested_table,
@@ -31,7 +34,9 @@ use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
     shipped_stub_sources, stub_source_problems,
 };
-use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{
+    AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::{ControlFlow, Range};
@@ -394,6 +399,7 @@ impl Worker {
             Default::default(),
             metadata.package,
         );
+        DataFiles::new(&worker.db, scan_data_files(&worker.workspace_root));
         worker.load_workspace_sources();
 
         let result = initialize_result(encoding, worker.experimental_features);
@@ -983,10 +989,24 @@ impl Worker {
         let mut config_changed = false;
         let mut metadata_changed = false;
         let mut reloaded_documents: Vec<PathBuf> = Vec::new();
+        let mut data_changed = false;
         for change in &params.changes {
             let Ok(path) = change.uri.to_file_path() else {
                 continue;
             };
+            if let Some(key) = data_file_key(&self.workspace_root, &path) {
+                let data_files = DataFiles::get(&self.db);
+                let mut layouts = data_files.layouts(&self.db).clone();
+                let changed = match sniff_data_file(&path) {
+                    Some(layout) => layouts.insert(key, layout.clone()) != Some(layout),
+                    None => layouts.remove(&key).is_some(),
+                };
+                if changed {
+                    data_files.set_layouts(&mut self.db).to(layouts);
+                    data_changed = true;
+                }
+                continue;
+            }
             // Matched by file name, not full path: tolerates symlinked roots
             // and case-normalizing clients.
             if path
@@ -1056,7 +1076,7 @@ impl Worker {
         if metadata_changed {
             self.refresh_metadata();
         }
-        if config_changed {
+        if config_changed || data_changed {
             self.refresh_all_diagnostics();
         }
     }
@@ -1095,6 +1115,13 @@ impl Worker {
                 glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
                     base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
                     pattern: "{NAMESPACE,DESCRIPTION}".to_owned(),
+                }),
+                kind: None,
+            },
+            lsp_types::FileSystemWatcher {
+                glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
+                    base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
+                    pattern: "**/*.{csv,tsv,CSV,TSV}".to_owned(),
                 }),
                 kind: None,
             },
