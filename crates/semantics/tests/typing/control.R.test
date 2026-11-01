@@ -13,9 +13,9 @@ fmt <- function(x) if (is.character(x)) x else "other"
 a <- fmt(1)
 b <- fmt("text")
 #++++
-fmt: <T> fn(x: T) -> T | character
-a: double | character
-b: character
+fmt: <T> fn(x: T) -> Unknown
+a: Unknown
+b: Unknown
 
 #---- two_open_branches_still_tie_to_each_other
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value

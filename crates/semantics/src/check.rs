@@ -2495,6 +2495,9 @@ impl<'db> Checker<'db, '_> {
         let guard = self.recognize_guard(condition);
 
         let mark = self.environment.mark();
+        let pre_guard = guard
+            .as_ref()
+            .and_then(|guard| self.environment.get(guard.slot));
         if let Some(guard) = &guard {
             if let Some(true_edge) = guard.true_edge {
                 self.environment.set(guard.slot, EnvEntry::Mono(true_edge));
@@ -2507,7 +2510,17 @@ impl<'db> Checker<'db, '_> {
         }
         let then_ty = self.infer(then_branch);
         let then_diverges = self.diverges(then_branch);
-        let then_writes = self.environment.writes_since(mark);
+        let mut then_writes = self.environment.writes_since(mark);
+        // A refinement the branch never overwrote is the value it narrowed, not a new one.
+        if let Some(guard) = &guard
+            && let Some(true_edge) = guard.true_edge
+        {
+            for (slot, entry) in &mut then_writes {
+                if *slot == guard.slot && *entry == Some(EnvEntry::Mono(true_edge)) {
+                    *entry = pre_guard;
+                }
+            }
+        }
         self.environment.rollback(mark);
 
         // The false edge applies to the else branch and, when the then branch diverges,
@@ -3300,6 +3313,33 @@ impl<'db> Checker<'db, '_> {
                 })
             }
             ExpressionKind::Paren(inner) => self.recognize_guard(*inner),
+            // Both operands of a true `&&` held, and both of a false `||` failed, so that edge
+            // keeps a guard's refinement; the other edge says nothing.
+            ExpressionKind::Binary {
+                operator: operator @ (BinaryOperator::And2 | BinaryOperator::Or2),
+                lhs,
+                rhs,
+                ..
+            } => {
+                let conjunction = *operator == BinaryOperator::And2;
+                let (lhs, rhs) = (*lhs, *rhs);
+                let guard = self
+                    .recognize_guard(lhs)
+                    .filter(|guard| {
+                        if conjunction {
+                            guard.true_edge.is_some()
+                        } else {
+                            guard.false_edge.is_some()
+                        }
+                    })
+                    .or_else(|| self.recognize_guard(rhs))?;
+                Some(GuardRefinement {
+                    missing_on_true: false,
+                    slot: guard.slot,
+                    true_edge: if conjunction { guard.true_edge } else { None },
+                    false_edge: if conjunction { None } else { guard.false_edge },
+                })
+            }
             ExpressionKind::Call { callee, arguments } => {
                 let ExpressionKind::NameRef(name) = &self.module.expression(*callee).kind else {
                     return None;
@@ -3433,6 +3473,28 @@ impl<'db> Checker<'db, '_> {
             GuardKind::Family(family) => {
                 // Inventing a concrete shape for `Any`/`Unknown` would false-positive against
                 // scalar-claim stub signatures.
+                // An untyped value that passes the test is used as that family on the true
+                // edge only (`is.numeric(x) && x > 0`), so it reads as unchecked there rather
+                // than constraining the parameter every other path still holds.
+                let unconstrained = match resolved.kind(self.db) {
+                    TyKind::Var(_) => {
+                        self.table.open_constraint(self.db, resolved)
+                            == Some(Constraint::Unconstrained)
+                    }
+                    TyKind::Rigid(name) => matches!(
+                        self.table.rigid_constraints.get(name),
+                        None | Some(Constraint::Unconstrained)
+                    ),
+                    _ => false,
+                };
+                if unconstrained {
+                    return Some(GuardRefinement {
+                        missing_on_true: false,
+                        slot,
+                        true_edge: Some(unknown(self.db)),
+                        false_edge: None,
+                    });
+                }
                 if matches!(
                     resolved.kind(self.db),
                     TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_)
@@ -3684,9 +3746,24 @@ impl<'db> Checker<'db, '_> {
                     })
             }
             Sequence => self.infer_colon(lhs, rhs),
+            // The right operand runs only on the left's true edge for `&&` (false for `||`), so
+            // `is.numeric(x) && x > 0` narrows like the `if` it abbreviates.
             And2 | Or2 => {
                 self.expect_scalar_logical(lhs);
+                let edge = self.recognize_guard(lhs).and_then(|guard| {
+                    let edge = if operator == And2 {
+                        guard.true_edge
+                    } else {
+                        guard.false_edge
+                    };
+                    edge.map(|edge| (guard.slot, edge))
+                });
+                let mark = self.environment.mark();
+                if let Some((slot, edge)) = edge {
+                    self.environment.set(slot, EnvEntry::Mono(edge));
+                }
                 self.expect_scalar_logical(rhs);
+                self.environment.rollback(mark);
                 scalar(self.db, Atomic::Logical)
             }
             // Opaque constructs: operands still infer for the IDE, but their diagnostics are

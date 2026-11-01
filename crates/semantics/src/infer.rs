@@ -651,6 +651,41 @@ impl<'db> InferenceTable<'db> {
             return true;
         }
         match (actual.kind(db), expected.kind(db)) {
+            // `character | list{..}` into `T | NULL`: the members the target does not list
+            // bind its one variable together, where member by member the first would pin it.
+            (TyKind::Union(members), TyKind::Union(expected_members))
+                if !members
+                    .iter()
+                    .any(|member| matches!(member.kind(db), TyKind::OtherTags))
+                    && expected_members
+                        .iter()
+                        .filter(|&&member| {
+                            matches!(self.shallow_resolve(db, member).kind(db), TyKind::Var(_))
+                        })
+                        .count()
+                        == 1 =>
+            {
+                let mut variable = None;
+                let mut concrete = Vec::new();
+                for &member in expected_members {
+                    let member = self.shallow_resolve(db, member);
+                    if matches!(member.kind(db), TyKind::Var(_)) {
+                        variable = Some(member);
+                    } else {
+                        concrete.push(member);
+                    }
+                }
+                let rest: Vec<Ty<'db>> = members
+                    .iter()
+                    .copied()
+                    .filter(|member| !concrete.contains(member))
+                    .collect();
+                match variable {
+                    Some(_) if rest.is_empty() => true,
+                    Some(variable) => self.unify(db, variable, union_of(db, rest)).is_ok(),
+                    None => false,
+                }
+            }
             // First, so union-vs-union means every actual member fits some expected member.
             // An open source fits only an open target that it can vouch for: a tag hidden in
             // the source's `..` could carry any payload under a name the target lists.
