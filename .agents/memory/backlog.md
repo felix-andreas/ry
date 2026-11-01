@@ -1623,7 +1623,8 @@ check.
 
 `function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every
 other overload set. Wrapping a standard-library numeric function in one of your own throws the types
-away.
+away. `sum` no longer has an `Any` fallback (it rejects strings), so a `sum` wrapper gives `Unknown`
+rather than `Any`.
 
 The cause is the fact-beats-guess rule. The `Any` fallback fits while binding nothing, so it beats
 every candidate that would narrow `x`.
@@ -1852,18 +1853,29 @@ The end-to-end guard rests on the corpus suites.
   and give plain subjects a fast path again if they regressed.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
-- **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
-  variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
-- **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
-  name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
-  instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
-- **Engine:** under `.EACHI`, `sum(.N)` reads the raw group row count rather than the matched
-  count (`single_value` does not rewrite the argument), and `parse_strings` uses Polars' string
-  cast, which is unverified against R for padded (`" 3"`) and hex (`"0x1A"`) strings.
-- **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
-  so `lapply(.SD, sum)` over a character column is silent.
-- **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
-  checked. The engine refuses a factor joined to a number and a number written into a factor.
+- **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
+  `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
+- **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
+  flagged although R allows it.
+- **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
+  `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
+  under ry's runtime an attached data.table still runs its own versions, which return a
+  `data.table` and reject a frame. The runtime needs these names routed to the engine
+  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
+  installs, before the checker's types are true at run time. The `[` bridge
+  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
+  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
+  and decline to data.table otherwise.
+- **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
+  `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
+  unknown columns (the spread columns are data values); a data path resolves against the project
+  root only, because `SourceFile` carries no path.
+- **`dcast` with an aggregate runs at data.table's speed, not faster** (`crates/table/benches/ops_benchmark.rs`
+  against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
+  through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
+  `ops::key_digits`, as `unique` does, would skip the general grouping.
+- **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
+  on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
   type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type

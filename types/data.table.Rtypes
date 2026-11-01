@@ -14,9 +14,12 @@ data.table : fn(...: Any, [keep.rownames]: logical | character, [check.names]: l
 as.data.table : fn(x: Any, [keep.rownames]: logical | character, ...: Any) -> data.table
 is.data.table : fn(x: Any) -> logical
 copy : <T> fn(x: T) -> T
-fread : fn([input]: character, [file]: character, [text]: character, [cmd]: character, ...: Any) -> data.table
+# ry's table replaces data.table, so reading, stacking and reshaping return a frame. The checker
+# sharpens the columns from the arguments: the file's sniffed layout, the stacked pieces, or the
+# melted columns.
+fread : fn([input]: character, [file]: character, [text]: character, [cmd]: character, ...: Any) -> frame
 fwrite : fn(x: Any, [file]: character, ...: Any) -> NULL
-rbindlist : fn(l: Any, [use.names]: logical | character, [fill]: logical, [idcol]: character | logical) -> data.table
+rbindlist : fn(l: Any, [use.names]: logical | character, [fill]: logical, [idcol]: character | logical) -> frame
 
 # The set*() family mutates by reference and returns its input invisibly.
 setDT : fn(x: Any, [keep.rownames]: logical | character, [key]: character[], [check.names]: logical) -> data.table
@@ -38,23 +41,31 @@ getDTthreads : fn([verbose]: logical) -> integer
 
 # Reshaping returns tables; the formula/value arguments stay Any (their
 # column vocabulary is out of static reach).
-melt : fn(data: Any, ...: Any) -> data.table
-dcast : fn(data: Any, [formula]: Any, ...: Any) -> data.table
+melt : fn(data: Any, ...: Any) -> frame
+dcast : fn(data: Any, [formula]: Any, ...: Any) -> frame
 merge : fn(x: Any, y: Any, ...: Any) -> data.table
 transpose : fn(l: Any, [fill]: Any, [ignore.empty]: logical, [keep.names]: character, [make.names]: Any) -> Any
 
 # Grouped/vector helpers usable outside brackets too.
 uniqueN : fn(x: Any, [by]: character[], [na.rm]: logical) -> integer
-fifelse : <T> fn(test: logical | logical[], yes: T, no: T, [na]: T) -> T
-fifelse : fn(test: Any, yes: Any, no: Any, [na]: Any) -> Any
+# The checker types the result from `yes`, `no` and `na`: one type, or integers and doubles
+# widened to doubles, as data.table allows.
+fifelse : fn(test: logical | logical[], yes: Any, no: Any, [na]: Any) -> Any
 fcase : fn(...: Any, [default]: Any) -> Any
+fcoalesce : <T> fn(x: T, ...: T) -> T
 fcoalesce : fn(...: Any) -> Any
+nafill : <T: numeric> fn(x: T, [type]: character, [fill]: T | double | logical, [nan]: Any) -> T
 nafill : fn(x: Any, [type]: character, [fill]: Any, [nan]: Any) -> Any
 setnafill : fn(x: Any, [type]: character, [fill]: Any, [nan]: Any, [cols]: Any) -> Any
+shift : <T> fn(x: T[], [n]: integer | double, [fill]: T | logical, [type]: character, [give.names]: logical) -> T[]
 shift : fn(x: Any, [n]: integer | integer[], [fill]: Any, [type]: character, [give.names]: logical) -> Any
 frank : fn(x: Any, ...: Any, [na.last]: logical | character, [ties.method]: character) -> Any
 frankv : fn(x: Any, [cols]: Any, [order]: integer, [na.last]: logical | character, [ties.method]: character) -> Any
+rleid : fn(...: Any, [prefix]: character) -> integer[]
+rleidv : fn(x: Any, [cols]: Any, [prefix]: character) -> integer[]
+%chin% : fn(x: Any, table: Any) -> logical[]
 chmatch : fn(x: character | character[], table: character | character[], [nomatch]: integer) -> integer[]
+tstrsplit : fn(x: character | character[], [split]: character, [fixed]: logical, [perl]: logical, [fill]: character, [keep]: integer | integer[] | double | double[], [names]: logical | character[]) -> list[character[]]
 tstrsplit : fn(x: Any, ...: Any, [fill]: Any, [type.convert]: Any, [keep]: Any, [names]: Any) -> list[Any]
 CJ : fn(...: Any, [sorted]: logical, [unique]: logical) -> data.table
 SJ : fn(...: Any) -> data.table
