@@ -9,6 +9,11 @@ labels <- DataFrame(count = 1L, label = "a")
 #++++
 labels: DataFrame{count: integer[], label: character[]}
 
+#---- an_array_column_types_as_its_item_vector
+prices <- DataFrame(id = [1L, 2L], price = [12.5, 9.99])
+#++++
+prices: DataFrame{id: integer[], price: double[]}
+
 #---- an_unnamed_variable_keeps_its_name
 id <- 1:3
 items <- DataFrame(id, price = c(1, 2, 3))
@@ -330,7 +335,7 @@ doubled <- sales[, lapply(.SD, function(v) v * 2)]
 #++++
 sales: DataFrame{team: character[], units: integer[], price: double[]}
 doubled: Unknown
-110..127 error[type-mismatch] this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
+122..123 error[type-mismatch] `v` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character[]` for it, for the column `team` of `.SD`
 
 #---- a_finding_every_column_causes_is_reported_once
 sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))

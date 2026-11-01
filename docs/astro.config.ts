@@ -98,6 +98,7 @@ export default defineConfig({
 					label: "4. Go fully typed",
 					items: [
 						{ slug: 'type-checking/records-and-tags' },
+						{ slug: 'type-checking/arrays' },
 						{ slug: 'guides/dataframes' },
 						{ slug: 'type-checking/dataframes' },
 						{ slug: 'reference/standard-library' },
@@ -122,8 +123,10 @@ export default defineConfig({
 						{ slug: 'contributing/architecture' },
 						{ slug: 'contributing/structure' },
 						{ slug: 'contributing/testing' },
+						{ slug: 'contributing/robustness' },
 						{ slug: 'contributing/corpus-and-oracle' },
 						{ slug: 'contributing/authoring-stubs' },
+						{ slug: 'contributing/releasing' },
 						// Drafts under contributing/design/ are proposals, not contracts; their index is the way in.
 						{ slug: 'contributing/design' },
 					],

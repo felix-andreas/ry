@@ -12,7 +12,7 @@ use {
         coerce::{coerce_vector, parse_real},
         conditions::warning,
         format::{format_complex_alone, format_real_alone_scipen},
-        unwind::{R, error},
+        unwind::{R, Unwind, error},
         values::{
             self, alloc, length, na_string, nil, scalar_bool, scalar_integer, scalar_string,
             string_vector, symbols,
@@ -20,6 +20,15 @@ use {
         write_console,
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+    std::{
+        cell::RefCell,
+        fs::File,
+        io::{BufWriter, Write},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[internal("scan", 19, do_scan)];
@@ -1528,7 +1537,6 @@ unsafe fn do_char_class(call: &NativeCall<'_>) -> R<Sexp> {
 // The console, the network and profiling.
 
 unsafe fn do_flush_console(_: &NativeCall<'_>) -> R<Sexp> {
-    use std::io::Write;
     std::io::stdout()
         .flush()
         .map_err(|failure| error(format!("cannot flush the console: {failure}")))?;
@@ -1552,13 +1560,147 @@ unsafe fn do_nsl(call: &NativeCall<'_>) -> R<Sexp> {
     }
 }
 
-/// `Rprof(filename, ...)`: ry has no sampling profiler, so starting one warns and does
-/// nothing; `Rprof(NULL)` stops nothing silently.
+/// Set by the profiler's timer thread once per sampling interval, and cleared when the
+/// interpreter records a sample. GNU R takes its samples in a `SIGPROF` handler; ry instead checks
+/// this flag where calls begin, which costs one relaxed load per call while no profile runs.
+pub static PROFILE_TICK: AtomicBool = AtomicBool::new(false);
+
+struct Profiler {
+    output: BufWriter<File>,
+    stop: Arc<AtomicBool>,
+    timer: std::thread::JoinHandle<()>,
+}
+
+thread_local! {
+    static PROFILER: RefCell<Option<Profiler>> = const { RefCell::new(None) };
+}
+
+/// `Rprof(filename, append, interval, ...)`: starts writing call-stack samples to `filename`
+/// in GNU R's format, which `summaryRprof` reads, or stops profiling for an empty or `NULL`
+/// filename. Only the call stack is sampled; memory, GC and line profiling are not supported.
 unsafe fn do_rprof(call: &NativeCall<'_>) -> R<Sexp> {
-    if values::first_string(call.arg(0)).is_some_and(|name| !name.is_empty()) {
-        warning("profiling is not supported in ry yet; Rprof() does nothing")?;
-    }
+    stop_profiler()?;
+    let Some(filename) = values::first_string(call.arg(0)).filter(|name| !name.is_empty()) else {
+        return Ok(nil());
+    };
+    let append = values::as_logical_scalar(call.arg(1)) == 1;
+    let interval = values::as_real_scalar(call.arg(2));
+    let interval = if interval.is_finite() && interval > 0.0 {
+        interval
+    } else {
+        0.02
+    };
+    let micros = (interval * 1e6).round().max(1.0) as u64;
+    let path = crate::connections::expand_path(&filename);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(&path)
+        .map_err(|failure| {
+            error(format!(
+                "Rprof: cannot open profile file '{filename}': {failure}"
+            ))
+        })?;
+    let mut output = BufWriter::new(file);
+    writeln!(output, "sample.interval={micros}").map_err(profile_write_error)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let timer_stop = stop.clone();
+    let timer = std::thread::Builder::new()
+        .name("rprof".into())
+        .spawn(move || {
+            while !timer_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_micros(micros));
+                PROFILE_TICK.store(true, Ordering::Relaxed);
+            }
+        })
+        .map_err(|failure| {
+            error(format!(
+                "Rprof: cannot start the profiling timer: {failure}"
+            ))
+        })?;
+    PROFILER.with_borrow_mut(|profiler| {
+        *profiler = Some(Profiler {
+            output,
+            stop,
+            timer,
+        })
+    });
     Ok(nil())
+}
+
+/// Stops a running profile and flushes its file. The session calls it on exit too, because the
+/// profiler lives in a thread local, whose destructor does not run for the main thread.
+pub unsafe fn stop_profiler() -> R<()> {
+    let Some(mut profiler) = PROFILER.with_borrow_mut(Option::take) else {
+        return Ok(());
+    };
+    profiler.stop.store(true, Ordering::Relaxed);
+    if profiler.timer.join().is_err() {
+        return Err(error("Rprof: the profiling timer panicked"));
+    }
+    PROFILE_TICK.store(false, Ordering::Relaxed);
+    profiler.output.flush().map_err(profile_write_error)
+}
+
+/// Writes one sample: the names of the calls on the stack, innermost first, after `innermost`
+/// (the builtin being called, if any).
+pub unsafe fn record_profile_sample(innermost: Option<&str>) -> R<()> {
+    PROFILE_TICK.store(false, Ordering::Relaxed);
+    let mut line = String::new();
+    if let Some(name) = innermost {
+        line.push_str(&format!("\"{name}\" "));
+    }
+    for frame in crate::interp().frames.iter().rev() {
+        line.push_str(&format!("\"{}\" ", profile_name(frame.call.car())));
+    }
+    if line.is_empty() {
+        return Ok(());
+    }
+    line.push('\n');
+    let written = PROFILER.with_borrow_mut(|profiler| match profiler {
+        Some(profiler) => profiler.output.write_all(line.as_bytes()),
+        None => Ok(()),
+    });
+    // A failed sample must not fail the user's call, so profiling stops with a warning instead.
+    if let Err(failure) = written {
+        match stop_profiler() {
+            // A failed flush fails for the reason the warning already reports.
+            Ok(()) | Err(_) => {}
+        }
+        warning(format!(
+            "Rprof: cannot write the profile file, so profiling stopped: {failure}"
+        ))?;
+    }
+    Ok(())
+}
+
+/// The name a call's function gets in a profile, as in GNU R: the symbol it was called by,
+/// `pkg::name` for a namespace-qualified call, and `<Anonymous>` otherwise.
+unsafe fn profile_name(head: Sexp) -> String {
+    if head.kind() == SexpType::Symbol {
+        return values::symbol_name(head).into_owned();
+    }
+    if head.kind() == SexpType::Language
+        && head.car().kind() == SexpType::Symbol
+        && length(head) == 3
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+        && head.cdr().car().kind() == SexpType::Symbol
+        && head.cdr().cdr().car().kind() == SexpType::Symbol
+    {
+        return format!(
+            "{}{}{}",
+            values::symbol_name(head.cdr().car()),
+            values::symbol_name(head.car()),
+            values::symbol_name(head.cdr().cdr().car())
+        );
+    }
+    "<Anonymous>".to_owned()
+}
+
+fn profile_write_error(failure: std::io::Error) -> Unwind {
+    error(format!("Rprof: cannot write the profile file: {failure}"))
 }
 
 unsafe fn do_rprofmem(call: &NativeCall<'_>) -> R<Sexp> {

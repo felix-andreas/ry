@@ -813,7 +813,7 @@ unsafe fn do_split(call: &Call<'_>) -> R<Sexp> {
     if codes.is_empty() && observations > 0 {
         return Err(error("group length is 0 but data length > 0"));
     }
-    if !codes.is_empty() && observations % codes.len() != 0 {
+    if !codes.is_empty() && !observations.is_multiple_of(codes.len()) {
         warning("data length is not a multiple of split variable")?;
     }
     let mut members: Vec<Vec<usize>> = vec![Vec::new(); level_count];
@@ -858,7 +858,10 @@ unsafe fn do_identical(call: &Call<'_>) -> R<Sexp> {
         "extptr.as.ref",
     ];
     for (position, name) in names.iter().enumerate() {
-        settings[position] = flag(call.arg(position + 2), &format!("invalid '{name}' value"))?;
+        settings[position] = match as_logical_scalar(call.arg(position + 2)) {
+            NA_LOGICAL => return Err(error(format!("invalid '{name}' value"))),
+            value => value != 0,
+        };
     }
     let flags = IdenticalFlags {
         num_eq: settings[0],
@@ -1499,6 +1502,7 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
     let kind = x.kind();
     if kind != y.kind()
         || x.is_object() != y.is_object()
+        || x.is_array() != y.is_array()
         || x.has_gp(gp::S4_OBJECT) != y.has_gp(gp::S4_OBJECT)
     {
         return false;

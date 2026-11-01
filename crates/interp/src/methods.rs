@@ -268,7 +268,7 @@ pub unsafe fn has_slot(object: Sexp, name: Sexp) -> R<bool> {
 pub unsafe fn slot_symbol(name: Sexp) -> R<Sexp> {
     match name.kind() {
         SexpType::Symbol => Ok(name),
-        SexpType::String if length(name) == 1 => values::install_bytes(name.element(0).bytes()),
+        SexpType::String if length(name) == 1 => values::install_charsxp(name.element(0)),
         _ => Err(error("invalid type or length for slot name")),
     }
 }
@@ -325,7 +325,7 @@ unsafe fn signature_symbols(generic_env: Sexp) -> R<Vec<Sexp>> {
     let mut result = Vec::with_capacity(count);
     for index in 0..count {
         let symbol = match arguments.kind() {
-            SexpType::String => values::install_bytes(arguments.element(index).bytes())?,
+            SexpType::String => values::install_charsxp(arguments.element(index))?,
             SexpType::List => {
                 let element = arguments.element(index);
                 if element.kind() == SexpType::Symbol {
@@ -601,7 +601,7 @@ unsafe fn class_from_cache(call: &NativeCall<'_>) -> R<Sexp> {
             if length(class) == 0 {
                 return Ok(nil());
             }
-            let symbol = values::install_bytes(class.element(0).bytes())?;
+            let symbol = values::install_charsxp(class.element(0))?;
             let value = eval::value_of(eval::find_var_in_frame(symbol, table)?)?;
             if value == unbound() {
                 return Ok(nil());
@@ -630,7 +630,7 @@ unsafe fn get_generic_routine(call: &NativeCall<'_>) -> R<Sexp> {
     let (name, must_find, env, package) = (call.arg(0), call.arg(1), call.arg(2), call.arg(3));
     let symbol = match name.kind() {
         SexpType::Symbol => name,
-        SexpType::String if length(name) >= 1 => values::install_bytes(name.element(0).bytes())?,
+        SexpType::String if length(name) >= 1 => values::install_charsxp(name.element(0))?,
         _ => {
             return Err(
                 call.error("invalid generic function name: expected a character string or a name")
@@ -696,7 +696,7 @@ unsafe fn set_slot(call: &NativeCall<'_>) -> R<Sexp> {
     if name.kind() != SexpType::String || length(name) != 1 {
         return Err(call.error("invalid type or length for slot name"));
     }
-    let symbol = values::install_bytes(name.element(0).bytes())?;
+    let symbol = values::install_charsxp(name.element(0))?;
     crate::subset::assign_slot(call.arg(0), symbol, call.arg(2))
 }
 
@@ -764,9 +764,7 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
     let (symbol, env) = (call.arg(0), call.arg(1));
     let symbol = match symbol.kind() {
         SexpType::Symbol => symbol,
-        SexpType::String if length(symbol) >= 1 => {
-            values::install_bytes(symbol.element(0).bytes())?
-        }
+        SexpType::String if length(symbol) >= 1 => values::install_charsxp(symbol.element(0))?,
         _ => {
             let class = dispatch::class_of(symbol)?;
             return Err(call.error(format!(
@@ -908,7 +906,7 @@ unsafe fn substitute_direct(call: &NativeCall<'_>) -> R<Sexp> {
                         let tag = if names.kind() == SexpType::String
                             && !names.element(index).bytes().is_empty()
                         {
-                            values::install_bytes(names.element(index).bytes())
+                            values::install_charsxp(names.element(index))
                         } else {
                             Ok(nil())
                         };

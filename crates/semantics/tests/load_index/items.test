@@ -112,3 +112,65 @@ syntax error 2: unclosed `(`; expected `)` to close the parameter list
 syntax error 2: expected a parameter name, found `{`
 1:0 lazy fine function at 1:8
 2:0 lazy broken function at 2:10
+
+#==== strict_constants
+#---- a_strict_file_binds_pure_constants_lazily
+#~~~~ R/a.R
+# typing: strict
+version <- "1.2.0"
+labels <- paste0("item_", seq_len(3))
+squares <- local({
+  out <- numeric(3)
+  for (i in seq_len(3)) out[i] <- i * i
+  out
+})
+setClass("Account", representation(balance = "numeric"))
+#++++
+package demo 0.1.0
+== R/a.R
+2:0 lazy version constant at 2:11
+3:0 lazy labels constant at 3:10
+4:0 lazy squares constant at 4:11
+9:0 eager reads [representation setClass] registers S4Class { class: "Account" }
+
+#---- an_impure_constant_a_chain_and_a_rewritten_name_stay_eager
+#~~~~ R/a.R
+# typing: strict
+home <- Sys.getenv("HOME")
+a <- b <- 1
+limit <- 1
+limit <- 2
+#++++
+package demo 0.1.0
+== R/a.R
+2:0 eager binds [home] reads [Sys.getenv]
+3:0 eager binds [a b]
+4:0 eager binds [limit]
+5:0 eager binds [limit]
+
+#---- a_constant_calling_a_project_pure_function
+#~~~~ R/a.R
+# typing: strict
+#: @pure
+twice <- function(x) x * 2
+doubled <- twice(21)
+#~~~~ R/b.R
+# typing: strict
+helper <- function(x) x
+used <- helper(1)
+#++++
+package demo 0.1.0
+== R/a.R
+3:0 lazy twice function at 3:9
+4:0 lazy doubled constant at 4:11
+== R/b.R
+2:0 lazy helper function at 2:10
+3:0 eager binds [used] reads [helper]
+
+#---- without_strict_mode_constants_stay_eager
+#~~~~ R/a.R
+version <- "1.2.0"
+#++++
+package demo 0.1.0
+== R/a.R
+1:0 eager binds [version]

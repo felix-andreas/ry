@@ -64,6 +64,8 @@ const SEEDS: &[&str] = &[
     "alias Point = list{\n  x: double, # across\n  y: double,\n}\np: @new Point <- list(x = 1, y = 2)",
     "x: @trust integer <- f(); y: @if-unknown character | NULL <- g()",
     "type <- \"a\"; alias(type = 1); type\nX <- 2",
+    "a <- [1, 2, 3]; e <- []; n <- [[1L], [2L, 3L]]; a[[1L]]; a[2]\n[4]",
+    "xs: Array<double> <- -[1.5, 2] * [3, 4][1L]; (x\n[1]); f([x, y],)",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -142,6 +144,7 @@ const ALPHABET: &[&str] = &[
     "**",
     ":=",
     "@type",
+    "@pure",
     "@param",
     "fn",
     "list[",
@@ -157,7 +160,16 @@ const ALPHABET: &[&str] = &[
     ":Some(",
     "Record{",
     "Tuple{",
+    "[",
+    "[[",
+    "]",
+    "]]",
+    "Array<",
 ];
+
+/// Inputs the coverage-guided `parse` target has broken. Unlike `SEEDS` these may hold syntax
+/// errors; only the invariants must hold.
+const REGRESSIONS: &[&str] = &[];
 
 fn iterations() -> usize {
     fuzz_iterations(1500)
@@ -167,6 +179,43 @@ fn iterations() -> usize {
 fn seeds_hold_invariants() {
     for seed in SEEDS {
         check_invariants(seed);
+    }
+}
+
+#[test]
+fn fuzz_regressions_hold_invariants() {
+    for input in REGRESSIONS {
+        check_invariants(input);
+    }
+}
+
+/// Edits the language-server simulator found where a splice reparse disagreed with a full
+/// parse: `(old text, new text, deleted range in the old text, inserted length)`.
+const SPLICE_REGRESSIONS: &[(&str, &str, (u32, u32), u32)] = &[
+    (
+        // The middle's quote opens a string the suffix's first quote closes; the lexer had ended
+        // it at its line break because the middle alone holds no closing quote.
+        "\nz <- c(1, 2, 3) |> rev()\nlabel: character <- \"日本語\"\ntota: integer, 3))\ndouble_it <- function(n) n * 2L\narea(\"a\", 3)\n",
+        "\nz <- c(1, 2, 3) |> rev()\nlabel: ctotal <- NULL\n日本語\"\ntota: integer, 3))\ndouble_it <- function(n) \tn * 2L\narea(\"a\", 3)\n",
+        (34, 102),
+        70,
+    ),
+    (
+        // The edit opens a parenthesis in the first statement that a later line closes, so the
+        // statement boundary the old tree had after the first line no longer exists.
+        "halve <- function(value: double) -> double value / 2\nif (TRU<-E)<-ats)\nrea(1, 2) else NUL)L\n",
+        "halve <- function(value(: double) -> double value / 2\nif (TRU<-E)<-alibrary(stats)\nts)\nrea(1, 2) else NUL)L\n",
+        (23, 67),
+        60,
+    ),
+];
+
+#[test]
+fn splice_regressions_match_a_full_parse() {
+    for (old, new, (start, end), inserted) in SPLICE_REGRESSIONS {
+        let deleted = TextRange::new(TextSize::from(*start), TextSize::from(*end));
+        let spliced = reparse(&parse(old), new, deleted, TextSize::from(*inserted));
+        assert_eq!(spliced, parse(new), "splicing {old:?} into {new:?}");
     }
 }
 

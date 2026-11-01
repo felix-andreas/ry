@@ -4,7 +4,7 @@ description: Every way to install ry
 ---
 
 Most people install ry through their editor, and the VS Code extension needs nothing else. Install
-the command-line binary as well if you want `ry check`, `ry fmt` and `ry R` in a terminal or in
+the command-line binary as well if you want `ry check`, `ry fmt` and `ry run` in a terminal or in
 CI.
 
 ## VS Code
@@ -25,8 +25,8 @@ instead.
 ## Command line
 
 **Prebuilt binary.** Each [release](https://github.com/felix-andreas/ry/releases) has one archive
-per platform holding a single `ry` binary: `ry-x86_64-unknown-linux-gnu.tar.gz`,
-`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-gnu.zip`. Name the tag in the URL,
+per platform: `ry-x86_64-unknown-linux-gnu.tar.gz`,
+`ry-aarch64-apple-darwin.tar.gz`, and `ry-x86_64-pc-windows-msvc.zip`. Name the tag in the URL,
 because every release since 0.1.1 is marked a pre-release, so GitHub's `releases/latest` still
 points at 0.1.1. On a Mac:
 
@@ -62,6 +62,30 @@ and `ry load` need a GNU R installation built as a shared library (see the
 [CLI reference](/reference/cli)). That includes ry's own runtime (`ry run`), which reads base
 R's R sources and the default packages from your GNU R installation instead of shipping them, so
 ry stays independent of R's license.
+
+ry finds that installation through `R_HOME` when it is set. Otherwise `ry run` looks in the
+usual places and then asks `R RHOME`, while `ry R` asks `R RHOME` first, so it runs the R on your
+`PATH`. The usual places are:
+
+| Platform | Searched |
+| --- | --- |
+| Linux | `/usr/lib/R`, `/usr/local/lib/R`, `/opt/R/lib/R`, `/usr/lib64/R` |
+| macOS | `/Library/Frameworks/R.framework/Resources` (CRAN's installer), `/opt/homebrew/opt/r/lib/R` and `/usr/local/opt/r/lib/R` (Homebrew), `/opt/R/lib/R` |
+| Windows | the `InstallPath` registry entry R's installer writes, then `R\R-x.y.z` under Program Files, newest first |
+
+If none holds base R, `ry run` and `ry load` stop with exit status 2 and name the places they
+searched. Install GNU R, or set `R_HOME` to the directory `R RHOME` prints.
+
+On Linux and macOS the release archive holds `ry` and ry's runtime (`libR.so` or `libR.dylib`).
+Keep them in the same directory, or put the runtime in `../lib/ry/` relative to `ry`. On Windows,
+ry's runtime is not built yet, so `ry run` and `ry load` are Linux and macOS only, while `ry R`
+works everywhere.
+
+On macOS, `ry run` loads packages installed by CRAN's or Homebrew's GNU R unchanged. Those binaries
+name GNU R's `libR`, so ry loads a copy of each package library, cached under
+`~/Library/Caches/ry/rebound/`, that names ry's runtime instead. The macOS runtime is built and its
+exports checked by cross-compiling from Linux; the release workflow's smoke test is what first runs
+it on a Mac.
 
 ## Zed
 

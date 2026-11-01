@@ -34,6 +34,7 @@ bad <- 1L %then% 2L
 ok: integer
 bad: Unknown
 31..43 error[strict] strict mode: could not determine the type of `bad`; add a type annotation
+31..43 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- shadowing_a_base_stub_is_strict_clean
 #~~~~ R/main.R

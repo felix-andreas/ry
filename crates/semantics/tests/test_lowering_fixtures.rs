@@ -5,7 +5,7 @@
 use {
     semantics::{
         DocumentKind,
-        hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind},
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         item_hir, item_tree,
         testing::with_fixture_project,
     },
@@ -47,10 +47,10 @@ fn render(source: &str) -> String {
 }
 
 fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: usize) {
-    let kind = &module.expression(id).kind;
+    let kind = module.kind(id);
     let label = match kind {
         ExpressionKind::Missing => "Missing".to_owned(),
-        ExpressionKind::Literal(literal) => format!("Literal {literal:?}"),
+        ExpressionKind::Literal(literal) => format!("Literal {}", literal_text(module, literal)),
         ExpressionKind::NameRef(name) => format!("NameRef {name}"),
         ExpressionKind::Assign { spelling, .. } => format!("Assign {spelling:?}"),
         ExpressionKind::Unary { operator, .. } => format!("Unary {operator:?}"),
@@ -80,7 +80,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
             name.as_deref().unwrap_or("?")
         ),
         ExpressionKind::Function { parameters, .. } => {
-            let spelled: Vec<String> = parameters
+            let spelled: Vec<String> = module[parameters]
                 .iter()
                 .map(|parameter| match parameter.default {
                     Some(_) => format!("{} = …", parameter.name),
@@ -101,8 +101,12 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Break => "Break".to_owned(),
         ExpressionKind::Next => "Next".to_owned(),
         ExpressionKind::Tuple(_) => "Tuple".to_owned(),
+        ExpressionKind::Array(_) => "Array".to_owned(),
         ExpressionKind::Record(fields) => {
-            let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
+            let names: Vec<&str> = module[fields]
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect();
             format!("Record({})", names.join(", "))
         }
         ExpressionKind::Tag { name, .. } => format!("Tag :{name}"),
@@ -120,7 +124,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
             ..
         } => {
             render_expression(output, module, *head, depth + 1);
-            render_arguments(output, module, arguments, depth + 1);
+            render_arguments(output, module, &module[arguments], depth + 1);
         }
         // Parameter defaults are spelled in the label, not rendered as children.
         ExpressionKind::Function { body, .. } => {
@@ -129,7 +133,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Match { scrutinee, arms } => {
             render_expression(output, module, *scrutinee, depth + 1);
             let indent = "  ".repeat(depth + 1);
-            for arm in arms {
+            for arm in &module[arms] {
                 output.push_str(&format!("{indent}arm\n"));
                 render_pattern(output, module, arm.pattern, depth + 2);
                 if let Some(guard) = arm.guard {
@@ -140,9 +144,9 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
             }
         }
         _ => {
-            for child in kind.child_ids() {
-                render_expression(output, module, child, depth + 1);
-            }
+            module.for_each_child(id, |child| {
+                render_expression(output, module, child, depth + 1)
+            });
         }
     }
 }
@@ -153,14 +157,15 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
         PatternKind::Missing => output.push_str(&format!("{indent}pattern Missing\n")),
         PatternKind::Wildcard => output.push_str(&format!("{indent}pattern _\n")),
         PatternKind::Bind(name) => {
-            let ExpressionKind::NameRef(name) = &module.expression(*name).kind else {
+            let ExpressionKind::NameRef(name) = module.kind(*name) else {
                 panic!("a binding leaf is a name");
             };
             output.push_str(&format!("{indent}pattern bind {name}\n"));
         }
         PatternKind::Literal { literal, negative } => output.push_str(&format!(
-            "{indent}pattern literal {}{literal:?}\n",
-            if *negative { "-" } else { "" }
+            "{indent}pattern literal {}{}\n",
+            if *negative { "-" } else { "" },
+            literal_text(module, literal)
         )),
         PatternKind::Tag { name, payload, .. } => {
             output.push_str(&format!("{indent}pattern tag :{name}\n"));
@@ -170,7 +175,7 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
         }
         PatternKind::Tuple(items) => {
             output.push_str(&format!("{indent}pattern tuple\n"));
-            for item in items {
+            for item in &module[items] {
                 render_pattern(output, module, *item, depth + 1);
             }
         }
@@ -179,14 +184,14 @@ fn render_pattern(output: &mut String, module: &Module, id: PatId, depth: usize)
                 "{indent}pattern Record{}\n",
                 if *rest { " .." } else { "" }
             ));
-            for field in fields {
+            for field in &module[fields] {
                 output.push_str(&format!("{indent}  field {} =\n", field.name));
                 render_pattern(output, module, field.pattern, depth + 2);
             }
         }
         PatternKind::Or(alternatives) => {
             output.push_str(&format!("{indent}pattern or\n"));
-            for alternative in alternatives {
+            for alternative in &module[alternatives] {
                 render_pattern(output, module, *alternative, depth + 1);
             }
         }
@@ -205,5 +210,16 @@ fn render_arguments(output: &mut String, module: &Module, arguments: &[Argument]
             (None, Some(value)) => render_expression(output, module, value, depth),
             (None, None) => output.push_str(&format!("{indent}<empty>\n")),
         }
+    }
+}
+
+/// Renders a literal with its text resolved, as `Integer("1L")`.
+fn literal_text(module: &Module, literal: &LiteralKind) -> String {
+    match literal {
+        LiteralKind::Integer(text) => format!("Integer({:?})", &module[text]),
+        LiteralKind::Double(text) => format!("Double({:?})", &module[text]),
+        LiteralKind::Complex(text) => format!("Complex({:?})", &module[text]),
+        LiteralKind::String(text) => format!("String({:?})", &module[text]),
+        other => format!("{other:?}"),
     }
 }

@@ -671,7 +671,7 @@ impl Formatter<'_> {
         // marker, not a hole argument.
         let is_literal = node
             .parent()
-            .is_some_and(|parent| matches!(parent.kind(), RECORD_EXPR | TUPLE_EXPR));
+            .is_some_and(|parent| matches!(parent.kind(), RECORD_EXPR | TUPLE_EXPR | ARRAY_EXPR));
         let trailing_space = !is_literal
             && close_previous_token
                 .as_ref()
@@ -995,6 +995,10 @@ impl Formatter<'_> {
             let after_comment = previous.is_some_and(is_comment);
             match element.kind() {
                 COMMENT | ANNOTATION => self.place_comment(previous, element, level, level),
+                PURE_MARKER => {
+                    self.element(element, level, false);
+                    self.out.push(' ');
+                }
                 PARAMETER_LIST => {
                     if after_comment {
                         self.newline(level);
