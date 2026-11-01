@@ -13,3 +13,4 @@ big <- data.table(g = c(1L, 1L), v = c(.Machine$integer.max, 1L))
 big[, .(s = sum(v)), by = g]
 dt[, w := cumsum(x)]
 dt
+invisible(NULL)

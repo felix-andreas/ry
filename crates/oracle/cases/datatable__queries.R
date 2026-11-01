@@ -41,3 +41,4 @@ names(attributes(dt[, .(s = sum(y)), keyby = g]))
 names(attributes(dt[, .(x)]))
 f <- function(d, v) d[x > v, .(s = sum(y), n = .N), by = g]
 f(dt, lim)
+invisible(NULL)

@@ -74,6 +74,9 @@ const HELPERS: &str = r#"
   data.table:::selfrefok(x) > 0L && data.table::truelength(x) >= length(x) + added
 }
 .datatable_set <- function(x, i, j, value) data.table::set(x, i, j, value)
+# `:=` returns the table visibly and leaves its address in `.global$print`, which is how
+# `print.data.table()` skips the autoprint at the prompt but still prints in nested frames.
+.datatable_updated <- function(x) assign("print", data.table::address(x), envir = data.table:::.global)
 "#;
 
 thread_local! {
@@ -418,7 +421,8 @@ unsafe fn update(
         let j = values::scalar_string(name)?;
         helper(".datatable_set", &[subject, rows.unwrap_or(nil()), j, value])?;
     }
-    interp().visible = false;
+    helper(".datatable_updated", &[subject])?;
+    interp().visible = true;
     Ok(Some(subject))
 }
 
