@@ -807,6 +807,19 @@ out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 G
 at 6.4 GB, and both grow with the row count.
 
 <!-- bench-table:5e7 -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 0.743 | 0.281 | 0.680 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.897 | 0.342 | 0.684 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.207 | 1.119 | 1.422 |
+| groupby q4: three means by `id4` | 1.614 | 1.292 | 1.710 |
+| groupby q5: three sums by `id6` | 1.259 | 1.155 | 1.503 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.813 | 0.923 | 1.372 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 4.912 | 0.637 | 0.963 |
+| groupby q8: the two largest `v3` by `id6` | 3.232 | 1.492 | 1.812 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.108 | 0.516 | 0.909 |
+| groupby q10: `sum(v3)`, count by all six ids | 9.814 | 5.242 | 6.237 |
+| total | 29.60 | 13.00 | 17.29 |
 <!-- /bench-table:5e7 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure

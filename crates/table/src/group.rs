@@ -467,7 +467,7 @@ fn dense(
     }
     // Each thread holding states for every code pays off only when the rows outnumber the
     // threads' states, and it cannot keep a double sum in row order. Otherwise each thread owns a
-    // range of codes instead, which also keeps its states in cache when the codes are many.
+    // range of codes, which also keeps its states in cache when the codes are many.
     if ordered || radix.saturating_mul(threads) > height {
         return dense_by_code(codes, radix, aggregations, top, threads);
     }
@@ -509,9 +509,11 @@ fn dense(
     }
 }
 
-/// Groups dense codes by giving each partition a contiguous range of codes. Every partition lists
-/// its rows in ascending order, so a group's values accumulate in row order, and the partitions'
-/// states line up end to end in code order.
+/// Groups dense codes by giving each thread a contiguous range of codes. A thread scans every row
+/// and keeps its own in ascending order, so a group's values accumulate in row order, and the
+/// threads' states line up end to end in code order. Scanning beats scattering the rows into
+/// partitions first: a thread's rows are spread over the whole table either way, so a scatter
+/// reads every value column once per partition, and it costs a pass of its own.
 fn dense_by_code(
     codes: &[u64],
     radix: usize,
@@ -519,26 +521,25 @@ fn dense_by_code(
     top: Option<&Ranking>,
     threads: usize,
 ) -> Grouping {
-    let shift = radix
-        .div_ceil(threads * 16)
-        .next_power_of_two()
-        .trailing_zeros();
-    let width = 1usize << shift;
+    let width = radix.div_ceil(threads).max(1);
     let partitions = radix.div_ceil(width);
-    let (rows, row_codes, bounds) =
-        scatter(codes, partitions, |code| (code >> shift) as usize, threads);
     let parts: Vec<(Vec<u32>, Vec<State>)> = THREAD_POOL.install(|| {
         (0..partitions)
             .into_par_iter()
             .map(|partition| {
                 let low = partition * width;
                 let slots = width.min(radix - low);
-                let span = bounds[partition]..bounds[partition + 1];
-                let rows = &rows[span.clone()];
-                let codes = &row_codes[span];
+                let (rows, row_slots): (Vec<u32>, Vec<u32>) = codes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, code)| {
+                        let slot = (*code as usize).wrapping_sub(low);
+                        (slot < slots).then_some((row as u32, slot as u32))
+                    })
+                    .unzip();
                 let mut first_rows = vec![NO_ROW; slots];
-                for (row, code) in rows.iter().zip(codes) {
-                    let slot = &mut first_rows[*code as usize - low];
+                for (row, slot) in rows.iter().zip(&row_slots) {
+                    let slot = &mut first_rows[*slot as usize];
                     if *slot == NO_ROW {
                         *slot = *row;
                     }
@@ -554,7 +555,7 @@ fn dense_by_code(
                         top,
                         rows.len(),
                         |index| rows[index] as usize,
-                        |index| codes[index] as usize - low,
+                        |index| row_slots[index] as usize,
                     );
                 }
                 (first_rows, states)
