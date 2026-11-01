@@ -44,6 +44,7 @@ pub mod methods;
 pub mod native;
 pub mod print;
 pub mod random;
+pub mod records;
 pub mod serialize;
 pub mod session;
 pub mod sort;

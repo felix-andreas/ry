@@ -374,6 +374,7 @@ impl Writer<'_, '_> {
             if self.version >= 3 && object.is_altrep() && self.write_altrep(object)? {
                 return Ok(());
             }
+            crate::vectors::refuse_native(object)?;
             let kind = object.kind();
             match kind {
                 SexpType::Symbol => {

@@ -61,12 +61,12 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## In flight
 
 - Runtime step 3 follow-up (session_0111kWqCeajgVo7m8XVxpfDk, Opus): stats natives, review fixes, GNU R `tests/*.R`, connection builtins, stringi, task callbacks.
-- Table performance (session_0111kWqB9LKMquDanx18xVTC, Opus): beat data.table on every db-benchmark query.
+- Table engine follow-up (session_0111kWqB9LKMquDanx18xVTC, Opus): .EACHI, non-equi joins, warning channel, frame() name clash. PR #116 (beats data.table on all 19 db-benchmark queries) merged as 693ee85.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
-- Lazy loader on ry's interpreter (session_0111kWqEkieA316rHiKNpGxB, Opus).
-- Native records, tuples and tagged unions; S4/R6 discouraged (session_0111kWqDq53tu9KBVLAT5WSn, Opus).
 - Runtime step 7: the Cranelift JIT (session_0111kWqBQdpLjmrdiA5ajbhR, Opus).
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
+- Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
+- Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -76,4 +76,4 @@ Nothing queued: every build-order step is in flight.
 Follow-ups:
 
 - Install R 4.6 via rig for data.table's version check.
-- Run a docs pass after the feature PRs land.
+- Run the next docs pass after the records/tags, JIT and table-in-interpreter PRs land.

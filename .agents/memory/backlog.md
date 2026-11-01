@@ -21,8 +21,19 @@ The quality bar is four things.
 
 ## Open: the package loader
 
-The loader works on the GNU R backend (`crates/loader`, `docs/.../guides/loading-packages.md`). Gaps,
-roughly in order of how often a real package hits them:
+The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
+`docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
+
+- **A package with `src/` does not load on ry's runtime**: pkgbuild's `check_build_tools` fails
+  there (callr and friends hit interpreter gaps). `readDCF` and classed comparisons were the first two
+  blockers. Until it works, `--runtime gnu-r` is the documented route.
+- **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
+  and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
+- **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
+  The loader has the byte range of every definition, so a srcref could be built from it once the
+  interpreter carries srcrefs at all.
+- **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
+  326,000-line bench package, shared by both runtimes; the next item is the fix.
 
 - **`system.file()` does not map `inst/`** for a source package; `pkgload` shims it. Packages that
   read bundled files at load time (`.onLoad`) fail until this exists.
@@ -43,7 +54,7 @@ roughly in order of how often a real package hits them:
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 - **The reload diff is O(eager statements) plus O(changed files)**, but `package_index` re-joins all
-  files' names (about 8 ms at 326,000 lines). A per-file name summary could make that O(changed).
+  files' names. A per-file name summary could make that O(changed).
 
 ## Open: false reports and gaps found by the documentation review
 
@@ -1764,6 +1775,26 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
+## Open: the built-in frame
+
+- **Query features:** `.EACHI`, non-equi joins and a computed `by` are not lowered;
+  they run as R per group or fail.
+- **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
+  ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
+- **A filtered `:=` loop is only 1.2x data.table's subset assignment** (`tools/bench/table/ry.R`,
+  "update subset").
+- **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
+  reject a frame, so users call `ry::setkey`.
+- **No warning channel.** data.table warns when a value is truncated into an integer column and when
+  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
+  where data.table keeps it, and a frame updated in a nested closure is not refined there.
+- **Naming:** `package:ry`'s `frame()` masks `graphics::frame` and calls it when given no
+  arguments.
+- **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
+  contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
+- **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
+
 ## Open: the runtime
 
 What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pressing first.
@@ -1847,8 +1878,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Explicitly out of scope for now
 
-- Tags and discriminated unions, through a stdlib `match` the checker knows about. Design it in
-  `contributing/design/open-questions.md` first.
 - Modelling S3 dispatch, meaning `UseMethod`. It is the prerequisite for an honest `print`,
   `summary` and `plot`.
 - Column-level typing for a data.frame, matrix dimensionality, and real S4 typing.
@@ -1858,6 +1887,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **`ry load` on ry's own runtime.** Lazy bindings are promises over the analysis's syntax trees, both runtimes apply the same plan, and `test_load.rs` runs on both. `decisions.md`, "the loader on ry's runtime".
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
 - **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry repl` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
 - **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.

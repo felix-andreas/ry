@@ -21,7 +21,7 @@ use table::{
         SerReader,
     },
     query::{
-        Aggregate, BinaryOp, Expr, Join, Output, Query, Roll, Rows, Select, SortKey,
+        Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, Roll, Rows, Select, SortKey,
         build::{aggregate, binary, column},
         execute,
     },
@@ -170,7 +170,7 @@ fn groupby(dir: &Path) -> Result<()> {
         ),
     ];
     for (question, query) in questions {
-        time_question(question, || answer(execute(&mut x, query.clone())?))?;
+        time_question(question, || Ok(execute(&mut x, query.clone())?))?;
     }
 
     time_question("update full", || {
@@ -178,7 +178,7 @@ fn groupby(dir: &Path) -> Result<()> {
             let update = binary(BinaryOp::Multiply, column("v3"), Expr::Double(1.000001));
             execute(&mut x, assign("v3", update))?;
         }
-        answer(execute(
+        Ok(execute(
             &mut x,
             Query {
                 select: columns([("v3", sum("v3"))]),
@@ -198,7 +198,7 @@ fn groupby(dir: &Path) -> Result<()> {
                 },
             )?;
         }
-        answer(execute(
+        Ok(execute(
             &mut x,
             Query {
                 select: columns([("v1", sum("v1"))]),
@@ -211,7 +211,7 @@ fn groupby(dir: &Path) -> Result<()> {
             let update = binary(BinaryOp::Multiply, column("v2"), Expr::Integer(step));
             execute(&mut x, assign(&format!("added{step}"), update))?;
         }
-        answer(execute(
+        Ok(execute(
             &mut x,
             Query {
                 select: columns([("added100", sum("added100"))]),
@@ -232,12 +232,12 @@ fn joins(dir: &Path) -> Result<()> {
         rows: equi_join(other, on, true),
         ..Query::default()
     };
-    time_question("join q1", || answer(execute(&mut x, inner(&small, "id1"))?))?;
+    time_question("join q1", || Ok(execute(&mut x, inner(&small, "id1"))?))?;
     time_question("join q2", || {
-        answer(execute(&mut x, inner(&medium_frame, "id2"))?)
+        Ok(execute(&mut x, inner(&medium_frame, "id2"))?)
     })?;
     time_question("join q3", || {
-        answer(execute(
+        Ok(execute(
             &mut medium,
             Query {
                 rows: equi_join(&x_frame, "id2", false),
@@ -246,9 +246,9 @@ fn joins(dir: &Path) -> Result<()> {
         )?)
     })?;
     time_question("join q4", || {
-        answer(execute(&mut x, inner(&medium_frame, "id5"))?)
+        Ok(execute(&mut x, inner(&medium_frame, "id5"))?)
     })?;
-    time_question("join q5", || answer(execute(&mut x, inner(&big, "id3"))?))
+    time_question("join q5", || Ok(execute(&mut x, inner(&big, "id3"))?))
 }
 
 fn rolling_join(dir: &Path) -> Result<()> {
@@ -264,8 +264,9 @@ fn rolling_join(dir: &Path) -> Result<()> {
             ],
             drop_unmatched: false,
             roll: Roll::Backward(None),
+            mult: Mult::All,
         });
-        answer(execute(
+        Ok(execute(
             &mut prices,
             Query {
                 rows,
@@ -307,11 +308,13 @@ fn read(dir: &Path, name: &str) -> Result<Table> {
     Ok(Table::new(DataFrame::new(frame.height(), columns)?)?)
 }
 
-fn time_question(question: &str, mut run: impl FnMut() -> Result<Answer>) -> Result<()> {
+/// Times one question. The checksum is computed after the clock stops, as `datatable.R` does.
+fn time_question(question: &str, mut run: impl FnMut() -> Result<Output>) -> Result<()> {
     for run_number in 1..=2 {
         let start = Instant::now();
-        let answer = run()?;
+        let output = run()?;
         let seconds = start.elapsed().as_secs_f64();
+        let answer = answer(output)?;
         println!(
             "{question}\t{run_number}\t{seconds:.4}\t{}\t{}\t{:.6e}",
             answer.rows, answer.cols, answer.checksum
@@ -397,6 +400,7 @@ fn equi_join(other: &Table, on: &str, drop_unmatched: bool) -> Rows {
         on: vec![(on.into(), on.into())],
         drop_unmatched,
         roll: Roll::None,
+        mult: Mult::All,
     })
 }
 

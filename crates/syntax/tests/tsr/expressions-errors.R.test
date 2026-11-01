@@ -271,10 +271,10 @@ err: 93..93: missing `,` between these arguments
 ()
 #++++
 SOURCE_FILE@0..2
-  PAREN_EXPR@0..2
-    L_PAREN@0..1 "("
-    R_PAREN@1..2 ")"
-err: 1..2: expected an expression inside `(`, found `)`
+  TUPLE_EXPR@0..2
+    ARGUMENT_LIST@0..2
+      L_PAREN@0..1 "("
+      R_PAREN@1..2 ")"
 
 #---- not_a_parenthesized_expression_2_ts_error
 (

@@ -1982,6 +1982,41 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   rebuilt shared library under a new name, a `system.file()` shim for `inst/`, testthat helpers, and
   evaluating `if` in `NAMESPACE` (ignored with a warning). `backlog.md` lists them.
 
+# Decision record: the loader on ry's runtime
+
+`ry load` applies the loader's plan on ry's interpreter by default; `--runtime gnu-r` (or
+`RY_RUNTIME=gnu-r`) keeps the GNU R path. `ry repl` and plain-R `load_all()` stay on GNU R.
+
+- **Previous shape:** the plan crossed to R as an RDS file whose code entries carried source text,
+  which GNU R parsed again on force, so every forced function was parsed twice (once by the
+  analysis, once by R).
+- **Target shape:** one R runtime (`runtime.R`) with backend hooks (`.ry_request`,
+  `.ry_sources`, `.ry_bind_lazily`, `.ry_run`). GNU R's hooks (`gnur.R`) keep the RDS plan and
+  `makeLazy`; ry's hooks (`ry.R`) call `.Internal(ryLoaderPlan/Commit/Bind/Run/Force)` in
+  `loader::ry_runtime`, which keeps the plan in process. A lazy binding is a promise over a call to
+  `ryLoaderForce(tree, start, end)`, where `tree` is an external pointer to the file's `Parse`
+  from the analysis, and forcing lowers the node spanning `start..end` with
+  `interp::lower::lower_node`. The plan carries byte offsets (`SourceSpan::source_start/end`) so the
+  node is found without text.
+- **Why a tree, not text:** the analysis already parsed every file, the rowan green tree is shared
+  and cheap to clone, and lowering a node skips the lexer and parser entirely. Memory is the trees
+  the analysis already holds. The finalizer drops a tree after no promise of its file remains, at the
+  collector's next finalizer point (a native call's return, `gc()`, or exit), not immediately.
+- **Why `.Internal`s and not `.Call`:** the interpreter registers Rust builtins directly, so the
+  backend needs no `DllInfo`, no RDS round trip and no source strings in R memory.
+- **Planning runs on its own thread** with `ANALYSIS_STACK_SIZE`, as every analysis entry point
+  does, because the analysis recurses as deeply as the code nests.
+- **Runtime fixes the load path needed, each pinned by an oracle case:** `readDCF`, `load()`/`save()`
+  of XDR workspaces (`R/sysdata.rda`, gzip, bzip2 or xz through `gzfile()`), `readChar` on a connection, comparisons and `&`/`|` keeping
+  only names, dim and dimnames, and two hot paths (`match()` on interned ASCII strings by pointer,
+  `names(env)` and `ls()` from print names without a string round trip).
+- **Impact:** on the 326,000-line bench package a cold load is faster than the GNU R backend on the
+  same machine and a one-function reload slightly slower (932 ms and 58 ms against 1,036 ms and
+  53 ms); on the 14,000-line package the cold load is slower (104 ms against 82 ms), because the
+  interpreter evaluates the eager statements more slowly than GNU R. Correctness
+  and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
+  namespace, S3/S4, collation and reload tests on both runtimes.
+
 # Decision record: base R's linear algebra
 
 - **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.
@@ -2107,8 +2142,88 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   for one row of i come back in x's order. A rolling join marks x's rows with a
   hidden column so an inner rolling join keeps matches whose values are NA.
 
-Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer
-and gives NA on overflow, where R gives a double.
+- **Native kernels run below Polars, with the Polars plans as the fallback and the reference.**
+  `kernel.rs` (row-wise expressions and `:=`), `group.rs` (grouped aggregates) and `join.rs` (equi
+  and rolling joins) cover the shapes the db-benchmark exercises and return `None` for anything
+  else, and the query then runs as a plan. Polars' lazy engine pays for planning, for widening
+  integers to 64 bits to detect overflow, for rebuilding a whole column when `:=` touches a subset,
+  and for a per-column `take` that nests parallelism badly, which is where data.table won.
+  `query::execute_with_plans_only` skips the kernels, and the differential fuzz in
+  `tests/test_table.rs` checks every kernel against it (`FUZZ_ITERS` raises the iteration count).
+- **Every `Table` column is one contiguous chunk** (`normalize`, `put_column`, `set_key`,
+  `from_normalized`). Kernels read a column as one slice, and the CSV reader returns many chunks,
+  so without the invariant every query copied its keys and inputs again (a third of an
+  integer-keyed group-by's time).
+- **Grouping maps keys to dense codes**: factors by their codes, integers by `value - min`, logicals
+  by two values, combined as mixed-radix digits of one `u64`. A code range no wider than the rows
+  (and at most 2^20) indexes states directly, and a wider one hash-partitions, because dense states
+  cost memory per possible code; dense runs split across threads only when the rows outnumber
+  every thread's states. The equi-join kernel bounds its buckets the same way, by the rows on
+  both sides. Each aggregate is a `State` that is updated per row, merged across
+  threads, appended across partitions and finished per group in output order.
+- **Moments use Welford updates with a symmetric co-moment and merge with Chan's formula**, so
+  `cor(a, b)` equals `cor(b, a)` bit for bit. They differ from Polars' two-pass result in the last
+  few digits, which is why the fuzz compares doubles to 1e-6.
+- **Median collects `(slot, value)` entries, counting-sorts them by slot in parallel, and selects
+  each group's middle in place**; a valid `NaN` without `na.rm` falls back to the plan, whose
+  ordering of NaN matches R's.
+- **Join output gathers column by column through `gather_column`**, parallel over rows, with
+  factors gathered by code and unmatched rows marked in validity. The rolling join searches
+  integer and double times natively after a parallel sortedness check.
+- **`mult = "first" | "last"`** keeps one match per row of `i`, as data.table does; `"all"` is the
+  default.
+- **R's integer `sum` is a double exactly when a total overflows**, as in R 4.3, and a group that
+  holds an `NA` (without `na.rm`) is `NA`, not an overflow. A top-level sum keeps 64 bits until
+  its totals are known (`narrow_sums`). A sum nested in a selected expression is staged: the
+  aggregates first, then the expression (`staged`); after a join, the joined rows are built first
+  and the query reruns over them. A new `:=` column nesting one is computed both
+  as written and with each sum over doubles (keeping the expression's own type, so `sum(v) > 0L`
+  stays logical), and hidden probe sums pick the version
+  (`assign` in `query.rs`). Where data.table's grouped `:=` takes the column type from the first
+  group, the engine makes the column a double if any group overflows.
+
+## Records, tuples and tags are ry values, not R lists
+
+- **Previous shape (draft only):** a record or tuple was a plain list and a tag a classed list with
+  an `ry_tag` attribute, so R and C code could read them unchanged. That made R's list semantics
+  (attributes, partial `$` matching, `c()` coercion, `names<-`) the semantics of ry's own types,
+  and gave the JIT no fixed layout to rely on.
+- **Chosen shape:** one heap object kind of ry's own (a type code GNU R leaves unused) holding a
+  32-bit interned layout id and eight-byte slots. The layout records the tag (an interned small
+  integer), the field names sorted canonically, and per-slot storage: an unboxed length-one
+  `double`, `integer` or `logical`, or a traced handle. Values are immutable with value semantics.
+- **Types:** `record{...}` and `tuple{...}` are distinct from `list{...}`, since the values differ.
+  Tags are structural; a tag union is an ordinary union, `..` makes it open, and there are no row
+  variables, which keeps the checker Hindley-Milner.
+- **R boundary:** explicit. `as.list()` converts out, `as.record()`/`as.tuple()`/`as.tag()` convert
+  in. Each kind has an implicit class (`ry_record`, `ry_tuple`, `ry_tag`) for `class`, `inherits` and
+  S3 dispatch. Printing, `identical`, `all.equal`, field access, the type predicates and builtins
+  that only store a value (such as `list`) accept native values; every other builtin raises one
+  error that names the conversion. C code sees an opaque object (`TYPEOF` 27): list element moves
+  work and every other accessor raises the same error, because a deep scan at `.Call` would cost
+  time in proportion to the data. `serialize` refuses them, so they never leave the session.
+- **Layout:** keyed on tag and sorted field names only; which slots hold raw scalars is a per-object
+  mask, so same-typed values share a layout id whatever their contents.
+- **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
+  a known type compile to a slot load after one layout-id comparison, and tag tests are integer
+  comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+- **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
+  the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
+  keeps its slot count in header padding, so the collector never reads the layout table.
+- **The refusal is a builtin flag, not a scan:** `BuiltinDef::accepts_native` is set at startup from
+  `syntax::native_values::ACCEPTS_NATIVE`, and `install_all` asserts every listed name exists, so a
+  renamed builtin cannot silently drop off the list. The check tests only top-level arguments,
+  because looking inside lists would cost time in proportion to the data.
+- **The checker reads the same list.** It reports a record, tuple or tag passed to an R function
+  that is not on it as a `type-mismatch`. The list lives in `syntax` because both `semantics` and
+  `interp` already depend on that crate, so the static error and the runtime refusal cannot drift
+  apart. The checker reports only when every member of the argument's type is the same native
+  kind, and never for a function the project itself defines or shadows.
+- **`$<-` on a record keeps its type.** Writing a field checks the value against the field's type,
+  and writing a field the record lacks is an error rather than a widening, because the runtime's
+  layout is fixed by the field names.
+- **Pattern encoding reuses the value constructors** (`.ry_tag`, `.ry_tuple`, `.ry_record`), so a
+  quoted pattern deparses with the same code as a quoted value, and `_`/`..` stay bare symbols.
 
 # Decision record: inline annotations at run time
 

@@ -608,6 +608,8 @@ pub enum CompletionKind {
     Variable,
     Function,
     Field,
+    /// A tag name, completed after the `:` that starts a tag.
+    Tag,
 }
 
 /// Variant order is the ranking order among items of equal match quality.
@@ -673,6 +675,10 @@ pub fn completion(
         })
     {
         return string_subscript_completion(db, file, offset, &string_token);
+    }
+
+    if let Some(items) = tag_completions(db, file, offset, &query) {
+        return finish_completions(items, &query);
     }
 
     let items = match context {
@@ -1965,19 +1971,25 @@ fn dollar_completions(
                 _ => None,
             })
             .min_by_key(|(range, _)| range.len())?;
-        let (TyKind::Record(fields) | TyKind::Frame(Some(fields))) =
-            check.expression_types.get(&target)?.kind(db)
-        else {
-            return None;
+        let fields: Vec<(&str, Ty<'_>)> = match check.expression_types.get(&target)?.kind(db) {
+            TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+                .iter()
+                .map(|field| (field.name.text(db), field.ty))
+                .collect(),
+            TyKind::NativeRecord(fields) => fields
+                .iter()
+                .map(|field| (field.name.text(db), field.ty))
+                .collect(),
+            _ => return None,
         };
         let mut renderer = TypeRenderer::default();
         Some(
             fields
-                .iter()
-                .map(|field| CompletionItem {
-                    detail: Some(renderer.render(db, field.ty)),
+                .into_iter()
+                .map(|(name, ty)| CompletionItem {
+                    detail: Some(renderer.render(db, ty)),
                     ..CompletionItem::new(
-                        insertable_name(field.name.text(db)),
+                        insertable_name(name),
                         CompletionKind::Field,
                         CompletionSource::Field,
                     )
@@ -1990,6 +2002,62 @@ fn dollar_completions(
         Some(items) if !items.is_empty() => items,
         _ => spelled_completions(db, files, query, DOLLAR_EXPR, CompletionSource::Field),
     }
+}
+
+/// After a lone `:` inside a `match`, the tags the scrutinee's type lists: the cases an arm can
+/// still name. `::` is a namespace, and `1:n` has no `match` around it to supply tags.
+fn tag_completions(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    query: &str,
+) -> Option<Vec<CompletionItem>> {
+    let text = file.text(db);
+    let before = text.get(..usize::from(offset).checked_sub(query.len())?)?;
+    if !before.ends_with(':') || before.ends_with("::") {
+        return None;
+    }
+    let position = position_in_item(db, file, offset)?;
+    let hir = item_hir(db, position.item).as_ref()?;
+    let check = item_check(db, position.item)?;
+    let scrutinee = hir
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            ExpressionKind::Match { scrutinee, .. }
+                if expression.range.contains_inclusive(position.relative)
+                    && hir.expression(*scrutinee).range.end() < position.relative =>
+            {
+                Some((expression.range.len(), *scrutinee))
+            }
+            _ => None,
+        })
+        .min_by_key(|(length, _)| *length)
+        .map(|(_, scrutinee)| scrutinee)?;
+    let ty = *check.expression_types.get(&scrutinee)?;
+    let members = match ty.kind(db) {
+        TyKind::Union(members) => members.clone(),
+        _ => vec![ty],
+    };
+    let mut renderer = TypeRenderer::default();
+    let items: Vec<CompletionItem> = members
+        .into_iter()
+        .filter_map(|member| {
+            let TyKind::Tag(name, _) = member.kind(db) else {
+                return None;
+            };
+            Some(CompletionItem {
+                detail: Some(renderer.render(db, member)),
+                ..CompletionItem::new(
+                    name.text(db).to_owned(),
+                    CompletionKind::Tag,
+                    CompletionSource::Field,
+                )
+            })
+        })
+        .filter(|item| search_match(&item.label, query).is_some())
+        .collect();
+    (!items.is_empty()).then_some(items)
 }
 
 fn namespace_completions(
@@ -2340,7 +2408,16 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => false,
         TyKind::Var(_) | TyKind::Rigid(_) => variables_allowed,
-        TyKind::Any | TyKind::Null | TyKind::Scalar(_) => true,
+        TyKind::Any | TyKind::Null | TyKind::Scalar(_) | TyKind::OtherTags => true,
+        TyKind::NativeTuple(items) => items
+            .iter()
+            .all(|&item| is_hintable(db, item, variables_allowed)),
+        TyKind::NativeRecord(fields) => fields
+            .iter()
+            .all(|field| is_hintable(db, field.ty, variables_allowed)),
+        TyKind::Tag(_, payload) => {
+            payload.is_none_or(|payload| is_hintable(db, payload, variables_allowed))
+        }
         TyKind::Vector(element)
         | TyKind::NamedVector(element)
         | TyKind::List(element)
@@ -2557,7 +2634,7 @@ fn s4_occurrences(
 }
 
 /// Parameters and loop variables are not expressions, so their declaration site is emitted
-/// explicitly.
+/// explicitly. A pattern's names are `NameRef` expressions, so they come with the resolutions.
 fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mut Vec<Occurrence>) {
     let (Some(node), Some(naming), Some(hir)) = (
         item_node(db, item),
@@ -2583,9 +2660,13 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let targets: BTreeSet<ExprId> = hir
         .expressions
         .iter()
-        .filter_map(|expression| match &expression.kind {
-            ExpressionKind::Assign { target, .. } => Some(*target),
-            _ => None,
+        .flat_map(|expression| match &expression.kind {
+            ExpressionKind::Assign { target, .. } => vec![*target],
+            ExpressionKind::Match { arms, .. } => arms
+                .iter()
+                .flat_map(|arm| arm.bindings.iter().copied())
+                .collect(),
+            _ => Vec::new(),
         })
         .collect();
     slot.extend(

@@ -37,7 +37,7 @@ expects a `data.frame` is a type error.
 ## Queries
 
 `x[i, j, by]` works as in data.table: `i` filters or orders rows, `j` selects or computes columns,
-and `by` or `keyby` groups. Joins take `on =`, `nomatch = NULL` and `roll =`, and `.N`, `.SD`,
+and `by` or `keyby` groups. Joins take `on =`, `nomatch = NULL`, `mult =` and `roll =`, and `.N`, `.SD`,
 `.SDcols`, `.I` and `.GRP` are available. Columns are in scope inside the brackets, so `amount`
 above is the column.
 

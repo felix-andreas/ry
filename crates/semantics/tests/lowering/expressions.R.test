@@ -35,7 +35,7 @@ FALSE
 # <statement>
   Literal Logical(false)
 # <statement>
-  Literal Complex
+  Literal Complex("1i")
 
 #---- numeric_literals_keep_their_source_text
 # The text is kept, not a parsed value: the checker reads it back for literal

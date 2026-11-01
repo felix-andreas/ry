@@ -12,6 +12,7 @@ use crate::{
     values::{self, nil},
 };
 use heap::object::{Sexp, SexpType};
+use syntax::native_values::ACCEPTS_NATIVE;
 
 /// How a builtin is called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,6 +77,9 @@ pub struct BuiltinDef {
     /// Empty arguments reach the builtin as `R_MissingArg` instead of being an error, as `[`
     /// needs for `x[, 1]`.
     pub keep_missing: bool,
+    /// Whether a ry record, tuple or tag may reach the builtin as a top-level argument; set at
+    /// registration from [`ACCEPTS_NATIVE`].
+    pub accepts_native: bool,
     pub function: BuiltinFn,
     pub object: Option<Sexp>,
 }
@@ -89,6 +93,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         visibility: Visibility::On,
         generic: Generic::None,
         keep_missing: false,
+        accepts_native: false,
         function,
         object: None,
     }
@@ -153,6 +158,7 @@ impl BuiltinDef {
             visibility: self.visibility,
             generic: self.generic,
             keep_missing: self.keep_missing,
+            accepts_native: self.accepts_native,
             function: self.function,
             object: self.object,
         }
@@ -186,6 +192,7 @@ pub(crate) unsafe fn install_all() {
         crate::session::BUILTINS,
         crate::native::BUILTINS,
         crate::utils::BUILTINS,
+        crate::records::BUILTINS,
     ] {
         // `register` lets a later definition replace an earlier one, which the host relies on;
         // within the interpreter's own tables a repeated name is a stale copy shadowing the real
@@ -199,6 +206,12 @@ pub(crate) unsafe fn install_all() {
         }
         register(table);
     }
+    for name in ACCEPTS_NATIVE {
+        assert!(
+            seen.contains(&(*name, false)) || seen.contains(&(*name, true)),
+            "`{name}` is listed as accepting ry values but is not a builtin"
+        );
+    }
 }
 
 pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
@@ -211,6 +224,7 @@ pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
             let existing = &mut state.builtins[index as usize];
             let object = existing.object;
             *existing = definition.copy();
+            existing.accepts_native = ACCEPTS_NATIVE.contains(&definition.name);
             existing.object = object;
             continue;
         }
@@ -233,6 +247,7 @@ pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
                 .unwrap_or_else(|failure| panic!("cannot bind `{}`: {failure}", definition.name));
         }
         let mut entry = definition.copy();
+        entry.accepts_native = ACCEPTS_NATIVE.contains(&definition.name);
         entry.object = Some(object);
         state.builtins.push(entry);
         state.builtin_index.insert(key, index);
@@ -335,7 +350,9 @@ pub unsafe fn match_builtin_args(
                 if matched[formal_index].is_some() {
                     return Err(error_in(
                         call,
-                        format!("formal argument \"{formal}\" matched by multiple actual arguments"),
+                        format!(
+                            "formal argument \"{formal}\" matched by multiple actual arguments"
+                        ),
                     ));
                 }
                 matched[formal_index] = Some(args[arg_index].value);

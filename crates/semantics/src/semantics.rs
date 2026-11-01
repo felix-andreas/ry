@@ -1,6 +1,7 @@
 pub mod annotations;
 pub mod check;
 pub mod diagnostics;
+pub mod exhaustiveness;
 pub mod hir;
 pub mod infer;
 pub mod lints;
@@ -15,7 +16,8 @@ use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use syntax::ast::{self, BinaryExpr, is_expression_kind};
+use syntax::ast::is_expression_kind;
+use syntax::ast::{self, BinaryExpr};
 use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
@@ -751,12 +753,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
         return BTreeSet::new();
     };
     let mut reads: BTreeSet<Symbol> = naming.non_locals.values().copied().collect();
-    reads.extend(
-        naming
-            .namespace_reads
-            .values()
-            .filter_map(|read| read.name),
-    );
+    reads.extend(naming.namespace_reads.values().filter_map(|read| read.name));
     reads
 }
 
@@ -1459,12 +1456,11 @@ fn top_level_definition(node: &SyntaxNode) -> Option<TopLevelDefinition> {
     }
     let binary = BinaryExpr::cast(node.clone())?;
     let operator = binary.operator()?;
+    let (lhs, rhs) = (binary.lhs(), binary.rhs());
     // `:=` binds nothing: R calls a function of that name (data.table, rlang).
     let (target, value) = match operator.kind() {
-        SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => {
-            (binary.lhs(), binary.rhs())
-        }
-        SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (binary.rhs(), binary.lhs()),
+        SyntaxKind::LESS_MINUS | SyntaxKind::EQ | SyntaxKind::LESS2_MINUS => (lhs, rhs),
+        SyntaxKind::MINUS_GREATER | SyntaxKind::MINUS_GREATER2 => (rhs, lhs),
         _ => return None,
     };
     let target = target?;
@@ -1577,6 +1573,7 @@ mod tests {
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
             column_misses: Default::default(),
+            match_findings: Vec::new(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

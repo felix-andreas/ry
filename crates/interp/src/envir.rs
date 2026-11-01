@@ -43,14 +43,30 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("bindingIsActive", 2, do_binding_is_active),
     internal("activeBindingFunction", 2, do_active_binding_function),
     internal("sys.call", 1, |call| unsafe { do_sys(call, SysKind::Call) }),
-    internal("sys.function", 1, |call| unsafe { do_sys(call, SysKind::Function) }),
-    internal("sys.frame", 1, |call| unsafe { do_sys(call, SysKind::Frame) }),
-    internal("sys.nframe", 0, |call| unsafe { do_sys(call, SysKind::NFrame) }),
-    internal("sys.calls", 0, |call| unsafe { do_sys(call, SysKind::Calls) }),
-    internal("sys.frames", 0, |call| unsafe { do_sys(call, SysKind::Frames) }),
-    internal("sys.parent", 1, |call| unsafe { do_sys(call, SysKind::Parent) }),
-    internal("sys.parents", 0, |call| unsafe { do_sys(call, SysKind::Parents) }),
-    internal("sys.on.exit", 0, |call| unsafe { do_sys(call, SysKind::OnExit) }),
+    internal("sys.function", 1, |call| unsafe {
+        do_sys(call, SysKind::Function)
+    }),
+    internal("sys.frame", 1, |call| unsafe {
+        do_sys(call, SysKind::Frame)
+    }),
+    internal("sys.nframe", 0, |call| unsafe {
+        do_sys(call, SysKind::NFrame)
+    }),
+    internal("sys.calls", 0, |call| unsafe {
+        do_sys(call, SysKind::Calls)
+    }),
+    internal("sys.frames", 0, |call| unsafe {
+        do_sys(call, SysKind::Frames)
+    }),
+    internal("sys.parent", 1, |call| unsafe {
+        do_sys(call, SysKind::Parent)
+    }),
+    internal("sys.parents", 0, |call| unsafe {
+        do_sys(call, SysKind::Parents)
+    }),
+    internal("sys.on.exit", 0, |call| unsafe {
+        do_sys(call, SysKind::OnExit)
+    }),
     internal("parent.frame", 1, do_parent_frame),
     builtin("as.environment", 1, do_as_environment),
     builtin("pos.to.env", 1, do_pos_to_env),
@@ -64,9 +80,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
     internal("unregisterNamespace", 1, do_unregister_namespace).invisible(),
-    internal("getNamespaceRegistry", 0, |_| unsafe { Ok(crate::heap().known().namespace_registry) }),
+    internal("getNamespaceRegistry", 0, |_| unsafe {
+        Ok(crate::heap().known().namespace_registry)
+    }),
     internal("importIntoEnv", 4, do_import_into_env).invisible(),
-    internal("isNamespaceEnv", 1, |call| unsafe { scalar_bool(is_namespace(call.arg(0))) }),
+    internal("isNamespaceEnv", 1, |call| unsafe {
+        scalar_bool(is_namespace(call.arg(0)))
+    }),
     internal("do.call", 3, do_do_call).keep_visibility(),
     internal("lapply", 2, do_lapply),
     internal("vapply", 4, do_vapply),
@@ -398,7 +418,9 @@ unsafe fn do_topenv(call: &Call<'_>) -> R<Sexp> {
             || current == base_namespace()
             || is_namespace(current)
             || is_package_env(current)
-            || crate::heap().frame_cell(current, symbols().dot_package_name).is_some()
+            || crate::heap()
+                .frame_cell(current, symbols().dot_package_name)
+                .is_some()
         {
             return Ok(current);
         }
@@ -433,7 +455,9 @@ pub unsafe fn namespace_name(env: Sexp) -> Option<String> {
     if env == base_namespace() {
         return Some("base".into());
     }
-    let info = crate::heap().frame_cell(env, symbols().dot_namespace)?.cdr();
+    let info = crate::heap()
+        .frame_cell(env, symbols().dot_namespace)?
+        .cdr();
     let info = value_of(info).ok()?;
     if info.kind() != SexpType::Environment {
         return None;
@@ -582,7 +606,9 @@ unsafe fn do_mget(call: &Call<'_>) -> R<Sexp> {
     let count = length(names);
     let result = alloc(SexpType::List, count)?;
     for index in 0..count {
-        let name = string_at(names, index).map(|text| text.into_owned()).unwrap_or_default();
+        let name = string_at(names, index)
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
         let symbol = values::install(&name)?;
         let mode = if length(modes) > 0 {
             string_at(modes, index % length(modes))
@@ -626,7 +652,9 @@ unsafe fn do_remove(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(1), "envir")?;
     let inherits = values::as_logical_scalar(call.arg(2)) == 1;
     for index in 0..length(names) {
-        let name = string_at(names, index).map(|text| text.into_owned()).unwrap_or_default();
+        let name = string_at(names, index)
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
         let symbol = values::install(&name)?;
         let mut frame = env;
         let mut done = false;
@@ -647,42 +675,53 @@ unsafe fn do_remove(call: &Call<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// The names bound in `env`, as `ls()` lists them.
-pub unsafe fn env_names(env: Sexp, all: bool, sorted: bool) -> Vec<String> {
-    let mut names: Vec<String> = crate::heap()
-        .frame_symbols(env)
-        .into_iter()
-        .map(|symbol| symbol_name(symbol).into_owned())
-        .filter(|name| all || !name.starts_with('.'))
-        .collect();
-    if sorted {
-        crate::sort::sort_strings(&mut names);
+/// The symbols bound in `env`, in the order `ls()` lists their names.
+pub unsafe fn env_symbols(env: Sexp, all: bool, sorted: bool) -> Vec<Sexp> {
+    let mut symbols = crate::heap().frame_symbols(env);
+    if !all {
+        symbols.retain(|symbol| symbol.car().bytes().first() != Some(&b'.'));
     }
-    names
+    if sorted {
+        symbols
+            .sort_by(|left, right| crate::sort::collate(&symbol_name(*left), &symbol_name(*right)));
+    }
+    symbols
+}
+
+/// The names bound in `env` as a character vector, as `ls()` lists them. A symbol's print name
+/// is already an interned `CHARSXP`, so no name is copied.
+pub unsafe fn env_names(env: Sexp, all: bool, sorted: bool) -> R<Sexp> {
+    symbol_names(&env_symbols(env, all, sorted))
+}
+
+unsafe fn symbol_names(symbols: &[Sexp]) -> R<Sexp> {
+    let names = alloc(SexpType::String, symbols.len())?;
+    for (index, symbol) in symbols.iter().enumerate() {
+        values::set_elt(names, index, symbol.car());
+    }
+    Ok(names)
 }
 
 unsafe fn do_ls(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "envir")?;
     let all = values::as_logical_scalar(call.arg(1)) == 1;
     let sorted = values::as_logical_scalar(call.arg(2)) != 0;
-    string_vector(&env_names(env, all, sorted))
+    env_names(env, all, sorted)
 }
 
 unsafe fn do_env2list(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "x")?;
     let all = values::as_logical_scalar(call.arg(1)) == 1;
     let sorted = values::as_logical_scalar(call.arg(2)) == 1;
-    let names = env_names(env, all, sorted);
-    let result = alloc(SexpType::List, names.len())?;
-    for (index, name) in names.iter().enumerate() {
-        let symbol = values::install(name)?;
+    let bound = env_symbols(env, all, sorted);
+    let result = alloc(SexpType::List, bound.len())?;
+    for (index, &symbol) in bound.iter().enumerate() {
         let value = find_var_in_frame(symbol, env)?;
         let value = value_of(value)?;
         values::set_elt(result, index, value);
     }
-    if !names.is_empty() {
-        let names = string_vector(&names)?;
-        values::set_attr(result, symbols().names, names)?;
+    if !bound.is_empty() {
+        values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
     }
     Ok(result)
 }
@@ -849,7 +888,10 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
             let path = search_path();
             if position == -1 {
                 // The calling environment.
-                return Ok(interp().frames.last().map_or(global_env(), |frame| frame.sys_parent));
+                return Ok(interp()
+                    .frames
+                    .last()
+                    .map_or(global_env(), |frame| frame.sys_parent));
             }
             if position < 1 || position as usize > path.len() {
                 return Err(error("invalid 'pos' argument"));
@@ -869,7 +911,9 @@ pub unsafe fn as_environment(value: Sexp) -> R<Sexp> {
                     return Ok(env);
                 }
             }
-            Err(error(format!("no item called \"{name}\" on the search list")))
+            Err(error(format!(
+                "no item called \"{name}\" on the search list"
+            )))
         }
         SexpType::List => list_to_env(value, empty_env()),
         SexpType::Object if value.has_gp(gp::S4_OBJECT) => {
@@ -1083,7 +1127,9 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
             changed = true;
         } else if arg.value.kind() == SexpType::String {
             for index in 0..length(arg.value) {
-                let name = string_at(arg.value, index).map(|text| text.into_owned()).unwrap_or_default();
+                let name = string_at(arg.value, index)
+                    .map(|text| text.into_owned())
+                    .unwrap_or_default();
                 let value = get_option(&name);
                 entries.push((name, value));
             }
@@ -1363,7 +1409,8 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
             )));
         }
         let compatible = value.kind() == kind
-            || (kind == SexpType::Real && matches!(value.kind(), SexpType::Integer | SexpType::Logical))
+            || (kind == SexpType::Real
+                && matches!(value.kind(), SexpType::Integer | SexpType::Logical))
             || (kind == SexpType::Integer && value.kind() == SexpType::Logical)
             || (kind == SexpType::List);
         if !compatible {
@@ -1425,7 +1472,8 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
         let value = crate::scope(|| {
             let mut args = Vec::new();
             for (position, &list) in lists.iter().enumerate() {
-                let element = crate::subset::list_or_vector_element(list, index % lengths[position])?;
+                let element =
+                    crate::subset::list_or_vector_element(list, index % lengths[position])?;
                 let tag = if names != nil() && !names.element(position).bytes().is_empty() {
                     crate::heap().install_char(names.element(position))?
                 } else {
@@ -1465,8 +1513,19 @@ unsafe fn do_rapply(call: &Call<'_>) -> R<Sexp> {
     rapply_one(object, function, classes, deflt, &how, call.env)
 }
 
-unsafe fn rapply_one(object: Sexp, function: Sexp, classes: Sexp, deflt: Sexp, how: &str, env: Sexp) -> R<Sexp> {
-    if object.kind() == SexpType::List && !values::inherits(object, "data.frame") || object.kind() == SexpType::List && how != "unlist" && values::inherits(object, "data.frame") {
+unsafe fn rapply_one(
+    object: Sexp,
+    function: Sexp,
+    classes: Sexp,
+    deflt: Sexp,
+    how: &str,
+    env: Sexp,
+) -> R<Sexp> {
+    if object.kind() == SexpType::List && !values::inherits(object, "data.frame")
+        || object.kind() == SexpType::List
+            && how != "unlist"
+            && values::inherits(object, "data.frame")
+    {
         let count = length(object);
         let result = alloc(SexpType::List, count)?;
         for index in 0..count {
@@ -1482,7 +1541,8 @@ unsafe fn rapply_one(object: Sexp, function: Sexp, classes: Sexp, deflt: Sexp, h
     let class = crate::dispatch::class_of(object)?;
     let matches = (0..length(classes)).any(|index| {
         let wanted = classes.element(index).bytes();
-        wanted == b"ANY" || (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
+        wanted == b"ANY"
+            || (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)
     });
     if matches {
         call_function(function, &eval::value_args(&[object]), env, nil())
@@ -1497,23 +1557,23 @@ unsafe fn do_eapply(call: &Call<'_>) -> R<Sexp> {
     let env = environment_arg(call.arg(0), "env")?;
     let function = call.arg(1);
     let all = values::as_logical_scalar(call.arg(2)) == 1;
-    let names = env_names(env, all, false);
-    let result = alloc(SexpType::List, names.len())?;
-    for (index, name) in names.iter().enumerate() {
-        let symbol = values::install(name)?;
+    let bound = env_symbols(env, all, false);
+    let result = alloc(SexpType::List, bound.len())?;
+    for (index, &symbol) in bound.iter().enumerate() {
         let value = value_of(find_var_in_frame(symbol, env)?)?;
         let value = call_function(function, &eval::value_args(&[value]), call.env, nil())?;
         values::set_elt(result, index, value);
     }
-    let names = string_vector(&names)?;
-    values::set_attr(result, symbols().names, names)?;
+    values::set_attr(result, symbols().names, symbol_names(&bound)?)?;
     Ok(result)
 }
 
 unsafe fn dots_of(env: Sexp) -> R<Sexp> {
     let value = find_var(symbols().dots, env)?;
     if value == unbound() {
-        return Err(error("incorrect context: the current call has no '...' to look in"));
+        return Err(error(
+            "incorrect context: the current call has no '...' to look in",
+        ));
     }
     Ok(value)
 }
@@ -1604,7 +1664,12 @@ unsafe fn do_args(call: &Call<'_>) -> R<Sexp> {
                     if value != unbound() {
                         let value = value_of(value)?;
                         if value.kind() == SexpType::Closure {
-                            return values::triple(SexpType::Closure, value.car(), nil(), global_env());
+                            return values::triple(
+                                SexpType::Closure,
+                                value.car(),
+                                nil(),
+                                global_env(),
+                            );
                         }
                     }
                 }
@@ -1699,7 +1764,9 @@ pub unsafe fn present_or_nil(value: Option<Sexp>) -> Sexp {
 unsafe fn colon_name(value: Sexp) -> R<String> {
     match value.kind() {
         SexpType::Symbol => Ok(symbol_name(value).into_owned()),
-        SexpType::String if length(value) == 1 => Ok(values::string_at(value, 0).unwrap_or_default().into_owned()),
+        SexpType::String if length(value) == 1 => {
+            Ok(values::string_at(value, 0).unwrap_or_default().into_owned())
+        }
         _ => Err(error("bad namespace name")),
     }
 }
@@ -1715,7 +1782,9 @@ unsafe fn namespace_value(call: &Call<'_>, exported: bool) -> R<Sexp> {
 /// Looks `name` up in a package's namespace, loading it if needed. Base is looked up directly;
 /// other packages go through base R's own `getExportedValue` and `asNamespace`.
 unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp) -> R<Sexp> {
-    let package_name = values::first_string(package).map(|text| text.into_owned()).unwrap_or_default();
+    let package_name = values::first_string(package)
+        .map(|text| text.into_owned())
+        .unwrap_or_default();
     let symbol = values::install(name)?;
     if package_name == "base" {
         let value = find_var_in_frame(symbol, base_namespace())?;
@@ -1728,15 +1797,29 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     let function = eval::find_fun(values::install(function_name)?, base_namespace())?;
     let name_value = values::scalar_string(name)?;
     if exported {
-        eval::apply(nil(), function, &eval::value_args(&[package, name_value]), env)
+        eval::apply(
+            nil(),
+            function,
+            &eval::value_args(&[package, name_value]),
+            env,
+        )
     } else {
         let as_namespace = eval::find_fun(values::install("asNamespace")?, base_namespace())?;
         let namespace = eval::apply(nil(), as_namespace, &eval::value_args(&[package]), env)?;
         let inherits = scalar_bool(false)?;
         let args = [
-            Arg { tag: nil(), value: name_value },
-            Arg { tag: values::install("envir")?, value: namespace },
-            Arg { tag: values::install("inherits")?, value: inherits },
+            Arg {
+                tag: nil(),
+                value: name_value,
+            },
+            Arg {
+                tag: values::install("envir")?,
+                value: namespace,
+            },
+            Arg {
+                tag: values::install("inherits")?,
+                value: inherits,
+            },
         ];
         eval::apply(nil(), function, &args, env)
     }

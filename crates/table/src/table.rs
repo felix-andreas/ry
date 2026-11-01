@@ -12,6 +12,9 @@
 
 pub mod convert;
 pub mod ffi;
+mod group;
+mod join;
+mod kernel;
 pub mod query;
 
 use convert::RVector;
@@ -201,6 +204,8 @@ impl fmt::Display for Schema {
 /// holds the table: an unshared table is updated in place through `&mut self`, and a shared one
 /// is first [`fork`](Table::fork)ed, which copies only the column list, because the Arrow
 /// buffers themselves are immutable and shared.
+///
+/// Every column is one contiguous chunk, so kernels read it as a slice without copying.
 #[derive(Clone, Debug, Default)]
 pub struct Table {
     frame: DataFrame,
@@ -292,7 +297,13 @@ impl Table {
     /// The values of an `Int32` column without nulls stored in one chunk, which R can read in
     /// place because the layouts agree. This is what makes `INTEGER_RO` on a table column free.
     pub fn column_slice_i32(&self, name: &str) -> Option<&[i32]> {
-        let chunked = self.frame.column(name).ok()?.as_materialized_series().i32().ok()?;
+        let chunked = self
+            .frame
+            .column(name)
+            .ok()?
+            .as_materialized_series()
+            .i32()
+            .ok()?;
         if chunked.null_count() > 0 {
             return None;
         }
@@ -302,7 +313,13 @@ impl Table {
     /// As [`Table::column_slice_i32`], for `Float64`. A `NaN` is fine, because R's `NaN` is the
     /// same value; only a null needs R's `NA_real_` bit pattern.
     pub fn column_slice_f64(&self, name: &str) -> Option<&[f64]> {
-        let chunked = self.frame.column(name).ok()?.as_materialized_series().f64().ok()?;
+        let chunked = self
+            .frame
+            .column(name)
+            .ok()?
+            .as_materialized_series()
+            .f64()
+            .ok()?;
         if chunked.null_count() > 0 {
             return None;
         }
@@ -331,6 +348,29 @@ impl Table {
         Ok(())
     }
 
+    /// Moves a column out of the table, leaving an all-`NA` placeholder until
+    /// [`put_column`](Table::put_column) brings it back. Nothing else then shares the column's
+    /// buffers if nothing shared the table, so a kernel can write into them in place.
+    pub(crate) fn take_column(&mut self, name: &str) -> Result<Column> {
+        let height = self.frame.height();
+        // SAFETY: the placeholder has the frame's height, so every column keeps it.
+        let columns = unsafe { self.frame.columns_mut() };
+        let slot = columns
+            .iter_mut()
+            .find(|column| column.name() == name)
+            .ok_or_else(|| Error::NoColumn(name.to_string()))?;
+        let placeholder = Column::full_null(slot.name().clone(), height, &DataType::Boolean);
+        Ok(std::mem::replace(slot, placeholder))
+    }
+
+    /// Adds or replaces a column that a kernel built, which holds no valid `i32::MIN` and has an
+    /// R dtype already, so it skips [`set_column`](Table::set_column)'s normalizing scan.
+    pub(crate) fn put_column(&mut self, column: Column) -> Result<()> {
+        self.forget_key(column.name().clone().as_str());
+        self.frame.with_column(column.rechunk())?;
+        Ok(())
+    }
+
     pub fn drop_column(&mut self, name: &str) -> Result<()> {
         self.frame
             .drop_in_place(name)
@@ -342,7 +382,7 @@ impl Table {
     /// Sorts the table by `columns` and records them as its key, as `setkey` does.
     pub fn set_key(&mut self, columns: &[&str]) -> Result<()> {
         let frame = std::mem::take(&mut self.frame);
-        self.frame = frame.sort(
+        let mut sorted = frame.sort(
             columns
                 .iter()
                 .copied()
@@ -350,6 +390,8 @@ impl Table {
                 .collect::<Vec<_>>(),
             Default::default(),
         )?;
+        sorted.rechunk_mut_par();
+        self.frame = sorted;
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();
         Ok(())
     }
@@ -360,14 +402,30 @@ impl Table {
         }
     }
 
+    /// Wraps a frame whose columns already hold R dtypes, such as one gathered from other tables'
+    /// columns, without [`Table::new`]'s scan of every integer column for `i32::MIN`.
+    pub(crate) fn from_normalized(mut frame: DataFrame) -> Table {
+        frame.rechunk_mut_par();
+        Table {
+            frame,
+            key: Vec::new(),
+        }
+    }
+
     pub(crate) fn with_key(mut self, key: Vec<PlSmallStr>) -> Table {
         self.key = key;
         self
     }
 }
 
-/// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for.
+/// Converts a column to the dtype its R vector type uses, or refuses a dtype R has no type for,
+/// and makes it one contiguous chunk. Every kernel reads a column as one slice, so a column left
+/// in the many chunks a CSV reader produces would be copied again by every query that reads it.
 fn normalize(column: Column) -> Result<Column> {
+    Ok(convert(column)?.rechunk())
+}
+
+fn convert(column: Column) -> Result<Column> {
     let target = match column.dtype() {
         DataType::Int32 => {
             // R's `NA_integer_` is `i32::MIN`, so a valid `i32::MIN` must become a null, or R would
@@ -382,10 +440,7 @@ fn normalize(column: Column) -> Result<Column> {
                 .collect();
             return Ok(cleaned.with_name(column.name().clone()).into_column());
         }
-        DataType::Boolean
-        | DataType::Float64
-        | DataType::String
-        | DataType::Enum(..) => {
+        DataType::Boolean | DataType::Float64 | DataType::String | DataType::Enum(..) => {
             return Ok(column);
         }
         DataType::Int8 | DataType::Int16 | DataType::UInt8 | DataType::UInt16 => DataType::Int32,

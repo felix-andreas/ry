@@ -64,6 +64,8 @@ pub enum SyntaxKind {
     MINUS_GREATER,
     MINUS_GREATER2,
     EQ,
+    /// `=>`, which separates a `match` arm's pattern from its body. R has no such token.
+    FAT_ARROW,
     COLON_EQ,
     COLON,
     COLON2,
@@ -109,6 +111,29 @@ pub enum SyntaxKind {
     REPEAT_EXPR,
     BREAK_EXPR,
     NEXT_EXPR,
+    /// `(a, b)`, a ry tuple literal.
+    TUPLE_EXPR,
+    /// `(x = 1, y = 2)`, a ry record literal.
+    RECORD_EXPR,
+    /// `:Name` or `:Name(payload)`, a ry tag constructor.
+    TAG_EXPR,
+    /// `match (value) { arms }`.
+    MATCH_EXPR,
+    MATCH_ARM,
+    /// `if (condition)` between an arm's pattern and its `=>`.
+    MATCH_GUARD,
+    PATTERN_WILDCARD,
+    PATTERN_BIND,
+    PATTERN_LITERAL,
+    PATTERN_TAG,
+    /// The parenthesized items of a tuple or record pattern, or of a tag's payload.
+    PATTERN_LIST,
+    /// `name = pattern` inside a [`PATTERN_LIST`].
+    PATTERN_FIELD,
+    /// `..`, which lets a record pattern ignore the remaining fields.
+    PATTERN_REST,
+    PATTERN_OR,
+    PATTERN_PAREN,
 
     /// Consecutive `#:` lines stitched into one node.
     ANNOTATION,
@@ -132,6 +157,12 @@ pub enum SyntaxKind {
     TYPE_ASCRIPTION,
     /// An inline `-> TYPE` between a function's parameter list and its body.
     RETURN_TYPE,
+    /// `:Name` or `:Name(payload)` in a type.
+    TYPE_TAG,
+    /// The parenthesized payload of a [`TYPE_TAG`].
+    TYPE_TAG_PAYLOAD,
+    /// `..`, the last member of an open tag union.
+    TYPE_OTHER_TAGS,
 
     ERROR,
 }
@@ -237,6 +268,7 @@ impl SyntaxKind {
             MINUS_GREATER => "`->`",
             MINUS_GREATER2 => "`->>`",
             EQ => "`=`",
+            FAT_ARROW => "`=>`",
             COLON_EQ => "`:=`",
             COLON => "`:`",
             COLON2 => "`::`",
@@ -278,6 +310,21 @@ impl SyntaxKind {
             REPEAT_EXPR => "`repeat` loop",
             BREAK_EXPR => "`break`",
             NEXT_EXPR => "`next`",
+            TUPLE_EXPR => "tuple",
+            RECORD_EXPR => "record",
+            TAG_EXPR => "tag",
+            MATCH_EXPR => "`match` expression",
+            MATCH_ARM => "`match` arm",
+            MATCH_GUARD => "arm guard",
+            PATTERN_WILDCARD => "`_` pattern",
+            PATTERN_BIND => "binding pattern",
+            PATTERN_LITERAL => "literal pattern",
+            PATTERN_TAG => "tag pattern",
+            PATTERN_LIST => "pattern list",
+            PATTERN_FIELD => "field pattern",
+            PATTERN_REST => "`..` pattern",
+            PATTERN_OR => "alternative patterns",
+            PATTERN_PAREN => "parenthesized pattern",
             ANNOTATION => "type annotation",
             ANNOTATION_DIRECTIVE => "annotation directive",
             TYPE_REF => "type",
@@ -297,6 +344,9 @@ impl SyntaxKind {
             TYPE_ARG_LIST => "type argument list",
             TYPE_ASCRIPTION => "type annotation",
             RETURN_TYPE => "return type annotation",
+            TYPE_TAG => "tag type",
+            TYPE_TAG_PAYLOAD => "tag payload type",
+            TYPE_OTHER_TAGS => "`..`",
             ERROR => "error",
         }
     }

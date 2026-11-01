@@ -44,6 +44,11 @@ const SEEDS: &[&str] = &[
     "x[[y[1]]]\n",
     "repeat {\n  next\n}\n",
     "{\n  1; 2\n  3\n}\n",
+    "p <- (x = 1, y = 2); t <- (1L, \"a\"); e <- (); one <- (x = 1,)\n",
+    "s <- :Rect(width = 2, height = 3); n <- :None\n",
+    "match (s) { # c\n  :Circle(radius = r) => r, :Rect(width = w, ..) if (w > 0) => w\n\n  (a, 'x') | (_, a) => a; -1L => 0\n  _ => NULL\n}\n",
+    "x: :Some(integer) | :None | .. <- :None\n",
+    "#: fn(p: record{x: double}) -> :Ok(value: double)\nf <- function(p) p\n",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -110,6 +115,13 @@ const ALPHABET: &[&str] = &[
     "list[",
     "list{",
     "\r\n",
+    "=>",
+    "match",
+    "..",
+    ":None",
+    ":Some(",
+    "record{",
+    "tuple{",
 ];
 
 /// Coverage-guided fuzzer finds. Unlike `SEEDS` these may refuse; only the

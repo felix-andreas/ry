@@ -35,7 +35,8 @@ use table::{
         ParquetReader, ParquetWriter, PlSmallStr, SerReader, SerWriter, col,
     },
     query::{
-        self, Aggregate, BinaryOp, Expr, Join, Output, Query, Roll, Rows, Select, SortKey, UnaryOp,
+        self, Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, Roll, Rows, Select, SortKey,
+        UnaryOp,
     },
 };
 
@@ -1065,6 +1066,7 @@ struct Parts {
     on: Option<Piece>,
     nomatch: Option<Piece>,
     roll: Option<Piece>,
+    mult: Option<Piece>,
     sdcols: Option<Piece>,
     with: Option<Piece>,
 }
@@ -1104,6 +1106,7 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
                     "on" => &mut parts.on,
                     "nomatch" => &mut parts.nomatch,
                     "roll" => &mut parts.roll,
+                    "mult" => &mut parts.mult,
                     ".SDcols" => &mut parts.sdcols,
                     "with" => &mut parts.with,
                     "drop" | "verbose" | "allow.cartesian" => continue,
@@ -1268,11 +1271,21 @@ impl Lowering<'_> {
             Some(piece) => roll(piece.value()?, self.call)?,
             None => Roll::None,
         };
+        let mult = match &parts.mult {
+            Some(piece) => match values::first_string(piece.value()?).as_deref() {
+                Some("all") => Mult::All,
+                Some("first") => Mult::First,
+                Some("last") => Mult::Last,
+                _ => return Err(error_in(self.call, "`mult =` takes \"all\", \"first\" or \"last\"")),
+            },
+            None => Mult::All,
+        };
         Ok(Join {
             other,
             on,
             drop_unmatched,
             roll,
+            mult,
         })
     }
 

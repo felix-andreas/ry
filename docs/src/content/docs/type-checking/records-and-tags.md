@@ -1,0 +1,176 @@
+---
+title: Records and tags
+description: ry's own records, tuples and tagged unions, and the match that checks every case
+---
+
+R models data with lists, S4 classes, R6 classes or Reference Classes, and ry can check none of them
+very far. ry adds its own records, tuples and tagged unions instead. They have a fixed shape that the
+checker knows exactly, and `match` reports the case you forgot:
+
+```r
+#: @alias Shape {:Circle(radius: double) | :Rect(width: double, height: double) | :Empty}
+
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+   --[R/shapes.R:5:3]
+ 4 | area <- function(s) {
+ 5 |   match (s) {
+   |   ^^^^^^^^^
+```
+
+These are ry values, not R lists. R cannot run code that uses them, so they belong in code that only
+ry runs.
+
+## Records and tuples
+
+A record is written in parentheses with named fields, and a tuple with unnamed items. A one-item
+form needs a trailing comma, so that `(x = 1)` and `(1)` keep the meaning they have in R:
+
+```r
+point <- (x = 1, y = 2)     # record{x: double, y: double}
+pair <- (1L, "a")           # tuple{integer, character}
+one <- (x = 1,)             # record{x: double}
+empty <- ()                 # tuple{}
+```
+
+Fields are exact. `$` never matches a prefix, and a field that does not exist is an error:
+
+```r
+origin: record{x: double, y: double} <- (x = 0, y = 0)
+moved <- origin$xx
+```
+
+```text
+type-mismatch
+
+  x field `xx` does not exist in `record{x: double, y: double}`
+    --[R/shapes.R:16:17]
+ 16 | moved <- origin$xx
+    |                 ^^
+```
+
+A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The new value must fit
+the field's type, and assigning to a field that the record does not have is an error, because a
+record's fields are fixed.
+
+## Tags
+
+A tag is a name that starts with `:`, with an optional payload that hugs it: `:None`, `:Some(5L)`,
+`:Rect(width = 2, height = 3)`. A union of tags lists the cases a value can be, and a value outside
+the union is an error:
+
+```r
+#: :Ok(integer) | :Err(character)
+bad <- :Ok("five")
+```
+
+```text
+type-mismatch
+
+  x expected `:Ok(integer) | :Err(character)`, found `:Ok(character)`
+```
+
+A union that ends in `..` is open: it accepts any other tag as well, so a `match` on it needs a
+catch-all arm.
+
+```r
+on_event <- function(event: :Click | :Key | ..) -> character {
+  match (event) {
+    :Click => "click"
+    _ => "other"
+  }
+}
+on_event(:Scroll)   # fine
+```
+
+## `match`
+
+`match (value) { pattern => result }` tries each arm in order and runs the first that matches. Put
+each arm on its own line, or separate arms with `;` or `,`. The `{` must be on the same line as the
+`)`, which keeps R's own `match()` function working unchanged.
+
+| Pattern | Matches |
+| --- | --- |
+| `_` | anything |
+| `name` | anything, and binds it to `name` |
+| `1L`, `"a"`, `TRUE`, `-1` | that literal |
+| `:Some(p)`, `:Rect(width = w, ..)` | that tag, with a matching payload |
+| `(p, q)` | a tuple of two items |
+| `(x = p, ..)` | a record with an `x` field, and any others |
+| `p \| q` | either pattern; both sides must bind the same names |
+
+An arm may add a guard, `pattern if (condition) => result`. A guarded arm never counts toward
+covering a case, because its condition can be false:
+
+```r
+describe <- function(result: :Ok(integer) | :Err(character)) -> character {
+  match (result) {
+    :Ok(n) if (n > 100L) => "big"
+    :Err(message) => message
+  }
+}
+```
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Ok(_)`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+An arm that earlier arms already cover can never run, and ry warns about it:
+
+```text
+unreachable-pattern
+
+  ! this arm is unreachable: the arms above it already match every value its pattern matches
+    --[R/shapes.R:11:5]
+ 11 |     :Ok(_) => "never"
+    |     ^^^^^^
+```
+
+ry checks coverage only when it knows the type of the matched value, and not while inline annotations
+are turned off.
+
+## Passing them to R
+
+R functions and C code do not know these values, so passing one to an R function is an error:
+
+```r
+point <- (x = 1, y = 2)
+sum(point)
+```
+
+```text
+type-mismatch
+
+  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+```
+
+A few R functions do accept them, such as `length()`, `print()`, `format()`, `identical()` and
+`list()`, and so do the functions your own project defines. If the checker misses a case, the code
+still stops when it runs, with the same fix in the message:
+
+```text
+Error in sum(point) :
+  `point` is a ry record, not an R object; convert it with `as.list()`
+```
+
+Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
+`as.record()`, `as.tuple()` and `as.tag()` turn a list back.
+
+## Instead of S4, R6 and Reference Classes
+
+S4, R6 and Reference Classes keep working, but each class definition gets an `object-system`
+warning that recommends records and tags. To forbid them in a project, set
+`[check] object-systems = false` in [`ry.toml`](/reference/configuration#object-systems).

@@ -29,6 +29,10 @@ polars = { version = "0.55", default-features = false, features = [
     "dtype-u16",
 ] }
 polars-arrow = { version = "0.55", default-features = false }
+# The kernels run on Polars' own thread pool, so `POLARS_MAX_THREADS` governs them too.
+polars-core = { version = "0.55", default-features = false }
+polars-buffer = { version = "0.55", default-features = false }
+rayon = "1.12"
 thiserror.workspace = true
 
 [dev-dependencies]
