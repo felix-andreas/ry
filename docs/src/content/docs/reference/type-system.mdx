@@ -1391,7 +1391,8 @@ members.
 - `(integer | character) + 1L` is a type error, because the `character` member is not numeric.
 - `(integer | NULL) + 1L` is `integer`. R's arithmetic and comparison give an empty vector for a
   `NULL` operand rather than failing, so a `NULL` member is accepted and contributes nothing to the
-  result, and `(character | NULL) == "a"` is `logical`. An operand that is only `NULL`, as in
+  result, and `(character | NULL) == "a"` is `logical`. A class member dispatches its declared
+  operator method the same way, so `(factor | NULL) == "a"` goes through `==.factor`. An operand that is only `NULL`, as in
   `NULL + 1L` or `NULL == 1L`, gives `Unknown`.
 - `rec$a` on `list{a: integer} | list{a: character}` is `integer | character`. A member that lacks
   the field changes the result, as [indexing](#indexing) describes.

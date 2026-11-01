@@ -4850,6 +4850,18 @@ impl<'db> Checker<'db, '_> {
         let globals = self.globals?;
         let spelling = operator_spelling(operator)?;
         let group = operator_group(operator)?;
+        // R computes `NULL == x` as an empty vector, so `truth == "a"` on a `factor | NULL`
+        // dispatches through `==.factor` exactly as it would on the factor alone.
+        let mut nullable_union = |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
+            TyKind::Union(members)
+                if members.iter().any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
+            {
+                self.operand_view(ty)
+            }
+            _ => ty,
+        };
+        let left = nullable_union(left);
+        let right = nullable_union(right);
         // A generic bounded `numeric` probes as the `double` it may be.
         let probe_operand =
             |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {

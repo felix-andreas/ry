@@ -607,3 +607,12 @@ greet <- function(name) shout(name)
 shout: fn(name: character) -> character
 greet: fn(name: character | NULL) -> character
 147..151 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- a_factor_that_may_be_null_compares_through_its_method
+matches <- function(truth, flag) {
+  truth <- as.factor(truth)
+  if (flag) truth <- NULL
+  truth == "a"
+}
+#++++
+matches: <T> fn(truth: T, flag: logical) -> logical

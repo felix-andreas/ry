@@ -168,6 +168,10 @@ classes, largest first:
   yet `f()` errors in R, because `UseMethod` reads a passed argument even though the generic may be
   called without one. A parameter cannot express "may be omitted, but read when passed", so the
   missed error stays until it can (`a_generic_does_not_require_the_formals_it_passes_on`).
+- **A formal forwarded to a local closure that never reads it is still required.** callr
+  `error.R` and processx `run.R`: `format_advice(x)` forwards `x` to `format_advice_cli(x)`, both
+  defined inside `local({...})`, which ignores it. The forwarding rule in `collect_formal_uses`
+  reads only global schemes, so `err$format$advice()` is reported as leaving out `x`.
 - **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
   `fast_svd("a", 1)` is not reported. A missed error, not a false report.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
