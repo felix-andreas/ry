@@ -33,15 +33,33 @@ pub fn namespace_import_problems(
         .collect()
 }
 
-/// `R CMD check`'s "undefined exports". `defines` is the package's whole
-/// top-level name set, so a name bound by any file counts.
+/// `R CMD check`'s "undefined exports". `defines` covers every top-level binding the
+/// package makes, in any file. A name the NAMESPACE also imports is a re-export
+/// (`importFrom(rlang, "%||%")` with `export("%||%")`), and a package that creates
+/// bindings at run time (`assign(name, ...)`, `makeActiveBinding("name", ...)`, a loop
+/// over a list of styles) can export a name it never writes as a definition, so a
+/// name the sources mention while they call such a definer is not reported.
 pub fn namespace_export_problems(
     exports: &[(String, TextRange)],
+    imports: &[NamespaceImport],
     defines: &dyn Fn(&str) -> bool,
+    imported_namespace_exports: &dyn Fn(&str, &str) -> Option<bool>,
+    used_tokens: &BTreeSet<String>,
 ) -> Vec<Diagnostic> {
+    let defines_at_run_time = RUNTIME_DEFINERS
+        .iter()
+        .any(|definer| used_tokens.contains(*definer));
     exports
         .iter()
-        .filter(|(name, _)| !defines(name))
+        .filter(|(name, _)| {
+            !defines(name)
+                && !imports.iter().any(|import| match &import.name {
+                    Some(imported) => imported == name,
+                    // An unknown namespace may export anything.
+                    None => imported_namespace_exports(&import.namespace, name) != Some(false),
+                })
+                && !(defines_at_run_time && used_tokens.contains(name))
+        })
         .map(|(name, range)| {
             Diagnostic::new(
                 *range,
@@ -52,6 +70,17 @@ pub fn namespace_export_problems(
         })
         .collect()
 }
+
+const RUNTIME_DEFINERS: &[&str] = &[
+    "assign",
+    "makeActiveBinding",
+    "delayedAssign",
+    "list2env",
+    "setGeneric",
+    "setClass",
+    "setRefClass",
+    "sys.source",
+];
 
 /// `used_tokens` is every token text across the package's sources: a conservative
 /// scan that under-reports rather than risk a false positive. Whole-namespace

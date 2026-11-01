@@ -384,12 +384,19 @@ pub(crate) fn analyze_project(
         let mut problems =
             namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
         let defines = |name: &str| {
-            ProjectFiles::try_get(&db)
-                .is_some_and(|files| semantics::package_definitions(&db, files).contains_key(name))
+            ProjectFiles::try_get(&db).is_some_and(|files| semantics::package_binds(&db, files, name))
+        };
+        let imported_namespace_exports = |package: &str, name: &str| {
+            namespace_known(&db, package)
+                .unwrap_or(false)
+                .then(|| namespace_exports(&db, package, name))
         };
         problems.extend(namespace::namespace_export_problems(
             &parse_namespace_exports(namespace_source),
+            &namespace_imports,
             &defines,
+            &imported_namespace_exports,
+            &used_tokens,
         ));
         problems.extend(namespace::unused_import_diagnostics(
             &namespace_imports,

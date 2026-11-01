@@ -320,10 +320,7 @@ pub fn package_scheme_exists(db: &dyn Db, name: &str) -> bool {
     if BUILTIN_GLOBAL_NAMES.contains(&name) {
         return true;
     }
-    if ProjectFiles::try_get(db).is_some_and(|files| {
-        package_definitions(db, files).contains_key(name)
-            || conditional_slot_items(db, files).contains_key(name)
-    }) {
+    if ProjectFiles::try_get(db).is_some_and(|files| package_binds(db, files, name)) {
         return true;
     }
     stubs::stubs(db).is_some_and(|library| {
@@ -684,6 +681,13 @@ pub fn project_type_definitions<'db>(
         }
     }
     definitions
+}
+
+/// Whether any package file binds `name` at top level, including the inner targets of
+/// `a <- b <- value` and conditional writes.
+pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
+    package_definitions(db, files).contains_key(name)
+        || conditional_slot_items(db, files).contains_key(name)
 }
 
 /// Items writing a top-level name other than their own (conditionally, or nested as in

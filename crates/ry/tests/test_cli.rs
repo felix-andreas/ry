@@ -756,6 +756,27 @@ fn check_reports_an_export_the_package_does_not_define() {
     );
 }
 
+#[test]
+fn check_accepts_exports_bound_by_chains_reexports_and_runtime_definers() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\n"),
+        (
+            "NAMESPACE",
+            "export(is.memoised)\nexport(is.memoized)\nexport(bgRed)\nexport(\"%||%\")\nimportFrom(rlang,\"%||%\")\n",
+        ),
+        (
+            "R/a.R",
+            "is.memoised <- is.memoized <- function(f) TRUE\nstyles <- list(bgRed = 41L)\nfor (style in names(styles)) assign(style, styles[[style]])\n",
+        ),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("is exported but"),
+        "every export is bound: {}",
+        output.stderr
+    );
+}
+
 // The caret pads by terminal cells, not characters, so it sits beneath the glyph.
 #[test]
 fn check_reports_character_columns_and_aligns_the_caret() {
