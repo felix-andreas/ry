@@ -66,9 +66,9 @@ not have these functions, and a script that calls one fails there with "could no
 These rules hold in every module:
 
 - **Names are plain R names.** `List.map` is one symbol, called like any R function; there is no
-  method syntax and no `ry::` prefix. The names live in an environment called `package:ry`, which
-  sits on the search path just above `package:base`, so a definition of your own, or one from an
-  attached package, comes first.
+  method syntax. The names live in ry's `ry` package, attached at startup as `package:ry`, so a
+  definition of your own, or one from a package you attach, comes first, and `ry::List.map` still
+  reaches the library's function.
 - **A collection is an R list.** `List.map` takes any list and returns a new one, and
   `Str.split_on` returns a list of strings. `List.from_vector` turns an atomic vector into a list,
   and `List.to_vector` turns a list of scalars back.

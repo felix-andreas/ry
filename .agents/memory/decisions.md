@@ -2260,11 +2260,13 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   column is cast back to `i`'s type.
 - **`by` keeps first-appearance order and `keyby` sorts and keys**, matching data.table, through
   `group_by_stable` and a sort.
-- **ALTREP lives in the `table` crate behind the `runtime` feature**, which links `libr` and `heap`.
-  The dependency points from the engine to the runtime so that `libr`, which every native package
-  loads, never compiles Polars. An exposed column's `data1` owns the Arrow array and `data2` holds
-  R's layout once something needs it; a column that R never materialized comes back from
-  `import_column` as the same buffer.
+- **ALTREP column exposure lives in `libr` (`crates/libr/src/frame_altrep.rs`), and `libr` links
+  Polars.** Frames are interpreter values, so `interp` depends on `table`, and `libr` (which
+  depends on `interp`) links Polars either way; keeping ALTREP in `table` behind a feature would
+  only make the engine depend on the runtime. The dependency points from the runtime to the
+  engine, and `libR.so` grows by the engine's size. An exposed column's `data1` owns the Arrow
+  array and `data2` holds R's layout once something needs it; a column that R never materialized
+  comes back from `import_column` as the same buffer.
 - **NA is Arrow validity, NaN is a value.** A column without nulls has the same bytes in both
   layouts, which is what makes the zero-copy paths possible.
 
@@ -2486,6 +2488,54 @@ or raised with only trivia left), which the parser knows and a range check canno
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
 
+## Frames as runtime values
+
+- **A frame is an `EXTPTRSXP` that owns a `Box<table::Table>`, tagged with the symbol `ry.frame`
+  and classed `"frame"` alone** (`crates/interp/src/frame.rs`). A weak reference with a C
+  finalizer drops the box. The table is the only copy of the data: a column becomes an R vector
+  when R code reads it (`$`, `[[`, `as.list`, a data mask). It is no longer a `data.frame` (the
+  class was `c("frame", "data.frame")`), because nothing about a data.frame's list layout or row
+  names holds for it, and the checker agrees: a frame fails a `data.frame` parameter but passes a
+  `list` one, because `as.list` gives its columns.
+- **`x[i, j, by]` on a frame never reaches the `[` primitive.** `[` is a `DispatchOrEval`
+  special, so `dispatch::dispatch_or_eval` evaluates only the subject, and when it is a frame
+  hands the unevaluated call to `frame::run`. Dispatching through `[.frame` would be too late,
+  because `i`, `j` and `by` name columns. `[.frame` still exists for calls that arrive with
+  evaluated arguments (`do.call`, `Map`). The bytecode compiles `[` as a generic call, so loops
+  that subset run the same path.
+- **Any other object subject of `[` dispatches lazily, as GNU R's `DispatchOrEval` does.** The
+  method receives the remaining arguments as promises, so `DT[, sum(x), by = g]` reaches
+  `[.data.table` with expressions instead of failing with "object 'x' not found".
+- **libr's option reads (`Rf_GetOption1`, `Rf_GetOptionWidth`, `Rf_GetOptionDigits`) go to the
+  interpreter's `options()` when the interpreter is installed.** The `.Options` pairlist in base
+  is the one source of truth; libr's own options environment serves only standalone use without
+  the interpreter. With two stores, C code sees no option R code set, and data.table's `alloccol`
+  fails with "Has getOption('datatable.alloccol') somehow become unset?".
+- **Lowering first, R second.** `Lowering` turns `i`, `j` and `by` into the engine's IR; any part
+  that returns `None` runs as R in a data mask that binds only the columns the expression
+  mentions, plus `.N`, `.SD`, `.I`, `.GRP`, `..x` and `.` as `list`. Grouped R code uses Polars
+  for the grouping (row indices per group) and evaluates once per group.
+- **Copy-on-modify, not by-reference.** `:=` updates in place when the frame's refcount is at most
+  one, and otherwise forks the table (cheap: Arrow buffers are shared) and rebinds the variable the
+  call named, searching enclosing scopes, so a global updated inside a function is rebound where
+  it lives. An alias taken before the update keeps the old columns, as the checker models.
+  `setkey` always forks and rebinds.
+- **`ry` is a registered namespace attached as `package:ry` at position 2** (`frame.rs`,
+  `NAMESPACE`, `PACKAGE`, `ATTACH`), built in the shape `loadNamespace` gives an installed package,
+  so `ry::setkey` and `ry::List.map` work after another package masks the bare name. It is the one
+  home of the standard library and the frame functions: the builtins bind the standard library in
+  a `package:ry` just above base, and session startup moves those bindings into the namespace and
+  replaces that environment with the full package in front of the default packages, so `frame`
+  masks `graphics::frame`. It holds the user-facing functions;
+  `.frame_*` builtins do the work. `setkey`, `setkeyv`, `key` and `copy`
+  delegate to data.table for anything that is not a frame. S3 methods for other packages' generics
+  are registered in the generic's methods table, as an installed package's `S3method()`
+  directives are; `as.data.table.frame` is registered from a data.table `onLoad` hook, because
+  data.table is not loaded at startup. The checker's stubs are `types/ry.Rtypes`
+  and `types/ry.exports` (the names the checker types itself or that delegate to data.table), and
+  `test_standard_library.rs` keeps both equal to what the runtime binds.
+
+
 # Decision record: the JIT tier
 
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
@@ -2540,7 +2590,9 @@ first lines R had already read, leaving R mid-command.
   for R's own packages (the first record in this file), so every project re-declared `Result` and
   wrote its own helpers over plain lists.
 - **Names:** plain qualified names such as `List.map` are ordinary R symbols with a dot, bound in a
-  `package:ry` environment attached just above `package:base` (`standard_library::attach`). There
+  `package:ry` environment attached just above `package:base` (`standard_library::attach`); session
+  startup moves them into the `ry` namespace, attached in front of the default packages beside the
+  frame functions (see "Frames as runtime values"). There
   is no static dispatch, so a call is a symbol lookup and the checker reads one stub per name. A
   definition in the user's code shadows a library name like any R binding, and
   `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so

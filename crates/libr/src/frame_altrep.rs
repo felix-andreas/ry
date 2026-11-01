@@ -23,7 +23,7 @@
 //! The functions here allocate on the R heap and must run on the thread that owns the runtime.
 //! Their results are rooted in the current handle scope, like any value an API function returns.
 
-use crate::{
+use table::{
     ColumnType, Table,
     convert::{RVector, to_r, to_series},
 };
@@ -31,7 +31,7 @@ use heap::{
     object::{Header, NA_INTEGER, NA_REAL, Sexp, SexpType},
     strings::Encoding,
 };
-use libr::{
+use crate::{
     R_xlen_t, Rboolean,
     altrep::{
         AltrepClass, R_altrep_inherits, R_make_altinteger_class, R_make_altlogical_class,
@@ -349,7 +349,7 @@ unsafe fn new_altrep(payload: Payload) -> ApiResult<Sexp> {
             .alloc_weak_ref(pointer, nil, nil, finalizer, true)?;
         // `R_new_altrep` roots its result only inside a native call, and this may run outside one.
         let object = R_new_altrep(class, pointer, nil);
-        libr::runtime().heap.root(object);
+        crate::runtime().heap.root(object);
         Ok(object)
     }
 }
@@ -583,7 +583,7 @@ unsafe fn read_slice<'a, T>(vector: Sexp, length: usize) -> ApiResult<&'a [T]> {
         if !vector.is_altrep() {
             return Ok(vector.slice::<T>());
         }
-        let pointer = libr::altrep::dataptr(vector, false)?;
+        let pointer = crate::altrep::dataptr(vector, false)?;
         Ok(std::slice::from_raw_parts(pointer.cast::<T>(), length))
     }
 }
@@ -592,7 +592,7 @@ unsafe fn read_slice<'a, T>(vector: Sexp, length: usize) -> ApiResult<&'a [T]> {
 unsafe fn vector_length(vector: Sexp) -> ApiResult<usize> {
     unsafe {
         let length = if vector.is_altrep() {
-            libr::altrep::length(vector)?
+            crate::altrep::length(vector)?
         } else {
             vector.length()
         };
@@ -607,7 +607,7 @@ unsafe fn read_strings(vector: Sexp) -> ApiResult<Vec<Option<String>>> {
         let mut values = Vec::with_capacity(length);
         for index in 0..length as R_xlen_t {
             let element = if vector.is_altrep() {
-                libr::altrep::sexp_elt(vector, index)?
+                crate::altrep::sexp_elt(vector, index)?
             } else {
                 vector.element(index as usize)
             };
@@ -629,7 +629,7 @@ fn first_chunk<T: Array + Clone>(
         .map_or_else(|| Err(error("an empty column has no chunk")), Ok)
 }
 
-fn table_error(failure: crate::Error) -> Unwind {
+fn table_error(failure: table::Error) -> Unwind {
     error(failure.to_string())
 }
 

@@ -1,8 +1,10 @@
-# ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions.
+# ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, and the
+# frame functions.
 #
-# The functions run only on ry's runtime, which binds them in the `package:ry` environment just
-# above `package:base` on the search path. `crates/interp/src/standard_library.rs` implements them,
-# and a test keeps this file's names and the runtime's table equal. The user contract is
+# The functions run only on ry's runtime, which binds them in the `ry` namespace and attaches it as
+# `package:ry`. `crates/interp/src/standard_library.rs` implements the modules and
+# `crates/interp/src/frame.rs` the frame functions, and a test keeps this file's names and the
+# runtime's equal. The user contract is
 # `docs/src/content/docs/reference/standard-library.mdx`.
 #
 # Conventions shared by every module:
@@ -171,3 +173,16 @@ Set.walk : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
 Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
 Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
 Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+
+# Frames
+#
+# `frame()` itself is typed structurally by the checker, and so are queries on a frame
+# (`f[i, j, by]`). These declarations cover the conversions and file IO around them.
+
+as.frame : fn(x: Any) -> frame
+is.frame : fn(x: Any) -> logical
+frame_type : fn(x: frame) -> character
+frame_read_csv : fn(path: character, [strings_as_factors]: logical) -> frame
+frame_read_parquet : fn(path: character) -> frame
+frame_write_csv : fn(x: frame, path: character) -> frame
+frame_write_parquet : fn(x: frame, path: character) -> frame

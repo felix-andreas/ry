@@ -2,8 +2,9 @@
 //! on Roc's builtins. `types/ry.Rtypes` declares their types, and the design and user contract
 //! live in the docs (`contributing/design/standard-library.md`, `reference/standard-library.mdx`).
 //!
-//! The functions are bound in the `package:ry` environment, which sits just above `package:base`
-//! on the search path, so any definition a program or package makes of the same name comes first.
+//! The functions are bound in a `package:ry` environment just above `package:base`, so any
+//! definition a program or package makes of the same name comes first. Session startup moves them
+//! into the `ry` namespace beside the frame functions (`frame::attach_package`).
 //! Every function is written for ry's own values, so each accepts a record, tuple or tag.
 //!
 //! A dictionary or set is a record object with a fixed layout (see `heap::records`): its keys as

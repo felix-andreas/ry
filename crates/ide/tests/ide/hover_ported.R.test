@@ -203,7 +203,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: NULL\n"
-completion (102): F, FALSE, for, function, factanal, factor, factor.scope, factorial
+completion (107): F, FALSE, for, function, factanal, factor, factor.scope, factorial
 hint @5: integer
 hint @18: NULL
 
@@ -239,7 +239,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
   edit 12..12 -> "#: NULL\n"
-completion (102): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (105): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 
@@ -374,7 +374,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (76): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
+completion (77): TRUE, trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -596,7 +596,7 @@ rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(x: T) -> T\n"
-completion (60): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
+completion (61): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
 hint @6: <T> fn(x: T) -> T
 
 #---- two_type_variables

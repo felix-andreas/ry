@@ -211,6 +211,7 @@ pub(crate) unsafe fn install_all() {
         crate::strings::BUILTINS,
         crate::print::BUILTINS,
         crate::format::BUILTINS,
+        crate::frame::BUILTINS,
         crate::deparse::BUILTINS,
         crate::sort::BUILTINS,
         crate::random::BUILTINS,

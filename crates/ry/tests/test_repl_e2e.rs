@@ -630,3 +630,51 @@ fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
         session.quit();
     }
 }
+
+/// Each query's type as the checker infers it, which must also be its schema at runtime.
+const FRAME_TYPES: &[(&str, &str)] = &[
+    ("sales", "frame{team: character[], amount: double[], units: integer[]}"),
+    ("sales[amount > 1]", "frame{team: character[], amount: double[], units: integer[]}"),
+    (
+        "sales[, .(total = sum(amount), n = .N), by = team]",
+        "frame{team: character[], total: double[], n: integer[]}",
+    ),
+    ("sales[, .(team, double = units * 2)]", "frame{team: character[], double: double[]}"),
+    (
+        "sales[labels, on = \"team\"]",
+        "frame{team: character[], amount: double[], units: integer[], label: character[]}",
+    ),
+];
+
+#[test]
+fn frame_types_agree_between_the_checker_and_the_runtime() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let mut script = String::from(
+        "sales <- frame(team = c(\"a\", \"b\", \"a\"), amount = c(1, 2, 3), units = c(4L, 5L, 6L))\n\
+         labels <- frame(team = c(\"a\", \"b\"), label = c(\"A\", \"B\"))\n",
+    );
+    for (index, (expression, ty)) in FRAME_TYPES.iter().enumerate() {
+        script.push_str(&format!("q{index}: {ty} <- {expression}\nprint(frame_type(q{index}))\n"));
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("script.R"), &script).expect("write the script");
+    let check = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .args(["check", "script.R"])
+        .current_dir(directory.path())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run the checker");
+    assert!(
+        check.status.success(),
+        "the checker must infer every annotated type:\n{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let (status, stdout, stderr) = run_project("ry", &[("script.R", script.as_str())]);
+    assert_eq!(status, Some(0), "{stderr}");
+    for (_, ty) in FRAME_TYPES {
+        assert!(stdout.contains(&format!("[1] \"{ty}\"")), "the runtime schema differs from `{ty}`:\n{stdout}");
+    }
+}
