@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
 use syntax::ast::{self, BinaryExpr};
-use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
+use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, paired_comment_definition};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
 /// run on threads with this stack rather than `ulimit -s`'s.
@@ -555,12 +555,34 @@ pub fn file_type_definitions<'db>(
 ) -> Vec<annotations::NamedDefinition<'db>> {
     let parse = parse(db, file);
     let root = parse.syntax_node();
-    let mut definitions = Vec::new();
-    for node in root
-        .children()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
-        definitions.extend(annotations::lower_annotation(db, &node).definitions);
+    let mut definitions: Vec<annotations::NamedDefinition<'db>> = Vec::new();
+    let mut inline_enabled = None;
+    for node in root.children() {
+        match node.kind() {
+            SyntaxKind::ANNOTATION => {
+                definitions.extend(annotations::lower_annotation(db, &node).definitions);
+            }
+            SyntaxKind::TYPE_DEFINITION => {
+                let enabled = *inline_enabled.get_or_insert_with(|| inline_annotations_enabled(db));
+                let paired = paired_comment_definition(&node).is_some();
+                for mut definition in annotations::lower_inline_annotation(db, &node).definitions {
+                    if paired {
+                        // One definition written two ways: on, the inline one wins; off, the
+                        // comment applies alone.
+                        if !enabled {
+                            continue;
+                        }
+                        definitions.retain(|known| known.name != definition.name);
+                    } else if !enabled {
+                        // Off, an inline definition types nothing, but its name stays declared
+                        // so uses of it are not also reported as unknown types.
+                        definition.body = types::unknown(db);
+                    }
+                    definitions.push(definition);
+                }
+            }
+            _ => {}
+        }
     }
     definitions
 }

@@ -579,7 +579,10 @@ impl Eraser {
         let end = start + green.text_len();
         // Mirrors `syntax::is_inline_annotation`, on kinds.
         let annotation = match kind {
-            SyntaxKind::TYPE_ASCRIPTION | SyntaxKind::RETURN_TYPE => true,
+            SyntaxKind::TYPE_ASCRIPTION
+            | SyntaxKind::RETURN_TYPE
+            | SyntaxKind::TYPE_DEFINITION
+            | SyntaxKind::NEW_TYPE => true,
             SyntaxKind::TYPE_BINDER_LIST => parent == Some(SyntaxKind::FUNCTION_DEF),
             _ => false,
         };
