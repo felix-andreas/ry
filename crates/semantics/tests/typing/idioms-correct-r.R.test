@@ -989,3 +989,18 @@ matched <- matches(1)
 matches: fn(pattern: character) -> logical
 matched: Unknown
 70..71 error[type-mismatch] expected `character`, found `double`
+
+#---- a_quoting_form_does_not_run_its_arguments
+label <- function() expression("density " * f[1] - f[2])
+call <- function() bquote("x" - .(y))
+#++++
+label: fn() -> Any
+call: fn() -> Any
+
+#---- a_project_function_named_like_a_quoting_form_still_checks_its_arguments
+expression <- function(x) x + 1
+label <- function() expression("a")
+#++++
+expression: <T: numeric> fn(x: T) -> double
+label: Unknown
+63..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`

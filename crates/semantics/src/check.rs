@@ -2028,6 +2028,21 @@ impl<'db> Checker<'db, '_> {
             }
             ExpressionKind::Call { callee, arguments } => {
                 let (callee, arguments) = (*callee, arguments.clone());
+                // A quoting form returns its arguments as code without running them, so
+                // `expression("density " * f[1] - f[2])` multiplies nothing. A project binding
+                // of the same name is an ordinary function.
+                if let ExpressionKind::NameRef(name) = module.kind(callee)
+                    && matches!(
+                        name.as_str(),
+                        "quote" | "bquote" | "substitute" | "expression"
+                    )
+                    && !self.naming.resolutions.contains_key(&callee)
+                    && !self
+                        .globals
+                        .is_some_and(|globals| globals.defined_in_project(name.as_str(), true))
+                {
+                    return any(self.db);
+                }
                 let first_call_error = self.errors.len();
                 let ty = self.infer_call_expression(id, range, callee, &module[arguments]);
                 self.check_native_arguments(range, callee, &module[arguments], first_call_error);

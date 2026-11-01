@@ -2478,7 +2478,9 @@ rebinding the name to a user function does not change that:
 - `quote(expr)`, `substitute(expr)`, `bquote(expr)`, and `expression(expr)` build an expression
   instead of running it, so an assignment written inside one binds nothing: `quote(x <- 1)` leaves `x`
   undefined. Nothing inside is checked for arity or argument types, and a name it mentions need not
-  exist. Those names still count as reads, because `eval` may run the expression later.
+  exist, so `expression("density " * f[1] - f[2])` is not a type error. The call is `Any`. Those
+  names still count as reads, because `eval` may run the expression later. A project function with
+  one of these names is an ordinary call.
 
 ### Name references
 
