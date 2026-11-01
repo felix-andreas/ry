@@ -928,11 +928,14 @@ enum State {
         moments: Vec<Moments>,
         missing: Vec<bool>,
     },
-    /// Every value with its slot, for `median`. One flat list appends far faster than a list per
-    /// group; the values are sorted into groups once, when the medians are taken.
+    /// Every counted row with its slot, for `median`, as one list per run of rows in row order. A
+    /// flat list appends far faster than a list per group, and keeping each run's list instead of
+    /// concatenating them saves a copy. The values are read and sorted into groups once, when the
+    /// medians are taken, so the lists hold row numbers rather than values: at ten million rows the
+    /// memory this saves is mostly page faults saved.
     Values {
         slots: usize,
-        entries: Vec<(u32, f64)>,
+        runs: Vec<Vec<(u32, u32)>>,
         missing: Vec<bool>,
     },
     /// Each group's best rows under the ranking, best first, [`NO_ROW`]-padded to `k` per group.
@@ -982,7 +985,7 @@ impl State {
             },
             Function::Median => State::Values {
                 slots,
-                entries: Vec::new(),
+                runs: Vec::new(),
                 missing: vec![false; slots],
             },
             Function::Top => {
@@ -1113,16 +1116,14 @@ impl State {
                 or_into(missing, later_missing);
             }
             (
+                State::Values { runs, missing, .. },
                 State::Values {
-                    entries, missing, ..
-                },
-                State::Values {
-                    entries: later_entries,
+                    runs: later_runs,
                     missing: later_missing,
                     ..
                 },
             ) => {
-                entries.extend(later_entries);
+                runs.extend(later_runs);
                 or_into(missing, later_missing);
             }
             (
@@ -1251,21 +1252,22 @@ impl State {
             (
                 State::Values {
                     slots,
-                    entries,
+                    runs,
                     missing,
                 },
                 State::Values {
                     slots: other_slots,
-                    entries: other_entries,
+                    runs: other_runs,
                     missing: other_missing,
                 },
             ) => {
                 let offset = *slots as u32;
-                entries.extend(
-                    other_entries
-                        .into_iter()
-                        .map(|(slot, value)| (slot + offset, value)),
-                );
+                for mut run in other_runs {
+                    for (_, slot) in &mut run {
+                        *slot += offset;
+                    }
+                    runs.push(run);
+                }
                 *slots += other_slots;
                 missing.extend(other_missing);
             }
@@ -1495,11 +1497,10 @@ fn update(
             }
         }
         (
-            State::Values {
-                entries, missing, ..
-            },
+            State::Values { runs, missing, .. },
             Input::Double { values, validity },
         ) => {
+            let mut entries = Vec::with_capacity(len);
             for index in 0..len {
                 let (row, slot) = (row_of(index), slot_of(index));
                 let value = values[row];
@@ -1511,9 +1512,10 @@ fn update(
                         missing[slot] = true;
                     }
                 } else if !(na_rm && value.is_nan()) {
-                    entries.push((slot as u32, value));
+                    entries.push((row as u32, slot as u32));
                 }
             }
+            runs.push(entries);
         }
         (State::Row { last, rows }, input) => {
             let last = *last;
@@ -1676,12 +1678,18 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
         }
         State::Values {
             slots,
-            entries,
+            runs,
             missing,
         } => {
+            let Input::Double { values, .. } = &aggregation.input else {
+                return Vector::Double {
+                    values: Buffer::from(vec![0.0; groups]),
+                    validity: Some(Bitmap::new_zeroed(groups)),
+                };
+            };
             // A counting sort puts each group's values together, and the groups' medians are then
             // selected in place, in parallel.
-            let (starts, mut sorted) = sort_by_slot(entries, *slots);
+            let (starts, mut sorted) = sort_by_slot(runs, *slots, values);
             let mut groups: Vec<&mut [f64]> = Vec::with_capacity(*slots);
             let mut rest = sorted.as_mut_slice();
             for slot in 0..*slots {
@@ -1729,27 +1737,26 @@ fn finish(aggregation: &Aggregation, state: &State, order: &[u32]) -> Vector {
     }
 }
 
-/// Counting-sorts `(slot, value)` entries by slot, keeping their order within a slot. Returns the
-/// values and where each slot's run starts, with the total length appended.
-fn sort_by_slot(entries: &[(u32, f64)], slots: usize) -> (Vec<usize>, Vec<f64>) {
+/// Counting-sorts the `values` of `(row, slot)` entries, given as lists in row order, by slot,
+/// keeping their order within a slot. Returns the sorted values and where each slot's run starts,
+/// with the total length appended.
+fn sort_by_slot(runs: &[Vec<(u32, u32)>], slots: usize, values: &[f64]) -> (Vec<usize>, Vec<f64>) {
     let threads = THREAD_POOL.current_num_threads();
+    let total: usize = runs.iter().map(Vec::len).sum();
     // Each part counts its slots in a histogram of its own, which pays off only when the
     // histograms are small next to the entries.
-    let parts = if entries.len() >= PARALLEL_ROWS && slots.saturating_mul(threads) <= entries.len()
-    {
-        threads
+    let piece = if total >= PARALLEL_ROWS && slots.saturating_mul(threads) <= total {
+        total.div_ceil(threads).max(1)
     } else {
-        1
+        usize::MAX
     };
-    let parts: Vec<&[(u32, f64)]> = entries
-        .chunks(entries.len().div_ceil(parts).max(1))
-        .collect();
+    let parts: Vec<&[(u32, u32)]> = runs.iter().flat_map(|run| run.chunks(piece)).collect();
     let mut next: Vec<Vec<usize>> = THREAD_POOL.install(|| {
         parts
             .par_iter()
             .map(|part| {
                 let mut counts = vec![0usize; slots];
-                for (slot, _) in *part {
+                for (_, slot) in *part {
                     counts[*slot as usize] += 1;
                 }
                 counts
@@ -1767,24 +1774,24 @@ fn sort_by_slot(entries: &[(u32, f64)], slots: usize) -> (Vec<usize>, Vec<f64>) 
         }
     }
     starts.push(position);
-    let mut sorted: Vec<f64> = Vec::with_capacity(entries.len());
+    let mut sorted: Vec<f64> = Vec::with_capacity(total);
     let target = Shared(sorted.as_mut_ptr());
     THREAD_POOL.install(|| {
         parts
             .par_iter()
             .zip(next.par_iter_mut())
             .for_each(|(part, next)| {
-                for (slot, value) in *part {
+                for (row, slot) in *part {
                     let position = &mut next[*slot as usize];
                     // SAFETY: the parts' offsets for a slot are disjoint runs inside that slot's
-                    // run, and the runs cover `0..entries.len()` exactly once.
-                    unsafe { target.write(*position, *value) };
+                    // run, and the runs cover `0..total` exactly once.
+                    unsafe { target.write(*position, values[*row as usize]) };
                     *position += 1;
                 }
             });
     });
-    // SAFETY: the scatter wrote every element in `0..entries.len()`.
-    unsafe { sorted.set_len(entries.len()) };
+    // SAFETY: the scatter wrote every element in `0..total`.
+    unsafe { sorted.set_len(total) };
     (starts, sorted)
 }
 
