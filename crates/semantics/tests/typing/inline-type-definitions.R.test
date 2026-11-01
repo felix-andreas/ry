@@ -30,6 +30,38 @@ x <- unbox(list(value = 1L))
 unbox: <T> fn(b: Box<T>) -> T
 x: integer
 
+#---- generic_tagged_union_alias
+alias Result<T, E> = :Ok(T) | :Err(E)
+unwrap_or <- function(r: Result<integer, character>, default: integer) -> integer {
+  match (r) {
+    :Ok(v) => v
+    :Err(e) => default
+  }
+}
+unwrap_or(:Ok(1L), 0L)
+unwrap_or(:Ok("a"), 0L)
+#++++
+unwrap_or: fn(r: Result<integer, character>, default: integer) -> integer
+integer
+integer
+214..222 error[type-mismatch] expected `:Ok(integer) | :Err(character)`, found `:Ok(character)`
+
+#---- nominal_tagged_union
+type Shape = :Circle(double) | :Square(double)
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(r) => r * r
+    :Square(w) => w * w
+  }
+}
+area(@Shape(:Circle(1)))
+area(:Circle(1))
+#++++
+area: fn(s: Shape) -> double
+double
+double
+184..194 error[type-mismatch] expected `Shape`, found `:Circle(double)`
+
 #---- constrained_binder
 alias Numeric<T: numeric> = T[]
 f <- function(x: Numeric<double>) -> double sum(x)

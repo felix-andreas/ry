@@ -1156,6 +1156,9 @@ The message says to add a type annotation, and no annotation form silences it. `
   default suite passes; the deep run does not.
 - **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
   definition may also be written inline as `type` or `alias`.
+- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+  accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
+  two spellings stay one grammar.
 - **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
   states the type.
 - **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
