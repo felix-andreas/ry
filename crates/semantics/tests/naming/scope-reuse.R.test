@@ -55,6 +55,7 @@ x
   10..14 list -> non-local
   30..31 x <- b0
   44..45 x -> b0
+  super-globals: x
 # <statement>
   0..1 x -> non-local
 
@@ -70,6 +71,7 @@ for (item in list(1L)) {
   13..17 list -> non-local
   27..32 value <- b1
   41..46 value -> b1
+  super-globals: item
   used top-level: value
 
 #---- nested_block_resolves_outer_global_when_unshadowed

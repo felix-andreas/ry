@@ -52,7 +52,7 @@ notx: fn(x: logical) -> logical
 #---- param_logical_from_and
 both <- function(x, y) x && y
 #++++
-both: fn(x: logical, y: logical) -> logical
+both: fn(x: logical, [y]: logical) -> logical
 
 #---- param_logical_from_if_cond
 when <- function(x) if (x) 1L else 2L
@@ -191,7 +191,7 @@ flagfn: <T> fn([flag]: T) -> integer
 #---- if_with_param_value_nullable
 pick <- function(c, v) if (c) v
 #++++
-pick: <T> fn(c: logical, v: T) -> T | NULL
+pick: <T> fn(c: logical, [v]: T) -> T | NULL
 
 #---- nested_call_result_numeric
 addcall <- function(f, x) f(x) + 1L
@@ -247,12 +247,12 @@ twiceapply: <T> fn(f: fn(T) -> T) -> fn(x: T) -> T
 #---- chooser_unifies_branch_variables
 pick <- function(cond, a, b) if (cond) a else b
 #++++
-pick: <T> fn(cond: logical, a: T, b: T) -> T
+pick: <T> fn(cond: logical, [a]: T, [b]: T) -> T
 
 #---- null_else_branch_keeps_variable_polymorphic
 maybe <- function(flag, value) if (flag) value else NULL
 #++++
-maybe: <T> fn(flag: logical, value: T) -> T | NULL
+maybe: <T> fn(flag: logical, [value]: T) -> T | NULL
 
 #---- different_branch_literals_join_to_union
 label_or_count <- function(flag) if (flag) 1L else "one"

@@ -6,12 +6,12 @@
 
 # File devices: closed formal sets, NULL return (the device is opened as a side effect). Dimension and
 # resolution arguments are Any-param (numeric literals).
-png : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character) -> NULL
-jpeg : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [quality]: Any, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character) -> NULL
-bmp : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character) -> NULL
-tiff : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [compression]: character, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character) -> NULL
-svg : fn([filename]: character, [width]: Any, [height]: Any, [pointsize]: Any, [onefile]: logical, [family]: Any, [bg]: Any, [antialias]: character) -> NULL
-pdf : fn([file]: Any, [width]: Any, [height]: Any, [onefile]: logical, [family]: Any, [title]: character, [fonts]: Any, [version]: character, [paper]: character, [encoding]: character, [bg]: Any, [fg]: Any, [pointsize]: Any, [compress]: logical) -> NULL
+png : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character, ...: Any) -> NULL
+jpeg : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [quality]: Any, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character, ...: Any) -> NULL
+bmp : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character, ...: Any) -> NULL
+tiff : fn([filename]: character, [width]: Any, [height]: Any, [units]: character, [pointsize]: Any, [compression]: character, [bg]: Any, [res]: Any, [family]: Any, [type]: character, [antialias]: character, ...: Any) -> NULL
+svg : fn([filename]: character, [width]: Any, [height]: Any, [pointsize]: Any, [onefile]: logical, [family]: Any, [bg]: Any, [antialias]: character, [symbolfamily]: Any) -> NULL
+pdf : fn([file]: Any, [width]: Any, [height]: Any, [onefile]: logical, [family]: Any, [title]: character, [fonts]: Any, [version]: character, [paper]: character, [encoding]: character, [bg]: Any, [fg]: Any, [pointsize]: Any, [compress]: logical, [pagecentre]: Any, [colormodel]: Any, [useDingbats]: Any, [useKerning]: Any, [fillOddEven]: Any) -> NULL
 postscript : Any
 
 # Device bookkeeping. `dev.off`/`dev.cur` return the (named) active-device number — a named integer

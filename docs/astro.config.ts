@@ -132,6 +132,8 @@ export default defineConfig({
 			components: {
 				PageTitle: './src/components/PageTitle.astro',
 			},
+			// Adds the `<link rel="alternate" type="text/markdown">` to every page.
+			routeMiddleware: './src/routeData.ts',
 			customCss: ['./src/tailwind.css'],
 			plugins: [
 				starlightThemeBlack({

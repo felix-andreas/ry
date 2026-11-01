@@ -667,6 +667,14 @@ impl Module {
                     return self.allocate(ExpressionKind::Local { body: *body }, range);
                 }
                 let callee = self.lower_optional(callee_node, range);
+                // R evaluates a string call head by looking up the function of that name, so
+                // `"%in%.integer64"(x, y)` calls exactly what the bare name would.
+                if let Some(callee_expression) = self.expressions.get_mut(callee.0 as usize)
+                    && let ExpressionKind::Literal(LiteralKind::String(name)) =
+                        &callee_expression.kind
+                {
+                    callee_expression.kind = ExpressionKind::NameRef(Symbol::new(name));
+                }
                 self.allocate(
                     ExpressionKind::Call {
                         callee,

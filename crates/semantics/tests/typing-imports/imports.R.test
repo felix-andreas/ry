@@ -178,10 +178,15 @@ f <- function(d) dplyr::mutate(d, x = 1)
 f: <T> fn(d: T) -> T
 
 #---- undeclared_namespaces_still_warn
+f <- function(d) unshipped::mutate(d, x = 1)
+#++++
+f: <T> fn(d: T) -> Unknown
+17..34 warning[unresolved] unknown package namespace `unshipped`.
+
+#---- a_shipped_package_may_be_read_by_qualification_alone
 f <- function(d) dplyr::mutate(d, x = 1)
 #++++
 f: <T> fn(d: T) -> Unknown
-17..30 warning[unresolved] unknown package namespace `dplyr`.
 
 #---- an_import_source_counts_as_declared
 #namespace importFrom(dplyr, mutate)
@@ -213,10 +218,10 @@ call_it: fn() -> character
 
 #---- a_different_package_is_still_validated
 #description Package: withr
-call_it <- function(d) dplyr::mutate(d, x = 1)
+call_it <- function(d) unshipped::mutate(d, x = 1)
 #++++
 call_it: <T> fn(d: T) -> Unknown
-51..64 warning[unresolved] unknown package namespace `dplyr`.
+51..68 warning[unresolved] unknown package namespace `unshipped`.
 
 #==== datatable
 #---- declared_dependency_activates_the_stub

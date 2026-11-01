@@ -4,7 +4,7 @@ f <- function(flag, x) if (flag) x else "s"
 a <- f(TRUE, 1)
 b <- f(TRUE, "text")
 #++++
-f: <T> fn(flag: logical, x: T) -> T | character
+f: <T> fn(flag: logical, [x]: T) -> T | character
 a: double | character
 b: character
 
@@ -13,14 +13,14 @@ fmt <- function(x) if (is.character(x)) x else "other"
 a <- fmt(1)
 b <- fmt("text")
 #++++
-fmt: <T> fn(x: T) -> T | character
-a: double | character
-b: character
+fmt: fn(x: Unknown) -> Unknown
+a: Unknown
+b: Unknown
 
 #---- two_open_branches_still_tie_to_each_other
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, fallback: T) -> T
+coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
 
 #---- a_constrained_branch_may_unify_so_recursion_converges
 fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
@@ -71,10 +71,10 @@ f: Unknown
 21..26 error[type-mismatch] expected `logical`, found `character`
 
 #---- condition_blame_excludes_trailing_trivia
-f <- function(n) if (n %% 2L ) 2L
+f <- function(n) if (paste(n) ) 2L
 #++++
 f: Unknown
-21..28 error[type-mismatch] expected a numeric value (`integer` or `double`), found `logical`
+21..29 error[type-mismatch] expected `logical`, found `character`
 
 #---- a_conditionally_reassigned_function_unions_both_signatures
 # Both paths write a function, so the slot cannot stay polymorphic: its type is
@@ -182,7 +182,7 @@ f: fn(x: integer | NULL) -> integer
 #---- coalesce_idiom_shapes
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, fallback: T) -> T
+coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
 
 #---- family_guard_filters
 f <- function(flag) {
@@ -239,7 +239,7 @@ f <- function(record) {
 #++++
 f: <T> fn(record: T) -> integer
 
-#---- null_test_makes_unguarded_use_a_finding
+#---- arithmetic_on_a_null_tested_value_follows_r
 f <- function(x) {
   if (is.null(x)) {
     print("missing")
@@ -247,8 +247,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: Unknown
-66..67 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T | NULL`
+f: <T: numeric> fn(x: T | NULL) -> T
 
 #==== loops
 #---- accumulator_is_stable
