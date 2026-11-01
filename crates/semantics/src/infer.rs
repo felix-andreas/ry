@@ -1383,7 +1383,9 @@ fn constraint_rejects<'db>(
         Constraint::Unconstrained => true,
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
         Constraint::Numeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex)
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
+            )
             | TyKind::Any
             | TyKind::Unknown => true,
             TyKind::Vector(element) | TyKind::NamedVector(element) => matches!(

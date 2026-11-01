@@ -3181,7 +3181,9 @@ impl<'db> Checker<'db, '_> {
         {
             return true;
         }
-        kind.child_ids().into_iter().any(|child| self.dispatches(child))
+        kind.child_ids()
+            .into_iter()
+            .any(|child| self.dispatches(child))
     }
 
     /// One arbitrary instantiation of the in-scope rigid binders, to ask whether a value
@@ -3810,7 +3812,11 @@ impl<'db> Checker<'db, '_> {
             return false;
         };
         matches!(&self.module.expression(*callee).kind, ExpressionKind::NameRef(name) if name == "c")
-            && arguments.iter().filter(|argument| argument.value.is_some()).count() >= 2
+            && arguments
+                .iter()
+                .filter(|argument| argument.value.is_some())
+                .count()
+                >= 2
     }
 
     /// A numeric condition is ordinary R (`if (length(x))`); character, complex, raw,
@@ -5356,32 +5362,13 @@ impl<'db> Checker<'db, '_> {
         let mut all_arguments_are_named = true;
         let mut saw_non_null_argument = false;
         let mut result_indeterminate = false;
-        for argument in arguments {
-            let Some(value) = argument.value else {
-                continue;
-            };
-            let argument_range = self.blame_range(value);
-            let inferred = self.infer(value);
-            let resolved = self.structural(inferred);
+        let present = arguments.iter().filter(|argument| argument.value.is_some());
+        for (argument, &resolved) in present.zip(&inferred) {
             if matches!(resolved.kind(self.db), TyKind::Null) {
                 continue;
             }
             saw_non_null_argument = true;
             all_arguments_are_named &= argument.name.is_some();
-            // An argument whose atomic is not statically known cannot pin the element type:
-            // the result is `Unknown`, and a variable stays unconstrained.
-            match resolved.kind(self.db) {
-                TyKind::Any | TyKind::Unknown => {
-                    result_indeterminate = true;
-                    continue;
-                }
-                TyKind::Var(_) | TyKind::Rigid(_) => {
-                    self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
-                    result_indeterminate = true;
-                    continue;
-                }
-                _ => {}
-            }
             // `NULL` union members contribute nothing (an accumulator seeded with `c()` is
             // `T[] | NULL` at the loop join).
             let argument_atomics: Option<Vec<Atomic>> = match resolved.kind(self.db) {
@@ -5392,42 +5379,21 @@ impl<'db> Checker<'db, '_> {
                     .collect(),
                 _ => combine_operand_atomic(self.db, resolved).map(|atomic| vec![atomic]),
             };
+            // R's `c()` accepts every value: an argument whose atomic is not statically known
+            // (a variable, a nominal it strips, a function it wraps into a list) leaves the
+            // result `Unknown` and pins nothing.
             let Some(argument_atomics) = argument_atomics.filter(|atomics| !atomics.is_empty())
             else {
-                // R's default `c()` strips a nominal into something the checker cannot name:
-                // indeterminate, not an error.
-                if matches!(resolved.kind(self.db), TyKind::Named(..)) {
+                if !matches!(resolved.kind(self.db), TyKind::Any | TyKind::Unknown) {
                     self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
-                    result_indeterminate = true;
-                    continue;
                 }
-                self.errors.push(TypeError {
-                    range: argument_range,
-                    kind: TypeErrorKind::Mismatch {
-                        expected: scalar(self.db, Atomic::Integer),
-                        found: resolved,
-                    },
-                });
                 result_indeterminate = true;
                 continue;
             };
             for current_atomic in argument_atomics {
                 item_atomic = Some(match item_atomic {
                     Some(previous_atomic) => {
-                        match promote_combine_atomic(previous_atomic, current_atomic) {
-                            Some(promoted) => promoted,
-                            None => {
-                                self.errors.push(TypeError {
-                                    range: argument_range,
-                                    kind: TypeErrorKind::Mismatch {
-                                        expected: scalar(self.db, previous_atomic),
-                                        found: resolved,
-                                    },
-                                });
-                                result_indeterminate = true;
-                                previous_atomic
-                            }
-                        }
+                        promote_combine_atomic(previous_atomic, current_atomic)
                     }
                     None => current_atomic,
                 });
@@ -5834,10 +5800,19 @@ impl<'db> Checker<'db, '_> {
         let unchecked_argument = caller_entries.is_empty()
             && call_arguments.iter().any(|argument| {
                 argument.ty.is_some_and(|ty| {
-                    matches!(
-                        self.table.shallow_resolve(self.db, ty).kind(self.db),
-                        TyKind::Unknown | TyKind::Any
-                    )
+                    // `c(x, unknown)` is as unchecked as `unknown` itself: its element type
+                    // fits every candidate too.
+                    let resolved = self.table.shallow_resolve(self.db, ty);
+                    let ty = match resolved.kind(self.db) {
+                        TyKind::Vector(element)
+                        | TyKind::NamedVector(element)
+                        | TyKind::List(element)
+                        | TyKind::NamedList(element) => {
+                            self.table.shallow_resolve(self.db, *element)
+                        }
+                        _ => resolved,
+                    };
+                    matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any)
                 })
             });
 
@@ -8811,26 +8786,21 @@ fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {
     }
 }
 
-/// `raw` sits outside R's coercion hierarchy and only combines with itself.
-fn promote_combine_atomic(left: Atomic, right: Atomic) -> Option<Atomic> {
-    if left == right {
-        return Some(left);
-    }
+/// R's coercion order for `c()`, lowest first: `c(as.raw(1), 1L)` is an integer vector.
+fn promote_combine_atomic(left: Atomic, right: Atomic) -> Atomic {
     let rank = |atomic: Atomic| match atomic {
-        Atomic::Logical => Some(0u8),
-        Atomic::Integer => Some(1),
-        Atomic::Double => Some(2),
-        Atomic::Complex => Some(3),
-        Atomic::Character => Some(4),
-        Atomic::Raw => None,
+        Atomic::Raw => 0u8,
+        Atomic::Logical => 1,
+        Atomic::Integer => 2,
+        Atomic::Double => 3,
+        Atomic::Complex => 4,
+        Atomic::Character => 5,
     };
-    Some(match rank(left)?.max(rank(right)?) {
-        0 => Atomic::Logical,
-        1 => Atomic::Integer,
-        2 => Atomic::Double,
-        3 => Atomic::Complex,
-        _ => Atomic::Character,
-    })
+    if rank(left) >= rank(right) {
+        left
+    } else {
+        right
+    }
 }
 
 fn union_field_names<'db>(db: &'db dyn Db, subject: Ty<'db>) -> Vec<String> {
