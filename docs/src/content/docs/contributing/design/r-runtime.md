@@ -440,10 +440,18 @@ instead (the two-level namespace), and CRAN's binaries name
 its own `libR.dylib`. ry therefore loads a copy of each such library whose `libR` load command is
 rewritten in place to `@rpath/libR.dylib`, the install name of ry's `libR.dylib`, and re-signed ad
 hoc (`crates/libr/src/macho.rs`, `crates/libr/src/dynload.rs`). dyld matches that load command
-against the already loaded image with the same install name, so the package binds to ry. Packages
+against the already loaded image with the same install name, so the package binds to ry. The
+copy's cache directory links to every file beside the original, so a dependency the package finds
+through `@loader_path` resolves from the copy too; one reached by climbing out of that directory
+(`@loader_path/../lib`) does not. Packages
 that `rcmd` builds on macOS link with `-undefined dynamic_lookup` and record no `libR` at all, so
 the same build loads under ry and under GNU R. `decisions.md` ("macOS packages bind to ry's libR")
 has the reasoning.
+
+Windows needs no rewriting. A package DLL that Rtools built imports from `R.dll` by module name,
+and the Windows loader satisfies that from an already loaded module with the same base name, so
+naming ry's library `R.dll` and loading it first is enough. Package DLLs load with `LoadLibraryExW`
+and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own dependent DLLs in `libs/x64/` resolve.
 
 ### Threads
 
@@ -996,7 +1004,8 @@ Each step ends with something real running, and each one is a large, whole chang
    4), and `rcmd` reads its toolchain from GNU R's `Makeconf`. All of this is verified by
    cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
    the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
-   Windows is next (section 11).
+   Windows builds `R.dll` and `ry.exe` for `x86_64-pc-windows-gnu`; what is verified and what is
+   open is in section 11.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
@@ -1008,21 +1017,35 @@ JIT fits around them.
 - **Graphics.** Five packages use the graphics engine, and only `ragg` implements a device. Implementing R's device API is large; the
   alternative is to defer graphics to GNU R in a subprocess. Undecided, and not needed for the
   benchmark's test suites.
-- **Windows runtime.** Designed, not built. The design:
-  - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
-    so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has
-    loaded it, with no rewriting.
-  - Exports come from a generated `.def` file holding the same names as the Linux version script,
-    and `libr`'s build emits the matching import library for packages that `rcmd` builds.
-  - The headers' `LibExtern` becomes `__declspec(dllimport) extern` under `_WIN32`, because data
-    exports such as `R_NilValue` need an import thunk on Windows.
-  - Package DLLs load with `LoadLibraryExW` and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own
-    dependent DLLs in its `libs/x64/` resolve.
+- **Windows runtime.** Built, not yet run on Windows. What exists:
+  - `libr` builds as `R.dll` for `x86_64-pc-windows-gnu`, the mingw-w64 ABI that Rtools builds
+    packages with. `native.c` marks its exports `__declspec(dllexport)` and rustc exports the Rust
+    side, so no `.def` file is needed, and the linker writes the import library `libR.dll.a`
+    beside the DLL.
+  - The headers' `LibExtern` is `__declspec(dllimport) extern` under `_WIN32`, as in GNU R, so a
+    package that `rcmd` builds reaches data exports such as `R_NilValue` through the import table.
+  - `native.c` uses `__builtin_setjmp` and `__builtin_longjmp` on Windows, because mingw's
+    `longjmp` unwinds through SEH. A jump never crosses a Rust frame either way.
+  - The interpreter's operating-system calls go through `crates/interp/src/platform.rs`: CPU
+    times, file modes, links, globbing, processes, dynamic libraries, `errno` and `iconv`. Windows
+    has no `iconv(3)`, so ry converts there itself (UTF-8, Latin-1, ASCII, UTF-16, UTF-32, and the
+    other encodings `encoding_rs` knows), behind the same interface `Riconv` exposes to packages.
+    BLAS and LAPACK come from the R installation's `bin/x64/Rblas.dll` and `Rlapack.dll`.
+  - `ry run` loads `R.dll` from beside `ry.exe`.
 
-  The gap: the interpreter uses about 70 Unix-only libc items (`iconv`, `glob`, `popen`, signals,
-  `getpwuid` and others), and `libr`'s C layer includes `dlfcn.h` and `sys/select.h`, so neither
-  compiles for Windows yet. R home discovery from the registry and Program Files exists and serves
-  `ry R` today.
+  Open:
+  - The C runtime differs. Rust's `windows-gnu` target links `msvcrt.dll`, while Rtools 4.2 and
+    newer link the UCRT. The R API itself does not cross the C runtime, but `errno`, `FILE *`
+    and `malloc`/`free` pairs do: a package that frees memory R allocated with `malloc`, or reads
+    `errno` after `Riconv`, sees a different runtime's state. Building `R.dll` with the
+    `x86_64-pc-windows-gnullvm` target (UCRT) closes this, and needs an llvm-mingw toolchain.
+  - The release workflow builds `ry.exe` with MSVC and does not build `R.dll` yet, so the Windows
+    archive still carries no runtime. Shipping it means installing the `x86_64-pc-windows-gnu`
+    target and a mingw linker on the Windows runner.
+  - Nothing has run on Windows. The cross-build is checked from Linux; running `ry run` under Wine
+    needs GNU R's own Windows DLLs, which this check did not execute.
+  - `rcmd` assembles its R home from symbolic links, which Windows creates only in Developer Mode
+    or as administrator.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,
   but it costs install time.

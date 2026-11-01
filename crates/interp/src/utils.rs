@@ -45,6 +45,16 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("flushconsole", do_flush_console),
     ("processevents", |_| Ok(nil())),
     ("tzcode_type", |_| unsafe { scalar_string("internal") }),
+    // GNU R for Windows' console routines, for a session without its GUI: `Rterm`'s answers.
+    ("winver", |_| unsafe {
+        let name = crate::platform::system_name();
+        scalar_string(&format!("{} {}", name.sysname, name.release))
+    }),
+    ("getIdentification", |_| unsafe { scalar_string("RTerm") }),
+    ("getWindowTitle", |_| unsafe { scalar_string("") }),
+    ("setWindowTitle", |_| Ok(nil())),
+    ("setStatusBar", |_| Ok(nil())),
+    ("shortpath", |call| Ok(call.arg(0))),
     ("nsl", do_nsl),
     ("menu", |_| {
         Err(error("menu() cannot be used non-interactively"))

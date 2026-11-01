@@ -59,7 +59,7 @@ unsafe extern "C" {
     fn ry_call_finalizer(function: unsafe extern "C" fn(Sexp), object: Sexp) -> c_int;
     pub(crate) fn ry_call_dlopen(
         path: *const std::ffi::c_char,
-        flags: c_int,
+        global: c_int,
         status: *mut c_int,
     ) -> *mut c_void;
     /// `info` is a `Dll`, which C sees only as the opaque `DllInfo *`.

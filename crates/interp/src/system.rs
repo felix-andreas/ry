@@ -5,6 +5,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
         interp,
+        platform::{Iconv, convert_all},
         unwind::{R, error},
         values::{
             self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
@@ -16,10 +17,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
         strings::Encoding,
     },
-    std::{
-        os::unix::fs::PermissionsExt,
-        path::{Path, PathBuf},
-    },
+    std::path::{Path, PathBuf},
 };
 
 /// The R version ry presents: that of the base package the session runs (`library/base` of the R
@@ -110,7 +108,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("file.symlink", 2, |call| unsafe {
         link_paths(call, |from, to| {
-            std::os::unix::fs::symlink(from, to).is_ok()
+            crate::platform::symlink(Path::new(from), Path::new(to)).is_ok()
         })
     }),
     internal("file.link", 2, |call| unsafe {
@@ -648,17 +646,11 @@ unsafe fn do_sys_unsetenv(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_proc_time(_call: &Call<'_>) -> R<Sexp> {
     // GNU R reports whole milliseconds, which is what keeps printed timings short.
     let milliseconds = |seconds: f64| (seconds * 1000.0).round() / 1000.0;
-    let times = |who: libc::c_int| {
-        let mut usage: libc::rusage = std::mem::zeroed();
-        libc::getrusage(who, &mut usage);
-        let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
-        (
-            milliseconds(seconds(usage.ru_utime)),
-            milliseconds(seconds(usage.ru_stime)),
-        )
-    };
-    let (user, system) = times(libc::RUSAGE_SELF);
-    let (child_user, child_system) = times(libc::RUSAGE_CHILDREN);
+    let times = crate::platform::cpu_times();
+    let (user, system) = (milliseconds(times.user), milliseconds(times.system));
+    let (child_user, child_system) = times.children.map_or((NA_REAL, NA_REAL), |(user, system)| {
+        (milliseconds(user), milliseconds(system))
+    });
     let elapsed = milliseconds(interp().started.elapsed().as_secs_f64());
     let result = values::real_vector(&[user, system, elapsed, child_user, child_system])?;
     let names = string_vector(&[
@@ -2039,7 +2031,8 @@ unsafe fn do_file_info(call: &Call<'_>) -> R<Sexp> {
             Ok(metadata) => {
                 values::reals_mut(size)[index] = metadata.len() as f64;
                 values::ints_mut(is_dir)[index] = metadata.is_dir() as i32;
-                values::ints_mut(mode)[index] = (metadata.permissions().mode() & 0o777) as i32;
+                values::ints_mut(mode)[index] =
+                    (crate::platform::file_mode(Path::new(&path), &metadata) & 0o777) as i32;
                 values::reals_mut(mtime)[index] = metadata
                     .modified()
                     .ok()
@@ -2199,6 +2192,9 @@ unsafe fn do_list_dirs(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
     let must_work = values::as_logical_scalar(call.arg(2));
+    // Only Windows has a second separator to choose; elsewhere `winslash` is ignored, as in GNU R.
+    let separator =
+        values::first_string(call.arg(1)).map_or_else(|| "\\".to_owned(), |text| text.into_owned());
     let count = length(paths);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
@@ -2208,7 +2204,10 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
         };
         let expanded = crate::connections::expand_path(&path);
         let normalized = match std::fs::canonicalize(&expanded) {
-            Ok(canonical) => canonical.display().to_string(),
+            Ok(canonical) if cfg!(windows) => {
+                crate::platform::path_text(&canonical).replace('\\', &separator)
+            }
+            Ok(canonical) => crate::platform::path_text(&canonical),
             Err(_) => {
                 if must_work == 1 {
                     return Err(call.error(format!(
@@ -2354,23 +2353,14 @@ unsafe fn do_setwd(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
-    let mut name: libc::utsname = std::mem::zeroed();
-    libc::uname(&mut name);
-    let field = |raw: &[libc::c_char]| -> String {
-        let bytes: Vec<u8> = raw
-            .iter()
-            .take_while(|&&byte| byte != 0)
-            .map(|&byte| byte as u8)
-            .collect();
-        String::from_utf8_lossy(&bytes).into_owned()
-    };
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let name = crate::platform::system_name();
+    let user = name.user;
     let values_list = [
-        field(&name.sysname),
-        field(&name.release),
-        field(&name.version),
-        field(&name.nodename),
-        field(&name.machine),
+        name.sysname,
+        name.release,
+        name.version,
+        name.nodename,
+        name.machine,
         user.clone(),
         user.clone(),
         user,
@@ -2406,15 +2396,12 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
     // GNU R's own platform strings, which packages match on (`grepl("darwin", R.version$os)`).
     // CRAN's macOS builds target Darwin 20, the first release with Apple silicon.
-    let os = if cfg!(target_os = "macos") {
-        "darwin20"
+    let (vendor, os) = if cfg!(target_os = "macos") {
+        ("apple", "darwin20")
+    } else if cfg!(windows) {
+        ("w64", "mingw32")
     } else {
-        "linux-gnu"
-    };
-    let vendor = if cfg!(target_os = "macos") {
-        "apple"
-    } else {
-        "pc"
+        ("pc", "linux-gnu")
     };
     let arch = std::env::consts::ARCH;
     let platform = format!("{arch}-{vendor}-{os}");
@@ -2641,8 +2628,8 @@ unsafe fn do_set_encoding(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `iconv(x, from, to, sub, mark, toRaw)` through the C library's `iconv(3)`, as GNU R does on
-/// Linux, so the encoding names and conversions are the system's.
+/// `iconv(x, from, to, sub, mark, toRaw)` through the C library's `iconv(3)` as GNU R does, so
+/// the encoding names and conversions are the system's; Windows has ry's own conversion.
 unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     let input = call.arg(0);
     // `iconvlist()` asks for the converter's encoding names with a NULL `x`. glibc cannot list
@@ -2669,7 +2656,7 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     };
     let (from_name, to_name) = (system_name(&from), system_name(&to));
     let from_utf8 = matches!(from_name.to_ascii_uppercase().as_str(), "UTF-8" | "UTF8");
-    let converter = Converter::open(&from_name, &to_name)
+    let mut converter = Converter::open(&from_name, &to_name)
         .ok_or_else(|| call.error(format!("unsupported conversion from '{from}' to '{to}'")))?;
     let target = to_name.to_ascii_uppercase();
     let encoding = if !mark {
@@ -2732,129 +2719,69 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// An open `iconv_t` conversion descriptor, closed on drop.
-struct Converter(libc::iconv_t);
+/// A conversion for `iconv()`, with R's handling of the bytes it cannot convert.
+struct Converter(Iconv);
 
 impl Converter {
     fn open(from: &str, to: &str) -> Option<Converter> {
-        let from = std::ffi::CString::new(from).ok()?;
-        let to = std::ffi::CString::new(to).ok()?;
-        // SAFETY: both names are valid NUL-terminated strings.
-        let descriptor = unsafe { libc::iconv_open(to.as_ptr(), from.as_ptr()) };
-        if descriptor as isize == -1 {
-            None
-        } else {
-            Some(Converter(descriptor))
-        }
+        Iconv::open(from, to).map(Converter)
     }
 
     /// `bytes` converted, or `None` when they hold a sequence the target cannot represent and
     /// there is no substitute. A substitute of "byte" writes `<xx>` for each offending byte,
     /// "Unicode" and "c99" write the code point of an offending UTF-8 character, and any other
     /// text replaces each offending byte.
-    fn convert(&self, bytes: &[u8], substitute: Option<&str>, from_utf8: bool) -> Option<Vec<u8>> {
+    fn convert(
+        &mut self,
+        bytes: &[u8],
+        substitute: Option<&str>,
+        from_utf8: bool,
+    ) -> Option<Vec<u8>> {
         let mut output = Vec::with_capacity(bytes.len() + 16);
-        let mut buffer = vec![0u8; bytes.len() * 4 + 16];
         let mut rest = bytes;
-        // SAFETY: a null input resets the descriptor's shift state.
-        unsafe {
-            libc::iconv(
-                self.0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-        }
-        loop {
-            let mut input_pointer = rest.as_ptr() as *mut libc::c_char;
-            let mut input_left = rest.len();
-            let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
-            let mut output_left = buffer.len();
-            // SAFETY: the pointers and lengths describe `rest` and `buffer`, which outlive the
-            // call; iconv only reads the input.
-            let status = unsafe {
-                libc::iconv(
-                    self.0,
-                    &mut input_pointer,
-                    &mut input_left,
-                    &mut output_pointer,
-                    &mut output_left,
-                )
-            };
-            let error = std::io::Error::last_os_error().raw_os_error();
-            output.extend_from_slice(&buffer[..buffer.len() - output_left]);
-            rest = &rest[rest.len() - input_left..];
-            if status != usize::MAX {
-                break;
-            }
-            match error {
-                Some(libc::E2BIG) => continue,
-                Some(libc::EILSEQ | libc::EINVAL) => {
-                    let substitute = substitute?;
-                    let skipped = match substitute {
-                        "Unicode" | "c99" if from_utf8 => {
-                            let length = utf8_sequence_length(rest);
-                            match std::str::from_utf8(&rest[..length])
-                                .ok()
-                                .and_then(|text| text.chars().next())
-                            {
-                                Some(character) => {
-                                    let code = u32::from(character);
-                                    let text = match (substitute, code > 0xFFFF) {
-                                        ("Unicode", false) => format!("<U+{code:04X}>"),
-                                        ("Unicode", true) => format!("<U+{code:08X}>"),
-                                        (_, false) => format!("\\u{code:04x}"),
-                                        (_, true) => format!("\\U{code:08x}"),
-                                    };
-                                    output.extend_from_slice(text.as_bytes());
-                                    length
-                                }
-                                None => {
-                                    output
-                                        .extend_from_slice(format!("<{:02x}>", rest[0]).as_bytes());
-                                    1
-                                }
-                            }
-                        }
-                        "byte" | "Unicode" | "c99" => {
-                            output.extend_from_slice(format!("<{:02x}>", rest.first()?).as_bytes());
-                            1
-                        }
-                        text => {
+        self.0.reset();
+        while let Err(_stop) = convert_all(&mut self.0, &mut rest, &mut output) {
+            let substitute = substitute?;
+            let skipped = match substitute {
+                "Unicode" | "c99" if from_utf8 => {
+                    let length = utf8_sequence_length(rest);
+                    match std::str::from_utf8(&rest[..length])
+                        .ok()
+                        .and_then(|text| text.chars().next())
+                    {
+                        Some(character) => {
+                            let code = u32::from(character);
+                            let text = match (substitute, code > 0xFFFF) {
+                                ("Unicode", false) => format!("<U+{code:04X}>"),
+                                ("Unicode", true) => format!("<U+{code:08X}>"),
+                                (_, false) => format!("\\u{code:04x}"),
+                                (_, true) => format!("\\U{code:08x}"),
+                            };
                             output.extend_from_slice(text.as_bytes());
+                            length
+                        }
+                        None => {
+                            output.extend_from_slice(format!("<{:02x}>", rest[0]).as_bytes());
                             1
                         }
-                    };
-                    rest = rest.get(skipped..)?;
+                    }
                 }
-                _ => return None,
-            }
+                "byte" | "Unicode" | "c99" => {
+                    output.extend_from_slice(format!("<{:02x}>", rest.first()?).as_bytes());
+                    1
+                }
+                text => {
+                    output.extend_from_slice(text.as_bytes());
+                    1
+                }
+            };
+            rest = rest.get(skipped..)?;
         }
         // Flush any shift sequence a stateful target needs at the end.
-        let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
-        let mut output_left = buffer.len();
-        // SAFETY: as above, with a null input asking for the final shift sequence.
-        unsafe {
-            libc::iconv(
-                self.0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut output_pointer,
-                &mut output_left,
-            );
-        }
-        output.extend_from_slice(&buffer[..buffer.len() - output_left]);
+        let mut buffer = [0u8; 64];
+        let (written, _) = self.0.finish(&mut buffer);
+        output.extend_from_slice(&buffer[..written]);
         Some(output)
-    }
-}
-
-impl Drop for Converter {
-    fn drop(&mut self) {
-        // SAFETY: the descriptor came from a successful iconv_open and is closed once.
-        unsafe {
-            libc::iconv_close(self.0);
-        }
     }
 }
 
@@ -2936,14 +2863,29 @@ pub unsafe fn machine() -> R<Sexp> {
 pub unsafe fn platform() -> R<Sexp> {
     let string = |text: &str| scalar_string(text);
     values::named_list(&[
-        ("OS.type", string("unix")?),
+        (
+            "OS.type",
+            string(if cfg!(windows) { "windows" } else { "unix" })?,
+        ),
         ("file.sep", string("/")?),
-        ("dynlib.ext", string(".so")?),
-        ("GUI", string("X11")?),
+        (
+            "dynlib.ext",
+            string(if cfg!(windows) { ".dll" } else { ".so" })?,
+        ),
+        ("GUI", string(if cfg!(windows) { "RTerm" } else { "X11" })?),
         ("endian", string("little")?),
-        ("pkgType", string("source")?),
-        ("path.sep", string(":")?),
-        ("r_arch", string("")?),
+        (
+            "pkgType",
+            string(if cfg!(windows) {
+                "win.binary"
+            } else {
+                "source"
+            })?,
+        ),
+        ("path.sep", string(if cfg!(windows) { ";" } else { ":" })?),
+        // GNU R for Windows keeps its 64-bit build under `bin/x64` and package DLLs under
+        // `libs/x64`, and `library.dynam` finds them through this.
+        ("r_arch", string(if cfg!(windows) { "x64" } else { "" })?),
     ])
 }
 
@@ -3047,43 +2989,16 @@ unsafe fn do_sys_glob(call: &Call<'_>) -> R<Sexp> {
     if dirmark == NA_LOGICAL {
         return Err(error("invalid 'dirmark' argument"));
     }
-    let mut buffer: libc::glob_t = std::mem::zeroed();
-    let mut appended = false;
-    for index in 0..length(patterns) {
-        let Some(pattern) = values::string_at(patterns, index) else {
-            continue;
-        };
-        let Ok(pattern) = std::ffi::CString::new(crate::connections::expand_path(&pattern)) else {
-            continue;
-        };
-        let mut flags = if dirmark != 0 { libc::GLOB_MARK } else { 0 };
-        if appended {
-            flags |= libc::GLOB_APPEND;
-        }
-        match libc::glob(pattern.as_ptr(), flags, None, &mut buffer) {
-            0 => appended = true,
-            libc::GLOB_NOMATCH => {}
-            libc::GLOB_NOSPACE => {
-                libc::globfree(&mut buffer);
-                return Err(error("internal out-of-memory condition"));
-            }
-            libc::GLOB_ABORTED => crate::conditions::warning("read error on directory")?,
-            _ => {}
-        }
+    let expanded: Vec<String> = (0..length(patterns))
+        .filter_map(|index| values::string_at(patterns, index))
+        .map(|pattern| crate::connections::expand_path(&pattern))
+        .collect();
+    let matches = crate::platform::glob(&expanded, dirmark != 0)
+        .map_err(|()| error("internal out-of-memory condition"))?;
+    if matches.read_error {
+        crate::conditions::warning("read error on directory")?;
     }
-    let matches: Vec<String> = if appended {
-        (0..buffer.gl_pathc)
-            .map(|index| {
-                std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    libc::globfree(&mut buffer);
-    string_vector(&matches)
+    string_vector(&matches.paths)
 }
 
 unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
@@ -3101,10 +3016,10 @@ unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
     };
     let honoured = if category == libc::LC_ALL {
         // As in GNU R, LC_ALL sets the categories R uses but leaves LC_NUMERIC at C.
-        let honoured = !libc::setlocale(libc::LC_CTYPE, text.as_ptr()).is_null();
+        let honoured = !set_locale(libc::LC_CTYPE, text.as_ptr()).is_null();
         if honoured {
             for category in [libc::LC_COLLATE, libc::LC_MONETARY, libc::LC_TIME] {
-                libc::setlocale(category, text.as_ptr());
+                set_locale(category, text.as_ptr());
             }
         }
         honoured
@@ -3112,7 +3027,7 @@ unsafe fn do_sys_setlocale(call: &Call<'_>) -> R<Sexp> {
         if category == libc::LC_NUMERIC {
             crate::conditions::warning("setting 'LC_NUMERIC' may cause R to function strangely")?;
         }
-        !libc::setlocale(category, text.as_ptr()).is_null()
+        !set_locale(category, text.as_ptr()).is_null()
     };
     crate::sort::refresh_collation();
     if !honoured {
@@ -3138,17 +3053,21 @@ pub unsafe fn init_locale() {
         libc::LC_COLLATE,
         libc::LC_TIME,
         libc::LC_MONETARY,
-        libc::LC_MESSAGES,
+        LC_MESSAGES,
         LC_PAPER,
         LC_MEASUREMENT,
     ] {
-        libc::setlocale(category, c"".as_ptr());
+        set_locale(category, c"".as_ptr());
     }
     crate::sort::refresh_collation();
 }
 
-/// macOS's C library has no paper or measurement category. `setlocale` rejects an unknown
-/// category, so on macOS these read as `""` and cannot be set, as in GNU R there.
+/// macOS's C library has no paper or measurement category, and Windows's has no messages
+/// category either. These read as `""` and cannot be set, as in GNU R there.
+#[cfg(unix)]
+const LC_MESSAGES: libc::c_int = libc::LC_MESSAGES;
+#[cfg(windows)]
+const LC_MESSAGES: libc::c_int = -1;
 #[cfg(target_os = "linux")]
 const LC_PAPER: libc::c_int = libc::LC_PAPER;
 #[cfg(target_os = "linux")]
@@ -3169,15 +3088,25 @@ fn locale_category(number: i32) -> Option<libc::c_int> {
         4 => libc::LC_MONETARY,
         5 => libc::LC_NUMERIC,
         6 => libc::LC_TIME,
-        7 => libc::LC_MESSAGES,
+        7 => LC_MESSAGES,
         8 => LC_PAPER,
         9 => LC_MEASUREMENT,
         _ => return None,
     })
 }
 
+/// `setlocale`, except that a category the platform lacks fails without calling it: Windows's
+/// C runtime treats an unknown category as a fatal invalid parameter.
+unsafe fn set_locale(category: libc::c_int, name: *const libc::c_char) -> *mut libc::c_char {
+    if category < 0 {
+        std::ptr::null_mut()
+    } else {
+        libc::setlocale(category, name)
+    }
+}
+
 unsafe fn current_locale(category: libc::c_int) -> String {
-    let current = libc::setlocale(category, std::ptr::null());
+    let current = set_locale(category, std::ptr::null());
     if current.is_null() {
         String::new()
     } else {
@@ -3217,11 +3146,8 @@ unsafe fn do_sys_chmod(call: &Call<'_>) -> R<Sexp> {
         };
         let mode = if use_umask { mode & !UMASK } else { mode };
         let changed = values::string_at(paths, index).is_some_and(|path| {
-            std::fs::set_permissions(
-                crate::connections::expand_path(&path),
-                std::fs::Permissions::from_mode(mode),
-            )
-            .is_ok()
+            crate::platform::set_file_mode(Path::new(&crate::connections::expand_path(&path)), mode)
+                .is_ok()
         });
         values::ints_mut(result)[index] = changed as i32;
     }

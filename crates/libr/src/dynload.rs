@@ -18,7 +18,8 @@ use {
         object::{Sexp, SexpType},
         strings::Encoding,
     },
-    std::ffi::{CStr, CString, c_char, c_int, c_void},
+    interp::platform,
+    std::ffi::{CString, c_char, c_int, c_void},
 };
 
 /// What GNU R calls `DllInfo`. Packages only hold pointers to it, so its layout is ry's.
@@ -109,15 +110,6 @@ impl Dll {
     }
 }
 
-unsafe fn dlerror_text() -> String {
-    let message = libc::dlerror();
-    if message.is_null() {
-        "unknown error".into()
-    } else {
-        CStr::from_ptr(message).to_string_lossy().into_owned()
-    }
-}
-
 /// `dyn.load`: opens the library, runs its initialization routine, and returns its record. A
 /// library that is already loaded is returned as it is. With `local` false, its symbols become
 /// visible to libraries loaded later, as `dyn.load(local = FALSE)` asks (RcppParallel loads
@@ -136,26 +128,22 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     #[cfg(not(target_os = "macos"))]
     let opened = canonical.clone();
     let c_path = CString::new(opened.as_str()).map_err(|_| error("invalid library path"))?;
-    let visibility = if local {
-        libc::RTLD_LOCAL
-    } else {
-        libc::RTLD_GLOBAL
-    };
     let mut handle = std::ptr::null_mut();
     with_native_scope(|| {
         let mut status = 0;
-        handle = ry_call_dlopen(c_path.as_ptr(), libc::RTLD_NOW | visibility, &mut status);
+        handle = ry_call_dlopen(c_path.as_ptr(), c_int::from(!local), &mut status);
         status
     })?;
     if handle.is_null() {
         let mut message = format!(
             "unable to load shared object '{canonical}':\n  {}",
-            dlerror_text()
+            platform::last_library_error()
         );
         if opened != canonical {
             message.push_str(&format!(
-                "\n  ry loaded a copy rebound to its runtime, {opened}; a library that finds \
-                 its dependencies through @loader_path cannot load from that copy"
+                "\n  ry loaded a copy rebound to its runtime, {opened}, beside links to the \
+                 files next to the original; a dependency found through a path that leaves \
+                 that directory (@loader_path/..) cannot load from the copy"
             ));
         }
         return Err(error(message));
@@ -179,7 +167,7 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
         .ok_or_else(|| error("the library list is empty"))?;
     let init_name = CString::new(format!("R_init_{}", name.replace('.', "_")))
         .map_err(|_| error("invalid library name"))?;
-    let init = libc::dlsym(handle, init_name.as_ptr());
+    let init = platform::library_symbol(handle, &init_name);
     if !init.is_null() {
         let init: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(init);
         with_native_scope(|| ry_call_init(init, dll.cast()))?;
@@ -195,6 +183,11 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
 /// reinstalled package gets a new copy, and a load that hits the cache costs two `stat` calls. A
 /// library that needs no rewrite leaves an empty marker, so it is not read again either. The
 /// copy keeps the original's file name, so dyld's messages name the library the user loaded.
+///
+/// The copy's directory also links to every other file beside the original, so a library that
+/// finds its own dependencies through `@loader_path` (or an `@loader_path` rpath) finds them
+/// from the copy too. A path that climbs out of the directory (`@loader_path/../lib`) is not
+/// covered.
 ///
 /// A path that cannot be read here (a bare name dyld searches for, or a system library that
 /// exists only in dyld's shared cache) is left to `dlopen`, which reports its own error.
@@ -258,6 +251,14 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
         failed(failure)
     };
     std::fs::write(&staging, &image).map_err(|failure| abandon(failure.to_string()))?;
+    if let Some(directory) = Path::new(path).parent() {
+        link_siblings(directory, file_name, &cache).map_err(|failure| {
+            abandon(format!(
+                "cannot link the files beside it into {}: {failure}",
+                cache.display()
+            ))
+        })?;
+    }
     // An absolute path, because an editor started from the Dock runs with a minimal PATH.
     let signed = std::process::Command::new("/usr/bin/codesign")
         .args(["--force", "--sign", "-"])
@@ -278,10 +279,34 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
     Ok(Some(target.to_string_lossy().into_owned()))
 }
 
-/// Part of the cache key, so a change to what `macho::rebind_libr` rewrites invalidates every
-/// copy and marker an earlier version left. Bump it whenever the rewrite changes.
+/// Links each entry of `directory` other than `skipped` into `cache` under the same name. A
+/// link a concurrent session made first is as good as this one.
+#[cfg(any(target_os = "macos", test))]
+fn link_siblings(
+    directory: &std::path::Path,
+    skipped: &std::ffi::OsStr,
+    cache: &std::path::Path,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == skipped {
+            continue;
+        }
+        match std::os::unix::fs::symlink(entry.path(), cache.join(&name)) {
+            Ok(()) => {}
+            Err(failure) if failure.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(failure) => return Err(failure),
+        }
+    }
+    Ok(())
+}
+
+/// Part of the cache key, so a change to what `macho::rebind_libr` rewrites (or what lands
+/// beside the copy) invalidates every copy and marker an earlier version left. Bump it
+/// whenever either changes.
 #[cfg(target_os = "macos")]
-const REBIND_VERSION: u32 = 2;
+const REBIND_VERSION: u32 = 3;
 
 /// FNV-1a, which is stable across builds and runs, unlike the standard library's hasher, so
 /// the cache key survives a rebuild of ry.
@@ -353,7 +378,7 @@ pub unsafe fn find_routine(
                 name.to_owned()
             };
             let c_name = CString::new(symbol_name).map_err(|_| error("invalid routine name"))?;
-            let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
+            let symbol = platform::library_symbol(dll.handle, &c_name);
             if !symbol.is_null() {
                 return Ok((std::mem::transmute::<*mut c_void, DlFunc>(symbol), None));
             }
@@ -468,7 +493,7 @@ pub unsafe extern "C" fn R_getEmbeddingDllInfo() -> *mut Dll {
     {
         return &mut **dll;
     }
-    let handle = libc::dlopen(std::ptr::null(), libc::RTLD_NOW);
+    let handle = platform::process_library();
     runtime.dlls.insert(
         0,
         Box::new(Dll::new(String::new(), "(embedding)".into(), handle)),
@@ -503,7 +528,7 @@ pub unsafe extern "C" fn R_FindSymbol(
         if dll.use_dynamic_symbols
             && let Ok(c_name) = CString::new(name.clone())
         {
-            let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
+            let symbol = platform::library_symbol(dll.handle, &c_name);
             if !symbol.is_null() {
                 return Some(std::mem::transmute::<*mut c_void, DlFunc>(symbol));
             }
@@ -615,7 +640,7 @@ pub unsafe fn registered_routine(
         }
     }
     let c_name = CString::new(name).ok()?;
-    let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
+    let symbol = platform::library_symbol(dll.handle, &c_name);
     (!symbol.is_null()).then(|| {
         (
             RoutineKind::Call,
@@ -700,4 +725,29 @@ pub unsafe extern "C" fn ry_native_symbol(name: *const c_char, package: *const c
         return runtime().nil();
     }
     enter(|| native_symbol_info(&name, &package))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::link_siblings;
+
+    #[test]
+    fn the_rebound_copy_sees_the_files_beside_the_original() {
+        let root = std::env::temp_dir().join(format!("ry-link-siblings-{}", std::process::id()));
+        let (libs, cache) = (root.join("libs"), root.join("cache"));
+        std::fs::create_dir_all(&libs).expect("create libs");
+        std::fs::create_dir_all(&cache).expect("create cache");
+        std::fs::write(libs.join("pkg.so"), b"package").expect("write package");
+        std::fs::write(libs.join("libdep.dylib"), b"dependency").expect("write dependency");
+        let skipped = std::ffi::OsStr::new("pkg.so");
+        link_siblings(&libs, skipped, &cache).expect("link");
+        // A second session racing to the same cache directory finds the links already there.
+        link_siblings(&libs, skipped, &cache).expect("link again");
+        assert_eq!(
+            std::fs::read(cache.join("libdep.dylib")).expect("read through the link"),
+            b"dependency"
+        );
+        assert!(!cache.join("pkg.so").exists());
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
 }
