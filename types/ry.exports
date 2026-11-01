@@ -16,6 +16,7 @@ DataFrame.group_by
 DataFrame.head
 DataFrame.height
 DataFrame.join
+DataFrame.join_asof
 DataFrame.lazy
 DataFrame.read_csv
 DataFrame.read_parquet
@@ -55,6 +56,7 @@ Expr.alias
 Expr.cor
 Expr.count
 Expr.first
+Expr.head
 Expr.if_else
 Expr.is_null
 Expr.last
@@ -76,6 +78,7 @@ LazyFrame.filter
 LazyFrame.group_by
 LazyFrame.head
 LazyFrame.join
+LazyFrame.join_asof
 LazyFrame.scan_csv
 LazyFrame.scan_parquet
 LazyFrame.select
