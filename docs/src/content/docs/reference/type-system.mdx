@@ -979,7 +979,11 @@ whose message suggests `as.Array()`.
 
 When the code runs, two Arrays of different lengths are an error rather than recycled, and a result
 that holds `NA` or `NaN`, such as an integer overflow, is an error. An operator on Arrays of ry
-values is an error.
+values is an error, and so are two Arrays of different item types. An operand that is not an Array
+and not a single item of the item type, such as an R vector, `NA` or an `integer` beside an
+`Array<double>`, is a `type-mismatch` in checked code; when R code does it, as base `str()` does
+with `ob - signif(ob, digits)`, R's operator runs and the result is a plain R vector, as for a
+replacement below.
 
 ### Array indexing
 
@@ -1244,6 +1248,10 @@ type, `x` would be an open variable and `c(x, x)` could not be typed. The rule h
 - With an overloaded callee, a formal takes a type only when every candidate that accepts the other
   arguments expects the same one. The overload is then chosen as usual, with the literal's inferred
   type among the arguments.
+- A formal whose expected type shares a type variable with the expected result type is an
+  accumulator, as `seen` is for `List.walk`'s `fn(S, T) -> S`. The result widens its type, so the
+  type the other arguments give it (such as an initial `list()`) is no context, and by the rule
+  above the literal takes no types.
 - A literal with a formal after `...` takes no types, because R binds positional arguments to
   `...` before any later formal.
 - A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no

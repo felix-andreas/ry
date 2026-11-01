@@ -8818,6 +8818,38 @@ impl<'db> Checker<'db, '_> {
                 Some(ArgumentTarget::Rest) => function.variadic.as_ref().map(|rest| rest.element),
                 _ => None,
             };
+            // A formal whose expected type shares a type variable with the expected result is
+            // an accumulator, as `S` is in `fn(S, T) -> S`: the result widens it, so the type the
+            // other arguments give it (an initial `list()`) is no context. Read before the probe
+            // binds the variables.
+            let accumulators: Vec<Vec<bool>> = targets
+                .iter()
+                .zip(deferred)
+                .map(|(target, &deferred)| {
+                    let expected = target_ty(target)
+                        .filter(|_| deferred)
+                        .map(|expected| self.table.shallow_resolve(self.db, expected));
+                    let Some(TyKind::Function(expected)) = expected.map(|ty| ty.kind(self.db))
+                    else {
+                        return Vec::new();
+                    };
+                    let mut result_vars = FxHashSet::default();
+                    self.table
+                        .collect_unbound_vars(self.db, expected.ret, &mut result_vars);
+                    expected
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(expected.named.iter().map(|parameter| parameter.ty))
+                        .map(|formal| {
+                            let mut formal_vars = FxHashSet::default();
+                            self.table
+                                .collect_unbound_vars(self.db, formal, &mut formal_vars);
+                            !formal_vars.is_disjoint(&result_vars)
+                        })
+                        .collect()
+                })
+                .collect();
             let snapshot = self.table.snapshot();
             let accepts = arguments.iter().zip(&targets).zip(deferred).all(
                 |((argument, target), &deferred)| {
@@ -8837,7 +8869,8 @@ impl<'db> Checker<'db, '_> {
             let candidate: Vec<Option<Vec<Option<Ty<'db>>>>> = targets
                 .iter()
                 .zip(deferred)
-                .map(|(target, &deferred)| {
+                .zip(&accumulators)
+                .map(|((target, &deferred), accumulators)| {
                     if !deferred || !accepts {
                         return None;
                     }
@@ -8852,9 +8885,11 @@ impl<'db> Checker<'db, '_> {
                         .chain(expected.named.iter().map(|parameter| parameter.ty));
                     Some(
                         formals
-                            .map(|formal| {
+                            .enumerate()
+                            .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
-                                (!self.table.contains_unbound_var(self.db, formal)
+                                (!accumulators.get(index).copied().unwrap_or(false)
+                                    && !self.table.contains_unbound_var(self.db, formal)
                                     && !matches!(
                                         formal.kind(self.db),
                                         TyKind::Any | TyKind::Unknown

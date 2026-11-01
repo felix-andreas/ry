@@ -338,3 +338,10 @@ doubled <- List.map(words, function(..., w) w * 2)
 words: Array<character>
 doubled: Unknown
 47..69 error[type-mismatch] this function is passed `character`, but its parameter `w` is used as a numeric value (`integer` or `double`)
+
+#---- a_fold_accumulator_is_left_to_inference
+bytes <- Str.walk_utf8_with_index("ab", list(), function(seen, byte, i) List.append(seen, byte * i))
+total <- List.walk([1L, 2L], list(), function(seen, item) List.append(seen, item))
+#++++
+bytes: list{}
+total: list{}
