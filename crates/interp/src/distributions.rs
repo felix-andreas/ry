@@ -3385,6 +3385,40 @@ pub fn choose(n: f64, k: f64) -> f64 {
     log_choose_fast(n, k).exp()
 }
 
+/// `log |C(n, k)|`, computed in log space so that it stays finite where `choose` overflows.
+pub fn lchoose(n: f64, k: f64) -> f64 {
+    let k = force_int(k);
+    if n.is_nan() || k.is_nan() {
+        return n + k;
+    }
+    if k < 2.0 {
+        if k < 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if k == 0.0 {
+            return 0.0;
+        }
+        return n.abs().ln();
+    }
+    if n < 0.0 {
+        return lchoose(-n + k - 1.0, k);
+    }
+    if n == force_int(n) {
+        let n = force_int(n);
+        if n < k {
+            return f64::NEG_INFINITY;
+        }
+        if n - k < 2.0 {
+            return lchoose(n, n - k);
+        }
+        return log_choose_fast(n, k);
+    }
+    if n < k - 1.0 {
+        return lgammafn(n + 1.0) - lgammafn(k + 1.0) - lgammafn(n - k + 1.0);
+    }
+    log_choose_fast(n, k)
+}
+
 // The Wilcoxon signed rank and rank sum distributions, by counting.
 
 /// The number of subsets of `1..=n` with each sum `0..=n(n+1)/2`.

@@ -1,0 +1,23 @@
+[stdout]
+| [1] TRUE
+| [1] "<environment: R_GlobalEnv>"
+| [1] 2
+| [1] 12
+| [1] "small" "big"  
+| {
+|     z <- x * y
+|     if (z > 3) 
+|         "big"
+|     else "small"
+| }
+| [1] "hello" " "     "world"
+| [1] "XX"
+| [1] "z<b>"
+| [1] TRUE
+| [1] "x41y"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "x41y"

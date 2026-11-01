@@ -1,0 +1,27 @@
+[stdout]
+|                         a 
+| "2020-01-02 03:04:05 UTC" 
+|   b 
+| 121 
+| [1] 0 5
+| attr(,"balanced")
+| [1] TRUE
+|    sec    min   hour   mday    mon   year   wday   yday  isdst   zone gmtoff 
+|      3      1      1      1      1      1      1      1      1      1      1 
+| [1] TRUE
+| [1] "list"
+| $class
+| [1] "POSIXlt" "POSIXt" 
+| 
+| $balanced
+| [1] TRUE
+| 
+| [1] "2015-01-01"
+|            a 
+| "2015-01-01" 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c(a = "2015-01-01")

@@ -3,7 +3,7 @@
 //! `include/ry_embed.h`.
 
 use crate::{Global, runtime};
-use heap::{Collection, GcStress};
+use heap::{Collection, GcStress, object::Sexp};
 use std::ffi::{c_char, c_int, c_void};
 
 type ConsoleCallback = unsafe extern "C" fn(*const c_char, usize, c_int, *mut c_void);
@@ -75,7 +75,7 @@ pub extern "C" fn ry_arena_bytes() -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_warning_count() -> c_int {
-    runtime().warnings.len() as c_int
+    pending_warnings().len() as c_int
 }
 
 static WARNING_TEXT: Global<Vec<u8>> = Global::new(Vec::new());
@@ -85,7 +85,7 @@ static WARNING_TEXT: Global<Vec<u8>> = Global::new(Vec::new());
 pub unsafe extern "C" fn ry_warning_message(index: c_int) -> *const c_char {
     let text = &mut *WARNING_TEXT.as_ptr();
     text.clear();
-    if let Some(message) = runtime().warnings.get(index.max(0) as usize) {
+    if let Some((_, message)) = pending_warnings().get(index.max(0) as usize) {
         text.extend_from_slice(message.as_bytes());
     }
     text.push(0);
@@ -94,7 +94,18 @@ pub unsafe extern "C" fn ry_warning_message(index: c_int) -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ry_clear_warnings() {
-    runtime().warnings.clear();
+    if interp::is_installed() {
+        interp::interp().warnings.clear();
+    }
+}
+
+/// The deferred warnings, which the interpreter keeps until the top level prints them.
+fn pending_warnings() -> &'static [(Sexp, String)] {
+    if interp::is_installed() {
+        &interp::interp().warnings
+    } else {
+        &[]
+    }
 }
 
 /// Sends console output to `callback` instead of stdout and stderr; a null callback restores

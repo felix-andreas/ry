@@ -15,16 +15,8 @@ corpus_dir <- Sys.getenv("RY_CORPUS_DIR", file.path(repo_root, ".corpus"))
 snapshot <- Sys.getenv("RY_CORPUS_SNAPSHOT", "2025-03-01")
 ncpus <- as.integer(Sys.getenv("RY_CORPUS_NCPUS", "4"))
 
-roots <- c(
-  "abind", "assertthat", "azidentity", "AzureAuth", "AzureKeyVault", "AzureStor", "AzureTableStor",
-  "brio", "cachem", "callr", "cli", "data.table", "DBI", "devtools", "digest", "doParallel",
-  "FLSSS", "foreach", "fs", "git2r", "httr", "httr2", "jsonlite", "lgr", "lubridate", "memoise",
-  "NlcOptim", "odbc", "ompr", "ompr.roi", "openxlsx", "partitions", "pdftools",
-  "PerformanceAnalytics", "plumber", "polars", "pool", "progress", "purrr", "quadprog", "R6",
-  "rappdirs", "Rblpapi", "RcppDE", "RcppSimdJson", "readr", "readxl", "renv", "Rglpk", "rlang",
-  "rmgarch", "ROI.plugin.highs", "rugarch", "rvest", "snakecase", "stringr", "testthat",
-  "tryCatchLog", "uuid", "withr", "xml2", "xts", "YieldCurve", "zeallot", "zoo"
-)
+# The benchmark dependency set from AGENTS.md, minus the GitHub remotes below.
+roots <- readLines(file.path(repo_root, "tools", "corpus", "roots.txt"))
 # Packages the benchmark takes from GitHub: name, URL, ref (NA means the default branch).
 remotes <- list(
   list(name = "esgtoolkit", url = "https://github.com/Techtonique/esgtoolkit", ref = "v1.0.0"),

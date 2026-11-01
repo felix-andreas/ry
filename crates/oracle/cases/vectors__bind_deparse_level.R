@@ -1,0 +1,5 @@
+x <- 1:2; d <- 3:4; y <- c(a = 5, b = 6)
+print(cbind(x, d, y))
+f <- function(x, d, y) cbind(x, d, y); print(f(1, 2, 3))
+print(rbind(x, d)); print(cbind(x, 1:2, foo = 3)); print(cbind(x + 1, d)); print(cbind(x, d, deparse.level = 0)); print(cbind(x + 1, d, deparse.level = 2))
+g <- function(...) cbind(...); print(g(x, d))

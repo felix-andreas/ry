@@ -1,0 +1,15 @@
+[stdout]
+| foo: x= foo y= bar rev= FALSE mx is +.foo: TRUE cl= foo_obj + bar_obj 
+| bar: x= bar y= foo rev= TRUE mx is +.bar: TRUE 
+| [1] "bar"
+| bar: x= bar y= foo rev= FALSE mx is +.bar: TRUE 
+| [1] "bar"
+| [1] "mm"
+| [1] "mm"
+| [1] "mm"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "mm"

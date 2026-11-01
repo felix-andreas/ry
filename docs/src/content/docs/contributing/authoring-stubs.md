@@ -66,11 +66,22 @@ nominal gives `Unknown` rather than an error, so `df$amount` and `df[rows, ]` st
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
+An opaque type may take type parameters, as `@type Dict<K, V>` does in `types/ry.Rtypes`. Its
+parameters are invariant, so a `Dict<character, double>` is neither a `Dict<character, Any>` nor
+the other way around, and `Dict<K, V>` in a signature binds both parameters at a call.
+
+A stub can also declare a structural alias, written exactly like a project's `#: @alias`:
+
+```
+@alias Result<T, E> {:Ok(T) | :Err(E)}
+```
+
+The alias then works in every annotation, as `Result<integer, :NotFound>`.
+
 A type name may contain an interior dot, as `data.frame` does, and a project's own `@type` or
 `@alias` of the same name shadows the stub's type. The structural form
-`@type NAME {REPRESENTATION}` cannot be written in `.Rtypes`: the opaque nominal is the only stub
-form, and a `@type` line whose name is not a plain identifier is reported as an error on its own
-line.
+`@type NAME {REPRESENTATION}` cannot be written in `.Rtypes`: a stub's `@type` is always opaque,
+and a `@type` line whose name is not a plain identifier is reported as an error on its own line.
 
 ### Data-masking functions
 

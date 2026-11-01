@@ -842,10 +842,15 @@ impl<'db> InferenceTable<'db> {
                     .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
             }
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
-            // to the first item and reject the rest.
+            // to the first item and reject the rest. An empty `list()` says nothing about `T`,
+            // so it leaves `T` open; binding it to the empty join would fail every constraint
+            // on `T`, as in `List.max(list())`.
             (TyKind::Tuple(items), TyKind::List(element))
                 if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
             {
+                if items.is_empty() {
+                    return true;
+                }
                 let joined = union_of(db, items.iter().copied());
                 self.unify(db, *element, joined).is_ok()
             }
@@ -1262,6 +1267,11 @@ enum Variance {
 }
 
 fn parameter_variances<'db>(db: &'db dyn Db, definition: &NamedDefinition<'db>) -> Vec<Variance> {
+    // An opaque type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
+    // values apart, and a `Dict<character, double>` must not pass for a `Dict<integer, double>`.
+    if !definition.alias && matches!(definition.body.kind(db), TyKind::Unknown) {
+        return vec![Variance::Invariant; definition.parameters.len()];
+    }
     let mut occurrences = vec![(false, false); definition.parameters.len()];
     record_occurrences(
         db,
@@ -1382,6 +1392,13 @@ fn constraint_rejects<'db>(
         },
         Constraint::AtomicElement => match ty.kind(db) {
             TyKind::Scalar(_) | TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
+        },
+        Constraint::Key => match ty.kind(db) {
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character)
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
         },
