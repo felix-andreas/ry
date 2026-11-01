@@ -6,25 +6,62 @@ description: How ry makes you handle a value that may be NULL
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 Many R functions return `NULL` for "nothing", and code that forgets the case fails far from where the
-`NULL` came from. A value that may be `NULL` has a union type, such as `list{retries: integer} |
-NULL`. Reading a field of it gives a value that may be `NULL` too, because R reads every field of
-`NULL` as `NULL`, so returning that field where an `integer` is declared is an error:
+`NULL` came from. A value that may be `NULL` has a union type, such as `character | NULL`.
+
+The most common case is an optional argument that defaults to `NULL`. Its type says what a caller
+may pass instead. In the `fn(...)` form, brackets around a name such as `[label]` mark an optional
+argument:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
+<TabItem label="Comments">
 
 ```r
-retries <- function(config: list{retries: integer} | NULL) -> integer {
-  config$retries
+#: fn(id: integer, [label]: character | NULL) -> character
+label_for <- function(id, label = NULL) {
+  if (is.null(label)) paste("item", id) else label
 }
+label_for(1L, label = 2)
 ```
 
 </TabItem>
+<TabItem label="Inline">
+
+```r
+label_for <- function(id: integer, label: character | NULL = NULL) -> character {
+  if (is.null(label)) paste("item", id) else label
+}
+label_for(1L, label = 2)
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `character | NULL`, found `double`
+```
+
+## Reading through a value that may be `NULL`
+
+A field of a value that may be `NULL` may be `NULL` too, because R reads every field of `NULL` as
+`NULL`. Returning such a field where an `integer` is declared is an error:
+
+<Tabs syncKey="annotation-style">
 <TabItem label="Comments">
 
 ```r
 #: fn(config: list{retries: integer} | NULL) -> integer
 retries <- function(config) {
+  config$retries
+}
+```
+
+</TabItem>
+<TabItem label="Inline">
+
+```r
+retries <- function(config: list{retries: integer} | NULL) -> integer {
   config$retries
 }
 ```
@@ -41,21 +78,21 @@ type-mismatch
 Check for `NULL` first, and the error goes away:
 
 <Tabs syncKey="annotation-style">
-<TabItem label="Inline">
+<TabItem label="Comments">
 
 ```r
-retries <- function(config: list{retries: integer} | NULL) -> integer {
+#: fn(config: list{retries: integer} | NULL) -> integer
+retries <- function(config) {
   if (is.null(config)) return(3L)
   config$retries
 }
 ```
 
 </TabItem>
-<TabItem label="Comments">
+<TabItem label="Inline">
 
 ```r
-#: fn(config: list{retries: integer} | NULL) -> integer
-retries <- function(config) {
+retries <- function(config: list{retries: integer} | NULL) -> integer {
   if (is.null(config)) return(3L)
   config$retries
 }

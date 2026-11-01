@@ -41,8 +41,8 @@ illegal dependency unrepresentable.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It depends on nothing else in the
   workspace.
-- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
-  `repl` included, needs R to build. With `--runtime ry` it loads ry's `libR.so` instead of GNU R's,
+- **`repl`** is the R console behind `ry run` and `ry R`. It loads R at run time, so no crate,
+  `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
   allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
@@ -153,10 +153,16 @@ wall time. Several of them are worth knowing:
   memo. So one item check resolves all its frame binders in one query (`item_frame_binders`) and
   caches the package names and schemes it looks up in `SalsaGlobals`. `package_name` and
   `test_name` take only the name and read `ProjectFiles` themselves.
-- Salsa's interning takes a shard lock, and the atomics that track an interned value's last use
-  bounce between cores. `Name` and `Ty` are interned with `revisions = usize::MAX`, so they are never
-  collected and skip that bookkeeping, and `Symbol::new` checks a thread-local table before the
-  shared one.
+- `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
+  64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
+  compare and reading the kind is a field load. The entry stores the type's size, which the
+  inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
+  one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
+  heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
+  salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
+  only before a line that opens a call and follows a line that is exactly one complete top-level
+  call, so no directive straddles a boundary.
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
@@ -238,7 +244,7 @@ binder that an immediate or script read sees. A structural edit re-runs each fir
 read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
 its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 
-Types are interned, so type equality is id equality and nothing is ever deep-cloned. Deep resolution
+Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
 decision log records that design.
 

@@ -68,10 +68,10 @@ export default defineConfig({
 					label: '1. Check the code you have',
 					items: [
 						{ slug: 'guides/checking' },
-						{ slug: 'guides/formatting' },
 						{ slug: 'guides/editors' },
-						{ slug: 'guides/console' },
 						{ slug: 'guides/loading-packages' },
+						{ slug: 'guides/console' },
+						{ slug: 'guides/formatting' },
 					],
 				},
 				{
@@ -80,8 +80,8 @@ export default defineConfig({
 						{ slug: 'type-checking/overview' },
 						{ slug: 'type-checking/annotations' },
 						{ slug: 'type-checking/vectors-and-lists' },
-						{ slug: 'type-checking/null' },
 						{ slug: 'type-checking/functions' },
+						{ slug: 'type-checking/null' },
 						{ slug: 'type-checking/custom-types' },
 						{ slug: 'type-checking/unknown' },
 						{ slug: 'type-checking/stubs' },
@@ -98,8 +98,8 @@ export default defineConfig({
 					label: "4. Go fully typed",
 					items: [
 						{ slug: 'type-checking/records-and-tags' },
-						{ slug: 'type-checking/dataframes' },
 						{ slug: 'guides/dataframes' },
+						{ slug: 'type-checking/dataframes' },
 						{ slug: 'reference/standard-library' },
 						{ slug: 'type-checking/strict-mode' },
 					],

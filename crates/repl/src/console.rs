@@ -18,7 +18,7 @@ use reedline::{
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::{CString, c_char, c_int, c_uchar};
+use std::ffi::{c_char, c_int, c_uchar};
 use std::io::{BufRead, IsTerminal, Write, stderr, stdin, stdout};
 use std::panic::catch_unwind;
 use std::path::PathBuf;
@@ -31,16 +31,12 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let batch = options.batch;
     let routines = std::mem::take(&mut options.routines);
     let startup = std::mem::take(&mut options.startup);
-    let arguments = std::mem::take(&mut options.arguments)
-        .into_iter()
-        .map(CString::new)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ReplError("a script argument contains a NUL byte".into()))?;
-    install(options, false)?;
+    let arguments = std::mem::take(&mut options.arguments);
+    install(options, false, None)?;
     install_sigint_handler();
     // A batch run prints only what its code prints, and so does a console reading a pipe.
     let quiet = batch || !stdin().is_terminal();
-    api.initialize(read_console, write_console_ex, quiet, &arguments)?;
+    api.initialize(read_console, write_console_ex, quiet, !batch, &arguments)?;
     api.register_call_routines(&routines);
     for statement in &startup {
         api.eval(statement);
@@ -69,8 +65,12 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
 
 /// Installs the console for ry's own runtime, whose console loop reads through
 /// [`ry_read_console`]. Every read it makes is at the top-level prompt.
-pub fn install_for_ry_runtime(options: RunOptions) -> Result<(), ReplError> {
-    install(options, true)
+/// `banner` is printed when the console first prompts, once the session has started.
+pub fn install_for_ry_runtime(
+    options: RunOptions,
+    banner: Option<String>,
+) -> Result<(), ReplError> {
+    install(options, true, banner)
 }
 
 /// The read hook ry's runtime calls: GNU R's `R_ReadConsole` without the history flag.
@@ -82,7 +82,7 @@ pub extern "C" fn ry_read_console(
     catch_unwind(|| read_console_inner(prompt, buffer, length)).unwrap_or(0)
 }
 
-fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
+fn install(options: RunOptions, ry_runtime: bool, banner: Option<String>) -> Result<(), ReplError> {
     let completion_menu_binding = ReedlineEvent::UntilFound(vec![
         ReedlineEvent::Menu("completion_menu".to_owned()),
         ReedlineEvent::MenuNext,
@@ -140,10 +140,6 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
         ),
         None => None,
     };
-    if options.batch && (script.is_some() || !options.input.is_empty()) {
-        // A top-level error quits with a failing status, which becomes the exit code.
-        pending.extend(b"options(error = function() q(status = 1, save = \"no\"))\n");
-    }
     if !options.input.is_empty() {
         pending.extend(normalize_line_endings(&options.input).into_bytes());
         pending.push_back(b'\n');
@@ -179,6 +175,7 @@ fn install(options: RunOptions, ry_runtime: bool) -> Result<(), ReplError> {
             held: false,
             ry_runtime,
             piped: !stdin().is_terminal(),
+            banner,
         });
     });
     Ok(())
@@ -222,6 +219,9 @@ struct Console {
     /// editor (which needs a terminal that answers cursor queries) and without a prompt, as
     /// `R --no-echo` reads a pipe.
     piped: bool,
+    /// Printed before the first prompt rather than before the session starts, so it appears
+    /// only once the console can take input.
+    banner: Option<String>,
 }
 
 /// R's parser rejects a raw `\r`, but scripts and the editor buffer carry CRLF on
@@ -269,6 +269,9 @@ fn read_console_inner(prompt: *const c_char, buffer: *mut c_uchar, length: c_int
         while console.pending.is_empty() {
             if console.batch {
                 return 0;
+            }
+            if let Some(banner) = console.banner.take() {
+                eprintln!("{banner}");
             }
             // R hands its hook a valid NUL-terminated prompt (or null).
             let prompt_text = match console.held {

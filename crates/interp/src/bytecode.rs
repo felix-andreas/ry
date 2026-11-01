@@ -1293,7 +1293,7 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
 unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
     let table = values::ints(loops);
     let mut best: Option<(usize, usize)> = None;
-    for entry in table.chunks_exact(4) {
+    for entry in table.as_chunks::<4>().0 {
         let (start, end) = (entry[0] as usize, entry[1] as usize);
         if start <= pc && pc < end && best.is_none_or(|(best_start, _)| start >= best_start) {
             best = Some((start, if is_break { entry[2] } else { entry[3] } as usize));

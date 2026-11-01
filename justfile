@@ -36,15 +36,15 @@ format-docs:
 fuzz-deep:
     cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture
 
-# libFuzzer (parse | format | semantics); seed with `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs`.
+# libFuzzer (parse | format | semantics); seed with `cargo -Zscript scripts/seed-fuzz-corpus.rs`.
 fuzz-run target="semantics" *args:
-    cargo +nightly fuzz run {{ target }} {{ args }}
+    cargo fuzz run {{ target }} {{ args }}
 
 # Phase timings, memory and typing bursts for a workspace.
 stats path=".":
     cargo run -q -p ry-lang -- debug analysis-stats {{ path }}
 
-# Corpus perf and memory budgets; fetch with `cargo +nightly -Zscript scripts/fetch-corpus.rs`.
+# Corpus perf and memory budgets; fetch with `cargo -Zscript scripts/fetch-corpus.rs`.
 perf:
     cargo test -p semantics --release --test test_perf -- --ignored --nocapture
 

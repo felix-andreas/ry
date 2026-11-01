@@ -17,8 +17,8 @@ use crate::metadata::{
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
 use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
-    TypeScheme, map_child_types, substitute_rigid, union_of,
+    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, QueryName,
+    RecordField, Ty, TyKind, TypeScheme, map_child_types, substitute_rigid, union_of,
 };
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
@@ -563,7 +563,7 @@ fn classify_non_local_read(
     });
     if crate::package_scheme_exists(db, name)
         || test_files.is_some_and(|_| {
-            let binding = crate::test_name(db, Name::new(db, name));
+            let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
         || super_globals(db, file).contains(name)
@@ -592,7 +592,8 @@ fn classify_non_local_read(
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
-        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name))),
+        suggestion: project_typo
+            .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
 }
 
@@ -1837,10 +1838,10 @@ fn project_typo_suggestion<'db>(
 
 /// Memoized per name: the scan over the whole stub corpus is the expensive part.
 #[salsa::tracked(returns(clone))]
-fn typo_suggestion<'db>(db: &'db dyn Db, name: Name<'db>) -> Option<String> {
+fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String> {
     let library = stubs(db)?;
     nearest_name(
-        name.text(db),
+        name.name(db).text(db),
         library
             .schemes
             .keys()

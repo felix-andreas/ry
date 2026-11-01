@@ -398,8 +398,8 @@ impl Reader<'_> {
                 let data = values::ints_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 4)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *slot = i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                        *slot = i32::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
@@ -414,10 +414,8 @@ impl Reader<'_> {
                 let data = values::reals_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 8)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(8)) {
-                        let mut array = [0u8; 8];
-                        array.copy_from_slice(chunk);
-                        *slot = f64::from_be_bytes(array);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                        *slot = f64::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
