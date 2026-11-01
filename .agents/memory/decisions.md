@@ -3369,7 +3369,13 @@ explicit allocators".
   (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
   own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
   TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
-  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+  after the first one exits. v2 stays: under `ry run`, data.table's OpenMP workers and Polars'
+  thread pool run beside it without a crash (both keep their threads alive). The v3 crash needs
+  an allocating thread to exit before another starts allocating, which the libr test binaries do
+  and a package that starts its own short-lived threads could too, so v2 removes the risk. Move to v3 only once a `libmimalloc-sys` release passes the libr test binaries with it.
+  Cargo unifies features across the packages of one build, so `cargo build -p ry-lang -p libr`
+  gives the binary v2 as well; `mi_option_arena_eager_commit` is option 4 in both versions, so
+  `main.rs` is correct either way. Arenas sit on top of the global allocator, not in place of it.
 - **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
   by value, because salsa stores them across revisions and backdates by equality. So an arena
   never leaks into a memoized result: a query does its work in a scratch arena and copies the
