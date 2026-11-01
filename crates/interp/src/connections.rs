@@ -257,14 +257,20 @@ unsafe fn open_connection(call: &Call<'_>, class: Class) -> R<Sexp> {
         text_lines: Vec::new(),
         partial_line: String::new(),
     };
-    if description.is_empty() && class == Class::File {
-        connection.mode = "w+".into();
+    if is_anonymous(&connection) {
+        // An anonymous file is a scratch buffer opened for both writing and reading: writes
+        // append to the unread input, so a later read sees them, as GNU R's temporary file does.
+        connection.mode = if mode.is_empty() { "w+".into() } else { mode.clone() };
         connection.open = true;
     } else if !mode.is_empty() {
         open(&mut connection)?;
     }
     let index = interp().connections.add(connection);
     connection_object(index)
+}
+
+fn is_anonymous(connection: &Connection) -> bool {
+    connection.class == Class::File && connection.description.is_empty()
 }
 
 fn open(connection: &mut Connection) -> R<()> {
@@ -288,6 +294,9 @@ fn open(connection: &mut Connection) -> R<()> {
 }
 
 fn flush_to_file(connection: &mut Connection) -> R<()> {
+    if is_anonymous(connection) {
+        return Ok(());
+    }
     if connection.mode.starts_with('w') || connection.mode.starts_with('a') {
         let path = expand_path(&connection.description);
         if connection.class == Class::Gzfile {
@@ -523,6 +532,8 @@ unsafe fn write_to(index: i32, bytes: &[u8]) -> R<()> {
             let connection = interp().connections.get(index)?;
             if connection.class == Class::Text {
                 text_output(connection, &String::from_utf8_lossy(bytes))?;
+            } else if is_anonymous(connection) {
+                connection.input.extend_from_slice(bytes);
             } else {
                 if !connection.open {
                     if connection.mode.is_empty() {
