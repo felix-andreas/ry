@@ -2192,15 +2192,27 @@ const HELVETICA_WIDTHS: [u16; 95] = [
     222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
 ];
 
+/// The same widths in Helvetica-Bold. The oblique faces share the widths of their upright ones.
+const HELVETICA_BOLD_WIDTHS: [u16; 95] = [
+    278, 333, 474, 556, 556, 889, 722, 278, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556,
+    556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667,
+    611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667,
+    667, 611, 333, 278, 333, 584, 556, 278, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556,
+    278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584,
+];
+
 /// The height of a capital letter in Helvetica, in thousandths of the font size.
 const HELVETICA_CAP_HEIGHT: f64 = 718.0;
 
-fn text_width_ems(line: &str) -> f64 {
+/// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
+/// are bold).
+fn text_width_ems(line: &str, font: i32) -> f64 {
+    let widths = if font == 2 || font == 4 { &HELVETICA_BOLD_WIDTHS } else { &HELVETICA_WIDTHS };
     line.chars()
         .map(|character| {
             let code = character as usize;
             let width = if (32..127).contains(&code) {
-                HELVETICA_WIDTHS[code - 32]
+                widths[code - 32]
             } else {
                 556
             };
@@ -2258,8 +2270,11 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
     } else {
         values::as_real_scalar(cex_value)
     };
+    let font_value = call.arg(3);
+    let font = if font_value == nil() { 0 } else { values::as_integer_scalar(font_value) };
     let sizes = with_started_plot(|device| {
         let pars = &device.pars;
+        let font = if font >= 1 { font } else { pars.font };
         // The `cex` argument scales `par("cex")` rather than replacing it.
         let cex = pars.cex
             * if cex.is_finite() && cex > 0.0 {
@@ -2293,7 +2308,7 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
                 } else {
                     lines
                         .iter()
-                        .map(|line| text_width_ems(line))
+                        .map(|line| text_width_ems(line, font))
                         .fold(0.0, f64::max)
                         * points
                         / 72.0

@@ -1,0 +1,63 @@
+[stdout]
+| null device 
+|           1 
+| NULL
+| pdf 
+|   2 
+| png 
+|   3 
+|        pdf        png        svg postscript 
+|          2          3          4          5 
+| postscript 
+|          5 
+| pdf 
+|   2 
+| svg 
+|   4 
+| pdf 
+|   2 
+| pdf 
+|   2 
+| svg 
+|   4 
+| png 
+|   3 
+| postscript 
+|          5 
+| svg 
+|   4 
+|        pdf        svg postscript 
+|          2          4          5 
+| svg 
+|   4 
+| svg 
+|   4 
+| [1] 7 7
+| svg 
+|   4 
+| [1] 504 504
+| [1] 7 7
+| postscript 
+|          5 
+| pdf 
+|   2 
+| null device 
+|           1 
+| null device 
+|           1 
+| [1] "cannot shut down device 1 (the null device)"
+| [1] "cannot shut down device 1 (the null device)"
+| [1] 4 3
+| [1] 4 3
+| [1] 2 1
+| [1] 200 100
+| [1] "pdf"  "jpeg" "bmp"  "tiff"
+| null device 
+|           1 
+| NULL
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL
