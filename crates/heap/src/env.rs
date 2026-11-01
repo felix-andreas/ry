@@ -12,9 +12,7 @@
 //! The base environment and the base namespace have no `Frame`: their cells hang off the symbols
 //! themselves, so a lookup of a base function is one load from the interned symbol.
 
-use crate::object::Sexp;
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells. Scanning a
 /// dozen cells is cheaper than building the index, which a call to a function with many
@@ -42,7 +40,10 @@ pub struct Frame {
 
 impl Frame {
     pub fn with_capacity(bindings: usize) -> Frame {
-        Frame { cells: SmallVec::with_capacity(bindings), ..Frame::default() }
+        Frame {
+            cells: SmallVec::with_capacity(bindings),
+            ..Frame::default()
+        }
     }
 
     pub fn cells(&self) -> &[Sexp] {

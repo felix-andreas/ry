@@ -1,7 +1,7 @@
-use std::iter::once;
-use std::path::Path;
-use syntax::parse;
-use syntax::testing::run_fixture_suite;
+use {
+    std::{iter::once, path::Path},
+    syntax::{parse, testing::run_fixture_suite},
+};
 
 #[test]
 fn error_messages() {

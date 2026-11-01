@@ -3,18 +3,20 @@
 //! reads (`class`, `oldClass`, `inherits`), and the hook `standardGeneric` calls once the methods
 //! package installs S4 dispatch.
 
-use crate::{
-    Frame,
-    builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
-    eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
-        symbol_name, symbols, unbound,
+use {
+    crate::{
+        Frame,
+        builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
+        eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
+        interp,
+        unwind::{R, error},
+        values::{
+            self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
+            symbol_name, symbols, unbound,
+        },
     },
+    heap::object::{Sexp, SexpType, gp},
 };
-use heap::object::{Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     special("UseMethod", -1, do_usemethod).keep_visibility(),
@@ -28,7 +30,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
     builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
     builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
-    builtin("isS4", 1, |call| unsafe { values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT)) }),
+    builtin("isS4", 1, |call| unsafe {
+        values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT))
+    }),
     internal("setS4Object", 3, do_set_s4_object),
     internal("standardGeneric", -1, do_standard_generic),
 ];
@@ -433,7 +437,10 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
     }
     // GNU R dispatches on the first supplied argument, so a generic called without one, even
     // where the formal has a default, dispatches on NULL.
-    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING)) {
+    if crate::heap()
+        .frame_cell(env, first)
+        .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
+    {
         return Ok(nil());
     }
     let value = eval::find_var_in_frame(first, env)?;
@@ -452,7 +459,10 @@ unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
         return Ok(false);
     }
     let first = formals.tag();
-    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING)) {
+    if crate::heap()
+        .frame_cell(env, first)
+        .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
+    {
         return Ok(true);
     }
     let value = eval::find_var_in_frame(first, env)?;
@@ -761,7 +771,11 @@ pub unsafe fn try_builtin_dispatch(
                 return Ok(Some(value));
             }
             // `seq.int` is the primitive behind the `seq` generic, so it finds `seq` methods.
-            let generic = if definition.name == "seq.int" { "seq" } else { definition.name };
+            let generic = if definition.name == "seq.int" {
+                "seq"
+            } else {
+                definition.name
+            };
             internal_dispatch(generic, call, args, env)
         }
         Generic::Ops | Generic::MatrixOps => {
@@ -769,12 +783,19 @@ pub unsafe fn try_builtin_dispatch(
             if !any_object {
                 return Ok(None);
             }
-            if args.iter().take(2).any(|arg| arg.value.has_gp(gp::S4_OBJECT))
+            if args
+                .iter()
+                .take(2)
+                .any(|arg| arg.value.has_gp(gp::S4_OBJECT))
                 && let Some(value) = s4_dispatch(op, call, args, env)?
             {
                 return Ok(Some(value));
             }
-            let group = if definition.generic == Generic::Ops { "Ops" } else { "matrixOps" };
+            let group = if definition.generic == Generic::Ops {
+                "Ops"
+            } else {
+                "matrixOps"
+            };
             group_dispatch(group, definition.name, call, args, env)
         }
         Generic::Summary => {
@@ -783,7 +804,11 @@ pub unsafe fn try_builtin_dispatch(
             // `na.rm` without a default. The method's call holds the evaluated arguments, as
             // `do_summary` builds it.
             let na_rm = symbols().na_rm;
-            let mut fixed: Vec<Arg> = args.iter().filter(|arg| arg.tag != na_rm).copied().collect();
+            let mut fixed: Vec<Arg> = args
+                .iter()
+                .filter(|arg| arg.tag != na_rm)
+                .copied()
+                .collect();
             let Some(first) = fixed.first().copied() else {
                 return Ok(None);
             };
@@ -800,7 +825,11 @@ pub unsafe fn try_builtin_dispatch(
                 None => values::scalar_logical(0)?,
             };
             fixed.push(Arg { tag: na_rm, value });
-            let head = if call.kind() == SexpType::Language { call.car() } else { op };
+            let head = if call.kind() == SexpType::Language {
+                call.car()
+            } else {
+                op
+            };
             let mut items = vec![(nil(), head)];
             items.extend(fixed.iter().map(|arg| (arg.tag, arg.value)));
             let fixed_call = values::pairlist(&items, SexpType::Language)?;
@@ -815,7 +844,11 @@ pub unsafe fn try_builtin_dispatch(
             {
                 return Ok(Some(value));
             }
-            let group = if definition.generic == Generic::Math { "Math" } else { "Complex" };
+            let group = if definition.generic == Generic::Math {
+                "Math"
+            } else {
+                "Complex"
+            };
             group_dispatch(group, definition.name, call, args, env)
         }
     }
@@ -858,7 +891,9 @@ pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) 
     {
         return Ok(None);
     }
-    if args.first().is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
+    if args
+        .first()
+        .is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
         && let Some(op) = crate::builtins::primitive(name)
         && let Some(value) = s4_dispatch(op, call, args, env)?
     {
@@ -1005,12 +1040,7 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
     apply_internal_method(call, found, &promised, env).map(Some)
 }
 
-unsafe fn apply_internal_method(
-    call: Sexp,
-    found: Found,
-    promised: &[Arg],
-    env: Sexp,
-) -> R<Sexp> {
+unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env: Sexp) -> R<Sexp> {
     let new_call = renamed_call(call, found.method_name)?;
     // GNU R evaluates the method inside a context of the builtin's own call, which shows in
     // `sys.calls()`.
@@ -1063,7 +1093,9 @@ unsafe fn group_dispatch(
             // GNU R lets date-time arithmetic win over `Ops.difftime`, so `time + 2 * diff`
             // shifts the time instead of warning about incompatible methods.
             let date_arithmetic = |name: &str, minus: bool| {
-                name == "+.POSIXt" || name == "+.Date" || (minus && (name == "-.POSIXt" || name == "-.Date"))
+                name == "+.POSIXt"
+                    || name == "+.Date"
+                    || (minus && (name == "-.POSIXt" || name == "-.Date"))
             };
             if left.method == right.method {
                 (0, 0)
@@ -1098,16 +1130,18 @@ unsafe fn group_dispatch(
         let method_name = symbol_name(found_method.method_name).into_owned();
         let methods: Vec<String> = (0..operands)
             .map(|index| {
-                if index == position || (operands == 2 && args[index].value.is_object() && {
-                    let other_classes = implicit_class(args[index].value).ok();
-                    other_classes.is_some_and(|classes| {
-                        (0..length(classes)).any(|class_index| {
-                            let class = char_str(classes.element(class_index));
-                            method_name == format!("{generic}.{class}")
-                                || method_name == format!("{group}.{class}")
+                if index == position
+                    || (operands == 2 && args[index].value.is_object() && {
+                        let other_classes = implicit_class(args[index].value).ok();
+                        other_classes.is_some_and(|classes| {
+                            (0..length(classes)).any(|class_index| {
+                                let class = char_str(classes.element(class_index));
+                                method_name == format!("{generic}.{class}")
+                                    || method_name == format!("{group}.{class}")
+                            })
                         })
                     })
-                }) {
+                {
                     method_name.clone()
                 } else {
                     String::new()
@@ -1115,7 +1149,10 @@ unsafe fn group_dispatch(
             })
             .collect();
         let method_vector = string_vector(&methods)?;
-        if let Some(entry) = vars.iter_mut().find(|(symbol, _)| *symbol == symbols().dot_method) {
+        if let Some(entry) = vars
+            .iter_mut()
+            .find(|(symbol, _)| *symbol == symbols().dot_method)
+        {
             entry.1 = method_vector;
         }
     }
@@ -1127,12 +1164,25 @@ unsafe fn group_dispatch(
 /// Asks `chooseOpsMethod(x, y, mx, my, cl, reverse)` whether `chosen`, the method found for
 /// one operand, should win over `other`, the method found for the other operand. `reverse`
 /// says that `chosen` belongs to the right operand.
-unsafe fn choose_ops_method(call: Sexp, args: &[Arg], chosen: &Found, other: &Found, reverse: bool) -> R<bool> {
+unsafe fn choose_ops_method(
+    call: Sexp,
+    args: &[Arg],
+    chosen: &Found,
+    other: &Found,
+    reverse: bool,
+) -> R<bool> {
     let (Some(left), Some(right)) = (args.first(), args.get(1)) else {
         return Ok(false);
     };
-    let (x, y) = if reverse { (right.value, left.value) } else { (left.value, right.value) };
-    let function = eval::find_fun(values::install("chooseOpsMethod")?, values::base_namespace())?;
+    let (x, y) = if reverse {
+        (right.value, left.value)
+    } else {
+        (left.value, right.value)
+    };
+    let function = eval::find_fun(
+        values::install("chooseOpsMethod")?,
+        values::base_namespace(),
+    )?;
     let reverse = values::scalar_bool(reverse)?;
     crate::heap().root(reverse);
     let chooser_call = values::lcons(values::install("chooseOpsMethod")?, nil())?;
@@ -1160,7 +1210,8 @@ unsafe fn find_group_method(
             if let Some(method) = lookup_method(name, env, def_env)? {
                 let suffix = class_suffix(classes, index)?;
                 let method_string = scalar_string(&symbol_name(name))?;
-                let vars = dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
+                let vars =
+                    dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
                 return Ok(Some(Found {
                     method,
                     method_name: name,
@@ -1313,13 +1364,14 @@ unsafe fn do_is_methods_dispatch_on(_call: &Call<'_>) -> R<Sexp> {
 /// `standardGeneric("f")`: hands the call to the dispatcher the methods package installed.
 pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
     if !interp().globals.methods_dispatch {
-        return Err(call.error(
-            "standardGeneric called without 'methods' dispatch enabled (will be ignored)",
-        ));
+        return Err(call
+            .error("standardGeneric called without 'methods' dispatch enabled (will be ignored)"));
     }
     let name = call.arg(0);
     if name.kind() != SexpType::String || length(name) != 1 {
-        return Err(call.error("argument to 'standardGeneric' must be a non-empty character string"));
+        return Err(
+            call.error("argument to 'standardGeneric' must be a non-empty character string")
+        );
     }
     let env = call.env;
     let generic = this_generic(name)?;
@@ -1495,7 +1547,11 @@ unsafe fn do_unclass(call: &Call<'_>) -> R<Sexp> {
     }
     // Unlike a replacement function, unclass may not reuse a value any variable still holds:
     // `lapply(unclass(x), f, oldClass(x))` reads the class of `x` afterwards.
-    let copy = if object.refcount() > 0 { values::shallow_duplicate(object)? } else { object };
+    let copy = if object.refcount() > 0 {
+        values::shallow_duplicate(object)?
+    } else {
+        object
+    };
     set_class_attribute(copy, nil())?;
     Ok(copy)
 }

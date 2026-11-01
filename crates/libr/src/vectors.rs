@@ -1,19 +1,21 @@
 //! Vector access, type predicates and coercion.
 
-use crate::{
-    R_len_t, R_xlen_t, Rboolean, SEXPTYPE, altrep,
-    attributes::{get_attrib, inherits, set_attrib},
-    boundary::{ApiResult, enter, error, warn},
-    globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
-    memory::{alloc_vector, scalar_string},
-    runtime,
-    strings::{c_bytes, utf8_text},
+use {
+    crate::{
+        R_len_t, R_xlen_t, Rboolean, SEXPTYPE, altrep,
+        attributes::{get_attrib, inherits, set_attrib},
+        boundary::{ApiResult, enter, error, warn},
+        globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
+        memory::{alloc_vector, scalar_string},
+        runtime,
+        strings::{c_bytes, utf8_text},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
+        strings::Encoding,
+    },
+    std::ffi::{c_char, c_int, c_void},
 };
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
-    strings::Encoding,
-};
-use std::ffi::{c_char, c_int, c_void};
 
 pub fn sexp_type(code: SEXPTYPE) -> ApiResult<SexpType> {
     SexpType::from_code(code).ok_or_else(|| error(format!("invalid type code {code}")))

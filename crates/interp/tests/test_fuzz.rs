@@ -7,10 +7,12 @@
 //!
 //! `FUZZ_ITERS` raises the budget.
 
-use heap::{Heap, object::Sexp};
-use interp::{deparse, eval, lower, unwind::Unwind, values};
-use std::sync::Once;
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes};
+use {
+    heap::{Heap, object::Sexp},
+    interp::{deparse, eval, lower, unwind::Unwind, values},
+    std::sync::Once,
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes},
+};
 
 static INSTALL: Once = Once::new();
 
@@ -72,12 +74,14 @@ fn deparse_round_trips_lowered_seeds() {
             };
             for index in 0..values::length(expressions) {
                 let expression = expressions.element(index);
-                let text = deparse::deparse_lines(expression, 60, deparse::options::KEEP_INTEGER).join("\n");
+                let text = deparse::deparse_lines(expression, 60, deparse::options::KEEP_INTEGER)
+                    .join("\n");
                 let Ok(again) = lower::parse_text(&text, "<deparsed>") else {
                     panic!("{seed}: deparsed text does not parse: {text}");
                 };
                 let again = again.element(0);
-                let text_again = deparse::deparse_lines(again, 60, deparse::options::KEEP_INTEGER).join("\n");
+                let text_again =
+                    deparse::deparse_lines(again, 60, deparse::options::KEEP_INTEGER).join("\n");
                 assert_eq!(text, text_again, "{seed}: deparse is not stable");
             }
         }
@@ -90,14 +94,23 @@ fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
         let mut rng = SplitMix64(0xb17e_c0de);
         for case in 0..fuzz_iterations(300) {
             let body = program(&mut rng);
-            let arguments = ["3L", "-2.5", "NA", "TRUE", "2147483647L", "0", "NA_integer_"];
+            let arguments = [
+                "3L",
+                "-2.5",
+                "NA",
+                "TRUE",
+                "2147483647L",
+                "0",
+                "NA_integer_",
+            ];
             let a = arguments[rng.below(arguments.len())];
             let b = arguments[rng.below(arguments.len())];
             // SAFETY: the interpreter is installed.
             let (direct, compiled) = unsafe { outcomes(&body, a, b) };
             for (call, outcome) in compiled.iter().enumerate() {
                 assert_eq!(
-                    &direct, outcome,
+                    &direct,
+                    outcome,
                     "case {case}, call {}: `{body}` with a = {a}, b = {b}",
                     call + 1
                 );
@@ -139,7 +152,9 @@ unsafe fn run(text: &str) -> String {
             Ok(value)
         })();
         let rendered = match outcome {
-            Ok(value) => deparse::deparse_lines(value, 60, deparse::options::KEEP_INTEGER).join("\n"),
+            Ok(value) => {
+                deparse::deparse_lines(value, 60, deparse::options::KEEP_INTEGER).join("\n")
+            }
             Err(_) => "error".to_owned(),
         };
         interp::interp().frames.clear();
@@ -164,7 +179,12 @@ fn program(rng: &mut SplitMix64) -> String {
             rng.below(4),
             expression(rng, 2)
         )),
-        2 => statements.push(format!("s <- if ({}) {} else {}", condition(rng), expression(rng, 2), expression(rng, 2))),
+        2 => statements.push(format!(
+            "s <- if ({}) {} else {}",
+            condition(rng),
+            expression(rng, 2),
+            expression(rng, 2)
+        )),
         _ => {}
     }
     statements.push(expression(rng, 3));
@@ -177,7 +197,12 @@ fn expression(rng: &mut SplitMix64, depth: usize) -> String {
     }
     match rng.below(5) {
         0 => format!("-({})", expression(rng, depth - 1)),
-        1 => format!("(if ({}) {} else {})", condition(rng), expression(rng, depth - 1), expression(rng, depth - 1)),
+        1 => format!(
+            "(if ({}) {} else {})",
+            condition(rng),
+            expression(rng, depth - 1),
+            expression(rng, depth - 1)
+        ),
         _ => {
             let operators = ["+", "-", "*", "/", "^", "%/%", "%%", "==", "<", ">=", "!="];
             format!(
@@ -193,7 +218,12 @@ fn expression(rng: &mut SplitMix64, depth: usize) -> String {
 fn condition(rng: &mut SplitMix64) -> String {
     let comparison = |rng: &mut SplitMix64| {
         let operators = ["<", ">", "==", "!=", "<=", ">="];
-        format!("{} {} {}", leaf(rng), operators[rng.below(operators.len())], leaf(rng))
+        format!(
+            "{} {} {}",
+            leaf(rng),
+            operators[rng.below(operators.len())],
+            leaf(rng)
+        )
     };
     match rng.below(4) {
         0 => format!("{} && {}", comparison(rng), comparison(rng)),
@@ -203,6 +233,8 @@ fn condition(rng: &mut SplitMix64) -> String {
 }
 
 fn leaf(rng: &mut SplitMix64) -> String {
-    let leaves = ["a", "b", "s", "1L", "2", "0.5", "NA", "TRUE", "-1L", "1e308", "0L", "3L"];
+    let leaves = [
+        "a", "b", "s", "1L", "2", "0.5", "NA", "TRUE", "-1L", "1e308", "0L", "3L",
+    ];
     leaves[rng.below(leaves.len())].to_owned()
 }

@@ -1,13 +1,15 @@
 //! Pairlists, calls, closures and promises: the linked structures native code walks with `CAR`
 //! and `CDR`.
 
-use crate::{
-    boundary::{ApiResult, enter, error},
-    globals::R_NamesSymbol,
-    runtime,
+use {
+    crate::{
+        boundary::{ApiResult, enter, error},
+        globals::R_NamesSymbol,
+        runtime,
+    },
+    heap::object::{Sexp, SexpType, Shape},
+    std::ffi::c_int,
 };
-use heap::object::{Sexp, SexpType, Shape};
-use std::ffi::c_int;
 
 unsafe fn triple(object: Sexp, accessor: &str) -> ApiResult<Sexp> {
     crate::vectors::refuse_native(object)?;

@@ -30,27 +30,33 @@
 //! deoptimization returns [`TierExit::Resume`], and the interpreter continues at any
 //! instruction.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, internal},
-    conditions, dispatch,
-    eval::{self, as_condition},
-    interp,
-    unwind::{Jump, R, Unwind, error, error_in},
-    values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, Generic, internal},
+        conditions, dispatch,
+        eval::{self, as_condition},
+        interp,
+        unwind::{Jump, R, Unwind, error, error_in},
+        values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+    },
+    heap::{
+        Marker,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
 };
-use heap::{
-    Marker,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
-};
-use rustc_hash::{FxHashMap, FxHashSet};
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
 /// `mkCode` turns it into byte code; ry keeps only the buffer's first constant, the source
 /// expression, exactly as it reads GNU R byte code from a stream, and compiles that itself.
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("bcVersion", 0, |_| unsafe { values::scalar_integer(GNU_R_BYTECODE_VERSION) }),
+    internal("bcVersion", 0, |_| unsafe {
+        values::scalar_integer(GNU_R_BYTECODE_VERSION)
+    }),
     internal("mkCode", 2, do_mk_code),
-    internal("bcClose", 3, |call| unsafe { eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2)) }),
+    internal("bcClose", 3, |call| unsafe {
+        eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))
+    }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
     internal("getconst", 2, do_get_constants),
@@ -75,7 +81,11 @@ pub struct State {
 
 impl Default for State {
     fn default() -> State {
-        State { registers: Vec::with_capacity(REGISTER_FILE_CAPACITY), calls: FxHashMap::default(), tier: None }
+        State {
+            registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
+            calls: FxHashMap::default(),
+            tier: None,
+        }
     }
 }
 
@@ -143,7 +153,9 @@ pub fn register_address(index: usize) -> *mut Sexp {
 pub fn reserve_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
     if length > registers.capacity() {
-        return Err(error("evaluation nested too deeply: the register file is full"));
+        return Err(error(
+            "evaluation nested too deeply: the register file is full",
+        ));
     }
     if length > registers.len() {
         registers.resize(length, nil());
@@ -490,7 +502,12 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
     for (index, entry) in compiler.loops.iter().enumerate() {
         let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
-        slots.copy_from_slice(&[entry.start as i32, entry.end as i32, entry.exit as i32, entry.step as i32]);
+        slots.copy_from_slice(&[
+            entry.start as i32,
+            entry.end as i32,
+            entry.exit as i32,
+            entry.step as i32,
+        ]);
     }
     heap.set_element(constants, LOOPS, loops);
     let registers = values::scalar_integer(compiler.registers as i32)?;
@@ -514,7 +531,11 @@ pub unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>
         symbols_found.insert(formal.tag());
         formal = formal.cdr();
     }
-    if collect_bindings(body, &mut symbols_found) { Some(symbols_found) } else { None }
+    if collect_bindings(body, &mut symbols_found) {
+        Some(symbols_found)
+    } else {
+        None
+    }
 }
 
 /// A binding's value with a forced promise replaced by its value; an unforced promise stays.
@@ -561,10 +582,18 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
     let head = expression.car();
     if head.kind() == SexpType::Symbol {
         let name = symbol_name(head);
-        if matches!(&*name, "<-" | "=" | "<<-") && expression.cdr().car().kind() == SexpType::Language {
+        if matches!(&*name, "<-" | "=" | "<<-")
+            && expression.cdr().car().kind() == SexpType::Language
+        {
             return true;
         }
-        if matches!(&*name, "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call") {
+        if reuses_first_argument(expression) {
+            return true;
+        }
+        if matches!(
+            &*name,
+            "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call"
+        ) {
             return true;
         }
     }
@@ -578,6 +607,28 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
     false
 }
 
+/// Whether `expression` is `x <- f(x, ...)` for a standard library function that updates its first
+/// argument in place. The AST evaluator decides at run time whether the binding owns the value
+/// (`eval::rebind`), so the compiler leaves the whole assignment to it, and an earlier argument
+/// of an enclosing call must not keep `x` in an uncounted register.
+unsafe fn reuses_first_argument(expression: Sexp) -> bool {
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol || !matches!(&*symbol_name(head), "<-" | "=") {
+        return false;
+    }
+    let target = expression.cdr().car();
+    let value = expression.cdr().cdr().car();
+    target.kind() == SexpType::Symbol
+        && value.kind() == SexpType::Language
+        && value.car().kind() == SexpType::Symbol
+        && value.cdr().kind() == SexpType::Pairlist
+        && value.cdr().car() == target
+        && value.cdr().tag() == nil()
+        && crate::standard_library::BUILTINS.iter().any(|definition| {
+            definition.reuses_first_argument && *symbol_name(value.car()) == *definition.name
+        })
+}
+
 /// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
 unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> bool {
     if expression.kind() != SexpType::Language {
@@ -588,9 +639,27 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
         let name = symbol_name(head);
         if matches!(
             &*name,
-            "assign" | "eval" | "evalq" | "delayedAssign" | "makeActiveBinding" | "local" | "sys.function"
-                | "environment" | "list2env" | "sys.frame" | "sys.frames" | "attach" | "with" | "within"
-                | "source" | "rm" | "remove" | "lockBinding" | "on.exit" | "Recall" | "do.call"
+            "assign"
+                | "eval"
+                | "evalq"
+                | "delayedAssign"
+                | "makeActiveBinding"
+                | "local"
+                | "sys.function"
+                | "environment"
+                | "list2env"
+                | "sys.frame"
+                | "sys.frames"
+                | "attach"
+                | "with"
+                | "within"
+                | "source"
+                | "rm"
+                | "remove"
+                | "lockBinding"
+                | "on.exit"
+                | "Recall"
+                | "do.call"
         ) {
             return false;
         }
@@ -848,8 +917,25 @@ impl Compiler {
     unsafe fn base_primitive(&mut self, symbol: Sexp, name: &str) -> R<Option<Sexp>> {
         let inlinable = matches!(
             name,
-            "{" | "(" | "if" | "for" | "while" | "repeat" | "break" | "next" | "return" | "<-" | "=" | "&&" | "||" | "function"
-                | "[" | "[[" | "[<-" | "[[<-" | ".Internal" | "local"
+            "{" | "("
+                | "if"
+                | "for"
+                | "while"
+                | "repeat"
+                | "break"
+                | "next"
+                | "return"
+                | "<-"
+                | "="
+                | "&&"
+                | "||"
+                | "function"
+                | "["
+                | "[["
+                | "[<-"
+                | "[[<-"
+                | ".Internal"
+                | "local"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -1038,6 +1124,7 @@ impl Compiler {
                 }
                 self.emit(Op::Return, &[dst]);
             }
+            "<-" | "=" if reuses_first_argument(call) => self.fallback(call, dst)?,
             "<-" | "=" => {
                 self.expression(args[1].1, dst)?;
                 let symbol = self.constant(args[0].1);
@@ -1184,7 +1271,9 @@ impl Compiler {
     /// special passes on as an empty argument but a register cannot hold, so it takes the
     /// generic path.
     unsafe fn eager_subject(&self, primitive: Sexp, args: &[(Sexp, Sexp)]) -> R<bool> {
-        if primitive.kind() != SexpType::Special || !eval::builtin_def(primitive)?.is_dispatch_or_eval() {
+        if primitive.kind() != SexpType::Special
+            || !eval::builtin_def(primitive)?.is_dispatch_or_eval()
+        {
             return Ok(false);
         }
         let Some(((_, subject), rest)) = args.split_first() else {
@@ -1197,13 +1286,22 @@ impl Compiler {
                     || value == missing_arg()
                     || (!self.formals.contains(&value) && eval::dot_dot_index(value).is_none()))
         };
-        Ok(*subject != missing_arg() && *subject != symbols().dots && rest.iter().all(|(_, value)| plain_argument(*value)))
+        Ok(*subject != missing_arg()
+            && *subject != symbols().dots
+            && rest.iter().all(|(_, value)| plain_argument(*value)))
     }
 
     /// A dispatch-or-eval special call: the subject evaluates first, an object dispatches with
     /// the other arguments as promises, and any other subject calls the special on values, the
     /// path the optimizing tier compiles.
-    unsafe fn subject_call(&mut self, call: Sexp, head: Sexp, primitive: Sexp, dst: u32, args: &[(Sexp, Sexp)]) -> R<()> {
+    unsafe fn subject_call(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        args: &[(Sexp, Sexp)],
+    ) -> R<()> {
         let symbol = self.constant(head);
         let expected = self.constant(primitive);
         let call_constant = self.constant(call);
@@ -1226,7 +1324,10 @@ impl Compiler {
                 self.expression(*value, base + index as u32)?;
             }
         }
-        self.emit(Op::CallBuiltin, &[dst, function, call_constant, base, args.len() as u32]);
+        self.emit(
+            Op::CallBuiltin,
+            &[dst, function, call_constant, base, args.len() as u32],
+        );
         let called = self.emit_patchable(Op::Jump, &[0]);
         self.patch(object);
         self.emit(Op::DispatchSubject, &[dst, function, call_constant, base]);
@@ -1332,7 +1433,11 @@ pub struct LoopState {
 impl LoopState {
     /// The state of a loop over a vector, which is all the optimizing tier compiles.
     pub fn vector(index: usize, count: usize) -> LoopState {
-        LoopState { index, count, cell: None }
+        LoopState {
+            index,
+            count,
+            cell: None,
+        }
     }
 }
 
@@ -1385,7 +1490,14 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let profile = values::ints_mut(constants.element(PROFILE));
     profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
     let mut loops = vec![LoopState::default(); loop_count(code)];
-    let mut machine = Machine { function, code, env, base, mark, loops: &mut loops };
+    let mut machine = Machine {
+        function,
+        code,
+        env,
+        base,
+        mark,
+        loops: &mut loops,
+    };
     let entered = match interp().bytecode.tier {
         Some(tier) => (tier.enter)(&mut machine),
         None => None,
@@ -1393,7 +1505,8 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
         Some(TierExit::Resume { pc, pending }) => match pending {
-            Some(unwind) => continue_after(&mut machine, pc, unwind).and_then(|pc| execute_code(&mut machine, pc)),
+            Some(unwind) => continue_after(&mut machine, pc, unwind)
+                .and_then(|pc| execute_code(&mut machine, pc)),
             None => execute_code(&mut machine, pc),
         },
         None => execute_code(&mut machine, 0),
@@ -1420,8 +1533,14 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                         profile[profile::BACK_EDGES] = 0;
                         match (tier.back_edge)(machine, pc) {
                             Some(TierExit::Finished(result)) => return result,
-                            Some(TierExit::Resume { pc: at, pending: Some(unwind) }) => pc = continue_after(machine, at, unwind)?,
-                            Some(TierExit::Resume { pc: at, pending: None }) => pc = at,
+                            Some(TierExit::Resume {
+                                pc: at,
+                                pending: Some(unwind),
+                            }) => pc = continue_after(machine, at, unwind)?,
+                            Some(TierExit::Resume {
+                                pc: at,
+                                pending: None,
+                            }) => pc = at,
                             None => {}
                         }
                     }
@@ -1458,7 +1577,7 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
 unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
     let table = values::ints(loops);
     let mut best: Option<(usize, usize)> = None;
-    for entry in table.chunks_exact(4) {
+    for entry in table.as_chunks::<4>().0 {
         let (start, end) = (entry[0] as usize, entry[1] as usize);
         if start <= pc && pc < end && best.is_none_or(|(best_start, _)| start >= best_start) {
             best = Some((start, if is_break { entry[2] } else { entry[3] } as usize));
@@ -1487,7 +1606,12 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
 
 /// The binding cell inline cache `slot` of `code` holds for lookups from `enclosure`, if it is
 /// still valid.
-pub unsafe fn cached_binding(code: Sexp, symbol: Sexp, enclosure: Sexp, slot: usize) -> Option<Sexp> {
+pub unsafe fn cached_binding(
+    code: Sexp,
+    symbol: Sexp,
+    enclosure: Sexp,
+    slot: usize,
+) -> Option<Sexp> {
     cached_cell(symbol, enclosure, code.cdr(), code.tag(), slot)
 }
 
@@ -1586,7 +1710,15 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let call = constants.element(operand(2));
             let definition = eval::builtin_def(function)?;
             let mut args = eval::Args::new();
-            let value = match dispatch::dispatch_evaluated_subject(definition, call, function, call.cdr(), register(operand(3)), env, &mut args)? {
+            let value = match dispatch::dispatch_evaluated_subject(
+                definition,
+                call,
+                function,
+                call.cdr(),
+                register(operand(3)),
+                env,
+                &mut args,
+            )? {
                 Some(value) => value,
                 None => call_builtin(definition, call, function, &args, env)?,
             };
@@ -1791,7 +1923,13 @@ pub fn logic_result(is_and: bool, left: i32, right: i32) -> i32 {
     }
 }
 
-unsafe fn call_builtin(definition: &'static BuiltinDef, call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Sexp> {
+unsafe fn call_builtin(
+    definition: &'static BuiltinDef,
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    env: Sexp,
+) -> R<Sexp> {
     if definition.generic != Generic::None
         && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)?
     {
@@ -1821,7 +1959,11 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
     let as_real = |value: Sexp| match value.kind() {
         SexpType::Integer => {
             let integer = values::ints(value)[0];
-            if integer == NA_INTEGER { NA_REAL } else { integer as f64 }
+            if integer == NA_INTEGER {
+                NA_REAL
+            } else {
+                integer as f64
+            }
         }
         _ => values::reals(value)[0],
     };
@@ -1957,7 +2099,13 @@ unsafe fn lookup_function(
 }
 
 /// [`lookup_function`] for a symbol the frame cannot bind: the frame is not probed.
-unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> R<Sexp> {
+unsafe fn lookup_enclosing_function(
+    symbol: Sexp,
+    env: Sexp,
+    constants: Sexp,
+    caches: Sexp,
+    slot: usize,
+) -> R<Sexp> {
     let enclosure = env.enclosure();
     if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
@@ -1970,7 +2118,13 @@ unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, ca
     lookup_function(symbol, env, constants, caches, slot, unbound())
 }
 
-unsafe fn cached_cell(symbol: Sexp, enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> Option<Sexp> {
+unsafe fn cached_cell(
+    symbol: Sexp,
+    enclosure: Sexp,
+    constants: Sexp,
+    caches: Sexp,
+    slot: usize,
+) -> Option<Sexp> {
     let epochs = constants.element(EPOCHS);
     if values::reals(epochs)[slot] != crate::heap().lookup_stamp(symbol) as f64 {
         return None;
@@ -1981,7 +2135,14 @@ unsafe fn cached_cell(symbol: Sexp, enclosure: Sexp, constants: Sexp, caches: Se
     Some(caches.element(slot * 2 + 1))
 }
 
-unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, constants: Sexp, caches: Sexp, slot: usize) {
+unsafe fn fill_cache(
+    symbol: Sexp,
+    enclosure: Sexp,
+    cell: Sexp,
+    constants: Sexp,
+    caches: Sexp,
+    slot: usize,
+) {
     let heap = crate::heap();
     heap.set_element(caches, slot * 2, enclosure);
     heap.set_element(caches, slot * 2 + 1, cell);

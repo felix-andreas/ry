@@ -1,11 +1,15 @@
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::DocumentKind;
-use semantics::diagnostics::Severity;
-use semantics::lints::{LintConfig, LintLevel, NameStyle, lint_file};
-use semantics::testing::with_fixture_project;
-use std::path::Path;
-use syntax::testing::run_fixture_suite;
+use {
+    semantics::{
+        DocumentKind,
+        diagnostics::Severity,
+        lints::{LintConfig, LintLevel, NameStyle, lint_file},
+        testing::with_fixture_project,
+    },
+    std::path::Path,
+    syntax::testing::run_fixture_suite,
+};
 
 fn render_with(source: &str, config: &LintConfig) -> String {
     with_fixture_project(

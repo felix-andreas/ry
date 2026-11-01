@@ -2,28 +2,36 @@
 //! live in the server. Per-item query results carry item-relative ranges, while this API speaks
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
-use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
-use semantics::check::{CalleeTarget, ItemCheck};
-use semantics::diagnostics::TypeRenderer;
-use semantics::hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind};
-use semantics::infer::apply_definition;
-use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
-use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
-use semantics::types::{
-    Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme, contains_inference_var,
-};
-use semantics::{
-    Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
-    item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range, item_naming,
-    item_node, item_tree, package_definitions, project_type_definitions, visible_type_definitions,
-};
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::iter::once;
-use syntax::SyntaxKind::{self, *};
-use syntax::kind::KEYWORDS;
-use syntax::{
-    SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, is_inline_annotation,
-    is_syntactic_name,
+use {
+    semantics::{
+        Db, Item, ItemKind, ProjectFiles, SourceFile,
+        annotations::{block_refusal, statement_inline_site, type_definition_keyword},
+        check::{CalleeTarget, ItemCheck},
+        diagnostics::TypeRenderer,
+        file_type_definitions, global_scheme,
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        infer::apply_definition,
+        item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
+        item_naming, item_node, item_tree,
+        naming::{BindingId, BindingKind, dot_dot_variable},
+        package_definitions, project_type_definitions,
+        stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
+        types::{
+            Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
+            contains_inference_var,
+        },
+        visible_type_definitions,
+    },
+    std::{
+        collections::{BTreeSet, HashMap, HashSet},
+        iter::once,
+    },
+    syntax::{
+        SyntaxElement,
+        SyntaxKind::{self, *},
+        SyntaxNode, SyntaxToken, TextRange, TextSize, is_inline_annotation, is_syntactic_name,
+        kind::KEYWORDS,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +54,8 @@ pub enum HoverDefinition {
         namespace: String,
         overloads: usize,
         declaration: Option<StubTarget>,
+        /// The declaration's `#'` lines, as Markdown.
+        documentation: Option<String>,
     },
 }
 
@@ -434,6 +444,7 @@ fn stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
         namespace: declaring_namespace(db, name)?.to_owned(),
         overloads: stubs(db)?.schemes.get(name).map_or(0, Vec::len),
         declaration: stub_target(db, name),
+        documentation: stubs(db)?.documentation.get(name).cloned(),
     })
 }
 
@@ -1159,7 +1170,13 @@ pub fn completion(
                         .exports_by_namespace
                         .iter()
                         .find(|(_, names)| names.contains(name))
-                        .map(|(namespace, _)| format!("From the `{namespace}` package."))
+                        .map(|(namespace, _)| {
+                            let origin = format!("From the `{namespace}` package.");
+                            match library.documentation.get(name) {
+                                Some(text) => format!("{text}\n\n{origin}"),
+                                None => origin,
+                            }
+                        })
                 };
                 items.extend(
                     library
@@ -2296,6 +2313,7 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
             namespace: namespace.to_owned(),
             overloads: 0,
             declaration: stub_target(db, &cursor.name),
+            documentation: None,
         })
     } else {
         None

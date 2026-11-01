@@ -8,18 +8,24 @@
 //! a derivative, and parentheses are added in place where deparsing needs them, which is why a
 //! node can come out parenthesized in every place it appears.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    unwind::{R, Unwind},
-    values::{self, length, nil, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        unwind::{R, Unwind},
+        values::{self, length, nil, symbols},
+    },
+    heap::object::{NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_REAL, Sexp, SexpType};
 
 /// `doD(expr, name)`.
 pub unsafe fn do_d(call: &NativeCall<'_>) -> R<Sexp> {
     let mut expression = call.arg(0);
     if expression.kind() == SexpType::Expression {
-        expression = if length(expression) > 0 { values::list_elt(expression, 0) } else { nil() };
+        expression = if length(expression) > 0 {
+            values::list_elt(expression, 0)
+        } else {
+            nil()
+        };
     }
     let names = call.arg(1);
     if names.kind() != SexpType::String || length(names) < 1 {
@@ -28,7 +34,9 @@ pub unsafe fn do_d(call: &NativeCall<'_>) -> R<Sexp> {
     if length(names) > 1 {
         call.warning("only the first element is used as variable name")?;
     }
-    let name = values::string_at(names, 0).map(|name| name.into_owned()).unwrap_or_default();
+    let name = values::string_at(names, 0)
+        .map(|name| name.into_owned())
+        .unwrap_or_default();
     let variable = values::install(&name)?;
     let derivative = differentiate(call, expression, variable)?;
     add_parens(derivative)
@@ -38,23 +46,36 @@ pub unsafe fn do_d(call: &NativeCall<'_>) -> R<Sexp> {
 pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
     let mut expression = call.arg(0);
     if expression.kind() == SexpType::Expression {
-        expression = if length(expression) > 0 { values::list_elt(expression, 0) } else { nil() };
+        expression = if length(expression) > 0 {
+            values::list_elt(expression, 0)
+        } else {
+            nil()
+        };
     }
     let names_argument = call.arg(1);
     if names_argument.kind() != SexpType::String || length(names_argument) == 0 {
         return Err(call.error("invalid variable names"));
     }
-    let names: Vec<String> = values::strings(names_argument).into_iter().map(Option::unwrap_or_default).collect();
+    let names: Vec<String> = values::strings(names_argument)
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
     let function_argument = call.arg(2);
     let tag = match values::first_string(call.arg(3)) {
         Some(tag) if !tag.is_empty() && tag.len() <= 60 => tag.into_owned(),
         _ => return Err(call.error("invalid tag")),
     };
     let hessian = values::as_logical_scalar(call.arg(4)) == 1;
-    let variables: Vec<Sexp> = names.iter().map(|name| values::install(name)).collect::<R<_>>()?;
+    let variables: Vec<Sexp> = names
+        .iter()
+        .map(|name| values::install(name))
+        .collect::<R<_>>()?;
     let count = names.len();
 
-    let mut table = Subexpressions { entries: Vec::new(), tag: tag.clone() };
+    let mut table = Subexpressions {
+        entries: Vec::new(),
+        tag: tag.clone(),
+    };
     let f_index = table.find(call, values::duplicate(expression)?)?;
     let mut d_index = vec![0usize; count];
     let mut d2_index = Vec::new();
@@ -73,7 +94,11 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
     let subexpression_count = table.entries.len();
     let mut entries = table.entries;
     let variable_for = |index: usize| values::install(&format!("{tag}{index}"));
-    entries.push(if f_index != 0 { variable_for(f_index)? } else { values::duplicate(expression)? });
+    entries.push(if f_index != 0 {
+        variable_for(f_index)?
+    } else {
+        values::duplicate(expression)?
+    });
     let slot = values::missing_arg();
     entries.push(nil());
     if hessian {
@@ -99,7 +124,11 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
                     entries.push(variable_for(d2_index[k])?);
                 } else {
                     let second = differentiate(call, values::duplicate(first)?, variables[j])?;
-                    entries.push(if d_index[i] == 0 && is_zero(second) { slot } else { second });
+                    entries.push(if d_index[i] == 0 && is_zero(second) {
+                        slot
+                    } else {
+                        second
+                    });
                 }
                 k += 1;
             }
@@ -114,7 +143,10 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
     // Inline the subexpressions used only once; keep the others as `.exprN <- ...`.
     for i in 0..subexpression_count {
         let variable = variable_for(i + 1)?;
-        let later_uses: usize = entries[i + 1..].iter().map(|&entry| count_occurrences(variable, entry)).sum();
+        let later_uses: usize = entries[i + 1..]
+            .iter()
+            .map(|&entry| count_occurrences(variable, entry))
+            .sum();
         if later_uses < 2 {
             let replacement = entries[i];
             for entry in entries[i + 1..].iter_mut() {
@@ -154,7 +186,11 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
         position += 1;
     }
     let subscript = |target: Sexp, indices: &[&str]| -> R<Sexp> {
-        let mut items = vec![(nil(), symbols().bracket), (nil(), target), (nil(), values::missing_arg())];
+        let mut items = vec![
+            (nil(), symbols().bracket),
+            (nil(), target),
+            (nil(), values::missing_arg()),
+        ];
         for index in indices {
             items.push((nil(), values::scalar_string(index)?));
         }
@@ -184,11 +220,17 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
         }
     }
     let attribute = values::install("attr")?;
-    let gradient_attribute = values::call(attribute, &[value_symbol, values::scalar_string("gradient")?])?;
+    let gradient_attribute = values::call(
+        attribute,
+        &[value_symbol, values::scalar_string("gradient")?],
+    )?;
     entries[position] = values::call(assign, &[gradient_attribute, gradient_symbol])?;
     position += 1;
     if hessian {
-        let hessian_attribute = values::call(attribute, &[value_symbol, values::scalar_string("hessian")?])?;
+        let hessian_attribute = values::call(
+            attribute,
+            &[value_symbol, values::scalar_string("hessian")?],
+        )?;
         entries[position] = values::call(assign, &[hessian_attribute, hessian_symbol])?;
         position += 1;
     }
@@ -196,13 +238,20 @@ pub unsafe fn deriv(call: &NativeCall<'_>) -> R<Sexp> {
     let kept: Vec<Sexp> = entries.into_iter().filter(|&entry| entry != slot).collect();
     let body = values::call(symbols().brace, &kept)?;
 
-    let function_argument = if function_argument.kind() == SexpType::Logical && values::as_logical_scalar(function_argument) == 1 {
+    let function_argument = if function_argument.kind() == SexpType::Logical
+        && values::as_logical_scalar(function_argument) == 1
+    {
         names_argument
     } else {
         function_argument
     };
     match function_argument.kind() {
-        SexpType::Closure => crate::eval::make_closure(function_argument.car(), body, values::nil(), function_argument.tag()),
+        SexpType::Closure => crate::eval::make_closure(
+            function_argument.car(),
+            body,
+            values::nil(),
+            function_argument.tag(),
+        ),
         SexpType::String => {
             let mut formals = Vec::with_capacity(length(function_argument));
             for name in values::strings(function_argument).into_iter().flatten() {
@@ -230,7 +279,11 @@ impl Subexpressions {
     /// variable, and returns the number of the expression itself (0 for a symbol or constant).
     unsafe fn find(&mut self, call: &NativeCall<'_>, expression: Sexp) -> R<usize> {
         match expression.kind() {
-            SexpType::Symbol | SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => Ok(0),
+            SexpType::Symbol
+            | SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::Complex => Ok(0),
             SexpType::Language => {
                 if expression.car() == symbols().function {
                     return Ok(0);
@@ -243,11 +296,16 @@ impl Subexpressions {
                 while cell != nil() {
                     let index = self.find(call, cell.car())?;
                     if index != 0 {
-                        crate::heap().set_car(cell, values::install(&format!("{}{index}", self.tag))?);
+                        crate::heap()
+                            .set_car(cell, values::install(&format!("{}{index}", self.tag))?);
                     }
                     cell = cell.cdr();
                 }
-                if let Some(position) = self.entries.iter().position(|&entry| equal(entry, expression)) {
+                if let Some(position) = self
+                    .entries
+                    .iter()
+                    .position(|&entry| equal(entry, expression))
+                {
                     return Ok(position + 1);
                 }
                 self.entries.push(expression);
@@ -266,13 +324,20 @@ unsafe fn equal(left: Sexp, right: Sexp) -> bool {
     match left.kind() {
         SexpType::Nil => true,
         SexpType::Symbol => left == right,
-        SexpType::Logical | SexpType::Integer => values::ints(left).first() == values::ints(right).first(),
+        SexpType::Logical | SexpType::Integer => {
+            values::ints(left).first() == values::ints(right).first()
+        }
         SexpType::Real => values::reals(left).first() == values::reals(right).first(),
         SexpType::Complex => {
-            let (a, b) = (values::complexes(left).first(), values::complexes(right).first());
+            let (a, b) = (
+                values::complexes(left).first(),
+                values::complexes(right).first(),
+            );
             matches!((a, b), (Some(a), Some(b)) if a.r == b.r && a.i == b.i)
         }
-        SexpType::Language | SexpType::Pairlist => equal(left.car(), right.car()) && equal(left.cdr(), right.cdr()),
+        SexpType::Language | SexpType::Pairlist => {
+            equal(left.car(), right.car()) && equal(left.cdr(), right.cdr())
+        }
         _ => false,
     }
 }
@@ -280,7 +345,10 @@ unsafe fn equal(left: Sexp, right: Sexp) -> bool {
 unsafe fn count_occurrences(symbol: Sexp, expression: Sexp) -> usize {
     match expression.kind() {
         SexpType::Symbol => (expression == symbol) as usize,
-        SexpType::Language | SexpType::Pairlist => count_occurrences(symbol, expression.car()) + count_occurrences(symbol, expression.cdr()),
+        SexpType::Language | SexpType::Pairlist => {
+            count_occurrences(symbol, expression.car())
+                + count_occurrences(symbol, expression.cdr())
+        }
         _ => 0,
     }
 }
@@ -301,7 +369,10 @@ unsafe fn replace(symbol: Sexp, replacement: Sexp, expression: Sexp) -> Sexp {
 }
 
 unsafe fn names_call(names: &[String]) -> R<Sexp> {
-    let items: Vec<Sexp> = names.iter().map(|name| values::scalar_string(name)).collect::<R<_>>()?;
+    let items: Vec<Sexp> = names
+        .iter()
+        .map(|name| values::scalar_string(name))
+        .collect::<R<_>>()?;
     values::call(values::install("c")?, &items)
 }
 
@@ -312,7 +383,10 @@ unsafe fn constant(value: f64) -> R<Sexp> {
 }
 
 unsafe fn is_numeric_constant(expression: Sexp) -> bool {
-    matches!(expression.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real) && length(expression) >= 1
+    matches!(
+        expression.kind(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) && length(expression) >= 1
 }
 
 unsafe fn constant_value(expression: Sexp) -> Option<f64> {
@@ -328,11 +402,15 @@ unsafe fn is_one(expression: Sexp) -> bool {
 }
 
 unsafe fn is_call(expression: Sexp, name: &str) -> bool {
-    expression.kind() == SexpType::Language && expression.car().kind() == SexpType::Symbol && values::symbol_name(expression.car()) == name
+    expression.kind() == SexpType::Language
+        && expression.car().kind() == SexpType::Symbol
+        && values::symbol_name(expression.car()) == name
 }
 
 unsafe fn is_unary_minus(expression: Sexp) -> bool {
-    is_call(expression, "-") && (length(expression) == 2 || (length(expression) == 3 && expression.cdr().cdr().car() == values::missing_arg()))
+    is_call(expression, "-")
+        && (length(expression) == 2
+            || (length(expression) == 3 && expression.cdr().cdr().car() == values::missing_arg()))
 }
 
 unsafe fn second(expression: Sexp) -> Sexp {
@@ -439,7 +517,10 @@ unsafe fn simplify(operator: Operator, left: Sexp, right: Option<Sexp>) -> R<Sex
                 constant(1.0)
             } else if is_zero(left) {
                 constant(0.0)
-            } else if is_unary_minus(left) && right.kind() == SexpType::Integer && values::as_integer_scalar(right) % 2 == 0 {
+            } else if is_unary_minus(left)
+                && right.kind() == SexpType::Integer
+                && values::as_integer_scalar(right) % 2 == 0
+            {
                 simplify(Operator::Power, second(left), Some(right))
             } else {
                 values::call(symbol("^")?, &[left, right])

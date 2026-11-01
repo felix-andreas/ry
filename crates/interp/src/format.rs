@@ -3,13 +3,15 @@
 //! number of decimals, decided by GNU R's rule (fixed unless it is wider than scientific by more
 //! than `scipen`).
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    unwind::{R, error},
-    values::{self, alloc, length, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        unwind::{R, error},
+        values::{self, alloc, length, nil, symbols},
+    },
+    heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, is_na_real},
+    unicode_width::UnicodeWidthChar,
 };
-use heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, is_na_real};
-use unicode_width::UnicodeWidthChar;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("format", 9, do_format),
@@ -78,7 +80,11 @@ pub fn scientific(value: f64, digits: usize) -> (bool, i32, usize) {
     let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
     let exponent: i32 = exponent.parse().unwrap_or(0);
     let significant: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
-    let trailing = significant.iter().rev().take_while(|&&digit| digit == b'0').count();
+    let trailing = significant
+        .iter()
+        .rev()
+        .take_while(|&&digit| digit == b'0')
+        .count();
     let needed = (significant.len() - trailing).max(1);
     (value < 0.0, exponent, needed)
 }
@@ -169,7 +175,11 @@ pub fn format_real_with(value: f64, format: RealFormat, na: &str) -> String {
         return "NaN".into();
     }
     if value.is_infinite() {
-        return if value < 0.0 { "-Inf".into() } else { "Inf".into() };
+        return if value < 0.0 {
+            "-Inf".into()
+        } else {
+            "Inf".into()
+        };
     }
     if format.exponent == 0 {
         let text = format!("{:.*}", format.decimals, value);
@@ -239,7 +249,12 @@ pub fn format_logical(value: i32) -> &'static str {
 }
 
 /// A complex number's parts formatted together.
-pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFormat, digits: usize) -> String {
+pub fn format_complex_with(
+    value: Rcomplex,
+    real: RealFormat,
+    imaginary: RealFormat,
+    digits: usize,
+) -> String {
     if is_na_real(value.r) || is_na_real(value.i) {
         return "NA".into();
     }
@@ -462,7 +477,11 @@ pub unsafe fn format_vector(
 
 /// Pads every item to the widest one; right-justified when `right`.
 pub fn justify(items: Vec<String>, right: bool) -> Vec<String> {
-    let width = items.iter().map(|item| display_width(item)).max().unwrap_or(0);
+    let width = items
+        .iter()
+        .map(|item| display_width(item))
+        .max()
+        .unwrap_or(0);
     items
         .into_iter()
         .map(|item| pad(&item, width, right))
@@ -591,7 +610,9 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
         let text = if mode == "character" {
-            values::string_at(vector, index).unwrap_or_default().into_owned()
+            values::string_at(vector, index)
+                .unwrap_or_default()
+                .into_owned()
         } else {
             let value = crate::subset::numeric_element(vector, index);
             c_format(value, &format, digits, &flag, mode == "integer")
@@ -629,7 +650,11 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
         return "NaN".into();
     }
     if value.is_infinite() {
-        return if value < 0.0 { "-Inf".into() } else { "Inf".into() };
+        return if value < 0.0 {
+            "-Inf".into()
+        } else {
+            "Inf".into()
+        };
     }
     let plus = if flag.contains('+') && value >= 0.0 {
         "+"
@@ -638,7 +663,11 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
     } else {
         ""
     };
-    let precision = if digits < 0 { None } else { Some(digits as usize) };
+    let precision = if digits < 0 {
+        None
+    } else {
+        Some(digits as usize)
+    };
     let text = match format {
         "d" => format!("{}", value.round() as i64),
         "f" => format!("{:.*}", precision.unwrap_or(6), value),
@@ -647,7 +676,11 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
         "g" | "G" | "fg" => {
             let significant = precision.unwrap_or(6).max(1);
             let text = c_general(value, significant, flag.contains('#'));
-            if format == "G" { text.to_uppercase() } else { text }
+            if format == "G" {
+                text.to_uppercase()
+            } else {
+                text
+            }
         }
         _ => {
             if integer {
@@ -681,7 +714,11 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
     } else {
         let decimals = (significant as i32 - 1 - exponent).max(0) as usize;
         let text = format!("{value:.decimals$}");
-        if keep_zeros { text } else { trim_zeros(&text).to_owned() }
+        if keep_zeros {
+            text
+        } else {
+            trim_zeros(&text).to_owned()
+        }
     };
     text
 }
@@ -713,7 +750,11 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
         })
         .collect();
     // GNU R treats `width = NULL` like `width = NA`: pad to the widest element.
-    let requested = if width == nil() { NA_INTEGER } else { values::as_integer_scalar(width) };
+    let requested = if width == nil() {
+        NA_INTEGER
+    } else {
+        values::as_integer_scalar(width)
+    };
     if requested != NA_INTEGER && requested < 0 {
         return Err(error("invalid 'width' value"));
     }
@@ -736,7 +777,12 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
                     1 => pad(&text, target, true),
                     2 => {
                         let total = target.saturating_sub(display_width(&text));
-                        format!("{}{}{}", " ".repeat(total / 2), text, " ".repeat(total - total / 2))
+                        format!(
+                            "{}{}{}",
+                            " ".repeat(total / 2),
+                            text,
+                            " ".repeat(total - total / 2)
+                        )
                     }
                     _ => text,
                 };
@@ -766,13 +812,23 @@ unsafe fn do_format_info(call: &Call<'_>) -> R<Sexp> {
             values::integer_vector(&[
                 format.width as i32,
                 format.decimals as i32,
-                if format.exponent == 0 { 0 } else { format.exponent as i32 - 1 },
+                if format.exponent == 0 {
+                    0
+                } else {
+                    format.exponent as i32 - 1
+                },
             ])
         }
         // The real and the imaginary part's width, digits and exponent width.
         SexpType::Complex => {
             let (real, imaginary) = format_complex_common(values::complexes(vector), settings);
-            let exponent = |format: &RealFormat| if format.exponent == 0 { 0 } else { format.exponent as i32 - 1 };
+            let exponent = |format: &RealFormat| {
+                if format.exponent == 0 {
+                    0
+                } else {
+                    format.exponent as i32 - 1
+                }
+            };
             values::integer_vector(&[
                 real.width as i32,
                 real.decimals as i32,
@@ -784,7 +840,11 @@ unsafe fn do_format_info(call: &Call<'_>) -> R<Sexp> {
         }
         _ => {
             let items = format_vector(vector, settings, false, "NA")?;
-            let width = items.iter().map(|item| display_width(item)).max().unwrap_or(0);
+            let width = items
+                .iter()
+                .map(|item| display_width(item))
+                .max()
+                .unwrap_or(0);
             values::integer_vector(&[width as i32])
         }
     }
@@ -799,4 +859,3 @@ pub unsafe fn width_option() -> usize {
         values::as_integer_scalar(width).clamp(10, 10000) as usize
     }
 }
-
