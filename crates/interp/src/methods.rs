@@ -10,7 +10,7 @@ use crate::{
     builtin_libraries::{NativeCall, NativeFn},
     conditions::{self, Handler},
     dispatch::{self, MethodsState},
-    eval::{self, BINDING_MISSING},
+    eval::{self, BINDING_ABSENT, BINDING_MISSING},
     interp,
     unwind::{Jump, R, Unwind, error, error_in},
     values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
@@ -182,6 +182,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
             ))
         })?;
         let missing = cell.has_gp(BINDING_MISSING) || cell.cdr() == missing_arg();
+        let absent = cell.has_gp(BINDING_ABSENT) || cell.cdr() == missing_arg();
         let mut value = cell.cdr();
         if missing && formal.car() != missing_arg() {
             value = eval::make_promise(formal.car(), method_env)?;
@@ -189,6 +190,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         eval::define(symbol, value, method_env)?;
         if missing && let Some(new_cell) = heap.frame_cell(method_env, symbol) {
             new_cell.set_gp_bits(BINDING_MISSING, true);
+            new_cell.set_gp_bits(BINDING_ABSENT, absent);
         }
         formal = formal.cdr();
     }

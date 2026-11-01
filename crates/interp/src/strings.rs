@@ -2301,7 +2301,10 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
         && (0..chars.len()).any(|index| {
             (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
         });
-    let mut groups: Vec<usize> = Vec::new();
+    // Where each open group starts in `output`, and whether it is a lookaround assertion.
+    let mut groups: Vec<(usize, bool)> = Vec::new();
+    // Where the assertion that just closed starts, while a quantifier may still apply to it.
+    let mut assertion: Option<usize> = None;
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
     let mut quantified = false;
@@ -2309,6 +2312,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     while index < chars.len() {
         let character = chars[index];
         let start = output.len();
+        let quantifiable_assertion = assertion.take();
         match character {
             '\\' => {
                 index = translate_escape(&chars, index, dialect, &mut output, &mut problem);
@@ -2325,7 +2329,9 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
             '(' if syntax == Syntax::Perl && chars.get(index + 1) == Some(&'?') => {
                 let (next, opens_group) = translate_group_prefix(&chars, index, &mut output);
                 if opens_group {
-                    groups.push(start);
+                    let lookaround = matches!(chars.get(index + 2), Some('=' | '!'))
+                        || (chars.get(index + 2) == Some(&'<') && matches!(chars.get(index + 3), Some('=' | '!')));
+                    groups.push((start, lookaround));
                 }
                 atom = None;
                 quantified = false;
@@ -2340,7 +2346,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
                         if close == ':' {
-                            groups.push(start);
+                            groups.push((start, false));
                         }
                         atom = None;
                         quantified = false;
@@ -2348,7 +2354,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                         continue;
                     }
                     _ => {
-                        groups.push(start);
+                        groups.push((start, false));
                         output.push('(');
                         atom = None;
                         quantified = false;
@@ -2360,15 +2366,30 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                 continue;
             }
             '(' => {
-                groups.push(start);
+                groups.push((start, false));
                 output.push('(');
                 atom = None;
                 quantified = false;
             }
             ')' => {
                 output.push(')');
-                atom = Some(groups.pop().unwrap_or(start));
+                let (group_start, lookaround) = groups.pop().unwrap_or((start, false));
+                atom = Some(group_start);
+                assertion = lookaround.then_some(group_start);
                 quantified = false;
+            }
+            // PCRE obeys a repeated assertion at most once, and one that may repeat zero times
+            // can never fail the match, so it is dropped; fancy-regex refuses either.
+            '*' | '+' | '?' if quantifiable_assertion.is_some() => {
+                if character != '+'
+                    && let Some(assertion_start) = quantifiable_assertion
+                {
+                    output.truncate(assertion_start);
+                    atom = None;
+                }
+                if matches!(chars.get(index + 1), Some('?' | '+')) {
+                    index += 1;
+                }
             }
             '|' => {
                 output.push('|');

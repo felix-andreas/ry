@@ -1,0 +1,13 @@
+[stdout]
+| [1] "ap"
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] "bp"
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| FALSE

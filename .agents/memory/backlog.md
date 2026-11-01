@@ -1889,20 +1889,26 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - `rawConnection` and `writeBin` are missing from the interpreter (libr has them, unregistered),
-    and cli renders every testthat failure through `rawConnection`, so about 21 packages stop there.
-  - About 12 packages (DBI, glue, withr, vctrs, lubridate, hms, readxl, later, lgr, tidyselect,
-    pkgbuild, blob) crash in the collector marking a dead handle, only in long runs. Reproduce
-    with `gctorture(TRUE)` on a profiling build.
+  - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
+    full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
+    was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
   - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
     `rm()` and `gc()`, so it is finalized in a later block.
-  - Smaller classes: ALTREP in checkmate, `latin1` encoding in fastmap, `file_access` names in fs,
-    `gsub` with a Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in
-    Bessel's asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, and the
-    `parallel` package's DLL for doParallel.
+  - `getParseData` returns `NULL` (see the source-references item below), and cli's
+    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
+  - Regular expressions fancy-regex cannot compile: rcmdcheck's `(?<q>...)\g{q}` backreference,
+    and lubridate's quantified lookahead `(?=\D+)?`. A non-constant-size pattern runs on
+    fancy-regex's backtracking VM because of `leftmost_longest`; a DFA leftmost-longest search
+    (regex-automata's `MatchKind::All`, anchored at the leftmost-first start) would avoid it.
+  - `match()` and `unique()` compare strings by pointer, so a latin1 string and its UTF-8 twin
+    differ there although `==` treats them as equal (`values::same_text`).
+  - Smaller classes: ALTREP in checkmate, fastmap's "Malformed keys" error, utf8's `utf8_encode`
+    on invalid UTF-8, pkgbuild's `is_gz_file`, shiny's `end_reporter`, `gsub` with a
+    Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
+    asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
+    package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
+    alternative in mvtnorm, and `NextMethod` in xts.
   - `eval(quote(next))` inside a loop reports no loop context.
-  - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
-    different order (`heap::env::Frame::listed_cells`).
   - The graphics device keeps a display list but draws nothing.
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
@@ -1910,9 +1916,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
   (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
   optimum along a slightly different path, so values agree to about seven digits only.
-- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
-  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
-  daylight-saving changes differ from GNU R.
+- **Time zones come from chrono-tz's database, not the system's.** GNU R on Linux reads
+  `/usr/share/zoneinfo`, so a zone whose rules changed after chrono-tz's release can differ.
+  `strptime` ignores `%U`, `%V`, `%W`, `%u` and `%w` beyond consuming their digits.
 - **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
   stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that

@@ -1735,6 +1735,8 @@ name = "interp"
 version = "0.3.2-beta"
 dependencies = [
  "bzip2-rs",
+ "chrono",
+ "chrono-tz",
  "fancy-regex",
  "flate2",
  "heap",
