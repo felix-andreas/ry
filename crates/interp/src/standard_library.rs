@@ -272,6 +272,21 @@ pub(crate) unsafe fn attach() -> Sexp {
 
 /// The arguments for `formals`, matched by name or position. Every formal is required.
 unsafe fn arguments<const N: usize>(call: &Call<'_>, formals: [&str; N]) -> R<[Sexp; N]> {
+    // Nearly every call passes exactly the formals by position, which needs no matching.
+    if call.args.len() == N && call.args.iter().all(|arg| arg.tag == nil()) {
+        let mut values = [nil(); N];
+        for (index, arg) in call.args.iter().enumerate() {
+            if arg.value == missing_arg() {
+                return Err(call.error(format!(
+                    "`{}()` needs the argument `{}`",
+                    call.name(),
+                    formals[index]
+                )));
+            }
+            values[index] = arg.value;
+        }
+        return Ok(values);
+    }
     // With no `...` formal, the matcher itself refuses an argument it cannot place.
     let (matched, _) = call.match_args(&formals)?;
     let mut values = [nil(); N];
@@ -392,6 +407,7 @@ unsafe fn invoke(call: &Call<'_>, function: Sexp, arguments: &[Sexp]) -> R<Sexp>
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
+    crate::moves::calling_back(function)?;
     eval::apply(nil(), function, &arguments, call.env)
 }
 
@@ -2499,6 +2515,7 @@ unsafe fn insert_in_place(object: Sexp, key: Key, value: Sexp) -> R<()> {
     let slot = match probe(values::ints(index), key, |position| key_at(keys, position)) {
         Ok(position) => {
             if is_dict && let Some(stored) = object.record_handle(1) {
+                crate::moves::replacing(object, position, stored.element(position));
                 heap.set_element(stored, position, value);
             }
             return Ok(());
@@ -2960,6 +2977,30 @@ unsafe fn collection(call: &Call<'_>, parameter: &str, value: Sexp, kind: Native
         "a set"
     };
     Err(wrong(call, parameter, needed, value))
+}
+
+/// A new dictionary or set holding the first `entries` entries of `object`, with the values at
+/// the `replaced` positions put back, newest first, as they were before in-place updates.
+pub(crate) unsafe fn collection_prefix(
+    object: Sexp,
+    entries: usize,
+    replaced: &[(usize, Sexp)],
+) -> R<Sexp> {
+    let mut collection = Collection::read(object)?;
+    collection.keys.truncate(entries);
+    if collection.kind == NativeKind::Dict {
+        collection.values.truncate(entries);
+        for &(position, old) in replaced.iter().rev() {
+            if let Some(slot) = collection.values.get_mut(position) {
+                *slot = old;
+            }
+        }
+    }
+    if collection.keys.is_empty() {
+        collection.key_kind = None;
+    }
+    collection.rebuild_index()?;
+    collection.write()
 }
 
 /// The number of entries of a dictionary or set, `length()`'s answer for one.

@@ -170,6 +170,9 @@ pub unsafe fn make_condition(message: &str, call: Sexp, classes: &[&str]) -> R<S
 
 /// GNU R's default error handler: prints the message, then goes to top level.
 pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
+    if let Err(unwind) = crate::moves::handling_error() {
+        return unwind;
+    }
     let state = interp();
     let text = format_error(call, message);
     state.error_message = text.clone();

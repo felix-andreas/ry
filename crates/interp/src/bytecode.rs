@@ -241,6 +241,15 @@ pub mod profile {
     pub const LENGTH: usize = 3;
 }
 
+/// The body `function` was defined with, which a compiled closure keeps beside its code.
+pub unsafe fn source_body(function: Sexp) -> Sexp {
+    if is_compiled(function) {
+        source_of(function.cdr())
+    } else {
+        function.cdr()
+    }
+}
+
 unsafe fn source_of(code: Sexp) -> Sexp {
     code.cdr().element(SOURCE)
 }
