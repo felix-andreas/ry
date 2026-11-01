@@ -641,6 +641,34 @@ fn the_ry_console_refuses_class_definitions_when_object_systems_are_off() {
 }
 
 #[test]
+fn piped_input_is_evaluated_and_autoprinted_on_both_runtimes() {
+    use std::io::Write;
+    let directory = tempfile::tempdir().expect("temp dir");
+    for runtime in runtimes() {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["repl", "--no-load", "--runtime", runtime])
+            .current_dir(directory.path())
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("start the console");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(b"1 + 1\nf <- function(a) {\n  a * 2\n}\nf(21)\n")
+            .expect("write the commands");
+        let output = child.wait_with_output().expect("console exits at end of input");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{runtime}: {output:?}");
+        assert!(stdout.contains("[1] 2\n"), "{runtime}: {stdout}");
+        assert!(stdout.contains("[1] 42\n"), "{runtime}: {stdout}");
+    }
+}
+
+#[test]
 fn run_in_strict_mode_refuses_untyped_code() {
     let config = "[check]\ntyping = true\nstrict = true\n";
     let untyped = "describe <- function(x) cat(\"a value\\n\")\ndescribe(1)\n";
