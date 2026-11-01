@@ -153,6 +153,7 @@ fn run(seed: u64, steps: usize, stress: bool) {
     let mut rng = SplitMix64(seed);
     let mut heap = Heap::new();
     heap.policy_mut().young_limit = 4096 + rng.below(64 * 1024);
+    heap.policy_mut().young_large_limit = 4096 + rng.below(256 * 1024);
     if stress {
         heap.policy_mut().stress = GcStress::EveryAllocation;
     }
@@ -342,11 +343,14 @@ fn unrooted_objects_are_freed_and_their_slots_reused() {
         let before = heap.stats().objects_freed;
         heap.collect(Collection::Minor);
         assert!(heap.stats().objects_freed > before);
-        assert_eq!(
-            garbage.kind(),
-            SexpType::Free,
-            "a freed slot is poisoned as FREESXP"
-        );
+        // Only debug builds poison freed slots, since it costs a store per dead byte.
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                garbage.kind(),
+                SexpType::Free,
+                "a freed slot is poisoned as FREESXP"
+            );
+        }
         let reused = heap.alloc_vector(SexpType::Real, 3).expect("alloc");
         assert_eq!(reused, garbage, "the free list hands the slot out again");
         assert!(is_na_real(kept.slice::<f64>()[1]));

@@ -31,6 +31,7 @@ tiny-skia = "0.11"
 ab_glyph = "0.2"
 jpeg-encoder = "0.7"
 encoding_rs = "0.8"
+memchr = "2.7"
 
 [target.'cfg(windows)'.dependencies]
 glob = "0.3"

@@ -649,6 +649,13 @@ pub unsafe fn set_elt(object: Sexp, index: usize, value: Sexp) {
 /// A `CHARSXP` as text. Invalid UTF-8 is replaced, which only affects byte-encoded strings.
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     let bytes = charsxp.bytes();
+    // Strict validation runs a word at a time over ASCII, where the lossy decoder steps through
+    // chunks. The bit is only a hint, since native code can set any of a string's flags.
+    if charsxp.has_gp(gp::ASCII)
+        && let Ok(text) = std::str::from_utf8(bytes)
+    {
+        return Cow::Borrowed(text);
+    }
     if charsxp.has_gp(gp::LATIN1) {
         return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
     }
