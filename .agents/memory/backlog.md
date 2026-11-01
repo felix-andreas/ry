@@ -258,6 +258,28 @@ distinctness, and no cascades outside the `@param` case. The gap is not the engi
 render the artifact unification left behind rather than the fact that failed, and the nominal story
 protects construction but nothing after it.
 
+## Open: the JIT
+
+`crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
+
+- **Direct calls between compiled closures, with promise elision.** `micro/closures` is slower
+  under the JIT than under tier 0 because each iteration's generic call writes `s` and `i` back and
+  reloads them, and fib and lapply gain nothing. A call to a speculated closure whose arguments are
+  effect-free should evaluate them eagerly and enter the callee's compiled code without a promise.
+- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
+  reads the checker's per-function summaries yet.
+- **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
+  and invalidated external pointers stay rooted.
+- **Builtin-bound benchmarks** (vector_arith, jackknife, log_rank, vasicek) are 2.5 to 3 times
+  slower than GNU R in tier 0 and the JIT alike; the cost is in the builtins, not the dispatch.
+- **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
+  `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
+  so they are tier-0 or base gaps, not JIT ones.
+- **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
+  may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
+  while the environment still holds the old value; and an allocation failure inside `boxed()`
+  (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
+
 ## Open: performance and memory
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
