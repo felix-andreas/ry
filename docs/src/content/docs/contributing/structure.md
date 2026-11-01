@@ -1,6 +1,6 @@
 ---
 title: Structure
-description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, libr, table, and rcmd crates
+description: What each source file holds in the syntax, semantics, ide, format, loader, oracle, ry, repl, heap, interp, jit, libr, sniff, table, and rcmd crates
 ---
 
 This page lists what each source file in ry's crates is responsible for. How the crates depend on
@@ -24,6 +24,9 @@ The crate root is `src/syntax.rs`.
   translation.
 - **`reparse.rs`**: incremental reparsing by splicing in a single statement. It is purely an
   optimization, and parse correctness never depends on it.
+- **`native_values.rs`**: the facts about ry's own records, tuples, tags, dictionaries and sets,
+  and the R functions that accept them, which the checker and the runtime both read so the two
+  cannot drift apart.
 - **`testing.rs`**: the fixture harness every fixture suite shares, with the `.test` file format,
   the `RY_BLESS` and `FIXTURE_FILTER` variables, the rejection of duplicate case ids, and the
   `#~~~~` separator that splits one case into several files. It also reads the program corpus in
@@ -59,6 +62,12 @@ The crate root is `src/semantics.rs`.
   `PackageSources`. Per item it derives a content hash, whether the item is a function definition,
   and the registrations it makes; per file, the text R reads (inline annotations erased) and every
   item's position; per package, which names are bound lazily.
+- **`exhaustiveness.rs`**: whether the arms of a `match` cover the scrutinee's type, by Maranget's
+  usefulness algorithm.
+- **`top_level.rs`**: what a package file's top level runs when the package loads, and which
+  functions are declared `@pure`, which strict mode's definitions-only rule and the lazy constants
+  of `ry load` both read.
+- **`sorted.rs`**: read-only sorted maps and sets for memoized results.
 - **`lints.rs`**: the style lints and their configuration types.
 - **`testing.rs`**: test support that other crates share. It holds the invariant battery for the
   semantic pipeline, which the fuzz harness and the coverage-guided targets run, the shared fixture
@@ -69,7 +78,8 @@ The crate root is `src/semantics.rs`.
 
 ## `ide`
 
-The whole crate is one file, `src/ide.rs`, and every editor feature in it is a read of `semantics`
+The crate root is `src/ide.rs`, and `src/testing.rs` holds the editor features' fuzz contract,
+which the in-tree harness and the coverage-guided target share. Every editor feature in `ide.rs` is a read of `semantics`
 queries: hover, goto-definition, references, rename, inlay hints, signature help, completion, code
 actions, document and workspace symbols, and navigation to annotation types and S4 definitions.
 Definition, references, and rename share one occurrence engine, and completion uses the shared
@@ -86,27 +96,39 @@ The crate root is `src/loader.rs`.
 
 - **`loader.rs`**: the session that reads a package's sources into the analysis, and the diff that
   turns the load index into a backend-neutral `Plan` of what to bind, run, remove, and register.
-- **`gnur.rs`**: the GNU R backend. It encodes a plan as an RDS file.
-- **`runtime.R`**: the R side of the GNU R backend, which applies a plan to a session and provides
-  `load_all()`.
+- **`runtime.R`**: the R code both backends share, which applies a plan to a session and provides
+  `load_all()`. **`r.rs`** turns a plan into an R list, encoding it as an RDS file for GNU R, and
+  **`gnur.R`** and **`ry.R`** are the hooks of the two runtimes.
+- **`ry_runtime.rs`** (feature `runtime`): the backend for ry's own runtime, where the plan never
+  leaves the process and a lazy definition is a promise over the analysis's syntax tree.
+- **`testing.rs`**: the fuzz contracts for reloads and the load index, shared by the in-tree
+  harness and the coverage-guided targets.
 
 ## `oracle`
 
 The library root is `src/oracle.rs`, and the binary root is `src/main.rs`. It runs one R file under
 GNU R and under a second engine and compares stdout, messages, warnings, errors and the last value;
-`driver.R` is the script that produces each engine's report. [Corpus, oracle and benchmark
-generator](/contributing/corpus-and-oracle) describes how to run it.
+`driver.R` is the script that produces each engine's report. `fuzz.rs` generates the programs for
+differential fuzzing, `packages.rs` runs the corpus packages' own tests on both runtimes,
+`install.rs` installs them from source on ry, and `bench.rs` compares the generated benchmark
+packages' tests test by test. [Corpus, oracle and benchmark generator](/contributing/corpus-and-oracle)
+describes how to run it.
 
 ## `ry`
 
 The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
 
-- **`main.rs`**: the CLI surface and the [exit-code contract](/reference/cli#exit-codes).
+- **`main.rs`**: the dispatch of every subcommand and the [exit-code contract](/reference/cli#exit-codes).
+  **`command_line.rs`** is the clap model, and resolves `ry run`, `ry R` and the `ry repl` alias to
+  one session shape.
+- **`preflight.rs`**: the check that runs before ry executes R code. It prints the inline-annotation
+  warnings and enforces strict mode, and leaves everything else to `ry check`.
 - **`cli.rs`**: the implementations of `check`, `fmt`, and `ry debug ast`. `check` assembles the
   project, renders the output, and reports `NAMESPACE` problems and stub overrides.
 - **`server.rs`**: the LSP server, all of it: the frontend and worker threads, document sync, push
   and pull diagnostics, every feature endpoint, semantic tokens, and the stub and `NAMESPACE`
-  buffers.
+  buffers. **`server/simulation.rs`** runs that same server under a seeded scheduler
+  ([Robustness](/contributing/robustness#the-language-server-simulator)).
 - **`config.rs`**: finds and parses `ry.toml`.
 - **`diagnostics.rs`**: assembles diagnostics for the server and the CLI alike, applying
   configuration gating, strict escalation, and suppression comments.
@@ -182,6 +204,34 @@ builtins. The root holds the interpreter state (`Interp`, the frame stack, the h
   implement them.
 - **`session.rs`**: start-up (base R from the GNU R installation, the profiles, the default
   packages) and running a script.
+- **`stats.rs`** and its `stats_*.rs` siblings (`stats_models`, `stats_optimize`, `stats_nlm`,
+  `stats_lbfgsb`, `stats_port`, `stats_arima`, `stats_cluster`, `stats_deriv`, `stats_tests`): the
+  stats package's native routines. **`parallel.rs`** holds the parallel package's, **`rd.rs`** the
+  Rd parser behind `tools::parse_Rd`, and **`graphics_render.rs`** what a graphics device draws
+  and the image files it writes.
+- **`annotations.rs`**: the run-time checks that [inline annotations](/type-checking/inline-annotations#running-annotated-code)
+  become at a function's boundary.
+- **`records.rs`**: records, tuples, tags and `match` at run time. **`arrays.rs`**: `Array<T>`, an R
+  vector with the heap's Array bit set, and the strict rules that go with it.
+- **`dataframe.rs`**: the Polars-style `DataFrame` verbs and column expressions. **`frame.rs`**: the
+  `DataFrame` value, its readers, writers and conversions. **`data_table.rs`**: data.table queries
+  answered on ry's engine when the result is guaranteed identical, and declined to data.table
+  otherwise.
+- **`standard_library.rs`**: `Result`, `List`, `Str`, `Num`, `Dict` and `Set`, typed by
+  `types/ry.Rtypes`.
+- **`testing.rs`**: the fuzz contracts of the interpreter, shared by the in-tree harness and the
+  coverage-guided targets.
+
+## `jit`
+
+The crate root is `src/jit.rs`. It is the optimizing tier: it compiles hot tier-0 bytecode to
+machine code with Cranelift, and hands the activation back to tier 0 when a speculation fails.
+
+- **`analysis.rs`**: the speculation plan, from an abstract interpretation of a body's bytecode
+  over R value types.
+- **`codegen.rs`**: machine code for a plan.
+- **`runtime.rs`**: the activation record compiled code runs on, and the helpers it calls for
+  everything that allocates, runs R code or can fail.
 
 ## `libr`
 
@@ -211,7 +261,8 @@ runtime state and R's C API. Each exported function that can fail runs its body 
   C callables.
 - **`extptr.rs`**: external pointers, weak references and finalizers.
 - **`altrep.rs`**: the ALTREP class registry, dispatch for every accessor, and base R's own
-  classes (compact sequences, deferred strings, wrappers).
+  classes (compact sequences, deferred strings, wrappers). **`frame_altrep.rs`**: a table column
+  as an ALTREP vector.
 - **`serialize.rs`**: R's serialization format in every variant, the stream API, RDS files and
   lazy-load databases.
 - **`connections.rs`**: the `R_ext/Connections.h` entry points over the interpreter's
@@ -245,9 +296,20 @@ The crate root is `src/table.rs`. It is ry's built-in typed table, an engine ove
   an R vector type, so every column crosses into R and back without loss.
 - **`convert.rs`**: conversion between Arrow columns and R vectors, including `NA`.
 - **`query.rs`**: the query IR, and its lowering of `tbl[i, j, by]` to a Polars lazy plan with
-  data.table's semantics.
-- **`altrep.rs`** (feature `runtime`): exposes columns to R and native code as ALTREP vectors.
-- **`ffi.rs`**: the C entry points.
+  data.table's semantics. **`lazy.rs`**: the Polars-style plan (`Plan`, its verbs, the optimizer and
+  `explain`). **`group.rs`**, **`join.rs`** and **`kernel.rs`**: kernels that beat Polars' general
+  plans for grouped aggregation, joins and row-wise expressions.
+- **`io.rs`**: `fread` and `fwrite`, with the layout read by `sniff`. **`ops.rs`**: the data.table
+  helpers that real code calls beside `[` (`setkey`, `rbindlist`, `melt`, `shift`, `fifelse` and
+  the like).
+- **`ffi.rs`**: the zero-copy interchange with the Arrow C data interface. A column reaches R and
+  native code as an ALTREP vector, which `libr`'s `frame_altrep.rs` provides.
+
+## `sniff`
+
+The crate root is `src/sniff.rs`. It reads a delimited text file's separator, header and column
+types by data.table's `fread` rules. The table engine's reader and the checker share it, so a
+literal `fread("prices.csv")` is typed as exactly the columns that read produces.
 
 ## `rcmd`
 

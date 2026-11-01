@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 377 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 233 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -166,10 +166,56 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
-- **`lapply` or `vapply` over a `data.frame`** (9; rprojroot, nlme, rmarkdown). The opaque
-  `data.frame` fits no `list` parameter. A `data.frame` overload of `lapply` fixes the call but makes
-  an untyped argument ambiguous and coarsens the `.SD` column error, so the fix is to give
-  `data.frame` its named-list representation rather than more overloads.
+- **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
+  on as a placeholder, but the same signature declared reports the call, so the round-trip test
+  lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
+  declared optional `NULL` default should read as a placeholder too, or the renderer should mark
+  it; settle which before the list grows.
+- **A declared vector into a scalar parameter is still reported** (`double[]` into ks
+  `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
+  variables pass by length (`without_inferred_length`), and only when their type is a union with
+  a scalar member: a computed plain `logical[]` into a parameter whose scalar claim was inferred
+  from the body (zoo `rlength(idx0)`, renv `unlink(recursive =)`, diffobj, ks, mgcv: about 13
+  corpus reports) is reported, because the call site cannot tell an inferred scalar parameter from
+  an annotated one (`pick(c(TRUE, FALSE))` against `fn(flag: logical)` is a real error). Exporting
+  whether each parameter type was declared with the item scheme would let only declared scalars
+  hold.
+- **Negating a parameter whose only type is a `NULL` default is reported** (pracma
+  `quadprog(A = NULL, b = NULL)` negates `b` under `if (!is.null(A))`: 2 corpus reports). Dropping
+  the `NULL` there constrains the parameter's variable to numeric, and the rendered scheme
+  `fn([b]: U)` then no longer admits its `NULL` default, which fails the annotation round trip.
+  A fix needs the scheme to keep `U | NULL` for a numeric-constrained defaulted parameter.
+- **Stubs cannot select an overload by a literal argument value.** `sort(x, index.return = TRUE)`
+  returns `list{x, ix}`, so `sorted$ix` reports `$` on an atomic vector (rmgarch, mgcv: 5 corpus
+  reports). An overload that merely requires `index.return` also matches `index.return = FALSE`,
+  which returns a vector, so it was dropped. Literal `TRUE`/`FALSE` parameter types in stubs
+  would express it.
+- **A `NULL` placeholder that a reflective write replaces is reported** (renv `cond <- NULL` then
+  `do.call(delayedAssign, list("cond", ...))`, brew's package-level `.extendedError = NULL` set by
+  `assign()` into the namespace). The checker does not see `assign()` or `delayedAssign()` as a
+  write; treating a string-named target of either as a write that makes the binding `Unknown`
+  would clear both.
+- **A literal `NULL` passed to a numeric parameter of a project function is reported** (Rsolnp
+  benchmarks `eqB = NULL`). The callee tests `is.null()`, but its parameter type came from a
+  numeric use outside the test.
+- **A number passed to a parameter tested as a condition is reported** (diffobj
+  `trim_hunk(h, "tar", 0L)` over `if (!line.id)`, ff `if (pagesize)`, renv, rmgarch; about 12
+  corpus reports). R takes `0L` as a condition, but `if (x)` and `!x` bind an open parameter to
+  `logical`. Bounding it by `scalar numeric` instead clears them but turns every flag's signature
+  into `<T: scalar numeric> fn(flag: T)`, which was tried and rejected for hover readability. A
+  call-site relaxation for parameters whose `logical` came from inference is the likely shape, but
+  schemes do not record that.
+- **A generic's dispatch formal, forwarded, reads as optional.** `f <- function(fit) persistence(fit)`
+  over `persistence <- function(object, ...) UseMethod("persistence")` gives `f` an optional `fit`,
+  yet `f()` errors in R, because `UseMethod` reads a passed argument even though the generic may be
+  called without one. A parameter cannot express "may be omitted, but read when passed", so the
+  missed error stays until it can (`a_generic_does_not_require_the_formals_it_passes_on`).
+- **A formal forwarded to a local closure that never reads it is still required.** callr
+  `error.R` and processx `run.R`: `format_advice(x)` forwards `x` to `format_advice_cli(x)`, both
+  defined inside `local({...})`, which ignores it. The forwarding rule in `collect_formal_uses`
+  reads only global schemes, so `err$format$advice()` is reported as leaving out `x`.
+- **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
+  `fast_svd("a", 1)` is not reported. A missed error, not a false report.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
 - One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
@@ -404,13 +450,14 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 - **Strict users must annotate `seq()` results.** The `seq` stub returns `Any`, so
   `x <- seq(...)` passes strict mode only with an annotation such as `x: double[]`. A precise
   overload set for `seq` and `seq_len` would remove that.
-- **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
-  and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
-  `crates/ry/tests/test_repl_e2e.rs`, and `errors_come_back_on_the_error_stream`). They pass alone.
-  The load comes from the ry-runtime cases running beside them, each of which spends about 2.8 s of
-  CPU starting a debug `libR.so`; input typed while a console is still starting arrives as one
-  paste. Waiting for the prompt instead of the banner (ry's console now prints its banner at the
-  first prompt), or serializing the ry-runtime cases, would remove it.
+- **The oracle's `stats__*` cases depend on the BLAS build.** Their expectations come from
+  reference BLAS; under OpenBLAS, `stats__formulas_and_least_squares` and
+  `stats__models_and_tests` differ in the last printed digits and `stats__lbfgsb` takes one more
+  L-BFGS-B iteration and warns in `HoltWinters`, so `recorded_outcomes_match_gnu_r` fails there.
+  Force reference BLAS with
+  `R_LD_LIBRARY_PATH=/usr/lib/R/lib:/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack`
+  (Debian's `ldpaths` otherwise puts the OpenBLAS alternative first), or make those cases print
+  rounded values. The `datatable__*` cases also need data.table in GNU R's library.
 
 ## Open: data-oriented layouts and explicit allocators
 
@@ -1155,35 +1202,6 @@ rewording a message now invalidates only the samples that quote it. Those sample
 re-captured in the same change. There is no harness for that yet, so it is a manual pass over the
 pages named in the next item.
 
-## Open: nothing verifies the rendered samples in the docs
-
-Many blocks show real tool output. They live across `getting-started`, `guides/`, `type-checking/`,
-`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`, `index.astro` and the
-README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
-the drift is only ever found when someone re-captures by hand.
-
-Two things this proves rather than predicts.
-
-- A reporter change left every one of them stale for days, and the cost of re-capturing them by hand
-  is most of what made that change expensive to land.
-- A parser change, narrowing an unterminated argument list's boundary, silently falsified the
-  headline missing-comma sample in `features.md`. That is the very example chosen to show off the
-  parser. Nobody noticed until the sample was re-run for an unrelated reason, and `main` had shipped
-  it wrong. This is the failure the "run the tool before claiming what it does" rule exists to
-  prevent, and that rule does not scale to prose that was true when it was written.
-
-**Shape of the fix.** Each sample needs its project, meaning a `ry.toml` and one or more source
-files, and its command recorded next to it, so a harness can rebuild the project, run the command
-and diff the captured block. There are two candidate homes. One is a fixture-suite-style directory
-whose renderer output is the docs block. The other is front matter or an HTML comment in the page
-naming a fixture directory. Prefer whichever keeps the docs readable as prose, because the samples
-are teaching material rather than test data. A block that excerpts one finding out of several needs
-a way to say so, through a first-N-findings selector or a filter by code, because several pages
-legitimately do that.
-
-Until it exists, treat "changed a message or a blame range" as implying a manual sweep of the pages
-above, and say in the commit which ones were re-run.
-
 ## Open: findings from the second simulated-user round
 
 Five simulated users each worked on a distinct project of their own writing, learned the tool from
@@ -1894,13 +1912,14 @@ tagging fences `r` for Zed if that proves distant.
 ## Open: website and docs
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
-  Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one. The
-  installation page states this is planned with no date, so if the plan changes that claim has to
-  change with it.
+  Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
-  rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
+  rather than the newest build, and the installation page names the tag in each URL. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 2,700 lines.
+- **The README's diagnostic image is not checked.** `docs/` samples are tests (`test_docs`), but
+  `.github/diagnostic.svg` is rendered by `scripts/render-diagnostic-svg.rs` and goes stale when a
+  message or blame range changes; re-run it after such a change.
+- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 3,500 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 

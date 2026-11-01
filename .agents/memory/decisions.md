@@ -2658,6 +2658,12 @@ first lines R had already read, leaving R mid-command.
 `crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
 (section 5, "What tier 1 does today") is the contract for what it does; this records why.
 
+- **Compile thresholds are 1000 entries and 10,000 backward jumps** (`crates/jit/src/jit.rs`).
+  At 10 and 500, a package load compiled the methods package's bodies that each `setClass` runs a
+  few dozen times, and compiling took half of a large package's S4 definitions (callgrind) and
+  about 200 ms of its cold `ry run`. Hot code crosses 1000 calls within milliseconds, so the
+  benchmarks time the same. Lower them only together with a cheaper first tier or background
+  compilation.
 - **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
   (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
   `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
@@ -3085,6 +3091,13 @@ first lines R had already read, leaving R mid-command.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
 - **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
 
+## A computed function that may be `NULL` is called as the function
+
+- **Previous shape.** Calling a value typed `fn | NULL` was a `type-mismatch` finding wherever the `NULL` came from, including a local set by a `switch` without a default (testthat's `load <- switch(style, ...)` after `arg_match(style)`) or by an `if` whose other branch is correlated with the call's guard (nloptr's `eval_g_ineq_wrapper`). A union of functions and plain values (shiny's `ns <- NS(namespace)`) was "not a function".
+- **Target shape.** `infer_ordinary_call` drops `NULL` beside function members unless the callee names a parameter, and `dispatch_call` checks a union of functions and values against its function members only, with an `Unknown` result. A parameter's `NULL` comes from its default or its declared type, so the caller supplies it and the call is still reported.
+- **Why.** The rule in "The checker presumes R code is correct": the `NULL` path of a computed function is one the code presumably rules out, and R fails only on that path.
+- **Impact.** Loses the true positive of a `switch` on an unvalidated value. Incremental analysis is unchanged: the rule reads the item's own naming.
+
 # Decision record: editor features for ry's own syntax
 
 - **The checker records pattern types.** `ItemCheck::pattern_types` maps each `match` pattern to
@@ -3314,7 +3327,7 @@ first lines R had already read, leaving R mid-command.
 
 - **Previous shape.** `libR.so` declares its own mimalloc, separate from the `ry` binary's, and only the binary turned off eager arena commit. In `libR` an eagerly committed arena is backed by transparent huge pages, so after earlier work had purged parts of it, the next large vector faulted them back in and the kernel zeroed and compacted whole huge pages. Every `Rf_allocVector` also zeroed the whole vector, which GNU R does not do for numbers, and a character vector or list was zeroed and then filled.
 - **Target shape.** `libR` sets `mi_option_arena_eager_commit` to 0 from an `.init_array` constructor (`crates/libr/src/libr.rs`). `Rf_allocVector` allocates numeric vectors uninitialized through `Heap::alloc_vector_uninit`, and `Heap::alloc_vector` zeroes only the header of a vector it fills with handles. Purging stays on (`MIMALLOC_PURGE_DELAY=-1` shaves a little more, but resident memory would only grow).
-- **Impact.** In ops.R's sequence at 1e7 rows, `rbindlist`'s slow first calls dropped from 2 to 6 s to about 1.3 s (GNU R: 0.9 to 2.1 s). Run-to-run noise on the other questions is larger than any change.
+- **Impact.** In ops.R's sequence at 1e7 rows, `rbindlist`'s slow first calls dropped from 2 to 6 s to about 1.3 s (GNU R: 0.9 to 2.1 s). Run-to-run noise on the other questions is larger than any change. Package loading gains too: it plans on every core, every planning thread's arena paid the zeroing, and the plan of a 326,000-line package went from 680-990 ms to 330-440 ms.
 
 # Decision record: everything is fuzzable, simulatable and scriptable
 
@@ -3727,3 +3740,43 @@ explicit allocators".
 - **Target shape.** Importing a character column into the engine (`import_column` in `crates/interp/src/data_table.rs`) already visits every CHARSXP, so it numbers each distinct string by first appearance through the CHARSXP's truelength, as data.table does, and restores the truelengths afterwards. The column is built from the distinct strings and the codes (`convert::strings_from_codes`, a parallel gather of views), and `Table::set_string_codes` stores the codes beside it (`StringCodes`). Any change to that column drops them (`forget_column`), and `set_key` drops all of them, so they cannot drift from the data. A code is a digit with radix `distinct + 1` (0 is `NA`). `keyby` ranks only the distinct strings, by byte order, so it sorts `k` strings, not `n` rows. In the bridge, `Piece::expand_eval` replaces `j = eval(e)` with the call `e` evaluates to, as `[.data.table` does, `frame::call_head` reads a primitive head by its name, and data.table's own namespace qualifies for grouped queries without `:=`.
 - **Exactness guards.** Outside GForce, base `sum` accumulates in `long double`, so the bridge still declines it, except `sum` of one integer or logical column (`sums_exactly`), which is exact in any order. GForce's integer `sum` widens to doubles with a warning as soon as a group's running total leaves the integer range, while the engine widens on the final total. The bridge therefore declines a GForce `sum` unless the absolute values of every integer column the query reads add up to at most `INT_MAX` (`running_sums_fit`), which rules out any running overflow. A `j` that picks whole columns of every row also declines, because data.table copies those vectors while the engine would convert each string column in and back out (0.048 s against 0.006 s at 1e6 rows).
 - **Impact.** At 1e6 rows, best of 15: `by = c("id1", "id4")` takes 0.007 s against 0.011 s on GNU R, `by = id3` 0.007 s against 0.013 s, `keyby = id3` 0.015 s against 0.016 s, and `dcast(x, id1 ~ id4, value.var = "v1", fun.aggregate = sum)` 0.018 s against 0.027 s. All `tools/bench/table/ops.R` checksums match GNU R at 1e6 and 1e7. `fuzz_kernels_agree_with_the_polars_plans` covers string keys with `NA`s and up to 5,000 distinct values, and `crates/oracle/cases/datatable__dynamic.R` pins `eval`, spliced primitives, `dcast` and the running-overflow rule against GNU R.
+
+## macOS packages bind to ry's libR
+
+- **Before.** `crates/libr/build.rs` set the export list and soname for Linux only, so a macOS
+  `libR.dylib` exported nothing from the C layer and had no stable install name, and nothing made
+  a GNU R package binary call into it. On Linux the problem never arises: a package records
+  `libR.so` by soname, and ry's library, loaded first with `RTLD_GLOBAL`, satisfies it.
+- **The macOS problem.** Mach-O uses a two-level namespace: every undefined symbol in a package
+  binary is bound to one named library. CRAN's binaries link `-framework R` and name
+  `/Library/Frameworks/R.framework/Versions/4.x-<arch>/Resources/lib/libR.dylib`; Homebrew's
+  link `-lR` and name Homebrew's `libR.dylib`. dyld would load GNU R's libR beside ry's, and the
+  package would run against GNU R's heap.
+- **Options weighed.** Forcing a flat namespace (`DYLD_FORCE_FLAT_NAMESPACE`) needs an environment
+  variable set before ry starts, is stripped by SIP for protected binaries, and changes binding for
+  every library in the process. Interposing (`DYLD_INSERT_LIBRARIES`) has the same launch problem.
+  Rebuilding every package from source gives up CRAN's binaries.
+- **Shape.** ry's `libR.dylib` has the install name `@rpath/libR.dylib`, and its exports are
+  rustc's list plus a second `-exported_symbols_list` naming the `RY_EXPORT` C symbols (ld64 and
+  ld64.lld merge the two lists). When `dyn.load` opens a Mach-O library whose load commands name
+  GNU R's libR (`crates/libr/src/macho.rs`), it opens a copy instead, with that load command
+  rewritten in place to `@rpath/libR.dylib` and re-signed ad hoc with `codesign --force --sign -`,
+  because arm64 refuses to map a modified, unsigned image. The rewrite also zeroes the compatibility version the
+  load command records (GNU R links libR with its own version, and ry's libR has none, so dyld
+  would refuse it). dyld satisfies a load command from an
+  already loaded image whose install name matches, so the copy binds to ry's library. The copy is
+  cached under the user cache directory keyed by the rewrite's version (`REBIND_VERSION` in
+  `dynload.rs`, bumped whenever the rewrite changes), path, size and mtime, and a library that names no
+  libR is recorded with a marker so it is read once. The DLL record keeps the original path.
+- **ry-built packages.** `rcmd` links with `-undefined dynamic_lookup` and an empty `LIBR`, so the
+  binary records no libR and resolves R's API in the flat lookup that falls back to every loaded
+  image. The same build then loads under ry and under GNU R, and needs no rewriting.
+- **Known gaps.** A package that loads a sibling dylib through `@loader_path` breaks in the
+  rebound copy, because the copy lives outside the package's `libs/`. A failed load of a rebound copy says so in its error. CRAN's own `libRblas.dylib`
+  could pull in GNU R's libR if a package links it directly; unobserved. The install-name match is
+  reasoned from dyld's source and verified only once the release smoke test runs on a Mac.
+- **Windows (designed, not built).** Name the library `R.dll`: the loader reuses an already loaded
+  module with the same base name, so Rtools-built package DLLs bind to ry's copy with no
+  rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
+  `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
+  The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).
