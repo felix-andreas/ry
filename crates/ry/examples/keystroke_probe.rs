@@ -23,7 +23,6 @@ use {
 static EXECUTES: AtomicUsize = AtomicUsize::new(0);
 static WALK_EXECUTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 const WALKS: &[&str] = &[
-    "interface_sccs",
     "conditional_slot_items",
     "package_definitions",
     "project_type_definitions",

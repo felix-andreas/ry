@@ -81,7 +81,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Kind},
         conditions::{HandlerStack, RestartStack},
-        unwind::R,
+        unwind::{R, Unwind},
     },
     heap::{Heap, Marker, RootSource, object::Sexp},
     rustc_hash::FxHashMap,
@@ -116,6 +116,8 @@ pub struct Hooks {
     pub write_console: unsafe fn(&[u8], bool),
     /// Materializes an ALTREP vector into an ordinary one.
     pub materialize_altrep: unsafe fn(Sexp) -> R<Sexp>,
+    /// An ALTREP vector's length, from its class's `Length` method.
+    pub altrep_length: unsafe fn(Sexp) -> R<usize>,
     /// Runs finalizers whose objects died, at a safe point.
     pub run_finalizers: unsafe fn(),
     /// Runs the top-level task callbacks after a task: the expression, its value, whether it
@@ -202,6 +204,9 @@ pub struct Interp {
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
+    /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
+    /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
+    pub parked_unwind: Option<Unwind>,
 }
 
 struct InterpState {
@@ -301,6 +306,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
         object_systems: true,
+        parked_unwind: None,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -320,6 +326,7 @@ pub fn default_hooks() -> Hooks {
     Hooks {
         write_console: default_write_console,
         materialize_altrep: |_| Err(unwind::error("ALTREP objects need the libR host")),
+        altrep_length: |_| Err(unwind::error("ALTREP objects need the libR host")),
         run_finalizers: || {},
         run_task_callbacks: |_, _, _, _| Ok(()),
         task_callback_routine: |_, _| {
@@ -412,6 +419,9 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            if let Some(unwind) = &interp.parked_unwind {
+                crate::unwind::trace_unwind(unwind, marker);
+            }
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);
                 marker.mark(whole);

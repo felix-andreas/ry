@@ -64,6 +64,11 @@ fetch <- function(package) {
   "not found"
 }
 
+# Packages outside the closure that ry must build from source: GNU R's binaries of graphics devices
+# refuse ry's newer graphics engine, and svglite renders the vignettes some closure packages build.
+devices <- intersect(c("svglite", "magick"), rownames(installed))
+for (package in devices) fetch(package)
+
 outcome <- vapply(closure, fetch, "")
 missing <- names(outcome)[outcome == "not found" | outcome == "tar failed"]
 cat(sprintf("closure: %d packages; sources: %d present\n", length(closure), length(closure) - length(missing)))
