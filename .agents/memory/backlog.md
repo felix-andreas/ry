@@ -2633,3 +2633,11 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **`ry run` on a debug build is unusable for loops** (a 20M-iteration loop took over three minutes
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
+
+## Open: findings from the developer-workflow round
+
+- **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
+  function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
+  Position[]`; the second member is the vector view of the same element type and adds noise.
+- **A piped `ry repl` prints nothing.** With stdin not a terminal the console reads no commands and
+  exits silently; it should either evaluate stdin or say it needs a terminal.
