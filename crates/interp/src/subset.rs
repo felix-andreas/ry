@@ -2147,7 +2147,9 @@ unsafe fn do_set_dimnames(call: &Call<'_>) -> R<Sexp> {
     Ok(object)
 }
 
-/// `dimnames<-` with GNU R's checks: each component is `NULL` or as long as its extent.
+/// `dimnames<-` with GNU R's checks: each component is `NULL` or as long as its extent. A
+/// list shorter than the dimensions is padded with `NULL`, an empty list removes the
+/// dimnames, and a list of only `NULL` components is kept as it is.
 pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     if dimnames == nil() {
         values::remove_attr(object, symbols().dimnames);
@@ -2162,7 +2164,11 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     if dimnames.kind() != SexpType::List {
         return Err(crate::unwind::error_in(call, "'dimnames' must be a list"));
     }
-    if length(dimnames) != dims.len() {
+    if length(dimnames) == 0 {
+        values::remove_attr(object, symbols().dimnames);
+        return Ok(());
+    }
+    if length(dimnames) > dims.len() {
         return Err(crate::unwind::error_in(
             call,
             format!(
@@ -2173,13 +2179,11 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         ));
     }
     let result = alloc(SexpType::List, dims.len())?;
-    let mut all_null = true;
-    for (dimension, &extent) in dims.iter().enumerate() {
+    for (dimension, &extent) in dims.iter().enumerate().take(length(dimnames)) {
         let component = dimnames.element(dimension);
         if component == nil() {
             continue;
         }
-        all_null = false;
         let component = if values::inherits(component, "factor") {
             coerce::factor_as_character(component)?
         } else if component.kind() != SexpType::String {
@@ -2202,12 +2206,16 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     }
     let names = values::names(dimnames);
     if names != nil() {
-        values::set_attr(result, symbols().names, names)?;
-        all_null = false;
-    }
-    if all_null {
-        values::remove_attr(object, symbols().dimnames);
-        return Ok(());
+        let padded = alloc(SexpType::String, dims.len())?;
+        for index in 0..dims.len() {
+            let name = if index < length(names) {
+                names.element(index)
+            } else {
+                values::mkchar("")?
+            };
+            values::set_elt(padded, index, name);
+        }
+        values::set_attr(result, symbols().names, padded)?;
     }
     values::set_attr(object, symbols().dimnames, result)
 }
