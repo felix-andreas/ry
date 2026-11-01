@@ -8769,6 +8769,38 @@ impl<'db> Checker<'db, '_> {
         self.join_types(left, right)
     }
 
+    /// A path that rebinds an untyped value (`if (is.null(repo)) repo <- getwd()`) must not
+    /// pin the value the other path still holds, which is usually a parameter. Neither may
+    /// a union keep that variable, since a later use of the rebound value (`repo + 1`)
+    /// would then constrain the parameter, so the joined value is unchecked.
+    fn join_written_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
+        let left_resolved = self.table.resolve(self.db, left);
+        let right_resolved = self.table.resolve(self.db, right);
+        let unconstrained_var = |ty: Ty<'db>| {
+            matches!(ty.kind(self.db), TyKind::Var(_))
+                && self.table.open_constraint(self.db, ty) == Some(Constraint::Unconstrained)
+        };
+        let (open, other) = match (
+            unconstrained_var(left_resolved),
+            unconstrained_var(right_resolved),
+        ) {
+            (true, false) => (left_resolved, right_resolved),
+            (false, true) => (right_resolved, left_resolved),
+            _ => return self.join_types(left, right),
+        };
+        // A guard's own narrowing (`T` against `T | NULL`) and a `NULL` path keep the
+        // variable.
+        let mut shared = FxHashSet::default();
+        self.table.collect_unbound_vars(self.db, other, &mut shared);
+        let TyKind::Var(var) = open.kind(self.db) else {
+            return self.join_types(left, right);
+        };
+        if shared.contains(var) || matches!(other.kind(self.db), TyKind::Null) {
+            return self.join_types(left, right);
+        }
+        unknown(self.db)
+    }
+
     /// Unifies when possible; a `NULL` side joins by union so it never binds a variable.
     fn join_types(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         let left_resolved = self.table.resolve(self.db, left);
@@ -8816,7 +8848,7 @@ impl<'db> Checker<'db, '_> {
             }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
-                    Some(EnvEntry::Mono(self.join_branch_values(a, b)))
+                    Some(EnvEntry::Mono(self.join_written_values(a, b)))
                 }
                 (None, Some(entry)) => Some(entry),
                 // Keeping identical entries as-is preserves a function slot's polymorphism.
