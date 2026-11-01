@@ -1775,6 +1775,20 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
+## Open: the built-in frame
+
+- **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
+  `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
+- **Query features:** `.EACHI` and non-equi joins are not supported.
+- **No warning channel.** data.table warns when a value is truncated into an integer column and when
+  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
+  where data.table keeps it, and a frame updated in a nested closure is not refined there.
+- **Naming:** at runtime `frame()` clashes with `graphics::frame`.
+- **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
+  contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
+- **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
+
 ## Open: the runtime
 
 What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pressing first.

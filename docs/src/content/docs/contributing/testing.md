@@ -317,6 +317,18 @@ non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`,
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
 
+### The table engine
+
+`crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes
+data.table behavior was read from data.table under GNU R. Its differential fuzz generates random
+tables and queries and checks the native kernels against the Polars plans
+(`query::execute_with_plans_only`), which serve as the reference. `FUZZ_ITERS` raises the
+iteration count; run it in release, as `FUZZ_ITERS=3000 cargo test --release -p table fuzz`. The
+fuzz tables are small, so the kernels' parallel paths get large-table tests of their own.
+
+`tools/bench/table/run.sh <dir> [rows]` runs the db-benchmark questions under data.table and the
+engine, each printing rows, columns and a checksum, so the answers compare line by line.
+
 ### Coverage-guided fuzzing
 
 `fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. It holds the

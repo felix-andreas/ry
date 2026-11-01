@@ -2140,8 +2140,45 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   for one row of i come back in x's order. A rolling join marks x's rows with a
   hidden column so an inner rolling join keeps matches whose values are NA.
 
-Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer
-and gives NA on overflow, where R gives a double.
+- **Native kernels run below Polars, with the Polars plans as the fallback and the reference.**
+  `kernel.rs` (row-wise expressions and `:=`), `group.rs` (grouped aggregates) and `join.rs` (equi
+  and rolling joins) cover the shapes the db-benchmark exercises and return `None` for anything
+  else, and the query then runs as a plan. Polars' lazy engine pays for planning, for widening
+  integers to 64 bits to detect overflow, for rebuilding a whole column when `:=` touches a subset,
+  and for a per-column `take` that nests parallelism badly, which is where data.table won.
+  `query::execute_with_plans_only` skips the kernels, and the differential fuzz in
+  `tests/test_table.rs` checks every kernel against it (`FUZZ_ITERS` raises the iteration count).
+- **Every `Table` column is one contiguous chunk** (`normalize`, `put_column`, `set_key`,
+  `from_normalized`). Kernels read a column as one slice, and the CSV reader returns many chunks,
+  so without the invariant every query copied its keys and inputs again (a third of an
+  integer-keyed group-by's time).
+- **Grouping maps keys to dense codes**: factors by their codes, integers by `value - min`, logicals
+  by two values, combined as mixed-radix digits of one `u64`. A code range no wider than the rows
+  (and at most 2^20) indexes states directly, and a wider one hash-partitions, because dense states
+  cost memory per possible code; dense runs split across threads only when the rows outnumber
+  every thread's states. The equi-join kernel bounds its buckets the same way, by the rows on
+  both sides. Each aggregate is a `State` that is updated per row, merged across
+  threads, appended across partitions and finished per group in output order.
+- **Moments use Welford updates with a symmetric co-moment and merge with Chan's formula**, so
+  `cor(a, b)` equals `cor(b, a)` bit for bit. They differ from Polars' two-pass result in the last
+  few digits, which is why the fuzz compares doubles to 1e-6.
+- **Median collects `(slot, value)` entries, counting-sorts them by slot in parallel, and selects
+  each group's middle in place**; a valid `NaN` without `na.rm` falls back to the plan, whose
+  ordering of NaN matches R's.
+- **Join output gathers column by column through `gather_column`**, parallel over rows, with
+  factors gathered by code and unmatched rows marked in validity. The rolling join searches
+  integer and double times natively after a parallel sortedness check.
+- **`mult = "first" | "last"`** keeps one match per row of `i`, as data.table does; `"all"` is the
+  default.
+- **R's integer `sum` is a double exactly when a total overflows**, as in R 4.3, and a group that
+  holds an `NA` (without `na.rm`) is `NA`, not an overflow. A top-level sum keeps 64 bits until
+  its totals are known (`narrow_sums`). A sum nested in a selected expression is staged: the
+  aggregates first, then the expression (`staged`); after a join, the joined rows are built first
+  and the query reruns over them. A new `:=` column nesting one is computed both
+  as written and with each sum over doubles (keeping the expression's own type, so `sum(v) > 0L`
+  stays logical), and hidden probe sums pick the version
+  (`assign` in `query.rs`). Where data.table's grouped `:=` takes the column type from the first
+  group, the engine makes the column a double if any group overflows.
 
 ## Records, tuples and tags are ry values, not R lists
 
