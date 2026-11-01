@@ -92,6 +92,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
         let _ = item_name_range(db, item);
+        let _ = crate::item_binds_only_own_name(db, item);
     }
 }
 
@@ -491,7 +492,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
-        for (expression, miss) in &check.column_misses {
+        for (expression, miss) in check.column_misses.iter() {
             let Some(name) = naming
                 .non_locals
                 .get(expression)
@@ -558,7 +559,7 @@ fn classify_non_local_read(
     symbol: Symbol,
 ) -> NonLocalRead {
     let name = symbol.as_str();
-    if check.masked_reads.contains(expression) {
+    if check.masked_reads.contains_key(expression) {
         return NonLocalRead::Resolvable;
     }
     if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)

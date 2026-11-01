@@ -61,6 +61,37 @@ impl RootDatabase {
     }
 }
 
+/// Releases every memoized tree of `files` and keeps everything derived from them. A one-shot
+/// check calls it once its syntax pass has derived what later passes read, because the trees
+/// are its largest memos. A later tree read still works, by reparsing that file.
+///
+/// The queries record reads only while their capacity is nonzero, so the capacity is raised for
+/// one single-threaded touch of every tree, which fills the eviction lists, and lowered again
+/// after: recording on every read of a parallel pass queues the threads on one mutex per query.
+/// The file trees come back to the caller, which owns the last reference to every node and can
+/// free them off the critical path.
+pub fn release_trees(db: &mut RootDatabase, files: &[SourceFile]) -> Vec<Parse> {
+    parse::set_lru_capacity(db, 1);
+    item_syntax::set_lru_capacity(db, 1);
+    item_annotation_syntax::set_lru_capacity(db, 1);
+    file_item_annotations::set_lru_capacity(db, 1);
+    let mut trees = Vec::with_capacity(files.len());
+    for &file in files {
+        trees.push(parse(db, file));
+        file_item_annotations(db, file);
+        for &item in item_tree(db, file) {
+            item_syntax(db, item);
+            item_annotation_syntax(db, item);
+        }
+    }
+    salsa::Database::trigger_lru_eviction(db);
+    parse::set_lru_capacity(db, 0);
+    item_syntax::set_lru_capacity(db, 0);
+    item_annotation_syntax::set_lru_capacity(db, 0);
+    file_item_annotations::set_lru_capacity(db, 0);
+    trees
+}
+
 #[salsa::db]
 impl salsa::Database for RootDatabase {}
 
@@ -102,7 +133,9 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-#[salsa::tracked(returns(clone))]
+// Every tree-holding query takes an LRU capacity of 0, which records nothing on a read, so a
+// one-shot host can still release the trees once ([`release_trees`]).
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
@@ -220,7 +253,7 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
 /// from it stay item-relative until the rendering edge.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
@@ -522,7 +555,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
@@ -530,7 +563,7 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 0)]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -1317,9 +1350,7 @@ fn layer_source<'a, 'db>(
 
 #[salsa::tracked(returns(ref))]
 pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
-    if item_syntax(db, item)
-        .is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))
-    {
+    if item_binds_only_own_name(db, item) {
         return item
             .name(db)
             .as_deref()
@@ -1402,6 +1433,13 @@ fn item_interface_edges<'db>(
 
 /// Whether the item's top-level writes are at most its own binding, read off its syntax so the
 /// common case needs no naming pass.
+/// A syntax fact of its own, so the naming pass decides from a memoized flag instead of the
+/// item's tree, which a one-shot check has released by then.
+#[salsa::tracked(returns(copy))]
+pub fn item_binds_only_own_name<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    item_syntax(db, item).is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))
+}
+
 fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
     // `name <- function(...)` binds only its own name at top level, since the body is a scope
     // of its own. Most items are functions, and skipping them keeps whole-project walks, such
@@ -1552,7 +1590,7 @@ pub fn interface_group<'db>(
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct MemberExports<'db> {
     pub scheme: types::TypeScheme<'db>,
-    pub top_level_bindings: Vec<(Symbol, types::TypeScheme<'db>)>,
+    pub top_level_bindings: Box<[(Symbol, types::TypeScheme<'db>)]>,
 }
 
 /// Independent of which member was queried first: each round re-checks every member
@@ -1604,7 +1642,7 @@ fn member_exports<'db>(
         },
         None => MemberExports {
             scheme: unknown(),
-            top_level_bindings: Vec::new(),
+            top_level_bindings: Box::default(),
         },
     }
 }
@@ -2434,7 +2472,8 @@ mod tests {
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
-            )],
+            )]
+            .into(),
         };
 
         let once = refuse_check(&db, check);
@@ -2445,7 +2484,7 @@ mod tests {
         assert_eq!(once.scheme.as_ref(), Some(&unknown));
         assert_eq!(
             once.top_level_bindings,
-            vec![(hir::Symbol::new("value"), unknown)]
+            [(hir::Symbol::new("value"), unknown)].into()
         );
     }
 

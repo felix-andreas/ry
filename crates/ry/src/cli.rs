@@ -35,14 +35,14 @@ use {
         num::NonZero,
         path::{Path, PathBuf},
         sync::{
-            LazyLock,
+            LazyLock, Mutex, PoisonError,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
         time::{Duration, Instant},
     },
     syntax::{
-        TextRange,
+        Parse, TextRange,
         literate::{is_literate_extension, r_source_of_literate},
     },
 };
@@ -389,6 +389,12 @@ pub(crate) fn analyze_project(
         used_tokens.extend(tokens);
     }
     let attached = attached_union(&db, project);
+    // Freeing a million tree nodes takes longer than naming the first files, so each naming
+    // worker frees the tree of the file it is about to name, across all cores.
+    let trees: Vec<Mutex<Option<Parse>>> = semantics::release_trees(&mut db, &files)
+        .into_iter()
+        .map(|tree| Mutex::new(Some(tree)))
+        .collect();
     if !attached.is_empty() {
         use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
@@ -397,6 +403,9 @@ pub(crate) fn analyze_project(
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim.
     in_parallel(&db, workers, &by_size, |db, index| {
+        if let Some(tree) = trees.get(index) {
+            drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
         let file = files[index];
         for &item in semantics::item_tree(db, file) {
             semantics::item_naming(db, item);

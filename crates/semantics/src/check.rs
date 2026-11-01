@@ -308,31 +308,31 @@ pub struct ItemCheck<'db> {
     /// annotated binding, a call argument or a nominal constructor, so completion can offer
     /// the fields a literal still lacks. Nested literals record nothing: their expectation is
     /// the enclosing one's field or payload.
-    pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
+    pub literal_expectations: SortedMap<ExprId, Ty<'db>>,
     /// The element type each `for` loop binds its variable to, keyed by the loop. The
     /// variable is a declaration, not an expression, so `expression_types` has no slot for it.
-    pub loop_variables: FxHashMap<ExprId, Ty<'db>>,
+    pub loop_variables: SortedMap<ExprId, Ty<'db>>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
     /// Index into the declared overload set; absent when no candidate matched.
-    pub selected_overloads: FxHashMap<ExprId, usize>,
+    pub selected_overloads: SortedMap<ExprId, usize>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
-    pub masked_reads: FxHashSet<ExprId>,
+    pub masked_reads: SortedMap<ExprId, ()>,
     /// Bare names inside a query on a frame with known columns that name no column and
     /// no lexical binding. Reported only when nothing else (a global, a builtin) defines
     /// the name, because R falls back to the enclosing scope for a non-column.
-    pub column_misses: FxHashMap<ExprId, ColumnMiss>,
+    pub column_misses: SortedMap<ExprId, ColumnMiss>,
     /// Settled scheme of every name the top-level frame binds, so a statement item's
     /// conditional write serves cross-item reads; a definition resolves via `scheme`.
-    pub top_level_bindings: Vec<(Symbol, TypeScheme<'db>)>,
+    pub top_level_bindings: Box<[(Symbol, TypeScheme<'db>)]>,
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
     pub match_findings: Vec<MatchFinding>,
     /// Call heads whose lookup skipped the binding naming resolved, because that binding
     /// cannot hold a function. Editor features navigate to the binding the call reaches.
-    pub callee_targets: FxHashMap<ExprId, CalleeTarget>,
+    pub callee_targets: SortedMap<ExprId, CalleeTarget>,
 }
 
 /// A DataFrame function whose result the checker computes from its arguments.
@@ -444,6 +444,46 @@ pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
 impl<'db> PatternTypes<'db> {
     pub fn get(&self, id: PatId) -> Option<Ty<'db>> {
         *self.0.get(id.index())?
+    }
+}
+
+/// A map frozen when its check finishes: pairs sorted by key in one boxed slice. Most items
+/// fill few or none of these side tables, and an empty boxed slice is half an empty hash map,
+/// so the many memoized checks stay small; lookups are a binary search.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+pub struct SortedMap<K, V>(Box<[(K, V)]>);
+
+impl<K: Ord, V> SortedMap<K, V> {
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let index = self.0.binary_search_by(|(probe, _)| probe.cmp(key)).ok()?;
+        self.0.get(index).map(|(_, value)| value)
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.0.iter().map(|(key, value)| (key, value))
+    }
+}
+
+impl<K, V> Default for SortedMap<K, V> {
+    fn default() -> Self {
+        SortedMap(Box::default())
+    }
+}
+
+/// The keys must be distinct, which holds for every source the checker drains: hash maps.
+impl<K: Ord, V> FromIterator<(K, V)> for SortedMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
+        let mut pairs: Vec<(K, V)> = pairs.into_iter().collect();
+        pairs.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        SortedMap(pairs.into_boxed_slice())
     }
 }
 
@@ -776,11 +816,15 @@ pub fn check_item_with_annotation<'db>(
         errors,
         strict_origins: context.strict_origins,
         scheme,
-        selected_overloads: context.selected_overloads,
-        callee_targets: context.callee_targets,
-        masked_reads: context.masked_reads,
-        column_misses: context.column_misses,
-        top_level_bindings,
+        selected_overloads: context.selected_overloads.into_iter().collect(),
+        callee_targets: context.callee_targets.into_iter().collect(),
+        masked_reads: context
+            .masked_reads
+            .into_iter()
+            .map(|id| (id, ()))
+            .collect(),
+        column_misses: context.column_misses.into_iter().collect(),
+        top_level_bindings: top_level_bindings.into_boxed_slice(),
     }
 }
 
