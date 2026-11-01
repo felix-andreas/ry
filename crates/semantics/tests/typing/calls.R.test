@@ -14,7 +14,7 @@ f <- function(choices) {
   if (confirmed) selected else 0L
 }
 #++++
-f: fn(choices: character | character[]) -> integer
+f: fn(choices: character | character[] | list[Any]) -> integer
 
 #---- error_handler_stubs_resolve
 options(error = recover)
@@ -59,7 +59,7 @@ f: fn() -> integer[]
 f <- function(x) grepl(1L, x)
 #++++
 f: Unknown
-23..25 error[type-mismatch] expected `character`, found `integer`
+17..29 error[type-mismatch] no overload of `grepl` matches these arguments. I tried all 2 declared signatures; the first candidate fails with: expected `character`, found `integer`
 
 #---- namespace_access
 f <- function(x) base::length(x)

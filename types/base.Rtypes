@@ -284,14 +284,21 @@ prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 # `regexpr` returns one match position per element
 # and `gregexpr` a list of position vectors (both carry match-length attributes, which `regmatches`
 # reads); `regexec`'s per-group structure and `regmatches` itself stay `Any`.
+# R matches only the first element of a longer `pattern`, with a warning, so `grepl`, `grep`,
+# `regexpr` and `gregexpr` also take a vector there. It is a second overload so that an open
+# variable passed as `pattern` still binds to `character`.
 gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 gsub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
+grepl : @pure fn(pattern: character[], x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grep : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [value]: logical, [fixed]: logical, [useBytes]: logical, [invert]: logical) -> Any
+grep : @pure fn(pattern: character[], x: Any, [ignore.case]: logical, [perl]: logical, [value]: logical, [fixed]: logical, [useBytes]: logical, [invert]: logical) -> Any
 regexpr : @pure fn(pattern: character, text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> integer[]
+regexpr : @pure fn(pattern: character[], text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> integer[]
 gregexpr : @pure fn(pattern: character, text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> list[integer[]]
+gregexpr : @pure fn(pattern: character[], text: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> list[integer[]]
 regexec : @pure Any
 regmatches : @pure Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer

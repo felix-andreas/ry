@@ -2132,7 +2132,10 @@ to such a name is resolved separately at each call site:
 - When several candidates fit only by narrowing the caller's undetermined types, the call keeps that
   narrowing only if they all narrow the same way. Otherwise the type becomes `Unknown`, and so does
   the call: `function(xs) lapply(xs, f)` infers `fn(xs: Unknown) -> Unknown`, because `lapply`'s
-  candidates for a named list and for a vector return different shapes.
+  candidates for a named list and for a vector return different shapes. One disagreement is
+  settled instead: when one candidate narrows to a scalar such as `character` and the others to
+  that atom's vector, which accepts the scalar, the scalar wins. `grepl` also takes a vector
+  `pattern`, yet `function(p, x) grepl(p, x)` infers `p: character`.
 - The exception is a set that preserves its argument. `Filter`, `head` and `unique` declare one
   candidate per shape, and each returns exactly the shape it accepted. When every fitting candidate
   other than an all-`Any` catch-all returns what it narrowed the same undetermined type to, the call
@@ -2368,6 +2371,10 @@ exceptions and additions:
   `if (flag) x <- x + 1; x` requires `x`, and a write inside `local()` binds a new frame and covers
   nothing.
 - `x <<- 1` writes an enclosing frame, so it never assigns the formal `x`.
+- A function that writes a name with `<<-` reads that name as the binding it keeps updating, such
+  as a Reference Class field, never as the shipped function of the same name. In `t <<- t[-drop]`,
+  `t` is `Unknown` rather than base `t`, so indexing it reports nothing, and strict mode reports the
+  read. A project binding of that name still types the read.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
 - When a forced formal has a default, the formals its default reads are forced too, so in

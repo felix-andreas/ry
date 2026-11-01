@@ -119,3 +119,11 @@ Any
 URLencode("a b", reserved = TRUE)
 #++++
 character
+
+#---- menu_accepts_a_list_of_choices
+choices <- list("yes", "no")
+pick <- function() utils::menu(choices)
+#++++
+choices: list{character, character}
+pick: fn() -> integer
+29..33 warning[unused] `pick` is assigned but never used.

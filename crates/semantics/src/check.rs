@@ -22,6 +22,7 @@ use {
             is_column_update, query_index_arguments,
         },
         stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
+        top_level::super_assigned_names,
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
             Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any,
@@ -580,6 +581,7 @@ pub fn check_item_with_annotation<'db>(
         value_read_slots: None,
         computed_slots: FxHashSet::default(),
         lookup_slots: FxHashSet::default(),
+        super_assigned: super_assigned_names(module),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -1041,6 +1043,8 @@ struct Checker<'db, 'a> {
     /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
     /// so a call through them must suit every member the collection holds.
     lookup_slots: FxHashSet<BindingId>,
+    /// The item's `<<-` target names, sorted.
+    super_assigned: Vec<Symbol>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -2791,6 +2795,25 @@ impl<'db> Checker<'db, '_> {
             return refined;
         }
         let naming = self.naming;
+        let deferred = naming.deferred_non_locals.contains(&id);
+        // The item writes this name with `<<-`, so the binding it reads is the one it keeps
+        // updating (a Reference Class field, a closure's state), not a shipped function that
+        // happens to share the name, such as `t`.
+        if let Some(name) = naming.non_locals.get(&id)
+            && self
+                .super_assigned
+                .binary_search_by_key(&name.as_str(), |written| written.as_str())
+                .is_ok()
+            && !self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+        {
+            self.record_strict_origin(
+                id,
+                StrictOriginKind::UndeterminedReference(name.to_string()),
+            );
+            return unknown(self.db);
+        }
         if let Some(name) = naming.non_locals.get(&id)
             && let Some(scheme) = self
                 .globals
@@ -2799,7 +2822,6 @@ impl<'db> Checker<'db, '_> {
             let instantiated = self.instantiate(&scheme);
             // A project-defined name owns its `Unknown` at its defining site, so reading it
             // propagates rather than re-originating.
-            let deferred = self.naming.deferred_non_locals.contains(&id);
             if matches!(
                 self.table.resolve(self.db, instantiated).kind(self.db),
                 TyKind::Unknown
@@ -9424,13 +9446,38 @@ impl<'db> Checker<'db, '_> {
         {
             return Ty::new(self.db, TyKind::Var(var));
         }
-        let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
-            let (_, _, first) = fits.first()?;
-            fits.iter()
-                .all(|(_, _, narrowing)| narrowing == first)
-                .then(|| fits.first())
-                .flatten()
-        });
+        let winner = fits
+            .iter()
+            .find(|(_, free, _)| *free)
+            .or_else(|| {
+                let (_, _, first) = fits.first()?;
+                fits.iter()
+                    .all(|(_, _, narrowing)| narrowing == first)
+                    .then(|| fits.first())
+                    .flatten()
+            })
+            .or_else(|| {
+                // A scalar narrowing wins over the same atom's vector, which accepts it:
+                // `grepl(p, x)` binds `p` to `character`, as its `character[]` candidate also
+                // takes that. Wider rules pick list shapes that later reads reject.
+                let db = self.db;
+                let scalar_of_vector = |actual: Ty<'db>, expected: Ty<'db>| {
+                    actual == expected
+                        || matches!(
+                            (actual.kind(db), expected.kind(db)),
+                            (TyKind::Scalar(atom), TyKind::Vector(element))
+                                if element.kind(db) == &TyKind::Scalar(*atom)
+                        )
+                };
+                fits.iter().find(|(_, _, narrowing)| {
+                    fits.iter().all(|(_, _, other)| {
+                        narrowing
+                            .iter()
+                            .zip(other)
+                            .all(|(&actual, &expected)| scalar_of_vector(actual, expected))
+                    })
+                })
+            });
         if winner.is_none()
             && let Some((_, _, first)) = fits.first()
         {

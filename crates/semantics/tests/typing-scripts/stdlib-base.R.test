@@ -399,6 +399,14 @@ gsub("a", "b", "banana")
 #++++
 character
 
+#---- regex_patterns_accept_a_vector
+# R uses the first element of a longer pattern with a warning, which the types cannot see.
+patterns <- c("a", "b")
+gregexpr(patterns, "banana")
+#++++
+patterns: character[]
+list[integer[]]
+
 #---- grepl_is_logical
 grepl("a", "banana")
 #++++
