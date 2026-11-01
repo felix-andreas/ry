@@ -1185,7 +1185,8 @@ pub fn beta(a: f64, b: f64) -> f64 {
         return 0.0;
     }
     if a + b < XMAX {
-        (1.0 / gammafn(a + b)) * (gammafn(a) * gammafn(b))
+        // Multiplying left to right keeps a tiny argument's huge gamma from overflowing.
+        (1.0 / gammafn(a + b)) * gammafn(a) * gammafn(b)
     } else {
         lbeta(a, b).exp()
     }

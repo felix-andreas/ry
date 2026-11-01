@@ -2746,22 +2746,45 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
     let rank = dims.len();
     let order: Vec<usize> = if permutation == nil() {
         (0..rank).rev().collect()
-    } else if permutation.kind() == SexpType::String {
-        let dimnames_names = values::names(get_attr(object, symbols().dimnames));
-        (0..rank)
-            .map(|index| {
-                let wanted = permutation.element(index);
-                (0..rank)
-                    .find(|&candidate| {
-                        dimnames_names != nil() && dimnames_names.element(candidate) == wanted
-                    })
-                    .unwrap_or(index)
-            })
-            .collect()
     } else {
-        (0..rank)
-            .map(|index| numeric_element(permutation, index) as usize - 1)
-            .collect()
+        let length = values::length(permutation);
+        if length != rank {
+            return Err(call.error(format!("'perm' is of wrong length {length} (!= {rank})")));
+        }
+        let mut order = Vec::with_capacity(rank);
+        if permutation.kind() == SexpType::String {
+            let dimnames_names = values::names(get_attr(object, symbols().dimnames));
+            if dimnames_names == nil() {
+                return Err(call.error("'a' does not have named dimnames"));
+            }
+            for index in 0..rank {
+                let wanted = permutation.element(index);
+                let Some(found) =
+                    (0..rank).find(|&candidate| dimnames_names.element(candidate) == wanted)
+                else {
+                    return Err(call.error(format!(
+                        "'perm[{}]' does not match a dimension name",
+                        index + 1
+                    )));
+                };
+                order.push(found);
+            }
+        } else {
+            for index in 0..rank {
+                let value = numeric_element(permutation, index);
+                if !(value >= 1.0 && value < rank as f64 + 1.0) {
+                    return Err(call.error("value out of range in 'perm'"));
+                }
+                order.push(value as usize - 1);
+            }
+        }
+        let mut seen = vec![false; rank];
+        for &dimension in &order {
+            if std::mem::replace(&mut seen[dimension], true) {
+                return Err(call.error("invalid 'perm' argument"));
+            }
+        }
+        order
     };
     let new_dims: Vec<usize> = order.iter().map(|&dimension| dims[dimension]).collect();
     let total: usize = dims.iter().product();

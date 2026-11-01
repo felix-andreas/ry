@@ -1550,8 +1550,9 @@ unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
 /// past it), a stack that grows downwards, and the closure call depth.
 unsafe fn cstack_info() -> R<Sexp> {
     const MAIN_STACK: usize = 8 * 1024 * 1024;
-    let current = stacker::remaining_stack()
-        .map_or(NA_INTEGER, |remaining| MAIN_STACK.saturating_sub(remaining) as i32);
+    let current = stacker::remaining_stack().map_or(NA_INTEGER, |remaining| {
+        MAIN_STACK.saturating_sub(remaining) as i32
+    });
     let depth = crate::interp().frames.len() as i32;
     let result = values::integer_vector(&[7969177, current, 1, depth])?;
     let names = ["size", "current", "direction", "eval_depth"];
