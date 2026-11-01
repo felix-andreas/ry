@@ -10,6 +10,7 @@ publish = false
 path = "src/interp.rs"
 
 [dependencies]
+smallvec = "1.15"
 heap = { path = "../heap" }
 syntax = { path = "../syntax" }
 table = { path = "../table" }

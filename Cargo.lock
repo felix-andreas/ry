@@ -1743,6 +1743,7 @@ dependencies = [
  "regex",
  "rowan",
  "rustc-hash 2.1.3",
+ "smallvec",
  "stacker",
  "syntax",
  "table",

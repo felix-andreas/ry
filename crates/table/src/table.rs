@@ -229,12 +229,14 @@ impl Table {
     /// becomes an `Enum` so its level order is fixed. A valid `i32::MIN` becomes a null, because
     /// R reads that bit pattern as `NA_integer_`.
     pub fn new(frame: DataFrame) -> Result<Table> {
+        // A frame without columns still has rows, which `.N` counts.
+        let height = frame.height();
         let mut columns = Vec::with_capacity(frame.width());
         for column in frame.into_columns() {
             columns.push(normalize(column)?);
         }
         Ok(Table {
-            frame: DataFrame::new_infer_height(columns)?,
+            frame: DataFrame::new(height, columns)?,
             key: Vec::new(),
         })
     }
