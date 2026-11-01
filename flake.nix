@@ -114,6 +114,9 @@
               cargoArtifacts = cargoArtifactsNative;
               # libr's own suites drive GNU R binaries and the corpus, which the sandbox lacks.
               checkPhaseCargoCommand = "cargoWithProfile test -p ry-lang";
+              # The CLI's end-to-end tests run scripts on GNU R and on ry's runtime, which reads base
+              # R from GNU R.
+              nativeCheckInputs = [ pkgs.R ];
               # Stub materialization writes to the user cache; the sandbox's HOME is read-only.
               preCheck = ''
                 export XDG_CACHE_HOME="$TMPDIR/.cache"

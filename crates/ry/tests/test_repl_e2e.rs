@@ -417,8 +417,12 @@ fn run_error_exits_nonzero() {
 }
 
 /// ry's runtime is the `libR` built beside the binary, which `cargo test -p ry-lang` does not
-/// build, so these tests skip without it: `cargo build -p libr` first.
+/// build, so these tests skip without it: `cargo build -p libr` first. It also reads base R from a
+/// GNU R installation, so they skip without one too.
 fn ry_runtime_available() -> bool {
+    if !r_available() {
+        return false;
+    }
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_ry"));
     let library = if cfg!(target_os = "macos") {
         "libR.dylib"
