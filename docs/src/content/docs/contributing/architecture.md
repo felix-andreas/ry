@@ -30,8 +30,9 @@ illegal dependency unrepresentable.
 - **`semantics`** holds the salsa database and every analysis query: the per-item item tree and HIR,
   naming, interned types, Hindley-Milner inference, the stub corpus, the lints, and the point where
   diagnostics leave the analysis. It depends on `syntax` and salsa.
-- **`ide`** implements the editor features (hover, navigation, rename, completion, inlay hints,
-  signature help, code actions, and symbols) as pure reads of `semantics` queries at byte offsets.
+- **`ide`** implements the editor features (hover, navigation, rename, call hierarchy, completion,
+  inlay hints, signature help, code actions and fixes, symbols and the outline, folding, selection
+  ranges, and semantic tokens) as pure reads of `semantics` queries at byte offsets.
   Anything to do with the editor protocol lives in the server, never here.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
@@ -48,8 +49,8 @@ illegal dependency unrepresentable.
   `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
-  allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
-  environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
+  allocation in bitmap-managed pages, the non-moving generational collector and its roots,
+  `CHARSXP` interning, symbols, environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
   `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
