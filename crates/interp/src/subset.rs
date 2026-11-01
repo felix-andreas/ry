@@ -17,6 +17,7 @@ use {
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
     rustc_hash::FxHashSet,
+    smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -77,6 +78,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
 
 /// A copy of `object` that may be modified in place.
 pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
+    // Ending a move hands the caller this same value back, which makes it shared.
+    crate::moves::modifying(object)?;
     if values::maybe_shared(object) {
         values::shallow_duplicate(object)
     } else {
@@ -453,9 +456,9 @@ unsafe fn scalar_position(call: &Call<'_>) -> Option<(Sexp, usize)> {
 }
 
 /// Splits a builtin's arguments into the object, the subscripts, and `drop`/`exact`.
-unsafe fn subset_args(call: &Call<'_>) -> (Sexp, Vec<Sexp>, Option<Sexp>, Option<Sexp>) {
+unsafe fn subset_args(call: &Call<'_>) -> (Sexp, SmallVec<[Sexp; 2]>, Option<Sexp>, Option<Sexp>) {
     let mut object = nil();
-    let mut indices = Vec::new();
+    let mut indices = SmallVec::new();
     let mut drop = None;
     let mut exact = None;
     let mut first = true;
@@ -1092,6 +1095,11 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
     }
     let object = eval::eval(call.arg(0), call.env)?;
     let name = name_argument(call.arg(1))?;
+    dollar_value(object, name, call.call, call.env)
+}
+
+/// `object$name` once the subject is evaluated: an object dispatches with the name as a string.
+pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R<Sexp> {
     if object.is_object() {
         let name_string = values::scalar_string_charsxp(name)?;
         let args = [
@@ -1104,11 +1112,11 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
                 value: name_string,
             },
         ];
-        if let Some(value) = crate::dispatch::dispatch_builtin("$", call.call, &args, call.env)? {
+        if let Some(value) = crate::dispatch::dispatch_builtin("$", call, &args, env)? {
             return Ok(value);
         }
     }
-    dollar(object, name, call.call)
+    dollar(object, name, call)
 }
 
 pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
@@ -2173,6 +2181,8 @@ unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp
     }
     if matches!(flattener.kind, SexpType::List | SexpType::Expression) {
         flattener.recursive = recursive;
+    } else if let Some(result) = combine_unnamed_atomic(args, flattener.kind)? {
+        return Ok(result);
     }
     for arg in args {
         let tag = if arg.tag == nil() {
@@ -2195,6 +2205,47 @@ unsafe fn combine_args(args: &[Arg], recursive: bool, use_names: bool) -> R<Sexp
         flattener.add(arg.value, &tag)?;
     }
     flattener.build()
+}
+
+/// `c()` of untagged atomic vectors without names into an atomic `kind`, copied slice by slice.
+/// It is most calls to `c()`, and the general path records every element and its name first.
+/// `None` means some argument carries a name, which the general path handles.
+unsafe fn combine_unnamed_atomic(args: &[Arg], kind: SexpType) -> R<Option<Sexp>> {
+    let mut total = 0;
+    for arg in args {
+        if arg.tag != nil()
+            || !(arg.value == nil() || arg.value.kind().is_atomic())
+            || values::names(arg.value) != nil()
+        {
+            return Ok(None);
+        }
+        total += length(arg.value);
+    }
+    let result = alloc(kind, total)?;
+    let mut position = 0;
+    for arg in args {
+        if arg.value == nil() {
+            continue;
+        }
+        let value = values::materialize(arg.value)?;
+        let count = length(value);
+        let target = position..position + count;
+        match (value.kind(), kind) {
+            (SexpType::Real, SexpType::Real) => {
+                values::reals_mut(result)[target].copy_from_slice(values::reals(value))
+            }
+            (SexpType::Integer, SexpType::Integer) | (SexpType::Logical, SexpType::Logical) => {
+                values::ints_mut(result)[target].copy_from_slice(values::ints(value))
+            }
+            _ => {
+                for index in 0..count {
+                    copy_element(value, index, result, position + index)?;
+                }
+            }
+        }
+        position += count;
+    }
+    Ok(Some(result))
 }
 
 unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {

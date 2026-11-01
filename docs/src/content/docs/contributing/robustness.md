@@ -135,7 +135,7 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 
 | Command | Meaning |
 | --- | --- |
-| `requires gnu-r` / `requires ry-runtime` | Skip the scenario unless GNU R is installed, or `libR.so` is built beside `ry` too. |
+| `requires gnu-r` / `requires ry-runtime` / `requires r-package:NAME` | Skip the scenario unless GNU R is installed, `libR.so` is built beside `ry` too, or GNU R has the package installed. |
 | `client pull` / `client utf8` | Start the editor as a pull-diagnostics or UTF-8 client. Must come before the first editor step. |
 | `file PATH` + body | Write a file; a running editor sees a watcher event. |
 | `remove PATH` | Delete a file, with a watcher event. |
@@ -155,7 +155,13 @@ above them. Quoted words may hold spaces and the escapes `\n`, `\t`, `\"` and `\
 | `expect workspace-symbol QUERY PATH NAME` | The workspace symbol query finds the name in the file. |
 | `expect fold PATH "from" "to"` | A fold spans the lines of the first occurrences of both needles. |
 | `expect selection PATH "anchor" "text"` | Expanding the selection from the anchor reaches exactly the text. |
+| `expect lens PATH "anchor" "title"` | A code lens on the anchor's line has that title, after resolving it. |
+| `expect token PATH "anchor" CLASS` | The semantic token at the anchor has that type, with modifiers as `+name` (`function+defaultLibrary`). |
 | `fix PATH "anchor" TITLE` | Apply the quick fix with that title at the anchor. |
+| `debug start PATH [entry] [prelude "R"] [test "name"] [break N \| break FILE:N]...` | Launch `ry debug-adapter` on the script, with breakpoints in it or in another file. |
+| `debug continue` / `next` / `step-in` / `step-out` / `disconnect` / `evaluate "expr"` | Drive the debug session. |
+| `expect stopped REASON at N` / `expect stack "f@2 g@7"` / `expect variable NAME "value"` | The next stop, its frames, and a variable of the top frame. |
+| `expect evaluated "value"` / `expect debug-output "needle"` / `expect exited N` | The last evaluation, the program's output so far, and its exit status. |
 | `run ry ARGS...` | Run the `ry` binary in the workspace. |
 | `install DIR` | Install a source package through ry's `R CMD INSTALL` into `library/`. |
 | `expect exit N` / `expect stdout\|stderr [lacks] "needle"` | Check the last `run` or `install`. |
@@ -176,6 +182,7 @@ harness of that kind yet; the gap is filed in the backlog.
 | IDE features | generated documents and positions (`ide` `test_fuzz`); `cargo fuzz` `ide` | no panic, ranges inside the document |
 | Language server | the simulator; scenarios; `cargo fuzz` `lsp` | a fresh server, the push contract, range geometry |
 | Loader | random reload sequences (`loader` `test_reload_fuzz`); `cargo fuzz` `reload`, `load_index` | a fresh load |
+| Debugger | scripted sessions and a seeded client that sends random requests at every stop (`interp` `test_debugger`); scenarios | transcripts; every request answered once, the session ends, the interpreter left clean |
 | Interpreter | generated programs (`interp` `test_fuzz`); differential fuzzing; `cargo fuzz` `interp_lower`, `bytecode` | GNU R, tier 0 |
 | Garbage collector | `RY_GC_STRESS` over the oracle cases and generated programs; `RY_GC_VERIFY` | the unstressed run, the write-barrier invariant |
 | C API | native fuzzing (`libr` `test_fuzz_native`); `cargo fuzz` `unserialize` | GNU R's behavior; the PROTECT balance check on every `.Call` |

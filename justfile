@@ -108,6 +108,12 @@ bench-why *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/bench/why/run.py {{ args }}
 
+# Runs the table benchmark against data.table and rewrites its table in r-runtime.md, e.g.
+# `just bench-table .bench/table` (1e7 rows) or `just bench-table .bench/table5e7 --rows 5e7 --groupby-only`.
+bench-table dir *args:
+    cargo build --release -p ry-lang -p libr
+    python3 -I tools/bench/table/report.py {{ dir }} --write {{ args }}
+
 # Drives `ry repl` through a pty against the system R; skips without R.
 repl-e2e:
     cargo test -p ry-lang --test test_repl_e2e -- --nocapture

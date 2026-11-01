@@ -128,6 +128,13 @@ and consoles of `ry run` and `ry R`.
 No feature is experimental right now, so `--experimental-features` ignores every name with a warning
 (`range_formatting` is always on).
 
+## debug-adapter
+
+`ry debug-adapter` serves one debug session over the
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) on standard input and
+output. The editor launches an R script, which runs on ry's runtime, and the command exits with the
+script's status. [Editors](/guides/editors#running-and-debugging) lists the launch arguments.
+
 ## debug
 
 `ry debug ast FILE` prints the syntax tree of a file, and `ry debug analysis-stats [PATH]` analyzes
