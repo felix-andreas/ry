@@ -867,7 +867,8 @@ impl Heap {
 
     /// Stores `count` elements of `from`, starting at `from_start`, into `to` from `to_start`,
     /// as `set_element` would one at a time but with one barrier decision for the whole run.
-    /// Neither vector may be ALTREP, and both ranges must be in bounds.
+    /// Neither vector may be ALTREP, both ranges must be in bounds, and when `to` is `from` the
+    /// ranges must not overlap.
     pub unsafe fn copy_elements(
         &mut self,
         to: Sexp,
@@ -876,6 +877,10 @@ impl Heap {
         from_start: usize,
         count: usize,
     ) {
+        debug_assert!(
+            to != from || to_start + count <= from_start || from_start + count <= to_start,
+            "copy_elements ranges overlap"
+        );
         let tracked = to.flags() & flag_bits::UNTRACKED == 0;
         for offset in 0..count {
             let value = from.stored_element(from_start + offset);
@@ -892,11 +897,7 @@ impl Heap {
             self.young_parent = Some(to);
             return;
         }
-        if (0..count).any(|offset| {
-            !self
-                .space
-                .is_marked(from.stored_element(from_start + offset))
-        }) {
+        if (0..count).any(|offset| !self.space.is_marked(to.stored_element(to_start + offset))) {
             to.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(to);
         }
@@ -1023,13 +1024,13 @@ impl Heap {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let size = object_size(SexpType::Binding, 0).ok_or(HeapError::TooLong)?;
         let request = size * bindings.len();
-        if self.collection_due(request) {
+        if self.collection_due(request, false) {
             let keep: SmallVec<[Sexp; 16]> = bindings
                 .iter()
                 .map(|binding| binding.value)
                 .chain([env])
                 .collect();
-            self.maybe_collect(request, &keep);
+            self.maybe_collect(request, false, &keep);
         }
         let nil = self.known.nil;
         let frame = &mut *env.frame_ptr();
@@ -1283,7 +1284,8 @@ impl Heap {
         keep: &[Sexp],
         zeroed: usize,
     ) -> HeapResult<Sexp> {
-        self.maybe_collect(size, keep);
+        let large = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).is_none();
+        self.maybe_collect(size, large, keep);
         self.allocate_uncollected(kind, size, zeroed)
     }
 
@@ -1343,7 +1345,7 @@ impl Heap {
         Ok(object)
     }
 
-    unsafe fn maybe_collect(&mut self, request: usize, keep: &[Sexp]) {
+    unsafe fn maybe_collect(&mut self, request: usize, large: bool, keep: &[Sexp]) {
         if self.inhibit > 0 {
             return;
         }
@@ -1358,7 +1360,7 @@ impl Heap {
                 self.collect_keeping(kind, keep);
             }
             GcStress::Off => {
-                if self.collection_due(request) {
+                if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep);
                     if self.old_bytes > self.policy.old_limit {
                         self.collect_keeping(Collection::Major, keep);
@@ -1368,8 +1370,9 @@ impl Heap {
         }
     }
 
-    /// Whether allocating `request` more bytes runs a collection.
-    fn collection_due(&self, request: usize) -> bool {
+    /// Whether allocating `request` more bytes, as one large vector or as small objects, runs a
+    /// collection.
+    fn collection_due(&self, request: usize, large: bool) -> bool {
         if self.inhibit > 0 {
             return false;
         }
@@ -1383,7 +1386,7 @@ impl Heap {
         // them to the nursery would buy a collection per column that rescans the columns
         // already allocated.
         let grown = self.old_bytes / 2;
-        if SIZE_CLASS_BY_WORDS.get(request.div_ceil(8)).is_none() {
+        if large {
             self.young_large_bytes + request > self.policy.young_large_limit.max(grown)
         } else {
             self.young_bytes + request > self.policy.young_limit.max(grown)
