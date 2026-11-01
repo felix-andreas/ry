@@ -1917,12 +1917,11 @@ The end-to-end guard rests on the corpus suites.
   bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
   `setkey` is at parity (0.026 s on both).
 - **data.table's helpers that allocate many large vectors trail GNU R at 1e7 rows.** In
-  `tools/bench/table/ops.R`, `rbindlist` takes 1.2 s against 0.85 s, `fwrite` 1.27 s against
-  0.76 s, `melt` 1.56 s against 1.21 s and `unique` 0.12 s against 0.07 s; the single-loop
-  helpers (`shift`, `fifelse`, `nafill`, `rleid`) are at parity. In `rbindlist` about 0.3 s is
-  collection (minor collections tracing the fresh 2e7-element character columns, and one major
-  collection), and `SET_STRING_ELT`'s barrier and reference counts touch each CHARSXP header.
-  `fwrite` has not been profiled.
+  `tools/bench/table/ops.R`, `rbindlist` takes 1.26 s against 0.85 s, `fwrite` 1.21 s against
+  0.76 s and `melt` 1.38 s against 1.21 s; `setkey`, `dcast`, `unique` and the single-loop helpers
+  are at parity or faster. In `rbindlist` about 0.3 s is collection (minor collections tracing the
+  fresh 2e7-element character columns, and one major collection), and `SET_STRING_ELT`'s barrier
+  and reference counts touch each CHARSXP header. `fwrite` has not been profiled.
 - **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
   `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
   against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
