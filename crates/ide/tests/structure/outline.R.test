@@ -1,0 +1,188 @@
+#==== outline
+#---- nested_functions
+outer <- function(data) {
+  helper <- function(x) {
+    inner <- function(y) y
+    inner(x)
+  }
+  results <- lapply(data, function(item) {
+    clean <- function(value) trimws(value)
+    clean(item)
+  })
+  helper(results)
+}
+#++++
+symbol outer (Function fn(data)) at "outer"
+symbol   helper (Function fn(x)) at "helper"
+symbol     inner (Function fn(y)) at "inner"
+symbol   clean (Function fn(value)) at "clean"
+fold 0..=9 Block
+fold 1..=3 Block
+fold 5..=7 Block
+token "outer" Function
+token "data" Parameter
+token "helper" Function
+token "x" Parameter
+token "inner" Function
+token "y" Parameter
+token "y" Parameter
+token "inner" Function
+token "x" Parameter
+token "lapply" Function
+token "data" Parameter
+token "item" Parameter
+token "clean" Function
+token "value" Parameter
+token "trimws" Function
+token "value" Parameter
+token "clean" Function
+token "item" Parameter
+token "helper" Function
+
+#---- sections_nest_items
+# Setup ----
+limit <- 10L
+
+## Helpers ----
+double_it <- function(x) x * 2
+
+# Main ====
+run <- function() double_it(limit)
+#++++
+symbol Setup (Section) at "# Setup ----"
+symbol   limit (Value) at "limit"
+symbol   Helpers (Section) at "## Helpers ----"
+symbol     double_it (Function fn(x)) at "double_it"
+symbol Main (Section) at "# Main ===="
+symbol   run (Function fn()) at "run"
+fold 0..=4 Section
+fold 3..=4 Section
+fold 6..=7 Section
+token "double_it" Function
+token "x" Parameter
+token "x" Parameter
+token "run" Function
+token "double_it" Function
+
+#---- section_without_items
+# Nothing here ----
+
+value <- 1
+#++++
+symbol Nothing here (Section) at "# Nothing here ----"
+symbol   value (Value) at "value"
+fold 0..=2 Section
+
+#==== folding
+#---- blocks_keep_closing_line
+f <- function(
+  x,
+  y
+) {
+  list(
+    x,
+    y
+  )
+}
+#++++
+symbol f (Function fn(x, y)) at "f"
+fold 0..=2 Block
+fold 3..=7 Block
+fold 4..=6 Block
+token "f" Function
+token "x" Parameter
+token "y" Parameter
+token "list" Function
+token "x" Parameter
+token "y" Parameter
+
+#---- comment_runs_and_regions
+# region setup
+# one
+# two
+a <- 1
+# endregion
+#++++
+symbol a (Value) at "a"
+fold 0..=4 Region
+fold 1..=2 Comment
+
+#---- sections_fold_to_next_header
+# First ----
+a <- 1
+
+b <- 2
+
+# Second ----
+c <- 3
+#++++
+symbol First (Section) at "# First ----"
+symbol   a (Value) at "a"
+symbol   b (Value) at "b"
+symbol Second (Section) at "# Second ----"
+symbol   c (Value) at "c"
+fold 0..=3 Section
+fold 5..=6 Section
+
+#---- multi_line_string
+query <- "
+SELECT *
+FROM t
+"
+#++++
+symbol query (Value) at "query"
+fold 0..=2 Block
+
+#---- section_inside_function
+f <- function() {
+  # Prepare ----
+  x <- 1
+  # Finish ----
+  x
+}
+#++++
+symbol f (Function fn()) at "f"
+fold 0..=4 Block
+fold 1..=2 Section
+fold 3..=4 Section
+token "f" Function
+
+#---- bare_separator_has_no_symbol
+a <- 1
+# ----------------------
+b <- 2
+#++++
+symbol a (Value) at "a"
+symbol b (Value) at "b"
+fold 1..=2 Section
+
+#---- section_inside_a_call
+Account <- list(
+  # Methods ----
+  deposit = function(x) x
+)
+# Reports ----
+report <- function() 1
+#++++
+symbol Account (Value fn(x)) at "Account"
+symbol Reports (Section) at "# Reports ----"
+symbol   report (Function fn()) at "report"
+fold 0..=2 Block
+fold 1..=2 Section
+fold 4..=5 Section
+token "list" Function
+token "x" Parameter
+token "x" Parameter
+token "report" Function
+
+#---- trailing_comments_do_not_fold
+x <- 1 # one
+y <- 2 # two
+# regional settings
+# follow
+z <- 3
+#++++
+symbol x (Value) at "x"
+symbol y (Value) at "y"
+symbol z (Value) at "z"
+fold 2..=3 Comment

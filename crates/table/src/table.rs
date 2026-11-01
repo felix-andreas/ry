@@ -28,13 +28,15 @@ use {
         ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr,
         Series,
     },
-    std::fmt,
+    std::{fmt, sync::Arc},
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("the frame has no column `{0}`")]
     NoColumn(String),
+    #[error("the string codes given for column `{0}` do not fit it")]
+    InvalidStringCodes(String),
     #[error("column `{name}` has {found} rows, but the frame has {expected}")]
     Length {
         name: String,
@@ -223,6 +225,18 @@ pub struct Table {
     frame: DataFrame,
     /// The columns the table is sorted by, as `setkey` leaves it. Keyed joins use it.
     key: Vec<PlSmallStr>,
+    /// Character columns whose rows are already numbered by distinct string, so grouping by them
+    /// reads an integer per row instead of hashing strings.
+    string_codes: Vec<(PlSmallStr, Arc<StringCodes>)>,
+}
+
+/// A character column's rows numbered by distinct string: `codes[row]` is 0 for `NA` and
+/// otherwise one more than the order in which that string first appears.
+#[derive(Debug)]
+pub struct StringCodes {
+    pub(crate) codes: Vec<u32>,
+    /// The first row of each distinct string, indexed by its code minus one.
+    pub(crate) first_rows: Vec<u32>,
 }
 
 impl Table {
@@ -241,6 +255,7 @@ impl Table {
         Ok(Table {
             frame: DataFrame::new(height, columns)?,
             key: Vec::new(),
+            string_codes: Vec::new(),
         })
     }
 
@@ -262,6 +277,7 @@ impl Table {
         Ok(Table {
             frame: DataFrame::new(height, converted)?,
             key: Vec::new(),
+            string_codes: Vec::new(),
         })
     }
 
@@ -357,7 +373,7 @@ impl Table {
                 found: column.len(),
             });
         }
-        self.forget_key(column.name().clone().as_str());
+        self.forget_column(column.name().clone().as_str());
         self.frame.with_column(column)?;
         Ok(())
     }
@@ -367,6 +383,7 @@ impl Table {
     /// buffers if nothing shared the table, so a kernel can write into them in place.
     pub(crate) fn take_column(&mut self, name: &str) -> Result<Column> {
         let height = self.frame.height();
+        self.forget_column(name);
         // SAFETY: the placeholder has the frame's height, so every column keeps it.
         let columns = unsafe { self.frame.columns_mut() };
         let slot = columns
@@ -380,7 +397,7 @@ impl Table {
     /// Adds or replaces a column that a kernel built, which holds no valid `i32::MIN` and has an
     /// R dtype already, so it skips [`set_column`](Table::set_column)'s normalizing scan.
     pub(crate) fn put_column(&mut self, column: Column) -> Result<()> {
-        self.forget_key(column.name().clone().as_str());
+        self.forget_column(column.name().clone().as_str());
         self.frame.with_column(column.rechunk())?;
         Ok(())
     }
@@ -389,7 +406,7 @@ impl Table {
         self.frame
             .drop_in_place(name)
             .map_err(|_| Error::NoColumn(name.to_string()))?;
-        self.forget_key(name);
+        self.forget_column(name);
         Ok(())
     }
 
@@ -400,13 +417,57 @@ impl Table {
         sorted.rechunk_mut_par();
         self.frame = sorted;
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();
+        self.string_codes.clear();
         Ok(())
     }
 
-    fn forget_key(&mut self, name: &str) {
+    /// Records that the column `name` changed: a key that includes it no longer holds, and
+    /// neither do its string codes.
+    fn forget_column(&mut self, name: &str) {
         if self.key.iter().any(|column| column == name) {
             self.key.clear();
         }
+        self.string_codes.retain(|(column, _)| column != name);
+    }
+
+    /// Numbers the rows of the character column `name` by distinct string, as
+    /// [`StringCodes`] describes. A caller that already knows which rows hold the same string,
+    /// as R's interned strings tell the bridge for free, saves every grouping by the column a
+    /// pass that hashes the strings. Rows with equal codes must hold equal strings.
+    pub fn set_string_codes(
+        &mut self,
+        name: &str,
+        codes: Vec<u32>,
+        first_rows: Vec<u32>,
+    ) -> Result<()> {
+        let column = self
+            .frame
+            .column(name)
+            .map_err(|_| Error::NoColumn(name.to_string()))?;
+        let valid = column.dtype() == &DataType::String
+            && codes.len() == self.frame.height()
+            && codes
+                .iter()
+                .all(|code| (*code as usize) <= first_rows.len())
+            && first_rows
+                .iter()
+                .all(|row| (*row as usize) < self.frame.height());
+        if !valid {
+            return Err(Error::InvalidStringCodes(name.to_string()));
+        }
+        self.string_codes.retain(|(column, _)| column != name);
+        self.string_codes.push((
+            PlSmallStr::from(name),
+            Arc::new(StringCodes { codes, first_rows }),
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn string_codes(&self, name: &str) -> Option<&Arc<StringCodes>> {
+        self.string_codes
+            .iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, codes)| codes)
     }
 
     /// Wraps a frame whose columns already hold R dtypes, such as one gathered from other tables'
@@ -416,6 +477,7 @@ impl Table {
         Table {
             frame,
             key: Vec::new(),
+            string_codes: Vec::new(),
         }
     }
 

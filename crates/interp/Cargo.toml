@@ -32,3 +32,15 @@ tiny-skia = "0.11"
 ab_glyph = "0.2"
 jpeg-encoder = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+encoding_rs = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+glob = "0.3"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }

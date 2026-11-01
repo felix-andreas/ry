@@ -28,7 +28,7 @@ use {
     },
     heap::object::{NA_INTEGER, Sexp, SexpType},
     rustc_hash::FxHashSet,
-    std::{cell::Cell, ffi::c_void},
+    std::{borrow::Cow, cell::Cell, ffi::c_void},
     table::{
         ColumnType, Table,
         convert::{self, RVector, is_na_real},
@@ -1121,6 +1121,43 @@ impl Piece {
         matches!(self.source, Source::Missing)
     }
 
+    /// Replaces `eval(e)` by the call or symbol `e` evaluates to, the way data.table's `[`
+    /// expands `j = eval(e)`: it evaluates `e` in the caller's frame and runs the result as `j`.
+    /// data.table matches `eval` by name, so a local `eval` does not stop the expansion, and it
+    /// leaves `eval(e)` alone when a variable of `e` names a column, because `e` then means that
+    /// column. An expansion that reads no column is an error: data.table decides `with = FALSE`
+    /// on the unexpanded `j`, so it evaluates `eval(quote(1:2))` to `1:2`, where the lowering
+    /// would read the numbers as column positions.
+    pub(crate) unsafe fn expand_eval(&mut self, lowering: &Lowering) -> R<()> {
+        let Some((expression, env)) = self.unevaluated() else {
+            return Ok(());
+        };
+        if expression.kind() != SexpType::Language
+            || expression.car().kind() != SexpType::Symbol
+            || symbol_name(expression.car()) != "eval"
+            || length(expression) != 2
+            || !is_nil(expression.cdr().tag())
+        {
+            return Ok(());
+        }
+        let argument = expression.cdr().car();
+        if lowering.has_column_variable(argument) {
+            return Ok(());
+        }
+        let mut value = lowering.evaluate_in(argument, env)?;
+        if value.kind() == SexpType::Expression && length(value) == 1 {
+            value = values::list_elt(value, 0);
+        }
+        if !matches!(value.kind(), SexpType::Language | SexpType::Symbol) {
+            return Ok(());
+        }
+        if !lowering.mentions_columns(value) {
+            return Err(error_in(lowering.call, "`eval()` in `j` reads no column"));
+        }
+        self.source = Source::Expression(value, env);
+        Ok(())
+    }
+
     /// The expression [`Piece::value`] would evaluate and its environment, when it has not been
     /// evaluated yet.
     fn unevaluated(&self) -> Option<(Sexp, Sexp)> {
@@ -1336,7 +1373,7 @@ pub(crate) unsafe fn plan(mut parts: Parts, lowering: &Lowering<'_>) -> R<(Parts
         parts.each_i = true;
     }
     let by = match &parts.by {
-        Some(piece) => lowering.by(piece)?,
+        Some(piece) => lowering.by(piece, parts.j.as_ref().and_then(Piece::expression))?,
         None => Some(Vec::new()),
     };
     let rows = match &parts.i {
@@ -1940,7 +1977,8 @@ impl Lowering<'_> {
     }
 
     /// `by` or `keyby`, or `None` when a group is computed by an expression the IR lacks.
-    unsafe fn by(&self, piece: &Piece) -> R<Option<Vec<(PlSmallStr, Expr)>>> {
+    /// Lowers `by`. `j` is the query's `j`, which data.table consults to name a group key.
+    unsafe fn by(&self, piece: &Piece, j: Option<Sexp>) -> R<Option<Vec<(PlSmallStr, Expr)>>> {
         if let Some(expression) = piece.expression() {
             if expression.kind() == SexpType::Symbol && self.is_column(&symbol_name(expression)) {
                 let name = symbol_name(expression).into_owned();
@@ -1966,6 +2004,12 @@ impl Lowering<'_> {
                     let name = match tag_name(tag) {
                         Some(name) => name,
                         None if item.kind() == SexpType::Symbol => symbol_name(item).into_owned(),
+                        None if item.kind() == SexpType::Language => {
+                            match by_expression_name(item, j) {
+                                Some(name) => name,
+                                None => return Ok(None),
+                            }
+                        }
                         None => format!("V{}", position + 1),
                     };
                     let Some(expr) = self.expr(item)? else {
@@ -2032,11 +2076,9 @@ impl Lowering<'_> {
     }
 
     unsafe fn call_expr(&self, expression: Sexp) -> R<Option<Expr>> {
-        let head = expression.car();
-        if head.kind() != SexpType::Symbol {
+        let Some(name) = call_head(expression) else {
             return Ok(None);
-        }
-        let name = symbol_name(head);
+        };
         let items = values::pairlist_items(expression.cdr());
         let positional: Vec<Sexp> = items
             .iter()
@@ -2123,6 +2165,22 @@ impl Lowering<'_> {
 
     /// Whether `expression` reads a column or one of data.table's special symbols anywhere,
     /// which decides whether it runs inside the query or once in the caller's scope.
+    /// Whether a variable of `expression`, as R's `all.vars` lists them (every symbol outside a
+    /// call's head), names a column.
+    unsafe fn has_column_variable(&self, expression: Sexp) -> bool {
+        match expression.kind() {
+            SexpType::Symbol => self.is_column(&symbol_name(expression)),
+            SexpType::Language => {
+                let head = expression.car();
+                (head.kind() == SexpType::Language && self.has_column_variable(head))
+                    || values::pairlist_items(expression.cdr())
+                        .into_iter()
+                        .any(|(_, item)| self.has_column_variable(item))
+            }
+            _ => false,
+        }
+    }
+
     unsafe fn mentions_columns(&self, expression: Sexp) -> bool {
         self.mentions(expression, true)
     }
@@ -2202,6 +2260,77 @@ fn is_special_symbol(name: &str) -> bool {
         name,
         ".N" | ".SD" | ".I" | ".GRP" | ".BY" | ".NGRP" | ".SDcols"
     )
+}
+
+/// The name of the function `call` calls: its head symbol, or the name of a primitive object
+/// that code building calls spliced in, as `dcast` builds `list(v1 = .Primitive("sum")(v1))`.
+pub(crate) unsafe fn call_head<'a>(call: Sexp) -> Option<Cow<'a, str>> {
+    let head = call.car();
+    match head.kind() {
+        SexpType::Symbol => Some(symbol_name(head)),
+        SexpType::Builtin | SexpType::Special => Some(Cow::Borrowed(values::primitive_name(head))),
+        _ => None,
+    }
+}
+
+/// The name data.table gives an unnamed group key computed by `key`, such as `v` for `v > 3`:
+/// the first of `all.vars(key, functions = TRUE)` that is not `eval` and starts with a letter or
+/// a dot, or the only one. `None` where data.table names the key `deparse(key)` instead, because
+/// that name is also a variable of `j`, and where `key` has no variable.
+unsafe fn by_expression_name(key: Sexp, j: Option<Sexp>) -> Option<String> {
+    let mut names = Vec::new();
+    all_vars(key, true, &mut names);
+    let name = match names.as_slice() {
+        [only] => only.clone(),
+        _ => names
+            .iter()
+            .find(|name| {
+                name.as_str() != "eval"
+                    && name
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_alphabetic() || first == '.' || first == ' ')
+            })
+            .cloned()
+            .or_else(|| {
+                let mut variables = Vec::new();
+                all_vars(key, false, &mut variables);
+                variables.into_iter().next()
+            })?,
+    };
+    if names.len() > 1
+        && let Some(j) = j
+    {
+        let mut variables = Vec::new();
+        all_vars(j, false, &mut variables);
+        if variables.contains(&name) {
+            return None;
+        }
+    }
+    Some(name)
+}
+
+/// R's `all.vars(expression, functions)`: the distinct symbols of `expression` in order, with the
+/// names of called functions only when `functions` is true.
+unsafe fn all_vars(expression: Sexp, functions: bool, names: &mut Vec<String>) {
+    match expression.kind() {
+        SexpType::Symbol => {
+            let name = symbol_name(expression).into_owned();
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        SexpType::Language => {
+            let head = expression.car();
+            if functions || head.kind() != SexpType::Symbol {
+                all_vars(head, functions, names);
+            }
+            for (_, item) in values::pairlist_items(expression.cdr()) {
+                all_vars(item, functions, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 unsafe fn is_call_to(expression: Sexp, name: &str) -> bool {
