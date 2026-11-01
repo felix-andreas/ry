@@ -1151,9 +1151,9 @@ The message says to add a type annotation, and no annotation form silences it. `
   idempotent, so it is deliberate, and it is undocumented.
 - **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
   annotations with a blank line" when there is only one annotation.**
-- **The deep formatter fuzz finds a non-idempotent `#:` block** when a string literal spans lines
-  inside it (shrunk input: `"#: n(x: ineger) ->' oo\n#' roxygendouble\n..."`). The bounded fuzz in the
-  default suite passes; the deep run does not.
+- **The deep formatter fuzz (`FUZZ_ITERS=300000`) still finds `l: :Sost$field`**, which the formatter
+  rewrites to `l::Sost$field`, turning two `:` tokens into one `::` and changing the code. The
+  default `fuzz_deep` budget passes.
 - **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
   definition may also be written inline as `type` or `alias`.
 - **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever

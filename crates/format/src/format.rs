@@ -197,7 +197,10 @@ impl Formatter<'_> {
                 Some(Directive::Off) => enabled = false,
                 _ => {}
             }
-            pending_directive = directive(element);
+            // A trailing comment attaches inside the code it follows once the
+            // formatter drops the `;` between them, so only a comment that
+            // starts its line is stable as a directive.
+            pending_directive = directive(element).filter(|_| !self.trails(previous, element));
             if element.kind() == SEMICOLON {
                 continue;
             }

@@ -557,3 +557,9 @@ x <- #: integer
 1L
 #++++
 ERROR: Syntax error: a `#:` annotation cannot interrupt an expression. Move it to its own line at line 1, column 6
+
+#---- annotation_ends_at_line_break_inside_string
+x <- 1 #: f(x) <- c("a
+b")
+#++++
+ERROR: Syntax error: unterminated string; expected a closing quote at line 1, column 21
