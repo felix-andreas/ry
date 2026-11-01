@@ -19,6 +19,16 @@ The quality bar is four things.
   and `just perf` runs it.
 - **No input kills the server.** There is no `unwrap` panic on a protocol-legal message.
 
+## Open: the benchmark packages under ry's runtime
+
+`just bench-compare` gives the current numbers; `MEMORY.md` records them.
+
+- **Stats natives and binary connections.** `cov`, `termsform`, `zeroin2`, `kmns` and `do_fmin`, plus `writeBin`, `readBin` of character and `rawConnection`, cause all but 8 of the remaining differences.
+- **`grepRaw`** is missing, so renv's `.onLoad` fails.
+- **parallel cannot fork.** `mc_fork` and the other fork routines error, so `mclapply` with more than one core fails (`decisions.md`, "parallel's natives without fork").
+- **Small output differences seen while fixing:** a 0-row matrix header pads differently from GNU R, and the call in `$<-`'s warning deparses an argument as `<promise>`.
+- **Time and scale.** ry's suites run 1.07x to 1.5x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
+
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,

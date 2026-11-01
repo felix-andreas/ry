@@ -389,14 +389,13 @@ fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json
             ratio
         );
     }
-    println!("(times are the suites' own; load and startup add {})", summaries
-        .iter()
-        .map(|summary| format!(
-            "{}: GNU R {:.2} s, ry {:.2} s wall",
+    println!("Suite times count only the tests. Process wall time, which adds startup and loading the package:");
+    for summary in &summaries {
+        println!(
+            "  {}: GNU R {:.2} s, ry {:.2} s",
             summary.package, summary.gnu_r_wall_seconds, summary.ry_wall_seconds
-        ))
-        .collect::<Vec<_>>()
-        .join("; "));
+        );
+    }
     if let Some(path) = json {
         let text = match serde_json::to_string_pretty(&summaries) {
             Ok(text) => text,

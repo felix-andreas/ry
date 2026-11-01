@@ -349,7 +349,7 @@ pub unsafe fn call_builtin(
         env,
     };
     let result = if !definition.accepts_native
-        && matches!(definition.kind, Kind::Builtin | Kind::Internal)
+        && (matches!(definition.kind, Kind::Builtin | Kind::Internal) || definition.is_dispatch_or_eval())
         && let Err(refused) = crate::records::check_native_args(call, args)
     {
         Err(refused)
