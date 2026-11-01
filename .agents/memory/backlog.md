@@ -28,7 +28,7 @@ The quality bar is four things.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** At 300,000 lines, with the JIT off, the test blocks run 1.18x to 1.39x GNU R's time, while whole processes are already faster than GNU R. The rest is spread over the interpreter core: on the first 20 dsbench files, bytecode `step` is about 12% of the profile, first touches of fresh nursery pages (`clear_page_erms`) 6%, `Heap::frame_cell` 4%, `allocate_with` 4%, collection 3.5% (mostly R-level `gc()` calls), `mk_char` 3% and `match_args` 2%. Measured alone, a call to a closure with many formals still costs 3x to 5x GNU R's (`inherits` 598 ns against 152, `identical` 1215 against 265, `nchar` 754 against 157), because each formal gets its own binding cell; a bulk cell allocation per frame is the next lever. A plain closure call is already faster than GNU R's (147 ns against 207).
+- **Per-test time.** On the first 20 dsbench files with the JIT off, ry's test blocks take 8.3 s against GNU R's 7.5 s (about 11% slower), and wall time is already level. The gap is interpreter work, not memory management: allocation and collection are under 7% of the runtime thread's profile, and a full collection on the loaded heap takes 35 ms against GNU R's 130 ms (the R-level `gc()` calls come from lgr's `Logger$finalize`, which GNU R pays too). The largest buckets are the data.table "event tables" tests (one repeated 200 times: 12.7 s against 9.2 s) and "serving validates requests". Their profile is flat over bytecode `step` (10%), `frame_cell`, closure calls, `mk_char`, `length` and `match_args`, so the next levers are fewer allocations per call and faster lookups rather than the allocator. A closure-call microbenchmark (`f(i, 1, d = 3)` plus a nine-formal call) still runs about 1.75x GNU R.
 
 ## Open: the package loader
 
@@ -566,20 +566,11 @@ change that does not pay.
    stride `registers + slots`, liveness as a bitset, `block_at` as a dense array, all in a bump
    arena dropped after codegen. Expected win: compile latency, which decides how early and how much
    code the JIT can afford to compile once it compiles calls.
-3. **Side mark bitmaps in the collector.** The mark bit lives in each object's `Header`
-   (`crates/heap/src/object.rs`); `sweep_all` reads the header of every slot on every page, and
-   `sweep_young` chases the `young: Vec<Sexp>` list in allocation order (`crates/heap/src/heap.rs`).
-   Target: a mark bitmap and a free bitmap per page, so marking writes dense bits and sweeping
-   scans words without touching dead objects. The header layout is private (packages reach it only
-   through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
-   in large-heap sessions such as the data.table groupby workloads.
-4. **The allocation fast path.** The size-to-class table and partial zeroing are in
-   (`SIZE_CLASS_BY_WORDS`, `allocate_with`'s `zeroed`; a triple is not zeroed at all). Left:
-   bump allocation through free runs of a page instead of popping a `Vec` free list, and the
-   `young` list push (`crates/heap/src/heap.rs`). `allocate_with` is about 4% of a profile of
-   the benchmark tests.
-   Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
-   2.5 to 3 times slower than GNU R ("Open: the JIT").
+3. **Side mark bitmaps in the collector.** Done (`decisions.md`, "Small objects live in bitmap
+   pages").
+4. **The allocation fast path.** Done with the same change: allocation claims a bitmap word of
+   free slots and there is no young list. What is left in `allocate_uncollected` is the store into
+   a cold slot's header, so the next cut is fewer allocations, not a faster allocator.
 5. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
@@ -2088,13 +2079,13 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
-  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena
-  commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
-  questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
-  The delay is process-wide and trades resident memory in every R program, so it stays at
-  mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
-  targeted fixes.
+- **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
+  a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
+  the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
+  at 6.7 GB peak with the default delay and 91 s at 8.1 GB with the delay set to never. libR sets it
+  to never (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory"), because
+  refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
+  Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
 - **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
   distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
   interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
