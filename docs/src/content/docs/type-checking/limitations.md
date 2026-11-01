@@ -59,8 +59,6 @@ These are known bugs, not design decisions:
 - **Package-qualified calls outside a package.** `pkg::fun()` reports an unknown namespace unless
   some file in the project calls `library(pkg)`, and for a package ry has no stub or export list for,
   even then.
-- **A `stop()` guard in strict mode.** `if (x < 0) stop("negative")` reports the `stop()` call as an
-  undetermined type.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
   reported, because type parameters on a function that is not bound to a name are not instantiated.
   Leave the function's types off, or bind it to a name first.

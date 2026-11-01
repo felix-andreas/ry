@@ -3,6 +3,33 @@ title: Why ry
 description: What ry gives you that other R tools do not, and the trade-offs behind it
 ---
 
+## How fast it runs
+
+ry's own runtime (`ry run --runtime ry`) interprets R and compiles hot loops to machine code. Each
+program below exists twice in `tools/bench/why/`: as plain R, and with inline annotations checked
+in [strict mode](/type-checking/strict-mode). The times are the best of three runs after one warm-up
+run, measured inside the script, so they leave out startup and, for the typed column, the static
+check. All three columns compute the same result.
+
+| program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
+| --- | ---: | ---: | ---: | ---: |
+| closures | 0.782 s | 0.381 s | 0.405 s | 2.1x |
+| drawdown | 0.309 s | 0.021 s | 0.021 s | 14.9x |
+| fib | 0.081 s | 0.088 s | 0.090 s | 0.9x |
+| log_rank | 0.099 s | 0.063 s | 0.062 s | 1.6x |
+| loop_sum | 0.247 s | 0.047 s | 0.047 s | 5.2x |
+| vasicek | 0.036 s | 0.041 s | 0.041 s | 0.9x |
+| vector_arith | 0.177 s | 0.122 s | 0.121 s | 1.5x |
+
+Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R 4.3.3 with its
+bytecode compiler on. `just bench-why` builds ry and regenerates the table on your machine.
+
+Loops and vector code run several times faster than on GNU R. Code dominated by small function
+calls (`fib`) or by the random number generator (`vasicek`) is still about 10% slower. Types do not
+make code faster yet: a static `double` still admits an integer or a logical through promotion, so
+the compiled code keeps its runtime checks, and checking annotations at each call costs a little,
+as `closures` shows.
+
 ## Mistakes show up before the code runs
 
 R reports an undefined name, a call with the wrong arguments, or a `NULL` where a value is needed

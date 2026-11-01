@@ -260,25 +260,40 @@ protects construction but nothing after it.
 
 ## Open: the JIT
 
-`crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
+`crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
-- **Direct calls between compiled closures, with promise elision.** `micro/closures` is slower
-  under the JIT than under tier 0 because each iteration's generic call writes `s` and `i` back and
-  reloads them, and fib and lapply gain nothing. A call to a speculated closure whose arguments are
-  effect-free should evaluate them eagerly and enter the callee's compiled code without a promise.
+- **Compiled-to-compiled calls.** `micro/fib` is still about 10% behind GNU R. Callgrind puts a
+  call at about 3,300 instructions, of which about 750 are allocation and collection across about
+  seven allocations (frame, forced promises, argument cells), and about 280 are tier 0's entry into
+  the callee. A call from compiled code should enter the callee's compiled code directly, with
+  arguments in registers and no promise when the callee provably never reflects
+  (`substitute`, `missing`, `sys.call`).
 - **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
-  reads the checker's per-function summaries yet.
+  reads the checker's per-function summaries yet, and strict typing does not remove guards
+  (`decisions.md`, "Static types do not remove guards"). Typed code currently runs at the speed of
+  untyped code, minus the boundary checks.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
-- **Builtin-bound benchmarks** (vector_arith, jackknife, log_rank, vasicek) are 2.5 to 3 times
-  slower than GNU R in tier 0 and the JIT alike; the cost is in the builtins, not the dispatch.
+- **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
+  is defined in a function frame, so a program that reuses a common function name as a local
+  variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
+- **`.Random.seed` is reread on every RNG call** (`crates/interp/src/random.rs`, `from_words`, about
+  4,400 instructions per `rnorm` call), as GNU R does. Caching the state against the binding's
+  identity would make `vasicek` match GNU R; it is still about 10% behind, with `qnorm` and the
+  twister refill the rest of the cost.
 - **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
   `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
   so they are tier-0 or base gaps, not JIT ones.
-- **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
-  may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
-  while the environment still holds the old value; and an allocation failure inside `boxed()`
-  (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
+- **Base gaps seen while benchmarking:** `sum()` of doubles does not follow GNU R's long-double
+  accumulation or its NaN-before-NA precedence exactly; a factor inside a list prints its codes;
+  `cov` and `sd` route through an R-level fallback instead of a native `C_cov`; `pkg::name` for a
+  name the namespace does not export gives a different message from GNU R.
+- **Strict users must annotate `seq()` results.** The `seq` stub returns `Any`, so
+  `x <- seq(...)` passes strict mode only with an annotation such as `x: double[]`. A precise
+  overload set for `seq` and `seq_len` would remove that.
+- **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
+  and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
+  `crates/ry/tests/test_repl_e2e.rs`). They pass alone; their timeouts need headroom.
 
 ## Open: performance and memory
 

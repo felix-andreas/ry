@@ -514,11 +514,9 @@ that the gain over a good interpreter is real but modest.
 `crates/jit` implements the core of this design for loops; the rest of the list above is still
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
-- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body that contains a
-  loop compiles on its tenth entry, and a running loop compiles after 500 backward jumps and
-  continues in compiled code at the loop header (on-stack replacement). A body without a loop stays
-  in tier 0, because without direct calls the cost of entering compiled code and forcing arguments
-  through helpers is larger than what it saves.
+- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
+  tenth entry, and a running loop compiles after 500 backward jumps and continues in compiled code
+  at the loop header (on-stack replacement).
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -531,7 +529,13 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it. Promises are not elided.
+  after something that could change it.
+- **Calls.** A call to a closure whose binding was resolved at compile time is direct: effect-free
+  arguments are evaluated eagerly and passed as already forced promises, bound by position without
+  the general matcher. A call of a small closure defined in the same body, which computes a scalar
+  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  against one global binding epoch, which the heap bumps whenever a watched binding changes or a
+  watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
   speculated against the binding epoch. A failed guard boxes the live values, writes back the dirty
   variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
@@ -547,8 +551,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
-- **Not yet built:** direct calls between compiled closures, promise elision, the use of static
-  types as early profiles, and freeing the machine code of invalidated bodies.
+- **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
+  call still enters through tier 0's call path and allocates a frame and forced promises), the use
+  of static types as early profiles, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
