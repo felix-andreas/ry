@@ -156,3 +156,11 @@ n <- length(s)
 #++++
 s: Set<character>
 n: integer
+
+#==== conversions
+#---- lists_convert_to_ry_values
+p <- as.record(list(x = 1, y = 2))
+t <- as.tuple(list(1, "a"))
+#++++
+p: Any
+t: Any

@@ -1669,6 +1669,22 @@ pub(crate) fn nearest_name<'a>(
     if name_characters.len() < 4 {
         return None;
     }
+    // A standard-library name such as `Str.split` is usually the start of a longer one
+    // (`Str.split_on`), which is farther away by edit distance than an unrelated base function.
+    let candidates: Vec<&str> = candidates.collect();
+    if ["List.", "Str.", "Num.", "Result.", "Dict.", "Set."]
+        .iter()
+        .any(|module| name.starts_with(module))
+    {
+        let completion = candidates
+            .iter()
+            .filter(|candidate| candidate.len() > name.len() && candidate.starts_with(name))
+            .min_by_key(|candidate| (candidate.len(), **candidate));
+        if let Some(candidate) = completion {
+            return Some((*candidate).to_owned());
+        }
+    }
+    let candidates = candidates.into_iter();
     let budget = if name_characters.len() >= 8 { 2 } else { 1 };
     let mut candidate_characters: Vec<char> = Vec::new();
     let mut previous: Vec<usize> = Vec::new();
@@ -2342,10 +2358,16 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *variable),
             renderer.render(db, *container)
         ),
-        TypeErrorKind::PatternNeverMatches { found } => format!(
-            "this pattern can never match: the value is `{}`",
-            renderer.render(db, *found)
-        ),
+        TypeErrorKind::PatternNeverMatches { found, hint } => {
+            let mut message = format!(
+                "this pattern can never match: the value is `{}`",
+                renderer.render(db, *found)
+            );
+            if let Some(hint) = hint {
+                message.push_str(&format!(". {hint}"));
+            }
+            message
+        }
         TypeErrorKind::NativeValueToR { function, kind } => {
             let kind = match kind {
                 NativeValueKind::Record => "record",
