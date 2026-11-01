@@ -54,8 +54,10 @@ A reload works out which top-level items changed and touches only those:
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
-- On ry's own runtime (the default for `ry load`), functions carry no source references, and a
-  package with `src/` does not load yet, because pkgbuild cannot find its build tools there. Use
-  `ry load --runtime gnu-r` for either.
+- On ry's own runtime (the default for `ry load`), functions carry no source references. Use
+  `ry load --runtime gnu-r` when you need them.
+- Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
+  GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
+  ry's own `libR.so` already provides.
 - A top-level statement that reads a name before the statement defining it runs sees, on a reload,
   the value from the previous load. A fresh load would fail on such code anyway.

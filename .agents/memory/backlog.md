@@ -24,9 +24,10 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **A package with `src/` does not load on ry's runtime**: pkgbuild's `check_build_tools` fails
-  there (callr and friends hit interpreter gaps). `readDCF` and classed comparisons were the first two
-  blockers. Until it works, `--runtime gnu-r` is the documented route.
+- **Compiled code builds with GNU R's toolchain**: on ry's runtime `R.home()` is GNU R's, so
+  `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links GNU R's `libR.so`. It loads
+  because ry's `libR.so` already holds that soname. Pointing `R.home()` at `crates/rcmd`'s R home
+  would make the build ry's own.
 - **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
