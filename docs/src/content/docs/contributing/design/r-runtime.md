@@ -1076,8 +1076,10 @@ JIT fits around them.
     the Rtools ABI of GNU R's `etc/x64/Makeconf`: `gcc`/`g++`/`gfortran`, `-shared
     -static-libgcc`, no PIC flags, and `-L"$(R_HOME)/bin/x64" -lR` against the `libR.dll.a` that
     the home keeps beside `R.dll` in `bin/x64/`. Windows runs no shell scripts, so the home's
-    `bin/R.exe`, `bin/Rscript.exe` and `bin/x64/Rcmd.exe` are copies of `ry-rcmd.exe`, which reads
-    which front end it is from its file name and the home from its location. Directories that
+    `bin/R.exe`, `bin/Rscript.exe`, `bin/x64/Rcmd.exe` and `bin/x64/Rterm.exe` (which callr starts)
+    are copies of `ry-rcmd.exe`, which reads which front end it is from its file name and the home
+    from its location, ignoring an inherited `R_HOME`. The paths it exports to `configure` and
+    `make` use forward slashes, because both read a backslash as an escape. Directories that
     cannot be linked (Windows needs Developer Mode for symbolic links) are copied.
   - `ry run` loads `R.dll` from beside `ry.exe`, and BLAS and LAPACK from the R installation's
     `bin/x64/Rblas.dll` and `Rlapack.dll`. DLLs load with `LOAD_WITH_ALTERED_SEARCH_PATH` from a
