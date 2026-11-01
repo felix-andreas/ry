@@ -412,6 +412,79 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
     })
 }
 
+/// Collects the integer `sum`s inside an expression.
+fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> {
+    match expr {
+        Expr::Aggregate {
+            function: Aggregate::Sum,
+            arg,
+            ..
+        } if typer.expr(arg)? != ColumnType::Double => sums.push(expr.clone()),
+        Expr::Aggregate { arg, .. } | Expr::Unary(_, arg) | Expr::Head(arg, _) => {
+            integer_sums(typer, arg, sums)?;
+        }
+        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+            integer_sums(typer, left, sums)?;
+            integer_sums(typer, right, sums)?;
+        }
+        Expr::IfElse(test, yes, no) => {
+            integer_sums(typer, test, sums)?;
+            integer_sums(typer, yes, sums)?;
+            integer_sums(typer, no, sums)?;
+        }
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_)
+        | Expr::Column(_)
+        | Expr::Count => {}
+    }
+    Ok(())
+}
+
+/// The expression with each integer `sum(x)` taken over doubles, as `sum(x * 1.0)`, which is what
+/// R's `sum` returns when the total overflows.
+fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
+    let double = |arg: &Expr| double_sums(typer, arg).map(Box::new);
+    Ok(match expr {
+        Expr::Aggregate {
+            function: Aggregate::Sum,
+            arg,
+            na_rm,
+        } if typer.expr(arg)? != ColumnType::Double => Expr::Aggregate {
+            function: Aggregate::Sum,
+            arg: Box::new(Expr::Binary(
+                BinaryOp::Multiply,
+                double(arg)?,
+                Box::new(Expr::Double(1.0)),
+            )),
+            na_rm: *na_rm,
+        },
+        Expr::Aggregate {
+            function,
+            arg,
+            na_rm,
+        } => Expr::Aggregate {
+            function: *function,
+            arg: double(arg)?,
+            na_rm: *na_rm,
+        },
+        Expr::Unary(op, arg) => Expr::Unary(*op, double(arg)?),
+        Expr::Head(arg, count) => Expr::Head(double(arg)?, *count),
+        Expr::Binary(op, left, right) => Expr::Binary(*op, double(left)?, double(right)?),
+        Expr::Correlation(left, right) => Expr::Correlation(double(left)?, double(right)?),
+        Expr::IfElse(test, yes, no) => Expr::IfElse(double(test)?, double(yes)?, double(no)?),
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_)
+        | Expr::Column(_)
+        | Expr::Count => expr.clone(),
+    })
+}
+
 /// The lazy plan for a query that does not assign, so tests and `explain` can inspect what the
 /// planner receives.
 pub fn plan(table: &Table, query: Query) -> Result<LazyFrame> {
@@ -890,7 +963,32 @@ fn assign(
     assignments: &[(PlSmallStr, Option<Expr>)],
     kernels: bool,
 ) -> Result<()> {
-    if kernels && by.is_empty() && assign_with_kernels(table, schema, rows, assignments)? {
+    let typer = Typer { schema };
+    // A new column whose value nests an integer `sum`, such as `sum(v) - 1L`, is a double when a
+    // total overflows, because R's `sum` then returns a double. The value is computed as written
+    // and again with each such sum taken over doubles, and probes holding the sums themselves, kept
+    // in 64 bits, tell which of the two to keep once the totals are known.
+    let mut alternatives = Vec::new();
+    for (index, (name, expr)) in assignments.iter().enumerate() {
+        let Some(expr) = expr else { continue };
+        let plain_sum = matches!(
+            expr,
+            Expr::Aggregate {
+                function: Aggregate::Sum,
+                ..
+            }
+        );
+        if schema.column(name).is_none() && !plain_sum && has_integer_sum(&typer, expr)? {
+            let mut probes = Vec::new();
+            integer_sums(&typer, expr, &mut probes)?;
+            alternatives.push((index, double_sums(&typer, expr)?, probes));
+        }
+    }
+    if kernels
+        && by.is_empty()
+        && alternatives.is_empty()
+        && assign_with_kernels(table, schema, rows, assignments)?
+    {
         return drop_removed(table, assignments);
     }
     let frame = table.frame().clone();
@@ -899,7 +997,6 @@ fn assign(
         schema,
         nulls: &nulls,
     };
-    let typer = Typer { schema };
     let filter = match rows {
         Rows::All => None,
         Rows::Filter(filter) => {
@@ -918,7 +1015,15 @@ fn assign(
     }
     let whole = filter.is_none() && groups.is_empty();
     let mut targets = Vec::with_capacity(assignments.len());
-    for (name, expr) in assignments {
+    // For each alternative, the index of the target it may replace.
+    let mut replaced = Vec::with_capacity(alternatives.len());
+    for (index, (name, expr)) in assignments.iter().enumerate() {
+        if alternatives
+            .iter()
+            .any(|(alternative, _, _)| *alternative == index)
+        {
+            replaced.push(targets.len());
+        }
         let existing = schema.column(name);
         let Some(expr) = expr else {
             if existing.is_none() {
@@ -953,6 +1058,30 @@ fn assign(
             levels,
             widens,
         });
+    }
+    let primaries = targets.len();
+    let mut hidden = 0;
+    let mut hidden_name = || {
+        hidden += 1;
+        PlSmallStr::from(format!("\u{1}assign{hidden}"))
+    };
+    for (_, doubled, probes) in &alternatives {
+        targets.push(Target {
+            name: hidden_name(),
+            expr: doubled,
+            kind: ColumnType::Double,
+            levels: None,
+            widens: false,
+        });
+        for probe in probes {
+            targets.push(Target {
+                name: hidden_name(),
+                expr: probe,
+                kind: ColumnType::Integer,
+                levels: None,
+                widens: true,
+            });
+        }
     }
     let result = match &filter {
         _ if targets.is_empty() => None,
@@ -1002,10 +1131,25 @@ fn assign(
             )
         }
     };
-    let mut columns = Vec::with_capacity(targets.len());
+    let mut columns = Vec::with_capacity(primaries);
     if let Some(result) = result {
         let result = narrow_sums(result)?;
-        for (column, target) in result.into_columns().into_iter().zip(&targets) {
+        let mut computed = result.into_columns();
+        let mut extras = computed.split_off(primaries).into_iter();
+        for ((_, _, probes), target) in alternatives.iter().zip(replaced) {
+            let doubled = extras.next();
+            let overflowed = extras
+                .by_ref()
+                .take(probes.len())
+                .any(|probe| probe.dtype() == &DataType::Float64);
+            if let (true, Some(doubled), Some(slot)) =
+                (overflowed, doubled, computed.get_mut(target))
+            {
+                let name = slot.name().clone();
+                *slot = doubled.with_name(name);
+            }
+        }
+        for (column, target) in computed.into_iter().zip(&targets) {
             columns.push(match &target.levels {
                 Some(levels) => relevel(column, levels)?,
                 None => column,

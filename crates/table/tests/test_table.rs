@@ -2044,3 +2044,49 @@ fn large_grouped_medians_and_moments_match_the_plan() {
         }
     }
 }
+
+/// data.table 1.18 under R 4.3 gives a double column for `s := sum(v) - 1L` when a total
+/// overflows, with or without `by`, because R's `sum` then returns a double.
+#[test]
+fn a_new_column_nesting_an_overflowing_sum_is_a_double() {
+    let x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
+    ]);
+    let nested = || {
+        binary(
+            BinaryOp::Subtract,
+            aggregate(Aggregate::Sum, column("v")),
+            Expr::Integer(1),
+        )
+    };
+    let update = |rows: Rows, by: &[&str]| {
+        let mut updated = x.fork();
+        run(
+            &mut updated,
+            Query {
+                rows,
+                select: Select::Assign(vec![set("s", nested())]),
+                by: by.iter().map(|name| named(name, column(name))).collect(),
+                ..Query::default()
+            },
+        );
+        get(&mut updated, "s")
+    };
+    assert_eq!(
+        Read(update(Rows::All, &["g"])),
+        doubles(&[3_999_999_999.0, 3_999_999_999.0, 0.0])
+    );
+    assert_eq!(Read(update(Rows::All, &[])), doubles(&[4e9, 4e9, 4e9]));
+    let small = || Rows::Filter(binary(BinaryOp::Equal, column("g"), Expr::Integer(2)));
+    assert_eq!(
+        Read(update(small(), &[])),
+        ints(&[NA_INTEGER, NA_INTEGER, 0]),
+        "a sum that fits stays integer"
+    );
+    let large = Rows::Filter(binary(BinaryOp::Equal, column("g"), Expr::Integer(1)));
+    assert_eq!(
+        Read(update(large, &["g"])),
+        doubles(&[3_999_999_999.0, 3_999_999_999.0, NA_REAL])
+    );
+}
