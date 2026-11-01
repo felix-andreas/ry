@@ -1733,9 +1733,10 @@ ry is UPL-1.0, so no GPL code from GNU R is copied into the repository. The runt
 implementation are written independently.
 
 Base R's R-level sources (the open question in `contributing/design/r-runtime.md`, section 11) are
-GPL-2-or-later. The default is to load them at runtime from the user's own GNU R installation
-rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
-project is the owner's call and is not assumed.
+GPL-2-or-later. The owner confirmed the default: load them at runtime from the user's own GNU R
+installation rather than vendor them, the way the `repl` crate already loads R at runtime. ry
+therefore stays license-independent of GNU R and needs GNU R installed (`installation.md` says so).
+Relicensing the project is not assumed.
 
 # Decision record: the runtime's object model, collector and native boundary
 
