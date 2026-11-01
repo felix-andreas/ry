@@ -1698,7 +1698,7 @@ async fn signature_help_labels_parameters_by_offset_or_substring() {
             .collect();
         assert_eq!(
             parameter_texts,
-            ["x: list[named: T]", "f: fn(T) -> U", "...: Any"]
+            ["X: list[named: T]", "FUN: fn(T) -> U", "...: Any"]
         );
         assert_eq!(help.active_parameter, Some(0));
         context.shutdown().await;

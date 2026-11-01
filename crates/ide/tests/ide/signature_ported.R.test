@@ -8,8 +8,8 @@ hover 124..126: integer
 definition: none
 references: none
 rename: none
-signature: fn(count: integer, label: character) -> integer
-parameters: [count: integer] | label: character
+signature: fn(count: integer, [label]: character) -> integer
+parameters: [count: integer] | [label]: character
 action: Add inferred type annotation for `result`
   edit 92..92 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
@@ -43,10 +43,10 @@ hover 91..99: Unknown
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(x: list[named: T], f: fn(T) -> U, ...: Any) -> list[named: U] (active)
-parameters: [x: list[named: T]] | f: fn(T) -> U | ...: Any
-signature: <T, U> fn(x: list[T] | T[], f: fn(T) -> U, ...: Any) -> list[U]
-parameters: [x: list[T] | T[]] | f: fn(T) -> U | ...: Any
+signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U] (active)
+parameters: [X: list[named: T]] | FUN: fn(T) -> U | ...: Any
+signature: <T, U> fn(X: list[T] | T[], FUN: fn(T) -> U, ...: Any) -> list[U]
+parameters: [X: list[T] | T[]] | FUN: fn(T) -> U | ...: Any
 completion (128+): break, else, FALSE, for, function, if, in, Inf
 
 #---- lapply_resolved_instantiation
@@ -57,10 +57,10 @@ hover 93..134: list[integer]
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(x: list[named: T], f: fn(T) -> U, ...: Any) -> list[named: U]
-parameters: x: list[named: T] | [f: fn(T) -> U] | ...: Any
-signature: fn(x: list[integer] | integer[], f: fn(integer) -> integer, ...: Any) -> list[integer] (active)
-parameters: x: list[integer] | integer[] | [f: fn(integer) -> integer] | ...: Any
+signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
+parameters: X: list[named: T] | [FUN: fn(T) -> U] | ...: Any
+signature: fn(X: list[integer] | integer[], FUN: fn(integer) -> integer, ...: Any) -> list[integer] (active)
+parameters: X: list[integer] | integer[] | [FUN: fn(integer) -> integer] | ...: Any
 action: Add inferred type annotation for `result`
   edit 83..83 -> "#: list[integer]\n"
 action: Add inferred type annotations for the whole file
@@ -76,9 +76,9 @@ hover 34..40: T
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(x: T, y: U) -> T
-parameters: [x: T] | y: U
+signature: <T, U> fn(x: T, [y]: U) -> T
+parameters: [x: T] | [y]: U
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U> fn(x: T, y: U) -> T\n"
+  edit 0..0 -> "#: <T, U> fn(x: T, [y]: U) -> T\n"
 completion (128+): break, else, FALSE, for, function, if, in, Inf
-hint @4: <T, U> fn(x: T, y: U) -> T
+hint @4: <T, U> fn(x: T, [y]: U) -> T

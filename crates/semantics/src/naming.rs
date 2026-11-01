@@ -81,6 +81,21 @@ pub struct ItemNaming {
     pub invalid_assignment_targets: Box<[InvalidAssignmentTarget]>,
     /// Alternatives of a `p | q` pattern that leave out a name another alternative binds.
     pub or_pattern_mismatches: Box<[OrPatternMismatch]>,
+    /// Call heads that resolved to a slot. R looks a called name up as a function, skipping
+    /// every binding that does not hold one, so the checker may fall through to these.
+    pub callee_fallbacks: SortedMap<ExprId, CalleeFallback>,
+    /// Bare names read as the routine of `.Call` and the other native interfaces, which a
+    /// registering `useDynLib` may bind.
+    pub native_routine_reads: SortedSet<ExprId>,
+}
+
+/// Where a call head's lookup continues when its nearest binding cannot hold a function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalleeFallback {
+    /// The enclosing slots of the same name, nearest first.
+    pub outer: Box<[BindingId]>,
+    /// Whether the call runs inside a function, so a cross-item lookup sees the final binding.
+    pub deferred: bool,
 }
 
 /// `ItemNaming` while resolution builds it; frozen into compact sorted slices at the end.
@@ -104,6 +119,8 @@ struct NamingDraft {
     super_globals: BTreeSet<Symbol>,
     invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
     or_pattern_mismatches: Vec<OrPatternMismatch>,
+    callee_fallbacks: BTreeMap<ExprId, CalleeFallback>,
+    native_routine_reads: BTreeSet<ExprId>,
 }
 
 impl NamingDraft {
@@ -127,6 +144,8 @@ impl NamingDraft {
             super_globals: self.super_globals.into(),
             invalid_assignment_targets: self.invalid_assignment_targets.into_boxed_slice(),
             or_pattern_mismatches: self.or_pattern_mismatches.into_boxed_slice(),
+            callee_fallbacks: self.callee_fallbacks.into(),
+            native_routine_reads: self.native_routine_reads.into(),
         }
     }
 }
@@ -377,6 +396,11 @@ impl Context<'_> {
                     ExpressionKind::NameRef(name) => Some(name.as_str()),
                     _ => None,
                 };
+                if let Some(name) = callee_name
+                    && let Some(&slot) = self.naming.resolutions.get(callee)
+                {
+                    self.record_callee_fallback(*callee, name, slot);
+                }
                 // `library(pkg)`, `require(pkg)` and `help(topic)` quote a bare first positional
                 // name. The rule is syntactic: a rebound `library` does not change it.
                 if matches!(callee_name, Some("library" | "require" | "help"))
@@ -392,6 +416,16 @@ impl Context<'_> {
                 // ordinary call.
                 let builtin_callee =
                     callee_name.filter(|_| !self.naming.resolutions.contains_key(callee));
+                if builtin_callee.is_some_and(|name| NATIVE_INTERFACES.contains(&name))
+                    && let Some(routine) = arguments
+                        .iter()
+                        .find(|argument| argument.name.as_deref() == Some(".NAME"))
+                        .or_else(|| arguments.iter().find(|argument| argument.name.is_none()))
+                        .and_then(|argument| argument.value)
+                    && matches!(module.expression(routine).kind, ExpressionKind::NameRef(_))
+                {
+                    self.naming.native_routine_reads.insert(routine);
+                }
                 match builtin_callee {
                     // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
                     // value and keep every write of those names alive.
@@ -903,6 +937,19 @@ impl Context<'_> {
                 let &slot = scope.slots.get(name)?;
                 (self.flow.contains_key(&slot) || depth < function_depth).then_some((depth, slot))
             })?;
+        let maybe_undefined = self.mark_slot_reached(name, depth, slot, function_depth);
+        Some((slot, maybe_undefined))
+    }
+
+    /// Records that a read at the current point observes `slot`, which lives at scope `depth`;
+    /// true when some path reaches the read with the slot still unassigned.
+    fn mark_slot_reached(
+        &mut self,
+        name: &str,
+        depth: usize,
+        slot: BindingId,
+        function_depth: usize,
+    ) -> bool {
         match self.naming.bindings.get(&slot).map(|binding| binding.kind) {
             Some(BindingKind::Parameter) => {
                 self.read_parameter_slots.insert(slot);
@@ -931,7 +978,38 @@ impl Context<'_> {
                 }
             }
         }
-        Some((slot, maybe_undefined))
+        maybe_undefined
+    }
+
+    /// Every enclosing slot that could serve the call is marked read, since the checker may
+    /// pick any of them once it knows which bindings hold functions.
+    fn record_callee_fallback(&mut self, callee: ExprId, name: &str, nearest: BindingId) {
+        let function_depth = self.current_function_depth();
+        let Some(nearest_depth) = self
+            .scopes
+            .iter()
+            .rposition(|scope| scope.slots.get(name) == Some(&nearest))
+        else {
+            return;
+        };
+        let mut outer = Vec::new();
+        for depth in (0..nearest_depth).rev() {
+            let Some(&slot) = self.scopes[depth].slots.get(name) else {
+                continue;
+            };
+            if !self.flow.contains_key(&slot) && depth >= function_depth {
+                continue;
+            }
+            self.mark_slot_reached(name, depth, slot, function_depth);
+            outer.push(slot);
+        }
+        self.naming.callee_fallbacks.insert(
+            callee,
+            CalleeFallback {
+                outer: outer.into_boxed_slice(),
+                deferred: function_depth > 0,
+            },
+        );
     }
 
     fn resolve_read(&mut self, id: ExprId, name: &str) {
@@ -1289,6 +1367,9 @@ fn diverges(module: &Module, id: ExprId) -> bool {
         _ => false,
     }
 }
+
+/// The base functions that call a compiled routine named by their `.NAME` argument.
+const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.
 fn base_masking_family(name: &str) -> Option<Vec<&'static str>> {

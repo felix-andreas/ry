@@ -11,7 +11,9 @@ use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::lints::LintConfig;
-use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
+use crate::metadata::{
+    declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
+};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
@@ -558,8 +560,24 @@ fn classify_non_local_read(
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
+    if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+        return NonLocalRead::Resolvable;
+    }
+    if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
+        return NonLocalRead::Resolvable;
+    }
     let files = ProjectFiles::try_get(db);
+    let test_files = files.filter(|_| {
+        matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+    });
     if crate::package_scheme_exists(db, name)
+        || test_files.is_some_and(|files| {
+            crate::test_definitions(db, files).contains_key(name)
+                || crate::test_conditional_slot_items(db, files).contains_key(name)
+        })
         || super_globals(db, file).contains(name)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
@@ -571,10 +589,14 @@ fn classify_non_local_read(
     // checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
+            let test_names = test_files
+                .into_iter()
+                .flat_map(|files| crate::test_definitions(db, files).keys());
             nearest_name(
                 name,
                 crate::package_definitions(db, files)
                     .keys()
+                    .chain(test_names)
                     .map(String::as_str),
             )
         })
@@ -1776,6 +1798,17 @@ fn project_global_variable_declarations(db: &dyn Db, files: ProjectFiles) -> BTr
 /// R6 injects these into every method's environment at construction, so they
 /// resolve nowhere lexically.
 const R6_INJECTED_BINDINGS: [&str; 3] = ["self", "private", "super"];
+
+/// `UseMethod`, `NextMethod` and group-generic dispatch bind these in the method's frame, and
+/// any function can be a method, so a read inside a function body may see them.
+const DISPATCH_VARIABLES: [&str; 6] = [
+    ".Generic",
+    ".Method",
+    ".Class",
+    ".Group",
+    ".GenericCallEnv",
+    ".GenericDefEnv",
+];
 
 /// Purely syntactic: a local binding shadowing `R6Class` is not honored.
 #[salsa::tracked]

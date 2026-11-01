@@ -2047,6 +2047,39 @@ A name reference evaluates to the type currently bound to the name. When the nam
 checker reports it as unresolved, and treats the reference as `Unknown` from then on, so checking
 continues without a cascade of follow-on errors.
 
+### Called names
+
+R looks up the name in a call `f(...)` as a function: a binding whose value is not a function is
+skipped, and the lookup continues outward. A called name therefore resolves to the nearest binding
+whose type can be a function, so this is clean:
+
+```r
+upper_names <- function(x) {
+  names <- toupper(names(x))
+  names(x)
+}
+```
+
+- A binding whose type is definitely not a function (`NULL`, an atomic vector, a list, a record, a
+  tuple, a tag or a frame) is skipped. The lookup tries the enclosing frames' slots of the same name,
+  then the package's top-level binding, then the library. A top-level `l10n_info <- NULL` therefore
+  leaves `l10n_info()` calling base's function. In a package file the top level is the namespace
+  itself, so past it only the library remains. A test file's top level encloses in the helpers'
+  bindings and then the package namespace, and a script's in the namespace, so
+  `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
+- A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
+- A binding with no type information yet, such as an unannotated parameter nothing has constrained
+  or a parameter annotated with a type parameter `T`, may hold anything. When an outer binding of
+  the same name is a function, the call could reach either one, so it types as `Unknown` and constrains neither: `function(x, names) names(x)` does not
+  make `names` a function parameter. With no function of that name further out, the call checks
+  against the binding as usual, so `function(x, callback) callback(x)` still infers `callback` as a
+  function.
+- When no binding of the name is a function, R reports the call, and so does the checker: the error
+  names the nearest binding's type.
+- Hover and go-to-definition on the called name follow the binding the call reaches.
+
+`pkg::name` is never looked up this way: it names one namespace, as described next.
+
 ### Namespace access
 
 `pkg::name` and `pkg:::name` read one name directly from a package's namespace, bypassing lexical
@@ -2057,11 +2090,13 @@ scoping.
   `dplyr` (see [stubs](/type-checking/stubs)).
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
-  and wins over a stub namespace of the same name. The name itself is not validated, because a
-  package exports names its sources never bind: re-exports, S4 generics from `setGeneric`, datasets
-  under `data/`, and bindings installed by `.onLoad`.
-- When the stubs declare `name` in `pkg`, the qualified read has the stub's type, exactly like the
-  bare name. A name that only the namespace's [export manifest](#standard-library-exports) lists
+  and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
+  a script `pathpkg::path` skips that file's own `path` binding. The name itself is not validated,
+  because a package exports names its sources never bind: re-exports, S4 generics from
+  `setGeneric`, datasets under `data/`, and bindings installed by `.onLoad`.
+- When the stubs declare `name` in `pkg`, the qualified read has the stub's type. A project binding
+  of the same name does not change it: `base::date()` calls base's `date` even when the package
+  defines its own `date`. A name that only the namespace's [export manifest](#standard-library-exports) lists
   validates the same way, and types as `Unknown`.
 - An unknown namespace warns, and so does a known namespace that neither declares nor lists the name
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
@@ -2103,6 +2138,13 @@ the whole package. Without them, analysis behaves as though both were empty.
 - A `pkg::name` read of a namespace the stubs do not know does not warn when `pkg` belongs to the
   package's *declared universe*: a `DESCRIPTION` dependency field (`Depends`, `Imports`, `Suggests`,
   or `Enhances`), or the source namespace of any `NAMESPACE` import. Such a read types as `Unknown`.
+- `useDynLib(lib, ...)` binds native symbols, which read as `Unknown`. Each listed symbol binds its
+  name with the `.fixes` prefix in front, so `useDynLib(lib, hash, .fixes = "c_")` binds `c_hash`.
+  With `.registration = TRUE`, R binds every routine the compiled code registers, and those names
+  are known only to the compiled code, so two reads resolve: any name that starts with a non-empty
+  `.fixes` prefix, such as `C_endpoints` under `.fixes = "C_"`, and any bare name that is the routine
+  argument (the first positional one, or `.NAME`) of `.Call`, `.External`, `.External2`, `.C`, or
+  `.Fortran`.
 
 ### Standard-library exports
 
@@ -2245,6 +2287,11 @@ In a file that calls `R6Class`, the names `self`, `private`, and `super` resolve
 syntactic, so a local binding that shadows `R6Class` is not honored, and it is scoped to the file, so
 a file that defines no R6 class still warns about `self`.
 
+Inside any function body, the S3 dispatch variables `.Generic`, `.Method`, `.Class`, `.Group`,
+`.GenericCallEnv`, and `.GenericDefEnv` resolve and type as `Unknown`, because `UseMethod`,
+`NextMethod`, and group-generic dispatch bind them in the method's frame and any function can be
+called as a method. At the top level they are unresolved names.
+
 A top-level `globalVariables(c("a", "b"))` or `utils::globalVariables(...)` call with literal string
 arguments declares those names as bound dynamically for the whole package, which suppresses the
 unresolved-name warning for them everywhere.
@@ -2294,6 +2341,26 @@ types, plus their own local bindings and type declarations:
 - A package file and a script may reuse the same top-level value or type name without conflict.
 - Duplicate top-level value names inside a script do not produce the package-global duplicate-binding
   warning; they behave like ordinary rebinding.
+
+Files directly under `tests/testthat/` are test files, except that a file whose name starts with
+`helper` or `setup` is a helper file. testthat sources the helper files into one environment whose
+parent is the package namespace, and runs each test file in its own child of that environment. A
+test or helper file therefore reads the package's names but never adds to them:
+
+- A test or helper file resolves a name first in its own sequential scope, exactly like a script,
+  then in the helpers' namespace, then in the package-global namespace.
+- The helpers' namespace holds the top-level bindings of every helper file, the last one in project
+  order winning. A test file's own bindings are invisible to every other test file, so a name one
+  test file defines and another reads is an unresolved name.
+- Inside a closure, a test file's name resolves to the binding written by the same top-level
+  statement when there is one, and otherwise to the file's last binding. Each `test_that()` block
+  is one statement, so `f <- function() g()` calls the `g` its own block defines even when a later
+  block defines another `g`.
+- A test file's bindings are invisible to package files, so `names <- letters[1:4]` in a test does
+  not change what `names` means under `R/`, and a package file reading a name that only a test
+  defines is an unresolved name.
+- A test binding and a package binding of the same name are not duplicates, and neither are two test
+  bindings. Test files' `@type` and `@alias` declarations are file-local, like a script's.
 
 ## Data frames and non-standard evaluation
 
@@ -2787,7 +2854,12 @@ reads them.
 
 Two `unresolved` findings are errors in every mode, because they stop the package from loading: a
 `NAMESPACE` `importFrom` naming something the namespace does not export, and an `export()` naming
-something the package never defines.
+something that is not in the package's namespace. That namespace holds every top-level binding of a
+package file, including each target of a chained assignment such as `memoise <- memoize <-
+function(f) f`, and every imported name, so a package may re-export what it imports: a name from an
+`importFrom`, such as `importFrom(magrittr, "%>%")` with `export("%>%")`, or from an `import(pkg)`
+whose namespace exports it. An `import(pkg)` of a namespace without stubs may supply any name, so it
+silences the check.
 
 ### Per-file directive
 

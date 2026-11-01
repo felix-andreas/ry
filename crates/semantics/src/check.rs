@@ -247,6 +247,20 @@ pub struct ItemCheck<'db> {
     /// Coverage of each `match`, kept apart from `errors` because a missing case does not
     /// make the item's exported type untrustworthy.
     pub match_findings: Vec<MatchFinding>,
+    /// Call heads whose lookup skipped the binding naming resolved, because that binding
+    /// cannot hold a function. Editor features navigate to the binding the call reaches.
+    pub callee_targets: FxHashMap<ExprId, CalleeTarget>,
+}
+
+/// The binding a call head reaches after skipping non-function bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+pub enum CalleeTarget {
+    /// An enclosing slot of the same name.
+    Slot(BindingId),
+    /// The project's top-level binding of the name.
+    Project,
+    /// The library function of the name, past every project binding.
+    Library,
 }
 
 /// Settled type of every expression the checker recorded, indexed by expression id.
@@ -308,6 +322,21 @@ pub trait GlobalEnv<'db> {
     /// this item's own write.
     fn earlier_binding(&self, name: &str) -> Option<TypeScheme<'db>>;
 
+    /// Every stub candidate for `name`, ignoring project definitions: what `pkg::name` or a
+    /// call that skipped the project's non-function binding reaches. Empty for an export
+    /// the stubs list without a type.
+    fn library_candidates(&self, name: &str) -> Option<Vec<TypeScheme<'db>>>;
+
+    /// What a call reaches once its lookup has left the file's top-level frame without finding
+    /// a function, the library aside. A package file's frame is the namespace itself, so it
+    /// reaches nothing; a test or helper file's frame encloses in the helpers' environment and
+    /// the namespace, and a script's in the namespace.
+    fn enclosing_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+
+    /// What the project's own `pkg::name` reads: the package namespace, then the library.
+    /// A test file's or a script's own bindings and the helpers' are not in the namespace.
+    fn namespace_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
     fn type_definitions(&self) -> &'db FxHashMap<Name<'db>, NamedDefinition<'db>>;
@@ -344,6 +373,7 @@ pub fn check_item_with_annotation<'db>(
         scheme_arena: Vec::new(),
         recorded: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
+        callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
         column_scopes: Vec::new(),
         column_misses: FxHashMap::default(),
@@ -539,6 +569,7 @@ pub fn check_item_with_annotation<'db>(
         strict_origins: context.strict_origins,
         scheme,
         selected_overloads: context.selected_overloads,
+        callee_targets: context.callee_targets,
         masked_reads: context.masked_reads,
         column_misses: context.column_misses,
         top_level_bindings,
@@ -735,6 +766,7 @@ struct Checker<'db, 'a> {
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: FxHashMap<ExprId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
+    callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
     column_scopes: Vec<ColumnScope<'db>>,
@@ -769,6 +801,27 @@ struct Checker<'db, 'a> {
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: FxHashMap<Symbol, BindingId>,
     next_non_local_slot: u32,
+}
+
+/// How a call head's function lookup went; see [`Checker::function_lookup`].
+enum FunctionLookup<'db> {
+    /// The ordinary path applies: the head is no bare name, or nothing was skipped.
+    Ordinary,
+    /// The callee's type, already recorded for the head.
+    Found(Ty<'db>),
+    /// The library's candidates, past every project binding of the name.
+    Library(Symbol, Vec<TypeScheme<'db>>),
+    /// The nearest binding is an untyped value and an outer binding of the name holds a
+    /// function, so the call may reach either one and is not checked.
+    Undetermined,
+}
+
+/// Ordered so that a union is as callable as its most callable member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Callable {
+    No,
+    Untyped,
+    Yes,
 }
 
 /// The evaluation frame of one query `f[i, j, by]`.
@@ -1398,19 +1451,25 @@ impl<'db> Checker<'db, '_> {
                 let name_range = name_range.unwrap_or(range);
                 self.infer_field(id, range, name_range, at, target, name)
             }
-            // Validated against the stub namespaces (`:::` skips the export check), but the
-            // scheme comes from globals so a project override of a stub name keeps working.
+            // Validated against the stub namespaces (`:::` skips the export check). Only the
+            // project's own package reads the project's bindings; `base::date` is base's
+            // `date` even when the project defines one.
             ExpressionKind::Namespace {
                 internal,
                 package,
                 name,
             } => {
                 let validated = validated_namespace_name(self.db, *internal, package, name);
+                let reaches_project = namespace_reaches_project(self.db, package);
                 let name = *name;
-                match validated
-                    .as_ref()
-                    .and_then(|name| self.globals.and_then(|globals| globals.scheme(name, false)))
-                {
+                match validated.as_ref().and_then(|name| {
+                    let globals = self.globals?;
+                    if reaches_project {
+                        globals.namespace_scheme(name)
+                    } else {
+                        globals.library_candidates(name)?.pop()
+                    }
+                }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
                     None => {
                         if let Some(name) = name {
@@ -1826,6 +1885,13 @@ impl<'db> Checker<'db, '_> {
             return ty;
         }
         let Some(&slot) = self.naming.resolutions.get(&id) else {
+            return self.read_non_local(id);
+        };
+        self.read_slot(id, slot)
+    }
+
+    fn read_non_local(&mut self, id: ExprId) -> Ty<'db> {
+        {
             // Unresolved reads stay a silent `Unknown` (naming owns that diagnostic). A guard
             // may have refined this name earlier; reading the binding again would discard it.
             if let Some(name) = self.naming.non_locals.get(&id)
@@ -1864,8 +1930,12 @@ impl<'db> Checker<'db, '_> {
             {
                 return ty;
             }
-            return unknown(self.db);
-        };
+            unknown(self.db)
+        }
+    }
+
+    /// The value `slot` holds at the read `id`.
+    fn read_slot(&mut self, id: ExprId, slot: BindingId) -> Ty<'db> {
         match self.environment.get(slot) {
             Some(EnvEntry::Mono(ty)) => ty,
             Some(EnvEntry::Scheme(index)) => {
@@ -4557,11 +4627,44 @@ impl<'db> Checker<'db, '_> {
                 return ty;
             }
         }
-        if let Some(ty) = self.try_overloaded_call(id, range, callee, arguments) {
+        let looked_up = match self.function_lookup(callee) {
+            FunctionLookup::Ordinary => None,
+            FunctionLookup::Found(ty) => Some(ty),
+            FunctionLookup::Library(name, candidates) => {
+                self.callee_targets.insert(callee, CalleeTarget::Library);
+                if candidates.len() >= 2 {
+                    let call_arguments = self.infer_call_arguments(range, arguments);
+                    return self.overloaded_call(
+                        id,
+                        range,
+                        callee,
+                        name.to_string(),
+                        &candidates,
+                        &call_arguments,
+                    );
+                }
+                let ty = match candidates.last() {
+                    Some(scheme) => self.instantiate(scheme),
+                    None => unknown(self.db),
+                };
+                Some(self.record(callee, ty))
+            }
+            FunctionLookup::Undetermined => {
+                self.infer_call_arguments(range, arguments);
+                self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
+                return unknown(self.db);
+            }
+        };
+        if looked_up.is_none()
+            && let Some(ty) = self.try_overloaded_call(id, range, callee, arguments)
+        {
             return ty;
         }
         let callee_range = self.blame_range(callee);
-        let callee_ty = self.infer(callee);
+        let callee_ty = match looked_up {
+            Some(ty) => ty,
+            None => self.infer(callee),
+        };
         // A literal-`Any` callee is the escape hatch for stubs with no expressible
         // signature: the call is uncheckable, so findings inside its arguments are discarded.
         let resolved_callee = self.table.shallow_resolve(self.db, callee_ty);
@@ -4578,6 +4681,143 @@ impl<'db> Checker<'db, '_> {
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
         self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+    }
+
+    /// R looks a called name up as a function: a binding that holds no function is skipped,
+    /// so the lookup continues through the enclosing slots, the project global and the
+    /// library. A call head naming resolved to a slot is inferred here; any other one is
+    /// left to the ordinary path unless its project global is plainly no function.
+    fn function_lookup(&mut self, callee: ExprId) -> FunctionLookup<'db> {
+        let ExpressionKind::NameRef(name) = &self.module.expression(callee).kind else {
+            return FunctionLookup::Ordinary;
+        };
+        let name = *name;
+        let Some(fallback) = self.naming.callee_fallbacks.get(&callee) else {
+            let Some(non_local) = self.naming.non_locals.get(&callee) else {
+                return FunctionLookup::Ordinary;
+            };
+            let deferred = self.naming.deferred_non_locals.contains(&callee);
+            let Some(scheme) = self
+                .globals
+                .and_then(|globals| globals.scheme(non_local, deferred))
+            else {
+                return FunctionLookup::Ordinary;
+            };
+            if self.callable(scheme.body) != Callable::No {
+                return FunctionLookup::Ordinary;
+            }
+            if let Some(enclosing) = self
+                .globals
+                .and_then(|globals| globals.enclosing_scheme(non_local))
+                && self.callable(enclosing.body) != Callable::No
+            {
+                self.callee_targets.insert(callee, CalleeTarget::Project);
+                let ty = self.instantiate(&enclosing);
+                return FunctionLookup::Found(self.record(callee, ty));
+            }
+            return match self.library_function(name) {
+                Some(candidates) => FunctionLookup::Library(name, candidates),
+                None => FunctionLookup::Ordinary,
+            };
+        };
+        let Some(&nearest_slot) = self.naming.resolutions.get(&callee) else {
+            return FunctionLookup::Ordinary;
+        };
+        let outer = fallback.outer.clone();
+        let deferred = fallback.deferred;
+        let nearest = self.infer(callee);
+        let nearest_callable = self.callable(nearest);
+        if nearest_callable == Callable::Yes {
+            return FunctionLookup::Found(nearest);
+        }
+        let mut reaches_top_level = self.is_top_level_slot(nearest_slot);
+        for slot in outer {
+            reaches_top_level |= self.is_top_level_slot(slot);
+            let ty = self.read_slot(callee, slot);
+            match (nearest_callable, self.callable(ty)) {
+                (_, Callable::No) => continue,
+                // An untyped value next to a function of the same name may be either one.
+                (Callable::Untyped, _) => return FunctionLookup::Undetermined,
+                (_, _) => {
+                    self.callee_targets.insert(callee, CalleeTarget::Slot(slot));
+                    return FunctionLookup::Found(self.record(callee, ty));
+                }
+            }
+        }
+        let project = self.globals.and_then(|globals| match reaches_top_level {
+            false => globals.scheme(&name, deferred),
+            true => globals.enclosing_scheme(&name),
+        });
+        if let Some(scheme) = project
+            && self.callable(scheme.body) != Callable::No
+        {
+            if nearest_callable == Callable::Untyped {
+                return FunctionLookup::Undetermined;
+            }
+            self.callee_targets.insert(callee, CalleeTarget::Project);
+            let ty = self.instantiate(&scheme);
+            return FunctionLookup::Found(self.record(callee, ty));
+        }
+        match self.library_function(name) {
+            Some(_) if nearest_callable == Callable::Untyped => FunctionLookup::Undetermined,
+            Some(candidates) => FunctionLookup::Library(name, candidates),
+            // Nothing else is a function either: R reports the call, and so does the checker.
+            None => FunctionLookup::Found(nearest),
+        }
+    }
+
+    fn is_top_level_slot(&self, slot: BindingId) -> bool {
+        self.naming
+            .bindings
+            .get(&slot)
+            .is_some_and(|binding| binding.kind == BindingKind::TopLevel)
+    }
+
+    /// The library's candidates for `name` when the last one, which a plain read takes, is a
+    /// function.
+    fn library_function(&mut self, name: Symbol) -> Option<Vec<TypeScheme<'db>>> {
+        let candidates = self.globals?.library_candidates(&name)?;
+        match candidates.last() {
+            Some(last) if self.callable(last.body) == Callable::No => None,
+            _ => Some(candidates),
+        }
+    }
+
+    /// Whether a value of type `ty` can be called. An unconstrained variable and a type
+    /// parameter are `Untyped`, since nothing says whether they hold a function.
+    fn callable(&mut self, ty: Ty<'db>) -> Callable {
+        let resolved = self.structural(ty);
+        match resolved.kind(self.db) {
+            TyKind::Function(_) | TyKind::Any | TyKind::Unknown | TyKind::Named(..) => {
+                Callable::Yes
+            }
+            TyKind::Rigid(_) => Callable::Untyped,
+            TyKind::Var(_) => match self.table.open_constraint(self.db, resolved) {
+                Some(Constraint::Unconstrained) => Callable::Untyped,
+                _ => Callable::No,
+            },
+            TyKind::Union(members) => {
+                let members = members.clone();
+                members
+                    .into_iter()
+                    .map(|member| self.callable(member))
+                    .max()
+                    .unwrap_or(Callable::No)
+            }
+            TyKind::Null
+            | TyKind::Scalar(_)
+            | TyKind::Vector(_)
+            | TyKind::NamedVector(_)
+            | TyKind::List(_)
+            | TyKind::NamedList(_)
+            | TyKind::Tuple(_)
+            | TyKind::Record(_)
+            | TyKind::NativeTuple(_)
+            | TyKind::NativeRecord(_)
+            | TyKind::Tag(..)
+            | TyKind::OtherTags
+            | TyKind::Frame(_) => Callable::No,
+        }
     }
 
     /// `frame(id = 1:3, price = c(1, 2, 3))` builds `frame{id: integer[], price: double[]}`.
@@ -4983,7 +5223,25 @@ impl<'db> Checker<'db, '_> {
                 internal,
                 package,
                 name,
-            } => validated_namespace_name(self.db, *internal, package, name)?,
+            } => {
+                let name = validated_namespace_name(self.db, *internal, package, name)?;
+                if !namespace_reaches_project(self.db, package) {
+                    let schemes = self.globals?.library_candidates(&name)?;
+                    if schemes.len() < 2 {
+                        return None;
+                    }
+                    let call_arguments = self.infer_call_arguments(range, arguments);
+                    return Some(self.overloaded_call(
+                        id,
+                        range,
+                        callee,
+                        name,
+                        &schemes,
+                        &call_arguments,
+                    ));
+                }
+                name
+            }
             _ => return None,
         };
         let schemes = self
@@ -8284,6 +8542,13 @@ fn alias_cycle_walk<'db>(
 }
 
 /// With no stub corpus installed validation is impossible, so every qualified read resolves.
+/// Whether `pkg::name` can reach the project's own bindings: only for the project's package.
+fn namespace_reaches_project(db: &dyn Db, package: &Option<Symbol>) -> bool {
+    package
+        .as_ref()
+        .is_none_or(|package| is_own_package(db, package.as_str()))
+}
+
 fn validated_namespace_name(
     db: &dyn Db,
     internal: bool,
