@@ -151,16 +151,40 @@ f <- function() g(1)
 g: <T: numeric, U> fn(x: T, [total]: U) -> double
 f: fn() -> double
 
-#---- a_formal_assigned_on_one_branch_only_is_required
+#---- a_formal_assigned_on_one_branch_only_may_be_omitted
 g <- function(x, flag) {
   if (flag) x <- 1
   x
 }
 f <- function() g(flag = FALSE)
 #++++
+g: <T> fn([x]: T, flag: logical) -> Unknown
+f: fn() -> Unknown
+
+#---- a_formal_read_by_its_own_conditional_write_is_required
+g <- function(x, flag) {
+  if (flag) x <- x + 1
+  x
+}
+f <- function() g(flag = FALSE)
+#++++
+g: <T: numeric> fn(x: T, flag: logical) -> Unknown
+f: Unknown
+70..71 error[type-mismatch] this call leaves out `x`, which the function requires
+
+#---- a_formal_forced_before_its_write_is_still_required
+g <- function(x, flag) {
+  if (flag) {
+    print(x)
+    x <- 1
+  }
+  x
+}
+f <- function() g(flag = FALSE)
+#++++
 g: <T> fn(x: T, flag: logical) -> Unknown
 f: Unknown
-66..67 error[type-mismatch] this call leaves out `x`, which the function requires
+89..90 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- a_formal_assigned_on_both_branches_may_be_omitted
 g <- function(x, flag) {
@@ -182,7 +206,7 @@ f <- function() g(flag = TRUE)
 g: <T> fn([x]: T, flag: logical) -> double
 f: fn() -> double
 
-#---- a_formal_assigned_in_a_loop_body_is_required
+#---- a_formal_assigned_in_a_loop_body_may_be_omitted
 g <- function(x, n) {
   while (n > 0) {
     x <- n
@@ -192,9 +216,8 @@ g <- function(x, n) {
 }
 f <- function() g(n = 2)
 #++++
-g: <T, U: numeric> fn(x: T, n: U) -> Unknown
-f: Unknown
-92..93 error[type-mismatch] this call leaves out `x`, which the function requires
+g: <T, U: numeric> fn([x]: T, n: U) -> Unknown
+f: fn() -> Unknown
 
 #---- a_super_assignment_does_not_assign_the_formal
 g <- function(x) {

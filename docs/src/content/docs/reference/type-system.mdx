@@ -2316,10 +2316,13 @@ exceptions and additions:
   `quo()`.
 - A formal assigned before any read, as in `function(x) { x <- 1; x }`, is never forced. The order
   is evaluation order, so `n <- n / 2` forces `n`, and a `for` variable is assigned by the loop.
-- The write must happen on every path to the read. `if (flag) x <- 1 else x <- 2` assigns `x`, and
-  so does a branch beside one that returns or stops, but `if (flag) x <- 1` alone does not, and
-  neither does a write inside a `while` or `for` body, the right operand of `&&` or `||`, `local()`,
-  or only some arms of a `switch()` (or all of them when it has no unnamed default). So `function(x, flag) { if (flag) x <- 1; x }` requires `x`.
+- A write on some paths covers those paths, so a later read forces the formal only on the paths
+  that did not write it. `function(x, flag) { if (flag) x <- 1; x }` may be called as `f(flag =
+  TRUE)`, and so may a formal written in a `while` or `for` body, the right operand of `&&` or `||`,
+  or some arms of a `switch()`, because a call that takes the writing path never needs the
+  argument. A path that forced the formal before writing it still forced it, so
+  `if (flag) x <- x + 1; x` requires `x`, and a write inside `local()` binds a new frame and covers
+  nothing.
 - `x <<- 1` writes an enclosing frame, so it never assigns the formal `x`.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
@@ -2707,7 +2710,7 @@ A variable that still holds an untyped value, usually an unannotated parameter, 
 when one path rebinds it. A union would let a later use of the rebound value constrain the
 parameter that the other path still holds, so the joined variable is `Unknown` instead, and the
 parameter stays open: `function(x, flag) { if (flag) x <- 1L; x + 1L }` is
-`<T> fn(x: T, flag: logical) -> Unknown`. The default idiom `if (is.null(x)) x <- 0L` joins the
+`<T> fn([x]: T, flag: logical) -> Unknown`. The default idiom `if (is.null(x)) x <- 0L` joins the
 same way, so `x` reads as `Unknown` after the `if`. A parameter that only carries a bound such as
 `numeric` still counts as untyped, so `if (flag) omega <- omega + m %*% m` leaves `omega` a
 `T: numeric` that a caller may fill with a plain vector, and a loop's `x <- n` does not make two

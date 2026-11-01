@@ -1422,8 +1422,10 @@ fn atomic_in_family(atomic: Atomic, family: GuardFamily) -> bool {
 #[derive(Default)]
 struct FormalUses {
     missing_tested: FxHashSet<Symbol>,
-    /// Names read on every path where no write of them dominates the read.
+    /// Names read on every path before any write of them on that path.
     forced: FxHashSet<Symbol>,
+    /// Names some path wrote before forcing them. A later read does not force such a name,
+    /// because on that path the call never needed the argument.
     assigned: FxHashSet<Symbol>,
     /// The names forced on every path that leaves through `return()`, or `None` when none
     /// does. A formal read only after `if (fo == "A1") return("")` is not forced on the
@@ -1442,6 +1444,12 @@ impl FormalUses {
                 .returned
                 .as_ref()
                 .is_none_or(|returned| returned.contains(&name))
+    }
+
+    fn record_write(&mut self, name: Symbol) {
+        if !self.forced.contains(&name) {
+            self.assigned.insert(name);
+        }
     }
 
     fn record_return(&mut self) {
@@ -1464,8 +1472,8 @@ fn tests_missing_without_default(function: &str, parameter: &str) -> bool {
     )
 }
 
-/// The names every non-diverging branch assigned. When every branch diverges, the code after
-/// the join is unreachable and keeps `before`.
+/// The names any non-diverging branch assigned before forcing them. When every branch
+/// diverges, the code after the join is unreachable and keeps `before`.
 fn join_assigned(
     before: FxHashSet<Symbol>,
     branches: impl IntoIterator<Item = Option<FxHashSet<Symbol>>>,
@@ -1473,7 +1481,10 @@ fn join_assigned(
     branches
         .into_iter()
         .flatten()
-        .reduce(|joined, branch| joined.intersection(&branch).copied().collect())
+        .reduce(|mut joined, branch| {
+            joined.extend(branch);
+            joined
+        })
         .unwrap_or(before)
 }
 
@@ -4262,7 +4273,7 @@ impl<'db> Checker<'db, '_> {
                         .filter_map(|argument| argument.value)
                     {
                         if let ExpressionKind::NameRef(name) = self.module.kind(value) {
-                            uses.assigned.insert(*name);
+                            uses.record_write(*name);
                         }
                     }
                 }
@@ -4272,7 +4283,7 @@ impl<'db> Checker<'db, '_> {
                 if let ExpressionKind::NameRef(name) = self.module.kind(*target) =>
             {
                 self.collect_formal_uses(*value, uses);
-                uses.assigned.insert(*name);
+                uses.record_write(*name);
                 return;
             }
             ExpressionKind::Assign { target, value, .. } => {
@@ -4280,9 +4291,9 @@ impl<'db> Checker<'db, '_> {
                 self.collect_formal_uses(*target, uses);
                 return;
             }
-            // A write assigns a formal only where it dominates the read: on both arms of a
-            // branch, never inside a loop body that may not run or an operand that may not
-            // be evaluated.
+            // A write on one arm of a branch, in a loop body, or in an operand that may not be
+            // evaluated covers only the paths that run it, so a later read still forces the
+            // formal on the others, and is forced on every path only when no path wrote it.
             ExpressionKind::If {
                 condition,
                 then_branch,
@@ -4316,15 +4327,15 @@ impl<'db> Checker<'db, '_> {
             {
                 self.collect_formal_uses(*lhs, uses);
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*rhs, uses, &before);
-                uses.assigned = before;
+                let (after, _) = self.collect_branch_uses(*rhs, uses, &before);
+                uses.assigned = after.unwrap_or(before);
                 return;
             }
             ExpressionKind::While { condition, body } => {
                 self.collect_formal_uses(*condition, uses);
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*body, uses, &before);
-                uses.assigned = before;
+                let (after, _) = self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = after.unwrap_or(before);
                 return;
             }
             ExpressionKind::For {
@@ -4334,10 +4345,12 @@ impl<'db> Checker<'db, '_> {
                 ..
             } => {
                 self.collect_formal_uses(*sequence, uses);
-                uses.assigned.extend(*variable);
+                if let Some(variable) = variable {
+                    uses.record_write(*variable);
+                }
                 let before = uses.assigned.clone();
-                self.collect_branch_uses(*body, uses, &before);
-                uses.assigned = before;
+                let (after, _) = self.collect_branch_uses(*body, uses, &before);
+                uses.assigned = after.unwrap_or(before);
                 return;
             }
             // `local()` evaluates in a new frame, so its writes bind nothing here.
@@ -4355,7 +4368,9 @@ impl<'db> Checker<'db, '_> {
                 for arm in &self.module[arms] {
                     let mut entry = before.clone();
                     for &binding in &self.module[arm.bindings] {
-                        if let ExpressionKind::NameRef(name) = self.module.kind(binding) {
+                        if let ExpressionKind::NameRef(name) = self.module.kind(binding)
+                            && !uses.forced.contains(name)
+                        {
                             entry.insert(*name);
                         }
                     }

@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 123 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 120 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -889,7 +889,7 @@ completion fix.
 |---|---|---|---|
 | syntax test_fuzz | 1.58 s | 0.10 s | 15.8x |
 | format test_fuzz | 2.31 s | 0.21 s | 11.0x |
-| semantics test_fuzz | 123.68 s | 8.62 s | 14.3x |
+| semantics test_fuzz | 120.68 s | 8.62 s | 14.3x |
 | ide test_fuzz | 199.77 s | 44.40 s | 4.5x |
 | total | 327.34 s | 53.33 s | 6.1x |
 
