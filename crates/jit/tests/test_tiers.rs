@@ -91,7 +91,7 @@ fn seeds_agree_across_tiers() {
         // A subject that gains a class mid-loop dispatches, and the method sees its index
         // unevaluated.
         (
-            "`[.tagged` <- function(x, i) deparse(substitute(i))\nx <- 1:3\nout <- list()\nfor (j in 1:n) { if (j == 3L) class(x) <- \"tagged\"; out[[j]] <- x[j + 1L] }\nout",
+            "`[.tagged` <- function(x, i) substitute(i)\nx <- 1:3\nout <- list()\nfor (j in 1:n) { if (j == 3L) class(x) <- \"tagged\"; out[[j]] <- x[j + 1L] }\nout",
             "(n = 4L)",
             false,
         ),
