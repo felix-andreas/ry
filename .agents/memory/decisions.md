@@ -3446,6 +3446,14 @@ explicit allocators".
   (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
   pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
   Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Measured: the JIT's analysis plan.** Operands borrowed from the bytecode words, abstract
+  states as rows of one flat matrix, liveness as bitsets, `block_at` as a dense array, all in one
+  `Bump` per compilation (`crates/jit/src/analysis.rs`). Over the seven `tools/bench/why`
+  programs, analysis time per program fell from about 6.0 ms to about 4.5 ms (min of five runs,
+  roughly 100 compiled bodies each). The first cut was 25% slower than the old layout, because the
+  state matrix grew by doubling inside the arena, and a bump arena cannot reuse a vector's old
+  buffer, so every regrowth copied the whole matrix: reserve arena lists whose final size is
+  roughly known. Analysis is about 5% of compile time; Cranelift's code generation is the rest.
 - **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
