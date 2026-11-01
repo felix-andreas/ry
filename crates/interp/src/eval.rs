@@ -1992,17 +1992,39 @@ unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
 /// `count` arguments before its body runs. The apply family calls `FUN` this way, so a closure
 /// that captures its argument sees this iteration's element, not the last one.
 pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
-    force_and_call_with(call, count, env, None)
+    force_and_call_with(call, count, env, None, None)
+}
+
+/// The storage type every first value of a run of [`force_and_call_with`] calls shares, as the
+/// elements of one atomic vector do, with the annotation checks that type settles for the last
+/// closure called. A typed `FUN` then has its argument checked once per run instead of once per
+/// element.
+pub struct KnownFirst {
+    kind: SexpType,
+    function: Option<Sexp>,
+    entry: Entry,
+}
+
+impl KnownFirst {
+    pub fn new(kind: SexpType) -> KnownFirst {
+        KnownFirst {
+            kind,
+            function: None,
+            entry: Entry::Unchecked,
+        }
+    }
 }
 
 /// [`force_and_call`] where the caller already knows the first argument's value, so its
 /// promise starts out forced instead of evaluating its expression. The caller must only pass a
-/// value that evaluating the expression would produce without side effects.
+/// value that evaluating the expression would produce without side effects, and of the storage
+/// type `known` names, if any.
 pub unsafe fn force_and_call_with(
     call: Sexp,
     count: usize,
     env: Sexp,
     first: Option<Sexp>,
+    known: Option<&mut KnownFirst>,
 ) -> R<Sexp> {
     let head = call.car();
     let function = if head.kind() == SexpType::Symbol {
@@ -2015,6 +2037,7 @@ pub unsafe fn force_and_call_with(
         return apply_call(call, function, call.cdr(), env);
     }
     let args = promise_args(call.cdr(), env)?;
+    let mut seeded = false;
     if let (Some(value), Some(arg)) = (first, args.first())
         && arg.value.kind() == SexpType::Promise
         && arg.value.car() == unbound()
@@ -2023,13 +2046,27 @@ pub unsafe fn force_and_call_with(
         let heap = crate::heap();
         heap.set_car(arg.value, value);
         heap.set_tag(arg.value, nil());
+        seeded = true;
     }
     for arg in args.iter().take(count) {
         if arg.value.kind() == SexpType::Promise {
             force_promise(arg.value)?;
         }
     }
-    apply_closure(call, function, &args, env, None)
+    // A lone untagged argument binds the first formal, which is what `entry_for` assumes.
+    let entry = match known {
+        Some(known) if seeded && args.len() == 1 && args[0].tag == nil() => {
+            if known.function != Some(function) {
+                known.entry = crate::annotations::entry_for(function, &[Some(known.kind)]);
+                known.function = Some(function);
+            }
+            known.entry
+        }
+        _ => Entry::Unchecked,
+    };
+    let frame = bind_arguments(call, function, &args, None)?;
+    let promargs = args_pairlist(&args)?;
+    run_closure(call, function, frame, env, promargs, entry)
 }
 
 unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {

@@ -169,6 +169,23 @@ fn seeds_agree_across_tiers() {
             "(n = 4L)",
             false,
         ),
+        // An inlined typed closure keeps its checks: a call reached only after the loop compiled
+        // fails on its argument, or on its value, exactly as in tier 0.
+        (
+            "flag <- function(a: logical) -> logical !a\ns <- 0\nfor (i in 1:n) if (i > 300L) s <- s + flag(1.5)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "half <- function(a: double) -> integer a / 2\ns <- 0\nfor (i in 1:n) if (i > 300L) s <- s + half(2.5)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "half <- function(a: double) -> double a / 2\ns <- 0\nfor (i in 1:n) if (i > 300L) s <- s + half(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
     ];
     with_interpreter(|| {
         for (case, (body, call, fails)) in seeds.iter().enumerate() {

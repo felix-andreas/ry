@@ -1419,11 +1419,18 @@ unsafe fn do_lapply(call: &Call<'_>) -> R<Sexp> {
     // `FUN(X[[i]], ...)`, with `i` bound afresh each time.
     let element = values::call(symbols.bracket2, &[x_symbol, i_symbol])?;
     let fun_call = values::call(fun_symbol, &[element, symbols.dots])?;
+    let mut known = atomic_elements(list);
     for index in 0..count {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::force_and_call_with(fun_call, 1, env, plain_element(list, i, element)?)
+            eval::force_and_call_with(
+                fun_call,
+                1,
+                env,
+                plain_element(list, i, element)?,
+                known.as_mut(),
+            )
         })?;
         values::set_elt(result, index, value);
     }
@@ -1441,6 +1448,20 @@ unsafe fn plain_element(list: Sexp, i: Sexp, element: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     }
     crate::subset::subset2(list, &[i], Some(true), element).map(Some)
+}
+
+/// What every element [`plain_element`] takes from `list` is known to share: its storage type,
+/// when `list` is an atomic vector.
+unsafe fn atomic_elements(list: Sexp) -> Option<eval::KnownFirst> {
+    match list.kind() {
+        SexpType::Logical
+        | SexpType::Integer
+        | SexpType::Real
+        | SexpType::Complex
+        | SexpType::String
+        | SexpType::Raw => Some(eval::KnownFirst::new(list.kind())),
+        _ => None,
+    }
 }
 
 unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
@@ -1462,11 +1483,18 @@ unsafe fn do_vapply(call: &Call<'_>) -> R<Sexp> {
     let fun_call = values::call(fun_symbol, &[element, symbols.dots])?;
     let result = alloc(kind, count * template_length)?;
     let mut row_names = nil();
+    let mut known = atomic_elements(list);
     for index in 0..count {
         let value = crate::scope(|| {
             let i = values::scalar_integer(index as i32 + 1)?;
             define(i_symbol, i, env)?;
-            eval::force_and_call_with(fun_call, 1, env, plain_element(list, i, element)?)
+            eval::force_and_call_with(
+                fun_call,
+                1,
+                env,
+                plain_element(list, i, element)?,
+                known.as_mut(),
+            )
         })?;
         if length(value) != template_length {
             return Err(error(format!(

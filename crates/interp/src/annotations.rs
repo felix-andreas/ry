@@ -358,12 +358,43 @@ pub unsafe fn declared_return_type(function: Sexp) -> Option<SexpType> {
     }
 }
 
+/// Whether a call that binds plain values of storage types `arguments` to the formals of the
+/// definition `formals`/`body`, one each in order, and returns a value of storage type `result`
+/// passes all of that definition's checks. A compiler that inlines the call decides this before
+/// the call runs, and leaves a call that would fail to the interpreter, which reports it.
+/// `None` is a type the compiler does not know.
+pub unsafe fn admits_inline(
+    formals: Sexp,
+    body: Sexp,
+    arguments: &[Option<SexpType>],
+    result: Option<SexpType>,
+) -> bool {
+    let Some(signature) = signature_for(formals, body) else {
+        return true;
+    };
+    let masks = values::ints(signature.element(MASKS));
+    let admitted = |mask: i32, kind: Option<SexpType>| {
+        mask == 0 || kind.is_some_and(|kind| mask as Mask & bit(kind) != 0)
+    };
+    let formal_masks = masks.get(FIRST_FORMAL_SLOT..).unwrap_or(&[]);
+    formal_masks.len() == arguments.len()
+        && formal_masks
+            .iter()
+            .zip(arguments)
+            .all(|(&mask, &kind)| admitted(mask, kind))
+        && admitted(masks.get(RETURN_SLOT).copied().unwrap_or(0), result)
+}
+
 unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
-    let formals = function.car();
+    signature_for(function.car(), crate::bytecode::closure_body(function))
+}
+
+/// The signature of the definition with these formals and this body (as source).
+unsafe fn signature_for(formals: Sexp, body: Sexp) -> Option<Sexp> {
     let key = if formals.kind() == SexpType::Pairlist {
         formals
     } else {
-        crate::bytecode::closure_body(function)
+        body
     };
     if !key.has_gp(gp::TYPED_DEFINITION) {
         return None;
@@ -373,7 +404,7 @@ unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
         return None;
     }
     let signature = weak.weak_value();
-    (signature.element(BODY) == crate::bytecode::closure_body(function)).then_some(signature)
+    (signature.element(BODY) == body).then_some(signature)
 }
 
 unsafe fn check_argument(

@@ -111,6 +111,16 @@ impl Ty {
         }
     }
 
+    /// The storage type of an unboxed scalar of this type.
+    pub fn storage(self) -> Option<SexpType> {
+        match self {
+            Ty::Dbl => Some(SexpType::Real),
+            Ty::Int => Some(SexpType::Integer),
+            Ty::Lgl => Some(SexpType::Logical),
+            _ => None,
+        }
+    }
+
     /// The vector type a boxed scalar of this type is an instance of.
     fn vector(self) -> Ty {
         match self {
@@ -1780,9 +1790,7 @@ impl<'a> Builder<'a> {
         let kinds: SmallVec<[Option<SexpType>; 4]> = args
             .iter()
             .map(|argument| match *argument {
-                Argument::Unboxed { ty: Ty::Dbl, .. } => Some(SexpType::Real),
-                Argument::Unboxed { ty: Ty::Int, .. } => Some(SexpType::Integer),
-                Argument::Unboxed { ty: Ty::Lgl, .. } => Some(SexpType::Logical),
+                Argument::Unboxed { ty, .. } => ty.storage(),
                 _ => None,
             })
             .collect();
@@ -1811,7 +1819,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let args = values::pairlist_items(call.cdr());
-        let formals = values::pairlist_items(formals);
+        let parameters = values::pairlist_items(formals);
         let positional = args.iter().all(|(tag, value)| {
             *tag == values::nil()
                 && *value != values::missing_arg()
@@ -1820,8 +1828,8 @@ impl<'a> Builder<'a> {
         // Every formal needs its argument: a default is evaluated in the callee's frame, which
         // the inlined body does not have.
         if !positional
-            || args.len() != formals.len()
-            || formals
+            || args.len() != parameters.len()
+            || parameters
                 .iter()
                 .any(|(symbol, _)| *symbol == values::symbols().dots)
         {
@@ -1839,16 +1847,25 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        lowering.scope = formals
+        lowering.scope = parameters
             .iter()
             .map(|(symbol, _)| *symbol)
             .zip(scope)
             .collect();
         let outer_closed = std::mem::replace(&mut lowering.closed, closed);
         let result = self.lower_expression(lowering, body, depth);
+        let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
+            .scope
+            .iter()
+            .map(|&(_, register)| lowering.state.registers[register].storage())
+            .collect();
         lowering.scope = outer;
         lowering.closed = outer_closed;
-        result
+        let result = result?;
+        // Inlined code has no frame to check annotations in, so a typed closure is inlined only
+        // when its checks are known to pass; tier 0 runs any other call and reports the failure.
+        let returned = lowering.state.registers[result].storage();
+        annotations::admits_inline(formals, body, &arguments, returned).then_some(result)
     }
 
     /// Lowers an expression of an inlined call into steps, returning the register that holds
