@@ -1568,6 +1568,10 @@ name follows the same rule. `$` does not work on atomic vectors, because R rejec
 vector, named ones included: `c(foo = 1L)$foo` is a type error, while `c(foo = 1L)[["foo"]]` is
 `integer | NULL`.
 
+On a nominal whose class declares a `$` method, in a stub or in the project (`$.request` for
+`@type request`), `x$name` types as that method's result instead, because R dispatches the read to
+the method before it looks at the representation. The same holds for `[.class` and `[[.class`.
+
 Every element of `NULL` is `NULL` in R, so `NULL$name`, `NULL[["name"]]`, and `NULL[1]` are `NULL`.
 A list that may be absent is therefore read directly: on `list{retries: integer} | NULL`,
 `config$retries` is `integer | NULL`.

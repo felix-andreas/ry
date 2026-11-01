@@ -635,7 +635,7 @@ const OPERATOR_METHOD_PREFIXES: [&str; 13] = [
 ];
 
 /// `[.factor` and `[[.factor` say which class a subset of the nominal keeps. Longest first.
-const SUBSET_METHOD_PREFIXES: [&str; 2] = ["[[", "["];
+const SUBSET_METHOD_PREFIXES: [&str; 3] = ["[[", "[", "$"];
 
 pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
     StubSources::new(db, shipped_stub_sources(), shipped_export_manifests())

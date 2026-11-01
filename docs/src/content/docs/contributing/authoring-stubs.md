@@ -40,7 +40,8 @@ List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
 
 A declared `name` can be an R identifier, an infix operator such as `%in%` (or a project's own
 `%||%`), or an S3 operator method such as `+.Date`, `-.POSIXct`, `Arith.difftime`, `Compare.Date`,
-or `Ops.gg`. The operator spellings are how a stub gives a class arithmetic or comparison, and
+or `Ops.gg`, or a subset method such as `[.xts`, `[[.zoo`, or `$.request`, which types `x[i]`,
+`x[[i]]`, or `x$name` on that class. The operator spellings are how a stub gives a class arithmetic or comparison, and
 [operator methods on a class](/reference/type-system#operator-methods-on-a-class) describes the
 dispatch order. The suffix is the nominal type's own name, so a project stub line
 `+.ggplot : fn(e1: ggplot, e2: Any) -> ggplot` is all a `+`-based DSL needs.

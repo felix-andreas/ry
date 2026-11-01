@@ -9723,7 +9723,11 @@ impl<'db> Checker<'db, '_> {
     /// not checked against it: the stubs declare these methods only to say which class the
     /// subset keeps.
     fn index_method_result(&mut self, class: &str, double: bool) -> Option<Ty<'db>> {
-        let method = format!("{}.{class}", if double { "[[" } else { "[" });
+        self.subset_method_result(if double { "[[" } else { "[" }, class)
+    }
+
+    fn subset_method_result(&mut self, operator: &str, class: &str) -> Option<Ty<'db>> {
+        let method = format!("{operator}.{class}");
         let scheme = self.globals?.scheme(&method, false)?;
         let instantiated = self.instantiate(&scheme);
         match self
@@ -9775,6 +9779,13 @@ impl<'db> Checker<'db, '_> {
         if self.naming.masked_subsets.contains(&id) {
             return unknown(self.db);
         }
+        // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
+        // `[.factor` or `[[.zoo` gives the result type.
+        if let TyKind::Named(name, _) = subject.kind(self.db)
+            && let Some(ty) = self.index_method_result(name.text(self.db), double)
+        {
+            return ty;
+        }
         if let Some(element) = array_element(self.db, subject) {
             return self.array_index(range, double, subject, element, arguments, &index_types);
         }
@@ -9786,12 +9797,6 @@ impl<'db> Checker<'db, '_> {
             // A shape the author never wrote down (a sealed nominal, or `m` in
             // `function(m, i, j) m[i, j]`) refuses before the index-arity check: the caller
             // knows the shape, the callee does not.
-            // R dispatches `[` on the class, so a stub's `[.factor` gives the result type.
-            TyKind::Named(name, _)
-                if let Some(ty) = self.index_method_result(name.text(self.db), double) =>
-            {
-                return ty;
-            }
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 return unknown(self.db);
@@ -11515,6 +11520,14 @@ impl<'db> Checker<'db, '_> {
         let Some(name) = name else {
             return unknown(self.db);
         };
+        // R dispatches `$` on a classed value to its `$.class` method before the representation
+        // is ever read, so the method decides the result even for a transparent nominal.
+        if let TyKind::Named(class, _) =
+            self.table.shallow_resolve(self.db, target_ty).kind(self.db)
+            && let Some(ty) = self.subset_method_result("$", class.text(self.db))
+        {
+            return ty;
+        }
         let subject = self.structural(target_ty);
         match self.dollar_result(id, range, name_range, subject, &name) {
             Ok(ty) => ty,
@@ -11695,6 +11708,12 @@ impl<'db> Checker<'db, '_> {
                     container: subject,
                 },
             }),
+            // A stub types `$` on its class the way R dispatches it, through a `$.class` method.
+            TyKind::Named(class, _)
+                if let Some(ty) = self.subset_method_result("$", class.text(self.db)) =>
+            {
+                Ok(ty)
+            }
             // Refuse rather than reject: `df$col` and `function(node) node$value` are idiomatic.
             TyKind::Named(..) | TyKind::Var(_) | TyKind::Rigid(_) => {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
