@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 216 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 211 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -174,6 +174,14 @@ classes, largest first:
 - **A declared vector into a scalar parameter is still reported** (`double[]` into ks
   `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
   variables pass by length (`without_inferred_length`).
+- **A `NULL` placeholder that a reflective write replaces is reported** (renv `cond <- NULL` then
+  `do.call(delayedAssign, list("cond", ...))`, brew's package-level `.extendedError = NULL` set by
+  `assign()` into the namespace). The checker does not see `assign()` or `delayedAssign()` as a
+  write; treating a string-named target of either as a write that makes the binding `Unknown`
+  would clear both.
+- **A literal `NULL` passed to a numeric parameter of a project function is reported** (Rsolnp
+  benchmarks `eqB = NULL`). The callee tests `is.null()`, but its parameter type came from a
+  numeric use outside the test.
 - **A number passed to a parameter tested as a condition is reported** (diffobj
   `trim_hunk(h, "tar", 0L)` over `if (!line.id)`, ff `if (pagesize)`, renv, rmgarch; about 12
   corpus reports). R takes `0L` as a condition, but `if (x)` and `!x` bind an open parameter to
