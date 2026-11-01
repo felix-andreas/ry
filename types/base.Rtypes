@@ -534,6 +534,11 @@ sapply : Any
 # `V[] | V` because the idiomatic spelling is a length-1 vector (`numeric(1)`)
 # while the callback returns a scalar. A multi-element template makes R return a
 # matrix; the result claim stays `V[]` (scalar-claim, as elsewhere in this file).
+# R promotes a logical or integer result under a `double` template (and a logical
+# one under `integer`), so those templates come first, the narrower one first and take any value of a
+# lower numeric type.
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer | logical, FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 mapply : Any
 Map : Any
