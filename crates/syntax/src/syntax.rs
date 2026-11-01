@@ -148,7 +148,10 @@ pub fn erase_inline_annotations(parse: &Parse) -> String {
         match element {
             NodeOrToken::Token(token) => out.push_str(token.text()),
             NodeOrToken::Node(node) if node.kind() == SyntaxKind::TYPE_DEFINITION => {
-                out.push_str(&type_definition_comment(&node));
+                // A paired definition already has its comment spelling right above it.
+                if paired_comment_definition(&node).is_none() {
+                    out.push_str(&type_definition_comment(&node));
+                }
                 preorder.skip_subtree();
             }
             NodeOrToken::Node(node) if is_inline_annotation(&node) => preorder.skip_subtree(),
@@ -174,8 +177,12 @@ fn type_definition_comment(node: &SyntaxNode) -> String {
                     after_equals = true;
                 }
                 SyntaxKind::IDENT => out.push_str(token.text()),
-                // Trivia after `=` is dropped so the type opens the braces directly.
-                _ if after_equals || out.ends_with(' ') => {}
+                SyntaxKind::COMMENT => out.push_str(token.text()),
+                SyntaxKind::NEWLINE => out.push_str("\n#: "),
+                // Indentation on a continued line is kept; other spacing collapses, and the
+                // type opens the braces directly.
+                SyntaxKind::WHITESPACE if out.ends_with("\n#: ") => out.push_str(token.text()),
+                _ if out.ends_with([' ', '{']) => {}
                 _ => out.push(' '),
             },
             NodeOrToken::Node(child) => {
@@ -195,6 +202,46 @@ fn type_definition_comment(node: &SyntaxNode) -> String {
         out.push('}');
     }
     out
+}
+
+/// The `#:` block directly above an inline type definition when it defines the same
+/// name: then the two are one definition written two ways, not a duplicate.
+pub fn paired_comment_definition(definition: &SyntaxNode) -> Option<SyntaxNode> {
+    let name = definition_name(definition)?;
+    let mut newlines = 0;
+    let mut previous = definition.prev_sibling_or_token();
+    while let Some(element) = previous {
+        match element.kind() {
+            SyntaxKind::WHITESPACE => {}
+            SyntaxKind::NEWLINE if newlines == 0 => newlines += 1,
+            SyntaxKind::ANNOTATION => {
+                let comment = element.into_node()?;
+                let defines = comment
+                    .children()
+                    .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+                    .filter(|directive| {
+                        directive
+                            .children_with_tokens()
+                            .nth(1)
+                            .and_then(|element| element.into_token())
+                            .is_some_and(|word| matches!(word.text(), "type" | "alias"))
+                    })
+                    .any(|directive| definition_name(&directive).as_deref() == Some(name.as_str()));
+                return defines.then_some(comment);
+            }
+            _ => return None,
+        }
+        previous = element.prev_sibling_or_token();
+    }
+    None
+}
+
+/// The name a `#: @type` or `@alias` directive or an inline type definition declares.
+fn definition_name(node: &SyntaxNode) -> Option<String> {
+    node.children()
+        .find(|child| child.kind() == SyntaxKind::NAME)
+        .and_then(ast::Name::cast)
+        .and_then(|name| name.text())
 }
 
 /// Inline annotation syntax: R's own grammar has no reading for these nodes.

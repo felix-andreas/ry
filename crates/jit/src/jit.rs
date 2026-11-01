@@ -78,7 +78,11 @@ pub fn install_mode(mode: Mode) {
     // Such bodies pay off only once calls go directly from compiled code to compiled code, so
     // the default mode leaves them to tier 0 and only `force` compiles them, for coverage.
     STRAIGHT_LINE.with(|straight_line| straight_line.set(mode == Mode::Force));
-    bytecode::set_tier(Some(Tier { enter, back_edge, back_edge_threshold: back_edges }));
+    bytecode::set_tier(Some(Tier {
+        enter,
+        back_edge,
+        back_edge_threshold: back_edges,
+    }));
 }
 
 unsafe fn enter(machine: &mut Machine<'_>) -> Option<TierExit> {
@@ -140,7 +144,10 @@ unsafe fn compiled_for<'a>(machine: &Machine<'_>, hot: bool) -> Option<&'a Compi
 unsafe fn describe(code: Sexp) -> String {
     unsafe {
         let source = code.cdr().element(bytecode::SOURCE);
-        interp::deparse::deparse_one_line(source).chars().take(60).collect()
+        interp::deparse::deparse_one_line(source)
+            .chars()
+            .take(60)
+            .collect()
     }
 }
 
@@ -152,7 +159,11 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
         if std::env::var_os("RY_JIT_LOG").is_some() {
             eprintln!("jit: compiled {}", describe(machine.code));
         }
-        let osr = plan.loop_headers.iter().map(|&block| plan.insts[plan.blocks[block].start].pc).collect();
+        let osr = plan
+            .loop_headers
+            .iter()
+            .map(|&block| plan.insts[plan.blocks[block].start].pc)
+            .collect();
         let compiled = Box::new(Compiled {
             entry,
             enclosure,
@@ -228,12 +239,20 @@ unsafe fn run(machine: &mut Machine<'_>, compiled: &Compiled, entry_pc: usize) -
         }
         match result as usize {
             runtime::DECLINED => return None,
-            runtime::DEOPTIMIZED => return Some(TierExit::Resume { pc: activation.resume_pc, pending: activation.pending.take() }),
+            runtime::DEOPTIMIZED => {
+                return Some(TierExit::Resume {
+                    pc: activation.resume_pc,
+                    pending: activation.pending.take(),
+                });
+            }
             _ => {}
         }
         Some(TierExit::Finished(match Sexp::from_raw(result) {
             Some(value) => Ok(value),
-            None => Err(activation.pending.take().unwrap_or_else(|| error("compiled code failed without an error"))),
+            None => Err(activation
+                .pending
+                .take()
+                .unwrap_or_else(|| error("compiled code failed without an error"))),
         }))
     }
 }

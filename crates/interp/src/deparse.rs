@@ -334,7 +334,10 @@ impl Deparser {
     /// The arguments of a call: `tag = value`, with GNU R's line breaks.
     unsafe fn arguments(&mut self, mut list: Sexp, formals: bool) {
         let mut broken = false;
-        while matches!(list.kind(), SexpType::Pairlist | SexpType::Language | SexpType::Dots) {
+        while matches!(
+            list.kind(),
+            SexpType::Pairlist | SexpType::Language | SexpType::Dots
+        ) {
             let tag = list.tag();
             if tag != nil() && tag.kind() == SexpType::Symbol {
                 let name = symbol_name(tag);
@@ -358,7 +361,10 @@ impl Deparser {
                 self.deparse(list.car());
             }
             list = list.cdr();
-            if matches!(list.kind(), SexpType::Pairlist | SexpType::Language | SexpType::Dots) {
+            if matches!(
+                list.kind(),
+                SexpType::Pairlist | SexpType::Language | SexpType::Dots
+            ) {
                 self.print(", ");
                 self.line_break(&mut broken);
             }
@@ -434,7 +440,11 @@ impl Deparser {
             if let Some(info) = operator_info(name) {
                 match (info.kind, argument_count) {
                     (Kind::Subset, count) if count >= 1 => {
-                        let (open, close) = if name == b"[" { ("[", "]") } else { ("[[", "]]") };
+                        let (open, close) = if name == b"[" {
+                            ("[", "]")
+                        } else {
+                            ("[[", "]]")
+                        };
                         let target = arguments.car();
                         let parens = needs_parens(info, target, true);
                         if parens {
@@ -577,7 +587,13 @@ impl Deparser {
         // A call whose function is itself an expression.
         let needs = matches!(head.kind(), SexpType::Language)
             && (head.car() == symbols().function
-                || head.car().kind() == SexpType::Symbol && operator_info(head.car().car().bytes()).is_some_and(|info| info.kind != Kind::Subset && info.kind != Kind::Dollar && !(info.kind == Kind::Binary2 && info.precedence == precedence::NAMESPACE)));
+                || head.car().kind() == SexpType::Symbol
+                    && operator_info(head.car().car().bytes()).is_some_and(|info| {
+                        info.kind != Kind::Subset
+                            && info.kind != Kind::Dollar
+                            && !(info.kind == Kind::Binary2
+                                && info.precedence == precedence::NAMESPACE)
+                    }));
         if needs || head.kind() == SexpType::Closure {
             self.print("(");
             self.deparse(head);
@@ -662,8 +678,10 @@ impl Deparser {
                 let scrutinee = arguments.car();
                 self.print("match ");
                 // `match (a, b) {` puts a tuple scrutinee in the parentheses themselves.
-                if matches!(ry_call_form(scrutinee), Some(RyForm::Record | RyForm::Tuple))
-                    && values::pairlist_length(scrutinee.cdr()) > 1
+                if matches!(
+                    ry_call_form(scrutinee),
+                    Some(RyForm::Record | RyForm::Tuple)
+                ) && values::pairlist_length(scrutinee.cdr()) > 1
                 {
                     self.deparse(scrutinee);
                 } else {
@@ -690,7 +708,10 @@ impl Deparser {
 
     /// One `match` arm, `pattern => body` or `pattern if (guard) => body`.
     unsafe fn arm(&mut self, arm: Sexp) {
-        let parts: Vec<Sexp> = values::pairlist_items(arm.cdr()).into_iter().map(|(_, part)| part).collect();
+        let parts: Vec<Sexp> = values::pairlist_items(arm.cdr())
+            .into_iter()
+            .map(|(_, part)| part)
+            .collect();
         let (pattern, guard, body) = match parts.as_slice() {
             [pattern, body] => (*pattern, None, *body),
             [pattern, guard, body] => (*pattern, Some(*guard), *body),
@@ -742,9 +763,9 @@ impl Deparser {
                         self.print("(");
                         self.pattern_items(arguments);
                         let items = values::pairlist_items(arguments);
-                        let rest = items
-                            .last()
-                            .is_some_and(|(_, item)| item.kind() == SexpType::Symbol && item.car().bytes() == b"..");
+                        let rest = items.last().is_some_and(|(_, item)| {
+                            item.kind() == SexpType::Symbol && item.car().bytes() == b".."
+                        });
                         if items.len() == 1 && !rest {
                             self.print(",");
                         }
@@ -931,7 +952,9 @@ impl Deparser {
             let step = data[1] as i64 - data[0] as i64;
             let is_run = data[0] != NA_INTEGER
                 && (step == 1 || step == -1)
-                && data.windows(2).all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step);
+                && data
+                    .windows(2)
+                    .all(|pair| pair[1] != NA_INTEGER && pair[1] as i64 == pair[0] as i64 + step);
             if is_run {
                 self.print(&format!("{}:{}", data[0], data[count - 1]));
                 return;
@@ -939,25 +962,34 @@ impl Deparser {
         }
         if kind == SexpType::Raw {
             self.print("as.raw(c(");
-            let items: Vec<String> = values::raws(vector).iter().map(|byte| format!("0x{byte:02x}")).collect();
+            let items: Vec<String> = values::raws(vector)
+                .iter()
+                .map(|byte| format!("0x{byte:02x}"))
+                .collect();
             self.print(&items.join(", "));
             self.print("))");
             return;
         }
         let all_na = match kind {
-            SexpType::Logical | SexpType::Integer => values::ints(vector).iter().all(|&value| value == NA_INTEGER),
+            SexpType::Logical | SexpType::Integer => values::ints(vector)
+                .iter()
+                .all(|&value| value == NA_INTEGER),
             SexpType::Real => values::reals(vector).iter().all(|&value| is_na_real(value)),
-            SexpType::String => (0..count).all(|index| vector.element(index) == values::na_string()),
-            SexpType::Complex => values::complexes(vector).iter().all(|value| is_na_real(value.r)),
+            SexpType::String => {
+                (0..count).all(|index| vector.element(index) == values::na_string())
+            }
+            SexpType::Complex => values::complexes(vector)
+                .iter()
+                .all(|value| is_na_real(value.r)),
             _ => false,
         };
         // Whole doubles keep their type through `as.double` only when some element shows it.
         let surround_double = kind == SexpType::Real
             && keep_integer
             && !all_na
-            && values::reals(vector).iter().all(|&value| {
-                !value.is_finite() || (value.fract() == 0.0 && value.abs() < 1e15)
-            })
+            && values::reals(vector)
+                .iter()
+                .all(|&value| !value.is_finite() || (value.fract() == 0.0 && value.abs() < 1e15))
             && false;
         let wrap = count > 1 || nice;
         if surround_double {
@@ -984,7 +1016,11 @@ impl Deparser {
                 SexpType::Integer => {
                     let value = values::ints(vector)[index];
                     if value == NA_INTEGER {
-                        if keep_na && all_na { "NA_integer_".to_owned() } else { "NA".to_owned() }
+                        if keep_na && all_na {
+                            "NA_integer_".to_owned()
+                        } else {
+                            "NA".to_owned()
+                        }
                     } else if keep_integer {
                         format!("{value}L")
                     } else {
@@ -994,9 +1030,17 @@ impl Deparser {
                 SexpType::Real => {
                     let value = values::reals(vector)[index];
                     if is_na_real(value) {
-                        if keep_na && all_na { "NA_real_".to_owned() } else { "NA".to_owned() }
+                        if keep_na && all_na {
+                            "NA_real_".to_owned()
+                        } else {
+                            "NA".to_owned()
+                        }
                     } else {
-                        let digits = if self.opts & options::DIGITS17 != 0 { 17 } else { 15 };
+                        let digits = if self.opts & options::DIGITS17 != 0 {
+                            17
+                        } else {
+                            15
+                        };
                         let text = format::format_real_alone(value, digits);
                         if keep_integer && kind == SexpType::Real && false {
                             text
@@ -1008,7 +1052,11 @@ impl Deparser {
                 SexpType::Complex => {
                     let value = values::complexes(vector)[index];
                     if is_na_real(value.r) || is_na_real(value.i) {
-                        if keep_na && all_na { "NA_complex_".to_owned() } else { "NA".to_owned() }
+                        if keep_na && all_na {
+                            "NA_complex_".to_owned()
+                        } else {
+                            "NA".to_owned()
+                        }
                     } else {
                         format::format_complex_alone(value, 15)
                     }
@@ -1016,7 +1064,11 @@ impl Deparser {
                 SexpType::String => {
                     let element = vector.element(index);
                     if element == values::na_string() {
-                        if keep_na && all_na { "NA_character_".to_owned() } else { "NA".to_owned() }
+                        if keep_na && all_na {
+                            "NA_character_".to_owned()
+                        } else {
+                            "NA".to_owned()
+                        }
                     } else {
                         format::encode_string(&char_str(element), Some('"'))
                     }
@@ -1099,7 +1151,10 @@ unsafe fn nice_names_ok(object: Sexp) -> bool {
 
 /// Whether deparsing `object` needs `structure(...)` around it.
 unsafe fn has_shown_attributes(object: Sexp) -> bool {
-    if matches!(object.kind(), SexpType::Language | SexpType::Symbol | SexpType::Environment | SexpType::Closure) {
+    if matches!(
+        object.kind(),
+        SexpType::Language | SexpType::Symbol | SexpType::Environment | SexpType::Closure
+    ) {
         return false;
     }
     let mut cell = object.attrib();
@@ -1192,18 +1247,21 @@ unsafe fn needs_parens(main: OperatorInfo, argument: Sexp, left: bool) -> bool {
                             _ => return false,
                         }
                         return main.precedence > info.precedence
-                            || (main.precedence == info.precedence && left == main.right_associative);
+                            || (main.precedence == info.precedence
+                                && left == main.right_associative);
                     }
                     Kind::Subset => {
                         if main.kind == Kind::Dollar {
                             return false;
                         }
                         return main.precedence > info.precedence
-                            || (main.precedence == info.precedence && left == main.right_associative);
+                            || (main.precedence == info.precedence
+                                && left == main.right_associative);
                     }
                     Kind::Assign | Kind::Unary | Kind::Dollar => {
                         return main.precedence > info.precedence
-                            || (main.precedence == info.precedence && left == main.right_associative);
+                            || (main.precedence == info.precedence
+                                && left == main.right_associative);
                     }
                     Kind::Other => return false,
                 }

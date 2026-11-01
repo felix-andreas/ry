@@ -102,7 +102,9 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
     if epoch != compiled.epoch.get() {
         for speculation in &compiled.speculations {
             match resolve_function(speculation.symbol, compiled.enclosure) {
-                Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
+                Some(found)
+                    if found.cell == speculation.cell && found.function == speculation.function => {
+                }
                 _ => return false,
             }
         }
@@ -116,7 +118,11 @@ pub unsafe fn valid(compiled: &Compiled) -> bool {
         if value != speculation.function {
             return false;
         }
-        if speculation.frames.iter().any(|&frame| heap.frame_cell(frame, speculation.symbol).is_some()) {
+        if speculation
+            .frames
+            .iter()
+            .any(|&frame| heap.frame_cell(frame, speculation.symbol).is_some())
+        {
             return false;
         }
         if let Some(home) = speculation.home
@@ -159,7 +165,11 @@ unsafe fn compiled<'a>(activation: &Activation) -> &'a Compiled {
 }
 
 /// Runs `body`, parking a panic in the activation and returning `fallback` instead.
-unsafe fn guarded<T>(activation: *mut Activation, fallback: T, body: impl FnOnce(&mut Activation) -> T) -> T {
+unsafe fn guarded<T>(
+    activation: *mut Activation,
+    fallback: T,
+    body: impl FnOnce(&mut Activation) -> T,
+) -> T {
     let activation = unsafe { &mut *activation };
     if activation.panic.is_some() {
         return fallback;
@@ -189,7 +199,11 @@ fn park(activation: &mut Activation, unwind: Unwind) {
 }
 
 unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
-    unsafe { activation.registers.add(compiled(activation).registers + slot as usize) }
+    unsafe {
+        activation
+            .registers
+            .add(compiled(activation).registers + slot as usize)
+    }
 }
 
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
@@ -264,7 +278,12 @@ pub mod representation {
 
 /// Writes a dirty slot back to the environment. A boxed value hands the reference compiled
 /// code held over to the binding. Returns 1 on success.
-pub unsafe extern "C" fn jit_flush(activation: *mut Activation, slot: i64, kind: i32, bits: i64) -> i32 {
+pub unsafe extern "C" fn jit_flush(
+    activation: *mut Activation,
+    slot: i64,
+    kind: i32,
+    bits: i64,
+) -> i32 {
     unsafe {
         guarded(activation, 0, |activation| {
             let machine = machine(activation);
@@ -320,7 +339,11 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
 }
 
 /// `if (value)`: 1 or 0, or 2 after parking the error.
-pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut Header, call: *mut Header) -> i32 {
+pub unsafe extern "C" fn jit_condition(
+    activation: *mut Activation,
+    value: *mut Header,
+    call: *mut Header,
+) -> i32 {
     unsafe {
         guarded(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
@@ -339,7 +362,13 @@ pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut 
 }
 
 /// An operand of `&&` or `||` as a logical scalar, or 2 after parking the error.
-pub unsafe extern "C" fn jit_logic(activation: *mut Activation, value: *mut Header, call: *mut Header, is_and: i32, right: i32) -> i32 {
+pub unsafe extern "C" fn jit_logic(
+    activation: *mut Activation,
+    value: *mut Header,
+    call: *mut Header,
+    is_and: i32,
+    right: i32,
+) -> i32 {
     unsafe {
         guarded(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
@@ -361,7 +390,11 @@ pub unsafe extern "C" fn jit_logic(activation: *mut Activation, value: *mut Head
 
 /// Replaces a slot's vector with a private copy compiled code may modify in place, owning one
 /// reference to it. `dirty` says whether the slot owned a reference to the old vector.
-pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, dirty: i32) -> *mut Header {
+pub unsafe extern "C" fn jit_duplicate(
+    activation: *mut Activation,
+    slot: i64,
+    dirty: i32,
+) -> *mut Header {
     unsafe {
         guarded(activation, std::ptr::null_mut(), |activation| {
             let cell = slot_cell(activation, slot);
@@ -386,14 +419,18 @@ pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, d
 
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {
-        guarded(activation, values::nil().as_ptr(), |activation| match make() {
-            Ok(value) => value.as_ptr(),
-            // Only an exhausted heap gets here. The next helper sees the parked error.
-            Err(unwind) => {
-                park(activation, unwind);
-                values::nil().as_ptr()
-            }
-        })
+        guarded(
+            activation,
+            values::nil().as_ptr(),
+            |activation| match make() {
+                Ok(value) => value.as_ptr(),
+                // Only an exhausted heap gets here. The next helper sees the parked error.
+                Err(unwind) => {
+                    park(activation, unwind);
+                    values::nil().as_ptr()
+                }
+            },
+        )
     }
 }
 
@@ -416,7 +453,11 @@ pub extern "C" fn jit_handlers_present() -> i32 {
 
 /// `^` on doubles, as tier 0 computes it.
 pub extern "C" fn jit_power(base: f64, exponent: f64) -> f64 {
-    if exponent == 2.0 && !is_na_real(base) { base * base } else { arith::power(base, exponent) }
+    if exponent == 2.0 && !is_na_real(base) {
+        base * base
+    } else {
+        arith::power(base, exponent)
+    }
 }
 
 pub extern "C" fn jit_exp(value: f64) -> f64 {
@@ -447,4 +488,3 @@ pub extern "C" fn jit_integer_divide(a: i32, b: i32) -> i32 {
     }
     (a as f64 / b as f64).floor() as i32
 }
-

@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
 use syntax::ast::{self, BinaryExpr};
-use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize};
+use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, paired_comment_definition};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
 /// run on threads with this stack rather than `ulimit -s`'s.
@@ -585,46 +585,6 @@ pub fn file_type_definitions<'db>(
         }
     }
     definitions
-}
-
-/// The `#:` block directly above an inline type definition when it defines the same
-/// name: then the two are one definition written two ways, not a duplicate.
-pub fn paired_comment_definition(definition: &SyntaxNode) -> Option<SyntaxNode> {
-    let name = definition_name(definition)?;
-    let mut newlines = 0;
-    let mut previous = definition.prev_sibling_or_token();
-    while let Some(element) = previous {
-        match element.kind() {
-            SyntaxKind::WHITESPACE => {}
-            SyntaxKind::NEWLINE if newlines == 0 => newlines += 1,
-            SyntaxKind::ANNOTATION => {
-                let comment = element.into_node()?;
-                let defines = comment
-                    .children()
-                    .filter(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
-                    .filter(|directive| {
-                        directive
-                            .children_with_tokens()
-                            .nth(1)
-                            .and_then(|element| element.into_token())
-                            .is_some_and(|word| matches!(word.text(), "type" | "alias"))
-                    })
-                    .any(|directive| definition_name(&directive).as_deref() == Some(name.as_str()));
-                return defines.then_some(comment);
-            }
-            _ => return None,
-        }
-        previous = element.prev_sibling_or_token();
-    }
-    None
-}
-
-/// The name a `#: @type` or `@alias` directive or an inline type definition declares.
-fn definition_name(node: &SyntaxNode) -> Option<String> {
-    node.children()
-        .find(|child| child.kind() == SyntaxKind::NAME)
-        .and_then(ast::Name::cast)
-        .and_then(|name| name.text())
 }
 
 #[salsa::tracked(returns(ref))]

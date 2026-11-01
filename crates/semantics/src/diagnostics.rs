@@ -19,14 +19,14 @@ use crate::types::{
 use crate::{
     AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SourceFile, file_type_definitions,
     inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-    item_tree, paired_comment_definition, parse, project_type_definitions, statement_annotations,
+    item_tree, parse, project_type_definitions, statement_annotations,
 };
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{iter, mem};
 use syntax::SyntaxNode;
 use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name};
+use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -112,10 +112,9 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
     }
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::TYPE_DEFINITION && node.parent().as_ref() != Some(&root))
-    {
+    for node in root.descendants().filter(|node| {
+        node.kind() == SyntaxKind::TYPE_DEFINITION && node.parent().as_ref() != Some(&root)
+    }) {
         diagnostics.push(Diagnostic::new(
             node.text_range(),
             Severity::Error,
@@ -973,12 +972,18 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             continue;
         };
         let name = inline_definition.name.text(db);
-        let child_of = |node: &SyntaxNode, kind: SyntaxKind| node.children().find(|child| child.kind() == kind);
-        let body_of = |node: &SyntaxNode| {
-            node.children()
-                .find(|child| is_type_kind(child.kind()) && child.kind() != SyntaxKind::TYPE_BINDER_LIST)
+        let child_of = |node: &SyntaxNode, kind: SyntaxKind| {
+            node.children().find(|child| child.kind() == kind)
         };
-        let mut push = |range: TextRange, disagreement: String, related_range: TextRange, related: &'static str| {
+        let body_of = |node: &SyntaxNode| {
+            node.children().find(|child| {
+                is_type_kind(child.kind()) && child.kind() != SyntaxKind::TYPE_BINDER_LIST
+            })
+        };
+        let mut push = |range: TextRange,
+                        disagreement: String,
+                        related_range: TextRange,
+                        related: &'static str| {
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Warning,
@@ -1019,7 +1024,9 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
         );
         if inline_count != comment_count {
             push(
-                inline_binders.as_ref().map_or(name_range, |list| list.text_range()),
+                inline_binders
+                    .as_ref()
+                    .map_or(name_range, |list| list.text_range()),
                 format!(
                     "the inline definition gives `{name}` {inline_count} type {}, but the `#:` comment gives it {comment_count}",
                     plural(inline_count, "parameter", "parameters")
@@ -1055,7 +1062,9 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             }
         };
         for ((inline_spelling, inline_range), (comment_spelling, comment_range)) in
-            constraints(&inline_binders).iter().zip(&constraints(&comment_binders))
+            constraints(&inline_binders)
+                .iter()
+                .zip(&constraints(&comment_binders))
         {
             if inline_spelling != comment_spelling {
                 push(
@@ -1070,16 +1079,18 @@ fn definition_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                 );
             }
         }
-        let [inline_body, comment_body] = [inline_definition, comment_definition].map(|definition| {
-            let binders: Vec<(Name, Constraint)> = definition
-                .parameters
-                .iter()
-                .map(|parameter| (*parameter, Constraint::Unconstrained))
-                .collect();
-            substitute_rigid(db, definition.body, &positional_binders(db, &binders))
-        });
+        let [inline_body, comment_body] =
+            [inline_definition, comment_definition].map(|definition| {
+                let binders: Vec<(Name, Constraint)> = definition
+                    .parameters
+                    .iter()
+                    .map(|parameter| (*parameter, Constraint::Unconstrained))
+                    .collect();
+                substitute_rigid(db, definition.body, &positional_binders(db, &binders))
+            });
         if !same_type(db, inline_body, comment_body, &definitions)
-            && let (Some(inline_type), Some(comment_type)) = (body_of(&inline_node), body_of(&directive))
+            && let (Some(inline_type), Some(comment_type)) =
+                (body_of(&inline_node), body_of(&directive))
         {
             push(
                 inline_type.text_range(),
@@ -1346,7 +1357,7 @@ fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRan
             SyntaxKind::TYPE_DEFINITION => {
                 // A `#:` block spelling the same definition directly above is the same
                 // declaration, so the inline site stands for both.
-                if let Some(comment) = crate::paired_comment_definition(&node) {
+                if let Some(comment) = paired_comment_definition(&node) {
                     let comment_range = comment.text_range();
                     let name = lower_inline_annotation(db, &node)
                         .definitions

@@ -844,7 +844,9 @@ binding; and `@Name(value)` or `@Name<Args>(value)` constructs a nominal value, 
 **Why it is unambiguous.** Two names in a row are not valid R, and neither is `@` at the start of an
 expression, so none of these forms gives a valid R program a new reading. `type` and `alias` are
 contextual: the definition is recognized only at a statement start with the defined name on the same
-line, so `type <- 1`, `alias(type)` and `type` as a parameter keep working. A nested definition is an
+line, so `type <- 1`, `alias(type)` and `type` as a parameter keep working. At a line start
+`@Name` is a constructor only before `(` or `<`, so `obj` newline `@slot` keeps R's own error;
+after an operator a bare `@Name` is a constructor, so completion works while it is typed. A nested definition is an
 `annotation` error rather than a silent new scope, because a type's scope is the file. Rejected:
 `@type Name = T` (reads as a decorator, and `@` at statement start would collide with the constructor),
 and `newtype` (a second keyword for no new meaning).
@@ -861,8 +863,11 @@ or body is an `annotation-mismatch` warning; with them off, the comment applies 
 inline definition with inline annotations off still declares its name, with an `Unknown` body, so
 uses of the name do not turn into unknown-type errors on top of the `inline-annotation` warning.
 
-**Erasure and run time.** Erasure turns a definition into its `#: @type`/`#: @alias` comment, so the
-erased program still declares the type, drops the `@Name` of a constructor, leaving `(value)`, and drops
+**Erasure and run time.** Erasure turns a definition into its `#: @type`/`#: @alias` comment, line
+for line and keeping comments, so the erased program still declares the type. A paired definition
+erases to nothing, since its partner already declares it (two copies would be a duplicate). Because
+the comment would swallow the rest of its line, a definition must end its line, which the parser
+enforces. Erasure also drops the `@Name` of a constructor, leaving `(value)`, and drops
 a coercing binding's `: @trust T`. The runtime skips definitions and lowers `@Name(value)` to its
 parenthesized value; a nominal type has no run-time representation.
 

@@ -198,14 +198,17 @@ function and the binding's type is then checked against it like any other value.
 A parameter's type and a function's return type and type parameters can be written on any function
 literal. A binding's type is recognized only where a statement starts, at the top level of a file or
 directly inside `{ }`. Elsewhere, such as in a braceless `if` branch, `y: integer <- 1L` is R's
-reading of `y:integer` as an assignment target, which is reported as a syntax error.
+reading of `y:integer` as an assignment target, which is reported as a syntax error. A binding's type
+continues onto the next line inside an open bracket, after a `|`, and onto a line that starts with
+`|`.
 
 `type` and `alias` start a definition only at the start of a statement and only when a name follows
 them on the same line, so `type <- "x"`, `alias(y)` and every other use of them as ordinary names
 keep their R meaning. A definition inside a function body or any other block parses, but is an
 `annotation` error: definitions belong at the top level of a file. A definition ends at the end of
-its line, except that its type continues onto the next line after `=`, after a `|`, inside an open
-bracket, and onto a line that starts with `|`. No R statement starts with `|`, so a union may line
+its line, and nothing but a comment may follow it there, so `type Id = integer; x <- 1` is a syntax
+error. Its type continues onto the next line after `=`, after a `|`, inside an open bracket, and
+onto a line that starts with `|`. No R statement starts with `|`, so a union may line
 up its members:
 
 ```r
@@ -231,12 +234,16 @@ R's own parser rejects every inline annotation except a binding's, which R reads
 program contains one, and existing R code parses and behaves exactly as before.
 
 `type` and `alias` definitions and `@Name(value)` are not R either: a definition is two names in a
-row, and `@` cannot start an R expression.
+row, and `@` cannot start an R expression. At the start of a line, `@Name` reads as a constructor
+only when `(` or `<` follows the name, so a slot access broken across lines, `obj` then `@slot`,
+keeps R's own syntax error.
 
 Removing each inline annotation turns an annotated program into the plain R program it means:
 delete a binding's or parameter's `: TYPE` (with its directive), a function's `<...>`, its
-`-> TYPE`, and the `@Name` of `@Name(value)`. A type definition becomes its `#:` comment, so the
-erased program still declares the type. Comments and `#:` blocks stay. `count: integer <- 0L`
+`-> TYPE`, and the `@Name` of `@Name(value)`. A type definition becomes its `#:` comment, line for
+line, so the erased program still declares the type, and a definition paired with a `#:` block
+directly above it is removed, because that block already declares it. Comments and `#:` blocks
+stay. `count: integer <- 0L`
 erases to `count <- 0L`, `function<T>(x: T) -> T x` to `function(x) x`, `@UserId(5L)` to `(5L)`,
 and `type UserId = integer` to `#: @type UserId {integer}`.
 
@@ -287,8 +294,9 @@ also run under R. An annotation that is off types nothing, and each one is repor
 `inline-annotation` warning, because R cannot run that code. ry also warns once per run, and the
 language server once per load, for as long as the setting stays off. A `#:` block on the same
 statement then applies alone, and so does a paired `#:` definition. An inline type definition with
-no `#:` partner still declares its name, so uses of it are not also reported as unknown types, but
-its representation is `Unknown`. The setting also governs running code: `ry run` and `ry repl` still
+no `#:` partner still declares its name, so uses of it are not also reported as unknown types. A
+`type` stays nominal, so a plain value is still not accepted where it is expected, but its
+representation is `Unknown`. The setting also governs running code: `ry run` and `ry repl` still
 erase the annotations, but ry's runtime registers no checks for them.
 
 ### Inline annotations at run time

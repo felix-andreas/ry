@@ -28,7 +28,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
     builtin(".cache_class", -1, |call| unsafe { Ok(call.arg(1)) }),
     builtin(".isMethodsDispatchOn", -1, do_is_methods_dispatch_on),
-    builtin("isS4", 1, |call| unsafe { values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT)) }),
+    builtin("isS4", 1, |call| unsafe {
+        values::scalar_bool(call.arg(0).has_gp(gp::S4_OBJECT))
+    }),
     internal("setS4Object", 3, do_set_s4_object),
     internal("standardGeneric", -1, do_standard_generic),
 ];
@@ -344,7 +346,10 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         .collect();
     let new_call = renamed_call(frame_call, found.method_name)?;
     let result = apply_method(new_call, found.method, &args, sys_parent, &vars)?;
-    Err(crate::unwind::jump(crate::Jump::Return { env, value: result }))
+    Err(crate::unwind::jump(crate::Jump::Return {
+        env,
+        value: result,
+    }))
 }
 
 /// The generic function named `name` as seen from the generic's frame.
@@ -431,7 +436,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("NextMethod called from outside a method dispatch"));
     };
     let method_env = state.frames[own].sys_parent;
-    let Some(position) = state.frames.iter().rposition(|frame| frame.env == method_env) else {
+    let Some(position) = state
+        .frames
+        .iter()
+        .rposition(|frame| frame.env == method_env)
+    else {
         return Err(call.error("NextMethod called from outside a method dispatch"));
     };
     let (frame_call, function, promargs, sys_parent) = {
@@ -441,7 +450,11 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let symbols = symbols();
     let read = |symbol: Sexp| -> R<Sexp> {
         let value = eval::find_var_in_frame(symbol, method_env)?;
-        Ok(if value == unbound() { value } else { value_of(value)? })
+        Ok(if value == unbound() {
+            value
+        } else {
+            value_of(value)?
+        })
     };
     // The generic: the argument, else `.Generic`, else the called function's name.
     let mut generic = call.arg(0);
@@ -466,18 +479,27 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         classes = implicit_class(object)?;
     }
     let group = read(symbols.dot_group)?;
-    let group_name = if group != unbound() && group.kind() == SexpType::String && length(group) == 1 {
+    let group_name = if group != unbound() && group.kind() == SexpType::String && length(group) == 1
+    {
         Some(char_str(group.element(0)).into_owned())
     } else {
         None
     };
     let call_env = {
         let value = read(symbols.dot_generic_call_env)?;
-        if value == unbound() { sys_parent } else { value }
+        if value == unbound() {
+            sys_parent
+        } else {
+            value
+        }
     };
     let def_env = {
         let value = read(symbols.dot_generic_def_env)?;
-        if value == unbound() { values::base_namespace() } else { value }
+        if value == unbound() {
+            values::base_namespace()
+        } else {
+            value
+        }
     };
     // The current method's name decides where in `.Class` dispatch resumes.
     let current = read(symbols.dot_method)?;
@@ -540,9 +562,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
                 match function {
                     Some(function) => (function, generic_symbol, class_names.len()),
                     None => {
-                        return Err(call.error(format!(
-                            "no more methods for '{generic_name}'"
-                        )));
+                        return Err(call.error(format!("no more methods for '{generic_name}'")));
                     }
                 }
             }
@@ -645,7 +665,10 @@ pub unsafe fn try_builtin_dispatch(
             if !any_object {
                 return Ok(None);
             }
-            if args.iter().take(2).any(|arg| arg.value.has_gp(gp::S4_OBJECT))
+            if args
+                .iter()
+                .take(2)
+                .any(|arg| arg.value.has_gp(gp::S4_OBJECT))
                 && let Some(value) = s4_dispatch(op, call, args, env)?
             {
                 return Ok(Some(value));
@@ -701,7 +724,9 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
 
 /// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
 pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
-    if args.first().is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
+    if args
+        .first()
+        .is_some_and(|arg| arg.value.has_gp(gp::S4_OBJECT))
         && let Some(op) = crate::builtins::primitive(name)
         && let Some(value) = s4_dispatch(op, call, args, env)?
     {
@@ -789,16 +814,18 @@ unsafe fn group_dispatch(
         let method_name = symbol_name(found_method.method_name).into_owned();
         let methods: Vec<String> = (0..operands)
             .map(|index| {
-                if index == position || (operands == 2 && args[index].value.is_object() && {
-                    let other_classes = implicit_class(args[index].value).ok();
-                    other_classes.is_some_and(|classes| {
-                        (0..length(classes)).any(|class_index| {
-                            let class = char_str(classes.element(class_index));
-                            method_name == format!("{generic}.{class}")
-                                || method_name == format!("{group}.{class}")
+                if index == position
+                    || (operands == 2 && args[index].value.is_object() && {
+                        let other_classes = implicit_class(args[index].value).ok();
+                        other_classes.is_some_and(|classes| {
+                            (0..length(classes)).any(|class_index| {
+                                let class = char_str(classes.element(class_index));
+                                method_name == format!("{generic}.{class}")
+                                    || method_name == format!("{group}.{class}")
+                            })
                         })
                     })
-                }) {
+                {
                     method_name.clone()
                 } else {
                     String::new()
@@ -806,7 +833,10 @@ unsafe fn group_dispatch(
             })
             .collect();
         let method_vector = string_vector(&methods)?;
-        if let Some(entry) = vars.iter_mut().find(|(symbol, _)| *symbol == symbols().dot_method) {
+        if let Some(entry) = vars
+            .iter_mut()
+            .find(|(symbol, _)| *symbol == symbols().dot_method)
+        {
             entry.1 = method_vector;
         }
     }
@@ -830,7 +860,8 @@ unsafe fn find_group_method(
             if let Some(method) = lookup_method(name, env, def_env)? {
                 let suffix = class_suffix(classes, index)?;
                 let method_string = scalar_string(&symbol_name(name))?;
-                let vars = dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
+                let vars =
+                    dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
                 return Ok(Some(Found {
                     method,
                     method_name: name,
@@ -868,7 +899,11 @@ pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods
         "reset" => MethodsState::NeedsReset,
         "set" => MethodsState::Has,
         "suppress" => MethodsState::Suppressed,
-        _ => return Err(error(format!("invalid primitive methods code (\"{code}\"): should be \"clear\", \"reset\", \"set\", or \"suppress\""))),
+        _ => {
+            return Err(error(format!(
+                "invalid primitive methods code (\"{code}\"): should be \"clear\", \"reset\", \"set\", or \"suppress\""
+            )));
+        }
     };
     if !matches!(op.kind(), SexpType::Builtin | SexpType::Special) {
         return Err(error("invalid object: must be a primitive function"));
@@ -891,7 +926,11 @@ pub unsafe fn set_primitive_methods(op: Sexp, code: &str, generic: Sexp, methods
                     generic.kind().name()
                 )));
             }
-            let entry = table.entry(index).or_insert(PrimitiveMethods { state, generic: nil(), methods: nil() });
+            let entry = table.entry(index).or_insert(PrimitiveMethods {
+                state,
+                generic: nil(),
+                methods: nil(),
+            });
             entry.state = state;
             if generic != nil() {
                 entry.generic = generic;
@@ -923,7 +962,11 @@ unsafe fn s4_dispatch(op: Sexp, call: Sexp, args: &[Arg], env: Sexp) -> R<Option
     if !interp().globals.allow_primitive_methods {
         return Ok(None);
     }
-    let Some(entry) = interp().globals.primitive_methods.get(&op.primitive_index()) else {
+    let Some(entry) = interp()
+        .globals
+        .primitive_methods
+        .get(&op.primitive_index())
+    else {
         return Ok(None);
     };
     if !matches!(entry.state, MethodsState::Has | MethodsState::NeedsReset) {
@@ -967,13 +1010,14 @@ unsafe fn do_is_methods_dispatch_on(call: &Call<'_>) -> R<Sexp> {
 /// `standardGeneric("f")`: hands the call to the dispatcher the methods package installed.
 pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
     if !interp().globals.methods_dispatch {
-        return Err(call.error(
-            "standardGeneric called without 'methods' dispatch enabled (will be ignored)",
-        ));
+        return Err(call
+            .error("standardGeneric called without 'methods' dispatch enabled (will be ignored)"));
     }
     let name = call.arg(0);
     if name.kind() != SexpType::String || length(name) != 1 {
-        return Err(call.error("argument to 'standardGeneric' must be a non-empty character string"));
+        return Err(
+            call.error("argument to 'standardGeneric' must be a non-empty character string")
+        );
     }
     let env = call.env;
     let generic = this_generic(name)?;
@@ -1183,7 +1227,9 @@ unsafe fn do_inherits(call: &Call<'_>) -> R<Sexp> {
         let name_call = values::call(generic, &[quoted])?;
         let name = eval::eval(name_call, values::base_namespace())?;
         if name.kind() != SexpType::String {
-            return Err(call.error("'what' must be a character vector or an object with a nameOfClass() method"));
+            return Err(call.error(
+                "'what' must be a character vector or an object with a nameOfClass() method",
+            ));
         }
         name
     };

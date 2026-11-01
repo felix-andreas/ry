@@ -1369,18 +1369,21 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         SexpType::Object => true,
         SexpType::Record => {
             x.record_layout() == y.record_layout()
-                && (0..x.record_slot_count()).all(|index| match (x.record_slot(index), y.record_slot(index)) {
-                    (Slot::Handle(left), Slot::Handle(right)) => identical(left, right, flags),
-                    (Slot::Real(left), Slot::Real(right)) => reals_identical(left, right, flags),
-                    (Slot::Integer(left), Slot::Integer(right)) | (Slot::Logical(left), Slot::Logical(right)) => {
-                        left == right
+                && (0..x.record_slot_count()).all(|index| {
+                    match (x.record_slot(index), y.record_slot(index)) {
+                        (Slot::Handle(left), Slot::Handle(right)) => identical(left, right, flags),
+                        (Slot::Real(left), Slot::Real(right)) => {
+                            reals_identical(left, right, flags)
+                        }
+                        (Slot::Integer(left), Slot::Integer(right))
+                        | (Slot::Logical(left), Slot::Logical(right)) => left == right,
+                        // A scalar is boxed only when it could not be stored raw (an ALTREP value, or
+                        // a double whose bits collide with the raw encoding), so compare contents.
+                        (Slot::Handle(handle), raw) | (raw, Slot::Handle(handle)) => {
+                            raw_slot_identical(raw, handle, flags)
+                        }
+                        _ => false,
                     }
-                    // A scalar is boxed only when it could not be stored raw (an ALTREP value, or
-                    // a double whose bits collide with the raw encoding), so compare contents.
-                    (Slot::Handle(handle), raw) | (raw, Slot::Handle(handle)) => {
-                        raw_slot_identical(raw, handle, flags)
-                    }
-                    _ => false,
                 })
         }
         _ => false,
@@ -1395,7 +1398,9 @@ unsafe fn raw_slot_identical(raw: Slot, handle: Sexp, flags: &IdenticalFlags) ->
         return false;
     };
     match (raw, handle.kind()) {
-        (Slot::Real(value), SexpType::Real) => reals_identical(value, values::reals(handle)[0], flags),
+        (Slot::Real(value), SexpType::Real) => {
+            reals_identical(value, values::reals(handle)[0], flags)
+        }
         (Slot::Integer(value), SexpType::Integer) | (Slot::Logical(value), SexpType::Logical) => {
             values::ints(handle)[0] == value
         }

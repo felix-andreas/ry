@@ -4,9 +4,7 @@ use crate::{
     builtins::{BuiltinDef, Call, Generic, builtin, internal},
     conditions, deparse, heap,
     unwind::{R, error},
-    values::{
-        self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
-    },
+    values::{self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols},
 };
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real};
 
@@ -69,9 +67,9 @@ pub fn parse_real(text: &str) -> Option<f64> {
     let lower = body.to_ascii_lowercase();
     if let Some(hex) = lower.strip_prefix("0x") {
         if hex.is_empty()
-            || !hex
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() || matches!(character, '.' | 'p' | '-' | '+'))
+            || !hex.chars().all(|character| {
+                character.is_ascii_hexdigit() || matches!(character, '.' | 'p' | '-' | '+')
+            })
         {
             return None;
         }
@@ -197,7 +195,9 @@ pub unsafe fn coerce_vector_quiet(
             return coerce_pairlist(object, kind, warnings);
         }
         SexpType::Environment if kind == SexpType::List => {
-            return Err(error("cannot coerce type 'environment' to vector of type 'list'"));
+            return Err(error(
+                "cannot coerce type 'environment' to vector of type 'list'",
+            ));
         }
         SexpType::List | SexpType::Expression => coerce_list(object, kind, warnings)?,
         _ if source.is_atomic() => coerce_atomic(object, kind, warnings)?,
@@ -352,11 +352,19 @@ pub unsafe fn coerce_atomic(
                 *slot = match source {
                     SexpType::Integer => {
                         let value = values::ints(object)[index];
-                        if value == NA_INTEGER { NA_LOGICAL } else { (value != 0) as i32 }
+                        if value == NA_INTEGER {
+                            NA_LOGICAL
+                        } else {
+                            (value != 0) as i32
+                        }
                     }
                     SexpType::Real => {
                         let value = values::reals(object)[index];
-                        if value.is_nan() { NA_LOGICAL } else { (value != 0.0) as i32 }
+                        if value.is_nan() {
+                            NA_LOGICAL
+                        } else {
+                            (value != 0.0) as i32
+                        }
                     }
                     SexpType::Complex => {
                         let value = values::complexes(object)[index];
@@ -424,7 +432,11 @@ pub unsafe fn coerce_atomic(
                 *slot = match source {
                     SexpType::Logical | SexpType::Integer => {
                         let value = values::ints(object)[index];
-                        if value == NA_INTEGER { NA_REAL } else { value as f64 }
+                        if value == NA_INTEGER {
+                            NA_REAL
+                        } else {
+                            value as f64
+                        }
                     }
                     SexpType::Complex => {
                         let value = values::complexes(object)[index];
@@ -457,15 +469,24 @@ pub unsafe fn coerce_atomic(
                     SexpType::Logical | SexpType::Integer => {
                         let value = values::ints(object)[index];
                         if value == NA_INTEGER {
-                            Rcomplex { r: NA_REAL, i: NA_REAL }
+                            Rcomplex {
+                                r: NA_REAL,
+                                i: NA_REAL,
+                            }
                         } else {
-                            Rcomplex { r: value as f64, i: 0.0 }
+                            Rcomplex {
+                                r: value as f64,
+                                i: 0.0,
+                            }
                         }
                     }
                     SexpType::Real => {
                         let value = values::reals(object)[index];
                         if is_na_real(value) {
-                            Rcomplex { r: NA_REAL, i: NA_REAL }
+                            Rcomplex {
+                                r: NA_REAL,
+                                i: NA_REAL,
+                            }
                         } else {
                             Rcomplex { r: value, i: 0.0 }
                         }
@@ -475,16 +496,25 @@ pub unsafe fn coerce_atomic(
                             Some(value) => value,
                             None => {
                                 warnings.na = true;
-                                Rcomplex { r: NA_REAL, i: NA_REAL }
+                                Rcomplex {
+                                    r: NA_REAL,
+                                    i: NA_REAL,
+                                }
                             }
                         },
-                        None => Rcomplex { r: NA_REAL, i: NA_REAL },
+                        None => Rcomplex {
+                            r: NA_REAL,
+                            i: NA_REAL,
+                        },
                     },
                     SexpType::Raw => Rcomplex {
                         r: values::raws(object)[index] as f64,
                         i: 0.0,
                     },
-                    _ => Rcomplex { r: NA_REAL, i: NA_REAL },
+                    _ => Rcomplex {
+                        r: NA_REAL,
+                        i: NA_REAL,
+                    },
                 };
             }
         }
@@ -500,11 +530,19 @@ pub unsafe fn coerce_atomic(
                 let value = match source {
                     SexpType::Logical | SexpType::Integer => {
                         let value = values::ints(object)[index];
-                        if value == NA_INTEGER { -1 } else { value as i64 }
+                        if value == NA_INTEGER {
+                            -1
+                        } else {
+                            value as i64
+                        }
                     }
                     SexpType::Real => {
                         let value = values::reals(object)[index];
-                        if value.is_nan() { -1 } else { value.trunc() as i64 }
+                        if value.is_nan() {
+                            -1
+                        } else {
+                            value.trunc() as i64
+                        }
                     }
                     SexpType::String => values::string_at(object, index)
                         .and_then(|text| parse_real(&text))
@@ -651,7 +689,10 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
         values::clear_attributes(copy);
         return Ok(copy);
     }
-    if matches!(kind, SexpType::List | SexpType::Expression) && result.is_object() && object.kind() != kind {
+    if matches!(kind, SexpType::List | SexpType::Expression)
+        && result.is_object()
+        && object.kind() != kind
+    {
         let names = values::get_attr(result, symbols().names);
         values::clear_attributes(result);
         if names != nil() {
@@ -664,82 +705,158 @@ pub unsafe fn as_vector(object: Sexp, mode: &str) -> R<Sexp> {
 // The builtins.
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("asCharacterFactor", 1, |call| unsafe { as_character_factor(call.arg(0)) }),
-    builtin("as.character", -1, |call| unsafe { as_type(call, SexpType::String) }).generic(Generic::Internal),
-    builtin("as.integer", -1, |call| unsafe { as_type(call, SexpType::Integer) }).generic(Generic::Internal),
-    builtin("as.double", -1, |call| unsafe { as_type(call, SexpType::Real) }).generic(Generic::Internal),
-    builtin("as.numeric", -1, |call| unsafe { as_type(call, SexpType::Real) }).generic(Generic::Internal),
-    builtin("as.logical", -1, |call| unsafe { as_type(call, SexpType::Logical) }).generic(Generic::Internal),
-    builtin("as.complex", -1, |call| unsafe { as_type(call, SexpType::Complex) }).generic(Generic::Internal),
+    internal("asCharacterFactor", 1, |call| unsafe {
+        as_character_factor(call.arg(0))
+    }),
+    builtin("as.character", -1, |call| unsafe {
+        as_type(call, SexpType::String)
+    })
+    .generic(Generic::Internal),
+    builtin("as.integer", -1, |call| unsafe {
+        as_type(call, SexpType::Integer)
+    })
+    .generic(Generic::Internal),
+    builtin("as.double", -1, |call| unsafe {
+        as_type(call, SexpType::Real)
+    })
+    .generic(Generic::Internal),
+    builtin("as.numeric", -1, |call| unsafe {
+        as_type(call, SexpType::Real)
+    })
+    .generic(Generic::Internal),
+    builtin("as.logical", -1, |call| unsafe {
+        as_type(call, SexpType::Logical)
+    })
+    .generic(Generic::Internal),
+    builtin("as.complex", -1, |call| unsafe {
+        as_type(call, SexpType::Complex)
+    })
+    .generic(Generic::Internal),
     builtin("as.raw", 1, |call| unsafe { as_type(call, SexpType::Raw) }).generic(Generic::Internal),
     internal("as.vector", 2, do_as_vector).generic(Generic::Internal),
     builtin("as.call", 1, do_as_call),
     internal("as.function.default", 2, do_as_function),
-    internal("typeof", 1, |call| unsafe { scalar_string(type_name(call.arg(0))) }),
+    internal("typeof", 1, |call| unsafe {
+        scalar_string(type_name(call.arg(0)))
+    }),
     internal("vector", 2, do_vector),
     builtin("storage.mode<-", 2, do_set_storage_mode),
     internal("is.vector", 2, do_is_vector),
-    builtin("is.null", 1, |call| unsafe { scalar_bool(call.arg(0) == nil()) }),
-    builtin("is.logical", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Logical) }),
-    builtin("is.integer", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Integer) }),
-    builtin("is.double", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Real) }),
-    builtin("is.complex", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Complex) }),
-    builtin("is.character", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::String) }),
-    builtin("is.symbol", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Symbol) }),
-    builtin("is.name", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Symbol) }),
-    builtin("is.environment", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Environment) }),
-    builtin("is.list", 1, |call| unsafe { {
-        scalar_bool(matches!(call.arg(0).kind(), SexpType::List | SexpType::Pairlist))
-    } }),
-    builtin("is.pairlist", 1, |call| unsafe { {
-        scalar_bool(matches!(call.arg(0).kind(), SexpType::Pairlist | SexpType::Nil))
-    } }),
-    builtin("is.expression", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Expression) }),
-    builtin("is.raw", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Raw) }),
-    builtin("is.object", 1, |call| unsafe { scalar_bool(call.arg(0).is_object()) }),
+    builtin("is.null", 1, |call| unsafe {
+        scalar_bool(call.arg(0) == nil())
+    }),
+    builtin("is.logical", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Logical)
+    }),
+    builtin("is.integer", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Integer)
+    }),
+    builtin("is.double", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Real)
+    }),
+    builtin("is.complex", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Complex)
+    }),
+    builtin("is.character", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::String)
+    }),
+    builtin("is.symbol", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Symbol)
+    }),
+    builtin("is.name", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Symbol)
+    }),
+    builtin("is.environment", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Environment)
+    }),
+    builtin("is.list", 1, |call| unsafe {
+        {
+            scalar_bool(matches!(
+                call.arg(0).kind(),
+                SexpType::List | SexpType::Pairlist
+            ))
+        }
+    }),
+    builtin("is.pairlist", 1, |call| unsafe {
+        {
+            scalar_bool(matches!(
+                call.arg(0).kind(),
+                SexpType::Pairlist | SexpType::Nil
+            ))
+        }
+    }),
+    builtin("is.expression", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Expression)
+    }),
+    builtin("is.raw", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Raw)
+    }),
+    builtin("is.object", 1, |call| unsafe {
+        scalar_bool(call.arg(0).is_object())
+    }),
     builtin("is.numeric", 1, do_is_numeric).generic(Generic::Internal),
-    builtin("is.matrix", 1, |call| unsafe { {
-        scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2))
-    } }),
-    builtin("is.array", 1, |call| unsafe { scalar_bool(values::dims(call.arg(0)).is_some()) }),
-    builtin("is.atomic", 1, |call| unsafe { {
-        scalar_bool(call.arg(0).kind().is_atomic())
-    } }),
-    builtin("is.recursive", 1, |call| unsafe { {
-        scalar_bool(matches!(
-            call.arg(0).kind(),
-            SexpType::List
-                | SexpType::Pairlist
-                | SexpType::Language
-                | SexpType::Closure
-                | SexpType::Environment
-                | SexpType::Expression
-                | SexpType::Special
-                | SexpType::Builtin
-                | SexpType::ExternalPtr
-                | SexpType::WeakRef
-                | SexpType::Object
-        ))
-    } }),
-    builtin("is.call", 1, |call| unsafe { scalar_bool(call.arg(0).kind() == SexpType::Language) }),
-    builtin("is.language", 1, |call| unsafe { {
-        scalar_bool(matches!(
-            call.arg(0).kind(),
-            SexpType::Symbol | SexpType::Language | SexpType::Expression
-        ))
-    } }),
-    builtin("is.function", 1, |call| unsafe { scalar_bool(values::is_function(call.arg(0))) }),
-    builtin("is.primitive", 1, |call| unsafe { {
-        scalar_bool(matches!(call.arg(0).kind(), SexpType::Builtin | SexpType::Special))
-    } }),
-    builtin("is.single", 1, |call| unsafe { Err(call.error("type \"single\" unimplemented in R")) }),
-    internal("is.builtin.internal", 1, |call| unsafe { {
-        let symbol = call.arg(0);
-        scalar_bool(
-            symbol.kind() == SexpType::Symbol
-                && crate::builtins::internal_function(symbol).is_some_and(|object| object.kind() == SexpType::Builtin),
-        )
-    } }),
+    builtin("is.matrix", 1, |call| unsafe {
+        { scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2)) }
+    }),
+    builtin("is.array", 1, |call| unsafe {
+        scalar_bool(values::dims(call.arg(0)).is_some())
+    }),
+    builtin("is.atomic", 1, |call| unsafe {
+        { scalar_bool(call.arg(0).kind().is_atomic()) }
+    }),
+    builtin("is.recursive", 1, |call| unsafe {
+        {
+            scalar_bool(matches!(
+                call.arg(0).kind(),
+                SexpType::List
+                    | SexpType::Pairlist
+                    | SexpType::Language
+                    | SexpType::Closure
+                    | SexpType::Environment
+                    | SexpType::Expression
+                    | SexpType::Special
+                    | SexpType::Builtin
+                    | SexpType::ExternalPtr
+                    | SexpType::WeakRef
+                    | SexpType::Object
+            ))
+        }
+    }),
+    builtin("is.call", 1, |call| unsafe {
+        scalar_bool(call.arg(0).kind() == SexpType::Language)
+    }),
+    builtin("is.language", 1, |call| unsafe {
+        {
+            scalar_bool(matches!(
+                call.arg(0).kind(),
+                SexpType::Symbol | SexpType::Language | SexpType::Expression
+            ))
+        }
+    }),
+    builtin("is.function", 1, |call| unsafe {
+        scalar_bool(values::is_function(call.arg(0)))
+    }),
+    builtin("is.primitive", 1, |call| unsafe {
+        {
+            scalar_bool(matches!(
+                call.arg(0).kind(),
+                SexpType::Builtin | SexpType::Special
+            ))
+        }
+    }),
+    builtin("is.single", 1, |call| unsafe {
+        Err(call.error("type \"single\" unimplemented in R"))
+    }),
+    internal("is.builtin.internal", 1, |call| unsafe {
+        {
+            let symbol = call.arg(0);
+            scalar_bool(
+                symbol.kind() == SexpType::Symbol
+                    && crate::builtins::internal_function(symbol)
+                        .is_some_and(|object| object.kind() == SexpType::Builtin),
+            )
+        }
+    }),
 ];
 
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
@@ -848,9 +965,8 @@ unsafe fn do_vector(call: &Call<'_>) -> R<Sexp> {
     let count = crate::subset::length_argument(call.arg(1))?;
     let kind = match mode.as_str() {
         "any" => SexpType::Logical,
-        mode => mode_type(mode).ok_or_else(|| {
-            call.error(format!("vector: cannot make a vector of mode '{mode}'."))
-        })?,
+        mode => mode_type(mode)
+            .ok_or_else(|| call.error(format!("vector: cannot make a vector of mode '{mode}'.")))?,
     };
     if kind == SexpType::Pairlist {
         let items = vec![(nil(), nil()); count];
@@ -881,9 +997,14 @@ unsafe fn do_is_vector(call: &Call<'_>) -> R<Sexp> {
     let kind = object.kind();
     let kind_matches = match mode.as_str() {
         "any" => kind.is_vector(),
-        "numeric" => matches!(kind, SexpType::Integer | SexpType::Real) && !values::inherits(object, "factor"),
+        "numeric" => {
+            matches!(kind, SexpType::Integer | SexpType::Real)
+                && !values::inherits(object, "factor")
+        }
         "name" | "symbol" => kind == SexpType::Symbol,
-        mode => kind.is_vector() && kind.name() == mode || (mode == "list" && kind == SexpType::List),
+        mode => {
+            kind.is_vector() && kind.name() == mode || (mode == "list" && kind == SexpType::List)
+        }
     };
     if !kind_matches {
         return scalar_bool(false);
@@ -928,7 +1049,11 @@ pub fn higher_type(left: SexpType, right: SexpType) -> SexpType {
             _ => 7,
         }
     }
-    if rank(left) >= rank(right) { left } else { right }
+    if rank(left) >= rank(right) {
+        left
+    } else {
+        right
+    }
 }
 
 pub unsafe fn na_of(kind: SexpType) -> R<Sexp> {
@@ -936,7 +1061,12 @@ pub unsafe fn na_of(kind: SexpType) -> R<Sexp> {
     match kind {
         SexpType::Logical | SexpType::Integer => values::ints_mut(result)[0] = NA_INTEGER,
         SexpType::Real => values::reals_mut(result)[0] = NA_REAL,
-        SexpType::Complex => values::complexes_mut(result)[0] = Rcomplex { r: NA_REAL, i: NA_REAL },
+        SexpType::Complex => {
+            values::complexes_mut(result)[0] = Rcomplex {
+                r: NA_REAL,
+                i: NA_REAL,
+            }
+        }
         SexpType::String => values::set_elt(result, 0, na_string()),
         _ => {}
     }

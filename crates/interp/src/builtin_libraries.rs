@@ -82,7 +82,11 @@ pub unsafe fn registered_routines(info: Sexp) -> R<Option<Sexp>> {
     let Some(package) = library_of(info) else {
         return Ok(None);
     };
-    let dll = match interp().builtin_libraries.iter().find(|(name, _)| *name == package) {
+    let dll = match interp()
+        .builtin_libraries
+        .iter()
+        .find(|(name, _)| *name == package)
+    {
         Some((_, path)) => dll_info(package, &path.clone())?,
         None => dll_info(package, package)?,
     };
@@ -93,8 +97,10 @@ pub unsafe fn registered_routines(info: Sexp) -> R<Option<Sexp>> {
         (RoutineKind::Fortran, "FortranRoutine"),
         (RoutineKind::External, "ExternalRoutine"),
     ] {
-        let routines: Vec<&(&str, RoutineKind, &str, i32)> =
-            ROUTINES.iter().filter(|routine| routine.0 == package && routine.1 == kind).collect();
+        let routines: Vec<&(&str, RoutineKind, &str, i32)> = ROUTINES
+            .iter()
+            .filter(|routine| routine.0 == package && routine.1 == kind)
+            .collect();
         let mut entries = Vec::with_capacity(routines.len());
         for routine in &routines {
             entries.push(native_symbol(routine, dll, class)?);
@@ -150,7 +156,10 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
             }
             continue;
         }
-        routine_args.push(Arg { tag: arg.tag, value: arg.value });
+        routine_args.push(Arg {
+            tag: arg.tag,
+            value: arg.value,
+        });
     }
     let routine = match first.value.kind() {
         SexpType::String => {
@@ -159,13 +168,14 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
             };
             let package = package.as_deref();
             let loaded = |routine: &&(&str, RoutineKind, &str, i32)| {
-                interp().builtin_libraries.iter().any(|(name, _)| *name == routine.0)
+                interp()
+                    .builtin_libraries
+                    .iter()
+                    .any(|(name, _)| *name == routine.0)
             };
-            match ROUTINES
-                .iter()
-                .filter(loaded)
-                .find(|routine| routine.2 == &*name && package.is_none_or(|package| package == routine.0))
-            {
+            match ROUTINES.iter().filter(loaded).find(|routine| {
+                routine.2 == &*name && package.is_none_or(|package| package == routine.0)
+            }) {
                 Some(routine) => routine,
                 None => return Ok(None),
             }
@@ -180,8 +190,15 @@ pub unsafe fn try_call(call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
         },
         _ => return Ok(None),
     };
-    let native = NativeCall { call, args: &routine_args, env };
-    if routine.3 >= 0 && matches!(routine.1, RoutineKind::Call) && routine.3 as usize != routine_args.len() {
+    let native = NativeCall {
+        call,
+        args: &routine_args,
+        env,
+    };
+    if routine.3 >= 0
+        && matches!(routine.1, RoutineKind::Call)
+        && routine.3 as usize != routine_args.len()
+    {
         return Err(native.error(format!(
             "Incorrect number of arguments ({}), expecting {} for '{}'",
             routine_args.len(),
@@ -206,7 +223,13 @@ pub unsafe fn c_result(call: &NativeCall<'_>, values_out: &[Sexp]) -> R<Sexp> {
         let names: Vec<String> = call
             .args
             .iter()
-            .map(|arg| if arg.tag.kind() == SexpType::Symbol { values::symbol_name(arg.tag).into_owned() } else { String::new() })
+            .map(|arg| {
+                if arg.tag.kind() == SexpType::Symbol {
+                    values::symbol_name(arg.tag).into_owned()
+                } else {
+                    String::new()
+                }
+            })
             .collect();
         let names = values::string_vector(&names)?;
         values::set_attr(result, symbols().names, names)?;
@@ -214,7 +237,14 @@ pub unsafe fn c_result(call: &NativeCall<'_>, values_out: &[Sexp]) -> R<Sexp> {
     Ok(result)
 }
 
-const PACKAGES: [&str; 6] = ["methods", "utils", "stats", "grDevices", "graphics", "tools"];
+const PACKAGES: [&str; 6] = [
+    "methods",
+    "utils",
+    "stats",
+    "grDevices",
+    "graphics",
+    "tools",
+];
 
 const LIBRARY_MARKER: &str = "ry builtin library";
 const ROUTINE_MARKER: &str = "ry builtin routine";
@@ -229,14 +259,20 @@ fn implementation(package: &str, name: &str) -> Option<NativeFn> {
         "graphics" => crate::graphics::GRAPHICS_ROUTINES,
         _ => &[],
     };
-    let found = table.iter().find(|(routine, _)| *routine == name).map(|(_, function)| *function);
+    let found = table
+        .iter()
+        .find(|(routine, _)| *routine == name)
+        .map(|(_, function)| *function);
     match package {
         "graphics" | "grDevices" => Some(found.unwrap_or(crate::graphics::no_devices)),
         _ => found,
     }
 }
 
-fn find(name: &str, package: Option<&str>) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
+fn find(
+    name: &str,
+    package: Option<&str>,
+) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
     ROUTINES
         .iter()
         .find(|routine| routine.2 == name && package.is_none_or(|package| package == routine.0))
@@ -249,16 +285,23 @@ unsafe fn library_of(info: Sexp) -> Option<&'static str> {
         SexpType::List => values::list_get(info, "info"),
         _ => return None,
     };
-    if pointer.kind() != SexpType::ExternalPtr || !is_marker(pointer.external_tag(), LIBRARY_MARKER) {
+    if pointer.kind() != SexpType::ExternalPtr || !is_marker(pointer.external_tag(), LIBRARY_MARKER)
+    {
         return None;
     }
     let package = values::first_string(pointer.external_protected())?;
-    PACKAGES.iter().find(|candidate| **candidate == &*package).copied()
+    PACKAGES
+        .iter()
+        .find(|candidate| **candidate == &*package)
+        .copied()
 }
 
 /// The routine a `RegisteredNativeSymbol` pointer refers to, if it is a builtin one.
-unsafe fn routine_of(address: Sexp) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
-    if address.kind() != SexpType::ExternalPtr || !is_marker(address.external_tag(), ROUTINE_MARKER) {
+unsafe fn routine_of(
+    address: Sexp,
+) -> Option<&'static (&'static str, RoutineKind, &'static str, i32)> {
+    if address.kind() != SexpType::ExternalPtr || !is_marker(address.external_tag(), ROUTINE_MARKER)
+    {
         return None;
     }
     let identity = address.external_protected();
@@ -284,7 +327,11 @@ unsafe fn dll_info(package: &str, path: &str) -> R<Sexp> {
     Ok(info)
 }
 
-unsafe fn native_symbol(routine: &(&str, RoutineKind, &str, i32), dll: Sexp, class: &str) -> R<Sexp> {
+unsafe fn native_symbol(
+    routine: &(&str, RoutineKind, &str, i32),
+    dll: Sexp,
+    class: &str,
+) -> R<Sexp> {
     let identity = values::string_vector(&[routine.0, routine.2])?;
     let marker = values::install(ROUTINE_MARKER)?;
     let address = crate::heap().alloc_external_ptr(std::ptr::null_mut(), marker, identity)?;
@@ -308,7 +355,12 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("methods", RoutineKind::Call, "R_clear_method_selection", 0),
     ("methods", RoutineKind::Call, "R_dummy_extern_place", 0),
     ("methods", RoutineKind::Call, "R_el_named", 2),
-    ("methods", RoutineKind::Call, "R_externalptr_prototype_object", 0),
+    (
+        "methods",
+        RoutineKind::Call,
+        "R_externalptr_prototype_object",
+        0,
+    ),
     ("methods", RoutineKind::Call, "R_getClassFromCache", 2),
     ("methods", RoutineKind::Call, "R_getGeneric", 4),
     ("methods", RoutineKind::Call, "R_get_slot", 2),

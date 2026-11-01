@@ -17,7 +17,6 @@ use crate::{
     runtime::{self, Activation, offset, outcome, reason, representation},
 };
 use cranelift_codegen::{
-
     ir::{
         AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, Type, Value,
         condcodes::{FloatCC, IntCC},
@@ -91,7 +90,9 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
             return Err(Refusal("Cranelift rejected the function"));
         }
         module.clear_context(&mut context);
-        module.finalize_definitions().map_err(|_| Refusal("Cranelift could not finalize the code"))?;
+        module
+            .finalize_definitions()
+            .map_err(|_| Refusal("Cranelift could not finalize the code"))?;
         let pointer = module.get_finalized_function(id);
         // SAFETY: the function was built with exactly this signature.
         Ok(unsafe { std::mem::transmute::<*const u8, Entry>(pointer) })
@@ -111,7 +112,10 @@ fn new_module() -> Result<JITModule, Refusal> {
         .map_err(|_| Refusal("this host has no Cranelift backend"))?
         .finish(settings::Flags::new(flags))
         .map_err(|_| Refusal("Cranelift could not configure the host"))?;
-    Ok(JITModule::new(JITBuilder::with_isa(isa, default_libcall_names())))
+    Ok(JITModule::new(JITBuilder::with_isa(
+        isa,
+        default_libcall_names(),
+    )))
 }
 
 /// A cold block that hands the activation back to the interpreter.
@@ -158,8 +162,17 @@ fn flags() -> MemFlagsData {
 }
 
 impl<'p, 'b> Translator<'p, 'b> {
-    fn new(plan: &'p Plan, code: Sexp, mut builder: FunctionBuilder<'b>, call_conv: CallConv) -> Translator<'p, 'b> {
-        let mut declare = |count: usize, ty: Type| (0..count).map(|_| builder.declare_var(ty)).collect::<Vec<_>>();
+    fn new(
+        plan: &'p Plan,
+        code: Sexp,
+        mut builder: FunctionBuilder<'b>,
+        call_conv: CallConv,
+    ) -> Translator<'p, 'b> {
+        let mut declare = |count: usize, ty: Type| {
+            (0..count)
+                .map(|_| builder.declare_var(ty))
+                .collect::<Vec<_>>()
+        };
         let integers = declare(plan.registers, I32);
         let doubles = declare(plan.registers, F64);
         let slot_integers = declare(plan.slots.len(), I32);
@@ -197,14 +210,31 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.append_block_params_for_function_params(entry);
         self.builder.switch_to_block(entry);
         self.activation = self.builder.block_params(entry)[0];
-        self.window = self.builder.ins().load(I64, flags(), self.activation, offset::REGISTERS);
-        self.loops = self.builder.ins().load(I64, flags(), self.activation, offset::LOOPS);
-        self.visible = self.builder.ins().load(I64, flags(), self.activation, offset::VISIBLE);
-        let entry_pc = self.builder.ins().load(I64, flags(), self.activation, offset::ENTRY_PC);
+        self.window = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::REGISTERS);
+        self.loops = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::LOOPS);
+        self.visible = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::VISIBLE);
+        let entry_pc = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.activation, offset::ENTRY_PC);
         let zero32 = self.builder.ins().iconst(I32, 0);
         let zero64 = self.builder.ins().iconst(I64, 0);
         let zero_double = self.builder.ins().f64const(0.0);
-        for variable in self.integers.iter().chain(&self.slot_integers).chain(&self.statuses) {
+        for variable in self
+            .integers
+            .iter()
+            .chain(&self.slot_integers)
+            .chain(&self.statuses)
+        {
             self.builder.def_var(*variable, zero32);
         }
         for variable in self.doubles.iter().chain(&self.slot_doubles) {
@@ -219,15 +249,25 @@ impl<'p, 'b> Translator<'p, 'b> {
             .iter()
             .map(|block| block.entry.as_ref().map(|_| self.builder.create_block()))
             .collect();
-        let start = self.labels.first().copied().flatten().ok_or(Refusal("the body has no reachable code"))?;
+        let start = self
+            .labels
+            .first()
+            .copied()
+            .flatten()
+            .ok_or(Refusal("the body has no reachable code"))?;
         // Dispatch on where execution starts: the top, or a loop header.
         let mut osr = Vec::new();
         for &header in &self.plan.loop_headers {
-            let Some(label) = self.labels[header] else { continue };
+            let Some(label) = self.labels[header] else {
+                continue;
+            };
             let pc = self.plan.insts[self.plan.blocks[header].start].pc;
             let enter = self.builder.create_block();
             let next = self.builder.create_block();
-            let here = self.builder.ins().icmp_imm_s(IntCC::Equal, entry_pc, pc as i64);
+            let here = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, entry_pc, pc as i64);
             self.builder.ins().brif(here, enter, &[], next, &[]);
             self.builder.switch_to_block(next);
             osr.push((enter, header, label));
@@ -244,13 +284,20 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.ins().return_(&[sentinel]);
 
         for index in 0..self.plan.blocks.len() {
-            let Some(label) = self.labels[index] else { continue };
+            let Some(label) = self.labels[index] else {
+                continue;
+            };
             self.builder.switch_to_block(label);
             let (start, end) = (self.plan.blocks[index].start, self.plan.blocks[index].end);
             for position in start..end {
                 let terminated = self.instruction(position)?;
                 if position + 1 == end && !terminated {
-                    let next = self.plan.insts.get(end).ok_or(Refusal("the body falls off its end"))?.pc;
+                    let next = self
+                        .plan
+                        .insts
+                        .get(end)
+                        .ok_or(Refusal("the body falls off its end"))?
+                        .pc;
                     let target = self.edge(position, next)?;
                     self.builder.ins().jump(target, &[]);
                     self.fill_edges()?;
@@ -266,14 +313,28 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     /// Enters at a loop header with tier 0's registers in the window and every variable in the
     /// environment, declining when a register's value does not have the type the loop assumes.
-    unsafe fn osr_entry(&mut self, header: usize, label: Label, declined: Label) -> Result<(), Refusal> {
+    unsafe fn osr_entry(
+        &mut self,
+        header: usize,
+        label: Label,
+        declined: Label,
+    ) -> Result<(), Refusal> {
         for index in 0..self.plan.loops {
-            let loop_index = self.builder.ins().load(I64, flags(), self.loops, (16 * index) as i32);
-            let count = self.builder.ins().load(I64, flags(), self.loops, (16 * index + 8) as i32);
+            let loop_index = self
+                .builder
+                .ins()
+                .load(I64, flags(), self.loops, (16 * index) as i32);
+            let count = self
+                .builder
+                .ins()
+                .load(I64, flags(), self.loops, (16 * index + 8) as i32);
             self.builder.def_var(self.loop_indexes[index], loop_index);
             self.builder.def_var(self.loop_counts[index], count);
         }
-        let entry = self.plan.blocks[header].entry.clone().ok_or(Refusal("an unreachable loop header"))?;
+        let entry = self.plan.blocks[header]
+            .entry
+            .clone()
+            .ok_or(Refusal("an unreachable loop header"))?;
         for (register, ty) in entry.registers.iter().enumerate() {
             if matches!(ty, Ty::Bottom | Ty::Boxed) {
                 continue;
@@ -305,7 +366,10 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::Constant { dst, value, ty } => {
                 match ty {
                     Ty::Int | Ty::Lgl => {
-                        let constant = self.builder.ins().iconst(I32, values::ints(value)[0] as i64);
+                        let constant = self
+                            .builder
+                            .ins()
+                            .iconst(I32, values::ints(value)[0] as i64);
                         self.builder.def_var(self.integers[dst], constant);
                     }
                     Ty::Dbl => {
@@ -320,7 +384,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                 }
                 self.set_visible(&before, true);
             }
-            Action::GetVar { dst, slot, load, forcing } => {
+            Action::GetVar {
+                dst,
+                slot,
+                load,
+                forcing,
+            } => {
                 if let Some(ty) = load {
                     self.load_slot(position, &before, slot, ty, forcing)?;
                 }
@@ -339,7 +408,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                     Ty::Bottom => Ty::Boxed,
                     ty => ty,
                 };
-                let value = if ty.is_unboxed() { self.use_register(src, ty) } else { self.load_register(src) };
+                let value = if ty.is_unboxed() {
+                    self.use_register(src, ty)
+                } else {
+                    self.load_register(src)
+                };
                 self.assign_slot(&before, slot, ty, value);
                 self.set_visible(&before, false);
             }
@@ -347,7 +420,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let pointer = self.builder.ins().iconst(I64, function.as_ptr() as i64);
                 self.store_register(dst, pointer);
             }
-            Action::Step { effect, objects, dst } => self.step(position, &before, effect, &objects, dst)?,
+            Action::Step {
+                effect,
+                objects,
+                dst,
+            } => self.step(position, &before, effect, &objects, dst)?,
             Action::Branch => {
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let label = self.edge(position, target)?;
@@ -358,7 +435,10 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::BranchUnlessBuiltin { function } => {
                 let value = self.load_register(function);
                 let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
-                let builtin = self.builder.ins().icmp_imm_s(IntCC::Equal, kind, SexpType::Builtin as i64);
+                let builtin =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, kind, SexpType::Builtin as i64);
                 let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
                 let taken = self.edge(position, target)?;
                 let next = self.next_pc(position)?;
@@ -375,7 +455,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let flag = &interp::unwind::INTERRUPT_REQUESTED as *const AtomicBool as i64;
                     let address = self.builder.ins().iconst(I64, flag);
                     let requested = self.builder.ins().uload8(I32, flags(), address, 0);
-                    let interrupted = self.deopt(pc, before.clone(), plan.live[position].clone(), reason::INTERRUPT);
+                    let interrupted = self.deopt(
+                        pc,
+                        before.clone(),
+                        plan.live[position].clone(),
+                        reason::INTERRUPT,
+                    );
                     let calm = self.builder.ins().icmp_imm_s(IntCC::Equal, requested, 0);
                     self.guard(calm, interrupted);
                 }
@@ -395,21 +480,43 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.fill_edges()?;
                 return Ok(true);
             }
-            Action::Arithmetic { arith, numeric, dst, left, right } => {
+            Action::Arithmetic {
+                arith,
+                numeric,
+                dst,
+                left,
+                right,
+            } => {
                 self.arithmetic(position, &before, arith, numeric, dst, left, right)?;
                 self.set_visible(&before, true);
             }
-            Action::Comparison { arith, numeric, dst, left, right } => {
+            Action::Comparison {
+                arith,
+                numeric,
+                dst,
+                left,
+                right,
+            } => {
                 let result = self.comparison(&before, arith, numeric, left, right);
                 self.builder.def_var(self.integers[dst], result);
                 self.set_visible(&before, true);
             }
-            Action::Intrinsic { intrinsic, dst, args, result } => {
+            Action::Intrinsic {
+                intrinsic,
+                dst,
+                args,
+                result,
+            } => {
                 self.intrinsic(position, &before, intrinsic, dst, &args, result)?;
                 self.set_visible(&before, true);
             }
             Action::Return { src } => {
-                let failed = self.deopt(pc, before.clone(), plan.live[position].clone(), reason::PENDING);
+                let failed = self.deopt(
+                    pc,
+                    before.clone(),
+                    plan.live[position].clone(),
+                    reason::PENDING,
+                );
                 self.flush_all(&before, failed);
                 let ty = before.registers[src];
                 let value = if ty.is_unboxed() {
@@ -432,7 +539,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let value = self.load_register(src);
                     if let Some(expected) = refine {
                         let fits = self.check(value, expected);
-                        let failed = self.deopt(pc, before.clone(), plan.live[position].clone(), reason::SPECULATION);
+                        let failed = self.deopt(
+                            pc,
+                            before.clone(),
+                            plan.live[position].clone(),
+                            reason::SPECULATION,
+                        );
                         self.guard(fits, failed);
                     }
                     value
@@ -445,7 +557,10 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::ForStep { index, src, slot } => {
                 let current = self.builder.use_var(self.loop_indexes[index]);
                 let count = self.builder.use_var(self.loop_counts[index]);
-                let done = self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, current, count);
+                let done = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::SignedGreaterThanOrEqual, current, count);
                 let target = jump_target(inst).ok_or(Refusal("a loop without an exit"))?;
                 let exit = self.edge(position, target)?;
                 let body = self.builder.create_block();
@@ -454,7 +569,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.switch_to_block(body);
                 let sequence = self.load_register(src);
                 let element_ty = before.registers[src].element();
-                let width = if matches!(element_ty, Ty::Int | Ty::Lgl) { 4 } else { 8 };
+                let width = if matches!(element_ty, Ty::Int | Ty::Lgl) {
+                    4
+                } else {
+                    8
+                };
                 let scaled = self.builder.ins().imul_imm_s(current, width);
                 let address = self.builder.ins().iadd(sequence, scaled);
                 let next_index = self.builder.ins().iadd_imm_s(current, 1);
@@ -481,14 +600,20 @@ impl<'p, 'b> Translator<'p, 'b> {
             Action::LogicLeft { dst, src, is_and } => {
                 let call = runtime_constant(self.code, inst.operands[2]);
                 let value = self.logical(position, &before, src, call, is_and, false)?;
-                let decided = self.builder.ins().icmp_imm_s(IntCC::Equal, value, if is_and { 0 } else { 1 });
+                let decided =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, value, if is_and { 0 } else { 1 });
                 let decided_block = self.builder.create_block();
                 let undecided_block = self.builder.create_block();
-                self.builder.ins().brif(decided, decided_block, &[], undecided_block, &[]);
+                self.builder
+                    .ins()
+                    .brif(decided, decided_block, &[], undecided_block, &[]);
                 self.builder.switch_to_block(decided_block);
                 self.builder.def_var(self.integers[dst], value);
                 self.set_visible(&before, true);
-                let target = jump_target(inst).ok_or(Refusal("a logic operator without a target"))?;
+                let target =
+                    jump_target(inst).ok_or(Refusal("a logic operator without a target"))?;
                 let label = self.edge(position, target)?;
                 self.builder.ins().jump(label, &[]);
                 self.fill_edges()?;
@@ -500,9 +625,16 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.fill_edges()?;
                 return Ok(true);
             }
-            Action::LogicRight { dst, left, right, is_and } => {
+            Action::LogicRight {
+                dst,
+                left,
+                right,
+                is_and,
+            } => {
                 if before.registers[left] != Ty::Lgl {
-                    return Err(Refusal("a logic operator whose left operand is not a logical scalar"));
+                    return Err(Refusal(
+                        "a logic operator whose left operand is not a logical scalar",
+                    ));
                 }
                 let call = runtime_constant(self.code, inst.operands[3]);
                 let left_value = self.builder.use_var(self.integers[left]);
@@ -511,8 +643,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let left_na = self.builder.ins().icmp(IntCC::Equal, left_value, na);
                 let right_na = self.builder.ins().icmp(IntCC::Equal, right_value, na);
                 let any_na = self.builder.ins().bor(left_na, right_na);
-                let (decisive, decided_value, otherwise) = if is_and { (0, 0, 1) } else { (1, 1, 0) };
-                let decides = self.builder.ins().icmp_imm_s(IntCC::Equal, right_value, decisive);
+                let (decisive, decided_value, otherwise) =
+                    if is_and { (0, 0, 1) } else { (1, 1, 0) };
+                let decides = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, right_value, decisive);
                 let decided_value = self.builder.ins().iconst(I32, decided_value);
                 let otherwise = self.builder.ins().iconst(I32, otherwise);
                 let undecided = self.builder.ins().select(any_na, na, otherwise);
@@ -520,7 +656,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.builder.def_var(self.integers[dst], result);
                 self.set_visible(&before, true);
             }
-            Action::SubAssign { dst, slot, index, value } => {
+            Action::SubAssign {
+                dst,
+                slot,
+                index,
+                value,
+            } => {
                 self.sub_assign(position, &before, dst, slot, index, value)?;
                 self.set_visible(&before, false);
             }
@@ -530,10 +671,22 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     // Steps: instructions tier 0 runs.
 
-    unsafe fn step(&mut self, position: usize, before: &State, effect: Effect, objects: &[usize], dst: Option<(usize, Ty)>) -> Result<(), Refusal> {
+    unsafe fn step(
+        &mut self,
+        position: usize,
+        before: &State,
+        effect: Effect,
+        objects: &[usize],
+        dst: Option<(usize, Ty)>,
+    ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         self.box_reads(position, before);
-        let failed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::PENDING);
+        let failed = self.deopt(
+            pc,
+            before.clone(),
+            self.plan.live[position].clone(),
+            reason::PENDING,
+        );
         let validate = match effect {
             Effect::Pure => self.builder.ins().iconst(I32, 0),
             Effect::Opaque => {
@@ -542,7 +695,12 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Effect::PureUnlessObserved => {
                 let mut any = self
-                    .call(runtime::jit_handlers_present as *const () as usize, &[], Some(I32), &[])
+                    .call(
+                        runtime::jit_handlers_present as *const () as usize,
+                        &[],
+                        Some(I32),
+                        &[],
+                    )
                     .ok_or(Refusal("a helper without a result"))?;
                 for &register in objects {
                     let value = self.load_register(register);
@@ -554,7 +712,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let join = self.builder.create_block();
                 self.builder.append_block_param(join, I32);
                 let zero = self.builder.ins().iconst(I32, 0);
-                self.builder.ins().brif(any, dispatching, &[], join, &[zero.into()]);
+                self.builder
+                    .ins()
+                    .brif(any, dispatching, &[], join, &[zero.into()]);
                 self.builder.switch_to_block(dispatching);
                 self.flush_all(before, failed);
                 let one = self.builder.ins().iconst(I32, 1);
@@ -566,16 +726,29 @@ impl<'p, 'b> Translator<'p, 'b> {
         let result = self.call_step(pc, validate)?;
         let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
         let next = self.next_pc(position)?;
-        let next_live = self.plan.live.get(position + 1).cloned().unwrap_or_default();
+        let next_live = self
+            .plan
+            .live
+            .get(position + 1)
+            .cloned()
+            .unwrap_or_default();
         let invalidated = self.deopt(next, after.clone(), next_live.clone(), reason::SPECULATION);
-        let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
+        let ok = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
         let continued = self.builder.create_block();
         let problem = self.builder.create_block();
         self.builder.ins().brif(ok, continued, &[], problem, &[]);
         self.builder.switch_to_block(problem);
         self.builder.set_cold_block(problem);
-        let errored = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::FAILED as i64);
-        self.builder.ins().brif(errored, failed, &[], invalidated, &[]);
+        let errored = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, outcome::FAILED as i64);
+        self.builder
+            .ins()
+            .brif(errored, failed, &[], invalidated, &[]);
         self.builder.switch_to_block(continued);
         match effect {
             Effect::Pure => {}
@@ -597,7 +770,14 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     /// Checks that the value an instruction left in `register` has type `ty` and unboxes it,
     /// deoptimizing to `next` otherwise.
-    unsafe fn refine(&mut self, register: usize, ty: Ty, next: usize, after: State, live: Vec<bool>) {
+    unsafe fn refine(
+        &mut self,
+        register: usize,
+        ty: Ty,
+        next: usize,
+        after: State,
+        live: Vec<bool>,
+    ) {
         if matches!(ty, Ty::Boxed | Ty::Bottom) {
             return;
         }
@@ -614,7 +794,11 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Boxes the unboxed registers the instruction at `position` reads, so tier 0 finds them.
     unsafe fn box_reads(&mut self, position: usize, before: &State) {
         for register in reads(&self.plan.insts[position]) {
-            let ty = before.registers.get(register).copied().unwrap_or(Ty::Bottom);
+            let ty = before
+                .registers
+                .get(register)
+                .copied()
+                .unwrap_or(Ty::Bottom);
             if ty.is_unboxed() {
                 let value = self.use_register(register, ty);
                 let boxed = self.box_value(ty, value);
@@ -628,14 +812,28 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// re-enters compiled code at the next loop back edge.
     fn hand_off(&mut self, position: usize, before: &State) {
         let pc = self.plan.insts[position].pc;
-        let handoff = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::HANDOFF);
+        let handoff = self.deopt(
+            pc,
+            before.clone(),
+            self.plan.live[position].clone(),
+            reason::HANDOFF,
+        );
         self.builder.ins().jump(handoff, &[]);
     }
 
     // Arithmetic.
 
     #[allow(clippy::too_many_arguments)]
-    unsafe fn arithmetic(&mut self, position: usize, before: &State, arith: Arith, numeric: Numeric, dst: usize, left: usize, right: usize) -> Result<(), Refusal> {
+    unsafe fn arithmetic(
+        &mut self,
+        position: usize,
+        before: &State,
+        arith: Arith,
+        numeric: Numeric,
+        dst: usize,
+        left: usize,
+        right: usize,
+    ) -> Result<(), Refusal> {
         let (left_ty, right_ty) = (before.registers[left], before.registers[right]);
         match numeric {
             Numeric::Int => {
@@ -675,7 +873,12 @@ impl<'p, 'b> Translator<'p, 'b> {
                     Arith::Multiply => self.builder.ins().fmul(a, b),
                     Arith::Divide => self.builder.ins().fdiv(a, b),
                     Arith::Power => self
-                        .call(runtime::jit_power as *const () as usize, &[F64, F64], Some(F64), &[a, b])
+                        .call(
+                            runtime::jit_power as *const () as usize,
+                            &[F64, F64],
+                            Some(F64),
+                            &[a, b],
+                        )
                         .ok_or(Refusal("a helper without a result"))?,
                     _ => return Err(Refusal("double arithmetic the JIT does not inline")),
                 };
@@ -685,7 +888,14 @@ impl<'p, 'b> Translator<'p, 'b> {
         Ok(())
     }
 
-    unsafe fn comparison(&mut self, before: &State, arith: Arith, numeric: Numeric, left: usize, right: usize) -> Value {
+    unsafe fn comparison(
+        &mut self,
+        before: &State,
+        arith: Arith,
+        numeric: Numeric,
+        left: usize,
+        right: usize,
+    ) -> Value {
         let (left_ty, right_ty) = (before.registers[left], before.registers[right]);
         let na = self.builder.ins().iconst(I32, NA_INTEGER as i64);
         let (flag, missing) = match numeric {
@@ -724,8 +934,19 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.builder.ins().select(missing, na, flag)
     }
 
-    unsafe fn intrinsic(&mut self, position: usize, before: &State, intrinsic: Intrinsic, dst: usize, args: &[usize], result: Ty) -> Result<(), Refusal> {
-        let types: Vec<Ty> = args.iter().map(|&register| before.registers[register]).collect();
+    unsafe fn intrinsic(
+        &mut self,
+        position: usize,
+        before: &State,
+        intrinsic: Intrinsic,
+        dst: usize,
+        args: &[usize],
+        result: Ty,
+    ) -> Result<(), Refusal> {
+        let types: Vec<Ty> = args
+            .iter()
+            .map(|&register| before.registers[register])
+            .collect();
         let na = self.builder.ins().iconst(I32, NA_INTEGER as i64);
         match intrinsic {
             Intrinsic::Element => {
@@ -735,14 +956,24 @@ impl<'p, 'b> Translator<'p, 'b> {
                     Ty::Int => {
                         let index = self.use_register(args[1], Ty::Int);
                         let index = self.builder.ins().sextend(I64, index);
-                        let positive = self.builder.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, index, 1);
-                        let within = self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, index, length);
+                        let positive = self.builder.ins().icmp_imm_s(
+                            IntCC::SignedGreaterThanOrEqual,
+                            index,
+                            1,
+                        );
+                        let within =
+                            self.builder
+                                .ins()
+                                .icmp(IntCC::SignedLessThanOrEqual, index, length);
                         (index, self.builder.ins().band(positive, within))
                     }
                     _ => {
                         let index = self.use_register(args[1], Ty::Dbl);
                         let one = self.builder.ins().f64const(1.0);
-                        let positive = self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, index, one);
+                        let positive =
+                            self.builder
+                                .ins()
+                                .fcmp(FloatCC::GreaterThanOrEqual, index, one);
                         let bound = self.builder.ins().fcvt_from_sint(F64, length);
                         let bound = self.builder.ins().fadd(bound, one);
                         let within = self.builder.ins().fcmp(FloatCC::LessThan, index, bound);
@@ -757,7 +988,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let join = self.builder.create_block();
                 self.builder.ins().brif(in_range, fast, &[], slow, &[]);
                 self.builder.switch_to_block(fast);
-                let width = if matches!(result, Ty::Int | Ty::Lgl) { 4 } else { 8 };
+                let width = if matches!(result, Ty::Int | Ty::Lgl) {
+                    4
+                } else {
+                    8
+                };
                 let offset = self.builder.ins().iadd_imm_s(index, -1);
                 let scaled = self.builder.ins().imul_imm_s(offset, width);
                 let address = self.builder.ins().iadd(vector, scaled);
@@ -788,8 +1023,17 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let vector = self.load_register(args[0]);
                     let length = self.builder.ins().load(I64, flags(), vector, LENGTH);
                     // Longer vectors have a double length; leave those to tier 0.
-                    let fits = self.builder.ins().icmp_imm_s(IntCC::SignedLessThanOrEqual, length, i32::MAX as i64);
-                    let failed = self.deopt(self.plan.insts[position].pc, before.clone(), self.plan.live[position].clone(), reason::SPECULATION);
+                    let fits = self.builder.ins().icmp_imm_s(
+                        IntCC::SignedLessThanOrEqual,
+                        length,
+                        i32::MAX as i64,
+                    );
+                    let failed = self.deopt(
+                        self.plan.insts[position].pc,
+                        before.clone(),
+                        self.plan.live[position].clone(),
+                        reason::SPECULATION,
+                    );
                     self.guard(fits, failed);
                     self.builder.ins().ireduce(I32, length)
                 };
@@ -823,8 +1067,14 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let (zero, missing) = if types[0] == Ty::Dbl {
                     let value = self.use_register(args[0], Ty::Dbl);
                     let zero_constant = self.builder.ins().f64const(0.0);
-                    let zero = self.builder.ins().fcmp(FloatCC::Equal, value, zero_constant);
-                    (zero, self.builder.ins().fcmp(FloatCC::Unordered, value, value))
+                    let zero = self
+                        .builder
+                        .ins()
+                        .fcmp(FloatCC::Equal, value, zero_constant);
+                    (
+                        zero,
+                        self.builder.ins().fcmp(FloatCC::Unordered, value, value),
+                    )
                 } else {
                     let value = self.use_register(args[0], types[0]);
                     let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
@@ -851,7 +1101,13 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let result = if intrinsic == Intrinsic::Sqrt {
                     self.builder.ins().sqrt(value)
                 } else {
-                    self.call(runtime::jit_log as *const () as usize, &[F64], Some(F64), &[value]).ok_or(Refusal("a helper without a result"))?
+                    self.call(
+                        runtime::jit_log as *const () as usize,
+                        &[F64],
+                        Some(F64),
+                        &[value],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?
                 };
                 self.builder.def_var(self.doubles[dst], result);
                 self.builder.ins().jump(join, &[]);
@@ -863,7 +1119,14 @@ impl<'p, 'b> Translator<'p, 'b> {
             Intrinsic::Exp | Intrinsic::Floor | Intrinsic::Ceiling => {
                 let value = self.as_double(args[0], types[0]);
                 let result = match intrinsic {
-                    Intrinsic::Exp => self.call(runtime::jit_exp as *const () as usize, &[F64], Some(F64), &[value]).ok_or(Refusal("a helper without a result"))?,
+                    Intrinsic::Exp => self
+                        .call(
+                            runtime::jit_exp as *const () as usize,
+                            &[F64],
+                            Some(F64),
+                            &[value],
+                        )
+                        .ok_or(Refusal("a helper without a result"))?,
                     Intrinsic::Floor => self.builder.ins().floor(value),
                     _ => self.builder.ins().ceil(value),
                 };
@@ -872,14 +1135,27 @@ impl<'p, 'b> Translator<'p, 'b> {
             Intrinsic::Modulo(Numeric::Int) | Intrinsic::IntegerDivide(Numeric::Int) => {
                 let a = self.use_register(args[0], types[0]);
                 let b = self.use_register(args[1], types[1]);
-                let helper = if matches!(intrinsic, Intrinsic::Modulo(_)) { runtime::jit_integer_modulo as *const () as usize } else { runtime::jit_integer_divide as *const () as usize };
-                let result = self.call(helper, &[I32, I32], Some(I32), &[a, b]).ok_or(Refusal("a helper without a result"))?;
+                let helper = if matches!(intrinsic, Intrinsic::Modulo(_)) {
+                    runtime::jit_integer_modulo as *const () as usize
+                } else {
+                    runtime::jit_integer_divide as *const () as usize
+                };
+                let result = self
+                    .call(helper, &[I32, I32], Some(I32), &[a, b])
+                    .ok_or(Refusal("a helper without a result"))?;
                 self.builder.def_var(self.integers[dst], result);
             }
             Intrinsic::Modulo(Numeric::Dbl) => {
                 let a = self.as_double(args[0], types[0]);
                 let b = self.as_double(args[1], types[1]);
-                let result = self.call(runtime::jit_real_modulo as *const () as usize, &[F64, F64], Some(F64), &[a, b]).ok_or(Refusal("a helper without a result"))?;
+                let result = self
+                    .call(
+                        runtime::jit_real_modulo as *const () as usize,
+                        &[F64, F64],
+                        Some(F64),
+                        &[a, b],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
                 self.builder.def_var(self.doubles[dst], result);
             }
             Intrinsic::IntegerDivide(Numeric::Dbl) => {
@@ -897,27 +1173,54 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     /// The truth of `if`'s condition as a Cranelift boolean, deoptimizing with the error for
     /// `NA` and anything else tier 0 rejects.
-    unsafe fn condition(&mut self, position: usize, before: &State, src: usize, call: Sexp) -> Result<Value, Refusal> {
+    unsafe fn condition(
+        &mut self,
+        position: usize,
+        before: &State,
+        src: usize,
+        call: Sexp,
+    ) -> Result<Value, Refusal> {
         let ty = before.registers[src];
         let pc = self.plan.insts[position].pc;
-        let failed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::PENDING);
+        let failed = self.deopt(
+            pc,
+            before.clone(),
+            self.plan.live[position].clone(),
+            reason::PENDING,
+        );
         let (truth, valid) = match ty {
             Ty::Int | Ty::Lgl => {
                 let value = self.use_register(src, ty);
                 let truth = self.builder.ins().icmp_imm_s(IntCC::NotEqual, value, 0);
-                (truth, self.builder.ins().icmp_imm_s(IntCC::NotEqual, value, NA_INTEGER as i64))
+                (
+                    truth,
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::NotEqual, value, NA_INTEGER as i64),
+                )
             }
             Ty::Dbl => {
                 let value = self.use_register(src, ty);
                 let zero = self.builder.ins().f64const(0.0);
-                let truth = self.builder.ins().fcmp(FloatCC::OrderedNotEqual, value, zero);
-                (truth, self.builder.ins().fcmp(FloatCC::Ordered, value, value))
+                let truth = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::OrderedNotEqual, value, zero);
+                (
+                    truth,
+                    self.builder.ins().fcmp(FloatCC::Ordered, value, value),
+                )
             }
             _ => {
                 let value = self.load_register(src);
                 let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
                 let result = self
-                    .call(runtime::jit_condition as *const () as usize, &[I64, I64, I64], Some(I32), &[self.activation, value, call])
+                    .call(
+                        runtime::jit_condition as *const () as usize,
+                        &[I64, I64, I64],
+                        Some(I32),
+                        &[self.activation, value, call],
+                    )
                     .ok_or(Refusal("a helper without a result"))?;
                 let valid = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 2);
                 self.guard(valid, failed);
@@ -934,14 +1237,27 @@ impl<'p, 'b> Translator<'p, 'b> {
         let boxed = self.box_value(ty, value);
         self.store_register(src, boxed);
         let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
-        self.call(runtime::jit_condition as *const () as usize, &[I64, I64, I64], Some(I32), &[self.activation, boxed, call]);
+        self.call(
+            runtime::jit_condition as *const () as usize,
+            &[I64, I64, I64],
+            Some(I32),
+            &[self.activation, boxed, call],
+        );
         self.builder.ins().jump(failed, &[]);
         self.builder.switch_to_block(fine);
         Ok(truth)
     }
 
     /// An operand of `&&` or `||` as a logical `i32`.
-    unsafe fn logical(&mut self, position: usize, before: &State, src: usize, call: Sexp, is_and: bool, right: bool) -> Result<Value, Refusal> {
+    unsafe fn logical(
+        &mut self,
+        position: usize,
+        before: &State,
+        src: usize,
+        call: Sexp,
+        is_and: bool,
+        right: bool,
+    ) -> Result<Value, Refusal> {
         let ty = before.registers[src];
         let na = self.builder.ins().iconst(I32, NA_INTEGER as i64);
         Ok(match ty {
@@ -957,19 +1273,32 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let value = self.use_register(src, ty);
                 let missing = self.builder.ins().fcmp(FloatCC::Unordered, value, value);
                 let zero = self.builder.ins().f64const(0.0);
-                let truth = self.builder.ins().fcmp(FloatCC::OrderedNotEqual, value, zero);
+                let truth = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::OrderedNotEqual, value, zero);
                 let truth = self.builder.ins().uextend(I32, truth);
                 self.builder.ins().select(missing, na, truth)
             }
             _ => {
                 let pc = self.plan.insts[position].pc;
-                let failed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::PENDING);
+                let failed = self.deopt(
+                    pc,
+                    before.clone(),
+                    self.plan.live[position].clone(),
+                    reason::PENDING,
+                );
                 let value = self.load_register(src);
                 let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
                 let is_and = self.builder.ins().iconst(I32, is_and as i64);
                 let right = self.builder.ins().iconst(I32, right as i64);
                 let result = self
-                    .call(runtime::jit_logic as *const () as usize, &[I64, I64, I64, I32, I32], Some(I32), &[self.activation, value, call, is_and, right])
+                    .call(
+                        runtime::jit_logic as *const () as usize,
+                        &[I64, I64, I64, I32, I32],
+                        Some(I32),
+                        &[self.activation, value, call, is_and, right],
+                    )
                     .ok_or(Refusal("a helper without a result"))?;
                 let valid = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 2);
                 self.guard(valid, failed);
@@ -980,7 +1309,15 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     // Element assignment.
 
-    unsafe fn sub_assign(&mut self, position: usize, before: &State, dst: usize, slot: usize, index: usize, value: usize) -> Result<(), Refusal> {
+    unsafe fn sub_assign(
+        &mut self,
+        position: usize,
+        before: &State,
+        dst: usize,
+        slot: usize,
+        index: usize,
+        value: usize,
+    ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         let target = before.slots[slot].ty;
         let (index_ty, value_ty) = (before.registers[index], before.registers[value]);
@@ -998,13 +1335,25 @@ impl<'p, 'b> Translator<'p, 'b> {
             self.builder.switch_to_block(load);
             let slot_constant = iconst(&mut self.builder, slot);
             let result = self
-                .call(runtime::jit_load_slot as *const () as usize, &[I64, I64], Some(I32), &[self.activation, slot_constant])
+                .call(
+                    runtime::jit_load_slot as *const () as usize,
+                    &[I64, I64],
+                    Some(I32),
+                    &[self.activation, slot_constant],
+                )
                 .ok_or(Refusal("a helper without a result"))?;
-            let error = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
+            let error =
+                self.builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
             let not_error = self.builder.create_block();
             self.builder.ins().brif(error, failed, &[], not_error, &[]);
             self.builder.switch_to_block(not_error);
-            let invalid = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
+            let invalid = self.builder.ins().icmp_imm_s(
+                IntCC::Equal,
+                result,
+                outcome::LOAD_INVALIDATED as i64,
+            );
             let valid = self.builder.ins().bxor_imm_u(invalid, 1);
             self.guard(valid, mismatch);
             let vector = self.load_slot_cell(slot);
@@ -1020,17 +1369,29 @@ impl<'p, 'b> Translator<'p, 'b> {
             Ty::Int => {
                 let index_value = self.use_register(index, Ty::Int);
                 let index_value = self.builder.ins().sextend(I64, index_value);
-                let positive = self.builder.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, index_value, 1);
-                let within = self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, index_value, length);
+                let positive =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, index_value, 1);
+                let within =
+                    self.builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThanOrEqual, index_value, length);
                 (index_value, self.builder.ins().band(positive, within))
             }
             _ => {
                 let index_value = self.use_register(index, Ty::Dbl);
                 let one = self.builder.ins().f64const(1.0);
-                let positive = self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, index_value, one);
+                let positive =
+                    self.builder
+                        .ins()
+                        .fcmp(FloatCC::GreaterThanOrEqual, index_value, one);
                 let bound = self.builder.ins().fcvt_from_sint(F64, length);
                 let bound = self.builder.ins().fadd(bound, one);
-                let within = self.builder.ins().fcmp(FloatCC::LessThan, index_value, bound);
+                let within = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::LessThan, index_value, bound);
                 let in_range = self.builder.ins().band(positive, within);
                 let safe = self.builder.ins().select(in_range, index_value, one);
                 (self.builder.ins().fcvt_to_sint(I64, safe), in_range)
@@ -1043,20 +1404,36 @@ impl<'p, 'b> Translator<'p, 'b> {
 
         self.builder.switch_to_block(fast);
         let status = self.builder.use_var(self.statuses[slot]);
-        let enclosing = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_ENCLOSING);
+        let enclosing =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_ENCLOSING);
         let count = self.builder.ins().uload16(I32, flags(), vector, REFCOUNT);
-        let shared_count = self.builder.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, count, 1);
+        let shared_count = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedGreaterThan, count, 1);
         let shared = self.builder.ins().bor(enclosing, shared_count);
         let copy = self.builder.create_block();
         let store = self.builder.create_block();
         self.builder.append_block_param(store, I64);
-        self.builder.ins().brif(shared, copy, &[], store, &[vector.into()]);
+        self.builder
+            .ins()
+            .brif(shared, copy, &[], store, &[vector.into()]);
         self.builder.switch_to_block(copy);
-        let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+        let dirty = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
         let dirty = self.builder.ins().uextend(I32, dirty);
         let slot_constant = iconst(&mut self.builder, slot);
         let fresh = self
-            .call(runtime::jit_duplicate as *const () as usize, &[I64, I64, I32], Some(I64), &[self.activation, slot_constant, dirty])
+            .call(
+                runtime::jit_duplicate as *const () as usize,
+                &[I64, I64, I32],
+                Some(I64),
+                &[self.activation, slot_constant, dirty],
+            )
             .ok_or(Refusal("a helper without a result"))?;
         let copied = self.builder.ins().icmp_imm_s(IntCC::NotEqual, fresh, 0);
         self.guard(copied, failed);
@@ -1079,7 +1456,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 let address = self.builder.ins().iadd(vector, scaled);
                 self.builder.ins().store(flags(), element, address, DATA);
             }
-            _ => return Err(Refusal("an element assignment into a vector of unknown type")),
+            _ => {
+                return Err(Refusal(
+                    "an element assignment into a vector of unknown type",
+                ));
+            }
         }
         self.builder.ins().jump(join, &[]);
 
@@ -1091,7 +1472,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         self.box_reads(position, before);
         let zero = self.builder.ins().iconst(I32, 0);
         let result = self.call_step(pc, zero)?;
-        let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
+        let ok = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
         self.guard(ok, failed);
         let unloaded = self.builder.ins().iconst(I32, 0);
         self.builder.def_var(self.statuses[slot], unloaded);
@@ -1110,7 +1494,14 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Loads a slot whose runtime status may be "not loaded", checking the value has type `ty`.
     /// A `forcing` load may evaluate a default argument in this frame, so the variables are
     /// written back before it and forgotten after it.
-    unsafe fn load_slot(&mut self, position: usize, before: &State, slot: usize, ty: Ty, forcing: bool) -> Result<(), Refusal> {
+    unsafe fn load_slot(
+        &mut self,
+        position: usize,
+        before: &State,
+        slot: usize,
+        ty: Ty,
+        forcing: bool,
+    ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         let live = self.plan.live[position].clone();
         let failed = self.deopt(pc, before.clone(), live.clone(), reason::PENDING);
@@ -1131,13 +1522,24 @@ impl<'p, 'b> Translator<'p, 'b> {
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
         let result = self
-            .call(runtime::jit_load as *const () as usize, &[I64, I64, I64], Some(I32), &[self.activation, pc_constant, slot_constant])
+            .call(
+                runtime::jit_load as *const () as usize,
+                &[I64, I64, I64],
+                Some(I32),
+                &[self.activation, pc_constant, slot_constant],
+            )
             .ok_or(Refusal("a helper without a result"))?;
-        let error = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
+        let error =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_FAILED as i64);
         let not_error = self.builder.create_block();
         self.builder.ins().brif(error, failed, &[], not_error, &[]);
         self.builder.switch_to_block(not_error);
-        let invalid = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
+        let invalid =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
         let valid = self.builder.ins().bxor_imm_u(invalid, 1);
         self.guard(valid, mismatch);
         if forcing {
@@ -1170,11 +1572,15 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// was dirty and boxed, after counting the new one, since the two may be the same object.
     unsafe fn assign_slot(&mut self, before: &State, slot: usize, ty: Ty, value: Value) {
         let old = before.slots[slot];
-        let release = (!old.ty.is_unboxed() && old.ty != Ty::Bottom && old.may_be(status::DIRTY)).then(|| {
-            let status = self.builder.use_var(self.statuses[slot]);
-            let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
-            (self.load_slot_cell(slot), dirty)
-        });
+        let release = (!old.ty.is_unboxed() && old.ty != Ty::Bottom && old.may_be(status::DIRTY))
+            .then(|| {
+                let status = self.builder.use_var(self.statuses[slot]);
+                let dirty =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+                (self.load_slot_cell(slot), dirty)
+            });
         match ty {
             Ty::Int | Ty::Lgl => self.builder.def_var(self.slot_integers[slot], value),
             Ty::Dbl => self.builder.def_var(self.slot_doubles[slot], value),
@@ -1203,7 +1609,10 @@ impl<'p, 'b> Translator<'p, 'b> {
             return;
         }
         let status = self.builder.use_var(self.statuses[slot]);
-        let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+        let dirty = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
         let flush = self.builder.create_block();
         let done = self.builder.create_block();
         self.builder.ins().brif(dirty, flush, &[], done, &[]);
@@ -1221,19 +1630,31 @@ impl<'p, 'b> Translator<'p, 'b> {
         let (kind, bits) = match ty {
             Ty::Int | Ty::Lgl => {
                 let value = self.builder.use_var(self.slot_integers[slot]);
-                let kind = if ty == Ty::Int { representation::INTEGER } else { representation::LOGICAL };
+                let kind = if ty == Ty::Int {
+                    representation::INTEGER
+                } else {
+                    representation::LOGICAL
+                };
                 (kind, self.builder.ins().sextend(I64, value))
             }
             Ty::Dbl => {
                 let value = self.builder.use_var(self.slot_doubles[slot]);
-                (representation::DOUBLE, self.builder.ins().bitcast(I64, MemFlagsData::new(), value))
+                (
+                    representation::DOUBLE,
+                    self.builder.ins().bitcast(I64, MemFlagsData::new(), value),
+                )
             }
             _ => (representation::BOXED, self.builder.ins().iconst(I64, 0)),
         };
         let slot_constant = iconst(&mut self.builder, slot);
         let kind = self.builder.ins().iconst(I32, kind as i64);
-        self.call(runtime::jit_flush as *const () as usize, &[I64, I64, I32, I64], Some(I32), &[self.activation, slot_constant, kind, bits])
-            .unwrap_or(kind)
+        self.call(
+            runtime::jit_flush as *const () as usize,
+            &[I64, I64, I32, I64],
+            Some(I32),
+            &[self.activation, slot_constant, kind, bits],
+        )
+        .unwrap_or(kind)
     }
 
     unsafe fn forget_slots(&mut self) {
@@ -1253,18 +1674,36 @@ impl<'p, 'b> Translator<'p, 'b> {
             .find(|(pc, _)| *pc == target)
             .map(|(_, state)| state.clone())
             .ok_or(Refusal("an edge the analysis did not see"))?;
-        let block = *self.plan.block_at.get(&target).ok_or(Refusal("a jump into an instruction"))?;
+        let block = *self
+            .plan
+            .block_at
+            .get(&target)
+            .ok_or(Refusal("a jump into an instruction"))?;
         let label = self.labels[block].ok_or(Refusal("a jump to unreachable code"))?;
-        let entry = self.plan.blocks[block].entry.as_ref().ok_or(Refusal("a jump to unreachable code"))?;
-        let registers = state.registers.iter().zip(&entry.registers).any(|(from, to)| from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed());
+        let entry = self.plan.blocks[block]
+            .entry
+            .as_ref()
+            .ok_or(Refusal("a jump to unreachable code"))?;
+        let registers = state
+            .registers
+            .iter()
+            .zip(&entry.registers)
+            .any(|(from, to)| from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed());
         let slots = state.slots.iter().zip(&entry.slots).any(|(from, to)| {
-            from.ty.is_unboxed() && from.may_be(status::LOADED) && to.ty != Ty::Bottom && !to.ty.is_unboxed()
+            from.ty.is_unboxed()
+                && from.may_be(status::LOADED)
+                && to.ty != Ty::Bottom
+                && !to.ty.is_unboxed()
         });
         if !registers && !slots {
             return Ok(label);
         }
         let converting = self.builder.create_block();
-        self.edges.push(PendingEdge { label: converting, state, target: block });
+        self.edges.push(PendingEdge {
+            label: converting,
+            state,
+            target: block,
+        });
         Ok(converting)
     }
 
@@ -1272,8 +1711,17 @@ impl<'p, 'b> Translator<'p, 'b> {
         let edges = std::mem::take(&mut self.edges);
         for edge in edges {
             self.builder.switch_to_block(edge.label);
-            let entry = self.plan.blocks[edge.target].entry.clone().ok_or(Refusal("a jump to unreachable code"))?;
-            for (register, (from, to)) in edge.state.registers.iter().zip(&entry.registers).enumerate() {
+            let entry = self.plan.blocks[edge.target]
+                .entry
+                .clone()
+                .ok_or(Refusal("a jump to unreachable code"))?;
+            for (register, (from, to)) in edge
+                .state
+                .registers
+                .iter()
+                .zip(&entry.registers)
+                .enumerate()
+            {
                 if from.is_unboxed() && *to != Ty::Bottom && !to.is_unboxed() {
                     let value = self.use_register(register, *from);
                     let boxed = self.box_value(*from, value);
@@ -1281,7 +1729,11 @@ impl<'p, 'b> Translator<'p, 'b> {
                 }
             }
             for (slot, (from, to)) in edge.state.slots.iter().zip(&entry.slots).enumerate() {
-                if from.ty.is_unboxed() && from.may_be(status::LOADED) && to.ty != Ty::Bottom && !to.ty.is_unboxed() {
+                if from.ty.is_unboxed()
+                    && from.may_be(status::LOADED)
+                    && to.ty != Ty::Bottom
+                    && !to.ty.is_unboxed()
+                {
                     self.box_slot(slot, from.ty);
                 }
             }
@@ -1302,7 +1754,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         let value = self.use_slot(slot, ty);
         let boxed = self.box_value(ty, value);
         self.store_slot_cell(slot, boxed);
-        let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+        let dirty = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
         self.increment_if(boxed, dirty);
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
@@ -1310,7 +1765,13 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     fn deopt(&mut self, pc: usize, state: State, live: Vec<bool>, why: i32) -> Label {
         let label = self.builder.create_block();
-        self.deopts.push(Deopt { label, pc, state, live, why });
+        self.deopts.push(Deopt {
+            label,
+            pc,
+            state,
+            live,
+            why,
+        });
         label
     }
 
@@ -1330,7 +1791,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                 continue;
             }
             let status = self.builder.use_var(self.statuses[slot]);
-            let dirty = self.builder.ins().icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+            let dirty = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
             let flush = self.builder.create_block();
             let done = self.builder.create_block();
             self.builder.ins().brif(dirty, flush, &[], done, &[]);
@@ -1345,12 +1809,21 @@ impl<'p, 'b> Translator<'p, 'b> {
         for index in 0..self.plan.loops {
             let value = self.builder.use_var(self.loop_indexes[index]);
             let count = self.builder.use_var(self.loop_counts[index]);
-            self.builder.ins().store(flags(), value, self.loops, (16 * index) as i32);
-            self.builder.ins().store(flags(), count, self.loops, (16 * index + 8) as i32);
+            self.builder
+                .ins()
+                .store(flags(), value, self.loops, (16 * index) as i32);
+            self.builder
+                .ins()
+                .store(flags(), count, self.loops, (16 * index + 8) as i32);
         }
         let pc = iconst(&mut self.builder, deopt.pc);
         let why = self.builder.ins().iconst(I32, deopt.why as i64);
-        let result = self.call(runtime::jit_deopt as *const () as usize, &[I64, I64, I32], Some(I64), &[self.activation, pc, why]);
+        let result = self.call(
+            runtime::jit_deopt as *const () as usize,
+            &[I64, I64, I32],
+            Some(I64),
+            &[self.activation, pc, why],
+        );
         let result = result.unwrap_or(pc);
         self.builder.ins().return_(&[result]);
     }
@@ -1362,7 +1835,11 @@ impl<'p, 'b> Translator<'p, 'b> {
     }
 
     fn next_pc(&self, position: usize) -> Result<usize, Refusal> {
-        self.plan.insts.get(position + 1).map(|inst| inst.pc).ok_or(Refusal("the body falls off its end"))
+        self.plan
+            .insts
+            .get(position + 1)
+            .map(|inst| inst.pc)
+            .ok_or(Refusal("the body falls off its end"))
     }
 
     fn after(&self, position: usize) -> Result<State, Refusal> {
@@ -1393,19 +1870,33 @@ impl<'p, 'b> Translator<'p, 'b> {
     // Values.
 
     fn load_register(&mut self, register: usize) -> Value {
-        self.builder.ins().load(I64, flags(), self.window, (8 * register) as i32)
+        self.builder
+            .ins()
+            .load(I64, flags(), self.window, (8 * register) as i32)
     }
 
     fn store_register(&mut self, register: usize, value: Value) {
-        self.builder.ins().store(flags(), value, self.window, (8 * register) as i32);
+        self.builder
+            .ins()
+            .store(flags(), value, self.window, (8 * register) as i32);
     }
 
     fn load_slot_cell(&mut self, slot: usize) -> Value {
-        self.builder.ins().load(I64, flags(), self.window, (8 * (self.plan.registers + slot)) as i32)
+        self.builder.ins().load(
+            I64,
+            flags(),
+            self.window,
+            (8 * (self.plan.registers + slot)) as i32,
+        )
     }
 
     fn store_slot_cell(&mut self, slot: usize, value: Value) {
-        self.builder.ins().store(flags(), value, self.window, (8 * (self.plan.registers + slot)) as i32);
+        self.builder.ins().store(
+            flags(),
+            value,
+            self.window,
+            (8 * (self.plan.registers + slot)) as i32,
+        );
     }
 
     fn use_register(&mut self, register: usize, ty: Ty) -> Value {
@@ -1435,7 +1926,10 @@ impl<'p, 'b> Translator<'p, 'b> {
         if ty == Ty::Dbl {
             return value;
         }
-        let missing = self.builder.ins().icmp_imm_s(IntCC::Equal, value, NA_INTEGER as i64);
+        let missing = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, value, NA_INTEGER as i64);
         let converted = self.builder.ins().fcvt_from_sint(F64, value);
         let na = self.builder.ins().f64const(Ieee64::with_bits(NA_REAL_BITS));
         self.builder.ins().select(missing, na, converted)
@@ -1444,7 +1938,12 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Whether the object `value` points to has type `ty`.
     fn check(&mut self, value: Value, ty: Ty) -> Value {
         let (kind, scalar) = match ty {
-            Ty::Fun(function) => return self.builder.ins().icmp_imm_s(IntCC::Equal, value, function.as_ptr() as i64),
+            Ty::Fun(function) => {
+                return self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, value, function.as_ptr() as i64);
+            }
             Ty::Int => (SexpType::Integer, true),
             Ty::Dbl => (SexpType::Real, true),
             Ty::Lgl => (SexpType::Logical, true),
@@ -1455,9 +1954,15 @@ impl<'p, 'b> Translator<'p, 'b> {
             Ty::Boxed | Ty::Bottom => return self.builder.ins().iconst(I8, 1),
         };
         let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
-        let mut fits = self.builder.ins().icmp_imm_s(IntCC::Equal, actual, kind as i64);
+        let mut fits = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, actual, kind as i64);
         let attributes = self.builder.ins().load(I64, flags(), value, ATTRIB);
-        let plain = self.builder.ins().icmp_imm_s(IntCC::Equal, attributes, self.nil);
+        let plain = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, attributes, self.nil);
         fits = self.builder.ins().band(fits, plain);
         let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
         let altrep = self.builder.ins().band_imm_u(bits, ALTREP_FLAG);
@@ -1482,7 +1987,8 @@ impl<'p, 'b> Translator<'p, 'b> {
             Ty::Dbl => (runtime::jit_box_double as *const () as usize, F64),
             _ => (runtime::jit_box_logical as *const () as usize, I32),
         };
-        self.call(helper, &[I64, param], Some(I64), &[self.activation, value]).unwrap_or(value)
+        self.call(helper, &[I64, param], Some(I64), &[self.activation, value])
+            .unwrap_or(value)
     }
 
     fn increment(&mut self, value: Value) {
@@ -1493,40 +1999,63 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Counts a reference to `value` when `condition` holds, saturating like the heap does.
     fn increment_if(&mut self, value: Value, condition: Value) {
         let count = self.builder.ins().uload16(I32, flags(), value, REFCOUNT);
-        let saturated = self.builder.ins().icmp_imm_s(IntCC::Equal, count, REFCOUNT_MAX as i64);
+        let saturated = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, count, REFCOUNT_MAX as i64);
         let not_saturated = self.builder.ins().bxor_imm_u(saturated, 1);
         let counting = self.builder.ins().band(condition, not_saturated);
         let raised = self.builder.ins().iadd_imm_s(count, 1);
         let new_count = self.builder.ins().select(counting, raised, count);
-        self.builder.ins().istore16(flags(), new_count, value, REFCOUNT);
+        self.builder
+            .ins()
+            .istore16(flags(), new_count, value, REFCOUNT);
     }
 
     fn decrement_if(&mut self, value: Value, condition: Value) {
         let count = self.builder.ins().uload16(I32, flags(), value, REFCOUNT);
-        let saturated = self.builder.ins().icmp_imm_s(IntCC::Equal, count, REFCOUNT_MAX as i64);
+        let saturated = self
+            .builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, count, REFCOUNT_MAX as i64);
         let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 0);
         let stuck = self.builder.ins().bor(saturated, zero);
         let free = self.builder.ins().bxor_imm_u(stuck, 1);
         let counting = self.builder.ins().band(condition, free);
         let lowered = self.builder.ins().iadd_imm_s(count, -1);
         let new_count = self.builder.ins().select(counting, lowered, count);
-        self.builder.ins().istore16(flags(), new_count, value, REFCOUNT);
+        self.builder
+            .ins()
+            .istore16(flags(), new_count, value, REFCOUNT);
     }
 
     /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`].
     fn call_step(&mut self, pc: usize, validate: Value) -> Result<Value, Refusal> {
         let pc = iconst(&mut self.builder, pc);
-        self.call(runtime::jit_step as *const () as usize, &[I64, I64, I32], Some(I32), &[self.activation, pc, validate])
-            .ok_or(Refusal("a helper without a result"))
+        self.call(
+            runtime::jit_step as *const () as usize,
+            &[I64, I64, I32],
+            Some(I32),
+            &[self.activation, pc, validate],
+        )
+        .ok_or(Refusal("a helper without a result"))
     }
 
-    fn call(&mut self, address: usize, params: &[Type], result: Option<Type>, args: &[Value]) -> Option<Value> {
+    fn call(
+        &mut self,
+        address: usize,
+        params: &[Type],
+        result: Option<Type>,
+        args: &[Value],
+    ) -> Option<Value> {
         let key = (params.to_vec(), result);
         let signature = match self.signatures.get(&key) {
             Some(signature) => *signature,
             None => {
                 let mut signature = Signature::new(self.call_conv);
-                signature.params.extend(params.iter().map(|ty| AbiParam::new(*ty)));
+                signature
+                    .params
+                    .extend(params.iter().map(|ty| AbiParam::new(*ty)));
                 signature.returns.extend(result.map(AbiParam::new));
                 let reference = self.builder.import_signature(signature);
                 self.signatures.insert(key, reference);
@@ -1551,7 +2080,9 @@ unsafe fn runtime_constant(code: Sexp, index: usize) -> Sexp {
 fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
     let operand = |index: usize| inst.operands[index];
     match inst.op {
-        Op::CallBuiltin => std::iter::once(operand(1)).chain(operand(3)..operand(3) + operand(4)).collect(),
+        Op::CallBuiltin => std::iter::once(operand(1))
+            .chain(operand(3)..operand(3) + operand(4))
+            .collect(),
         Op::CallGeneric => vec![operand(1)],
         Op::BranchUnlessBuiltin => vec![operand(0)],
         Op::Arithmetic => vec![operand(2), operand(3)],

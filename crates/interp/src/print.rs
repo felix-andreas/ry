@@ -15,7 +15,9 @@ use heap::object::{Sexp, SexpType, gp};
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| unsafe { Err(call.error("prmatrix is not supported")) }),
+    internal("prmatrix", 6, |call| unsafe {
+        Err(call.error("prmatrix is not supported"))
+    }),
 ];
 
 /// Print settings, from `print.default`'s arguments and the options.
@@ -47,7 +49,11 @@ impl PrintOptions {
             width: format::width_option(),
             na_string: "NA".into(),
             na_string_noquote: "<NA>".into(),
-            max: if max == nil() { 99999 } else { values::as_integer_scalar(max).max(1) as usize },
+            max: if max == nil() {
+                99999
+            } else {
+                values::as_integer_scalar(max).max(1) as usize
+            },
             use_source: true,
             env,
             call_args: Vec::new(),
@@ -69,7 +75,8 @@ pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
         eval::find_var(print, values::base_namespace())? != values::unbound()
     };
     if value.is_object() || values::is_function(value) || dispatches {
-        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil() {
+        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil()
+        {
             let show = values::install("show")?;
             eval::find_fun(show, interp().globals.methods_namespace)?
         } else {
@@ -90,7 +97,8 @@ pub unsafe fn print_value_top(value: Sexp, env: Sexp) -> R<()> {
 /// Prints a value with dispatch, as `print.default` does for list elements that are objects.
 unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     if value.is_object() {
-        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil() {
+        let function = if value.has_gp(gp::S4_OBJECT) && interp().globals.methods_namespace != nil()
+        {
             eval::find_fun(values::install("show")?, interp().globals.methods_namespace)?
         } else {
             eval::find_fun(values::install("print")?, values::base_namespace())?
@@ -162,7 +170,10 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                 out("<object>\n");
             }
         }
-        SexpType::Char => out(&format!("<CHARSXP: {}>\n", encode_string(&char_str(value), Some('"')))),
+        SexpType::Char => out(&format!(
+            "<CHARSXP: {}>\n",
+            encode_string(&char_str(value), Some('"'))
+        )),
         kind if kind.is_atomic() => {
             let dims = values::dims(value);
             match dims.as_deref() {
@@ -173,7 +184,9 @@ pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String)
                     // empty one, on a line of its own, as a 1-D table does.
                     let dimnames_names = values::names(get_attr(value, symbols().dimnames));
                     if dimnames_names != nil() {
-                        let title = values::string_at(dimnames_names, 0).map(|text| text.into_owned()).unwrap_or_default();
+                        let title = values::string_at(dimnames_names, 0)
+                            .map(|text| text.into_owned())
+                            .unwrap_or_default();
                         out(&format!("{title}\n"));
                     }
                     print_vector(value, options)?
@@ -206,7 +219,12 @@ unsafe fn print_primitive(value: Sexp) -> R<()> {
             let function = value_of(function)?;
             if function.kind() == SexpType::Closure {
                 let lines = deparse::deparse_lines(
-                    values::triple(SexpType::Closure, function.car(), nil(), values::global_env())?,
+                    values::triple(
+                        SexpType::Closure,
+                        function.car(),
+                        nil(),
+                        values::global_env(),
+                    )?,
                     60,
                     deparse::options::SIMPLE,
                 );
@@ -300,12 +318,20 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     } else {
         vector
     };
-    let items = escape_unquoted(format::format_vector(subset, options.settings, options.quote, na)?, vector, options);
+    let items = escape_unquoted(
+        format::format_vector(subset, options.settings, options.quote, na)?,
+        vector,
+        options,
+    );
     if names != nil() {
         print_named_vector(&items, names, options);
     } else {
         let right = vector.kind() != SexpType::String || options.right;
-        let width = items.iter().map(|item| display_width(item)).max().unwrap_or(0);
+        let width = items
+            .iter()
+            .map(|item| display_width(item))
+            .max()
+            .unwrap_or(0);
         let labels = label_width(shown);
         let mut line = String::new();
         let mut used = 0;
@@ -366,7 +392,12 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptio
 }
 
 /// The text of each column of a matrix, formatted per column as GNU R does.
-unsafe fn matrix_columns(matrix: Sexp, rows: usize, cols: usize, options: &PrintOptions) -> R<Vec<Vec<String>>> {
+unsafe fn matrix_columns(
+    matrix: Sexp,
+    rows: usize,
+    cols: usize,
+    options: &PrintOptions,
+) -> R<Vec<Vec<String>>> {
     let na = if matrix.kind() == SexpType::String && !options.quote {
         &options.na_string_noquote
     } else {
@@ -376,7 +407,11 @@ unsafe fn matrix_columns(matrix: Sexp, rows: usize, cols: usize, options: &Print
     for col in 0..cols {
         let indices: Vec<usize> = (0..rows).map(|row| row + col * rows).collect();
         let column = crate::subset::select_elements(matrix, &indices)?;
-        columns.push(escape_unquoted(format::format_vector(column, options.settings, options.quote, na)?, matrix, options));
+        columns.push(escape_unquoted(
+            format::format_vector(column, options.settings, options.quote, na)?,
+            matrix,
+            options,
+        ));
     }
     Ok(columns)
 }
@@ -386,7 +421,10 @@ unsafe fn escape_unquoted(items: Vec<String>, vector: Sexp, options: &PrintOptio
     if vector.kind() != SexpType::String || options.quote {
         return items;
     }
-    items.into_iter().map(|item| encode_string(&item, None)).collect()
+    items
+        .into_iter()
+        .map(|item| encode_string(&item, None))
+        .collect()
 }
 
 pub unsafe fn print_matrix(
@@ -404,19 +442,24 @@ pub unsafe fn print_matrix(
     };
     let dimnames_names = values::names(dimnames);
     let row_title = if dimnames_names != nil() {
-        values::string_at(dimnames_names, 0).map(|text| text.into_owned()).unwrap_or_default()
+        values::string_at(dimnames_names, 0)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
     } else {
         String::new()
     };
     let col_title = if dimnames_names != nil() && length(dimnames_names) > 1 {
-        values::string_at(dimnames_names, 1).map(|text| text.into_owned()).unwrap_or_default()
+        values::string_at(dimnames_names, 1)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
     } else {
         String::new()
     };
     let row_labels: Vec<String> = (0..rows)
         .map(|row| {
             if row_names != nil() {
-                values::string_at(row_names, row).map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(row_names, row)
+                    .map_or("<NA>".to_owned(), |text| text.into_owned())
             } else {
                 format!("[{},]", row + 1)
             }
@@ -434,7 +477,8 @@ pub unsafe fn print_matrix(
     let col_labels: Vec<String> = (0..cols)
         .map(|col| {
             if col_names != nil() {
-                values::string_at(col_names, col).map_or("<NA>".to_owned(), |text| text.into_owned())
+                values::string_at(col_names, col)
+                    .map_or("<NA>".to_owned(), |text| text.into_owned())
             } else {
                 format!("[,{}]", col + 1)
             }
@@ -511,9 +555,17 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         for (dimension, &extent) in dims.iter().enumerate().skip(2) {
             let position = remainder % extent;
             remainder /= extent;
-            let names = if dimnames.kind() == SexpType::List { dimnames.element(dimension) } else { nil() };
+            let names = if dimnames.kind() == SexpType::List {
+                dimnames.element(dimension)
+            } else {
+                nil()
+            };
             if names != nil() {
-                parts.push(values::string_at(names, position).map(|text| text.into_owned()).unwrap_or_default());
+                parts.push(
+                    values::string_at(names, position)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default(),
+                );
             } else {
                 parts.push((position + 1).to_string());
             }
@@ -658,7 +710,11 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     let mut call_args = Vec::new();
     for (tag, argument) in values::pairlist_items(args) {
         let argument = value_of(argument)?;
-        let name = if tag == nil() { String::new() } else { symbol_name(tag).into_owned() };
+        let name = if tag == nil() {
+            String::new()
+        } else {
+            symbol_name(tag).into_owned()
+        };
         match name.as_str() {
             "digits" => {
                 if argument != nil() {
@@ -676,7 +732,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
             }
             "na.print" => {
                 if argument != nil() {
-                    let text = values::first_string(argument).map(|text| text.into_owned()).unwrap_or_default();
+                    let text = values::first_string(argument)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default();
                     options.na_string = text.clone();
                     options.na_string_noquote = text;
                 }
@@ -702,7 +760,10 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
         }
     }
     options.call_args = call_args;
-    if value.has_gp(gp::S4_OBJECT) && value.is_object() && interp().globals.methods_namespace != nil() {
+    if value.has_gp(gp::S4_OBJECT)
+        && value.is_object()
+        && interp().globals.methods_namespace != nil()
+    {
         print_dispatch(value, &options, &mut String::new())?;
     } else {
         print_value(value, &options, &mut String::new())?;

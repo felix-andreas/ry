@@ -32,13 +32,33 @@ fn erasure_of_inline_forms() {
         ),
         (
             "alias Shape =\n  | :Circle(radius: double)\n  | :Empty\n",
-            "#: @alias Shape {| :Circle(radius: double)\n#:   | :Empty}\n",
+            "#: @alias Shape {\n#:   | :Circle(radius: double)\n#:   | :Empty}\n",
+        ),
+        // Comments stay, and so does every line, so erased line numbers match.
+        (
+            "type A = # cents\n  integer\n",
+            "#: @type A {# cents\n#:   integer}\n",
+        ),
+        (
+            "type A = integer # cents\n",
+            "#: @type A {integer} # cents\n",
+        ),
+        // A paired definition already has its comment spelling right above it.
+        (
+            "#: @type C {double}\ntype C = double\nx <- 1\n",
+            "#: @type C {double}\n\nx <- 1\n",
         ),
         ("type <- 1\nalias(type)\n", "type <- 1\nalias(type)\n"),
+        // A binding type spanning lines erases with its line breaks.
+        ("count: integer\n  | NULL <- 1L\n", "count <- 1L\n"),
     ];
     for (input, expected) in cases {
         let parse = parse(input);
         assert!(parse.errors().is_empty(), "{input:?}: {:?}", parse.errors());
-        assert_eq!(syntax::erase_inline_annotations(&parse), expected, "{input:?}");
+        assert_eq!(
+            syntax::erase_inline_annotations(&parse),
+            expected,
+            "{input:?}"
+        );
     }
 }

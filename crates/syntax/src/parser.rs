@@ -803,6 +803,15 @@ impl Parser<'_, '_> {
     }
 
     /// The token right after the current one, with no trivia between.
+    /// Nothing but trivia stands before the current token on its line.
+    fn at_line_start(&self) -> bool {
+        self.tokens[..self.pos]
+            .iter()
+            .rev()
+            .find(|token| !matches!(token.kind, WHITESPACE | COMMENT))
+            .is_none_or(|token| matches!(token.kind, NEWLINE | SEMICOLON))
+    }
+
     fn next_token_is(&self, kind: SyntaxKind) -> bool {
         self.tokens.get(self.pos + 1).map(|token| token.kind) == Some(kind)
     }
@@ -1297,7 +1306,10 @@ impl Parser<'_, '_> {
             let kind = kind_at(pos)?;
             match kind {
                 WHITESPACE | COMMENT => {}
-                NEWLINE if depth > 0 || after_pipe => {}
+                NEWLINE
+                    if depth > 0
+                        || after_pipe
+                        || matches!(self.peek_significant(pos + 1, true), Some((PIPE, _))) => {}
                 // A coercion directive: `@` and the adjacent words of its name.
                 AT => {
                     while kind_at(pos + 1).is_some_and(|next| {
@@ -1373,6 +1385,20 @@ impl Parser<'_, '_> {
                 parser.finish();
             }
         });
+        // Erasure turns the definition into a `#:` line comment, which would swallow
+        // whatever follows it on the line.
+        // A `}` ends a definition nested in a block, which is reported as nested instead.
+        if let Some((kind, pos)) = self.peek_significant(self.pos, false)
+            && !matches!(kind, NEWLINE | R_BRACE)
+        {
+            self.error_at(
+                self.token_range(pos),
+                format!(
+                    "expected the end of the line after a type definition, found {}",
+                    kind.display()
+                ),
+            );
+        }
         self.finish();
     }
 
@@ -1393,16 +1419,41 @@ impl Parser<'_, '_> {
             self.ann_directive(end);
             return;
         }
+        let message = if name.is_empty() {
+            "expected a directive name right after `@`, as in `@trust`".to_owned()
+        } else {
+            format!(
+                "`@{name}` cannot annotate a binding; only `@trust`, `@if-unknown` and `@new` can"
+            )
+        };
+        // `@ trust` is one mistake: take the spaced-off name into the error, so it is not
+        // read as a type as well.
+        let mut pos = pos.max(self.pos + 1);
+        if name.is_empty() {
+            while self
+                .tokens
+                .get(pos)
+                .is_some_and(|token| token.kind == WHITESPACE)
+            {
+                pos += 1;
+            }
+            let word_start = pos;
+            while pos < self.tokens.len()
+                && (pos == word_start || self.adjacent(pos))
+                && (matches!(self.tokens[pos].kind, IDENT | MINUS)
+                    || self.tokens[pos].kind.is_keyword())
+            {
+                pos += 1;
+            }
+            if pos == word_start {
+                pos = self.pos + 1;
+            }
+        }
         let range = TextRange::new(
             self.token_range(self.pos).start(),
             self.token_range(pos.saturating_sub(1)).end(),
         );
-        self.error_at(
-            range,
-            format!(
-                "`@{name}` cannot annotate a binding; only `@trust`, `@if-unknown` and `@new` can"
-            ),
-        );
+        self.error_at(range, message);
         self.start(ERROR);
         while self.pos < pos {
             self.bump();
@@ -1534,7 +1585,17 @@ impl Parser<'_, '_> {
             }
             IDENT | DOTS | DOTDOTI | UNDERSCORE => self.wrap(NAME),
             COLON if self.next_token_is(IDENT) => self.tag_expr(),
-            AT if self.next_token_is(IDENT) => self.new_expr(),
+            // `obj@slot` broken across lines stays R's own syntax error: at a line start only
+            // `@Name(` or `@Name<` reads as a constructor, while after an operator a bare
+            // `@Name` is one being typed.
+            AT if self.next_token_is(IDENT)
+                && (matches!(
+                    self.tokens.get(self.pos + 2).map(|token| token.kind),
+                    Some(L_PAREN | LESS)
+                ) || !self.at_line_start()) =>
+            {
+                self.new_expr()
+            }
             L_PAREN if self.literal_ahead() => self.collection_literal(),
             ERROR_TOKEN => {
                 self.statement_had_lexer_error = true;
