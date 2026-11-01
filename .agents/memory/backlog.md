@@ -2607,8 +2607,8 @@ typing on:
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
 | finance | 2.4-2.5 s | 515 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
-| data science | 3.0-3.2 s | 525 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
-| biostatistics | 2.5 s | 527 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
+| data science | 2.5-2.7 s | 520 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
+| biostatistics | 2.5-2.7 s | 528 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
 
 The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (6.3 s on one core, 3.8 times faster on four), so per-file constant costs set its wall time; the remaining profile is item checking (about 3 s of CPU, half of it `infer_call_arguments`), parse, item HIR and lints. Before the green-tree searches, per-check caches and lazy arena commit, main measured 3.3-3.7 s and about 780-795 MiB on finance. Ideas not yet tried: fuse the per-file green walks into one tracked "syntax sites" query, cut type interning in `fresh_ty`, `literal_ty` and `substitute_rigid_memo`, and compute `interface_sccs` and `conditional_slot_items` before the third pass instead of inside its first batch. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
@@ -2675,7 +2675,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: false errors on real CRAN code
 
-`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 171 after the call-checking, name-resolution and inference fixes (`decisions.md`). What remains, by message shape:
+`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 175 after the call-checking, name-resolution and inference fixes (`decisions.md`). What remains, by message shape:
 - 38 "expected X, found Y" and 17 "expected a numeric value": mostly `T | NULL` results of functions that really can return NULL, vector `if` conditions, and parameters pinned by an unconditional write before a test (xts `Ops.xts.R:52`).
 - 26 "exported but this package defines no such top-level object": dynamic exports (cli `pb_*` through `makeActiveBinding`, rlang `ffi_` natives, lgr's `lgr`).
 - 20 "this call leaves out": formals the body does force on some path, worth a second look per site.
