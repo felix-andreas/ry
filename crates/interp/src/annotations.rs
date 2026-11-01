@@ -399,9 +399,7 @@ fn mask_of(node: &SyntaxNode) -> Mask {
         }
         // A frame is an external pointer to a table, so its columns are not in its storage.
         SyntaxKind::TYPE_RECORD
-            if node
-                .first_token()
-                .is_some_and(|token| token.text() == "frame") =>
+            if node.first_token().is_some_and(|token| token.text() == "frame") =>
         {
             0
         }

@@ -46,12 +46,10 @@ impl Model {
             match self.nodes[index].as_ref().map(|(_, node)| node) {
                 Some(Node::List(children)) => stack.extend(children.iter().copied()),
                 Some(Node::Env(bindings)) => stack.extend(bindings.iter().map(|(_, value)| *value)),
-                Some(Node::Record(items)) => {
-                    stack.extend(items.iter().filter_map(|item| match item {
-                        Item::Child(child) => Some(*child),
-                        Item::Raw(_) => None,
-                    }))
-                }
+                Some(Node::Record(items)) => stack.extend(items.iter().filter_map(|item| match item {
+                    Item::Child(child) => Some(*child),
+                    Item::Raw(_) => None,
+                })),
                 _ => {}
             }
         }
@@ -135,11 +133,7 @@ unsafe fn verify(heap: &mut Heap, model: &mut Model) {
                             }
                             Item::Raw(value) => Slot::Real(*value),
                         };
-                        assert_eq!(
-                            sexp.record_slot(position),
-                            expected,
-                            "node {index}.{position}"
-                        );
+                        assert_eq!(sexp.record_slot(position), expected, "node {index}.{position}");
                     }
                 }
             }
@@ -254,11 +248,7 @@ fn run(seed: u64, steps: usize, stress: bool) {
                         })
                         .collect();
                     let wide = !boxed.is_empty() && rng.chance(1, 8);
-                    let width = if wide {
-                        64 + rng.below(8)
-                    } else {
-                        rng.below(6)
-                    };
+                    let width = if wide { 64 + rng.below(8) } else { rng.below(6) };
                     let mut items = Vec::new();
                     let mut values = Vec::new();
                     for position in 0..width {

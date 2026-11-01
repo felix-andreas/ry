@@ -101,10 +101,7 @@ pub unsafe fn port_nlsb(call: &NativeCall<'_>) -> R<Sexp> {
         gradient: closure("gradient")?,
         current: None,
     };
-    let start = real_values(coerce_vector(
-        eval::eval(values::call(get_pars, &[])?, call.env)?,
-        SexpType::Real,
-    )?)?;
+    let start = real_values(coerce_vector(eval::eval(values::call(get_pars, &[])?, call.env)?, SexpType::Real)?)?;
     let n = start.len();
     let scale = scale_vector(call, call.arg(1), n)?;
     let (iv, v) = work_vectors(call, call.arg(3), call.arg(4))?;
@@ -195,11 +192,7 @@ unsafe fn controls(iv: &[i32], v: &[f64]) -> Controls {
 }
 
 unsafe fn work_vectors(call: &NativeCall<'_>, iv: Sexp, v: Sexp) -> R<(Sexp, Sexp)> {
-    if iv.kind() != SexpType::Integer
-        || v.kind() != SexpType::Real
-        || length(iv) < 31
-        || length(v) < 43
-    {
+    if iv.kind() != SexpType::Integer || v.kind() != SexpType::Real || length(iv) < 31 || length(v) < 43 {
         return Err(call.error("'iv' and 'v' must be the work vectors that 'port_ivset' filled"));
     }
     Ok((iv, v))
@@ -207,32 +200,19 @@ unsafe fn work_vectors(call: &NativeCall<'_>, iv: Sexp, v: Sexp) -> R<(Sexp, Sex
 
 unsafe fn scale_vector(call: &NativeCall<'_>, d: Sexp, n: usize) -> R<Vec<f64>> {
     let scale = real_values(coerce_vector(d, SexpType::Real)?)?;
-    if scale.len() != n
-        || scale
-            .iter()
-            .any(|value| !(value.is_finite() && *value > 0.0))
-    {
-        return Err(call.error(format!(
-            "'d' must be a nonzero positive vector of length {n}"
-        )));
+    if scale.len() != n || scale.iter().any(|value| !(value.is_finite() && *value > 0.0)) {
+        return Err(call.error(format!("'d' must be a nonzero positive vector of length {n}")));
     }
     Ok(scale)
 }
 
-unsafe fn bounds(
-    call: &NativeCall<'_>,
-    lower: Sexp,
-    upper: Sexp,
-    n: usize,
-) -> R<(Vec<f64>, Vec<f64>)> {
+unsafe fn bounds(call: &NativeCall<'_>, lower: Sexp, upper: Sexp, n: usize) -> R<(Vec<f64>, Vec<f64>)> {
     let lower = real_values(coerce_vector(lower, SexpType::Real)?)?;
     let upper = real_values(coerce_vector(upper, SexpType::Real)?)?;
     match (lower.len(), upper.len()) {
         (0, 0) => Ok((vec![f64::NEG_INFINITY; n], vec![f64::INFINITY; n])),
         (low, high) if low == n && high == n => Ok((lower, upper)),
-        _ => Err(call.error(format!(
-            "'lower' and 'upper' must be numeric vectors of length {n}"
-        ))),
+        _ => Err(call.error(format!("'lower' and 'upper' must be numeric vectors of length {n}"))),
     }
 }
 
@@ -287,25 +267,12 @@ unsafe fn minimize(
     controls: &Controls,
 ) -> R<Outcome> {
     let n = start.len();
-    let mut x: Vec<f64> = (0..n)
-        .map(|i| start[i].clamp(lower[i], upper[i].max(lower[i])))
-        .collect();
+    let mut x: Vec<f64> = (0..n).map(|i| start[i].clamp(lower[i], upper[i].max(lower[i]))).collect();
     let mut evaluations = 1;
     let mut gradient_evaluations = 0;
     let mut iterations = 0;
-    let finish = |x: Vec<f64>,
-                  value: f64,
-                  gradient: &[f64],
-                  code: i32,
-                  iterations: i32,
-                  evaluations: i32,
-                  gradient_evaluations: i32| Outcome {
-        gradient_norm: gradient
-            .iter()
-            .zip(scale)
-            .map(|(g, d)| (g / d).powi(2))
-            .sum::<f64>()
-            .sqrt(),
+    let finish = |x: Vec<f64>, value: f64, gradient: &[f64], code: i32, iterations: i32, evaluations: i32, gradient_evaluations: i32| Outcome {
+        gradient_norm: gradient.iter().zip(scale).map(|(g, d)| (g / d).powi(2)).sum::<f64>().sqrt(),
         x,
         value,
         code,
@@ -332,73 +299,27 @@ unsafe fn minimize(
         print_trace(0, value, &x);
     }
     if n == 0 {
-        return Ok(finish(
-            x,
-            value,
-            &gradient,
-            code::RELATIVE,
-            0,
-            evaluations,
-            gradient_evaluations,
-        ));
+        return Ok(finish(x, value, &gradient, code::RELATIVE, 0, evaluations, gradient_evaluations));
     }
     loop {
         let free = free_variables(&x, &gradient, lower, upper);
         if value.abs() < controls.absolute_tolerance {
-            return Ok(finish(
-                x,
-                value,
-                &gradient,
-                code::ABSOLUTE,
-                iterations,
-                evaluations,
-                gradient_evaluations,
-            ));
+            return Ok(finish(x, value, &gradient, code::ABSOLUTE, iterations, evaluations, gradient_evaluations));
         }
-        if iterations == 0
-            && newton_reduction(&hessian, &gradient, &free, n)
-                .is_some_and(|reduction| reduction <= controls.relative_tolerance * value.abs())
-        {
-            return Ok(finish(
-                x,
-                value,
-                &gradient,
-                code::RELATIVE,
-                iterations,
-                evaluations,
-                gradient_evaluations,
-            ));
+        if iterations == 0 && newton_reduction(&hessian, &gradient, &free, n).is_some_and(|reduction| reduction <= controls.relative_tolerance * value.abs()) {
+            return Ok(finish(x, value, &gradient, code::RELATIVE, iterations, evaluations, gradient_evaluations));
         }
         if iterations >= controls.iteration_limit {
-            return Ok(finish(
-                x,
-                value,
-                &gradient,
-                code::ITERATION_LIMIT,
-                iterations,
-                evaluations,
-                gradient_evaluations,
-            ));
+            return Ok(finish(x, value, &gradient, code::ITERATION_LIMIT, iterations, evaluations, gradient_evaluations));
         }
         iterations += 1;
         // Shrink the trust region until a step decreases the objective enough.
         let (step, newton_step, new_x, new_value) = loop {
             if evaluations >= controls.evaluation_limit {
-                return Ok(finish(
-                    x,
-                    value,
-                    &gradient,
-                    code::EVALUATION_LIMIT,
-                    iterations,
-                    evaluations,
-                    gradient_evaluations,
-                ));
+                return Ok(finish(x, value, &gradient, code::EVALUATION_LIMIT, iterations, evaluations, gradient_evaluations));
             }
-            let (direction, newton_step) =
-                trust_region_step(&hessian, &gradient, scale, &free, radius, n);
-            let new_x: Vec<f64> = (0..n)
-                .map(|i| (x[i] + direction[i]).clamp(lower[i], upper[i]))
-                .collect();
+            let (direction, newton_step) = trust_region_step(&hessian, &gradient, scale, &free, radius, n);
+            let new_x: Vec<f64> = (0..n).map(|i| (x[i] + direction[i]).clamp(lower[i], upper[i])).collect();
             let step: Vec<f64> = (0..n).map(|i| new_x[i] - x[i]).collect();
             let length = scaled_norm(&step, scale);
             let predicted = -(dot(&gradient, &step) + 0.5 * quadratic_form(&hessian, &step, n));
@@ -408,9 +329,7 @@ unsafe fn minimize(
             } else {
                 None
             };
-            let ratio = new_value.map_or(f64::NEG_INFINITY, |new_value| {
-                (value - new_value) / predicted
-            });
+            let ratio = new_value.map_or(f64::NEG_INFINITY, |new_value| (value - new_value) / predicted);
             if let (Some(new_value), true) = (new_value, ratio >= 1e-4) {
                 if ratio > 0.75 && length >= 0.99 * radius {
                     radius *= 2.0;
@@ -422,31 +341,12 @@ unsafe fn minimize(
             if relative_step(&x, &new_x, scale) <= controls.false_tolerance || length == 0.0 {
                 // No step can make progress. That is convergence when the model predicts
                 // nothing left to gain, and false convergence otherwise.
-                let settled =
-                    newton_reduction(&hessian, &gradient, &free, n).is_some_and(|reduction| {
-                        reduction <= controls.relative_tolerance * value.abs()
-                    });
-                let code = if settled {
-                    code::RELATIVE
-                } else {
-                    code::FALSE_CONVERGENCE
-                };
-                return Ok(finish(
-                    x,
-                    value,
-                    &gradient,
-                    code,
-                    iterations,
-                    evaluations,
-                    gradient_evaluations,
-                ));
+                let settled = newton_reduction(&hessian, &gradient, &free, n)
+                    .is_some_and(|reduction| reduction <= controls.relative_tolerance * value.abs());
+                let code = if settled { code::RELATIVE } else { code::FALSE_CONVERGENCE };
+                return Ok(finish(x, value, &gradient, code, iterations, evaluations, gradient_evaluations));
             }
-            radius = 0.25
-                * if length > 0.0 {
-                    length.min(radius)
-                } else {
-                    radius
-                };
+            radius = 0.25 * if length > 0.0 { length.min(radius) } else { radius };
         };
         let reduction = value - new_value;
         let x_converged = newton_step && relative_step(&x, &new_x, scale) <= controls.x_tolerance;
@@ -466,45 +366,20 @@ unsafe fn minimize(
             print_trace(iterations, value, &x);
         }
         let relative_converged = reduction <= controls.relative_tolerance * value.abs()
-            && newton_reduction(
-                &hessian,
-                &gradient,
-                &free_variables(&x, &gradient, lower, upper),
-                n,
-            )
-            .is_some_and(|predicted| predicted <= controls.relative_tolerance * value.abs());
+            && newton_reduction(&hessian, &gradient, &free_variables(&x, &gradient, lower, upper), n)
+                .is_some_and(|predicted| predicted <= controls.relative_tolerance * value.abs());
         if relative_converged {
-            return Ok(finish(
-                x,
-                value,
-                &gradient,
-                code::RELATIVE,
-                iterations,
-                evaluations,
-                gradient_evaluations,
-            ));
+            return Ok(finish(x, value, &gradient, code::RELATIVE, iterations, evaluations, gradient_evaluations));
         }
         if x_converged {
-            return Ok(finish(
-                x,
-                value,
-                &gradient,
-                code::X_CONVERGENCE,
-                iterations,
-                evaluations,
-                gradient_evaluations,
-            ));
+            return Ok(finish(x, value, &gradient, code::X_CONVERGENCE, iterations, evaluations, gradient_evaluations));
         }
     }
 }
 
 /// The variables a step may move: those not at a bound that the gradient pushes against.
 fn free_variables(x: &[f64], gradient: &[f64], lower: &[f64], upper: &[f64]) -> Vec<bool> {
-    (0..x.len())
-        .map(|i| {
-            !((x[i] <= lower[i] && gradient[i] > 0.0) || (x[i] >= upper[i] && gradient[i] < 0.0))
-        })
-        .collect()
+    (0..x.len()).map(|i| !((x[i] <= lower[i] && gradient[i] > 0.0) || (x[i] >= upper[i] && gradient[i] < 0.0))).collect()
 }
 
 /// The decrease the quadratic model predicts for the full Newton step over the free
@@ -515,10 +390,7 @@ fn newton_reduction(hessian: &[f64], gradient: &[f64], free: &[bool], n: usize) 
         return Some(0.0);
     }
     let size = indices.len();
-    let mut matrix: Vec<f64> = indices
-        .iter()
-        .flat_map(|&j| indices.iter().map(move |&i| hessian[j * n + i]))
-        .collect();
+    let mut matrix: Vec<f64> = indices.iter().flat_map(|&j| indices.iter().map(move |&i| hessian[j * n + i])).collect();
     let rhs: Vec<f64> = indices.iter().map(|&i| gradient[i]).collect();
     if !cholesky(&mut matrix, size) {
         return None;
@@ -531,14 +403,7 @@ fn newton_reduction(hessian: &[f64], gradient: &[f64], free: &[bool], n: usize) 
 /// radius`: the Newton step when it fits, otherwise `(H + mu D^2) s = -g` with `mu` found by
 /// Newton's method on `1/||D s|| = 1/radius`, after Moré and Sorensen. The flag says whether
 /// the step is the Newton step.
-fn trust_region_step(
-    hessian: &[f64],
-    gradient: &[f64],
-    scale: &[f64],
-    free: &[bool],
-    radius: f64,
-    n: usize,
-) -> (Vec<f64>, bool) {
+fn trust_region_step(hessian: &[f64], gradient: &[f64], scale: &[f64], free: &[bool], radius: f64, n: usize) -> (Vec<f64>, bool) {
     let indices: Vec<usize> = (0..n).filter(|&i| free[i]).collect();
     let size = indices.len();
     let mut step = vec![0.0; n];
@@ -548,11 +413,7 @@ fn trust_region_step(
     // In the scaled variables t = D s the problem is (H~ + mu I) t = -g~ with H~ = D^-1 H D^-1.
     let scaled: Vec<f64> = indices
         .iter()
-        .flat_map(|&j| {
-            indices
-                .iter()
-                .map(move |&i| hessian[j * n + i] / (scale[i] * scale[j]))
-        })
+        .flat_map(|&j| indices.iter().map(move |&i| hessian[j * n + i] / (scale[i] * scale[j])))
         .collect();
     let rhs: Vec<f64> = indices.iter().map(|&i| -gradient[i] / scale[i]).collect();
     let solve = |mu: f64| -> Option<(Vec<f64>, Vec<f64>)> {
@@ -567,9 +428,7 @@ fn trust_region_step(
         let solution = backward_substitute(&matrix, size, &half);
         Some((solution, matrix))
     };
-    let largest = scaled
-        .iter()
-        .fold(0.0f64, |largest, value| largest.max(value.abs()));
+    let largest = scaled.iter().fold(0.0f64, |largest, value| largest.max(value.abs()));
     let gradient_norm = dot(&rhs, &rhs).sqrt();
     let mut mu = 0.0;
     // Every mu tried so far that gave too long a step (or an indefinite matrix) lies below the
@@ -582,9 +441,7 @@ fn trust_region_step(
             None => {
                 newton = false;
                 below = below.max(mu);
-                (2.0 * mu)
-                    .max(1e-10 * largest.max(1.0))
-                    .max(mu + gradient_norm / radius * 1e-3)
+                (2.0 * mu).max(1e-10 * largest.max(1.0)).max(mu + gradient_norm / radius * 1e-3)
             }
             Some((candidate, factor)) => {
                 let length = dot(&candidate, &candidate).sqrt();
@@ -618,17 +475,10 @@ fn trust_region_step(
     let solution = match solution {
         Some(solution) => solution,
         // H is so indefinite that no shift worked: fall back to steepest descent.
-        None => rhs
-            .iter()
-            .map(|value| value * radius / gradient_norm.max(f64::MIN_POSITIVE))
-            .collect(),
+        None => rhs.iter().map(|value| value * radius / gradient_norm.max(f64::MIN_POSITIVE)).collect(),
     };
     let length = dot(&solution, &solution).sqrt();
-    let shrink = if length > radius {
-        radius / length
-    } else {
-        1.0
-    };
+    let shrink = if length > radius { radius / length } else { 1.0 };
     for (k, &i) in indices.iter().enumerate() {
         step[i] = solution[k] * shrink / scale[i];
     }
@@ -654,17 +504,14 @@ fn bfgs_update(hessian: &mut [f64], step: &[f64], change: &[f64], n: usize, firs
         }
         *first = false;
     }
-    let product: Vec<f64> = (0..n)
-        .map(|i| (0..n).map(|j| hessian[j * n + i] * step[j]).sum())
-        .collect();
+    let product: Vec<f64> = (0..n).map(|i| (0..n).map(|j| hessian[j * n + i] * step[j]).sum()).collect();
     let form = dot(step, &product);
     if form <= 0.0 {
         return;
     }
     for j in 0..n {
         for i in 0..n {
-            hessian[j * n + i] +=
-                change[i] * change[j] / curvature - product[i] * product[j] / form;
+            hessian[j * n + i] += change[i] * change[j] / curvature - product[i] * product[j] / form;
         }
     }
 }
@@ -722,17 +569,11 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 }
 
 fn quadratic_form(matrix: &[f64], vector: &[f64], n: usize) -> f64 {
-    (0..n)
-        .map(|j| vector[j] * (0..n).map(|i| matrix[j * n + i] * vector[i]).sum::<f64>())
-        .sum()
+    (0..n).map(|j| vector[j] * (0..n).map(|i| matrix[j * n + i] * vector[i]).sum::<f64>()).sum()
 }
 
 fn scaled_norm(step: &[f64], scale: &[f64]) -> f64 {
-    step.iter()
-        .zip(scale)
-        .map(|(s, d)| (s * d).powi(2))
-        .sum::<f64>()
-        .sqrt()
+    step.iter().zip(scale).map(|(s, d)| (s * d).powi(2)).sum::<f64>().sqrt()
 }
 
 /// PORT's relative step size: the largest scaled change over the largest scaled magnitude.
@@ -776,32 +617,17 @@ impl Objective<'_> {
         eval::define(self.par_symbol, par, self.rho)
     }
 
-    unsafe fn evaluate_numbers(
-        &self,
-        expression: Sexp,
-        what: &str,
-        size: Option<usize>,
-    ) -> R<Vec<f64>> {
+    unsafe fn evaluate_numbers(&self, expression: Sexp, what: &str, size: Option<usize>) -> R<Vec<f64>> {
         let numbers = crate::scope(|| {
             let result = eval::eval(expression, self.rho)?;
-            if !matches!(
-                result.kind(),
-                SexpType::Real | SexpType::Integer | SexpType::Logical
-            ) {
-                return Err(self
-                    .call
-                    .error(format!("{what} must return a numeric vector")));
+            if !matches!(result.kind(), SexpType::Real | SexpType::Integer | SexpType::Logical) {
+                return Err(self.call.error(format!("{what} must return a numeric vector")));
             }
-            Ok(ValueVector(real_values(coerce_vector(
-                result,
-                SexpType::Real,
-            )?)?))
+            Ok(ValueVector(real_values(coerce_vector(result, SexpType::Real)?)?))
         })?
         .0;
         match size {
-            Some(size) if numbers.len() != size => Err(self
-                .call
-                .error(format!("{what} must return a vector of length {size}"))),
+            Some(size) if numbers.len() != size => Err(self.call.error(format!("{what} must return a vector of length {size}"))),
             _ => Ok(numbers),
         }
     }
@@ -813,10 +639,7 @@ impl Model for Objective<'_> {
             self.assign(x)?;
             let result = eval::eval(self.objective, self.rho)?;
             if length(result) != 1 {
-                return Err(self.call.error(format!(
-                    "objective function in nlminb evaluates to length {} not 1",
-                    length(result)
-                )));
+                return Err(self.call.error(format!("objective function in nlminb evaluates to length {} not 1", length(result))));
             }
             let value = values::as_real_scalar(result);
             Ok(value.is_finite().then_some(value))
@@ -848,9 +671,7 @@ impl Model for Objective<'_> {
                 }
             }
         } else {
-            return Err(self.call.error(format!(
-                "Hessian function must return a square numeric matrix of order {n}"
-            )));
+            return Err(self.call.error(format!("Hessian function must return a square numeric matrix of order {n}")));
         }
         Ok((gradient, Some(hessian)))
     }
@@ -911,10 +732,7 @@ impl LeastSquares<'_> {
     unsafe fn residuals(&mut self) -> R<Vec<f64>> {
         crate::scope(|| {
             let result = eval::eval(values::call(self.resid, &[])?, self.call.env)?;
-            Ok(ValueVector(real_values(coerce_vector(
-                result,
-                SexpType::Real,
-            )?)?))
+            Ok(ValueVector(real_values(coerce_vector(result, SexpType::Real)?)?))
         })
         .map(|values| values.0)
     }
@@ -939,16 +757,11 @@ impl Model for LeastSquares<'_> {
         let n = x.len();
         let jacobian = crate::scope(|| {
             let result = eval::eval(values::call(self.gradient, &[])?, self.call.env)?;
-            Ok(ValueVector(real_values(coerce_vector(
-                result,
-                SexpType::Real,
-            )?)?))
+            Ok(ValueVector(real_values(coerce_vector(result, SexpType::Real)?)?))
         })?
         .0;
         if jacobian.len() != rows * n {
-            return Err(self.call.error(format!(
-                "the gradient of the model must be a {rows} by {n} matrix"
-            )));
+            return Err(self.call.error(format!("the gradient of the model must be a {rows} by {n} matrix")));
         }
         let mut gradient = vec![0.0; n];
         let mut hessian = vec![0.0; n * n];

@@ -63,20 +63,10 @@ pub unsafe fn nlm(call: &NativeCall<'_>) -> R<Sexp> {
     let max_step = if max_step > 0.0 {
         max_step
     } else {
-        let size = start
-            .iter()
-            .zip(&scale)
-            .map(|(x, s)| (x * s).powi(2))
-            .sum::<f64>()
-            .sqrt();
+        let size = start.iter().zip(&scale).map(|(x, s)| (x * s).powi(2)).sum::<f64>().sqrt();
         (1000.0 * size).max(1000.0)
     };
-    let mut objective = Objective {
-        call,
-        function,
-        n,
-        last: None,
-    };
+    let mut objective = Objective { call, function, n, last: None };
     let first = objective.evaluate(&start)?;
     let settings = Settings {
         scale,
@@ -100,13 +90,7 @@ pub unsafe fn nlm(call: &NativeCall<'_>) -> R<Sexp> {
         ("gradient", values::real_vector(&outcome.gradient)?),
     ];
     if want_hessian {
-        let hessian = difference_hessian(
-            &mut objective,
-            &outcome.estimate,
-            outcome.value,
-            &settings.typical,
-            digits,
-        )?;
+        let hessian = difference_hessian(&mut objective, &outcome.estimate, outcome.value, &settings.typical, digits)?;
         entries.push(("hessian", real_matrix(&hessian, n, n)?));
     }
     entries.push(("code", values::scalar_integer(outcome.code)?));
@@ -149,18 +133,10 @@ enum GradientKind {
     Central,
 }
 
-unsafe fn minimize(
-    objective: &mut Objective<'_>,
-    start: &[f64],
-    settings: &Settings,
-) -> R<Outcome> {
+unsafe fn minimize(objective: &mut Objective<'_>, start: &[f64], settings: &Settings) -> R<Outcome> {
     let n = start.len();
     let scale = &settings.scale;
-    let mut kind = if settings.analytic_gradient {
-        GradientKind::Analytic
-    } else {
-        GradientKind::Forward
-    };
+    let mut kind = if settings.analytic_gradient { GradientKind::Analytic } else { GradientKind::Forward };
     let mut x = start.to_vec();
     let mut f = objective.value(&x)?;
     let mut g = gradient(objective, &x, f, kind, settings)?;
@@ -172,36 +148,18 @@ unsafe fn minimize(
             (g[i] - estimate[i]).abs() > g[i].abs().max(size) * tolerance
         });
         if wrong {
-            return Err(objective
-                .call
-                .error("probable coding error in analytic gradient"));
+            return Err(objective.call.error("probable coding error in analytic gradient"));
         }
     }
     let mut iterations = 0;
     let mut consecutive_max_steps = 0;
-    let mut code = stopping_code(
-        &x,
-        f,
-        &g,
-        &x,
-        iterations,
-        &mut consecutive_max_steps,
-        None,
-        false,
-        settings,
-    );
+    let mut code = stopping_code(&x, f, &g, &x, iterations, &mut consecutive_max_steps, None, false, settings);
     if code != 0 {
         if !settings.silent {
             print_iterate(iterations, None, &x, f, &g)?;
             print_stop_message(code);
         }
-        return Ok(Outcome {
-            value: f,
-            estimate: x,
-            gradient: g,
-            code,
-            iterations,
-        });
+        return Ok(Outcome { value: f, estimate: x, gradient: g, code, iterations });
     }
     // The secant method keeps the Cholesky factor `L` of its Hessian approximation in the
     // lower triangle; Newton's method keeps the Hessian there and factors it each iteration.
@@ -226,8 +184,7 @@ unsafe fn minimize(
         loop {
             let direction = newton_direction(&factor, n, &g);
             let search = line_search(objective, &x, f, &g, direction, settings)?;
-            (x_new, f_new, took_max_step, failed) =
-                (search.x, search.f, search.took_max_step, search.failed);
+            (x_new, f_new, took_max_step, failed) = (search.x, search.f, search.took_max_step, search.failed);
             if failed && kind == GradientKind::Forward {
                 kind = GradientKind::Central;
                 g = central_gradient(objective, &x, settings)?;
@@ -258,22 +215,8 @@ unsafe fn minimize(
         if settings.analytic_hessian {
             objective.hessian_into(&x_new, &mut factor)?;
         } else {
-            let relative_tolerance = if kind == GradientKind::Forward {
-                settings.noise.sqrt()
-            } else {
-                settings.noise
-            };
-            secant_update(
-                &mut factor,
-                n,
-                &x,
-                &x_new,
-                &g,
-                &g_new,
-                scale,
-                relative_tolerance,
-                &mut first_update,
-            );
+            let relative_tolerance = if kind == GradientKind::Forward { settings.noise.sqrt() } else { settings.noise };
+            secant_update(&mut factor, n, &x, &x_new, &g, &g_new, scale, relative_tolerance, &mut first_update);
         }
         if settings.trace && !settings.silent {
             let step: Vec<f64> = x_new.iter().zip(&x).map(|(new, old)| new - old).collect();
@@ -285,34 +228,15 @@ unsafe fn minimize(
     }
 }
 
-unsafe fn finish(
-    settings: &Settings,
-    iterations: i32,
-    code: i32,
-    x: Vec<f64>,
-    f: f64,
-    g: Vec<f64>,
-) -> R<Outcome> {
+unsafe fn finish(settings: &Settings, iterations: i32, code: i32, x: Vec<f64>, f: f64, g: Vec<f64>) -> R<Outcome> {
     if !settings.silent {
         print_iterate(iterations, None, &x, f, &g)?;
         print_stop_message(code);
     }
-    Ok(Outcome {
-        value: f,
-        estimate: x,
-        gradient: g,
-        code,
-        iterations,
-    })
+    Ok(Outcome { value: f, estimate: x, gradient: g, code, iterations })
 }
 
-unsafe fn gradient(
-    objective: &mut Objective<'_>,
-    x: &[f64],
-    f: f64,
-    kind: GradientKind,
-    settings: &Settings,
-) -> R<Vec<f64>> {
+unsafe fn gradient(objective: &mut Objective<'_>, x: &[f64], f: f64, kind: GradientKind, settings: &Settings) -> R<Vec<f64>> {
     match kind {
         GradientKind::Analytic => objective.gradient(x),
         GradientKind::Forward => forward_gradient(objective, x, f, settings),
@@ -321,12 +245,7 @@ unsafe fn gradient(
 }
 
 /// Forward differences with steps of `sqrt(eta)` relative to each parameter's size (A5.6.3).
-unsafe fn forward_gradient(
-    objective: &mut Objective<'_>,
-    x: &[f64],
-    f: f64,
-    settings: &Settings,
-) -> R<Vec<f64>> {
+unsafe fn forward_gradient(objective: &mut Objective<'_>, x: &[f64], f: f64, settings: &Settings) -> R<Vec<f64>> {
     let mut point = x.to_vec();
     let mut result = Vec::with_capacity(x.len());
     for j in 0..x.len() {
@@ -340,11 +259,7 @@ unsafe fn forward_gradient(
 }
 
 /// Central differences with steps of `eta^(1/3)` relative to each parameter's size (A5.6.4).
-unsafe fn central_gradient(
-    objective: &mut Objective<'_>,
-    x: &[f64],
-    settings: &Settings,
-) -> R<Vec<f64>> {
+unsafe fn central_gradient(objective: &mut Objective<'_>, x: &[f64], settings: &Settings) -> R<Vec<f64>> {
     let mut point = x.to_vec();
     let mut result = Vec::with_capacity(x.len());
     for i in 0..x.len() {
@@ -379,18 +294,14 @@ fn stopping_code(
     }
     let size = |i: usize| x_new[i].abs().max(1.0 / settings.scale[i]);
     let denominator = f_new.abs().max(settings.fscale);
-    let relative_gradient = (0..x_new.len())
-        .map(|i| g_new[i].abs() * size(i) / denominator)
-        .fold(0.0, f64::max);
+    let relative_gradient = (0..x_new.len()).map(|i| g_new[i].abs() * size(i) / denominator).fold(0.0, f64::max);
     if relative_gradient <= settings.gradient_tolerance {
         return 1;
     }
     if iterations == 0 {
         return 0;
     }
-    let relative_step = (0..x_new.len())
-        .map(|i| (x_new[i] - x[i]).abs() / size(i))
-        .fold(0.0, f64::max);
+    let relative_step = (0..x_new.len()).map(|i| (x_new[i] - x[i]).abs() / size(i)).fold(0.0, f64::max);
     if relative_step <= settings.step_tolerance {
         return 2;
     }
@@ -430,20 +341,10 @@ struct Search {
 /// The backtracking line search of A6.3.1: accept the first point along `direction` with
 /// sufficient decrease, backtracking by a quadratic and then cubic model of the objective,
 /// and fail once the step shrinks below the step tolerance.
-unsafe fn line_search(
-    objective: &mut Objective<'_>,
-    x: &[f64],
-    f: f64,
-    g: &[f64],
-    mut direction: Vec<f64>,
-    settings: &Settings,
-) -> R<Search> {
+unsafe fn line_search(objective: &mut Objective<'_>, x: &[f64], f: f64, g: &[f64], mut direction: Vec<f64>, settings: &Settings) -> R<Search> {
     let n = x.len();
     let scale = &settings.scale;
-    let mut length = (0..n)
-        .map(|i| (scale[i] * direction[i]).powi(2))
-        .sum::<f64>()
-        .sqrt();
+    let mut length = (0..n).map(|i| (scale[i] * direction[i]).powi(2)).sum::<f64>().sqrt();
     if length > settings.max_step {
         let shrink = settings.max_step / length;
         for value in &mut direction {
@@ -452,9 +353,7 @@ unsafe fn line_search(
         length = settings.max_step;
     }
     let slope: f64 = (0..n).map(|i| g[i] * direction[i]).sum();
-    let relative_length = (0..n)
-        .map(|i| direction[i].abs() / x[i].abs().max(1.0 / scale[i]))
-        .fold(0.0, f64::max);
+    let relative_length = (0..n).map(|i| direction[i].abs() / x[i].abs().max(1.0 / scale[i])).fold(0.0, f64::max);
     let min_lambda = settings.step_tolerance / relative_length;
     let mut lambda = 1.0;
     let mut first_backtrack = true;
@@ -464,20 +363,10 @@ unsafe fn line_search(
         let value = objective.value(&point)?;
         if value <= f + slope * 1e-4 * lambda {
             let took_max_step = lambda == 1.0 && length > settings.max_step * 0.99;
-            return Ok(Search {
-                x: point,
-                f: value,
-                took_max_step,
-                failed: false,
-            });
+            return Ok(Search { x: point, f: value, took_max_step, failed: false });
         }
         if lambda < min_lambda {
-            return Ok(Search {
-                x: point,
-                f: value,
-                took_max_step: false,
-                failed: true,
-            });
+            return Ok(Search { x: point, f: value, took_max_step: false, failed: true });
         }
         let next = if first_backtrack {
             first_backtrack = false;
@@ -487,9 +376,7 @@ unsafe fn line_search(
             let t2 = previous_f - f - previous_lambda * slope;
             let t3 = 1.0 / (lambda - previous_lambda);
             let a3 = t3 * (t1 / (lambda * lambda) - t2 / (previous_lambda * previous_lambda));
-            let b = t3
-                * (t2 * lambda / (previous_lambda * previous_lambda)
-                    - t1 * previous_lambda / (lambda * lambda));
+            let b = t3 * (t2 * lambda / (previous_lambda * previous_lambda) - t1 * previous_lambda / (lambda * lambda));
             let discriminant = b * b - a3 * 3.0 * slope;
             let root = discriminant.sqrt();
             // One positive critical point means it is the minimum; two mean the first is.
@@ -502,11 +389,7 @@ unsafe fn line_search(
         };
         previous_lambda = lambda;
         previous_f = value;
-        lambda = if next < lambda * 0.1 {
-            lambda * 0.1
-        } else {
-            next
-        };
+        lambda = if next < lambda * 0.1 { lambda * 0.1 } else { next };
     }
 }
 
@@ -528,18 +411,13 @@ fn secant_update(
     let s: Vec<f64> = (0..n).map(|i| x_new[i] - x[i]).collect();
     let y: Vec<f64> = (0..n).map(|i| g_new[i] - g[i]).collect();
     let den1: f64 = (0..n).map(|i| s[i] * y[i]).sum();
-    let s_norm = (0..n)
-        .map(|i| (scale[i] * s[i]).powi(2))
-        .sum::<f64>()
-        .sqrt();
+    let s_norm = (0..n).map(|i| (scale[i] * s[i]).powi(2)).sum::<f64>().sqrt();
     let y_norm = y.iter().map(|value| value * value).sum::<f64>().sqrt();
     if den1 < f64::EPSILON.sqrt() * s_norm * y_norm {
         return;
     }
     // u = L' s
-    let mut u: Vec<f64> = (0..n)
-        .map(|i| (i..n).map(|k| factor[k * n + i] * s[k]).sum())
-        .collect();
+    let mut u: Vec<f64> = (0..n).map(|i| (i..n).map(|k| factor[k * n + i] * s[k]).sum()).collect();
     let mut den2: f64 = u.iter().map(|value| value * value).sum();
     let mut alpha = (den1 / den2).sqrt();
     if *first_update {
@@ -556,11 +434,8 @@ fn secant_update(
         alpha = 1.0;
     }
     // w = L u
-    let mut w: Vec<f64> = (0..n)
-        .map(|i| (0..=i).map(|k| factor[i * n + k] * u[k]).sum())
-        .collect();
-    let skip =
-        (0..n).all(|i| (y[i] - w[i]).abs() < relative_tolerance * g[i].abs().max(g_new[i].abs()));
+    let mut w: Vec<f64> = (0..n).map(|i| (0..=i).map(|k| factor[i * n + k] * u[k]).sum()).collect();
+    let skip = (0..n).all(|i| (y[i] - w[i]).abs() < relative_tolerance * g[i].abs().max(g_new[i].abs()));
     if skip {
         return;
     }
@@ -649,15 +524,8 @@ fn perturbed_cholesky(matrix: &mut [f64], n: usize, scale: &[f64]) {
     if smallest <= positive_largest * tolerance {
         let mut shift = tolerance * (positive_largest - smallest) - smallest;
         if shift == 0.0 {
-            let off_diagonal = (0..n)
-                .flat_map(|i| (0..i).map(move |j| (i, j)))
-                .map(|(i, j)| matrix[i * n + j].abs())
-                .fold(0.0, f64::max);
-            shift = if off_diagonal == 0.0 {
-                1.0
-            } else {
-                off_diagonal * (1.0 + tolerance)
-            };
+            let off_diagonal = (0..n).flat_map(|i| (0..i).map(move |j| (i, j))).map(|(i, j)| matrix[i * n + j].abs()).fold(0.0, f64::max);
+            shift = if off_diagonal == 0.0 { 1.0 } else { off_diagonal * (1.0 + tolerance) };
         }
         for i in 0..n {
             matrix[i * n + i] += shift;
@@ -682,10 +550,7 @@ fn perturbed_cholesky(matrix: &mut [f64], n: usize, scale: &[f64]) {
         let mut lowest = 0.0f64;
         let mut highest = matrix[0];
         for i in 0..n {
-            let row: f64 = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| matrix[i.min(j) * n + i.max(j)].abs())
-                .sum();
+            let row: f64 = (0..n).filter(|&j| j != i).map(|j| matrix[i.min(j) * n + i.max(j)].abs()).sum();
             lowest = lowest.min(matrix[i * n + i] - row);
             highest = highest.max(matrix[i * n + i] + row);
         }
@@ -705,12 +570,7 @@ fn perturbed_cholesky(matrix: &mut [f64], n: usize, scale: &[f64]) {
 
 /// Cholesky factorization into the lower triangle that raises a diagonal element too small
 /// for a stable factor, returning the largest amount added (A5.5.2).
-fn cholesky_with_additions(
-    matrix: &mut [f64],
-    n: usize,
-    largest_diagonal: f64,
-    tolerance: f64,
-) -> f64 {
+fn cholesky_with_additions(matrix: &mut [f64], n: usize, largest_diagonal: f64, tolerance: f64) -> f64 {
     let mut added = 0.0f64;
     let minimum = (largest_diagonal * tolerance).sqrt();
     let minimum_squared = minimum * minimum;
@@ -720,9 +580,7 @@ fn cholesky_with_additions(
         if remainder >= minimum_squared {
             matrix[j * n + j] = remainder.sqrt();
         } else {
-            let mut off_diagonal = (j + 1..n)
-                .map(|i| matrix[i * n + j].abs())
-                .fold(0.0, f64::max);
+            let mut off_diagonal = (j + 1..n).map(|i| matrix[i * n + j].abs()).fold(0.0, f64::max);
             if off_diagonal <= minimum_squared {
                 off_diagonal = minimum_squared;
             }
@@ -739,13 +597,7 @@ fn cholesky_with_additions(
 
 /// The Hessian `nlm(hessian = TRUE)` reports: second differences of the objective with steps
 /// of `10^(-ndigit/3)` relative to each parameter's typical size (A5.6.2).
-unsafe fn difference_hessian(
-    objective: &mut Objective<'_>,
-    x: &[f64],
-    value: f64,
-    typical: &[f64],
-    digits: i32,
-) -> R<Vec<f64>> {
+unsafe fn difference_hessian(objective: &mut Objective<'_>, x: &[f64], value: f64, typical: &[f64], digits: i32) -> R<Vec<f64>> {
     let n = x.len();
     let eta = 10f64.powf(-(digits as f64) / 3.0);
     let mut point = x.to_vec();
@@ -828,8 +680,7 @@ impl Objective<'_> {
                     if entry.is_finite() {
                         entry
                     } else {
-                        self.call
-                            .warning("NA/Inf replaced by maximum positive value")?;
+                        self.call.warning("NA/Inf replaced by maximum positive value")?;
                         f64::MAX
                     }
                 }
@@ -842,9 +693,7 @@ impl Objective<'_> {
                 }
                 let numbers = real_values(coerce_vector(found, SexpType::Real)?)?;
                 if numbers.len() != size {
-                    return Err(self
-                        .call
-                        .error(format!("the '{name}' attribute has the wrong length")));
+                    return Err(self.call.error(format!("the '{name}' attribute has the wrong length")));
                 }
                 Ok(Some(numbers))
             };
@@ -863,10 +712,7 @@ impl Objective<'_> {
 
     unsafe fn gradient(&mut self, x: &[f64]) -> R<Vec<f64>> {
         let evaluation = self.evaluate(x)?;
-        Ok(evaluation
-            .gradient
-            .clone()
-            .unwrap_or_else(|| vec![0.0; x.len()]))
+        Ok(evaluation.gradient.clone().unwrap_or_else(|| vec![0.0; x.len()]))
     }
 
     /// Writes the lower triangle of the analytic Hessian, which R stores by columns.
@@ -884,16 +730,9 @@ impl Objective<'_> {
     }
 }
 
-unsafe fn print_iterate(
-    iteration: i32,
-    step: Option<&[f64]>,
-    x: &[f64],
-    f: f64,
-    g: &[f64],
-) -> R<()> {
+unsafe fn print_iterate(iteration: i32, step: Option<&[f64]>, x: &[f64], f: f64, g: &[f64]) -> R<()> {
     let options = PrintOptions::defaults(values::global_env());
-    let print_numbers =
-        |numbers: &[f64]| -> R<()> { print_vector(values::real_vector(numbers)?, &options) };
+    let print_numbers = |numbers: &[f64]| -> R<()> { print_vector(values::real_vector(numbers)?, &options) };
     print(&format!("iteration = {iteration}\n"));
     if let Some(step) = step {
         print("Step:\n");
@@ -913,13 +752,9 @@ fn print_stop_message(code: i32) {
     let text = match code {
         1 => "Relative gradient close to zero.\nCurrent iterate is probably solution.\n",
         2 => "Successive iterates within tolerance.\nCurrent iterate is probably solution.\n",
-        3 => {
-            "Last global step failed to locate a point lower than x.\nEither x is an approximate local minimum of the function,\nthe function is too non-linear for this algorithm,\nor steptol is too large.\n"
-        }
+        3 => "Last global step failed to locate a point lower than x.\nEither x is an approximate local minimum of the function,\nthe function is too non-linear for this algorithm,\nor steptol is too large.\n",
         4 => "Iteration limit exceeded.  Algorithm failed.\n",
-        5 => {
-            "Maximum step size exceeded 5 consecutive times.\nEither the function is unbounded below,\nbecomes asymptotic to a finite value\nfrom above in some direction,\nor stepmx is too small.\n"
-        }
+        5 => "Maximum step size exceeded 5 consecutive times.\nEither the function is unbounded below,\nbecomes asymptotic to a finite value\nfrom above in some direction,\nor stepmx is too small.\n",
         _ => return,
     };
     print(text);

@@ -12,12 +12,8 @@ use crate::{
 use heap::object::{Sexp, SexpType};
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
-    ("nextStream", |call| unsafe {
-        advance(call, &A1P127, &A2P127)
-    }),
-    ("nextSubStream", |call| unsafe {
-        advance(call, &A1P76, &A2P76)
-    }),
+    ("nextStream", |call| unsafe { advance(call, &A1P127, &A2P127) }),
+    ("nextSubStream", |call| unsafe { advance(call, &A1P76, &A2P76) }),
     ("mc_is_child", |_| unsafe { scalar_bool(false) }),
     ("mc_children", |_| unsafe { values::integer_vector(&[]) }),
     ("mc_fds", |_| unsafe { values::integer_vector(&[]) }),

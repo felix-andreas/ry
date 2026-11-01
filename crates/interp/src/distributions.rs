@@ -22,7 +22,6 @@
 //! precision) are collected while the functions run and raised by the builtin afterwards, which
 //! keeps the functions free of interpreter state.
 
-use crate::rmath::*;
 use crate::{
     builtin_libraries::NativeFn,
     builtins::{Arg, BuiltinDef, internal},
@@ -35,6 +34,7 @@ use crate::{
         ints_mut, length, list_vector, materialize, nil, reals, reals_mut, set_attr, symbols,
     },
 };
+use crate::rmath::*;
 use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real};
 
 /// Generates the `.Internal` table and the stats routine table from one list, so that both

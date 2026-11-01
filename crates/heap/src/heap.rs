@@ -28,8 +28,8 @@ pub mod strings;
 use crate::{
     env::Frame,
     object::{
-        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, VECTOR_DATA_OFFSET,
-        flag_bits, gc_bits, gp, object_size, slot_for,
+        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, VECTOR_DATA_OFFSET, flag_bits,
+        gc_bits, gp, object_size, slot_for,
     },
     records::Layouts,
     strings::{Encoding, StringTable},

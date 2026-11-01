@@ -18,31 +18,20 @@ use crate::{
 use heap::object::{Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    builtin(".Call", -1, |call| unsafe {
-        foreign_call(call, Some(Interface::Call))
-    }),
+    builtin(".Call", -1, |call| unsafe { foreign_call(call, Some(Interface::Call)) }),
     builtin(".External", -1, |call| unsafe { foreign_call(call, None) }),
     builtin(".External2", -1, |call| unsafe { foreign_call(call, None) }),
-    builtin(".C", -1, |call| unsafe {
-        foreign_call(call, Some(Interface::C))
-    }),
-    builtin(".Fortran", -1, |call| unsafe {
-        foreign_call(call, Some(Interface::Fortran))
-    }),
-    builtin(".Call.graphics", -1, |call| unsafe {
-        foreign_call(call, None)
-    }),
-    builtin(".External.graphics", -1, |call| unsafe {
-        foreign_call(call, None)
-    }),
+    builtin(".C", -1, |call| unsafe { foreign_call(call, Some(Interface::C)) }),
+    builtin(".Fortran", -1, |call| unsafe { foreign_call(call, Some(Interface::Fortran)) }),
+    builtin(".Call.graphics", -1, |call| unsafe { foreign_call(call, None) }),
+    builtin(".External.graphics", -1, |call| unsafe { foreign_call(call, None) }),
     internal("dyn.load", 4, |call| unsafe {
         let path = values::require_string(call.arg(0), "x")?;
         match builtin_libraries::builtin_library(&path) {
             Some(package) => builtin_libraries::load(package, &path),
             None => no_host(call),
         }
-    })
-    .invisible(),
+    }).invisible(),
     internal("dyn.unload", 1, no_host),
     internal("is.loaded", 3, |call| unsafe {
         let name = values::first_string(call.arg(0))

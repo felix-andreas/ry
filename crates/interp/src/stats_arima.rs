@@ -84,14 +84,7 @@ pub unsafe fn transpars(call: &NativeCall<'_>) -> R<Sexp> {
 }
 
 fn expand(input: &[f64], orders: &Orders, transform: bool) -> (Vec<f64>, Vec<f64>) {
-    let Orders {
-        p: mp,
-        q: mq,
-        seasonal_p: msp,
-        seasonal_q: msq,
-        period: ns,
-        ..
-    } = *orders;
+    let Orders { p: mp, q: mq, seasonal_p: msp, seasonal_q: msq, period: ns, .. } = *orders;
     let mut parameters = input.to_vec();
     if transform {
         if mp > 0 {
@@ -137,8 +130,7 @@ pub unsafe fn undopars(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let start = orders.p + orders.q;
     if orders.seasonal_p > 0 {
-        result[start..start + orders.seasonal_p]
-            .copy_from_slice(&partrans(&input[start..start + orders.seasonal_p]));
+        result[start..start + orders.seasonal_p].copy_from_slice(&partrans(&input[start..start + orders.seasonal_p]));
     }
     values::real_vector(&result)
 }
@@ -153,8 +145,7 @@ pub unsafe fn invtrans(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let start = orders.p + orders.q;
     if orders.seasonal_p > 0 {
-        result[start..start + orders.seasonal_p]
-            .copy_from_slice(&invpartrans(&input[start..start + orders.seasonal_p]));
+        result[start..start + orders.seasonal_p].copy_from_slice(&invpartrans(&input[start..start + orders.seasonal_p]));
     }
     values::real_vector(&result)
 }
@@ -241,8 +232,7 @@ pub unsafe fn get_q0(call: &NativeCall<'_>) -> R<Sexp> {
     let phi = real_values(call.arg(0))?;
     let theta = real_values(call.arg(1))?;
     let r = phi.len().max(theta.len() + 1);
-    let covariance = stationary_covariance(&phi, &theta, r)
-        .ok_or_else(|| call.error("the stationary covariance is singular"))?;
+    let covariance = stationary_covariance(&phi, &theta, r).ok_or_else(|| call.error("the stationary covariance is singular"))?;
     real_matrix(&covariance, r, r)
 }
 
@@ -265,15 +255,7 @@ fn stationary_covariance(phi: &[f64], theta: &[f64], r: usize) -> Option<Vec<f64
         }
         value
     };
-    let noise: Vec<f64> = (0..r)
-        .map(|i| {
-            if i == 0 {
-                1.0
-            } else {
-                theta.get(i - 1).copied().unwrap_or(0.0)
-            }
-        })
-        .collect();
+    let noise: Vec<f64> = (0..r).map(|i| if i == 0 { 1.0 } else { theta.get(i - 1).copied().unwrap_or(0.0) }).collect();
     let index = |i: usize, j: usize| -> usize {
         let (low, high) = if i <= j { (i, j) } else { (j, i) };
         low * r - low * (low + 1) / 2 + high
@@ -313,11 +295,7 @@ fn stationary_covariance(phi: &[f64], theta: &[f64], r: usize) -> Option<Vec<f64
 /// Gaussian elimination with partial pivoting of the row-major `n` by `n` system.
 fn solve(matrix: &mut [f64], rhs: &mut [f64], n: usize) -> Option<Vec<f64>> {
     for column in 0..n {
-        let pivot = (column..n).max_by(|&a, &b| {
-            matrix[a * n + column]
-                .abs()
-                .total_cmp(&matrix[b * n + column].abs())
-        })?;
+        let pivot = (column..n).max_by(|&a, &b| matrix[a * n + column].abs().total_cmp(&matrix[b * n + column].abs()))?;
         if matrix[pivot * n + column] == 0.0 {
             return None;
         }
@@ -373,9 +351,7 @@ impl Model {
     unsafe fn read(call: &NativeCall<'_>, model: Sexp) -> R<Model> {
         let z = values::reals(component(call, model, "Z")?).to_vec();
         let size = z.len();
-        let read = |name: &str| -> R<Vec<f64>> {
-            Ok(values::reals(component(call, model, name)?).to_vec())
-        };
+        let read = |name: &str| -> R<Vec<f64>> { Ok(values::reals(component(call, model, name)?).to_vec()) };
         let model = Model {
             a: read("a")?,
             p: read("P")?,
@@ -387,12 +363,7 @@ impl Model {
             size,
         };
         let square = size * size;
-        if model.a.len() != size
-            || model.p.len() != square
-            || model.t.len() != square
-            || model.v.len() != square
-            || model.pn.len() != square
-        {
+        if model.a.len() != size || model.p.len() != square || model.t.len() != square || model.v.len() != square || model.pn.len() != square {
             return Err(call.error("invalid argument type"));
         }
         Ok(model)
@@ -410,8 +381,7 @@ impl Model {
             let mut product = vec![0.0; n * n];
             for i in 0..n {
                 for j in 0..n {
-                    product[i + n * j] =
-                        (0..n).map(|k| self.t[i + n * k] * self.p[k + n * j]).sum();
+                    product[i + n * j] = (0..n).map(|k| self.t[i + n * k] * self.p[k + n * j]).sum();
                 }
             }
             for i in 0..n {
@@ -428,9 +398,7 @@ impl Model {
     fn update(&mut self, y: f64) -> (f64, f64) {
         let n = self.size;
         let innovation = y - (0..n).map(|i| self.z[i] * self.a[i]).sum::<f64>();
-        let gain_vector: Vec<f64> = (0..n)
-            .map(|i| (0..n).map(|k| self.pn[i + n * k] * self.z[k]).sum())
-            .collect();
+        let gain_vector: Vec<f64> = (0..n).map(|i| (0..n).map(|k| self.pn[i + n * k] * self.z[k]).sum()).collect();
         let variance = self.h + (0..n).map(|i| self.z[i] * gain_vector[i]).sum::<f64>();
         for i in 0..n {
             self.a[i] += gain_vector[i] * innovation / variance;
@@ -502,21 +470,9 @@ pub unsafe fn arima_like(call: &NativeCall<'_>) -> R<Sexp> {
         if l as i64 > use_prior_until as i64 {
             if d == 0 {
                 for i in 0..r {
-                    let vi = if i == 0 {
-                        1.0
-                    } else if i - 1 < q {
-                        theta[i - 1]
-                    } else {
-                        0.0
-                    };
+                    let vi = if i == 0 { 1.0 } else if i - 1 < q { theta[i - 1] } else { 0.0 };
                     for j in 0..r {
-                        let mut value = if j == 0 {
-                            vi
-                        } else if j - 1 < q {
-                            vi * theta[j - 1]
-                        } else {
-                            0.0
-                        };
+                        let mut value = if j == 0 { vi } else if j - 1 < q { vi * theta[j - 1] } else { 0.0 };
                         if i < p && j < p {
                             value += phi[i] * phi[j] * big_p[0];
                         }
@@ -706,10 +662,7 @@ pub unsafe fn kalman_fore(call: &NativeCall<'_>) -> R<Sexp> {
         }
         variances.push(variance);
     }
-    let result = values::named_list(&[
-        ("pred", values::real_vector(&forecasts)?),
-        ("var", values::real_vector(&variances)?),
-    ])?;
+    let result = values::named_list(&[("pred", values::real_vector(&forecasts)?), ("var", values::real_vector(&variances)?)])?;
     if update {
         model.write_back(call, model_list)?;
         values::set_attr(result, values::install("mod")?, model_list)?;
@@ -773,9 +726,7 @@ pub unsafe fn kalman_smooth(call: &NativeCall<'_>) -> R<Sexp> {
             (next_r, next_n)
         } else {
             let variance = variances[l];
-            let gain: Vec<f64> = (0..size)
-                .map(|i| (0..size).map(|k| p[i + size * k] * z[k]).sum::<f64>() / variance)
-                .collect();
+            let gain: Vec<f64> = (0..size).map(|i| (0..size).map(|k| p[i + size * k] * z[k]).sum::<f64>() / variance).collect();
             let mut l_matrix = vec![0.0; square];
             for i in 0..size {
                 for j in 0..size {
@@ -785,10 +736,7 @@ pub unsafe fn kalman_smooth(call: &NativeCall<'_>) -> R<Sexp> {
             }
             let mut next_r = vec![0.0; size];
             for i in 0..size {
-                next_r[i] = z[i] * innovations[l] / variance
-                    + (0..size)
-                        .map(|k| l_matrix[k + size * i] * r[k])
-                        .sum::<f64>();
+                next_r[i] = z[i] * innovations[l] / variance + (0..size).map(|k| l_matrix[k + size * i] * r[k]).sum::<f64>();
             }
             let mut next_n = vec![0.0; square];
             for i in 0..size {
@@ -796,9 +744,7 @@ pub unsafe fn kalman_smooth(call: &NativeCall<'_>) -> R<Sexp> {
                     let mut value = z[i] * z[j] / variance;
                     for k in 0..size {
                         for m in 0..size {
-                            value += l_matrix[k + size * i]
-                                * big_n[k + size * m]
-                                * l_matrix[m + size * j];
+                            value += l_matrix[k + size * i] * big_n[k + size * m] * l_matrix[m + size * j];
                         }
                     }
                     next_n[i + size * j] = value;
@@ -826,8 +772,5 @@ pub unsafe fn kalman_smooth(call: &NativeCall<'_>) -> R<Sexp> {
     let variance = values::real_vector(&smooth_variance)?;
     let dim = values::integer_vector(&[n as i32, square as i32])?;
     values::set_attr(variance, symbols().dim, dim)?;
-    values::named_list(&[
-        ("smooth", real_matrix(&smooth, n, size)?),
-        ("var", variance),
-    ])
+    values::named_list(&[("smooth", real_matrix(&smooth, n, size)?), ("var", variance)])
 }

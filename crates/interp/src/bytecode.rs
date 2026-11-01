@@ -48,13 +48,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// `mkCode` turns it into byte code; ry keeps only the buffer's first constant, the source
 /// expression, exactly as it reads GNU R byte code from a stream, and compiles that itself.
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("bcVersion", 0, |_| unsafe {
-        values::scalar_integer(GNU_R_BYTECODE_VERSION)
-    }),
+    internal("bcVersion", 0, |_| unsafe { values::scalar_integer(GNU_R_BYTECODE_VERSION) }),
     internal("mkCode", 2, do_mk_code),
-    internal("bcClose", 3, |call| unsafe {
-        eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2))
-    }),
+    internal("bcClose", 3, |call| unsafe { eval::make_closure(call.arg(0), call.arg(1), nil(), call.arg(2)) }),
     internal("growconst", 1, do_grow_constants),
     internal("putconst", 3, do_put_constant),
     internal("getconst", 2, do_get_constants),
@@ -79,11 +75,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> State {
-        State {
-            registers: Vec::with_capacity(REGISTER_FILE_CAPACITY),
-            calls: FxHashMap::default(),
-            tier: None,
-        }
+        State { registers: Vec::with_capacity(REGISTER_FILE_CAPACITY), calls: FxHashMap::default(), tier: None }
     }
 }
 
@@ -151,9 +143,7 @@ pub fn register_address(index: usize) -> *mut Sexp {
 pub fn reserve_registers(length: usize) -> R<()> {
     let registers = &mut interp().bytecode.registers;
     if length > registers.capacity() {
-        return Err(error(
-            "evaluation nested too deeply: the register file is full",
-        ));
+        return Err(error("evaluation nested too deeply: the register file is full"));
     }
     if length > registers.len() {
         registers.resize(length, nil());
@@ -489,12 +479,7 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let loops = values::alloc(SexpType::Integer, compiler.loops.len() * 4)?;
     for (index, entry) in compiler.loops.iter().enumerate() {
         let slots = &mut values::ints_mut(loops)[index * 4..index * 4 + 4];
-        slots.copy_from_slice(&[
-            entry.start as i32,
-            entry.end as i32,
-            entry.exit as i32,
-            entry.step as i32,
-        ]);
+        slots.copy_from_slice(&[entry.start as i32, entry.end as i32, entry.exit as i32, entry.step as i32]);
     }
     heap.set_element(constants, LOOPS, loops);
     let registers = values::scalar_integer(compiler.registers as i32)?;
@@ -518,11 +503,7 @@ pub unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>
         symbols_found.insert(formal.tag());
         formal = formal.cdr();
     }
-    if collect_bindings(body, &mut symbols_found) {
-        Some(symbols_found)
-    } else {
-        None
-    }
+    if collect_bindings(body, &mut symbols_found) { Some(symbols_found) } else { None }
 }
 
 /// A binding's value with a forced promise replaced by its value; an unforced promise stays.
@@ -569,15 +550,10 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
     let head = expression.car();
     if head.kind() == SexpType::Symbol {
         let name = symbol_name(head);
-        if matches!(&*name, "<-" | "=" | "<<-")
-            && expression.cdr().car().kind() == SexpType::Language
-        {
+        if matches!(&*name, "<-" | "=" | "<<-") && expression.cdr().car().kind() == SexpType::Language {
             return true;
         }
-        if matches!(
-            &*name,
-            "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call"
-        ) {
+        if matches!(&*name, "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call") {
             return true;
         }
     }
@@ -601,27 +577,9 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
         let name = symbol_name(head);
         if matches!(
             &*name,
-            "assign"
-                | "eval"
-                | "evalq"
-                | "delayedAssign"
-                | "makeActiveBinding"
-                | "local"
-                | "sys.function"
-                | "environment"
-                | "list2env"
-                | "sys.frame"
-                | "sys.frames"
-                | "attach"
-                | "with"
-                | "within"
-                | "source"
-                | "rm"
-                | "remove"
-                | "lockBinding"
-                | "on.exit"
-                | "Recall"
-                | "do.call"
+            "assign" | "eval" | "evalq" | "delayedAssign" | "makeActiveBinding" | "local" | "sys.function"
+                | "environment" | "list2env" | "sys.frame" | "sys.frames" | "attach" | "with" | "within"
+                | "source" | "rm" | "remove" | "lockBinding" | "on.exit" | "Recall" | "do.call"
         ) {
             return false;
         }
@@ -1311,11 +1269,7 @@ pub struct LoopState {
 impl LoopState {
     /// The state of a loop over a vector, which is all the optimizing tier compiles.
     pub fn vector(index: usize, count: usize) -> LoopState {
-        LoopState {
-            index,
-            count,
-            cell: None,
-        }
+        LoopState { index, count, cell: None }
     }
 }
 
@@ -1368,14 +1322,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let profile = values::ints_mut(constants.element(PROFILE));
     profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
     let mut loops = vec![LoopState::default(); loop_count(code)];
-    let mut machine = Machine {
-        function,
-        code,
-        env,
-        base,
-        mark,
-        loops: &mut loops,
-    };
+    let mut machine = Machine { function, code, env, base, mark, loops: &mut loops };
     let entered = match interp().bytecode.tier {
         Some(tier) => (tier.enter)(&mut machine),
         None => None,
@@ -1383,8 +1330,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     let result = match entered {
         Some(TierExit::Finished(result)) => result,
         Some(TierExit::Resume { pc, pending }) => match pending {
-            Some(unwind) => continue_after(&mut machine, pc, unwind)
-                .and_then(|pc| execute_code(&mut machine, pc)),
+            Some(unwind) => continue_after(&mut machine, pc, unwind).and_then(|pc| execute_code(&mut machine, pc)),
             None => execute_code(&mut machine, pc),
         },
         None => execute_code(&mut machine, 0),
@@ -1411,14 +1357,8 @@ unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
                         profile[profile::BACK_EDGES] = 0;
                         match (tier.back_edge)(machine, pc) {
                             Some(TierExit::Finished(result)) => return result,
-                            Some(TierExit::Resume {
-                                pc: at,
-                                pending: Some(unwind),
-                            }) => pc = continue_after(machine, at, unwind)?,
-                            Some(TierExit::Resume {
-                                pc: at,
-                                pending: None,
-                            }) => pc = at,
+                            Some(TierExit::Resume { pc: at, pending: Some(unwind) }) => pc = continue_after(machine, at, unwind)?,
+                            Some(TierExit::Resume { pc: at, pending: None }) => pc = at,
                             None => {}
                         }
                     }
@@ -1484,12 +1424,7 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
 
 /// The binding cell inline cache `slot` of `code` holds for lookups from `enclosure`, if it is
 /// still valid.
-pub unsafe fn cached_binding(
-    code: Sexp,
-    symbol: Sexp,
-    enclosure: Sexp,
-    slot: usize,
-) -> Option<Sexp> {
+pub unsafe fn cached_binding(code: Sexp, symbol: Sexp, enclosure: Sexp, slot: usize) -> Option<Sexp> {
     cached_cell(symbol, enclosure, code.cdr(), code.tag(), slot)
 }
 
@@ -1769,13 +1704,7 @@ pub fn logic_result(is_and: bool, left: i32, right: i32) -> i32 {
     }
 }
 
-unsafe fn call_builtin(
-    definition: &'static BuiltinDef,
-    call: Sexp,
-    function: Sexp,
-    args: &[Arg],
-    env: Sexp,
-) -> R<Sexp> {
+unsafe fn call_builtin(definition: &'static BuiltinDef, call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Sexp> {
     if definition.generic != Generic::None
         && let Some(value) = dispatch::try_builtin_dispatch(definition, call, function, args, env)?
     {
@@ -1805,11 +1734,7 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
     let as_real = |value: Sexp| match value.kind() {
         SexpType::Integer => {
             let integer = values::ints(value)[0];
-            if integer == NA_INTEGER {
-                NA_REAL
-            } else {
-                integer as f64
-            }
+            if integer == NA_INTEGER { NA_REAL } else { integer as f64 }
         }
         _ => values::reals(value)[0],
     };
@@ -1945,13 +1870,7 @@ unsafe fn lookup_function(
 }
 
 /// [`lookup_function`] for a symbol the frame cannot bind: the frame is not probed.
-unsafe fn lookup_enclosing_function(
-    symbol: Sexp,
-    env: Sexp,
-    constants: Sexp,
-    caches: Sexp,
-    slot: usize,
-) -> R<Sexp> {
+unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> R<Sexp> {
     let enclosure = env.enclosure();
     if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
@@ -1964,13 +1883,7 @@ unsafe fn lookup_enclosing_function(
     lookup_function(symbol, env, constants, caches, slot, unbound())
 }
 
-unsafe fn cached_cell(
-    symbol: Sexp,
-    enclosure: Sexp,
-    constants: Sexp,
-    caches: Sexp,
-    slot: usize,
-) -> Option<Sexp> {
+unsafe fn cached_cell(symbol: Sexp, enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> Option<Sexp> {
     let epochs = constants.element(EPOCHS);
     if values::reals(epochs)[slot] != crate::heap().lookup_stamp(symbol) as f64 {
         return None;
@@ -1981,14 +1894,7 @@ unsafe fn cached_cell(
     Some(caches.element(slot * 2 + 1))
 }
 
-unsafe fn fill_cache(
-    symbol: Sexp,
-    enclosure: Sexp,
-    cell: Sexp,
-    constants: Sexp,
-    caches: Sexp,
-    slot: usize,
-) {
+unsafe fn fill_cache(symbol: Sexp, enclosure: Sexp, cell: Sexp, constants: Sexp, caches: Sexp, slot: usize) {
     let heap = crate::heap();
     heap.set_element(caches, slot * 2, enclosure);
     heap.set_element(caches, slot * 2 + 1, cell);

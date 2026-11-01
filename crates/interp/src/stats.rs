@@ -9,9 +9,9 @@
 
 use crate::{
     builtin_libraries::{NativeCall, NativeFn, c_result},
+    linalg,
     coerce::coerce_vector,
-    linalg, stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize,
-    stats_port, stats_tests,
+    stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize, stats_port, stats_tests,
     unwind::R,
     values::{self, length, symbols},
 };
@@ -142,11 +142,7 @@ pub(crate) unsafe fn real_values(x: Sexp) -> R<Vec<f64>> {
 
 /// The elements of `x` as integers.
 pub(crate) unsafe fn integer_values(x: Sexp) -> R<Vec<i32>> {
-    let integers = if x.kind() == SexpType::Integer {
-        values::materialize(x)?
-    } else {
-        coerce_vector(x, SexpType::Integer)?
-    };
+    let integers = if x.kind() == SexpType::Integer { values::materialize(x)? } else { coerce_vector(x, SexpType::Integer)? };
     Ok(values::ints(integers).to_vec())
 }
 
@@ -213,17 +209,7 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
     let rank_slot = values::scalar_integer(0)?;
     let work = values::alloc(SexpType::Real, 2 * p)?;
     let tolerance_value = values::scalar_real(tolerance)?;
-    linalg::dqrdc2(&[
-        qr,
-        integer(n)?,
-        integer(n)?,
-        integer(p)?,
-        tolerance_value,
-        rank_slot,
-        qraux,
-        pivot,
-        work,
-    ])?;
+    linalg::dqrdc2(&[qr, integer(n)?, integer(n)?, integer(p)?, tolerance_value, rank_slot, qraux, pivot, work])?;
     let rank = values::ints(rank_slot)[0].max(0) as usize;
     if rank > 0 {
         let size = integer(rank)?;
@@ -236,16 +222,12 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
         let b = values::reals_mut(coefficients);
         let solved = values::reals(solved);
         for column in 0..ny {
-            b[column * p..column * p + rank]
-                .copy_from_slice(&solved[column * rank..(column + 1) * rank]);
+            b[column * p..column * p + rank].copy_from_slice(&solved[column * rank..(column + 1) * rank]);
         }
     }
     let qraux = values::reals(qraux).to_vec();
     let pivot = values::ints(pivot).to_vec();
-    let pivoted = pivot
-        .iter()
-        .enumerate()
-        .any(|(index, &column)| column != index as i32 + 1);
+    let pivoted = pivot.iter().enumerate().any(|(index, &column)| column != index as i32 + 1);
     values::named_list(&[
         ("qr", qr),
         ("coefficients", coefficients),
@@ -288,10 +270,7 @@ unsafe fn logit_link(call: &NativeCall<'_>) -> R<Sexp> {
     numeric_argument(call, mu, "mu")?;
     map_reals(mu, |value| {
         if !(0.0..=1.0).contains(&value) {
-            return Err(call.error(format!(
-                "Value {} out of range (0, 1)",
-                crate::format::c_general(value, 6, false)
-            )));
+            return Err(call.error(format!("Value {} out of range (0, 1)", crate::format::c_general(value, 6, false))));
         }
         Ok((value / (1.0 - value)).ln())
     })
@@ -333,9 +312,7 @@ unsafe fn binomial_dev_resids(call: &NativeCall<'_>) -> R<Sexp> {
     for (value, name) in [(mu, "mu"), (weights, "wt")] {
         let size = length(value);
         if size != n && size != 1 {
-            return Err(call.error(format!(
-                "argument {name} must be a numeric vector of length 1 or length {n}"
-            )));
+            return Err(call.error(format!("argument {name} must be a numeric vector of length 1 or length {n}")));
         }
     }
     let mu = values::reals(mu).to_vec();
@@ -408,14 +385,8 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     let column = |data: &[f64], index: usize| data[index * n..(index + 1) * n].to_vec();
     let x_data: Vec<Vec<f64>> = (0..x_columns).map(|index| column(&x, index)).collect();
     let y_data: Vec<Vec<f64>> = (0..y_columns).map(|index| column(&y, index)).collect();
-    let all_columns: Vec<&Vec<f64>> = if has_y {
-        x_data.iter().chain(&y_data).collect()
-    } else {
-        x_data.iter().collect()
-    };
-    let any_missing = all_columns
-        .iter()
-        .any(|data| data.iter().any(|value| value.is_nan()));
+    let all_columns: Vec<&Vec<f64>> = if has_y { x_data.iter().chain(&y_data).collect() } else { x_data.iter().collect() };
+    let any_missing = all_columns.iter().any(|data| data.iter().any(|value| value.is_nan()));
     if policy == MissingPolicy::AllObservations && any_missing {
         return Err(call.error("missing observations in cov/cor"));
     }
@@ -424,49 +395,30 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     if policy == MissingPolicy::Pairwise {
         for i in 0..x_columns {
             for j in 0..y_columns {
-                let used: Vec<bool> = (0..n)
-                    .map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan())
-                    .collect();
+                let used: Vec<bool> = (0..n).map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan()).collect();
                 result[i + j * x_columns] = if !has_y && i == j && correlate {
                     1.0
                 } else {
-                    pair_statistic(
-                        &x_data[i],
-                        &y_data[j],
-                        &used,
-                        correlate,
-                        kendall,
-                        &mut zero_deviation,
-                    )
+                    pair_statistic(&x_data[i], &y_data[j], &used, correlate, kendall, &mut zero_deviation)
                 };
             }
         }
     } else {
-        let used: Vec<bool> = if matches!(
-            policy,
-            MissingPolicy::CompleteObservations | MissingPolicy::NaOrComplete
-        ) {
-            (0..n)
-                .map(|row| all_columns.iter().all(|data| !data[row].is_nan()))
-                .collect()
+        let used: Vec<bool> = if matches!(policy, MissingPolicy::CompleteObservations | MissingPolicy::NaOrComplete) {
+            (0..n).map(|row| all_columns.iter().all(|data| !data[row].is_nan())).collect()
         } else {
             vec![true; n]
         };
         if !used.iter().any(|&flag| flag) && policy == MissingPolicy::CompleteObservations {
             return Err(call.error("no complete element pairs"));
         }
-        let has_missing = |data: &Vec<f64>| {
-            data.iter()
-                .zip(&used)
-                .any(|(value, &flag)| flag && value.is_nan())
-        };
+        let has_missing = |data: &Vec<f64>| data.iter().zip(&used).any(|(value, &flag)| flag && value.is_nan());
         let missing_x: Vec<bool> = x_data.iter().map(has_missing).collect();
         let missing_y: Vec<bool> = y_data.iter().map(has_missing).collect();
         for i in 0..x_columns {
             for j in 0..y_columns {
                 if !missing_x[i] && !missing_y[j] {
-                    result[i + j * x_columns] =
-                        complete_covariance(&x_data[i], &y_data[j], &used, kendall);
+                    result[i + j * x_columns] = complete_covariance(&x_data[i], &y_data[j], &used, kendall);
                 }
             }
         }
@@ -474,21 +426,11 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             let scales = |data: &[Vec<f64>], missing: &[bool]| -> Vec<f64> {
                 data.iter()
                     .zip(missing)
-                    .map(|(column, &absent)| {
-                        if absent {
-                            NA_REAL
-                        } else {
-                            complete_covariance(column, column, &used, kendall).sqrt()
-                        }
-                    })
+                    .map(|(column, &absent)| if absent { NA_REAL } else { complete_covariance(column, column, &used, kendall).sqrt() })
                     .collect()
             };
             let x_scale = scales(&x_data, &missing_x);
-            let y_scale = if has_y {
-                scales(&y_data, &missing_y)
-            } else {
-                x_scale.clone()
-            };
+            let y_scale = if has_y { scales(&y_data, &missing_y) } else { x_scale.clone() };
             for i in 0..x_columns {
                 for j in 0..y_columns {
                     let slot = &mut result[i + j * x_columns];
@@ -509,11 +451,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     let answer = if is_matrix(x_argument) || (has_y && is_matrix(y_argument)) {
         let matrix = real_matrix(&result, x_columns, y_columns)?;
         let x_names = column_names(x_argument);
-        let y_names = if has_y {
-            column_names(y_argument)
-        } else {
-            x_names
-        };
+        let y_names = if has_y { column_names(y_argument) } else { x_names };
         if x_names != values::nil() || y_names != values::nil() {
             let dimnames = values::list_vector(&[x_names, y_names])?;
             values::set_attr(matrix, symbols().dimnames, dimnames)?;
@@ -530,11 +468,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
 
 unsafe fn column_names(x: Sexp) -> Sexp {
     let dimnames = values::get_attr(x, symbols().dimnames);
-    if dimnames.kind() == SexpType::List && length(dimnames) == 2 {
-        values::list_elt(dimnames, 1)
-    } else {
-        values::nil()
-    }
+    if dimnames.kind() == SexpType::List && length(dimnames) == 2 { values::list_elt(dimnames, 1) } else { values::nil() }
 }
 
 /// A sum accumulated with an error term, standing in for the 80-bit `long double` GNU R sums
@@ -548,11 +482,7 @@ pub(crate) struct Accumulator {
 impl Accumulator {
     pub(crate) fn add(&mut self, value: f64) {
         let sum = self.high + value;
-        let error = if self.high.abs() >= value.abs() {
-            (self.high - sum) + value
-        } else {
-            (value - sum) + self.high
-        };
+        let error = if self.high.abs() >= value.abs() { (self.high - sum) + value } else { (value - sum) + self.high };
         self.high = sum;
         self.low += error;
     }
@@ -617,14 +547,7 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> f6
 }
 
 /// One entry of a pairwise-complete `cov` or `cor`.
-fn pair_statistic(
-    x: &[f64],
-    y: &[f64],
-    used: &[bool],
-    correlate: bool,
-    kendall: bool,
-    zero_deviation: &mut bool,
-) -> f64 {
+fn pair_statistic(x: &[f64], y: &[f64], used: &[bool], correlate: bool, kendall: bool, zero_deviation: &mut bool) -> f64 {
     let covariance = complete_covariance(x, y, used, kendall);
     if !correlate || covariance.is_nan() {
         return covariance;
@@ -766,11 +689,7 @@ unsafe fn cdist(call: &NativeCall<'_>) -> R<Sexp> {
     let names = values::names(attributes);
     for index in 0..length(attributes) {
         if let Some(name) = values::string_at(names, index) {
-            values::set_attr(
-                answer,
-                values::install(&name)?,
-                values::list_elt(attributes, index),
-            )?;
+            values::set_attr(answer, values::install(&name)?, values::list_elt(attributes, index))?;
         }
     }
     Ok(answer)
@@ -874,12 +793,8 @@ unsafe fn fft(call: &NativeCall<'_>) -> R<Sexp> {
                 if extent > 1 {
                     for start in (0..data.len()).step_by(block.max(1)) {
                         for offset in 0..stride {
-                            let indices: Vec<usize> =
-                                (0..extent).map(|k| start + offset + k * stride).collect();
-                            let mut line: Vec<Complex> = indices
-                                .iter()
-                                .map(|&index| Complex::from(data[index]))
-                                .collect();
+                            let indices: Vec<usize> = (0..extent).map(|k| start + offset + k * stride).collect();
+                            let mut line: Vec<Complex> = indices.iter().map(|&index| Complex::from(data[index])).collect();
                             transform(&mut line, sign);
                             for (&index, value) in indices.iter().zip(line) {
                                 data[index] = value.into();
@@ -923,21 +838,13 @@ unsafe fn mvfft(call: &NativeCall<'_>) -> R<Sexp> {
 
 unsafe fn fft_sign(call: &NativeCall<'_>) -> R<f64> {
     let inverse = values::as_logical_scalar(call.arg(1));
-    Ok(if inverse == heap::object::NA_LOGICAL || inverse == 0 {
-        -2.0
-    } else {
-        2.0
-    })
+    Ok(if inverse == heap::object::NA_LOGICAL || inverse == 0 { -2.0 } else { 2.0 })
 }
 
 /// A fresh complex copy of `z`, keeping its attributes.
 unsafe fn complex_copy(z: Sexp) -> R<Sexp> {
     let converted = coerce_vector(z, SexpType::Complex)?;
-    if converted == z {
-        values::duplicate(z)
-    } else {
-        Ok(converted)
-    }
+    if converted == z { values::duplicate(z) } else { Ok(converted) }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -948,19 +855,13 @@ struct Complex {
 
 impl From<heap::object::Rcomplex> for Complex {
     fn from(value: heap::object::Rcomplex) -> Complex {
-        Complex {
-            re: value.r,
-            im: value.i,
-        }
+        Complex { re: value.r, im: value.i }
     }
 }
 
 impl From<Complex> for heap::object::Rcomplex {
     fn from(value: Complex) -> heap::object::Rcomplex {
-        heap::object::Rcomplex {
-            r: value.re,
-            i: value.im,
-        }
+        heap::object::Rcomplex { r: value.re, i: value.im }
     }
 }
 
@@ -1029,20 +930,13 @@ fn mixed_radix(data: &[Complex], factors: &[usize], direction: f64) -> Vec<Compl
                     return value;
                 }
                 let (sin, cos) = unit_root(angle, offset * k, n);
-                Complex {
-                    re: value.re * cos - value.im * sin,
-                    im: value.re * sin + value.im * cos,
-                }
+                Complex { re: value.re * cos - value.im * sin, im: value.re * sin + value.im * cos }
             })
             .collect();
         for q in 0..radix {
             let mut sum = Complex::default();
             for (offset, value) in twiddled.iter().enumerate() {
-                let (sin, cos) = unit_root(
-                    direction * 2.0 * std::f64::consts::PI / radix as f64,
-                    offset * q,
-                    radix,
-                );
+                let (sin, cos) = unit_root(direction * 2.0 * std::f64::consts::PI / radix as f64, offset * q, radix);
                 sum.re += value.re * cos - value.im * sin;
                 sum.im += value.re * sin + value.im * cos;
             }
@@ -1080,10 +974,7 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
     if factors.is_empty() {
         return Err(call.error("no factors"));
     }
-    if factors
-        .iter()
-        .any(|&factor| factor == NA_INTEGER || factor <= 1)
-    {
+    if factors.iter().any(|&factor| factor == NA_INTEGER || factor <= 1) {
         return Err(call.error("invalid factors"));
     }
     let mut result = Vec::with_capacity(n.len());
@@ -1105,11 +996,7 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
             }
             candidate += 1;
         }
-        result.push(if candidate > i32::MAX as i64 {
-            NA_INTEGER
-        } else {
-            candidate as i32
-        });
+        result.push(if candidate > i32::MAX as i64 { NA_INTEGER } else { candidate as i32 });
     }
     values::integer_vector(&result)
 }
@@ -1182,8 +1069,7 @@ unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
         if method == 1 {
             y[low] + (y[high] - y[low]) * ((point - x[low]) / (x[high] - x[low]))
         } else {
-            (if f1 != 0.0 { y[low] * f1 } else { 0.0 })
-                + (if f2 != 0.0 { y[high] * f2 } else { 0.0 })
+            (if f1 != 0.0 { y[low] * f1 } else { 0.0 }) + (if f2 != 0.0 { y[high] * f2 } else { 0.0 })
         }
     };
     let result: Vec<f64> = v.iter().map(|&point| interpolate(point)).collect();
@@ -1349,8 +1235,7 @@ fn periodic_spline(x: &[f64], y: &[f64]) -> SplineCoefficients {
     for i in 0..m {
         let previous = if i == 0 { m - 1 } else { i - 1 };
         diagonal[i] = 2.0 * (h[i] + h[previous]);
-        rhs[i] =
-            (y[i + 1] - y[i]) / h[i] - (y[i] - y[if i == 0 { m - 1 } else { i - 1 }]) / h[previous];
+        rhs[i] = (y[i + 1] - y[i]) / h[i] - (y[i] - y[if i == 0 { m - 1 } else { i - 1 }]) / h[previous];
     }
     // Cholesky factor: `diagonal` its diagonal, `lower` its subdiagonal, `corner` its last row.
     let mut lower = vec![0.0; m];
@@ -1437,11 +1322,7 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
             interval = low;
         }
         let offset = position - x[interval];
-        let cubic = if method == 2 && position < x[0] {
-            0.0
-        } else {
-            d[interval]
-        };
+        let cubic = if method == 2 && position < x[0] { 0.0 } else { d[interval] };
         result.push(y[interval] + offset * (b[interval] + offset * (c[interval] + offset * cubic)));
     }
     values::real_vector(&result)
@@ -1534,15 +1415,7 @@ fn clowess(x: &[f64], y: &[f64], span: f64, iterations: usize, delta: f64) -> Ve
                 left += 1;
                 right += 1;
             }
-            match local_fit(
-                x,
-                y,
-                x[i],
-                left,
-                right,
-                &mut weights,
-                use_robustness.then_some(&robustness[..]),
-            ) {
+            match local_fit(x, y, x[i], left, right, &mut weights, use_robustness.then_some(&robustness[..])) {
                 Some(value) => fitted[i] = value,
                 None => fitted[i] = y[i],
             }
@@ -1584,11 +1457,7 @@ fn clowess(x: &[f64], y: &[f64], span: f64, iterations: usize, delta: f64) -> Ve
         let mut absolute: Vec<f64> = residuals.iter().map(|value| value.abs()).collect();
         absolute.sort_by(f64::total_cmp);
         let half = n / 2;
-        let median = if n % 2 == 0 {
-            (absolute[half - 1] + absolute[half]) / 2.0
-        } else {
-            absolute[half]
-        };
+        let median = if n % 2 == 0 { (absolute[half - 1] + absolute[half]) / 2.0 } else { absolute[half] };
         let cmad = 6.0 * median;
         if cmad < 1e-7 * scale {
             break;
@@ -1611,15 +1480,7 @@ fn clowess(x: &[f64], y: &[f64], span: f64, iterations: usize, delta: f64) -> Ve
 
 /// The local weighted line through the points `left..=right` (and any further ties) at `xs`,
 /// or `None` when every weight is zero.
-fn local_fit(
-    x: &[f64],
-    y: &[f64],
-    xs: f64,
-    left: usize,
-    right: usize,
-    weights: &mut [f64],
-    robustness: Option<&[f64]>,
-) -> Option<f64> {
+fn local_fit(x: &[f64], y: &[f64], xs: f64, left: usize, right: usize, weights: &mut [f64], robustness: Option<&[f64]>) -> Option<f64> {
     let n = x.len();
     let range = x[n - 1] - x[0];
     let h = (xs - x[left]).max(x[right] - xs);
@@ -1631,11 +1492,7 @@ fn local_fit(
         weights[j] = 0.0;
         let r = (x[j] - xs).abs();
         if r <= h9 {
-            weights[j] = if r <= h1 {
-                1.0
-            } else {
-                cube(1.0 - cube(r / h))
-            };
+            weights[j] = if r <= h1 { 1.0 } else { cube(1.0 - cube(r / h)) };
             if let Some(robustness) = robustness {
                 weights[j] *= robustness[j];
             }
@@ -1655,9 +1512,7 @@ fn local_fit(
     if h > 0.0 {
         let mean: f64 = (left..end).map(|k| weights[k] * x[k]).sum();
         let mut slope = xs - mean;
-        let spread: f64 = (left..end)
-            .map(|k| weights[k] * (x[k] - mean) * (x[k] - mean))
-            .sum();
+        let spread: f64 = (left..end).map(|k| weights[k] * (x[k] - mean) * (x[k] - mean)).sum();
         if spread.sqrt() > 0.001 * range {
             slope /= spread;
             for k in left..end {
@@ -1688,11 +1543,7 @@ unsafe fn ksmooth(call: &NativeCall<'_>) -> R<Sexp> {
         }
     };
     let mut first = 0usize;
-    while first < n
-        && points
-            .first()
-            .is_some_and(|&point| x[first] < point - cutoff)
-    {
+    while first < n && points.first().is_some_and(|&point| x[first] < point - cutoff) {
         first += 1;
     }
     let mut fitted = Vec::with_capacity(points.len());
@@ -1706,25 +1557,14 @@ unsafe fn ksmooth(call: &NativeCall<'_>) -> R<Sexp> {
                     break;
                 }
                 let distance = (x[i] - point).abs() / bandwidth;
-                let weight = if kernel == 1 {
-                    1.0
-                } else {
-                    (-0.5 * distance * distance).exp()
-                };
+                let weight = if kernel == 1 { 1.0 } else { (-0.5 * distance * distance).exp() };
                 numerator += weight * y[i];
                 denominator += weight;
             }
         }
-        fitted.push(if denominator > 0.0 {
-            numerator / denominator
-        } else {
-            NA_REAL
-        });
+        fitted.push(if denominator > 0.0 { numerator / denominator } else { NA_REAL });
     }
-    values::named_list(&[
-        ("x", values::real_vector(&points)?),
-        ("y", values::real_vector(&fitted)?),
-    ])
+    values::named_list(&[("x", values::real_vector(&points)?), ("y", values::real_vector(&fitted)?)])
 }
 
 /// `runmed(x, k, iend, naAction, ...)`: running medians of odd span `k`. Ends keep the data
@@ -1921,11 +1761,7 @@ unsafe fn bin_dist(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn bw_den(call: &NativeCall<'_>) -> R<Sexp> {
     let bins = values::as_integer_scalar(call.arg(0)).max(1) as usize;
     let x = real_values(call.arg(1))?;
-    let (low, high) = x
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {
-            (low.min(value), high.max(value))
-        });
+    let (low, high) = x.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| (low.min(value), high.max(value)));
     let range = (high - low) * 1.01;
     let width = range / bins as f64;
     let mut counts = vec![0.0; bins];
@@ -1959,10 +1795,7 @@ unsafe fn bw_den_binned(call: &NativeCall<'_>) -> R<Sexp> {
 }
 
 /// The bandwidth selectors' criteria, from the binned distance counts `cnt` of bin width `d`.
-unsafe fn bandwidth_criterion(
-    call: &NativeCall<'_>,
-    criterion: fn(f64) -> f64,
-) -> R<(f64, f64, f64)> {
+unsafe fn bandwidth_criterion(call: &NativeCall<'_>, criterion: fn(f64) -> f64) -> R<(f64, f64, f64)> {
     let n = values::as_real_scalar(call.arg(0));
     let width = values::as_real_scalar(call.arg(1));
     let counts = real_values(call.arg(2))?;
@@ -1983,23 +1816,17 @@ const SQRT_PI: f64 = 1.772_453_850_905_516;
 const SQRT_2PI: f64 = 2.506_628_274_631_000_5;
 
 unsafe fn bw_ucv(call: &NativeCall<'_>) -> R<Sexp> {
-    let (n, h, sum) = bandwidth_criterion(call, |delta| {
-        (-delta / 4.0).exp() - 8f64.sqrt() * (-delta / 2.0).exp()
-    })?;
+    let (n, h, sum) = bandwidth_criterion(call, |delta| (-delta / 4.0).exp() - 8f64.sqrt() * (-delta / 2.0).exp())?;
     values::scalar_real((0.5 + sum / n) / (n * h * SQRT_PI))
 }
 
 unsafe fn bw_bcv(call: &NativeCall<'_>) -> R<Sexp> {
-    let (n, h, sum) = bandwidth_criterion(call, |delta| {
-        (-delta / 4.0).exp() * (delta * delta - 12.0 * delta + 12.0)
-    })?;
+    let (n, h, sum) = bandwidth_criterion(call, |delta| (-delta / 4.0).exp() * (delta * delta - 12.0 * delta + 12.0))?;
     values::scalar_real((1.0 + sum / (32.0 * n)) / (2.0 * n * h * SQRT_PI))
 }
 
 unsafe fn bw_phi4(call: &NativeCall<'_>) -> R<Sexp> {
-    let (n, h, sum) = bandwidth_criterion(call, |delta| {
-        (-delta / 2.0).exp() * (delta * delta - 6.0 * delta + 3.0)
-    })?;
+    let (n, h, sum) = bandwidth_criterion(call, |delta| (-delta / 2.0).exp() * (delta * delta - 6.0 * delta + 3.0))?;
     let sum = 2.0 * sum + n * 3.0;
     values::scalar_real(sum / (n * (n - 1.0) * h.powi(5) * SQRT_2PI))
 }
@@ -2036,11 +1863,7 @@ unsafe fn acf(call: &NativeCall<'_>) -> R<Sexp> {
                         sum += a * b;
                     }
                 }
-                result[lag + size * u + size * series * v] = if count > 0 {
-                    sum / (count + lag) as f64
-                } else {
-                    NA_REAL
-                };
+                result[lag + size * u + size * series * v] = if count > 0 { sum / (count + lag) as f64 } else { NA_REAL };
             }
         }
     }
@@ -2050,9 +1873,7 @@ unsafe fn acf(call: &NativeCall<'_>) -> R<Sexp> {
                 result[size * u + size * series * u] = 1.0;
             }
         } else {
-            let scale: Vec<f64> = (0..series)
-                .map(|u| result[size * u + size * series * u].sqrt())
-                .collect();
+            let scale: Vec<f64> = (0..series).map(|u| result[size * u + size * series * u].sqrt()).collect();
             for u in 0..series {
                 for v in 0..series {
                     for lag in 0..=lags {
@@ -2262,13 +2083,7 @@ unsafe fn holt_winters(call: &NativeCall<'_>) -> R<Sexp> {
         let i0 = i + 2 - start;
         let s0 = i0 + period - 1;
         let mut forecast = level[i0 - 1] + if do_trend { trend[i0 - 1] } else { 0.0 };
-        let seasonal_term = if do_seasonal {
-            season[s0 - period]
-        } else if additive {
-            0.0
-        } else {
-            1.0
-        };
+        let seasonal_term = if do_seasonal { season[s0 - period] } else if additive { 0.0 } else { 1.0 };
         if additive {
             forecast += seasonal_term;
         } else {
@@ -2276,21 +2091,13 @@ unsafe fn holt_winters(call: &NativeCall<'_>) -> R<Sexp> {
         }
         let residual = x[i] - forecast;
         sse += residual * residual;
-        let deseasonalized = if additive {
-            x[i] - seasonal_term
-        } else {
-            x[i] / seasonal_term
-        };
+        let deseasonalized = if additive { x[i] - seasonal_term } else { x[i] / seasonal_term };
         level[i0] = alpha * deseasonalized + (1.0 - alpha) * (level[i0 - 1] + trend[i0 - 1]);
         if do_trend {
             trend[i0] = beta * (level[i0] - level[i0 - 1]) + (1.0 - beta) * trend[i0 - 1];
         }
         if do_seasonal {
-            let observed = if additive {
-                x[i] - level[i0]
-            } else {
-                x[i] / level[i0]
-            };
+            let observed = if additive { x[i] - level[i0] } else { x[i] / level[i0] };
             season[s0] = gamma * observed + (1.0 - gamma) * seasonal_term;
         }
     }
@@ -2381,8 +2188,7 @@ unsafe fn burg(call: &NativeCall<'_>) -> R<Sexp> {
         let reflection = 2.0 * numerator / denominator;
         coefficients[order * (p - 1) + (p - 1)] = reflection;
         for j in 1..p {
-            coefficients[p - 1 + order * (j - 1)] = coefficients[p - 2 + order * (j - 1)]
-                - reflection * coefficients[p - 2 + order * (p - j - 1)];
+            coefficients[p - 1 + order * (j - 1)] = coefficients[p - 2 + order * (j - 1)] - reflection * coefficients[p - 2 + order * (p - j - 1)];
         }
         let previous = forward.clone();
         for t in p..n {
@@ -2390,16 +2196,10 @@ unsafe fn burg(call: &NativeCall<'_>) -> R<Sexp> {
             backward[t] -= reflection * previous[t - 1];
         }
         variance1[p] = variance1[p - 1] * (1.0 - reflection * reflection);
-        let total: f64 = (p..n)
-            .map(|t| backward[t] * backward[t] + forward[t] * forward[t])
-            .sum();
+        let total: f64 = (p..n).map(|t| backward[t] * backward[t] + forward[t] * forward[t]).sum();
         variance2[p] = total / (2.0 * (n - p) as f64);
     }
-    values::list_vector(&[
-        values::real_vector(&coefficients)?,
-        values::real_vector(&variance1)?,
-        values::real_vector(&variance2)?,
-    ])
+    values::list_vector(&[values::real_vector(&coefficients)?, values::real_vector(&variance1)?, values::real_vector(&variance2)?])
 }
 
 /// `LogLin(dim, config, table, start, nmar, eps, iter)`: iterative proportional fitting of a
@@ -2407,10 +2207,7 @@ unsafe fn burg(call: &NativeCall<'_>) -> R<Sexp> {
 /// fit to every margin in `config` in turn, until the largest difference between a fitted
 /// and an observed margin entry falls below `eps`.
 unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
-    let dims: Vec<usize> = integer_values(call.arg(0))?
-        .iter()
-        .map(|&value| value.max(0) as usize)
-        .collect();
+    let dims: Vec<usize> = integer_values(call.arg(0))?.iter().map(|&value| value.max(0) as usize).collect();
     let configuration = integer_values(call.arg(1))?;
     let table = real_values(call.arg(2))?;
     let mut fit = real_values(call.arg(3))?;
@@ -2422,13 +2219,7 @@ unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
     }
     let margins: Vec<Vec<usize>> = configuration
         .chunks(variables)
-        .map(|column| {
-            column
-                .iter()
-                .take_while(|&&variable| variable > 0)
-                .map(|&variable| variable as usize - 1)
-                .collect()
-        })
+        .map(|column| column.iter().take_while(|&&variable| variable > 0).map(|&variable| variable as usize - 1).collect())
         .collect();
     let cells = table.len();
     // The marginal cell of each table cell for each margin.
@@ -2480,11 +2271,7 @@ unsafe fn loglin(call: &NativeCall<'_>) -> R<Sexp> {
                 largest = largest.max((value - observed[margin][index]).abs());
             }
             for (cell, &index) in indices.iter().enumerate() {
-                fit[cell] = if fitted[index] > 0.0 {
-                    fit[cell] * observed[margin][index] / fitted[index]
-                } else {
-                    0.0
-                };
+                fit[cell] = if fitted[index] > 0.0 { fit[cell] * observed[margin][index] / fitted[index] } else { 0.0 };
             }
         }
         deviations[iteration] = largest;
@@ -2535,38 +2322,16 @@ unsafe fn stl(call: &NativeCall<'_>) -> R<Sexp> {
     loop {
         for _ in 0..inner {
             let detrended: Vec<f64> = (0..n).map(|i| y[i] - trend[i]).collect();
-            let cycles = cycle_subseries_smooth(
-                &detrended,
-                period,
-                seasonal_span,
-                seasonal_degree,
-                seasonal_jump,
-                robust,
-                &weights,
-            );
+            let cycles = cycle_subseries_smooth(&detrended, period, seasonal_span, seasonal_degree, seasonal_jump, robust, &weights);
             let first = moving_average(&cycles, period);
             let second = moving_average(&first, period);
             let lowpass_input = moving_average(&second, 3);
-            let lowpass = loess_jumps(
-                &lowpass_input,
-                lowpass_span,
-                lowpass_degree,
-                lowpass_jump,
-                false,
-                &[],
-            );
+            let lowpass = loess_jumps(&lowpass_input, lowpass_span, lowpass_degree, lowpass_jump, false, &[]);
             for i in 0..n {
                 season[i] = cycles[period + i] - lowpass[i];
             }
             let deseasonalized: Vec<f64> = (0..n).map(|i| y[i] - season[i]).collect();
-            trend = loess_jumps(
-                &deseasonalized,
-                trend_span,
-                trend_degree,
-                trend_jump,
-                robust,
-                &weights,
-            );
+            trend = loess_jumps(&deseasonalized, trend_span, trend_degree, trend_jump, robust, &weights);
         }
         pass += 1;
         if pass > outer {
@@ -2587,52 +2352,20 @@ unsafe fn stl(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// Smooths each cycle subseries by loess and extends it by one value at each end, giving a
 /// series of length `n + 2 period` laid out by cycle position.
-fn cycle_subseries_smooth(
-    y: &[f64],
-    period: usize,
-    span: usize,
-    degree: i32,
-    jump: usize,
-    robust: bool,
-    weights: &[f64],
-) -> Vec<f64> {
+fn cycle_subseries_smooth(y: &[f64], period: usize, span: usize, degree: i32, jump: usize, robust: bool, weights: &[f64]) -> Vec<f64> {
     let n = y.len();
     let mut result = vec![0.0; n + 2 * period];
     for j in 0..period {
         let count = if j < n { (n - j - 1) / period + 1 } else { 0 };
         let series: Vec<f64> = (0..count).map(|i| y[i * period + j]).collect();
-        let series_weights: Vec<f64> = if robust {
-            (0..count).map(|i| weights[i * period + j]).collect()
-        } else {
-            Vec::new()
-        };
+        let series_weights: Vec<f64> = if robust { (0..count).map(|i| weights[i * period + j]).collect() } else { Vec::new() };
         let mut smoothed = vec![0.0; count + 2];
         let inner = loess_jumps(&series, span, degree, jump, robust, &series_weights);
         smoothed[1..count + 1].copy_from_slice(&inner);
         let right = span.min(count);
-        smoothed[0] = loess_estimate(
-            &series,
-            span,
-            degree,
-            0.0,
-            1,
-            right,
-            robust,
-            &series_weights,
-        )
-        .unwrap_or(smoothed[1]);
+        smoothed[0] = loess_estimate(&series, span, degree, 0.0, 1, right, robust, &series_weights).unwrap_or(smoothed[1]);
         let left = if count >= span { count - span + 1 } else { 1 };
-        smoothed[count + 1] = loess_estimate(
-            &series,
-            span,
-            degree,
-            (count + 1) as f64,
-            left,
-            count,
-            robust,
-            &series_weights,
-        )
-        .unwrap_or(smoothed[count]);
+        smoothed[count + 1] = loess_estimate(&series, span, degree, (count + 1) as f64, left, count, robust, &series_weights).unwrap_or(smoothed[count]);
         for (m, &value) in smoothed.iter().enumerate() {
             let index = m * period + j;
             if index < result.len() {
@@ -2657,14 +2390,7 @@ fn moving_average(x: &[f64], length: usize) -> Vec<f64> {
 
 /// Loess at every point (1-based positions), fitting exactly every `jump` points and
 /// interpolating linearly between them.
-fn loess_jumps(
-    y: &[f64],
-    span: usize,
-    degree: i32,
-    jump: usize,
-    robust: bool,
-    weights: &[f64],
-) -> Vec<f64> {
+fn loess_jumps(y: &[f64], span: usize, degree: i32, jump: usize, robust: bool, weights: &[f64]) -> Vec<f64> {
     let n = y.len();
     if n < 2 {
         return y.to_vec();
@@ -2673,8 +2399,7 @@ fn loess_jumps(
     let step = jump.min(n - 1);
     let (mut left, mut right) = (1usize, n);
     let fit_at = |i: usize, left: usize, right: usize, fitted: &mut [f64]| {
-        fitted[i - 1] = loess_estimate(y, span, degree, i as f64, left, right, robust, weights)
-            .unwrap_or(y[i - 1]);
+        fitted[i - 1] = loess_estimate(y, span, degree, i as f64, left, right, robust, weights).unwrap_or(y[i - 1]);
     };
     if span >= n {
         let mut i = 1;
@@ -2736,16 +2461,7 @@ fn loess_jumps(
 /// The tricube-weighted local constant (`degree` 0) or line at `xs` from points `left..=right`
 /// (1-based), or `None` when all weights vanish.
 #[allow(clippy::too_many_arguments)]
-fn loess_estimate(
-    y: &[f64],
-    span: usize,
-    degree: i32,
-    xs: f64,
-    left: usize,
-    right: usize,
-    robust: bool,
-    robustness: &[f64],
-) -> Option<f64> {
+fn loess_estimate(y: &[f64], span: usize, degree: i32, xs: f64, left: usize, right: usize, robust: bool, robustness: &[f64]) -> Option<f64> {
     let n = y.len();
     let range = n as f64 - 1.0;
     let mut h = (xs - left as f64).max(right as f64 - xs);
@@ -2758,11 +2474,7 @@ fn loess_estimate(
     for j in left..=right {
         let r = (j as f64 - xs).abs();
         if r <= h9 {
-            weights[j] = if r <= h1 {
-                1.0
-            } else {
-                (1.0 - (r / h).powi(3)).powi(3)
-            };
+            weights[j] = if r <= h1 { 1.0 } else { (1.0 - (r / h).powi(3)).powi(3) };
             if robust {
                 weights[j] *= robustness[j - 1];
             }
@@ -2778,9 +2490,7 @@ fn loess_estimate(
     if h > 0.0 && degree > 0 {
         let mean: f64 = (left..=right).map(|j| weights[j] * j as f64).sum();
         let mut slope = xs - mean;
-        let spread: f64 = (left..=right)
-            .map(|j| weights[j] * (j as f64 - mean).powi(2))
-            .sum();
+        let spread: f64 = (left..=right).map(|j| weights[j] * (j as f64 - mean).powi(2)).sum();
         if spread.sqrt() > 0.001 * range {
             slope /= spread;
             for j in left..=right {
@@ -2803,14 +2513,6 @@ fn robustness_weights(y: &[f64], fitted: &[f64]) -> Vec<f64> {
     let (high, low) = (0.999 * cmad, 0.001 * cmad);
     residuals
         .iter()
-        .map(|&r| {
-            if r <= low {
-                1.0
-            } else if r <= high {
-                (1.0 - (r / cmad).powi(2)).powi(2)
-            } else {
-                0.0
-            }
-        })
+        .map(|&r| if r <= low { 1.0 } else if r <= high { (1.0 - (r / cmad).powi(2)).powi(2) } else { 0.0 })
         .collect()
 }

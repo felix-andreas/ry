@@ -30,23 +30,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("%*%", 2, |call| unsafe {
         // R 4.3's `%*%` dispatches S4 methods, positionally, when either operand is an S4
         // object, and never S3 ones.
-        if call
-            .args
-            .iter()
-            .take(2)
-            .any(|arg| arg.value.has_gp(gp::S4_OBJECT))
-        {
-            let positional: Vec<Arg> = call
-                .args
-                .iter()
-                .map(|arg| Arg {
-                    tag: nil(),
-                    value: arg.value,
-                })
-                .collect();
-            if let Some(value) =
-                crate::dispatch::s4_dispatch(call.op, call.call, &positional, call.env)?
-            {
+        if call.args.iter().take(2).any(|arg| arg.value.has_gp(gp::S4_OBJECT)) {
+            let positional: Vec<Arg> = call.args.iter().map(|arg| Arg { tag: nil(), value: arg.value }).collect();
+            if let Some(value) = crate::dispatch::s4_dispatch(call.op, call.call, &positional, call.env)? {
                 return Ok(value);
             }
         }
