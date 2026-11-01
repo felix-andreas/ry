@@ -2687,8 +2687,11 @@ impl<'db> Checker<'db, '_> {
                 _ => None,
             })
             .collect();
-        let Some((_, Some(tag_payload))) = tags.iter().find(|(tag, _)| *tag == name.as_str())
-        else {
+        let found = tags.iter().find(|(tag, _)| *tag == name.as_str());
+        if let Some((_, None)) = found {
+            return Some(format!("`:{}` carries no payload.", name.as_str()));
+        }
+        let Some((_, Some(tag_payload))) = found else {
             let nearest = nearest_name(
                 name.as_str(),
                 tags.iter().map(|(tag, _)| *tag),

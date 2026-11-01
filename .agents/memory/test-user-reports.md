@@ -509,6 +509,6 @@ mistakes on purpose, and read the diagnostics. Four findings were small enough t
   with a module prefix and is the start of a longer name now suggests that name (`Str.split_on`;
   `nearest_name`, one fixture in `scripts.R.test`).
 - **`as.record`, `as.tuple` and `as.tag` were reported `unresolved`** although the runtime binds them
-  and `records-and-tags.mdx` documents them. They are declared in `base.Rtypes` now.
+  and `records-and-tags.mdx` documents them. They are declared in `ry.Rtypes` now.
 - **The docs had no page for frames.** `type-checking/frames.mdx` covers them, and says plainly that
   they are checked but cannot run yet, because `frame()` is not wired into the interpreter.

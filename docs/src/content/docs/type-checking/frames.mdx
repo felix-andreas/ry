@@ -102,7 +102,7 @@ type-mismatch
   x expected `frame{team: character[], amount: double[]}`, found `frame{team: character[], cost: double[]}`
 ```
 
-A bare `frame` accepts any frame and leaves its columns unknown. A frame also counts as a
+The columns must match exactly: a frame with an extra column is not accepted either. A bare `frame` accepts any frame and leaves its columns unknown. A frame also counts as a
 `data.frame`, so functions that expect one accept it.
 
 The [typing reference](/reference/type-system/#frames) lists every form of query ry understands,

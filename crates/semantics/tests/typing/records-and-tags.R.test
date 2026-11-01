@@ -653,3 +653,15 @@ p$x <- 3L
 #++++
 p: record{x: double, y: double}
 integer
+
+#---- payload_pattern_on_a_tag_without_payload
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :None(zz = 1) => 0L
+    _ => 1L
+  }
+}
+#++++
+f: fn(o: :Some(integer) | :None) -> integer
+81..94 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. `:None` carries no payload.

@@ -1672,7 +1672,10 @@ pub(crate) fn nearest_name<'a>(
     // A standard-library name such as `Str.split` is usually the start of a longer one
     // (`Str.split_on`), which is farther away by edit distance than an unrelated base function.
     let candidates: Vec<&str> = candidates.collect();
-    if name.chars().next().is_some_and(char::is_uppercase) && name.contains('.') {
+    if ["List.", "Str.", "Num.", "Result.", "Dict.", "Set."]
+        .iter()
+        .any(|module| name.starts_with(module))
+    {
         let completion = candidates
             .iter()
             .filter(|candidate| candidate.len() > name.len() && candidate.starts_with(name))
