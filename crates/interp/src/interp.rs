@@ -204,6 +204,8 @@ pub struct Interp {
     /// An unwind raised where it cannot propagate (an ALTREP `Elt` method called through the
     /// infallible element accessor), raised by the next [`crate::unwind::poll_interrupt`].
     pub parked_unwind: Option<Unwind>,
+    /// The processes `parallel::mcfork` forked, and the pipe to the master in a forked child.
+    pub forks: parallel::Forks,
 }
 
 struct InterpState {
@@ -304,6 +306,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         annotations: annotations::State::default(),
         object_systems: true,
         parked_unwind: None,
+        forks: parallel::Forks::default(),
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();
@@ -353,15 +356,16 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
     drop(written);
 }
 
-/// Writes to the console through the host.
-/// Writes console output: standard output goes where `sink` diverts it, errors and messages to
-/// the terminal.
+/// Writes console output: standard output goes where `sink` diverts it, errors and messages
+/// where `sink(type = "message")` diverts them.
 pub fn write_console(text: &[u8], is_error: bool) {
-    if is_error {
-        write_terminal(text, true);
-    } else {
-        // SAFETY: the sink table only holds connections of this session.
-        unsafe { connections::write_output(text) }
+    // SAFETY: the sink table only holds connections of this session.
+    unsafe {
+        if is_error {
+            connections::write_message(text);
+        } else {
+            connections::write_output(text);
+        }
     }
 }
 

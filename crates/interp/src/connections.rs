@@ -225,6 +225,9 @@ pub struct Table {
     entries: Vec<Option<Entry>>,
     /// Innermost last.
     sinks: Vec<Sink>,
+    /// The slot messages and errors go to: 2, standard error, unless `sink(type = "message")`
+    /// diverted them. GNU R keeps a single message diversion, not a stack.
+    message_sink: usize,
 }
 
 struct Entry {
@@ -281,6 +284,7 @@ impl Table {
         Table {
             entries,
             sinks: Vec::new(),
+            message_sink: 2,
         }
     }
 
@@ -302,10 +306,10 @@ impl Table {
         }
         // A diversion keeps its connection alive, as GNU R preserves the `conn_id` of a sink, so
         // `sink(file(path))` is not closed as unused while output still goes to it.
-        for sink in &self.sinks {
+        for slot in self.sinks.iter().map(|sink| sink.slot).chain([self.message_sink]) {
             let id = self
                 .entries
-                .get(sink.slot)
+                .get(slot)
                 .and_then(Option::as_ref)
                 .and_then(|entry| Sexp::from_raw((*entry.con).ex_ptr.cast()));
             if let Some(id) = id {
@@ -403,11 +407,48 @@ pub unsafe fn write_output(bytes: &[u8]) {
     if split || slot == 1 {
         write_terminal(bytes, false);
     }
-    if slot == 1 {
-        return;
+    if slot != 1 {
+        write_diverted(slot, bytes, false);
     }
+}
+
+/// Writes out what every open file connection has buffered, so that a process about to fork
+/// does not leave the same bytes in both copies of the buffer.
+pub unsafe fn flush_pending_writes() -> R<()> {
+    for entry in entries().iter().flatten() {
+        if !entry.builtin || (*entry.con).isopen == 0 {
+            continue;
+        }
+        let device = (*entry.con).private as *mut Device;
+        if let Some(Device::File(FileDevice {
+            stream: Some(Stream::Plain(plain)),
+            ..
+        })) = device.as_mut()
+        {
+            flush_writes(plain).map_err(io_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes messages and errors: to the terminal's standard error, or to the connection
+/// `sink(type = "message")` diverted them to.
+pub unsafe fn write_message(bytes: &[u8]) {
+    match interp().connections.message_sink {
+        2 => write_terminal(bytes, true),
+        1 => write_output(bytes),
+        slot => write_diverted(slot, bytes, true),
+    }
+}
+
+/// Writes console output to the connection in `slot` and flushes it, as GNU R's `Rvprintf` and
+/// `REvprintf` do after every write, so the file a sink writes to can be read before the sink
+/// ends.
+unsafe fn write_diverted(slot: usize, bytes: &[u8], is_error: bool) {
     let written = match entry(slot) {
-        Some(entry) => method_print(entry.con, bytes),
+        Some(entry) => method_print(entry.con, bytes)
+            .and_then(|()| method_fflush(entry.con))
+            .map(drop),
         None => Err(error("invalid connection")),
     };
     if let Err(unwind) = written {
@@ -420,7 +461,7 @@ pub unsafe fn write_output(bytes: &[u8]) {
             format!("Error writing to the sink connection: {message}\n").as_bytes(),
             true,
         );
-        write_terminal(bytes, false);
+        write_terminal(bytes, is_error);
     }
 }
 
@@ -799,6 +840,9 @@ unsafe fn close(con: Sexp) -> R<Sexp> {
     let (slot, _) = resolve_con(con)?;
     if slot <= 2 {
         return Err(error("cannot close standard connections"));
+    }
+    if interp().connections.message_sink == slot {
+        return Err(error("cannot close 'message' sink connection"));
     }
     let status = close_slot(slot)?;
     if status == NA_INTEGER {
@@ -1357,13 +1401,20 @@ unsafe fn all_connections() -> R<Sexp> {
 }
 
 /// `sink(con, closeOnExit, type, split)`: diverts output to connection `con`, or ends the
-/// innermost diversion for `con = -1`. Diverting messages is accepted and ignored.
+/// innermost diversion for `con = -1`. With `type = "message"` it sets or, for `con = -1`,
+/// resets the single message diversion, which neither opens nor closes the connection.
 unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
     let target = call.arg(0);
     let close_on_exit = values::require_flag(call.arg(1), "closeOnExit")?;
     let messages = values::require_flag(call.arg(2), "type")?;
     let split = values::require_flag(call.arg(3), "split")?;
     if messages {
+        interp().connections.message_sink =
+            if !values::inherits(target, "connection") && values::as_integer_scalar(target) < 0 {
+                2
+            } else {
+                resolve_con(target)?.0
+            };
         return Ok(nil());
     }
     if !values::inherits(target, "connection") && values::as_integer_scalar(target) < 0 {
@@ -1410,7 +1461,7 @@ unsafe fn do_sink_number(call: &Call<'_>) -> R<Sexp> {
     if values::as_logical_scalar(call.arg(0)) == 1 {
         scalar_integer(interp().connections.sinks.len() as i32)
     } else {
-        scalar_integer(2)
+        scalar_integer(interp().connections.message_sink as i32)
     }
 }
 
@@ -3275,7 +3326,7 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             Ok(bytes.len())
         }
         Device::Standard(Standard::Error) => {
-            write_terminal(bytes, true);
+            write_message(bytes);
             Ok(bytes.len())
         }
         Device::File(file) => match &mut file.stream {
