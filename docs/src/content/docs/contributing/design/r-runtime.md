@@ -1058,8 +1058,10 @@ JIT fits around them.
   ```
 
   Verified under Wine 9 with a Windows R 4.5 home whose DLLs were not executed: scripts that
-  print, sort, summarize `mtcars`, format dates, run regular expressions, read files and call
-  `win.version()`, `Sys.info()` and `normalizePath()` produce GNU R's output.
+  print, sort, summarize `mtcars`, format dates, run regular expressions, read files, load
+  `stats`, `utils` and `tools`, and call `normalizePath()` print what GNU R prints. That
+  comparison is against GNU R's documented and Unix output, since GNU R itself did not run.
+  `win.version()` and `Sys.info()` report a fixed `Windows 10 x64` with no build number.
 
   Open:
   - BLAS and LAPACK come from the R installation's `bin/x64/Rblas.dll` and `Rlapack.dll`, which

@@ -117,7 +117,7 @@ impl Dll {
 pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     let runtime = runtime();
     let canonical = std::fs::canonicalize(path)
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| platform::path_text(&path))
         .unwrap_or_else(|_| path.to_owned());
     if let Some(dll) = runtime.dlls.iter_mut().find(|dll| dll.path == canonical) {
         return Ok(&mut **dll);
@@ -129,16 +129,26 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     let opened = canonical.clone();
     let c_path = CString::new(opened.as_str()).map_err(|_| error("invalid library path"))?;
     let mut handle = std::ptr::null_mut();
+    let mut load_error = 0;
     with_native_scope(|| {
         let mut status = 0;
-        handle = ry_call_dlopen(c_path.as_ptr(), c_int::from(!local), &mut status);
+        handle = ry_call_dlopen(
+            c_path.as_ptr(),
+            c_int::from(!local),
+            &mut status,
+            &mut load_error,
+        );
         status
     })?;
     if handle.is_null() {
-        let mut message = format!(
-            "unable to load shared object '{canonical}':\n  {}",
+        #[cfg(windows)]
+        let reason = platform::library_error_message(load_error);
+        #[cfg(not(windows))]
+        let reason = {
+            debug_assert_eq!(load_error, 0);
             platform::last_library_error()
-        );
+        };
+        let mut message = format!("unable to load shared object '{canonical}':\n  {reason}");
         if opened != canonical {
             message.push_str(&format!(
                 "\n  ry loaded a copy rebound to its runtime, {opened}, among links that \
@@ -295,8 +305,10 @@ fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
 /// the copy that climbs at most `climb` levels therefore resolves to the same file it reaches
 /// from the original: `@loader_path/../lib/libdep.dylib` from `pkg/libs/pkg.so` is
 /// `<cache>/pkg/lib/libdep.dylib`, a link to `pkg/lib/libdep.dylib`. A climb past the root
-/// stops there.
-#[cfg(any(target_os = "macos", test))]
+/// stops there. An ancestor that cannot be listed is left empty in the mirror rather than
+/// failing the load: a dependency under it then fails in `dlopen`, which names the missing file,
+/// and a library that needs nothing from it still loads.
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn mirror_surroundings(
     directory: &std::path::Path,
     file_name: &std::ffi::OsStr,
@@ -317,8 +329,13 @@ fn mirror_surroundings(
     }
     std::fs::create_dir_all(&mirror)?;
     let mut skipped = file_name;
-    for (original, mirrored) in levels.iter().rev() {
-        link_siblings(original, skipped, mirrored)?;
+    for (level, (original, mirrored)) in levels.iter().rev().enumerate() {
+        match link_siblings(original, skipped, mirrored) {
+            Ok(()) => {}
+            Err(failure) if level > 0 && failure.kind() == std::io::ErrorKind::PermissionDenied => {
+            }
+            Err(failure) => return Err(failure),
+        }
         skipped = original.file_name().unwrap_or_default();
     }
     Ok(mirror)
@@ -326,7 +343,7 @@ fn mirror_surroundings(
 
 /// Links each entry of `directory` other than `skipped` into `cache` under the same name. A
 /// link a concurrent session made first is as good as this one.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn link_siblings(
     directory: &std::path::Path,
     skipped: &std::ffi::OsStr,
@@ -772,7 +789,7 @@ pub unsafe extern "C" fn ry_native_symbol(name: *const c_char, package: *const c
     enter(|| native_symbol_info(&name, &package))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::mirror_surroundings;
 

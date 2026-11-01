@@ -2426,13 +2426,31 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
     ))?;
     // UTF-8 is the only multibyte codeset ry supports as a native encoding.
     let mbcs = scalar_bool(is_utf8)?;
-    let codeset = scalar_string(&name)?;
-    values::named_list(&[
-        ("MBCS", mbcs),
-        ("UTF-8", utf8),
-        ("Latin-1", latin1),
-        ("codeset", codeset),
-    ])
+    // GNU R on Windows reports code pages instead of a codeset name, and `tools` reads
+    // `codepage` while it loads.
+    #[cfg(windows)]
+    {
+        let codepage = scalar_integer(65001)?;
+        let system =
+            scalar_integer(i32::try_from(crate::platform::system_codepage()).unwrap_or(0))?;
+        values::named_list(&[
+            ("MBCS", mbcs),
+            ("UTF-8", utf8),
+            ("Latin-1", latin1),
+            ("codepage", codepage),
+            ("system.codepage", system),
+        ])
+    }
+    #[cfg(not(windows))]
+    {
+        let codeset = scalar_string(&name)?;
+        values::named_list(&[
+            ("MBCS", mbcs),
+            ("UTF-8", utf8),
+            ("Latin-1", latin1),
+            ("codeset", codeset),
+        ])
+    }
 }
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {

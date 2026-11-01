@@ -61,6 +61,7 @@ unsafe extern "C" {
         path: *const std::ffi::c_char,
         global: c_int,
         status: *mut c_int,
+        load_error: *mut u32,
     ) -> *mut c_void;
     /// `info` is a `Dll`, which C sees only as the opaque `DllInfo *`.
     pub(crate) fn ry_call_init(

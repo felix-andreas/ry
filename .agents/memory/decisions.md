@@ -3951,8 +3951,9 @@ explicit allocators".
   `__declspec(dllimport) extern` under `_WIN32`.
 - **One platform seam.** Every operating-system call the interpreter makes goes through
   `crates/interp/src/platform.rs`, which has a Unix and a Windows `imp` with the same functions.
-  Callers never `cfg` on the OS themselves, so a new libc use shows up as a Windows build error in
-  one file. Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
+  Operating-system *calls* never happen outside it, so a new libc use shows up as a Windows build
+  error in one file; platform *conventions* (`.Platform`, the platform string, `libs/x64`, the
+  routine table) still branch on `cfg!` where they are used. Windows has no `iconv(3)`, so `PortableIconv` converts with `encoding_rs` behind the
   same interface `Riconv` exports.
 - **lld is required.** GNU ld 2.41 (Ubuntu's mingw-w64) emits a `HIGHLOW` base relocation for
   each `SECREL32` thread-local offset, so a relocated `R.dll` (ASLR, or a base-address collision)

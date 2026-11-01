@@ -72,16 +72,21 @@ fn windows_executable(path: &Path) -> bool {
 
 /// A resolved path as R shows it. Windows' `canonicalize` returns a verbatim path (`\\?\C:\...`
 /// or `\\?\UNC\server\...`), which GNU R never produces and many path functions mishandle, so
-/// the prefix goes back to the ordinary drive or UNC form.
+/// the prefix goes back to the ordinary drive or UNC form. Any other verbatim path, such as a
+/// volume mounted without a drive letter (`\\?\Volume{...}\`), has no ordinary form and keeps
+/// its prefix.
 pub fn path_text(path: &Path) -> String {
     let text = path.to_string_lossy();
     if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else if let Some(local) = text.strip_prefix(r"\\?\") {
-        local.to_owned()
-    } else {
-        text.into_owned()
+        return format!(r"\\{unc}");
     }
+    if let Some(local) = text.strip_prefix(r"\\?\") {
+        let bytes = local.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return local.to_owned();
+        }
+    }
+    text.into_owned()
 }
 
 #[cfg(unix)]
@@ -382,7 +387,7 @@ mod imp {
         unsafe {
             let message = libc::dlerror();
             if message.is_null() {
-                String::new()
+                "unknown error".to_owned()
             } else {
                 CStr::from_ptr(message).to_string_lossy().into_owned()
             }
@@ -506,7 +511,7 @@ mod imp {
             path::Path,
         },
         windows_sys::Win32::{
-            Foundation::{CloseHandle, FILETIME, GetLastError, HMODULE},
+            Foundation::{CloseHandle, FILETIME, GetLastError, HMODULE, STILL_ACTIVE},
             Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES},
             System::{
                 Diagnostics::Debug::{
@@ -652,8 +657,10 @@ mod imp {
                 return false;
             }
             let succeeded = if signal == 0 {
+                // An exited process still answers while any handle to it is open, so only
+                // STILL_ACTIVE means alive.
                 let mut code = 0;
-                GetExitCodeProcess(process, &mut code) != 0
+                GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE as u32
             } else {
                 TerminateProcess(process, 1) != 0
             };
@@ -696,9 +703,15 @@ mod imp {
         )
     }
 
-    /// GNU R 4.2 and later run Windows in UTF-8, which `ry.exe`'s manifest also asks for.
+    /// GNU R 4.2 and later run Windows in UTF-8, and so does ry.
     pub fn native_codeset() -> String {
         "UTF-8".to_owned()
+    }
+
+    /// The system's ANSI code page, which `l10n_info()` reports as `system.codepage`.
+    pub fn system_codepage() -> u32 {
+        // SAFETY: GetACP only reads a process-wide setting.
+        unsafe { windows_sys::Win32::Globalization::GetACP() }
     }
 
     pub fn set_errno(code: i32) {
@@ -776,9 +789,14 @@ mod imp {
 
     /// The system's message for the last failed call, as GNU R words a `LoadLibrary` failure.
     pub fn last_library_error() -> String {
+        // SAFETY: GetLastError only reads the thread's last error code.
+        library_error_message(unsafe { GetLastError() })
+    }
+
+    /// The system's message for a `LoadLibrary` error code, as GNU R words it.
+    pub fn library_error_message(code: u32) -> String {
         // SAFETY: FormatMessageW writes at most the buffer's length.
         unsafe {
-            let code = GetLastError();
             let mut buffer = [0u16; 512];
             let length = FormatMessageW(
                 FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,

@@ -118,12 +118,7 @@ fn rebind_thin(image: &mut [u8]) -> Result<Rebound, String> {
                 .unwrap_or(field.len());
             let name = std::str::from_utf8(&field[..length]).unwrap_or("");
             if let Some(relative) = name.strip_prefix(LOADER_PATH) {
-                let climb = relative
-                    .split('/')
-                    .filter(|component| *component != "." && !component.is_empty())
-                    .take_while(|component| *component == "..")
-                    .count();
-                rebound.climb = rebound.climb.max(climb);
+                rebound.climb = rebound.climb.max(climb(relative));
             }
             if is_dylib && names_gnu_r_libr(name) {
                 let replacement = RY_LIBR_INSTALL_NAME.as_bytes();
@@ -146,6 +141,24 @@ fn rebind_thin(image: &mut [u8]) -> Result<Rebound, String> {
         offset = end;
     }
     Ok(rebound)
+}
+
+/// How many directories above its start a relative path reaches at its lowest point:
+/// `../lib` reaches 1, and `../lib/../../share` reaches 2.
+fn climb(relative: &str) -> usize {
+    let mut depth = 0_isize;
+    let mut lowest = 0_isize;
+    for component in relative.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                depth -= 1;
+                lowest = lowest.min(depth);
+            }
+            _ => depth += 1,
+        }
+    }
+    lowest.unsigned_abs()
 }
 
 /// GNU R's libR, linked as `-lR` (`.../lib/libR.dylib`) or as `-framework R`, whose binary
@@ -389,6 +402,8 @@ mod tests {
         );
         let mut bytes = image(&["@loader_path/libsibling.dylib"]);
         assert_eq!(rebind_libr(&mut bytes).map(|rebound| rebound.climb), Ok(0));
+        assert_eq!(climb("../lib/../../share/libx.dylib"), 2);
+        assert_eq!(climb("lib/../../libx.dylib"), 1);
     }
 
     #[test]

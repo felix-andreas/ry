@@ -231,8 +231,14 @@ int ry_call_init(void (*function)(DllInfo *), DllInfo *info)
  * `Function c("c")` looks up `c`). An error there jumps out of dlopen, as it does in GNU R;
  * the loader lock is recursive and stays with this thread, so later loads still work.
  */
-void *ry_call_dlopen(const char *path, int global, int *status)
+/*
+ * A failed load leaves its error code in *load_error on Windows, read right after LoadLibraryExW
+ * because the cleanup that follows may overwrite GetLastError(). Elsewhere dlerror() keeps the
+ * message until the next dl call, and *load_error stays 0.
+ */
+void *ry_call_dlopen(const char *path, int global, int *status, unsigned int *load_error)
 {
+    *load_error = 0;
     RyContext context;
     ry_context_push(&context);
     if (RY_SETJMP(context.buffer)) {
@@ -251,6 +257,8 @@ void *ry_call_dlopen(const char *path, int global, int *status)
     wchar_t *wide = length > 0 ? malloc(sizeof(wchar_t) * (size_t) length) : NULL;
     if (wide != NULL && MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, length) > 0)
         handle = (void *) LoadLibraryExW(wide, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (handle == NULL)
+        *load_error = (unsigned int) GetLastError();
     free(wide);
 #else
     void *handle = dlopen(path, RTLD_NOW | (global ? RTLD_GLOBAL : RTLD_LOCAL));
