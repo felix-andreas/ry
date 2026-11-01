@@ -445,7 +445,8 @@ Set.reserve : <T: key> fn(set: Set<T>, spare: integer) -> Set<T>
 # DataFrame
 #
 # A Polars-style table API. The checker types the verbs structurally: the schema flows through
-# `select`, `with_columns`, `filter`, `group_by`, `agg`, `sort`, `join`, `head` and `collect`, and a
+# `select`, `with_columns`, `filter`, `group_by`, `agg`, `sort`, `join`, `join_asof`, `head` and
+# `collect`, and a
 # string that names a column must name one the frame has. These declarations give the shapes the
 # checker refines and cover the conversions and file IO.
 
@@ -470,6 +471,7 @@ DataFrame.sort : fn(df: DataFrame, ...: Expr | character, [descending]: logical)
 DataFrame.head : fn(df: DataFrame, [n]: integer | double) -> DataFrame
 DataFrame.tail : fn(df: DataFrame, [n]: integer | double) -> DataFrame
 DataFrame.join : fn(df: DataFrame, other: DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> DataFrame
+DataFrame.join_asof : fn(df: DataFrame, other: DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> DataFrame
 DataFrame.lazy : fn(df: DataFrame) -> LazyFrame
 GroupBy.agg : fn(group: GroupBy, ...: Expr) -> DataFrame
 LazyFrame.scan_csv : fn(path: character) -> LazyFrame
@@ -482,6 +484,7 @@ LazyFrame.sort : fn(lf: LazyFrame, ...: Expr | character, [descending]: logical)
 LazyFrame.head : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
 LazyFrame.tail : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
 LazyFrame.join : fn(lf: LazyFrame, other: LazyFrame | DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> LazyFrame
+LazyFrame.join_asof : fn(lf: LazyFrame, other: LazyFrame | DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> LazyFrame
 LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
 LazyFrame.explain : fn(lf: LazyFrame) -> character
 LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
@@ -505,6 +508,7 @@ Expr.median : fn(expr: Expr) -> Expr
 Expr.std : fn(expr: Expr) -> Expr
 Expr.var : fn(expr: Expr) -> Expr
 Expr.count : fn(expr: Expr) -> Expr
+Expr.head : fn(expr: Expr, [n]: integer | double) -> Expr
 Expr.is_null : fn(expr: Expr) -> Expr
 Expr.len : fn() -> Expr
 Expr.if_else : fn(test: Expr, yes: Any, no: Any) -> Expr

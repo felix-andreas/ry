@@ -1160,6 +1160,31 @@ right: DataFrame{id: integer[], score: double[], label: character[]}
 joined: DataFrame{id: integer[], score: double[], score_right: double[], label: character[]}
 kept: DataFrame{id: integer[], score: double[]}
 
+#---- an_asof_join_matches_by_exactly_and_on_to_the_nearest_row
+trades <- DataFrame(ticker = c("a", "b"), time = c(5L, 3L), size = c(10, 20))
+quotes <- DataFrame(ticker = c("a", "b"), time = c(2L, 4L), price = c(1.5, 7))
+joined <- DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
+#++++
+trades: DataFrame{ticker: character[], time: integer[], size: double[]}
+quotes: DataFrame{ticker: character[], time: integer[], price: double[]}
+joined: DataFrame{ticker: character[], time: integer[], size: double[], price: double[]}
+
+#---- an_asof_join_with_by_null_has_no_equality_keys
+trades <- DataFrame(time = c(5L, 3L), size = c(10, 20))
+quotes <- DataFrame(time = c(2L, 4L), price = c(1.5, 7))
+joined <- DataFrame.join_asof(trades, quotes, on = "time", by = NULL)
+#++++
+trades: DataFrame{time: integer[], size: double[]}
+quotes: DataFrame{time: integer[], price: double[]}
+joined: DataFrame{time: integer[], size: double[], price: double[]}
+
+#---- head_in_agg_keeps_up_to_n_rows_per_group
+x <- DataFrame(g = c("p", "q", "p"), v = c(3, 9, 7))
+top <- x |> DataFrame.group_by("g") |> GroupBy.agg(top2 = col("v") |> Expr.head(2L))
+#++++
+x: DataFrame{g: character[], v: double[]}
+top: DataFrame{g: character[], top2: double[]}
+
 #---- lazy_frames_carry_the_schema_to_collect
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 plan <- sales |>
@@ -1208,6 +1233,24 @@ left: DataFrame{id: integer[]}
 right: DataFrame{key: integer[]}
 joined: Unknown
 101..105 error[type-mismatch] the frame `right` has no column `id`. Its columns are `key`
+
+#---- an_asof_join_key_must_exist_on_both_sides
+trades <- DataFrame(ticker = c("a", "b"), time = c(5L, 3L))
+quotes <- DataFrame(ticker = c("a", "b"), stamp = c(2L, 4L))
+joined <- DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
+#++++
+trades: DataFrame{ticker: character[], time: integer[]}
+quotes: DataFrame{ticker: character[], stamp: integer[]}
+joined: Unknown
+172..178 error[type-mismatch] the frame `quotes` has no column `time`. Its columns are `ticker`, `stamp`
+
+#---- head_cannot_be_combined_inside_agg
+x <- DataFrame(g = c("p", "q", "p"), v = c(3, 9, 7))
+bad <- x |> DataFrame.group_by("g") |> GroupBy.agg(col("v") |> Expr.head(2L) + 1)
+#++++
+x: DataFrame{g: character[], v: double[]}
+bad: Unknown
+104..133 error[type-mismatch] `Expr.head` gives several values of `v` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col("v") + 1) |> Expr.head(2L)`
 
 #---- a_key_missing_from_both_sides_is_reported_once
 left <- DataFrame(id = 1:3)
