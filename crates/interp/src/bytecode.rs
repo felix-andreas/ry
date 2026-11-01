@@ -828,18 +828,24 @@ impl Compiler {
                     self.emit(Op::Visible, &[]);
                 }
                 let srcrefs = values::get_attr(call, symbols().srcref);
-                if srcrefs == nil() {
-                    for (_, statement) in args {
-                        self.expression(*statement, dst)?;
-                    }
-                    return Ok(());
-                }
                 let outer = self.srcref;
+                let null = (args.len() > 1).then(|| self.constant(nil()));
                 for (index, (_, statement)) in args.iter().enumerate() {
-                    self.srcref = eval::statement_srcref(srcrefs, index + 1);
-                    let srcref = self.constant(self.srcref);
-                    self.emit(Op::SetSrcref, &[srcref]);
+                    // The register file is a root, so a statement's value left in `dst` would
+                    // stay alive while the next statement runs, and an object it dropped would
+                    // survive a `gc()` there and finalize late.
+                    if let Some(null) = null.filter(|_| index > 0) {
+                        self.emit(Op::Constant, &[dst, null]);
+                    }
+                    if srcrefs != nil() {
+                        self.srcref = eval::statement_srcref(srcrefs, index + 1);
+                        let srcref = self.constant(self.srcref);
+                        self.emit(Op::SetSrcref, &[srcref]);
+                    }
                     self.expression(*statement, dst)?;
+                }
+                if srcrefs == nil() {
+                    return Ok(());
                 }
                 self.srcref = outer;
                 let srcref = self.constant(outer);

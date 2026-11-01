@@ -1354,9 +1354,10 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     // The first srcref is the brace's own; each statement runs with its srcref current, which
     // the calls it makes record for `sys.call` and `traceback`.
     let saved = interp().srcref;
-    // Only the last value stays rooted, so an object a statement drops can be collected (and
-    // finalized) by a `gc()` later in the same block.
+    // Nothing a statement made stays rooted while the next one runs, not even its value, so an
+    // object it drops can be collected (and finalized) by a `gc()` later in the same block.
     let mark = crate::heap().handle_mark();
+    let last = call.args.len().saturating_sub(1);
     for (index, arg) in call.args.iter().enumerate() {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index + 1);
@@ -1366,7 +1367,9 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
         crate::heap().release_handles(mark);
         match result {
             Ok(next) => {
-                crate::heap().root(next);
+                if index == last {
+                    crate::heap().root(next);
+                }
                 value = next;
             }
             Err(unwind) => {

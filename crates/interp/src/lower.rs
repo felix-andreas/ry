@@ -209,7 +209,7 @@ impl ParseDataBuilder {
             }
             kind if kind.is_trivia() => {}
             kind => {
-                self.token(token, token_name(kind));
+                self.token(token, parse_token(kind));
             }
         }
     }
@@ -236,7 +236,7 @@ impl ParseDataBuilder {
         match node.kind() {
             SyntaxKind::NAME | SyntaxKind::LITERAL => {
                 if let Some(token) = significant_token(node) {
-                    children.push(self.token(&token, token_name(token.kind())));
+                    children.push(self.token(&token, parse_token(token.kind())));
                 }
             }
             SyntaxKind::FOR_EXPR => {
@@ -247,10 +247,10 @@ impl ParseDataBuilder {
                 for element in node.children_with_tokens() {
                     match (&element, condition.as_mut()) {
                         (SyntaxElement::Token(token), None) if !closed && token.kind() == SyntaxKind::L_PAREN => {
-                            condition = Some(vec![self.token(token, token_name(token.kind()))]);
+                            condition = Some(vec![self.token(token, parse_token(token.kind()))]);
                         }
                         (SyntaxElement::Token(token), Some(rows)) if token.kind() == SyntaxKind::R_PAREN => {
-                            rows.push(self.token(token, token_name(token.kind())));
+                            rows.push(self.token(token, parse_token(token.kind())));
                             let rows = std::mem::take(rows);
                             children.push(self.symbol(("forcond", 82), &rows));
                             condition = None;
@@ -325,7 +325,7 @@ impl ParseDataBuilder {
             (Role::Formal, _) => ("SYMBOL_FORMALS", 292),
             (Role::Slot, _) => ("SLOT", 298),
             (Role::Package, _) => ("SYMBOL_PACKAGE", 297),
-            (Role::Field | Role::LoopVariable, kind) => token_name(kind),
+            (Role::Field | Role::LoopVariable, kind) => parse_token(kind),
         };
         Some(self.token(&token, name))
     }
@@ -340,7 +340,7 @@ impl ParseDataBuilder {
                     self.rows[row].parent = Parent::Comment;
                 }
                 kind if kind.is_trivia() => {}
-                kind => children.push(self.token(token, token_name(kind))),
+                kind => children.push(self.token(token, parse_token(kind))),
             },
             SyntaxElement::Node(node) => match node.kind() {
                 SyntaxKind::ANNOTATION => self.comment_lines(node),
@@ -385,7 +385,7 @@ fn significant_token(node: &SyntaxNode) -> Option<SyntaxToken> {
 
 /// GNU R's name and number for a token: its character code for a one-character operator, and
 /// the grammar's numbering from 258 otherwise.
-fn token_name(kind: SyntaxKind) -> (&'static str, i32) {
+fn parse_token(kind: SyntaxKind) -> (&'static str, i32) {
     use SyntaxKind::*;
     match kind {
         IDENT | DOTS | DOTDOTI => ("SYMBOL", 263),

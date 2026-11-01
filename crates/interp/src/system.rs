@@ -1353,6 +1353,12 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
         let mut spec = characters.next()?;
         if spec == 'E' || spec == 'O' {
             let base = characters.next()?;
+            // GNU R's strptime fails on a modifier POSIX does not allow, such as `%Ob`, and
+            // lubridate relies on that to rank the formats it guesses.
+            let allowed = if spec == 'E' { "cCyYxX" } else { "deHImMSUVWwy" };
+            if !allowed.contains(base) {
+                return None;
+            }
             if spec == 'O' && base == 'S' {
                 // `%OS` reads seconds with an optional fraction; `%OSn` is for output only, so on
                 // input its digit is a literal the text must contain.
@@ -1903,10 +1909,14 @@ unsafe fn do_sys_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
-    let utf8 = scalar_bool(true)?;
-    let latin1 = scalar_bool(false)?;
-    let mbcs = scalar_bool(true)?;
-    let codeset = scalar_string("UTF-8")?;
+    let name = native_codeset();
+    let upper = name.to_ascii_uppercase();
+    let is_utf8 = matches!(upper.as_str(), "UTF-8" | "UTF8");
+    let utf8 = scalar_bool(is_utf8)?;
+    let latin1 = scalar_bool(matches!(upper.as_str(), "ISO-8859-1" | "ISO8859-1" | "LATIN1"))?;
+    // UTF-8 is the only multibyte codeset ry supports as a native encoding.
+    let mbcs = scalar_bool(is_utf8)?;
+    let codeset = scalar_string(&name)?;
     values::named_list(&[("MBCS", mbcs), ("UTF-8", utf8), ("Latin-1", latin1), ("codeset", codeset)])
 }
 
@@ -2118,11 +2128,11 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
     if !from_list && input.kind() != SexpType::String {
         return Err(call.error("'x' must be a character vector"));
     }
-    // The native encoding is always UTF-8 here, while the C library would read "" as the
-    // process locale's, which is ASCII until something calls setlocale.
+    // As in GNU R, "" names the codeset of the current LC_CTYPE, so text that a C locale
+    // cannot represent converts to NA; packages such as utf8 probe the locale this way.
     let system_name = |name: &str| -> String {
         match name {
-            "" => "UTF-8".to_string(),
+            "" => native_codeset(),
             other => other.to_string(),
         }
     };
@@ -2578,6 +2588,15 @@ fn locale_category(number: i32) -> Option<libc::c_int> {
         9 => libc::LC_MEASUREMENT,
         _ => return None,
     })
+}
+
+/// The codeset of the current LC_CTYPE, as `l10n_info()` reports it.
+unsafe fn native_codeset() -> String {
+    let codeset = libc::nl_langinfo(libc::CODESET);
+    if codeset.is_null() {
+        return "UTF-8".to_owned();
+    }
+    std::ffi::CStr::from_ptr(codeset).to_string_lossy().into_owned()
 }
 
 unsafe fn current_locale(category: libc::c_int) -> String {

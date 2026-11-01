@@ -22,6 +22,7 @@ use crate::{
     },
 };
 use fancy_regex::{Regex, RegexBuilder};
+use regex_automata::{Anchored, Input, MatchKind, meta, util::syntax};
 use heap::{
     object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
     strings::Encoding,
@@ -1939,13 +1940,22 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         0
     };
     let names = matcher.group_names();
+    // Only PCRE reports capture groups here, and finding the bare match keeps TRE patterns on
+    // the automaton rather than the backtracker.
+    let search = |element: &str, position: usize| -> R<Option<Groups>> {
+        if groups == 0 {
+            Ok(matcher.find_at(element, position)?.map(|span| vec![Some(span)]))
+        } else {
+            matcher.captures_at(element, position)
+        }
+    };
     let count = length(text);
     if !global {
         let mut table = MatchTable::new(groups);
         for index in 0..count {
             match string_at(text, index) {
                 None => table.push_na(),
-                Some(element) => match matcher.captures_at(&element, 0)? {
+                Some(element) => match search(&element, 0)? {
                     Some(found) => table.push(&element, &found, report.bytes),
                     None => table.push_none(),
                 },
@@ -1962,7 +1972,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
         };
         let mut position = 0;
         while position < element.len() {
-            let Some(found) = matcher.captures_at(&element, position)? else {
+            let Some(found) = search(&element, position)? else {
                 break;
             };
             let Some((start, end)) = found.first().copied().flatten() else {
@@ -2313,6 +2323,17 @@ type Groups = Vec<Option<(usize, usize)>>;
 enum Matcher {
     Literal(String),
     Pattern(Regex),
+    /// A POSIX pattern without backreferences, which finite automata can match in linear time.
+    /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
+    /// leftmost-longest pattern of variable width on its backtracker, which takes exponential
+    /// time on patterns such as `(.*z.*){10}` that TRE matches instantly. The leftmost match
+    /// starts where the leftmost-first match does, and `longest` (which reports every match end)
+    /// searched anchored at that start finds where the longest one ends.
+    Automaton {
+        regex: Regex,
+        first: meta::Regex,
+        longest: meta::Regex,
+    },
 }
 
 impl Matcher {
@@ -2342,12 +2363,27 @@ impl Matcher {
         };
         // POSIX picks the longest of the matches that start leftmost. The engine cannot do that
         // for every pattern (lazy quantifiers, for one), and those fall back to PCRE's rule.
-        let compiled = if options.perl {
-            build(false)
+        let (compiled, longest) = if options.perl {
+            (build(false), false)
         } else {
-            build(true).or_else(|_| build(false))
+            match build(true) {
+                Ok(regex) => (Ok(regex), true),
+                Err(_) => (build(false), false),
+            }
+        };
+        let automaton = |kind: MatchKind| {
+            meta::Regex::builder()
+                .configure(meta::Regex::config().match_kind(kind))
+                .syntax(syntax::Config::new().case_insensitive(options.ignore_case))
+                .build(&translated.pattern)
         };
         match compiled {
+            Ok(regex) if longest => {
+                match (automaton(MatchKind::LeftmostFirst), automaton(MatchKind::All)) {
+                    (Ok(first), Ok(longest)) => Ok(Matcher::Automaton { regex, first, longest }),
+                    _ => Ok(Matcher::Pattern(regex)),
+                }
+            }
             Ok(regex) => Ok(Matcher::Pattern(regex)),
             Err(reason) => {
                 if options.perl {
@@ -2373,6 +2409,16 @@ impl Matcher {
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(matching_error),
+            Matcher::Automaton { first, longest, .. } => {
+                let Some(found) = first.search(&Input::new(text).range(from..)) else {
+                    return Ok(None);
+                };
+                let anchored = Input::new(text)
+                    .range(found.start()..)
+                    .anchored(Anchored::Yes);
+                let end = longest.search(&anchored).map_or(found.end(), |longest| longest.end());
+                Ok(Some((found.start(), end)))
+            }
         }
     }
 
@@ -2380,7 +2426,10 @@ impl Matcher {
     fn captures_at(&self, text: &str, from: usize) -> R<Option<Groups>> {
         match self {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
-            Matcher::Pattern(regex) => {
+            Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
+                Ok(self.find_at(text, from)?.map(|span| vec![Some(span)]))
+            }
+            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
                     .captures_from_pos(text, from)
                     .map_err(matching_error)?
@@ -2404,7 +2453,9 @@ impl Matcher {
     fn group_count(&self) -> usize {
         match self {
             Matcher::Literal(_) => 0,
-            Matcher::Pattern(regex) => regex.captures_len().saturating_sub(1),
+            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
+                regex.captures_len().saturating_sub(1)
+            }
         }
     }
 
@@ -2412,7 +2463,7 @@ impl Matcher {
     fn group_names(&self) -> Vec<String> {
         match self {
             Matcher::Literal(_) => Vec::new(),
-            Matcher::Pattern(regex) => regex
+            Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => regex
                 .capture_names()
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
@@ -2754,9 +2805,8 @@ fn translate_escape(
             output.push_str(&format!(r"\x{{{point:X}}}"));
             end
         }
-        (Syntax::Perl, 'p' | 'P' | 'k' | 'g' | 'N' | 'o') => {
-            copy_delimited_escape(chars, index, output)
-        }
+        (Syntax::Perl, 'g' | 'k') => translate_backreference(chars, index, output),
+        (Syntax::Perl, 'p' | 'P' | 'N' | 'o') => copy_delimited_escape(chars, index, output),
         (Syntax::Perl, character) if character.is_ascii_alphanumeric() => {
             output.push('\\');
             output.push(character);
@@ -2793,6 +2843,32 @@ fn escape_class(escaped: char, dialect: Dialect) -> Option<String> {
     } else {
         contents.to_owned()
     })
+}
+
+/// Rewrites PCRE's backreference forms (`\g1`, `\g-1`, `\g{name}`, `\k{name}`) as `\k<...>`,
+/// because the engine reads `\g` as an Oniguruma subroutine call and knows no braced `\k`.
+/// PCRE's own subroutine calls, `\g<name>` and `\g'name'`, are copied unchanged.
+fn translate_backreference(chars: &[char], index: usize, output: &mut String) -> usize {
+    let cursor = index + 2;
+    let reference: String = match chars.get(cursor) {
+        Some('{') => match chars[cursor + 1..].iter().position(|character| *character == '}') {
+            Some(length) => chars[cursor + 1..cursor + 1 + length].iter().collect(),
+            None => return copy_delimited_escape(chars, index, output),
+        },
+        Some(character) if chars[index + 1] == 'g' && (character.is_ascii_digit() || *character == '-') => {
+            let digits = chars[cursor + 1..]
+                .iter()
+                .take_while(|character| character.is_ascii_digit())
+                .count();
+            chars[cursor..cursor + 1 + digits].iter().collect()
+        }
+        _ => return copy_delimited_escape(chars, index, output),
+    };
+    output.push_str(&format!(r"\k<{reference}>"));
+    match chars.get(cursor) {
+        Some('{') => cursor + reference.chars().count() + 2,
+        _ => cursor + reference.chars().count(),
+    }
 }
 
 /// Copies an escape with a delimited argument (`\p{L}`, `\k<name>`, `\g{-1}`) or a short one

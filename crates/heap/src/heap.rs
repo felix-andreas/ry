@@ -734,6 +734,11 @@ impl Heap {
     }
 
     pub unsafe fn set_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
+        if vector.is_altrep()
+            && let Some(elements) = crate::object::altrep_elements()
+        {
+            return (elements.write)(vector, index, value);
+        }
         self.store(vector, vector.element(index), value);
         vector.set_element_unbarriered(index, value);
     }
@@ -1251,6 +1256,36 @@ impl Heap {
     /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
     /// key is, so the values are marked to a fixpoint before any key is declared dead.
     unsafe fn process_weak_refs(&mut self) {
+        self.mark_live_weak_values();
+        let mut dying = Vec::new();
+        let mut index = 0;
+        while index < self.weak_refs.len() {
+            let weak = self.weak_refs[index];
+            if weak.weak_key().is_marked() {
+                index += 1;
+            } else {
+                dying.push(self.weak_refs.swap_remove(index));
+            }
+        }
+        for weak in dying {
+            let has_finalizer =
+                weak.weak_c_finalizer() != 0 || weak.weak_finalizer() != self.known.nil;
+            if has_finalizer {
+                self.mark(weak.weak_key());
+                self.mark(weak.weak_value());
+                self.mark(weak.weak_finalizer());
+                self.ready_to_finalize.push(weak);
+            } else {
+                self.clear_weak_ref(weak);
+            }
+        }
+        self.drain();
+        // What a finalizer reaches can be the key of a weak reference that stays registered,
+        // and that reference's value and finalizer must then survive too.
+        self.mark_live_weak_values();
+    }
+
+    unsafe fn mark_live_weak_values(&mut self) {
         loop {
             let mut changed = false;
             for index in 0..self.weak_refs.len() {
@@ -1268,26 +1303,6 @@ impl Heap {
                 break;
             }
             self.drain();
-        }
-        let mut index = 0;
-        while index < self.weak_refs.len() {
-            let weak = self.weak_refs[index];
-            if weak.weak_key().is_marked() {
-                index += 1;
-                continue;
-            }
-            self.weak_refs.swap_remove(index);
-            let has_finalizer =
-                weak.weak_c_finalizer() != 0 || weak.weak_finalizer() != self.known.nil;
-            if has_finalizer {
-                self.mark(weak.weak_key());
-                self.mark(weak.weak_value());
-                self.mark(weak.weak_finalizer());
-                self.drain();
-                self.ready_to_finalize.push(weak);
-            } else {
-                self.clear_weak_ref(weak);
-            }
         }
     }
 

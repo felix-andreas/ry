@@ -953,7 +953,7 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
         name: "postscript",
         file: device_file(call.arg(0)),
         bitmap: false,
-        format: None,
+        format: Some(Format::PostScript),
         size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -1010,10 +1010,10 @@ unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
     let (name, bitmap, format) = match values::as_integer_scalar(call.arg(1)) {
         2 | 5 => ("png", true, Some(Format::Png)),
-        3 => ("jpeg", true, None),
+        3 => ("jpeg", true, Some(Format::Jpeg)),
         4 => ("svg", false, Some(Format::Svg)),
         6 => ("cairo_pdf", false, Some(Format::Pdf)),
-        7 => ("cairo_ps", false, None),
+        7 => ("cairo_ps", false, Some(Format::PostScript)),
         8 => ("tiff", true, Some(Format::Tiff)),
         9 => ("bmp", true, Some(Format::Bmp)),
         _ => return Err(error("invalid type for cairo device")),
@@ -1055,7 +1055,7 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
     };
     let (name, format) = match kind {
         "png" => ("png", Some(Format::Png)),
-        "jpeg" => ("jpeg", None),
+        "jpeg" => ("jpeg", Some(Format::Jpeg)),
         "bmp" => ("bmp", Some(Format::Bmp)),
         "tiff" => ("tiff", Some(Format::Tiff)),
         _ => return Err(error("unable to start device X11")),

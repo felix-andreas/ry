@@ -25,6 +25,35 @@ use interp::{
 };
 use std::ffi::{c_char, c_int, c_void};
 
+/// An ALTREP string or list element for [`heap::object::Sexp::element`], rooted because a class
+/// may build it fresh on every call (nanoarrow's strings do). The accessor cannot fail, so an
+/// `Elt` error is reported and reads as `NA` (or `NULL` in a list).
+unsafe fn read_altrep_element(object: Sexp, index: usize) -> Sexp {
+    let runtime = runtime();
+    match crate::altrep::sexp_elt(object, index as crate::R_xlen_t) {
+        Ok(element) => {
+            runtime.heap.root(element);
+            element
+        }
+        Err(unwind) => {
+            report(&unwind, "Error");
+            if object.kind() == SexpType::String {
+                runtime.heap.known().na_string
+            } else {
+                runtime.heap.known().nil
+            }
+        }
+    }
+}
+
+/// Stores an ALTREP string or list element through the class's `Set_elt` method; an error is
+/// reported, as for [`read_altrep_element`].
+unsafe fn write_altrep_element(object: Sexp, index: usize, value: Sexp) {
+    if let Err(unwind) = crate::altrep::set_sexp_elt(object, index as crate::R_xlen_t, value) {
+        report(&unwind, "Error");
+    }
+}
+
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     let hooks = interp::Hooks {
@@ -40,6 +69,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
     };
     interp::install(&mut runtime.heap, hooks);
+    heap::object::install_altrep_elements(heap::object::AltrepElements {
+        read: read_altrep_element,
+        write: write_altrep_element,
+    });
     jit::install();
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
