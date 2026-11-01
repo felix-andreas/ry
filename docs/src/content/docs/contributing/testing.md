@@ -562,7 +562,12 @@ The packages are brio from the benchmark closure, vendored in `tests/packages/br
   builds of one package never share a session.
 - `test_headers.rs` compiles every header as C11 and C++17 with warnings as errors, checks with
   the compiler that every declared name is exported, runs BLAS and LAPACK calls through the
-  headers, and compares the graphics structs' layout with GNU R's.
+  headers, and compares the graphics structs' layout with GNU R's. It also requires every name in
+  `tests/headers/r_api_names.txt` (GNU R's public header names that its `R.dll` exports, plus the
+  internals packages link) to be declared by ry's headers and exported by `libR`. With
+  `RY_GNU_R_INCLUDE` and `RY_GNU_R_EXPORTS` pointing at a GNU R `include/` and a list of its
+  `R.dll` exports, `api_names_cover_gnu_r` checks the list against that release, and
+  `RY_UPDATE_API_NAMES=1` regenerates it.
 - `test_altrep.rs` and `test_altrep_api.rs` drive the `altreptest` package's classes of every
   kind and base R's own classes, against a report recorded from GNU R.
 - `test_serialize.rs` and `test_serialize_native.rs` read and write GNU R's recorded streams byte

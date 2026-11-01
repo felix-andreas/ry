@@ -1063,8 +1063,24 @@ JIT fits around them.
     packages' DLLs are found under `library/<pkg>/libs/x64/`, and the Windows-only routines that
     `utils` and `grDevices` call at load time (`winver`, `getIdentification`, `readRegistry` and
     so on) are registered (`WINDOWS_ROUTINES` in `crates/interp/src/builtin_libraries.rs`).
-  - `ry.exe` reserves a 64 MiB main-thread stack and embeds `ry.exe.manifest`, which makes UTF-8
-    the active code page as `R.exe`'s manifest does (`crates/ry/build.rs`, through `windres`).
+  - `ry.exe` and `ry-rcmd.exe` reserve a 64 MiB main-thread stack and embed `ry.exe.manifest`,
+    which makes UTF-8 the active code page as `R.exe`'s manifest does (`crates/ry/build.rs`,
+    through `windres`, which `rcmd` names as its build script too). The session also switches each
+    locale category's codeset to UTF-8 at startup, so it holds even where the manifest is ignored,
+    and reports the codeset as `.utf8`, as GNU R does (Wine's CRT names it `.65001`).
+  - `rcmd` builds packages the Windows way when the R home's `etc/Makeconf` says `SHLIB_EXT =
+    .dll`, the one fact every other convention is derived from (`Platform::of_home`):
+    `Makevars.ucrt`, then `Makevars.win`, then `Makevars`; `configure.ucrt` or `configure.win` and
+    `Makefile.ucrt` or `Makefile.win`, with no fallback to the Unix files; DLLs installed under
+    `libs/x64/`; and `R_ARCH=/x64` for the build and for `install.libs.R`. Its `Makeconf` follows
+    the Rtools ABI of GNU R's `etc/x64/Makeconf`: `gcc`/`g++`/`gfortran`, `-shared
+    -static-libgcc`, no PIC flags, and `-L"$(R_HOME)/bin/x64" -lR` against the `libR.dll.a` that
+    the home keeps beside `R.dll` in `bin/x64/`. Windows runs no shell scripts, so the home's
+    `bin/R.exe`, `bin/Rscript.exe`, `bin/x64/Rcmd.exe` and `bin/x64/Rterm.exe` (which callr starts)
+    are copies of `ry-rcmd.exe`, which reads which front end it is from its file name and the home
+    from its location, ignoring an inherited `R_HOME`. The paths it exports to `configure` and
+    `make` use forward slashes, because both read a backslash as an escape. Directories that
+    cannot be linked (Windows needs Developer Mode for symbolic links) are copied.
   - `ry run` loads `R.dll` from beside `ry.exe`, and BLAS and LAPACK from the R installation's
     `bin/x64/Rblas.dll` and `Rlapack.dll`. DLLs load with `LOAD_WITH_ALTERED_SEARCH_PATH` from a
     backslashed path, so `Rlapack.dll` finds `Rblas.dll` in its own directory.
@@ -1098,8 +1114,16 @@ JIT fits around them.
     (GCC 14's headers and static `libstdc++` from MSYS2's ucrt64 environment, driven by clang
     and lld): jsonlite, data.table (grouping, keys, `fwrite`/`fread`, its error messages), digest,
     cli, uuid and Rcpp, plus a test package that throws Rcpp and C++ exceptions, calls back into R,
-    and lets an R error cross its C++ frames, with every destructor run once. Installation was a
-    script over `tools:::.install_package_*` and `makeLazyLoading`, not `R CMD INSTALL`.
+    and lets an R error cross its C++ frames, with every destructor run once.
+  - `R CMD INSTALL` of those six packages through `rcmd`'s Windows conventions, then `library()`
+    and a call into each one's DLL from `libs/x64/` under `ry.exe`. The install was cross-hosted,
+    because running MSYS2's `gcc`, `make` or `sh` under Wine is not allowed in the environment
+    that verified it: `rcmd` on Linux, with a home whose `Makeconf` is the Windows one and whose
+    compilers are clang wrappers over the ucrt64 sysroot that link libstdc++, winpthreads and zlib
+    statically, as Rtools' GCC does. The R-code half of that install ran on Linux ry, so the
+    `Built:` platform was restamped before loading. `ry-rcmd.exe assemble` under Wine wrote the
+    Windows home, and its `R.exe RHOME` and `Rscript.exe` (loading digest, reporting `.utf8`
+    locales and code page 65001) ran from it.
   - The BLAS path, with a stand-in `Rblas.dll` built from C that imports `xerbla_` from `R.dll`
     as R's own does: `%*%` loads and calls it, and a bad argument becomes the R error `BLAS/LAPACK
     routine 'DGEMM ' gave error code -3`. R's own `Rblas.dll` and `Rlapack.dll` import nothing
@@ -1108,15 +1132,8 @@ JIT fits around them.
   Open:
   - Nothing has run on Windows itself; the release smoke test (`tools/smoke-test.sh`, which runs
     a script, a BLAS and LAPACK call and a CRAN binary of jsonlite) is the first run.
-  - Under Wine, `Sys.getlocale("LC_CTYPE")` reports `English_United States.1252` although the
-    active code page is UTF-8; GNU R under its manifest reports `.utf8`. Unverified on Windows.
-  - `rcmd` has no Windows `R CMD INSTALL`: it assembles its R home from symbolic links, which
-    Windows creates only in Developer Mode or as administrator, and it does not yet drive
-    Rtools.
-  - R.dll exports 1211 names against GNU R 4.5's 1352. Most of the difference is GNU R internals and
-    RGui, but `R_findVar`, `R_findVarInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its
-    siblings, `Rf_mbrtowc`, `utf8clen` and `R_MissingArgError` are public enough that packages
-    may link them, on every platform.
+  - `R CMD INSTALL` driving Rtools' own `make`, `sh` and GCC on Windows has not run; the release
+    smoke test should install a source package with a `Makevars.win` (data.table) on the runner.
   - `win.version()` and `Sys.info()` report a fixed `Windows 10 x64` with no build number.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,

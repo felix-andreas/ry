@@ -28,9 +28,10 @@ The quality bar is four things.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
 - **`rowSums` and `colSums` accumulate in a software long double model** to match GNU R's last digit, which makes them slower than GNU R on large matrices. A faster exact accumulator (two-sum, or 128-bit fixed point) would keep the digits.
+- **Oracle cases failing under `ORACLE_ENGINE=ry`** besides `stats__lbfgsb`: `graphics__device_files` (the PostScript header lacks `%%DocumentMedia`, and the bounding box swaps width and height), and `graphics__extreme_axis_ranges`, which takes about 18 s and is killed by the per-case timeout when cases run in parallel.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** On the first 20 dsbench files with the JIT off, ry's test blocks take 8.3 s against GNU R's 7.5 s (about 11% slower), and wall time is already level. The gap is interpreter work, not memory management: allocation and collection are under 7% of the runtime thread's profile, and a full collection on the loaded heap takes 35 ms against GNU R's 130 ms (the R-level `gc()` calls come from lgr's `Logger$finalize`, which GNU R pays too). The largest buckets are the data.table "event tables" tests (one repeated 200 times: 12.7 s against 9.2 s) and "serving validates requests". Their profile is flat over bytecode `step` (10%), `frame_cell`, closure calls, `mk_char`, `length` and `match_args`, so the next levers are fewer allocations per call and faster lookups rather than the allocator. A closure-call microbenchmark (`f(i, 1, d = 3)` plus a nine-formal call) still runs about 1.75x GNU R.
+- **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 118k instructions against GNU R's 72k, spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Next levers: fewer lookups per call (resolve base functions at compile time behind a guard), fewer cells and promises per call, and finding the callers of `mk_char` in the test code.
 
 ## Open: the package loader
 
@@ -2330,13 +2331,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
-- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
-  its R home from symbolic links, which need Developer Mode, and does not drive Rtools, so there is
-  no Windows `R CMD INSTALL` yet (package DLLs have been built by hand against `libR.dll.a`).
-- **C API exports packages may link but `libR` lacks** (found by diffing GNU R 4.5's `R.dll`
-  export table, on every platform): `R_findVar`, `R_findVarInFrame`, `R_findVarLoc`,
-  `R_findVarLocInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its siblings, `Rf_mbrtowc`,
-  `utf8clen`, `R_MissingArgError`. The rest of the 316-name difference is GNU R internals and RGui.
+- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
+  follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
+  `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
+  the Windows runner, and `R CMD config` there needs Rtools' `make` on `PATH`.
 
 ## Explicitly out of scope for now
 
