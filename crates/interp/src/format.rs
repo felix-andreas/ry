@@ -540,9 +540,14 @@ pub unsafe fn format_vector(
                 ..settings
             };
             let format = format_real_common(data, settings);
+            // The common width can exceed every element's own: a negative mantissa and a
+            // three-digit exponent each widen it, even when they occur in different elements.
             let items: Vec<String> = data
                 .iter()
-                .map(|&value| localize_decimal(format_real_with(value, format, na_string)))
+                .map(|&value| {
+                    let text = localize_decimal(format_real_with(value, format, na_string));
+                    pad(&text, format.width, true)
+                })
                 .collect();
             justify(items, true)
         }

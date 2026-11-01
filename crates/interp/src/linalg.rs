@@ -2873,7 +2873,7 @@ fn lapack_status(failed: bool, info: i32, routine: &str) -> R<()> {
 }
 
 /// `%g` with six significant digits, as GNU R's messages print reals.
-fn format_g(value: f64) -> String {
+pub fn format_g(value: f64) -> String {
     let mut buffer = [0u8; 64];
     // SAFETY: the format takes one double and the buffer is large enough for any `%g` output.
     let written = unsafe {

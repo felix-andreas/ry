@@ -5660,7 +5660,7 @@ unsafe fn do_axis_pars(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// The ticks of a linear axis: the pretty values inside `[low, high]`.
 fn linear_axis(low: f64, high: f64, intervals: i32) -> (f64, f64, i32) {
-    let pretty = crate::arith::pretty(low, high, intervals, 1, 0.25, [0.8, 1.7], 2, false);
+    let pretty = crate::arith::pretty(low, high, intervals, 1, 0.25, [0.8, 1.7, 20.0], 2, false);
     let unit = pretty.unit;
     let mut first = pretty.low;
     let mut last = pretty.high;

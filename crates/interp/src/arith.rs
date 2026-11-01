@@ -391,8 +391,8 @@ unsafe fn do_find_interval(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias), eps.correct, bounds)`: GNU R's
-/// rule for round tick values covering `[lo, up]` in about `n` steps.
+/// `pretty(lo, up, n, min.n, shrink.sml, c(high.u.bias, u5.bias, f.min), eps.correct, bounds)`:
+/// GNU R's rule for round tick values covering `[lo, up]` in about `n` steps.
 unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
     let biases = call.arg(5);
     let high_bias = crate::subset::numeric_element(biases, 0);
@@ -401,19 +401,35 @@ unsafe fn do_pretty(call: &Call<'_>) -> R<Sexp> {
     } else {
         0.5 + 1.5 * high_bias
     };
+    let smallest_factor = if length(biases) > 2 {
+        crate::subset::numeric_element(biases, 2)
+    } else {
+        20.0
+    };
+    let bounds = values::as_logical_scalar(call.arg(7)) != 0;
     let result = pretty(
         values::as_real_scalar(call.arg(0)),
         values::as_real_scalar(call.arg(1)),
         values::as_integer_scalar(call.arg(2)).max(0),
         values::as_integer_scalar(call.arg(3)).max(0),
         values::as_real_scalar(call.arg(4)),
-        [high_bias, five_bias],
+        [high_bias, five_bias, smallest_factor],
         values::as_integer_scalar(call.arg(6)),
-        values::as_logical_scalar(call.arg(7)) != 0,
+        bounds,
     );
+    if let Some(message) = &result.warning {
+        crate::conditions::warning(message.clone())?;
+    }
+    if bounds {
+        return values::named_list(&[
+            ("l", scalar_real(result.low)?),
+            ("u", scalar_real(result.high)?),
+            ("n", scalar_integer(result.count)?),
+        ]);
+    }
     values::named_list(&[
-        ("l", scalar_real(result.low)?),
-        ("u", scalar_real(result.high)?),
+        ("ns", scalar_real(result.low)?),
+        ("nu", scalar_real(result.high)?),
         ("n", scalar_integer(result.count)?),
         ("unit", scalar_real(result.unit)?),
     ])
@@ -426,10 +442,17 @@ pub struct Pretty {
     pub high: f64,
     pub count: i32,
     pub unit: f64,
+    /// GNU R's warning when the step size had to be clamped into the double range.
+    pub warning: Option<String>,
 }
 
+/// The step size is kept at most this factor below the largest double, so that a few steps
+/// beyond the range stay finite.
+const LARGEST_CELL_FACTOR: f64 = 1.25;
+
 /// The rounding behind `pretty()` and axis ticks: about `count` intervals of 1, 2 or 5 times a
-/// power of ten that cover `[low, high]`.
+/// power of ten that cover `[low, high]`. The step is never below `smallest_factor` times the
+/// smallest normal double.
 #[allow(clippy::too_many_arguments)]
 pub fn pretty(
     mut low: f64,
@@ -437,10 +460,11 @@ pub fn pretty(
     count: i32,
     min_count: i32,
     shrink: f64,
-    [high_bias, five_bias]: [f64; 2],
+    [high_bias, five_bias, smallest_factor]: [f64; 3],
     eps_correction: i32,
     bounds: bool,
 ) -> Pretty {
+    let (original_low, original_high) = (low, high);
     let range = high - low;
     let scale = low.abs().max(high.abs());
     let small = if range == 0.0 && scale == 0.0 {
@@ -466,16 +490,36 @@ pub fn pretty(
         if min_count > 1 {
             cell /= min_count as f64;
         }
-    } else {
+    } else if range.is_finite() {
         cell = range;
         if count > 1 {
             cell /= count as f64;
         }
+    } else {
+        // The range overflows, so each bound is divided before they are subtracted.
+        let divisor = count.max(1) as f64;
+        cell = high / divisor - low / divisor;
     }
-    if cell < 20.0 * f64::MIN_POSITIVE {
-        cell = 20.0 * f64::MIN_POSITIVE;
-    } else if cell * 10.0 > f64::MAX {
-        cell = 0.1 * f64::MAX;
+    let mut warning = None;
+    let smallest = match smallest_factor * f64::MIN_POSITIVE {
+        0.0 => f64::MIN_POSITIVE,
+        smallest => smallest,
+    };
+    let largest = f64::MAX / LARGEST_CELL_FACTOR;
+    if cell < smallest {
+        warning = Some(format!(
+            "R_pretty(): very small range 'cell'={}, corrected to {}",
+            crate::linalg::format_g(cell),
+            crate::linalg::format_g(smallest)
+        ));
+        cell = smallest;
+    } else if cell > largest {
+        warning = Some(format!(
+            "R_pretty(): very large range 'cell'={}, corrected to {}",
+            crate::linalg::format_g(cell),
+            crate::linalg::format_g(largest)
+        ));
+        cell = largest;
     }
     let base = 10f64.powf(cell.log10().floor());
     let mut unit = base;
@@ -505,14 +549,25 @@ pub fn pretty(
     while start * unit > low + 1e-10 * unit {
         start -= 1.0;
     }
+    while !(start * unit).is_finite() && start < 0.0 {
+        start += 1.0;
+    }
     while end * unit < high - 1e-10 * unit {
         end += 1.0;
+    }
+    while !(end * unit).is_finite() && end > 0.0 {
+        end -= 1.0;
     }
     let mut steps = (0.5 + end - start) as i32;
     if steps < min_count {
         let missing = min_count - steps;
         let (half, rest) = ((missing / 2) as f64, (missing % 2) as f64);
-        if start >= 0.0 {
+        // A range that starts or ends at zero keeps that end and grows away from it.
+        if original_low == 0.0 {
+            end += missing as f64;
+        } else if original_high == 0.0 {
+            start -= missing as f64;
+        } else if start >= 0.0 {
             end += half;
             start -= half + rest;
         } else {
@@ -537,6 +592,7 @@ pub fn pretty(
         high,
         count: steps,
         unit,
+        warning,
     }
 }
 
