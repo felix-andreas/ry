@@ -3550,21 +3550,81 @@ explicit allocators".
   is that environment's own compiled closure (whose updates the compiler orders with
   `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
   copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
-- **Rejected: moving a value into a helper's parameter.** `d <- helper(d, k)` handing the caller's
-  sole reference to the callee was implemented and removed. After an in-place update the caller's
-  variable no longer holds the old value, yet a second argument naming it, a nested closure,
-  `get(..., parent.frame())`, and an error unwinding through the assignment all read it. Making
-  it sound needs escape analysis of the callee plus an undo path, so helpers copy as in GNU R.
+- **Moving a value into a helper's parameter** was first rejected as unsound and is now built
+  with escape checks and an undo journal; see "Moving a collection into a helper's parameter".
 - **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
   vector, a value vector and an open-addressing index in an integer vector, all in the collector's
   heap, which a `SEXP`-holding value must be (`decisions.md`, "Data-oriented design and explicit
-  allocators"). Measured on a release build with 1,000,000 calls each: `Dict.len` (no hashing)
-  costs 0.62 us a call, `Dict.get` on a 1M-entry dictionary 0.67 us, and on a one-entry
-  dictionary 0.56 us. Hashing and probing are at most about 15% of a call; the rest is
-  interpreter dispatch, so a new layout cannot pay and the win is in call overhead.
+  allocators"). Hashing and probing were at most about 15% of a call, and the rest was call
+  overhead, which "Library leaves resolve at compile time" removes.
 - **Impact.** Value semantics are unchanged (pinned in
   `crates/interp/tests/test_standard_library.rs`, including the cases that broke the move), nested
   accumulator loops become linear, and incremental analysis is unaffected.
+
+## Library leaves resolve at compile time
+
+- **Before.** A call such as `Dict.len(d)` in a loop looked `Dict.len` up through the
+  environment chain, built an argument list with a promise per argument, and dispatched through
+  the builtin table on every iteration: about 0.27 us for `Dict.len` and 0.45 us for `Dict.get`
+  on the profiling build (0.6 us on an older build), against 0.001 us for an empty iteration.
+- **Tier 0.** The bytecode compiler resolves a qualified library name (`library_function` in
+  `bytecode.rs`) to its builtin when the name resolves to a native-accepting builtin and every
+  argument is positional with no `...`, and emits a guard on the symbol's binding, the builtin as
+  a constant and a direct `CallBuiltin`. A failed guard (someone rebound `Dict.len`) falls back to
+  the general call, so redefinition still works.
+- **Leaves.** `standard_library::is_leaf` names the functions that never call back into R
+  (`len`, `is_empty`, `get`, `contains` of `List`, `Dict` and `Set`). The JIT treats a leaf as an
+  opaque step with `Effect::PureUnlessObserved`, so it flushes nothing around it.
+- **Intrinsics.** `Dict.len`, `Set.len`, their `is_empty`, `Dict.contains`, `Set.contains` and
+  `Dict.get` compile to calls of small runtime helpers (`jit_collection_count`,
+  `jit_collection_position`, `jit_dict_get`) that take the key unboxed and return an unboxed
+  count or position. Anything they do not handle (a wrong type, `NA`, a mismatched key kind, a
+  one-entry collection stored without an index) hands the instruction to tier 0, which raises the
+  same error as before. `Dict.get` still allocates its `:Ok(value)` record; `:Err(:KeyNotFound)`
+  is one shared value (`standard_library::Tags`).
+- **Hash.** `key_hash` applies MurmurHash3's 64-bit finalizer after FxHash. FxHash's low bits are
+  constant for doubles that hold whole numbers, which the open-addressing index uses to pick a
+  slot, so integer-valued keys clustered and a miss probed linearly (0.80 us; 0.09 us with the
+  finalizer alone, before the intrinsics). The
+  index is not serialized, so the change needs no migration.
+- **Measured** (`ry run`, profiling build, minimum of 7 runs of 1,000,000 calls on a 1,000-entry
+  dictionary, us per call, before and after): `Dict.len` 0.271 to 0.009, `Dict.get` 0.450 to
+  0.053, `Dict.contains` 0.320 to 0.018, a missing key 0.800 to 0.025.
+- **Impact.** Library calls in loops are as cheap as `length()`, value semantics and errors are
+  unchanged (pinned in `test_standard_library.rs`, including compiled-loop error cases), and the
+  analysis is unaffected.
+
+## Moving a collection into a helper's parameter
+
+- **Before.** `d <- helper(d, k)` shared the dictionary between the caller's `d` and the
+  parameter, so the helper's `Dict.insert` copied it and a loop of such calls was quadratic. A
+  first version that cleared the caller's binding was removed, because a second argument naming
+  `d`, a nested closure, `get(..., parent.frame())` and an error unwinding through the assignment
+  all read the cleared variable.
+- **Target shape** (`crates/interp/src/moves.rs`). `rebind_call` offers a closure call to
+  `moves::call_moving`. A static check (`movable`) requires positional arguments without `...`,
+  and that the other arguments, the callee's defaults and its body call only closures and inert
+  builtins (`inert_builtin`, plus native-accepting library builtins), never naming the caller's
+  variable unless it is the callee's own local. Then the caller's binding is set to `NULL` for
+  the call. At run time any code the check did not cover ends the move first and restores the
+  binding: entering a closure other than the callee, forcing a promise the check did not see, a
+  library callback that is not a closure, and the default error handler.
+- **Undo journal.** An in-place update of a dictionary or set either appends or replaces a value
+  (`insert_in_place` reports replacements to `moves::replacing`), so the original is the first
+  `entries` entries with the replaced values put back (`collection_prefix`). A failed call, or an
+  early end, rebuilds the caller's value from it.
+- **Dead frame release.** When the call returns without the move having ended and the callee
+  creates no closure, its frame is unreachable, so `release_parameter` clears the parameter's
+  binding. Without that the dead frame keeps the result shared and the next call copies. The
+  heap does not count an environment's enclosure as a reference, so the environment's refcount
+  cannot decide this the way GNU R's `R_CleanupEnvir` does.
+- **Why static types do not prove it.** A type says what a value is, not which frames a
+  function reads or whether it captures its environment, so a typed helper needs the same body
+  check as an untyped one. Effect annotations would be the typed route, and ry has none.
+- **Measured.** 40,000 calls of `d <- add(d, i)` with `add <- function(d, k) { d <-
+  Dict.insert(d, k, k); d }` inside a function: 16.9 s before, 0.10 s after.
+- **Limits.** A helper that returns `Dict.insert(d, k, v)` without reassigning `d` still copies,
+  since nothing marks the parameter's last use; lists are not moved. Both are in `backlog.md`.
 
 ## A key of the wrong type is an error, not a missing key
 

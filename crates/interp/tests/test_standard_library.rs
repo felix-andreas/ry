@@ -334,6 +334,22 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 1\n",
     ),
     (
+        "{ kept <- NULL; add <- function(m, k) { m <- Dict.insert(m, k, k); g <- function() m; kept <<- g; m }; f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:3) m <- add(m, i); m <- Dict.insert(m, 9L, 9L); c(Dict.len(m), Dict.len(kept())) }; f() }",
+        "[1] 4 3\n",
+    ),
+    (
+        "{ add <- function(s, k) { s <- Set.insert(s, k); s }; f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:6) { if (i == 4L) old <- s; s <- add(s, i %% 5L) }; c(Set.len(old), Set.len(s)) }; f() }",
+        "[1] 3 5\n",
+    ),
+    (
+        "{ f <- function(m) { r <- 0L; for (i in 1:50) r <- r + Dict.len(m) + Dict.contains(m, i) + Set.len(Set.single(i)); r }; f(Dict.from_list(list((1L, 1), (2L, 2)))) }",
+        "[1] 152\n",
+    ),
+    (
+        "{ f <- function(m) { r <- NULL; for (i in 1:50) r <- Dict.get(m, if (i > 40L) 2 else 1L); r }; f(Dict.from_list(list((1L, \"a\"), (2L, \"b\")))) }",
+        ":Ok(\"b\")\n",
+    ),
+    (
         "{ h <- function() eval.parent(quote(x[[1]] <- 99)); f <- function() { for (i in 1) NULL; x <- list(1); r <- list(x, h()); c(r[[1]][[1]], x[[1]]) }; f() }",
         "[1]  1 99\n",
     ),
@@ -737,6 +753,19 @@ const PRINTS: &[(&str, &str)] = &[
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
+    // Compiled loops hand a failing call back to tier 0, which raises the same error.
+    (
+        "{ f <- function(m) { for (i in 1:50) r <- Dict.len(if (i > 40L) 1 else m); r }; f(d) }",
+        "`dict` must be a dict, not a double value",
+    ),
+    (
+        "{ f <- function(m) { for (i in 1:50) r <- Dict.get(m, if (i > 40L) NA_character_ else \"a\"); r }; f(d) }",
+        "`key` must be a single logical, number or string, not `NA`",
+    ),
+    (
+        "{ f <- function(m) { for (i in 1:50) r <- Dict.contains(m, if (i > 40L) 1L else \"a\"); r }; f(d) }",
+        "the dict's keys are character, and this one is integer; a collection holds one type",
+    ),
     (
         "Dict.get(d, 1L)",
         "the dict's keys are character, and this one is integer; a collection holds one type",
@@ -1023,6 +1052,7 @@ fn standard_library_at_runtime() {
                 ));
             }
         }
+        failures.extend(move_undo_failures());
         failures.extend(named_argument_failures());
         failures.extend(collection_model_failures());
         assert!(
@@ -1032,6 +1062,47 @@ fn standard_library_at_runtime() {
             failures.join("\n")
         );
     }
+}
+
+/// A helper that updates a moved dictionary and then fails leaves the caller's variable as it
+/// was before the call. The error comes from a builtin: one raised by a closure such as `stop`
+/// would end the move as the closure starts, which restores the variable before the journal is
+/// needed. The failure unwinds past the caller, so each case keeps the caller's
+/// frame in `frame` and reads the variable from it afterwards.
+unsafe fn move_undo_failures() -> Vec<String> {
+    let cases = [
+        (
+            "{ bad <- function(m, k) { m <- Dict.insert(m, k, 1); m <- Dict.insert(m, 1L, 1) }; f <- function() { for (i in 1) NULL; m <- Dict.empty(); frame <<- environment(); m <- bad(m, \"a\") }; f() }",
+            "Dict.len(frame$m)",
+            "[1] 0\n",
+        ),
+        (
+            "{ bad <- function(m, k) { m <- Dict.insert(m, \"new\", 1); m <- Dict.insert(m, k, 2); m <- Dict.insert(m, 1L, 1) }; f <- function() { for (i in 1) NULL; m <- Dict.single(\"a\", 0); m <- Dict.insert(m, \"b\", 0); frame <<- environment(); m <- bad(m, \"a\") }; f() }",
+            "c(Dict.len(frame$m), Result.with_default(Dict.get(frame$m, \"a\"), -1))",
+            "[1] 2 0\n",
+        ),
+        (
+            "{ bad <- function(s, k) { s <- Set.insert(s, k); s <- Set.insert(s, \"x\") }; f <- function() { for (i in 1) NULL; s <- Set.from_list(list(1L, 2L)); frame <<- environment(); s <- bad(s, 3L) }; f() }",
+            "Set.len(frame$s)",
+            "[1] 2\n",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (failing, check, expected) in cases {
+        // SAFETY: the interpreter is installed.
+        let reported = unsafe { printed(failing) };
+        if !reported.contains("a collection holds one type") {
+            failures.push(format!("`{failing}`\n  reported {reported:?}\n  expected a key type error"));
+        }
+        // SAFETY: as above.
+        let printed = unsafe { printed(check) };
+        if printed != expected {
+            failures.push(format!(
+                "`{check}` after `{failing}`\n  printed  {printed:?}\n  expected {expected:?}"
+            ));
+        }
+    }
+    failures
 }
 
 /// Calls every function with each declared parameter named. A name the runtime does not know is

@@ -161,9 +161,33 @@ state <- list(seen = Dict.empty(), count = 0L)
 for (i in 1:100000) state$seen <- Dict.insert(state$seen, i, TRUE)
 ```
 
-A helper function that updates a collection it receives copies it, as in GNU R, because the
-caller's variable still holds the value and must not change. Loop inside the helper, or keep the
-update in the loop that owns the variable:
+A dictionary or set also updates in place through a helper function, when the call has the form
+`x <- helper(x, ...)` and the helper reassigns its own parameter:
+
+```r
+remember <- function(seen, key) {
+  seen <- Dict.insert(seen, key, TRUE)
+  seen
+}
+seen <- Dict.empty()
+for (i in 1:100000) seen <- remember(seen, i)
+```
+
+The value moves into the helper's parameter for the duration of the call, so the parameter holds
+the only reference and its `Dict.insert` updates in place. The caller's variable cannot change
+visibly while the helper runs, because the move happens only when nothing can read that variable
+before the assignment replaces it. The helper's body and defaults, and the other arguments, must
+call nothing but closures and simple builtins (arithmetic, comparisons, indexing, `paste`,
+`length`, the standard library and similar), and must not name the caller's variable unless it is
+the helper's own parameter. The helper's arguments must be positional, with no `...`. If code the
+check did not cover runs during the call, such as a closure the helper calls, the move ends and the
+caller's variable gets its value back first. If the helper fails, the variable keeps the value it
+had before the call, even when the helper had already updated the collection.
+
+Other helpers copy, as in GNU R. That includes a helper that returns the update directly, as in
+`function(seen, key) Dict.insert(seen, key, TRUE)`, because nothing reassigns the parameter, and a
+helper that creates a closure. A list, through `List.append`, is not moved. For those, loop inside
+the helper, or keep the update in the loop that owns the variable:
 
 ```r
 remember_all <- function(seen, keys) {
