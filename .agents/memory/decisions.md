@@ -3693,6 +3693,14 @@ explicit allocators".
   once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
   the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
   rule of the data-oriented record above.
+- **Names at their own site are one side array, and ids carry a niche.** An argument name, a
+  field after `$` or `@`, a loop variable and a tag are a `NameId` into `Module::name_sites`, which
+  holds the `Symbol` with its range, instead of a `Symbol` and an `Option<TextRange>` inline in
+  every kind. `ExprId`, `PatId` and `NameId` are `NonZeroU32`, so `Option<ExprId>` is four bytes.
+  An expression kind went from 28 to 16 bytes and an argument from 24 to 8; together with hashing
+  `Symbol` by its index (`Ord` stays by spelling, so sorted output does not move) the cold check
+  took 3 to 8% less wall time and about 30 MiB less peak RSS. Read names through
+  `Module::name`, `Module::name_range` and `Module::argument_name`.
 - **Kept deliberately.** `ExprId` allocation order is the old one, so ids, fixtures and every
   downstream map are unchanged. `Module` still owns plain vectors and compares by value, so salsa
   backdating works as before.
