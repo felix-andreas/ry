@@ -1816,6 +1816,9 @@ The end-to-end guard rests on the corpus suites.
 - **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
   name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
   instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
+- **Engine:** under `.EACHI`, `sum(.N)` reads the raw group row count rather than the matched
+  count (`single_value` does not rewrite the argument), and `parse_strings` uses Polars' string
+  cast, which is unverified against R for padded (`" 3"`) and hex (`"0x1A"`) strings.
 - **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
   so `lapply(.SD, sum)` over a character column is silent.
 - **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
