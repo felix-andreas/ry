@@ -33,4 +33,4 @@ negate: <T: numeric> fn(x: T) -> T
 #---- numeric_param_compare_literal
 is_positive <- function(x) x > 0L
 #++++
-is_positive: <T: numeric> fn(x: T) -> logical
+is_positive: <T> fn(x: T) -> logical

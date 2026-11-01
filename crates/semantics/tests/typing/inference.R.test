@@ -38,10 +38,10 @@ half <- function(x) x / 2
 #++++
 half: <T: numeric> fn(x: T) -> double
 
-#---- comparison_constrains
+#---- comparison_leaves_the_operand_open
 positive <- function(x) x > 0L
 #++++
-positive: <T: numeric> fn(x: T) -> logical
+positive: <T> fn(x: T) -> logical
 
 #---- two_flexible_comparison_stays_unconstrained
 cmp <- function(a, b) a < b
@@ -173,8 +173,7 @@ h <- function() 1L < "a"
 #++++
 f: fn() -> logical
 g: fn() -> logical[]
-h: Unknown
-78..81 error[type-mismatch] expected `integer`, found `character`
+h: fn() -> logical
 
 #---- logical_operands_promote_to_integer_in_arithmetic
 f <- function() TRUE + TRUE
@@ -196,8 +195,7 @@ k <- function() TRUE < "a"
 f: fn() -> logical
 g: fn() -> logical[]
 h: fn() -> logical
-k: Unknown
-111..114 error[type-mismatch] expected `logical`, found `character`
+k: fn() -> logical
 
 #---- date_arithmetic_dispatches_to_the_declared_operator_method
 #: fn(from: Date, until: Date) -> difftime

@@ -211,8 +211,7 @@ logical[]
 #---- compare_array_cross_family
 c(1L, 2L) < "a"
 #++++
-Unknown
-12..15 error[type-mismatch] expected `integer[]`, found `character`
+logical[]
 
 #---- sub_named_map_scalar
 c(foo = 1L, bar = 2L) - 1L

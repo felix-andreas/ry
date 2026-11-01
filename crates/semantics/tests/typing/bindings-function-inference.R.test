@@ -37,7 +37,7 @@ neg: <T: numeric> fn(x: T) -> T
 #---- param_numeric_from_compare
 is_pos <- function(x) x > 0L
 #++++
-is_pos: <T: numeric> fn(x: T) -> logical
+is_pos: <T> fn(x: T) -> logical
 
 #---- param_numeric_division_double
 halve <- function(x) x / 2
@@ -186,7 +186,7 @@ applytwice: <T> fn(f: fn(T) -> T, x: T) -> T
 #---- param_or_default_logical
 flagfn <- function(flag = TRUE) if (flag) 1L else 2L
 #++++
-flagfn: fn([flag]: logical) -> integer
+flagfn: <T> fn([flag]: T) -> integer
 
 #---- if_with_param_value_nullable
 pick <- function(c, v) if (c) v

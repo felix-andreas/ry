@@ -84,11 +84,10 @@ Unknown
 Unknown
 1..4 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
-#---- comparison_cross_family
+#---- comparison_cross_family_coerces
 1L < "a"
 #++++
-Unknown
-5..8 error[type-mismatch] expected `integer`, found `character`
+logical
 
 #---- comparison_promotes_logical
 TRUE == 1L

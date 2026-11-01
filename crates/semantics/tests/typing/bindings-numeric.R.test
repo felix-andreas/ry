@@ -122,12 +122,12 @@ f: <T: numeric> fn(x: T) -> T
 #---- numeric_param_compare_eq
 f <- function(x) x == 0L
 #++++
-f: <T: numeric> fn(x: T) -> logical
+f: <T> fn(x: T) -> logical
 
 #---- numeric_param_compare_le
 f <- function(x) x <= 10L
 #++++
-f: <T: numeric> fn(x: T) -> logical
+f: <T> fn(x: T) -> logical
 
 #---- numeric_two_params_mul
 f <- function(a, b) a * b
@@ -305,10 +305,10 @@ f <- function(x) x == "a"
 #++++
 f: <T> fn(x: T) -> logical
 
-#---- compare_against_numeric_literal_constrains
+#---- compare_against_numeric_literal_leaves_the_operand_open
 f <- function(x) x == 1L
 #++++
-f: <T: numeric> fn(x: T) -> logical
+f: <T> fn(x: T) -> logical
 
 #==== range_numeric_var
 #---- range_over_numeric_var_is_double
