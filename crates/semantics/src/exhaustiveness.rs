@@ -514,7 +514,7 @@ fn lower<'db>(
             ..
         } if module.is_any_payload(*payload) => {
             let tag = |payload| Constructor::Tag {
-                name: name.as_str().to_owned(),
+                name: module.name(*name).as_str().to_owned(),
                 payload,
             };
             Pat::Or(vec![
@@ -524,7 +524,7 @@ fn lower<'db>(
         }
         PatternKind::Tag { name, payload, .. } => {
             let constructor = Constructor::Tag {
-                name: name.as_str().to_owned(),
+                name: module.name(*name).as_str().to_owned(),
                 payload: payload.is_some(),
             };
             let fields = match payload {

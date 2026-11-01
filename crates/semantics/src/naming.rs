@@ -5,8 +5,8 @@
 use {
     crate::{
         hir::{
-            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module, PatId,
-            PatternKind, Symbol, UnaryOperator, destructure_leaves,
+            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module,
+            NameSite, PatId, PatternKind, Symbol, UnaryOperator, destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
     },
@@ -181,7 +181,7 @@ pub fn resolve_item(module: &Module, masked_verbs: &FxHashMap<String, Vec<String
         scopes: vec![Scope {
             id: 0,
             kind: ScopeKind::TopLevel,
-            slots: BTreeMap::new(),
+            slots: FxHashMap::default(),
         }],
         bindings_by_site: FxHashMap::default(),
         scope_ids: FxHashMap::default(),
@@ -219,7 +219,7 @@ struct Scope {
     /// since a shadowed outer binding is not what the closure reads.
     id: u32,
     kind: ScopeKind,
-    slots: BTreeMap<Symbol, BindingId>,
+    slots: FxHashMap<Symbol, BindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -278,25 +278,16 @@ impl Context<'_> {
     }
 
     fn mint_binding(&mut self, name: Symbol, range: TextRange, kind: BindingKind) -> BindingId {
-        let key = (
-            u32::from(range.start()),
-            u32::from(range.end()),
-            name,
-        );
+        let key = (u32::from(range.start()), u32::from(range.end()), name);
         if let Some(&existing) = self.bindings_by_site.get(&key) {
             return existing;
         }
         let id = BindingId(self.next_binding);
         self.next_binding += 1;
         self.bindings_by_site.insert(key, id);
-        self.naming.bindings.insert(
-            id,
-            BindingInfo {
-                name,
-                range,
-                kind,
-            },
-        );
+        self.naming
+            .bindings
+            .insert(id, BindingInfo { name, range, kind });
         id
     }
 
@@ -464,7 +455,7 @@ impl Context<'_> {
                 if builtin_callee.is_some_and(|name| NATIVE_INTERFACES.contains(&name))
                     && let Some(routine) = module[arguments]
                         .iter()
-                        .find(|argument| argument.name.as_deref() == Some(".NAME"))
+                        .find(|argument| module.argument_name(argument).as_deref() == Some(".NAME"))
                         .or_else(|| {
                             module[arguments]
                                 .iter()
@@ -544,12 +535,12 @@ impl Context<'_> {
                 // positional argument takes the next data formal no name has claimed.
                 let claimed_by_name = module[arguments]
                     .iter()
-                    .filter_map(|argument| argument.name.as_deref())
-                    .filter(|name| leading.contains(name))
+                    .filter_map(|argument| module.argument_name(argument))
+                    .filter(|name| leading.contains(&name.as_str()))
                     .count();
                 let mut unclaimed = leading.len().saturating_sub(claimed_by_name);
                 for argument in &module[arguments] {
-                    let data_argument = match &argument.name {
+                    let data_argument = match module.argument_name(argument) {
                         Some(name) => leading.contains(&name.as_str()),
                         None => {
                             let takes_a_data_slot = unclaimed > 0;
@@ -625,7 +616,7 @@ impl Context<'_> {
                 self.scopes.push(Scope {
                     id: scope_id,
                     kind: ScopeKind::Function,
-                    slots: BTreeMap::new(),
+                    slots: FxHashMap::default(),
                 });
                 let saved_flow = mem::take(&mut self.flow);
                 for parameter in &module[parameters] {
@@ -660,18 +651,21 @@ impl Context<'_> {
             }
             ExpressionKind::For {
                 variable,
-                variable_range,
                 sequence,
                 body,
             } => {
                 self.resolve(*sequence);
-                if let (Some(variable), Some(range)) = (variable, variable_range) {
-                    let slot = self.mint_binding(*variable, *range, BindingKind::ForVariable);
+                if let Some(variable) = variable {
+                    let NameSite {
+                        name: variable,
+                        range,
+                    } = self.module[variable];
+                    let slot = self.mint_binding(variable, range, BindingKind::ForVariable);
                     // A top-level loop leaves its variable bound in the global environment.
                     if self.current_scope().kind == ScopeKind::TopLevel {
-                        self.naming.super_globals.insert(*variable);
+                        self.naming.super_globals.insert(variable);
                     }
-                    self.current_scope().slots.insert(*variable, slot);
+                    self.current_scope().slots.insert(variable, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
                 self.loop_body(*body, true);
@@ -688,7 +682,7 @@ impl Context<'_> {
                 self.scopes.push(Scope {
                     id: scope_id,
                     kind: ScopeKind::Local,
-                    slots: BTreeMap::new(),
+                    slots: FxHashMap::default(),
                 });
                 self.premint_frame_assignments(*body);
                 self.resolve(*body);
@@ -814,7 +808,7 @@ impl Context<'_> {
     fn resolve_switch(&mut self, arguments: &[Argument]) {
         let subject = arguments
             .iter()
-            .position(|argument| argument.name.as_deref() == Some("EXPR"))
+            .position(|argument| self.module.argument_name(argument).as_deref() == Some("EXPR"))
             .or_else(|| {
                 arguments
                     .iter()
@@ -935,12 +929,12 @@ impl Context<'_> {
             }
             ExpressionKind::For {
                 variable,
-                variable_range,
                 sequence,
                 body,
             } => {
-                if let (Some(variable), Some(range)) = (variable, variable_range) {
-                    self.frame_slot(*variable, *range, BindingKind::ForVariable);
+                if let Some(variable) = variable {
+                    let NameSite { name, range } = module[variable];
+                    self.frame_slot(name, range, BindingKind::ForVariable);
                 }
                 self.premint_frame_assignments(*sequence);
                 self.premint_frame_assignments(*body);
@@ -950,7 +944,11 @@ impl Context<'_> {
                 for arm in &module[arms] {
                     for &leaf in &module[arm.bindings] {
                         if let ExpressionKind::NameRef(name) = module.kind(leaf) {
-                            self.frame_slot(*name, module.range(leaf), BindingKind::PatternVariable);
+                            self.frame_slot(
+                                *name,
+                                module.range(leaf),
+                                BindingKind::PatternVariable,
+                            );
                         }
                     }
                     if let Some(guard) = arm.guard {
@@ -1332,10 +1330,12 @@ fn replacement_base(module: &Module, target: ExprId) -> Option<(ExprId, Symbol, 
 
 fn data_table_signature(module: &Module, arguments: &[Argument]) -> bool {
     arguments.iter().any(|argument| {
-        matches!(argument.name.as_deref(), Some("by" | "keyby"))
-            || argument
-                .value
-                .is_some_and(|value| data_table_marker(module, value))
+        matches!(
+            module.argument_name(argument).as_deref(),
+            Some("by" | "keyby")
+        ) || argument
+            .value
+            .is_some_and(|value| data_table_marker(module, value))
     })
 }
 
@@ -1348,7 +1348,7 @@ pub fn dot_dot_variable(name: &str) -> Option<&str> {
 
 /// The `j` argument is a `:=` call.
 pub(crate) fn is_column_update(module: &Module, arguments: &[Argument]) -> bool {
-    let (_, j) = query_index_arguments(arguments);
+    let (_, j) = query_index_arguments(module, arguments);
     j.and_then(|argument| argument.value).is_some_and(|value| {
         matches!(
             module.kind(value),
@@ -1360,13 +1360,14 @@ pub(crate) fn is_column_update(module: &Module, arguments: &[Argument]) -> bool 
 
 /// A query's `i` and `j`, matched as R matches `[`'s formals: by name first, then the
 /// unnamed arguments fill whichever of the two is still open, in order.
-pub(crate) fn query_index_arguments(
-    arguments: &[Argument],
-) -> (Option<&Argument>, Option<&Argument>) {
+pub(crate) fn query_index_arguments<'a>(
+    module: &Module,
+    arguments: &'a [Argument],
+) -> (Option<&'a Argument>, Option<&'a Argument>) {
     let named = |formal: &str| {
         arguments
             .iter()
-            .find(|argument| argument.name.as_deref() == Some(formal))
+            .find(|argument| module.argument_name(argument).as_deref() == Some(formal))
     };
     let mut positional = arguments.iter().filter(|argument| argument.name.is_none());
     let i = named("i").or_else(|| positional.next());

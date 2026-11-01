@@ -9,7 +9,10 @@ use {
         check::{CalleeTarget, ItemCheck},
         diagnostics::TypeRenderer,
         file_type_definitions, global_scheme,
-        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind, Symbol},
+        hir::{
+            Argument, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId, PatternKind,
+            Symbol,
+        },
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
@@ -200,10 +203,10 @@ fn member_at<'db>(
             continue;
         }
         match &pattern.kind {
-            PatternKind::Tag { name_range, .. } => {
-                let range: TextRange = tag_range(*name_range)?;
+            PatternKind::Tag { name, .. } => {
+                let range: TextRange = tag_range(hir.name_range(*name))?;
                 if range.contains_inclusive(relative) {
-                    let ty = check.pattern_types.get(PatId(index as u32))?;
+                    let ty = check.pattern_types.get(PatId::new(index))?;
                     return Some(Member {
                         range,
                         label: None,
@@ -237,7 +240,7 @@ fn member_at<'db>(
                     .find(|parameter| parameter.range.contains_inclusive(relative))
                 {
                     let TyKind::Function(function) =
-                        check.expression_types.get(&ExprId(index as u32))?.kind(db)
+                        check.expression_types.get(&ExprId::new(index))?.kind(db)
                     else {
                         return None;
                     };
@@ -254,13 +257,12 @@ fn member_at<'db>(
             }
             ExpressionKind::For {
                 variable: Some(variable),
-                variable_range: Some(variable_range),
                 ..
-            } if variable_range.contains_inclusive(relative) => {
+            } if hir.name_range(*variable).contains_inclusive(relative) => {
                 return Some(Member {
-                    range: *variable_range,
-                    label: Some(variable.to_string()),
-                    ty: *check.loop_variables.get(&ExprId(index as u32))?,
+                    range: hir.name_range(*variable),
+                    label: Some(hir.name(*variable).to_string()),
+                    ty: *check.loop_variables.get(&ExprId::new(index))?,
                 });
             }
             ExpressionKind::Record(fields) => {
@@ -278,18 +280,21 @@ fn member_at<'db>(
             ExpressionKind::Field {
                 target,
                 name: Some(name),
-                name_range: Some(name_range),
                 ..
-            } if name_range.contains_inclusive(relative) => {
+            } if hir.name_range(*name).contains_inclusive(relative) => {
+                let NameSite {
+                    name,
+                    range: name_range,
+                } = hir[name];
                 // An assignment target records no type of its own, but its record still says
                 // what the field holds.
                 let ty = check
                     .expression_types
-                    .get(&ExprId(index as u32))
+                    .get(&ExprId::new(index))
                     .copied()
-                    .or_else(|| field_type(db, *check.expression_types.get(target)?, name))?;
+                    .or_else(|| field_type(db, *check.expression_types.get(target)?, &name))?;
                 return Some(Member {
-                    range: *name_range,
+                    range: name_range,
                     label: Some(name.to_string()),
                     ty,
                 });
@@ -315,7 +320,7 @@ fn member_at<'db>(
                     db,
                     hir,
                     check,
-                    ExprId(index as u32),
+                    ExprId::new(index),
                     &hir[arguments],
                     relative,
                 ) {
@@ -736,11 +741,12 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
 
         for (index, kind) in hir.kinds().iter().enumerate() {
             if let ExpressionKind::For {
-                variable_range: Some(variable_range),
+                variable: Some(variable),
                 ..
             } = kind
             {
-                if let Some(&ty) = check.loop_variables.get(&ExprId(index as u32))
+                let variable_range = hir.name_range(*variable);
+                if let Some(&ty) = check.loop_variables.get(&ExprId::new(index))
                     && is_hintable(db, ty, false)
                 {
                     hints.push(InlayHint {
@@ -756,7 +762,7 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             if !matches!(hir.kind(*target), ExpressionKind::NameRef(_)) {
                 continue;
             }
-            let id = ExprId(index as u32);
+            let id = ExprId::new(index);
             let is_root = hir.root == Some(id);
             if (is_root && annotated)
                 || annotated_expressions.contains(&id)
@@ -933,9 +939,9 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
                 && !expression.range.is_empty()
                 && expression.range.contains_inclusive(position.relative)
         })
-        .map(|(index, expression)| (expression.range, ExprId(index as u32)))
+        .map(|(index, expression)| (expression.range, ExprId::new(index)))
         .collect();
-    calls.sort_by_key(|(range, id)| (range.len(), range.start(), id.0));
+    calls.sort_by_key(|(range, id)| (range.len(), range.start(), *id));
 
     let (callee, function, overloads, arguments) = calls.iter().find_map(|(_, id)| {
         let ExpressionKind::Call { callee, arguments } = &hir.kind(*id) else {
@@ -1407,7 +1413,7 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             let ExpressionKind::NameRef(name) = &hir.kind(*target) else {
                 continue;
             };
-            let id = ExprId(index as u32);
+            let id = ExprId::new(index);
             let is_root = hir.root == Some(id);
             if (is_root && annotated)
                 || annotated_expressions.contains(&id)
@@ -3374,7 +3380,7 @@ fn literal_expected_fields(
         hir.expressions()
             .enumerate()
             .filter(|(_, expression)| expression.range == range)
-            .find_map(|(index, _)| check.literal_expectations.get(&ExprId(index as u32)))
+            .find_map(|(index, _)| check.literal_expectations.get(&ExprId::new(index)))
             .copied()
     };
 
@@ -3649,8 +3655,8 @@ fn argument_name_completions(
     // arguments; anywhere inside an argument's own expression or name, a name would not fit.
     let mut typed = None;
     for (index, argument) in arguments.iter().enumerate() {
-        if argument
-            .name_range
+        if hir
+            .argument_name_range(argument)
             .is_some_and(|range| range.contains_inclusive(relative))
         {
             return Vec::new();
@@ -3674,7 +3680,7 @@ fn argument_name_completions(
     };
     let claimed: HashSet<&str> = arguments
         .iter()
-        .filter_map(|argument| argument.name.map(Symbol::as_str))
+        .filter_map(|argument| hir.argument_name(argument).map(Symbol::as_str))
         .collect();
     let positional = arguments
         .iter()
@@ -3963,10 +3969,10 @@ fn active_parameter(
 
     let mut consumed = vec![false; matchable_count];
     for argument in arguments.iter().take(cursor_index) {
-        match &argument.name {
+        match hir.argument_name(argument) {
             // Named arguments are never routed into `...`, so an unmatched name consumes no slot.
             Some(name) => {
-                if let Some(slot) = slot_for_name(name) {
+                if let Some(slot) = slot_for_name(&name) {
                     consumed[slot] = true;
                 }
             }
@@ -3981,8 +3987,8 @@ fn active_parameter(
     // The cursor's own named argument targets the parameter it names, else `...`.
     let named_target = arguments
         .get(cursor_index)
-        .and_then(|argument| argument.name.as_deref())
-        .and_then(|name| slot_for_name(name).or(variadic_slot));
+        .and_then(|argument| hir.argument_name(argument))
+        .and_then(|name| slot_for_name(&name).or(variadic_slot));
 
     Some(
         named_target
@@ -4489,7 +4495,7 @@ impl PositionedItem<'_> {
                 (
                     expression.range.len(),
                     !matches!(expression.kind, ExpressionKind::NameRef(_)),
-                    ExprId(index as u32),
+                    ExprId::new(index),
                 )
             })
             .collect();

@@ -680,7 +680,7 @@ fn expression_annotations<'db>(
         if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
             continue;
         }
-        attachments.push((hir::ExprId(index as u32), lowered));
+        attachments.push((hir::ExprId::new(index), lowered));
     }
     attachments
 }
@@ -1267,10 +1267,15 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
     // `name <- function(...)` binds only its own name at top level, since the body is a scope
     // of its own, so it needs no naming pass. Most items are functions, and skipping them keeps
     // whole-project walks, such as the loader's strict-mode classification, from naming
-    // everything.
+    // everything. The shape is read from the HIR, which outlives the tree: a cold pass has
+    // evicted most trees by the time whole-project walks ask, and reparsing every file for one
+    // node kind costs more than the rest of the walk.
     if *item.kind(db) == ItemKind::Function
-        && item_syntax(db, item)
-            .is_some_and(|syntax| syntax.syntax_node().kind() == SyntaxKind::BINARY_EXPR)
+        && item_hir(db, item).as_ref().is_some_and(|module| {
+            module
+                .root
+                .is_some_and(|root| matches!(module.kind(root), hir::ExpressionKind::Assign { .. }))
+        })
     {
         return item
             .name(db)
