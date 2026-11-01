@@ -482,13 +482,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             }
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
+                non_local_read(db, file, item_index, *expression)
             else {
                 continue;
             };
             let range = module.range(*expression) + offset;
             let display = display_name(name);
             let suggestion = suggestion
+                .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             diagnostics.push(Diagnostic::new(range, Severity::Warning, "unresolved", format!(
@@ -547,10 +548,52 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// Shared by the ordinary check and strict mode so they cannot disagree.
 /// `Tolerated`: undefined, but silenced by an attached package whose exports
 /// cannot be known; strict mode reports exactly these.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 enum NonLocalRead {
     Resolvable,
     Tolerated,
     Unresolved { suggestion: Option<String> },
+}
+
+/// Each item's non-local reads that do not resolve, by item position, classified once: the
+/// ordinary check reports the unresolved ones and strict mode the tolerated ones, and the
+/// classification probes several project-wide name tables per read.
+#[salsa::tracked(returns(ref))]
+fn file_unresolved_non_locals(db: &dyn Db, file: SourceFile) -> Vec<Vec<(ExprId, NonLocalRead)>> {
+    item_spans(db, file)
+        .iter()
+        .enumerate()
+        .map(|(item_index, span)| {
+            let (Some(check), Some(naming)) =
+                (item_check(db, span.item), item_naming(db, span.item))
+            else {
+                return Vec::new();
+            };
+            naming
+                .non_locals
+                .iter()
+                .filter_map(|(expression, name)| {
+                    let read = classify_non_local_read(
+                        db, file, item_index, &check, naming, expression, *name,
+                    );
+                    (read != NonLocalRead::Resolvable).then_some((*expression, read))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// How the non-local read at `expression` of the item at `item_index` resolves.
+fn non_local_read(
+    db: &dyn Db,
+    file: SourceFile,
+    item_index: usize,
+    expression: ExprId,
+) -> &NonLocalRead {
+    file_unresolved_non_locals(db, file)
+        .get(item_index)
+        .and_then(|reads| reads.iter().find(|(read, _)| *read == expression))
+        .map_or(&NonLocalRead::Resolvable, |(_, read)| read)
 }
 
 /// Guards run cheapest first: most non-local reads resolve through frame slots.
@@ -2142,18 +2185,11 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         let item = span.item;
         let offset = span.range.start();
-        let (Some(check), Some(module), Some(naming)) = (
-            item_check(db, item),
-            item_hir(db, item),
-            item_naming(db, item),
-        ) else {
+        let (Some(module), Some(naming)) = (item_hir(db, item), item_naming(db, item)) else {
             continue;
         };
         for (expression, name) in &naming.non_locals {
-            if !matches!(
-                classify_non_local_read(db, file, item_index, &check, naming, expression, *name),
-                NonLocalRead::Tolerated
-            ) {
+            if *non_local_read(db, file, item_index, *expression) != NonLocalRead::Tolerated {
                 continue;
             }
             diagnostics.push(Diagnostic::new(module.range(*expression) + offset, Severity::Error, "strict", format!(
