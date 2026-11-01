@@ -10,7 +10,7 @@ use {
     crate::analysis::{Speculation, resolve_function},
     heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
     interp::{
-        arith,
+        annotations, arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
         eval, heap,
@@ -392,10 +392,14 @@ pub unsafe extern "C" fn jit_call(
                         value,
                     });
                 }
+                // The values are at hand, so a typed callee's argument checks read them here
+                // instead of looking each formal up again in the new frame.
+                let values: SmallVec<[Sexp; 4]> = args.iter().map(|arg| arg.value).collect();
+                let entry = annotations::enter_positional(call, function, &values)?;
                 // The frame records no argument list: only `nargs`, method dispatch and
                 // `standardGeneric` read it, and a frame-safe callee calls none of them.
                 let env = eval::bind_arguments(call, function, &args, None)?;
-                eval::run_closure(call, function, env, machine.env, values::nil())
+                eval::run_closure(call, function, env, machine.env, values::nil(), entry)
             });
             match result {
                 Err(unwind) => {

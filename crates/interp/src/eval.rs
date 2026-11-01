@@ -6,6 +6,7 @@
 use {
     crate::{
         Frame,
+        annotations::Entry,
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         bytecode, conditions, deparse, dispatch, interp, scope,
         unwind::{Jump, R, Unwind, error, error_in, jump},
@@ -756,7 +757,7 @@ pub unsafe fn apply_closure(
 ) -> R<Sexp> {
     let env = bind_arguments(call, function, args, supplied)?;
     let promargs = args_pairlist(args)?;
-    run_closure(call, function, env, sys_parent, promargs)
+    run_closure(call, function, env, sys_parent, promargs, Entry::Unchecked)
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
@@ -851,6 +852,7 @@ pub unsafe fn run_closure(
     env: Sexp,
     sys_parent: Sexp,
     promargs: Sexp,
+    entry: Entry,
 ) -> R<Sexp> {
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
@@ -878,7 +880,10 @@ pub unsafe fn run_closure(
     let depth = state.frames.len();
     let caller_srcref = state.srcref;
     state.srcref = values::get_attr(function, symbols().srcref);
-    let signature = crate::annotations::enter(call, function, env, depth);
+    let signature = match entry {
+        Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
+        Entry::Checked(signature) => Ok(signature),
+    };
     let result = signature.and_then(|signature| {
         let result = scope(|| {
             stacker::maybe_grow(128 * 1024, 4 * 1024 * 1024, || {
