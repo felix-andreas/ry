@@ -11,7 +11,7 @@ blobs_@ID@ <- function(rows = @ROWS@L, centers = @CENTERS@L, seed = 6L) {
 }
 
 cluster_kmeans_@ID@ <- function(points, centers = @CENTERS@L) {
-  stats::kmeans(points, centers = centers, nstart = 5L)$cluster
+  stats::kmeans(points, centers = centers, nstart = 25L)$cluster
 }
 
 cluster_hierarchical_@ID@ <- function(points, centers = @CENTERS@L) {
