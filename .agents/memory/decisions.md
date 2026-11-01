@@ -2855,7 +2855,9 @@ first lines R had already read, leaving R mid-command.
 - **A backward jump compiles impatiently.** The cold refusal (wait for code that has never run to
   record its types) applies only to compiles at entry. At a loop's back edge the loop is the hot
   code, and waiting for the code after it ran three more rounds of back-edge thresholds in
-  tier 0.
+  tier 0. An impatient compile that reaches a loop which has never run guesses an integer
+  sequence behind the guard rather than refusing, because any refusal other than a cold one
+  disables the body for good.
 
 # Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
 
