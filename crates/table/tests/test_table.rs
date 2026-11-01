@@ -2440,6 +2440,26 @@ fn each_i_runs_j_once_per_row_of_i() {
         doubles(&[1.0, 1.0, NA_REAL, f64::NAN])
     );
     assert_eq!(read(&mut result, "n"), ints(&[3, 3, 0, 0]));
+
+    // `.N` is one value per row of `i`, so an aggregate over it is that count, not the group's
+    // raw row count, which is 1 for a row of `i` that matched nothing.
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(
+                &i,
+                &[("t", LessEqual, "hi"), ("t", GreaterEqual, "lo")],
+                Mult::All,
+            )),
+            select: Select::Columns(vec![
+                named("total", aggregate(Aggregate::Sum, Expr::Count)),
+                named("average", aggregate(Aggregate::Mean, Expr::Count)),
+            ]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(read(&mut result, "total"), ints(&[3, 3, 0, 0]));
+    assert_eq!(read(&mut result, "average"), doubles(&[3.0, 3.0, 0.0, 0.0]));
 }
 
 #[test]
@@ -2984,6 +3004,24 @@ fn assigning_strings_into_a_number_column_parses_them_with_a_warning() {
         (
             "b",
             "yes",
+            RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER]),
+        ),
+        // R trims the spaces around a number, reads hexadecimal and exponents, and truncates
+        // toward zero for an integer; it does not trim a logical's spelling.
+        ("d", " 3 ", doubles(&[1.0, 3.0, 3.0])),
+        ("d", "0x1A", doubles(&[1.0, 26.0, 26.0])),
+        ("d", "Inf", doubles(&[1.0, f64::INFINITY, f64::INFINITY])),
+        ("d", "+4", doubles(&[1.0, 4.0, 4.0])),
+        ("d", "1,5", doubles(&[1.0, NA_REAL, NA_REAL])),
+        ("a", " 3", ints(&[1, 3, 3])),
+        ("a", "0X1a", ints(&[1, 26, 26])),
+        ("a", "1e2", ints(&[1, 100, 100])),
+        ("a", "-3.7", ints(&[1, -3, -3])),
+        ("a", ".5", ints(&[1, 0, 0])),
+        ("a", "Inf", ints(&[1, NA_INTEGER, NA_INTEGER])),
+        (
+            "b",
+            " TRUE",
             RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER]),
         ),
     ];
