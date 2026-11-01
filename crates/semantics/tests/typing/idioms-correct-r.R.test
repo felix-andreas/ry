@@ -1100,3 +1100,20 @@ penalty <- function(m, first) {
 #++++
 penalty: Unknown
 79..97 error[type-mismatch] `+` is not defined between `character` and `matrix`
+
+#---- a_callback_called_positionally_may_later_be_called_by_name
+step <- function(f, pars, arglist) {
+  base <- f(pars, arglist)
+  f(pars = pars + 1, arglist) - base
+}
+#++++
+step: <T: numeric, U, V: numeric> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> V
+
+#---- a_callback_called_by_name_still_takes_no_extra_argument
+step <- function(f, pars, arglist) {
+  base <- f(pars, arglist)
+  f(pars = pars + 1, arglist, 3) - base
+}
+#++++
+step: Unknown
+94..95 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1

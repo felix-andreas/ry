@@ -1510,6 +1510,9 @@ enum ArgumentTarget {
     /// A name no formal declares on a non-variadic function, or a duplicate of one
     /// already supplied.
     UnmatchedName,
+    /// A name on a shape inferred from a call, which declared no names: it takes a positional
+    /// slot whose type is not checked.
+    UndeclaredName,
     Overflow,
 }
 
@@ -9613,7 +9616,7 @@ impl<'db> Checker<'db, '_> {
                             preceding_named: 0,
                         }),
                         ret,
-                        inferred: false,
+                        inferred: true,
                     }),
                 );
                 self.unify_or_report(range, expected, resolved);
@@ -9900,6 +9903,7 @@ impl<'db> Checker<'db, '_> {
                         findings.push(error);
                     }
                 }
+                ArgumentTarget::UndeclaredName => {}
                 ArgumentTarget::UnmatchedName => {
                     if let Some(name) = &argument.name {
                         findings.push(TypeError {
@@ -9920,7 +9924,13 @@ impl<'db> Checker<'db, '_> {
                             .zip(arguments)
                             .filter(|(target, argument)| {
                                 argument.name.is_some()
-                                    && matches!(target, Some(ArgumentTarget::Named(_)))
+                                    && matches!(
+                                        target,
+                                        Some(
+                                            ArgumentTarget::Named(_)
+                                                | ArgumentTarget::UndeclaredName
+                                        )
+                                    )
                             })
                             .count();
                         return vec![TypeError {
@@ -9957,7 +9967,12 @@ impl<'db> Checker<'db, '_> {
 
         let positional_filled = targets
             .iter()
-            .filter(|target| matches!(target, Some(ArgumentTarget::Positional(_))))
+            .filter(|target| {
+                matches!(
+                    target,
+                    Some(ArgumentTarget::Positional(_) | ArgumentTarget::UndeclaredName)
+                )
+            })
             .count();
         if forwards_dots || unknown_name {
             return findings;
@@ -10221,7 +10236,24 @@ impl<'db> Checker<'db, '_> {
             }
         }
 
+        // A shape inferred from an earlier call (`f(pars, arglist)` on a parameter `f`) has
+        // positional slots whose names nobody declared, so a later `f(pars = x, arglist)`
+        // names one of them. R matches names before positions, so such a name reserves the
+        // first free slot, unchecked because which slot it names is unknown.
         let mut next_positional = 0usize;
+        if function.inferred && function.variadic.is_none() {
+            for (index, argument) in arguments.iter().enumerate() {
+                if argument.forwards_dots
+                    || targets[index].is_some()
+                    || argument.name.is_none()
+                    || next_positional >= function.positional.len()
+                {
+                    continue;
+                }
+                targets[index] = Some(ArgumentTarget::UndeclaredName);
+                next_positional += 1;
+            }
+        }
         let mut next_named = 0usize;
         for (index, argument) in arguments.iter().enumerate() {
             if argument.forwards_dots || targets[index].is_some() {
