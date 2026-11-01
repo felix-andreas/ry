@@ -58,9 +58,9 @@ call it, as devtools' does.
 
 ## Controlling reloads
 
-In `ry R`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
-scratch when you want a clean slate, and `ry R --no-load` starts the console without loading the
-package at all.
+In the console, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
+scratch when you want a clean slate, and `--no-load` (`ry R --no-load`, `ry run --no-load`) starts
+the console without loading the package at all.
 
 ## Differences from devtools
 
@@ -70,9 +70,9 @@ package's `inst/`, and datasets in `data/` are not loaded.
 
 ## Which R runs your package
 
-`ry R` and `load_all()` in an R session run your package on GNU R. `ry load` and `ry run` scripts
-run it on ry's own runtime, and `load_all()` loads on whichever runtime calls it. The console of
-`ry run` does not load the package yet.
+`ry R` and `load_all()` in an R session run your package on GNU R. `ry run` and `ry load` run it on
+ry's own runtime, and `load_all()` loads on whichever runtime calls it. Started inside a package, the
+console of `ry run` loads and reloads it exactly as `ry R` does.
 
 A package written in plain R, with or without [inline annotations](/type-checking/inline-annotations),
 loads on both. A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads only

@@ -85,6 +85,12 @@ fn session() -> std::sync::MutexGuard<'static, Session> {
     SESSION.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether a loaded package's sources changed on disk since it was loaded, which the console
+/// asks before each command to decide whether to reload. A change is reported once.
+pub fn changed() -> bool {
+    !session().loader.changed_roots().is_empty()
+}
+
 /// `.Internal(ryLoaderPlan(root, full))`: the plan as `runtime.R` reads it, or `list(error =)`.
 unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;

@@ -36,9 +36,9 @@ owner    character
 `ry R` runs the GNU R installed on your machine, which ry finds on its own. `ry run` opens the same
 console on ry's own runtime, which runs [records, tags](/type-checking/records-and-tags) and
 [`DataFrame`](/guides/dataframes) and turns inline annotations into
-[checks](/type-checking/inline-annotations#running-annotated-code). That runtime is still
-incomplete, so code that needs something it lacks stops with an error that names it, and its
-console does not load your package yet.
+[checks](/type-checking/inline-annotations#running-annotated-code). It loads and reloads your
+package as `ry R` does. That runtime is still incomplete, so code that needs something it lacks
+stops with an error that names it.
 
 Both run a script when you give them one, and the arguments after the script name reach it through
 `commandArgs(trailingOnly = TRUE)`:

@@ -226,36 +226,66 @@ fn run_script(body: &str) -> Option<(std::process::Output, String)> {
 
 #[test]
 fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_command() {
-    if !r_available() {
-        return;
+    for runtime in runtimes() {
+        let package = tempfile::tempdir().expect("temp dir");
+        let package = package.path();
+        fs::create_dir_all(package.join("R")).expect("create package");
+        fs::write(
+            package.join("DESCRIPTION"),
+            "Package: replpkg\nVersion: 1.0\n",
+        )
+        .expect("write");
+        fs::write(
+            package.join("R/a.R"),
+            "greet <- function() \"first version\"\n",
+        )
+        .expect("write");
+        let mut session = ReplSession::start_with(Some(package), &[runtime_command(runtime)]);
+        session.expect("Loaded replpkg");
+        session.send("greet()\r");
+        session.expect("first version");
+        // Distinct sizes, so the change is visible even within one timestamp tick.
+        fs::write(
+            package.join("R/a.R"),
+            "greet <- function() \"second, edited version\"\n",
+        )
+        .expect("write");
+        session.send("greet()\r");
+        session.expect("Reloaded replpkg: 1 function rebound");
+        session.expect("second, edited version");
+        // Nothing changed since, so the next command runs without a reload.
+        session.send("cat(\"no\", \"reload\\n\")\r");
+        session.expect("no reload");
+        assert_eq!(
+            session.seen.matches("Reloaded replpkg").count(),
+            1,
+            "{runtime}: {}",
+            session.seen
+        );
+        session.quit();
     }
-    let package = std::env::temp_dir().join(format!("ry-repl-load-{}", std::process::id()));
-    fs::create_dir_all(package.join("R")).expect("create package");
-    fs::write(
-        package.join("DESCRIPTION"),
-        "Package: replpkg\nVersion: 1.0\n",
-    )
-    .expect("write");
-    fs::write(
-        package.join("R/a.R"),
-        "greet <- function() \"first version\"\n",
-    )
-    .expect("write");
-    let mut session = ReplSession::start_in(Some(&package));
-    session.expect("Loaded replpkg");
-    session.send("greet()\r");
-    session.expect("first version");
-    // Distinct sizes, so the change is visible even within one timestamp tick.
-    fs::write(
-        package.join("R/a.R"),
-        "greet <- function() \"second, edited version\"\n",
-    )
-    .expect("write");
-    session.send("greet()\r");
-    session.expect("Reloaded replpkg: 1 function rebound");
-    session.expect("second, edited version");
-    session.quit();
-    fs::remove_dir_all(&package).ok();
+}
+
+#[test]
+fn without_loading_the_console_starts_bare_and_load_all_loads_on_both_runtimes() {
+    for runtime in runtimes() {
+        let package = tempfile::tempdir().expect("temp dir");
+        let package = package.path();
+        fs::create_dir_all(package.join("R")).expect("create package");
+        fs::write(package.join("DESCRIPTION"), "Package: barepkg\nVersion: 1.0\n")
+            .expect("write");
+        fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
+        let (status, stdout, stderr) = ry_with_input(
+            package,
+            &[runtime_command(runtime), "--no-load"],
+            &[],
+            "exists(\"level\")\nload_all()\nlevel()\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(stdout.starts_with("[1] FALSE\n"), "{runtime}: {stdout}");
+        assert!(stdout.contains("[1] \"one\""), "{runtime}: {stdout}");
+        assert!(stderr.contains("Loaded barepkg"), "{runtime}: {stderr}");
+    }
 }
 
 #[test]

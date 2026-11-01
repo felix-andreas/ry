@@ -62,6 +62,9 @@ struct LoadedPackage {
     committed: Option<LoadState>,
     /// The state a plan was made for, until the backend confirms it applied.
     pending: Option<LoadState>,
+    /// [`source_fingerprint`] of what is loaded, and of what the pending plan read.
+    committed_fingerprint: Option<u64>,
+    pending_fingerprint: Option<u64>,
 }
 
 /// What is loaded for one package: the load index plus the inputs the analysis does not read.
@@ -219,8 +222,14 @@ impl Loader {
     /// one. The plan stays pending until [`Loader::commit`].
     pub fn plan(&mut self, path: &Path, full: bool) -> Result<Plan, LoadError> {
         let root = find_package_root(path)?;
+        // Taken before reading, so an edit made while the plan is read shows as a change later.
+        let fingerprint = source_fingerprint(&root);
         let inputs = self.read(&root)?;
-        self.plan_inputs(&root, inputs, full)
+        let plan = self.plan_inputs(&root, inputs, full)?;
+        if let Some(package) = self.packages.iter_mut().find(|package| package.root == root) {
+            package.pending_fingerprint = fingerprint;
+        }
+        Ok(plan)
     }
 
     /// Plans a load of the package at `root` from sources the caller read.
@@ -283,10 +292,29 @@ impl Loader {
         match package.pending.take() {
             Some(state) => {
                 package.committed = Some(state);
+                package.committed_fingerprint = package.pending_fingerprint.take();
                 true
             }
             None => false,
         }
+    }
+
+    /// The roots of the loaded packages whose sources changed on disk since they were loaded,
+    /// judged from file names, sizes and modification times without reading a file. A root is
+    /// reported once per change: a reload that fails is not retried until the next change.
+    pub fn changed_roots(&mut self) -> Vec<PathBuf> {
+        let mut changed = Vec::new();
+        for package in &mut self.packages {
+            if package.committed.is_none() {
+                continue;
+            }
+            let current = source_fingerprint(&package.root);
+            if current != package.committed_fingerprint {
+                package.committed_fingerprint = current;
+                changed.push(package.root.clone());
+            }
+        }
+        changed
     }
 
     /// The pending state for `root`, which a backend that persists state saves.
@@ -416,6 +444,8 @@ impl Loader {
                     sources,
                     files: FxHashMap::default(),
                     committed: None,
+                    committed_fingerprint: None,
+                    pending_fingerprint: None,
                     pending: None,
                 });
                 self.packages.len() - 1
@@ -1142,6 +1172,34 @@ impl Plan {
             && self.dynamic_libraries.is_none()
             && !self.exports_changed
     }
+}
+
+/// Of the names, sizes and modification times of everything a load reads, so a change is
+/// noticed without reading a file.
+fn source_fingerprint(root: &Path) -> Option<u64> {
+    let mut records = Vec::new();
+    let mut record = |path: &Path| {
+        if let Ok(metadata) = fs::metadata(path) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            records.push(format!(
+                "{}\0{}\0{modified}",
+                path.display(),
+                metadata.len()
+            ));
+        }
+    };
+    record(&root.join("DESCRIPTION"));
+    record(&root.join("NAMESPACE"));
+    let entries = fs::read_dir(root.join("R")).ok()?;
+    for entry in entries.flatten() {
+        record(&entry.path());
+    }
+    records.sort();
+    Some(fnv1a(records.join("\n").as_bytes()))
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {

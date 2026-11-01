@@ -3,7 +3,7 @@ title: Package loading
 description: What ry binds, runs and rebinds when it loads a package from source, and what it does not do yet
 ---
 
-[`ry load`](/guides/loading-packages), the `ry R` console and `load_all()` all load a package the same way.
+[`ry load`](/guides/loading-packages), the `ry run` and `ry R` consoles and `load_all()` all load a package the same way.
 This page is the exact behavior.
 
 ## A load
@@ -25,7 +25,7 @@ This page is the exact behavior.
   `# typing: strict` comment, `ry load` checks the package's `R/` files first, on either runtime.
   If any has a strict-mode error, it prints the errors and exits with status 1 without loading
   anything. The `R/` files are checked together, so a name one file defines resolves in the others.
-  A later `load_all()` in the same session, and the load the `ry R` console makes, do not check.
+  A later `load_all()` in the same session, and the load a console makes, do not check.
 
 On GNU R, functions keep their source references, so `print()`, tracebacks, and the debugger point
 into your files, as long as `options(keep.source = TRUE)` is set, which is the default in an
@@ -54,7 +54,7 @@ A reload works out which top-level items changed and touches only those:
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
-- On ry's own runtime (`ry load`, and `load_all()` in a `ry run` script), functions carry no source
+- On ry's own runtime (`ry load`, the `ry run` console, and `load_all()` in a `ry run` script), functions carry no source
   references. Load in `ry R` when you need them.
 - Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
   GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
