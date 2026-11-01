@@ -577,7 +577,9 @@ fn may_have_nan_or_inf(values: &[f64]) -> bool {
         return true;
     }
     values[odd..]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .any(|pair| !(pair[0] + pair[1]).is_finite())
 }
 

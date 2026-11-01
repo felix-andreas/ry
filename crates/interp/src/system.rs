@@ -1395,7 +1395,7 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             'u' | 'w' => {
                 number(input, 1)?;
             }
-            'U' | 'V' | 'W' => {
+            'U'..='W' => {
                 number(input, 2)?;
             }
             'z' => fields.offset = Some(parse_offset(input)?),

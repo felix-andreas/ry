@@ -40,10 +40,11 @@ On Linux, use `ry-x86_64-unknown-linux-gnu.tar.gz` the same way. From 0.3.2-beta
 x86_64 distribution with glibc 2.17 or newer. The binary in 0.3.1-beta and earlier starts only under
 Nix, and fails elsewhere with `cannot execute: required file not found`.
 
-**From source**, with a [Rust toolchain](https://www.rust-lang.org/tools/install):
+**From source**, with [rustup](https://rustup.rs). ry builds on a nightly Rust toolchain, and
+`cargo install` does not read the toolchain the repository pins, so name a nightly yourself:
 
 ```bash
-cargo install --git https://github.com/felix-andreas/ry ry-lang
+cargo +nightly install --git https://github.com/felix-andreas/ry ry-lang
 ```
 
 The crate is `ry-lang`, and the command it installs is `ry`.
@@ -66,7 +67,8 @@ ry stays independent of R's license.
 
 The Zed extension is not in Zed's registry yet, so install it as a dev extension:
 
-1. Install a [Rust toolchain](https://rustup.rs), which Zed uses to compile dev extensions.
+1. Install [rustup](https://rustup.rs), which Zed uses to compile dev extensions. The first build
+   downloads the nightly toolchain that the repository pins.
 2. Clone the repository.
 3. Run `zed: install dev extension` from the command palette and select the `editors/zed` directory.
 

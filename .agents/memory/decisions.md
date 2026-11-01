@@ -3258,24 +3258,31 @@ explicit allocators".
 - **Where it applies first.** The checker's per-item inference (types built mid-check), HIR
   lowering, the JIT's analysis plan, and the heap's mark and sweep. The table engine already keeps
   columns in Arrow buffers and accumulators as struct-of-arrays, so it changes only at the edges.
-- **Allocator API status (checked against the Rust docs, the tracking issue and releases.rs).**
-  `std::alloc::Allocator` was nightly-only (`allocator_api`, rust-lang/rust#32838) until
-  rust-lang/rust#156882 stabilized a subset for Rust 1.100.0: the `Allocator` trait, `Global`,
+- **The toolchain is a pinned nightly (user directive), and std's allocator API is the interface.**
+  `rust-toolchain.toml` pins a dated nightly. Rust 1.100.0 (stable on 12 November 2026)
+  stabilizes a subset of `allocator_api` (rust-lang/rust#156882): the `Allocator` trait, `Global`,
   `System`, and the allocator parameter of `Box<T, A>` and `Vec<T, A>` with their `new_in` and
-  `with_capacity_in` families. 1.100.0 is scheduled for stable on 12 November 2026. The
-  `Store` API, `StaticAllocator`, and `Box::into_pin` with a custom allocator stay unstable, and
-  std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter. CI builds with
-  `dtolnay/rust-toolchain@stable`, the dev container has rustc 1.97.0 (which rejects
-  `Vec::new_in`), and the nix flake uses the latest nightly. The workspace has no
-  `rust-toolchain` file and no `rust-version`.
-- **The route that works on every toolchain.** `allocator-api2` is the stable polyfill of the
-  trait and of `Vec`/`Box`, and `hashbrown` (already a `heap` dependency) accepts it for its maps.
-  `bumpalo` with its `allocator-api2` feature gives a bump arena those collections can allocate
-  in, so `hashbrown::HashMap::new_in(&bump)` and `allocator_api2::vec::Vec::new_in(&bump)` build and
-  run on stable rustc 1.97.0 (bumpalo 3.20, hashbrown 0.16, allocator-api2 0.2). Move to std's `Vec<T, A>` and
-  `Box<T, A>` once every toolchain the project builds with is 1.100 or newer; maps stay on
-  `hashbrown`. Whether `bumpalo` implements the stabilized std trait without its nightly
-  `allocator_api` feature is unverified.
+  `with_capacity_in` families. The pinned nightly already has that subset with no feature gate;
+  `#![feature(allocator_api)]` now only warns that it was partially stabilized, and the unstable
+  remainder lives under `allocator_ext`. Verified on the pinned nightly: `Vec::new_in(&bump)` and
+  `Box::new_in(x, &bump)` build against `bumpalo` 3.20 with its `allocator_api` feature, and
+  `hashbrown::HashMap::new_in(&bump)` builds with hashbrown 0.16's `nightly` feature, which makes
+  it take std's trait. So arenas are `bumpalo` through std's `Vec` and `Box`, maps stay on
+  `hashbrown` (std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter), and the
+  earlier `allocator-api2` polyfill route is dropped: nothing needs it.
+- **The pin moves forward deliberately.** Bump the date in one commit that also fixes what the new
+  nightly breaks (new lints, rustfmt changes), never by floating `nightly`, so a build is
+  reproducible. `flake.nix` reads the channel from `rust-toolchain.toml`, so a bump also needs
+  `nix flake update rust-overlay` when the locked overlay predates the new date. `cargo install
+  --git` does not read the file, so the installation page tells users to pass `+nightly`.
+- **A nightly feature is enabled only for a clear performance or design payoff,** with a
+  `#![feature(...)]` at the crate root and a one-line reason beside it. Likely candidates:
+  `allocator_ext` (the unstable rest of the allocator API, if an arena needs it), `portable_simd`
+  (table kernels), `likely_unlikely` (branch hints on interpreter and heap fast paths),
+  `never_type`, `try_blocks` and `trait_alias`. Features marked incomplete (`specialization`,
+  `generic_const_exprs`) stay out. Nightly rustfmt also applies the unstable `group_imports` and
+  `imports_granularity` settings in `rustfmt.toml`, the style the original code used, so each file
+  has one `use { ... }` tree.
 - **The global allocator stays mimalloc.** The `ry` binary sets it as `#[global_allocator]`
   (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
   own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default

@@ -74,10 +74,12 @@ fn md5(message: &[u8]) -> [u8; 16] {
         padded.push(0);
     }
     padded.extend_from_slice(&((message.len() as u64).wrapping_mul(8)).to_le_bytes());
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0 {
         let words: Vec<u32> = block
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
             .collect();
         let [mut a, mut b, mut c, mut d] = state;
         for round in 0..64 {
@@ -101,7 +103,7 @@ fn md5(message: &[u8]) -> [u8; 16] {
         }
     }
     let mut digest = [0u8; 16];
-    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+    for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     digest
