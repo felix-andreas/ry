@@ -296,20 +296,28 @@ decision log records that design.
 order plus the `NAMESPACE` and `DESCRIPTION` text, as separate fields so a `NAMESPACE` edit never
 re-derives an item. The index has three layers, and each depends only on the one below:
 
-- `item_load` gives one item's content hash (of the text R evaluates, with inline annotations
-  erased), whether it is a function definition, and the S4, R6 and S3 registrations it makes. It
-  reads only `item_syntax`, so it is the per-item firewall. `item_immediate_reads` gives the names a
-  statement reads while it runs, which excludes reads inside the functions it defines.
-- `file_items` joins one file's items with their positions in the erased text, which keeps every
-  line break, so line numbers match the file on disk.
-- `package_index` joins the files and decides which names are bound lazily: a name whose one writer
-  is a function definition.
+- `file_load_index` erases one file's inline annotations, keeping every line break so line numbers
+  match the file on disk, and records each item's position in that text. `file_items` then gives
+  each item its content hash (of its erased text), whether it is a function definition, the names
+  it writes and reads while it runs (`item_immediate_reads`, which excludes reads inside the
+  functions it defines), and the S4, R6 and S3 registrations it makes. Both read one file only.
+- `file_binds` reduces one file to the names it binds and how, and `package_bindings` joins those
+  into which names are bound lazily: a name whose one writer is a function definition. A body edit
+  leaves a file's binds equal, so salsa backdates them and the join, which is the firewall that
+  keeps an edit from reaching every file's bindings.
+- `package_index` joins the files and the bindings into what a plan diffs.
 
 A reload depends on all of a package's files, so salsa would revisit every file's memos after any
 edit. The loader avoids that with durability: a file starts at high durability and drops to low on
 its first edit, and salsa skips verifying memos that depend only on inputs at a durability nothing
 changed at. The diff then looks inside only the files whose hash changed, plus the eager code of
-every file, which is all an edit can reach. `test_incremental.rs` pins the per-item contract.
+every file, which is all an edit can reach. Lowering a file's durability makes its first edit verify
+every memo once (about 20 ms at 326,000 lines), and later edits of that file skip the check.
+`test_incremental.rs` pins the per-file contract.
+
+Before the console or `ry load` starts R for a package, it calls the loader's `prepare`, which reads
+the sources and derives this whole index on its own threads while base R loads. The first
+`load_all()` then waits for that to finish and only diffs.
 
 ### Diagnostics
 

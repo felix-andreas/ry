@@ -145,6 +145,10 @@ pub fn plan_value(plan: &Plan, with_sources: bool) -> RValue {
             plan.touched_names().map_or(RValue::Null, RValue::Character),
         ),
         (
+            "keeps_names".into(),
+            RValue::Logical(plan.keeps_names && plan.touched_names().is_some()),
+        ),
+        (
             "registers_s4".into(),
             RValue::Logical(plan.run.iter().any(|code| code.registers_s4)),
         ),
