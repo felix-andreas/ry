@@ -3019,11 +3019,17 @@ first lines R had already read, leaving R mid-command.
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
   then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
-  purple one") above the four steps as tabs. A reader has to want the features before a path to
+  purple one") beside the four steps as tabs. A reader has to want the features before a path to
   them matters, which is why the migration is the last part of the sell and not the opening.
 - **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
   people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
+- **Motion shows the story; it never decorates.** The migration section sets the Venn beside the
+  step tabs, and each step moves a "your code" marker into its region and dims the others (the
+  `data-step` attribute on `Venn.astro`; without it the diagram stays static, as on `why-ry.mdx`).
+  Runtime and migration snippets reveal code first and output after, once on first view and again
+  on each tab switch, and one neutral pill slides between tabs (no colored outline or glow). Every
+  snippet function uses a `{}` body. All motion is off under `prefers-reduced-motion`.
 - **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
   tab when the JIT benchmark table lands. The DataFrame tab shows the Polars-style API, never
   data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
