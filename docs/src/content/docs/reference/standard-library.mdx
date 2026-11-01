@@ -164,7 +164,7 @@ state <- list(seen = Dict.empty(), count = 0L)
 for (i in 1:100000) state$seen <- Dict.insert(state$seen, i, TRUE)
 ```
 
-A dictionary or set also updates in place through a helper function, when the call has the form
+A dictionary, set or list also updates in place through a helper function, when the call has the form
 `x <- helper(x, ...)` and the helper either reassigns its own parameter or returns the update of
 its first parameter directly, as in `function(seen, key) Dict.insert(seen, key, TRUE)`:
 
@@ -188,11 +188,15 @@ check did not cover runs during the call, such as a closure the helper calls, th
 caller's variable gets its value back first. If the helper fails, the variable keeps the value it
 had before the call, even when the helper had already updated the collection.
 
+A helper may define and call its own closures, as in `inc <- function(x) x + 1`, as long as each
+closure's body passes the same check and none of them outlives the call. Such a helper updates in
+place only through the reassignment form (`xs <- List.append(xs, inc(i)); xs`); its tail form,
+`List.append(xs, inc(i))` as the last expression, copies.
+
 Other helpers copy, as in GNU R, and so does a call whose result goes to another variable, as in
-`y <- helper(x, k)`. A helper that creates a closure keeps its frame alive, so it moves the value
-but updates it in place only through the reassignment form, and the next call copies. A helper that
-reads a variable through an environment, as in `env$x`, ends the move at that point. A list, through `List.append`, is not
-moved. For those, loop inside the helper, or keep the update in the loop that owns the variable:
+`y <- helper(x, k)`. A helper that reads a variable through an environment, as in `env$x`, ends the
+move at that point. For those, loop inside the helper, or keep the update in the loop that owns the
+variable:
 
 ```r
 remember_all <- function(seen, keys) {

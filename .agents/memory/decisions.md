@@ -3987,8 +3987,23 @@ explicit allocators".
   { d <- Dict.insert(d, k, k); d }` inside a function, 16.9 s before and 0.10 s after; at top
   level inside `system.time`, 16 s before the shared-start fix and 0.066 s after; with the tail
   form `add <- function(d, k) Dict.insert(d, k, k)`, 16.4 s before and 0.053 s after.
-- **Limits.** Lists are not moved, and the tail update covers only the last statement. Both are
-  in `backlog.md`.
+- **Lists.** A plain list (no attributes, not an Array) moves like a dictionary: `moves::extent`
+  gives its length as the journal's `entries`, and `List.set` and `List.swap` report replaced
+  elements to `moves::replacing`, so `original` rebuilds it. Growth past capacity copies and
+  leaves the original intact. 40,000 calls of `xs <- helper(xs, i)` with
+  `helper <- function(xs, i) List.append(xs, i)` take 0.046 s on the profiling build.
+- **Closure-creating helpers.** `movable` accepts a `function` literal whose defaults and body pass
+  the same check (`check_literal`) and returns those bodies. `eval::make_closure` reports every
+  closure to `moves::created_closure`, which marks it checked when its body is one of them, and
+  entering a checked closure no longer ends the move; its frame joins the move's tracked frames,
+  so forcing a promise made there is covered too. At return, `closures_dead` releases the
+  parameter only when no created closure is the result and each one's refcount is covered by the
+  tracked frames' own cells, which means none escaped. 40,000 calls of
+  `{ inc <- function(x) x + 1; xs <- List.append(xs, inc(i)); xs }` take 0.12 s, against 6.9 s
+  for the tail form, which still copies because `Op::CallTailUpdate` stays off for a body that
+  may capture its frame.
+- **Limits.** The tail update covers only the last statement and stays off in a body that creates
+  a closure. Both are in `backlog.md`.
 
 ## A key of the wrong type is an error, not a missing key
 

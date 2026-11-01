@@ -367,11 +367,14 @@ protects construction but nothing after it.
 - A check-time diagnostic for library calls in a project that targets GNU R, once a project can
   declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
   time, `ry R` already stops with an error that names the cause.
-- List values (`List.append`) are not moved into a helper's parameter, so `xs <- helper(xs, x)`
-  copies (`decisions.md`, "Moving a collection into a helper's parameter").
-- A helper that calls a closure on every call ends every move early, so each call copies. Ending
-  only when the closure can reach the moved value (it is not handed the frame or the value) would
-  need an escape check on the closure's body.
+- A helper that calls a closure it did not create (a parameter, a global) ends every move early,
+  so each call copies. Ending only when the closure can reach the moved value would need an
+  escape check on the closure's body; closures the helper creates itself are already covered
+  (`decisions.md`, "Moving a collection into a helper's parameter").
+- In a helper that creates a closure, the tail form `List.append(xs, f(i))` copies, because
+  `Op::CallTailUpdate` stays off when the body may capture its frame. Allowing it needs proof
+  that no created closure can read the parameter after the update.
+- `List.walk(ks, d, fn)` with `fn` updating `d` copies `d` on the first iteration.
 - The tail update covers only a body's last statement; `if (c) Dict.insert(d, k, 1) else d` and
   `return(Dict.insert(d, ...))` still copy.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
