@@ -2099,11 +2099,22 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 
 - **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
   xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
-  point size and the base graphics parameters, and creates an empty output file so `file.exists`
-  agrees with GNU R. Drawing routines check their arguments and a started plot, then return. A real
-  renderer would slot in behind the same table; nothing else reads pixels today.
+  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
+  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
+  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
+  write per finished page. Drawing routines check their arguments and a started plot, then return.
+  A real renderer would slot in behind the same table; nothing else reads pixels today.
+- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
+  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
+  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
+  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
+  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
+  and that belongs with real drawing, when the display list holds the calls to replay.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
-  and `.Device` in base are rebound after every change, and any routine that needs a device opens
+  (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
+  are rebound from the table after every change, `dev.set(1)` starts the default device but
+  reports device 1 as GNU R does, and any routine that needs a device opens
   `getOption("device")` first, which is how a script with no device gets `pdf("Rplots.pdf")`.
 - **One copy of `par`.** GNU R keeps default and current parameters so a high-level call's inline
   parameters apply for its duration; ry reads inline parameters from the call instead, so a single

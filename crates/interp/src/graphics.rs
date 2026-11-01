@@ -70,7 +70,7 @@ pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("devsize", do_dev_size),
     ("devUp", do_dev_up),
     ("getSnapshot", do_get_snapshot),
-    ("playSnapshot", do_device_noop),
+    ("playSnapshot", do_play_snapshot),
     ("getGraphicsEvent", no_events),
     ("setGraphicsEventEnv", no_events),
     ("setPattern", do_device_noop),
@@ -87,7 +87,6 @@ pub const GRAPHICS_ROUTINES: &[(&str, NativeFn)] = &[
     // Whether contour labels follow the contour, which every device ry opens does.
     ("C_contourDef", |_| unsafe { scalar_bool(true) }),
     ("RunregisterBase", |_| Ok(nil())),
-    ("C_par", do_par),
     ("C_plot_new", do_plot_new),
     ("C_plot_window", do_plot_window),
     ("C_layout", do_layout),
@@ -160,6 +159,9 @@ impl DeviceTable {
 /// metrics and the base graphics parameters.
 struct Device {
     name: &'static str,
+    /// The file the device was opened on, as given, which `.Devices` reports as the entry's
+    /// `filepath` attribute. `pdf(NULL)` has none.
+    file: Option<String>,
     /// Width and height in inches.
     size: [f64; 2],
     /// The size of a device unit in inches: a big point for vector devices, a pixel for
@@ -764,27 +766,31 @@ fn previous_device(devices: &DeviceTable, from: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// Rebinds `.Devices` and `.Device` in base to the device table.
+/// Rebinds `.Devices` and `.Device` in base to the device table. Like GNU R's, `.Devices` is a
+/// pairlist of device names, and the name of a device opened on a file carries the file as
+/// its `filepath` attribute.
 unsafe fn publish_devices() -> R<()> {
-    let (names, current) = DEVICES.with(|devices| {
+    let (entries, current) = DEVICES.with(|devices| {
         let devices = devices.borrow();
-        let names: Vec<&'static str> = (0..devices.listed)
+        let entries: Vec<(&'static str, Option<String>)> = (0..devices.listed)
             .map(|slot| match devices.slots[slot].as_ref() {
-                _ if slot == 0 => NULL_DEVICE_NAME,
-                Some(device) => device.name,
-                None => "",
+                _ if slot == 0 => (NULL_DEVICE_NAME, None),
+                Some(device) => (device.name, device.file.clone()),
+                None => ("", None),
             })
             .collect();
-        let current = names
+        let current = entries
             .get(devices.current)
-            .copied()
-            .unwrap_or(NULL_DEVICE_NAME);
-        (names, current)
+            .map_or(NULL_DEVICE_NAME, |(name, _)| name);
+        (entries, current)
     });
-    let list = alloc(SexpType::List, names.len())?;
-    crate::heap().root(list);
-    for (index, name) in names.iter().enumerate() {
-        values::set_elt(list, index, scalar_string(name)?);
+    let mut list = nil();
+    for (name, file) in entries.iter().rev() {
+        let entry = scalar_string(name)?;
+        if let Some(file) = file {
+            values::set_attr(entry, values::install("filepath")?, scalar_string(file)?)?;
+        }
+        list = values::cons(entry, list)?;
     }
     let base = values::base_env();
     crate::eval::define(values::install(".Devices")?, list, base)?;
@@ -850,25 +856,26 @@ unsafe fn colour_arg(value: Sexp, default: Colour) -> R<Colour> {
     colour_element(value, 0)
 }
 
-/// Creates the (empty) output file of a file device, numbering a `%d`-style name as the first
-/// page. A `NULL` or empty name, or a pipe, has no file.
-unsafe fn create_output_file(file: Sexp) -> R<()> {
-    let Some(name) = values::first_string(file).filter(|_| file.kind() == SexpType::String) else {
-        return Ok(());
-    };
-    if name.is_empty() || name.starts_with('|') {
-        return Ok(());
+/// The file a device's `file` argument names: `NULL` and `""` name none.
+unsafe fn device_file(file: Sexp) -> Option<String> {
+    values::first_string(file)
+        .filter(|name| file.kind() == SexpType::String && !name.is_empty())
+        .map(|name| name.into_owned())
+}
+
+/// Where a device opened on `file` writes its first page, with a `%d`-style conversion
+/// filled in and `~` expanded. A pipe (`|command`) writes no file.
+fn output_path(file: &str) -> Option<String> {
+    if file.starts_with('|') {
+        return None;
     }
-    let mut path = first_page_name(&name);
+    let path = first_page_name(file);
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
     {
-        path = format!("{home}/{rest}");
+        return Some(format!("{home}/{rest}"));
     }
-    match std::fs::File::create(&path) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(error(format!("cannot open file '{path}'"))),
-    }
+    Some(path)
 }
 
 /// A file name with its `%d` (or `%03d`) conversion filled in with 1 and `%%` unescaped.
@@ -908,6 +915,10 @@ fn first_page_name(name: &str) -> String {
 
 struct DeviceSpec {
     name: &'static str,
+    file: Option<String>,
+    /// A bitmap device writes its file when a page is finished, so one that never draws
+    /// leaves no file; a vector device opens its file at once.
+    bitmap: bool,
     size: [f64; 2],
     unit_inches: f64,
     y_down: bool,
@@ -923,8 +934,15 @@ unsafe fn open_device(spec: DeviceSpec) -> R<Sexp> {
     {
         return Err(error(format!("unable to start {} device", spec.name)));
     }
+    if !spec.bitmap
+        && let Some(path) = spec.file.as_deref().and_then(output_path)
+    {
+        std::fs::File::create(&path)
+            .map_err(|_| error(format!("cannot open file '{path}'")))?;
+    }
     add_device(Device {
         name: spec.name,
+        file: spec.file,
         size: spec.size,
         unit_inches: spec.unit_inches,
         y_down: spec.y_down,
@@ -941,6 +959,8 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
     let size = paper_device_size(call.arg(1), call.arg(6), call.arg(7), false);
     let spec = DeviceSpec {
         name: "pdf",
+        file: device_file(call.arg(0)),
+        bitmap: false,
         size,
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -948,7 +968,6 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
     };
-    create_output_file(call.arg(0))?;
     open_device(spec)
 }
 
@@ -958,6 +977,8 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
     let spec = DeviceSpec {
         name: "postscript",
+        file: device_file(call.arg(0)),
+        bitmap: false,
         size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -965,7 +986,6 @@ unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
     };
-    create_output_file(call.arg(0))?;
     open_device(spec)
 }
 
@@ -974,6 +994,8 @@ unsafe fn do_xfig(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(7)) == 1;
     let spec = DeviceSpec {
         name: "xfig",
+        file: device_file(call.arg(0)),
+        bitmap: false,
         size: paper_device_size(call.arg(1), call.arg(5), call.arg(6), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
@@ -981,7 +1003,6 @@ unsafe fn do_xfig(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(3), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(4), BLACK)?,
     };
-    create_output_file(call.arg(0))?;
     open_device(spec)
 }
 
@@ -989,6 +1010,8 @@ unsafe fn do_xfig(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
     let spec = DeviceSpec {
         name: "pictex",
+        file: device_file(call.arg(0)),
+        bitmap: false,
         size: [
             values::as_real_scalar(call.arg(3)),
             values::as_real_scalar(call.arg(4)),
@@ -999,7 +1022,6 @@ unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(1), WHITE)?,
         fg: colour_arg(call.arg(2), BLACK)?,
     };
-    create_output_file(call.arg(0))?;
     open_device(spec)
 }
 
@@ -1028,6 +1050,8 @@ unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
     ];
     let spec = DeviceSpec {
         name,
+        file: device_file(call.arg(0)),
+        bitmap,
         size: pixels.map(|count| count / resolution),
         unit_inches: 1.0 / resolution,
         y_down: true,
@@ -1035,7 +1059,6 @@ unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(5), WHITE)?,
         fg: BLACK,
     };
-    create_output_file(call.arg(0))?;
     open_device(spec)
 }
 
@@ -1071,6 +1094,8 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
     ];
     let spec = DeviceSpec {
         name,
+        file: Some(file.to_owned()).filter(|file| !file.is_empty()),
+        bitmap: true,
         size: pixels.map(|count| count / resolution),
         unit_inches: 1.0 / resolution,
         y_down: true,
@@ -1078,7 +1103,6 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
         bg: colour_arg(call.arg(7), WHITE)?,
         fg: BLACK,
     };
-    create_output_file(scalar_string(file)?)?;
     open_device(spec)
 }
 
@@ -1113,21 +1137,68 @@ unsafe fn do_dev_set(call: &NativeCall<'_>) -> R<Sexp> {
         slot
     });
     publish_devices()?;
+    if slot == 0 {
+        // GNU R selects the null device and then asks for the current device, which starts
+        // the default one, yet still reports the null device as the one selected.
+        open_default_device()?;
+    }
     device_result(slot)
 }
 
 /// `dev.off(which)`: closes `which`; when it was current, the next open device becomes
-/// current.
+/// current. A pdf device writes a document without pages, which is what GNU R writes for a
+/// device nothing was drawn on.
 unsafe fn do_dev_off(call: &NativeCall<'_>) -> R<Sexp> {
     let which = device_number(call.arg(0));
-    DEVICES.with(|devices| {
+    let closed = DEVICES.with(|devices| {
         let mut devices = devices.borrow_mut();
-        if which > 0 && devices.slots[which].take().is_some() && devices.current == which {
+        let closed = if which > 0 {
+            devices.slots[which].take()
+        } else {
+            None
+        };
+        if closed.is_some() && devices.current == which {
             devices.current = next_device(&devices, which);
         }
+        closed
     });
     publish_devices()?;
+    if let Some(device) = closed
+        && matches!(device.name, "pdf" | "cairo_pdf")
+        && let Some(path) = device.file.as_deref().and_then(output_path)
+    {
+        std::fs::write(&path, empty_pdf())
+            .map_err(|_| error(format!("cannot open file '{path}'")))?;
+    }
     Ok(nil())
+}
+
+/// A valid PDF document without pages: a catalog, an empty page tree, and the cross-reference
+/// table that locates them.
+fn empty_pdf() -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [] /Count 0 >>",
+    ];
+    let mut document = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(document.len());
+        document.extend(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let table = document.len();
+    document.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        document.extend(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    document.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    document
 }
 
 /// `dev.size()`: the device's width and height in device units.
@@ -1180,12 +1251,45 @@ unsafe fn do_dev_capabilities(_: &NativeCall<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// `recordPlot()`'s snapshot: an empty display list and the graphics engine version.
+/// GNU R 4.3's `R_GE_version`, which a recorded plot carries as `engineVersion`.
+const GRAPHICS_ENGINE_VERSION: i32 = 16;
+
+/// `recordPlot()`'s snapshot, shaped like GNU R's: the display list, then one raw vector of
+/// state per graphics system (only base graphics here), with the engine version attached.
+/// Nothing is ever drawn, so the display list is always `NULL`, which is how code such as
+/// evaluate's plot capture tells that no plot was made. The state is empty because replaying
+/// an empty display list restores nothing.
 unsafe fn do_get_snapshot(_: &NativeCall<'_>) -> R<Sexp> {
     with_device(|_| Ok(()))?;
-    let version = scalar_integer(16)?;
-    crate::heap().root(version);
-    values::list_vector(&[nil(), version])
+    let state = alloc(SexpType::Raw, 0)?;
+    crate::heap().root(state);
+    values::set_attr(
+        state,
+        values::install("pkgName")?,
+        scalar_string("graphics")?,
+    )?;
+    let snapshot = values::list_vector(&[nil(), state])?;
+    crate::heap().root(snapshot);
+    values::set_attr(
+        snapshot,
+        values::install("engineVersion")?,
+        scalar_integer(GRAPHICS_ENGINE_VERSION)?,
+    )?;
+    Ok(snapshot)
+}
+
+/// `replayPlot(snapshot)`: replaying an empty display list draws nothing. A snapshot GNU R
+/// recorded with drawing on its display list cannot be replayed, since its state is GNU R's
+/// in-memory layout.
+unsafe fn do_play_snapshot(call: &NativeCall<'_>) -> R<Sexp> {
+    with_device(|_| Ok(()))?;
+    let snapshot = call.arg(0);
+    if snapshot.kind() == SexpType::List && length(snapshot) > 0 && snapshot.element(0) == nil() {
+        return Ok(nil());
+    }
+    Err(error(
+        "cannot replay a plot whose display list is not empty: ry does not draw yet",
+    ))
 }
 
 unsafe fn do_hold_flush(_: &NativeCall<'_>) -> R<Sexp> {
@@ -2208,7 +2312,11 @@ const HELVETICA_CAP_HEIGHT: f64 = 718.0;
 /// The width of one line of text in ems, in the face `font` (`par("font")` numbering: 2 and 4
 /// are bold).
 fn text_width_ems(line: &str, font: i32) -> f64 {
-    let widths = if font == 2 || font == 4 { &HELVETICA_BOLD_WIDTHS } else { &HELVETICA_WIDTHS };
+    let widths = if font == 2 || font == 4 {
+        &HELVETICA_BOLD_WIDTHS
+    } else {
+        &HELVETICA_WIDTHS
+    };
     line.chars()
         .map(|character| {
             let code = character as usize;
@@ -2272,7 +2380,11 @@ unsafe fn string_metric(call: &NativeCall<'_>, height: bool) -> R<Sexp> {
         values::as_real_scalar(cex_value)
     };
     let font_value = call.arg(3);
-    let font = if font_value == nil() { 0 } else { values::as_integer_scalar(font_value) };
+    let font = if font_value == nil() {
+        0
+    } else {
+        values::as_integer_scalar(font_value)
+    };
     let sizes = with_started_plot(|device| {
         let pars = &device.pars;
         let font = if font >= 1 { font } else { pars.font };
@@ -3462,7 +3574,9 @@ fn at_vector(axp: [f64; 3], usr: [f64; 2], intervals: i32, log: bool) -> Vec<f64
         }
         return ticks;
     }
-    let mut decade = 10f64.powf(first.log10().floor() - 1.0).max(f64::MIN_POSITIVE);
+    let mut decade = 10f64
+        .powf(first.log10().floor() - 1.0)
+        .max(f64::MIN_POSITIVE);
     while decade.is_finite() && decade <= high * 10.0 {
         for multiple in multiples {
             let tick = decade * multiple;
