@@ -1,7 +1,7 @@
 //! An async-lsp frontend plus one worker thread owning the salsa database. Edits
 //! cancel in-flight analysis cooperatively; a worker panic terminates the process.
 
-use crate::cli::{project_order, project_stub_paths, shares_a_namespace};
+use crate::cli::{document_kind, project_order, project_stub_paths};
 use crate::config::{
     CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, ExperimentalFeatures,
     INLINE_ANNOTATIONS_OFF, suggested_table,
@@ -670,8 +670,9 @@ impl Worker {
         Some((file, text, offset))
     }
 
-    fn is_package_path(&self, path: &Path) -> bool {
-        shares_a_namespace(path, &self.workspace_root)
+    /// Package and test files are read from disk, so a closed or changed one reloads.
+    fn is_project_path(&self, path: &Path) -> bool {
+        document_kind(path, &self.workspace_root) != DocumentKind::Script
     }
 
     fn text(&self, file: SourceFile) -> String {
@@ -837,12 +838,7 @@ impl Worker {
             return;
         }
 
-        let is_package = self.is_package_path(&path);
-        let kind = if is_package {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
             Some(&file) => {
                 file.set_text(&mut self.db).to(params.text_document.text);
@@ -970,7 +966,7 @@ impl Worker {
         self.open_documents.remove(&path);
         self.pending_semantic_publishes.retain(|owed| owed != &path);
 
-        if self.is_package_path(&path) {
+        if self.is_project_path(&path) {
             // A closed package file reverts to its on-disk text, discarding unsaved edits.
             match fs::read_to_string(&path) {
                 Ok(text) => {
@@ -1037,7 +1033,7 @@ impl Worker {
                         self.publish_config_diagnostics(Some(&error));
                     }
                 }
-            } else if self.is_package_path(&path)
+            } else if self.is_project_path(&path)
                 && path
                     .extension()
                     .is_some_and(|extension| extension == "R" || extension == "r")
@@ -1052,7 +1048,8 @@ impl Worker {
                             reloaded_documents.push(path.clone());
                         }
                         None => {
-                            let file = SourceFile::builder(text, DocumentKind::Package)
+                            let kind = document_kind(&path, &self.workspace_root);
+                            let file = SourceFile::builder(text, kind)
                                 .durability(Durability::MEDIUM)
                                 .new(&self.db);
                             self.files.insert(path.clone(), file);

@@ -2285,6 +2285,21 @@ types, plus their own local bindings and type declarations:
 - Duplicate top-level value names inside a script do not produce the package-global duplicate-binding
   warning; they behave like ordinary rebinding.
 
+Files directly under `tests/testthat/` are test files. testthat runs them in an environment whose
+parent is the package namespace, so a test file reads the package's names but never adds to them:
+
+- A test file resolves a name first in its own sequential scope, exactly like a script, then in the
+  test files' shared namespace, then in the package-global namespace.
+- The test files' shared namespace holds the top-level bindings of every test file, the last one in
+  project order winning. testthat sources the `helper-*.R` and `setup-*.R` files into one environment
+  that every test file sees, and attributing every test file's bindings to it keeps a helper call
+  resolving wherever the helper lives.
+- A test file's bindings are invisible to package files, so `names <- letters[1:4]` in a test does
+  not change what `names` means under `R/`, and a package file reading a name that only a test
+  defines is an unresolved name.
+- A test binding and a package binding of the same name are not duplicates, and neither are two test
+  bindings. Test files' `@type` and `@alias` declarations are file-local, like a script's.
+
 ## Data frames and non-standard evaluation
 
 R evaluates some arguments inside a data frame's own environment, where a bare name is a column

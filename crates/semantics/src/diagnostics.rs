@@ -567,7 +567,12 @@ fn classify_non_local_read(
         return NonLocalRead::Resolvable;
     }
     let files = ProjectFiles::try_get(db);
+    let test_files = files.filter(|_| *file.kind(db) == DocumentKind::Test);
     if crate::package_scheme_exists(db, name)
+        || test_files.is_some_and(|files| {
+            crate::test_definitions(db, files).contains_key(name)
+                || crate::test_conditional_slot_items(db, files).contains_key(name)
+        })
         || super_globals(db, file).contains(name)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
@@ -579,10 +584,14 @@ fn classify_non_local_read(
     // checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
+            let test_names = test_files
+                .into_iter()
+                .flat_map(|files| crate::test_definitions(db, files).keys());
             nearest_name(
                 name,
                 crate::package_definitions(db, files)
                     .keys()
+                    .chain(test_names)
                     .map(String::as_str),
             )
         })

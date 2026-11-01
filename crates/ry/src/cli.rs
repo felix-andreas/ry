@@ -314,11 +314,7 @@ pub(crate) fn analyze_project(
     let mut project = Vec::with_capacity(checked.len());
     for index in ordered {
         let (path, source) = &mut checked[index];
-        let kind = if shares_a_namespace(path, root) {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = document_kind(path, root);
         // `ordered` is a permutation, so each source is moved out exactly once.
         let file = SourceFile::new(&db, mem::take(source), kind);
         files[index] = Some(file);
@@ -532,14 +528,21 @@ pub(crate) fn exclude_matcher(
 /// Vendored dependency infrastructure rather than project code; scopes only the walk.
 const VENDORED_DIRECTORIES: [&str; 5] = ["renv", "packrat", "revdep", ".Rproj.user", ".Rcheck"];
 
-/// `R/` and `tests/testthat/` files each share one environment (testthat sources
-/// helpers first). Every surface assigning a [`DocumentKind`] must call this, or it
-/// analyses a different program. Not the ordering key: that is `R/` membership alone.
-pub(crate) fn shares_a_namespace(path: &Path, root: &Path) -> bool {
-    path.starts_with(root.join("R"))
-        || path
-            .parent()
-            .is_some_and(|parent| parent == root.join("tests").join("testthat"))
+/// `R/` files form the package namespace, and the files directly in `tests/testthat/` share
+/// testthat's environment, which reads that namespace without adding to it. Every surface
+/// assigning a [`DocumentKind`] must call this, or it analyses a different program. Not the
+/// ordering key: that is `R/` membership alone.
+pub(crate) fn document_kind(path: &Path, root: &Path) -> DocumentKind {
+    if path.starts_with(root.join("R")) {
+        DocumentKind::Package
+    } else if path
+        .parent()
+        .is_some_and(|parent| parent == root.join("tests").join("testthat"))
+    {
+        DocumentKind::Test
+    } else {
+        DocumentKind::Script
+    }
 }
 
 pub(crate) fn collect_r_files(

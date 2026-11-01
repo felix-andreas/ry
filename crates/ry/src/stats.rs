@@ -98,12 +98,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             }
         };
         let loc = source.lines().count();
-        let is_package = cli::shares_a_namespace(&path, &root);
-        let kind = if is_package {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = cli::document_kind(&path, &root);
+        let is_package = kind == DocumentKind::Package;
         package_count += usize::from(is_package);
         let start = Instant::now();
         let file = SourceFile::new(&db, source.clone(), kind);

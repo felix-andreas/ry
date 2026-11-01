@@ -29,6 +29,13 @@ fn render(source: &str) -> String {
             cursor = Some((index, TextSize::from(at as u32)));
         }
         let kind = match path {
+            Some(path)
+                if path
+                    .strip_prefix("tests/testthat/")
+                    .is_some_and(|rest| !rest.contains('/')) =>
+            {
+                DocumentKind::Test
+            }
             Some(path) if !path.starts_with("R/") => DocumentKind::Script,
             _ => DocumentKind::Package,
         };
