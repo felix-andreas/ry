@@ -110,6 +110,6 @@ dt[x > 1L]
 `tools/bench/table/` runs db-benchmark's group-by and join questions, `:=` update loops and a
 keyed rolling join, written as the same R script for data.table under GNU R and for frames under
 `ry run --runtime ry`. On 1 million rows with 4 threads, both produce the same checksums, and frames
-are faster on every group-by question (2 to 39 times), every join (2 to 4 times), and the full and
-added-column `:=` loops (5 to 6 times). A filtered `:=` loop and the keyed rolling join run about
-as fast as data.table. The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
+are faster on every group-by question (2 to 39 times), every join (2 to 4 times), the full and
+added-column `:=` loops (5 to 6 times), a filtered `:=` loop (1.4 times) and the keyed rolling
+join (2 times). The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.

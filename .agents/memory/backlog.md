@@ -1836,10 +1836,11 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
-  "update subset", 1e6 rows: about 0.11 s for both). From R it takes 0.10 to 0.14 s against the
-  engine's 0.085 s from Rust, so the interpreter's per-query cost (schema clone, lowering, fork
-  checks) shows here and is worth profiling.
+- **A filtered `:=` loop is engine-bound** (`tools/bench/table/ry.R`, "update subset", 1e6 rows:
+  0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
+  5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
+  engine code in a different process (libR.so allocates with glibc malloc, the Rust bench with
+  mimalloc), which is the next thing to check.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.
