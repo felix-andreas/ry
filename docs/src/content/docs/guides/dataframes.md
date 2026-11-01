@@ -17,9 +17,9 @@ so run scripts that use them with `ry run script.R`:
 
 ```r
 sales <- DataFrame(
-  region = c("eu", "us", "eu", "asia", "us"),
-  units = c(3L, 5L, 2L, 7L, 1L),
-  price = c(1.5, 2, 3, 0.5, 4)
+  region = ["eu", "us", "eu", "asia", "us"],
+  units = [3L, 5L, 2L, 7L, 1L],
+  price = [1.5, 2, 3, 0.5, 4]
 )
 sales |>
   DataFrame.filter(col("units") > 1L) |>
@@ -44,6 +44,11 @@ $ ry run sales.R
 Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, and takes the value
 it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
 method dispatch: `DataFrame.filter` always means the same function.
+
+Write columns as [Arrays](/type-checking/arrays/) (`[1.5, 2]`), so the checker holds each one to a
+single type with no missing values. A plain R vector such as `c(1.5, 2)` works too. A column read
+back with `sales$price` is a plain R vector, because later steps such as a left join can put `NA`
+into a column; `as.Array(sales$price)` turns it back into an Array and fails if it holds an `NA`.
 
 ## Existing data.table code
 
@@ -200,7 +205,7 @@ columns, then the right's non-key columns, and a right column whose name is alre
 `suffix` (`"_right"` by default), as in Polars.
 
 ```r
-regions <- DataFrame(region = c("eu", "us"), manager = c("Ana", "Bo"))
+regions <- DataFrame(region = ["eu", "us"], manager = ["Ana", "Bo"])
 DataFrame.join(sales, regions, on = "region", how = "left")
 ```
 
@@ -221,8 +226,8 @@ right row at or before the left row's value. `"forward"` takes the first one at 
 left join.
 
 ```r
-trades <- DataFrame(ticker = c("a", "b", "a"), time = c(5L, 3L, 1L), size = c(10, 20, 30))
-quotes <- DataFrame(ticker = c("a", "a", "b"), time = c(2L, 4L, 1L), bid = c(1.5, 1.6, 7))
+trades <- DataFrame(ticker = ["a", "b", "a"], time = [5L, 3L, 1L], size = [10, 20, 30])
+quotes <- DataFrame(ticker = ["a", "a", "b"], time = [2L, 4L, 1L], bid = [1.5, 1.6, 7])
 DataFrame.join_asof(trades, quotes, on = "time", by = "ticker")
 ```
 

@@ -339,7 +339,6 @@ protects construction but nothing after it.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
 - The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
   would let compiled loops run strict arithmetic without the generic call.
-- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 
 ## Open: strict mode restricts what a file's top level runs
@@ -505,10 +504,6 @@ change that does not pay.
    through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
    re-check. Target: hash the index, and sort by spelling only where output order is visible.
    Check first which maps rely on string order for deterministic output.
-8. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
-   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
-   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
-   only alongside other work in that file.
 
 ## Open: performance and memory
 
@@ -2033,11 +2028,18 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
-  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
-  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
-  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
-  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
+- **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
+  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. Measured on the
+  whole db-benchmark script (load plus all questions): the default ran 131 s at 6.7 GB peak, a
+  1000 ms purge delay 107 s at 7.6 GB, and never purging 96 s at 8.3 GB; the timed questions alone
+  barely moved (4.66 s, 4.66 s, 4.46 s), so the difference is almost all CSV loading. The delay is
+  process-wide and trades resident memory in every R program, so it stays at mimalloc's default.
+  Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
+- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
+  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
+  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
+  31 s for the same file. A factor representation that keeps the levels as a plain string array
+  and maps them only on demand would remove the 6 s.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`

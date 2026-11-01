@@ -3456,3 +3456,21 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## A DataFrame column reads back as a plain vector, not an Array
+
+- `DataFrame(price = [12.5, 9.99])` checks each column as an Array, then stores it as the plain
+  vector, and `df$price` reads back a plain `double[]`, statically and at run time.
+- Typing the read as `Array<T>` was rejected: a frame's later steps can put `NA` into a column (a
+  left join's unmatched rows), so the column type would have to be tracked per verb and an
+  `NA`-holding column would need a second representation. One column type keeps the schema the
+  single source of truth. `as.Array(df$x)` is the checked way back, and it fails on an `NA`.
+
+## mimalloc's purge delay stays at its default
+
+- Raising `MIMALLOC_PURGE_DELAY` (or calling `mi_option_set` for `purge_delay` in
+  `crates/libr/src/libr.rs`) keeps freed pages resident, which made the whole db-benchmark script
+  18 to 27 % faster but raised its peak memory by 0.9 to 1.6 GB. Nearly all of the gain was in CSV
+  loading, not in the timed queries, and the option is process-wide, so every R program would pay
+  the memory. The numbers are in the backlog item "Large allocations page-fault on every query";
+  revisit with a per-query arena, which keeps the gain without the global cost.
