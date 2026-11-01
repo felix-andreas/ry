@@ -19,14 +19,10 @@ use std::io::Read;
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("lazyLoadDBfetch", 4, do_lazy_load_fetch),
     internal("unserializeFromConn", 2, do_unserialize_from_conn),
-    internal("serializeToConn", 5, do_serialize_to_conn).invisible(),
     internal("unserialize", 2, do_unserialize),
-    internal("serialize", -1, do_serialize),
-    internal("serializeb", -1, do_serialize),
     internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("loadFromConn2", 3, do_load_from_conn).invisible(),
-    internal("saveToConn", 6, do_save_to_conn).invisible(),
     internal("getVarsFromFrame", 3, do_get_vars_from_frame),
     internal("memCompress", 2, do_mem_compress),
     internal("memDecompress", 2, do_mem_decompress),
@@ -730,390 +726,6 @@ pub unsafe fn unserialize(bytes: &[u8], hook: Sexp) -> R<Sexp> {
 
 // Writing.
 
-struct Writer {
-    bytes: Vec<u8>,
-    format: Format,
-    references: FxHashMap<Sexp, usize>,
-}
-
-impl Writer {
-    fn integer(&mut self, value: i32) {
-        match self.format {
-            Format::Xdr => self.bytes.extend_from_slice(&value.to_be_bytes()),
-            Format::Binary => self.bytes.extend_from_slice(&value.to_le_bytes()),
-            Format::Ascii if value == i32::MIN => self.bytes.extend_from_slice(b"NA\n"),
-            Format::Ascii => self.bytes.extend_from_slice(format!("{value}\n").as_bytes()),
-        }
-    }
-
-    fn real(&mut self, value: f64) {
-        match self.format {
-            Format::Xdr => self.bytes.extend_from_slice(&value.to_be_bytes()),
-            Format::Binary => self.bytes.extend_from_slice(&value.to_le_bytes()),
-            Format::Ascii => {
-                let text = if values::is_na(value) {
-                    "NA".to_string()
-                } else if value.is_nan() {
-                    "NaN".to_string()
-                } else if value.is_infinite() {
-                    if value > 0.0 { "Inf" } else { "-Inf" }.to_string()
-                } else {
-                    crate::format::c_general(value, 16, false)
-                };
-                self.bytes.extend_from_slice(text.as_bytes());
-                self.bytes.push(b'\n');
-            }
-        }
-    }
-
-    /// The bytes of a string whose length the caller already wrote. The ASCII format escapes
-    /// them into one whitespace-free word, which the reader unescapes.
-    fn text(&mut self, text: &[u8]) {
-        if self.format != Format::Ascii {
-            self.bytes.extend_from_slice(text);
-            return;
-        }
-        for &byte in text {
-            match byte {
-                b'\n' => self.bytes.extend_from_slice(b"\\n"),
-                b'\t' => self.bytes.extend_from_slice(b"\\t"),
-                b'\r' => self.bytes.extend_from_slice(b"\\r"),
-                b'\\' => self.bytes.extend_from_slice(b"\\\\"),
-                b'"' => self.bytes.extend_from_slice(b"\\\""),
-                b'\'' => self.bytes.extend_from_slice(b"\\'"),
-                b'!'..=b'~' => self.bytes.push(byte),
-                _ => self.bytes.extend_from_slice(format!("\\{byte:03o}").as_bytes()),
-            }
-        }
-        self.bytes.push(b'\n');
-    }
-
-    fn raw(&mut self, bytes: &[u8]) {
-        if self.format != Format::Ascii {
-            self.bytes.extend_from_slice(bytes);
-            return;
-        }
-        for byte in bytes {
-            self.bytes.extend_from_slice(format!("{byte:02x}\n").as_bytes());
-        }
-    }
-
-    fn length(&mut self, length: usize) {
-        if length > i32::MAX as usize {
-            self.integer(-1);
-            self.integer((length >> 32) as i32);
-            self.integer(length as u32 as i32);
-        } else {
-            self.integer(length as i32);
-        }
-    }
-
-    unsafe fn flags(
-        &mut self,
-        kind: u32,
-        levels: u16,
-        is_object: bool,
-        has_attributes: bool,
-        has_tag: bool,
-    ) {
-        let mut flags = kind | ((levels as u32) << 12);
-        if is_object {
-            flags |= IS_OBJECT;
-        }
-        if has_attributes {
-            flags |= HAS_ATTR;
-        }
-        if has_tag {
-            flags |= HAS_TAG;
-        }
-        self.integer(flags as i32);
-    }
-
-    unsafe fn reference(&mut self, object: Sexp) -> bool {
-        if let Some(&index) = self.references.get(&object) {
-            if index < (1 << 23) {
-                self.integer(((index << 8) as u32 | REFSXP) as i32);
-            } else {
-                self.integer(REFSXP as i32);
-                self.integer(index as i32);
-            }
-            return true;
-        }
-        false
-    }
-
-    unsafe fn add_reference(&mut self, object: Sexp) {
-        let index = self.references.len() + 1;
-        self.references.insert(object, index);
-    }
-
-    unsafe fn item(&mut self, object: Sexp) -> R<()> {
-        // A ry value has no R serialization, and writing one as something else would let it
-        // leave the session as a value it is not.
-        if object.kind() == SexpType::Record {
-            let kind = crate::records::native_kind(object);
-            return Err(error(crate::records::boundary_message("the value", kind)));
-        }
-        let known = *crate::heap().known();
-        if object == known.nil {
-            self.integer(NILVALUE_SXP as i32);
-            return Ok(());
-        }
-        if object == known.empty_env {
-            self.integer(EMPTYENV_SXP as i32);
-            return Ok(());
-        }
-        if object == known.base_env {
-            self.integer(BASEENV_SXP as i32);
-            return Ok(());
-        }
-        if object == known.global_env {
-            self.integer(GLOBALENV_SXP as i32);
-            return Ok(());
-        }
-        if object == known.unbound {
-            self.integer(UNBOUNDVALUE_SXP as i32);
-            return Ok(());
-        }
-        if object == known.missing_arg {
-            self.integer(MISSINGARG_SXP as i32);
-            return Ok(());
-        }
-        if object == known.base_namespace {
-            self.integer(BASENAMESPACE_SXP as i32);
-            return Ok(());
-        }
-        let object = values::materialize(object)?;
-        let kind = object.kind();
-        if matches!(
-            kind,
-            SexpType::Symbol | SexpType::Environment | SexpType::ExternalPtr | SexpType::WeakRef
-        ) && self.reference(object)
-        {
-            return Ok(());
-        }
-        let has_attributes = object.attrib() != known.nil && kind != SexpType::Char;
-        let levels = if kind == SexpType::Char {
-            object.gp() & (gp::UTF8 | gp::LATIN1 | gp::BYTES | gp::ASCII)
-        } else {
-            object.gp() & gp::S4_OBJECT
-        };
-        match kind {
-            SexpType::Symbol => {
-                self.add_reference(object);
-                self.integer(1);
-                self.item(object.car())?;
-            }
-            SexpType::Environment => {
-                if crate::envir::is_namespace(object) {
-                    self.add_reference(object);
-                    self.integer(NAMESPACESXP as i32);
-                    let name = crate::envir::namespace_name(object).unwrap_or_default();
-                    self.integer(0);
-                    self.integer(1);
-                    self.charsxp_text(&name);
-                    return Ok(());
-                }
-                self.add_reference(object);
-                self.integer(4);
-                self.integer(object.has_gp(gp::FRAME_LOCKED) as i32);
-                self.item(object.enclosure())?;
-                let symbols_list = crate::heap().frame_symbols(object);
-                let mut items = Vec::new();
-                for symbol in symbols_list {
-                    if let Some(cell) = crate::heap().frame_cell(object, symbol) {
-                        items.push((symbol, cell.cdr()));
-                    }
-                }
-                let frame = values::pairlist(&items, SexpType::Pairlist)?;
-                self.item(frame)?;
-                self.item(nil())?;
-                self.item(object.attrib())?;
-            }
-            SexpType::Pairlist
-            | SexpType::Language
-            | SexpType::Closure
-            | SexpType::Promise
-            | SexpType::Dots => {
-                let code = match kind {
-                    SexpType::Pairlist => 2,
-                    SexpType::Language => 6,
-                    SexpType::Closure => 3,
-                    SexpType::Promise => 5,
-                    _ => 17,
-                };
-                let tag = object.tag();
-                self.flags(
-                    code,
-                    levels,
-                    object.is_object(),
-                    has_attributes,
-                    tag != known.nil,
-                );
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-                if tag != known.nil {
-                    self.item(tag)?;
-                }
-                let car = object.car();
-                self.item(car)?;
-                let cdr = if kind == SexpType::Closure {
-                    crate::bytecode::closure_body(object)
-                } else {
-                    object.cdr()
-                };
-                self.item(cdr)?;
-            }
-            SexpType::ExternalPtr => {
-                self.add_reference(object);
-                self.flags(22, levels, object.is_object(), has_attributes, false);
-                self.item(object.external_protected())?;
-                self.item(object.external_tag())?;
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::WeakRef => {
-                self.add_reference(object);
-                self.flags(23, levels, object.is_object(), has_attributes, false);
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::Builtin | SexpType::Special => {
-                let name = values::primitive_name(object);
-                self.integer(if kind == SexpType::Builtin { 8 } else { 7 });
-                self.integer(name.len() as i32);
-                self.text(name.as_bytes());
-            }
-            SexpType::Char => {
-                if object == known.na_string {
-                    self.flags(9, 0, false, false, false);
-                    self.integer(-1);
-                } else {
-                    self.flags(9, levels, false, false, false);
-                    let bytes = object.bytes();
-                    self.integer(bytes.len() as i32);
-                    self.text(bytes);
-                }
-            }
-            SexpType::Logical | SexpType::Integer => {
-                self.flags(
-                    kind.code(),
-                    levels,
-                    object.is_object(),
-                    has_attributes,
-                    false,
-                );
-                self.length(length(object));
-                for &value in values::ints(object) {
-                    self.integer(value);
-                }
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::Real => {
-                self.flags(14, levels, object.is_object(), has_attributes, false);
-                self.length(length(object));
-                for &value in values::reals(object) {
-                    self.real(value);
-                }
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::Complex => {
-                self.flags(15, levels, object.is_object(), has_attributes, false);
-                self.length(length(object));
-                for value in values::complexes(object) {
-                    self.real(value.r);
-                    self.real(value.i);
-                }
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::String | SexpType::List | SexpType::Expression => {
-                self.flags(
-                    kind.code(),
-                    levels,
-                    object.is_object(),
-                    has_attributes,
-                    false,
-                );
-                self.length(length(object));
-                for index in 0..length(object) {
-                    self.item(object.element(index))?;
-                }
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::Raw => {
-                self.flags(24, levels, object.is_object(), has_attributes, false);
-                self.length(length(object));
-                self.raw(values::raws(object));
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            SexpType::Object => {
-                self.flags(25, levels, object.is_object(), has_attributes, false);
-                if has_attributes {
-                    self.item(object.attrib())?;
-                }
-            }
-            _ => return Err(error(format!("WriteItem: unknown type {}", kind.code()))),
-        }
-        Ok(())
-    }
-
-    fn charsxp_text(&mut self, text: &str) {
-        self.integer(9 | ((gp::UTF8 as i32) << 12));
-        self.integer(text.len() as i32);
-        self.text(text.as_bytes());
-    }
-}
-
-/// Serializes `object` in GNU R's format: version 2 or 3, as XDR, native binary or ASCII.
-pub unsafe fn serialize(object: Sexp, format: Format, version: i32) -> R<Vec<u8>> {
-    let magic: &[u8] = match format {
-        Format::Xdr => b"X\n",
-        Format::Binary => b"B\n",
-        Format::Ascii => b"A\n",
-    };
-    let mut writer = Writer {
-        bytes: magic.to_vec(),
-        format,
-        references: FxHashMap::default(),
-    };
-    writer.integer(version);
-    writer.integer(0x040602);
-    if version == 2 {
-        writer.integer(0x020300);
-    } else {
-        writer.integer(0x030500);
-        writer.integer(5);
-        writer.text(b"UTF-8");
-    }
-    writer.item(object)?;
-    Ok(writer.bytes)
-}
-
-/// Reads the `version` argument of the serialization internals: `NULL` means version 3.
-unsafe fn serialization_version(argument: Sexp) -> R<i32> {
-    if argument == nil() {
-        return Ok(3);
-    }
-    match values::as_integer_scalar(argument) {
-        2 => Ok(2),
-        3 => Ok(3),
-        _ => Err(error("version must be 2 or 3")),
-    }
-}
-
 // Lazy-load databases.
 
 /// The contents of lazy-load database files, read once per session.
@@ -1224,6 +836,7 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     }
     let bytes = crate::connections::read_binary(call.arg(0))?;
     let body = match bytes.get(..5) {
+        // The stream carries its own format header, so XDR, ASCII and binary read alike.
         Some(b"RDX2\n" | b"RDX3\n" | b"RDA2\n" | b"RDA3\n" | b"RDB2\n" | b"RDB3\n") => &bytes[5..],
         _ => return Err(call.error("the input does not start with a magic number compatible with loading from a connection")),
     };
@@ -1239,33 +852,6 @@ unsafe fn do_load_from_conn(call: &Call<'_>) -> R<Sexp> {
     values::string_vector(&names)
 }
 
-/// `saveToConn(names, con, ascii, version, envir, eval.promises)`: writes the bindings as a
-/// `save()` file, `RDA` plus ASCII data when `ascii` is TRUE and `RDX` plus XDR otherwise.
-unsafe fn do_save_to_conn(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    if names.kind() != SexpType::String {
-        return Err(call.error("first argument must be a character vector"));
-    }
-    let env = call.arg(4);
-    if env.kind() != SexpType::Environment {
-        return Err(call.error("invalid 'envir' argument"));
-    }
-    let force = values::as_logical_scalar(call.arg(5)) == 1;
-    let items = saved_bindings(call, names, env, force, false)?;
-    let bindings = values::pairlist(&items, SexpType::Pairlist)?;
-    crate::heap().root(bindings);
-    let version = serialization_version(call.arg(3))?;
-    let format = if values::as_logical_scalar(call.arg(2)) == 0 {
-        Format::Xdr
-    } else {
-        Format::Ascii
-    };
-    let letter = if format == Format::Ascii { "A" } else { "X" };
-    let mut bytes = format!("RD{letter}{version}\n").into_bytes();
-    bytes.extend(serialize(bindings, format, version)?);
-    crate::connections::write_binary(call.arg(1), &bytes)?;
-    Ok(nil())
-}
 
 /// `getVarsFromFrame(vars, env, force)`: the named list of the bindings in `env`'s own frame.
 unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
@@ -1286,7 +872,7 @@ unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
 
 /// The values bound to `names`, as `(symbol, value)` pairs. Each value stays reachable from
 /// `env`, which keeps it alive.
-unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
+pub unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::with_capacity(length(names));
     for index in 0..length(names) {
         let name = values::string_at(names, index).unwrap_or_default();
@@ -1372,17 +958,6 @@ unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {
     Ok(result)
 }
 
-/// `serializeToConn(object, con, ascii, version, hook)`, behind `saveRDS`.
-unsafe fn do_serialize_to_conn(call: &Call<'_>) -> R<Sexp> {
-    let format = if values::as_logical_scalar(call.arg(2)) == 0 {
-        Format::Xdr
-    } else {
-        Format::Ascii
-    };
-    let bytes = serialize(call.arg(0), format, serialization_version(call.arg(3))?)?;
-    crate::connections::write_binary(call.arg(1), &bytes)?;
-    Ok(nil())
-}
 
 unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     let source = call.arg(0);
@@ -1394,26 +969,3 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     unserialize(&bytes, call.arg(1))
 }
 
-/// `serialize(object, con, type, version, hook)`, where `type` is 0 for XDR, 1 or 2 for ASCII
-/// and 3 for native binary, and `serializeb(object, con, xdr, version, hook)`.
-unsafe fn do_serialize(call: &Call<'_>) -> R<Sexp> {
-    let selector = values::as_integer_scalar(call.arg(2));
-    let format = if call.name() == "serializeb" {
-        if selector == 0 { Format::Binary } else { Format::Xdr }
-    } else {
-        match selector {
-            1 | 2 => Format::Ascii,
-            3 => Format::Binary,
-            _ => Format::Xdr,
-        }
-    };
-    let bytes = serialize(call.arg(0), format, serialization_version(call.arg(3))?)?;
-    let connection = call.arg(1);
-    if connection == nil() {
-        let result = alloc(SexpType::Raw, bytes.len())?;
-        values::raws_mut(result).copy_from_slice(&bytes);
-        return Ok(result);
-    }
-    crate::connections::write_binary(connection, &bytes)?;
-    Ok(nil())
-}

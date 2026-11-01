@@ -23,12 +23,12 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **`unz` connections** are missing (`.Internal(unz)`), which fails every openxlsx and readxl round trip.
-- **`grepRaw`** is missing, so renv's `.onLoad` fails.
 - **parallel cannot fork or open sockets.** `mc_fork` and the other fork routines error, so `mclapply` and `registerDoParallel(cores = 2)` fail, and `makeCluster` needs `.Internal(serverSocket)` (`decisions.md`, "parallel's natives without fork").
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
+- **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
+- **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Time and scale.** ry's suites run 1.7x to 2.1x GNU R's time at 10,000 lines; the 300,000-line packages are not measured yet.
+- **Per-test time.** At 300,000 lines the test blocks run 1.7x to 2.1x GNU R's time, while whole processes are close to parity because GNU R spends minutes in testthat's per-file `gc()`. The gap is spread across the interpreter core rather than one hot spot: bytecode `step`, environment-chain lookup (`Heap::frame_cell`), `match_args`, and an allocation per binding and promise on every closure call. Basic operations measured alone are 2x to 4x GNU R's (a closure call, `seq`, `tryCatch`, `format`, `rlang::enquo`). Call overhead and cached global lookup belong to the JIT tier's call work (`decisions.md`, "the JIT tier"); vector kernels such as arithmetic and `sum` are already at or ahead of GNU R.
 
 ## Open: the package loader
 
@@ -285,8 +285,6 @@ protects construction but nothing after it.
   error; the checker rejects it statically, so only `Unknown` code reaches it.
 - The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
   touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
-- `serialize()` fails on ry's runtime for every value ("5 arguments passed to .Internal(serialize)
-  which requires 6"); `saveRDS()` works and refuses dicts and sets as intended.
 
 ## Open: the JIT
 
@@ -1906,17 +1904,37 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - `rawConnection` and `writeBin` are missing from the interpreter (libr has them, unregistered),
-    and cli renders every testthat failure through `rawConnection`, so about 21 packages stop there.
-  - About 12 packages (DBI, glue, withr, vctrs, lubridate, hms, readxl, later, lgr, tidyselect,
-    pkgbuild, blob) crash in the collector marking a dead handle, only in long runs. Reproduce
-    with `gctorture(TRUE)` on a profiling build.
+  - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
+    full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
+    was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
   - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
     `rm()` and `gc()`, so it is finalized in a later block.
-  - Smaller classes: ALTREP in checkmate, `latin1` encoding in fastmap, `file_access` names in fs,
-    `gsub` with a Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in
-    Bessel's asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, and the
-    `parallel` package's DLL for doParallel.
+  - `getParseData` returns `NULL` (see the source-references item below), and cli's
+    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
+  - Regular expressions fancy-regex cannot compile: rcmdcheck's `(?<q>...)\g{q}` backreference,
+    and lubridate's quantified lookahead `(?=\D+)?`. A non-constant-size pattern runs on
+    fancy-regex's backtracking VM because of `leftmost_longest`; a DFA leftmost-longest search
+    (regex-automata's `MatchKind::All`, anchored at the leftmost-first start) would avoid it.
+  - Two unserializers: `interp::serialize`'s reader and libr's `R_Unserialize`. The writer is
+    already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
+    same way.
+  - Gaps a review of the date-time and regex work found, none yet hit by a corpus test:
+    - `as.POSIXct(lt)` ignores an explicit `isdst` when the zone has a single offset.
+    - POSIX rule strings in `TZ` (`"EST5"`, `"JST-9"`, `"<+03>-3"`) and daylight rules after 2100.
+    - `strptime` input: `%%` skipping blanks, no warning for an out-of-range `%z`, and
+      `format`/`strptime` do not recycle the format.
+    - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
+      reports an error; quantified lookarounds and lookarounds in non-capturing groups.
+    - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
+  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
+    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
+  - withr: `RNGkind` lacks "Marsaglia-Multicarry", "Buggy Kinderman-Ramage" and "Rounding", and
+    the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
+  - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
+    Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
+    asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
+    package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
+    alternative in mvtnorm, and `NextMethod` in xts.
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).

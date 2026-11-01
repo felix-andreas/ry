@@ -15,8 +15,6 @@ use crate::{
 };
 use heap::object::{Sexp, SexpType, gp};
 
-/// The binding-cell bit that marks a formal bound to its default, which `missing()` reads.
-pub const BINDING_MISSING: u16 = 1 << 0;
 /// The promise bit set while its code runs, to report recursive default references.
 const PROMISE_SEEN: u16 = 1 << 0;
 
@@ -234,7 +232,7 @@ pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
                 return Ok(());
             }
             heap.set_binding_value(cell, value)?;
-            cell.set_gp_bits(BINDING_MISSING, false);
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
             return Ok(());
         }
         frame = frame.enclosure();
@@ -726,7 +724,7 @@ pub unsafe fn apply_closure(
             let promise = make_promise(formal.car(), env)?;
             heap.define(env, symbol, promise)?;
             if let Some(cell) = heap.frame_cell(env, symbol) {
-                cell.set_gp_bits(BINDING_MISSING, true);
+                cell.set_gp_bits(gp::BINDING_MISSING, true);
             }
         } else {
             heap.define(env, symbol, actual)?;
@@ -904,11 +902,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         let exit = eval(expression, env);
         interp().handlers = saved_handlers;
         match exit {
-            // `on.exit(return(x))` makes `x` the frame's value.
-            Err(unwind) if unwind.returns_to(env) => {
-                let Unwind::Jump(jump) = unwind else {
-                    unreachable!()
-                };
+            // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
+            // through it, as in GNU R.
+            Err(Unwind::Jump(jump)) if matches!(*jump, Jump::Return { env: target, .. } if target == env) => {
                 if let Jump::Return { value, .. } = *jump {
                     outcome = Ok(value);
                 }
@@ -935,6 +931,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
 pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>> {
     let missing = missing_arg();
     let dots_symbol = symbols().dots;
+    if let Some(matched) = match_positional_args(formals, args, missing, dots_symbol)? {
+        return Ok(matched);
+    }
     let formal_symbols: Vec<Sexp> = values::pairlist_items(formals)
         .into_iter()
         .map(|(tag, _)| tag)
@@ -1091,6 +1090,40 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Vec<Sexp>
     Ok(result)
 }
 
+/// The common case of `match_args` without its bookkeeping: no argument is named, so they fill
+/// the formals in order up to `...`, which collects the rest. Returns `None` when an argument is
+/// named or one is left over, which the full matcher handles and reports.
+unsafe fn match_positional_args(
+    formals: Sexp,
+    args: &[Arg],
+    missing: Sexp,
+    dots_symbol: Sexp,
+) -> R<Option<Vec<Sexp>>> {
+    let is_named =
+        |arg: &Arg| arg.tag.kind() == SexpType::Symbol && !arg.tag.car().bytes().is_empty();
+    if args.iter().any(is_named) {
+        return Ok(None);
+    }
+    let mut result = Vec::with_capacity(args.len().max(4));
+    let mut remaining = args.iter();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        if formal.tag() == dots_symbol {
+            let rest = remaining.as_slice();
+            let mut list = nil();
+            for arg in rest.iter().rev() {
+                list = triple(SexpType::Dots, arg.value, list, arg.tag)?;
+            }
+            result.push(if rest.is_empty() { missing } else { list });
+            remaining = [].iter();
+        } else {
+            result.push(remaining.next().map_or(missing, |arg| arg.value));
+        }
+        formal = formal.cdr();
+    }
+    Ok(remaining.as_slice().is_empty().then_some(result))
+}
+
 /// Whether `symbol` is missing in `env`: unbound to a supplied argument, or bound to a promise of
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
@@ -1145,7 +1178,7 @@ unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<
         }
         return value_is_missing(item.car());
     }
-    if defaults_count && cell.has_gp(BINDING_MISSING) {
+    if cell.has_gp(gp::BINDING_ABSENT) || (defaults_count && cell.has_gp(gp::BINDING_MISSING)) {
         return Ok(true);
     }
     value_is_missing(cell.cdr())
@@ -2083,7 +2116,7 @@ pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: b
                 return Ok(());
             }
             heap.set_binding_value(cell, value)?;
-            cell.set_gp_bits(BINDING_MISSING, false);
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
             return Ok(());
         }
         define(symbol, value, env)
@@ -2166,8 +2199,8 @@ pub unsafe fn complex_assign(
         }
         items.push((symbols.value, value_promise));
         let setter_call = values::pairlist(&items, SexpType::Language)?;
-        let depth = interp().frames.len();
-        let outer = interp().assignment_call.replace((setter_call, whole, depth));
+        let frame_depth = interp().frames.len();
+        let outer = interp().assignment_call.replace((setter_call, whole, frame_depth));
         let result = apply_setter(setter_call, whole, env);
         interp().assignment_call = outer;
         replacement = result?;
@@ -2177,9 +2210,9 @@ pub unsafe fn complex_assign(
 
 /// Evaluates one replacement call of a complex assignment. A builtin replacement function
 /// reports its errors and warnings against the whole assignment, as `x[1:2] <- 1:3` and not as
-/// the generated `` `[<-`(`*tmp*`, 1:2, value = 1:3) ``, while S3 dispatch, specials (which
-/// dispatch from inside) and closures see the generated call, which is the one `sys.call()` and
-/// `match.call()` must return.
+/// the generated `` `[<-`(`*tmp*`, 1:2, value = 1:3) ``, and so does a dispatching special that
+/// finds no method. S3 dispatch, the other specials (which dispatch from inside) and closures
+/// see the generated call, which is the one `sys.call()` and `match.call()` must return.
 unsafe fn apply_setter(setter_call: Sexp, whole: Sexp, env: Sexp) -> R<Sexp> {
     let head = setter_call.car();
     let function = if head.kind() == SexpType::Symbol {
@@ -2199,6 +2232,13 @@ unsafe fn apply_setter(setter_call: Sexp, whole: Sexp, env: Sexp) -> R<Sexp> {
                 return Ok(value);
             }
             call_builtin(definition, whole, function, &args, env)
+        }
+        SexpType::Special if builtin_def(function)?.is_dispatch_or_eval() => {
+            let definition = builtin_def(function)?;
+            match dispatch::dispatch_or_eval(definition, setter_call, function, arguments, env)? {
+                Ok(value) => Ok(value),
+                Err(args) => call_builtin(definition, whole, function, &args, env),
+            }
         }
         _ => apply_call(setter_call, function, arguments, env),
     }

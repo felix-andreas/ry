@@ -788,7 +788,10 @@ impl Heap {
     /// `Rf_defineVar`: binds `symbol` in `env`'s own frame.
     pub unsafe fn define(&mut self, env: Sexp, symbol: Sexp, value: Sexp) -> HeapResult<()> {
         if let Some(cell) = self.frame_cell(env, symbol) {
-            return self.set_binding_value(cell, value);
+            self.set_binding_value(cell, value)?;
+            // A formal that was missing stops being missing once it is assigned, as in GNU R.
+            cell.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+            return Ok(());
         }
         if env == self.known.empty_env {
             return Err(HeapError::EmptyEnvironment);
@@ -1113,14 +1116,18 @@ impl Heap {
         for index in 0..self.roots.handles.len() {
             self.mark(self.roots.handles[index]);
         }
-        let precious: Vec<Sexp> = self.roots.precious.keys().copied().collect();
-        for object in precious {
-            self.mark(object);
-        }
-        let symbols: Vec<Sexp> = self.symbols.values().copied().collect();
-        for symbol in symbols {
-            self.mark(symbol);
-        }
+        // Marking only touches the mark stack, so the tables can be borrowed beside it instead of
+        // copied out on every collection; a package with tens of thousands of symbols made that
+        // copy a large part of each minor collection.
+        let mark_stack = &mut self.mark_stack;
+        let mut mark = |object: Sexp| {
+            if !object.is_marked() {
+                object.set_gc_bit(gc_bits::MARK, true);
+                mark_stack.push(object);
+            }
+        };
+        self.roots.precious.keys().for_each(|&object| mark(object));
+        self.symbols.values().for_each(|&symbol| mark(symbol));
         let sources: Vec<Rc<dyn RootSource>> = self
             .sources
             .iter()
@@ -1263,7 +1270,7 @@ impl Heap {
                             SexpType::String | SexpType::List | SexpType::Expression
                         ) =>
                     {
-                        children.extend((0..parent.length() as usize).map(|i| parent.element(i)));
+                        children.extend((0..parent.length() as usize).map(|index| parent.element(index)));
                     }
                     Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
                     Shape::Environment => {
@@ -1277,7 +1284,7 @@ impl Heap {
                         children.extend([parent.external_tag(), parent.external_protected()])
                     }
                     Shape::Record => children.extend(
-                        (0..parent.record_slot_count()).filter_map(|i| parent.record_handle(i)),
+                        (0..parent.record_slot_count()).filter_map(|slot| parent.record_handle(slot)),
                     ),
                     _ => {}
                 }
@@ -1417,7 +1424,11 @@ impl Heap {
         }
         let slot_size = SLOT_SIZES[class as usize];
         let memory = NonNull::new_unchecked(object.as_ptr().cast::<u8>());
-        std::ptr::write_bytes(memory.as_ptr(), POISON, slot_size);
+        // Poisoning makes a use after free fail loudly, but costs a store per byte of every
+        // freed slot, so only debug builds pay for it.
+        if cfg!(debug_assertions) {
+            std::ptr::write_bytes(memory.as_ptr(), POISON, slot_size);
+        }
         // The kind and collector bytes stay meaningful: a free slot reads as `FREESXP` and unmarked.
         *memory.as_ptr() = SexpType::Free as u8;
         *memory.as_ptr().add(1) = 0;
@@ -1457,6 +1468,7 @@ impl Heap {
             self.known.base_env = base_env;
             let global_env = self.alloc_environment(base_env)?;
             self.known.global_env = global_env;
+            self.set_frame_hashed(global_env, 0);
             let base_namespace = self.alloc_environment(global_env)?;
             self.known.base_namespace = base_namespace;
             let namespace_registry = self.alloc_environment(nil)?;

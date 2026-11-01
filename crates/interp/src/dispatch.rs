@@ -348,7 +348,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
     } else {
-        dispatch_object(function, env)?
+        match dispatch_object(function, env)? {
+            // GNU R's `GetObject` falls back to the first supplied argument when the first
+            // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
+            object if object == nil() && first_formal_missing(function, env)? => {
+                first_supplied(promargs)?
+            }
+            object => object,
+        }
     };
     let def_env = match lookup_generic_definition(&generic_name, env, sys_parent)? {
         Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
@@ -424,17 +431,47 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         }
         return Ok(nil());
     }
+    // GNU R dispatches on the first supplied argument, so a generic called without one, even
+    // where the formal has a default, dispatches on NULL.
+    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING)) {
+        return Ok(nil());
+    }
     let value = eval::find_var_in_frame(first, env)?;
     if value == missing_arg() {
-        return Err(error(format!(
-            "argument \"{}\" is missing, with no default",
-            symbol_name(first)
-        )));
+        return Ok(nil());
     }
     if value == unbound() {
         return Ok(nil());
     }
     value_of(value)
+}
+
+unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
+    let formals = function.car();
+    if formals.kind() != SexpType::Pairlist || formals.tag() == symbols().dots {
+        return Ok(false);
+    }
+    let first = formals.tag();
+    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING)) {
+        return Ok(true);
+    }
+    let value = eval::find_var_in_frame(first, env)?;
+    Ok(value == missing_arg() || value == unbound())
+}
+
+/// The value of the first supplied argument among a call's matched arguments.
+unsafe fn first_supplied(mut promargs: Sexp) -> R<Sexp> {
+    while promargs.kind() == SexpType::Pairlist {
+        let value = promargs.car();
+        if value.kind() == SexpType::Dots {
+            return value_of(value.car());
+        }
+        if value != missing_arg() {
+            return value_of(value);
+        }
+        promargs = promargs.cdr();
+    }
+    Ok(nil())
 }
 
 unsafe fn apply_method(
@@ -992,15 +1029,24 @@ unsafe fn group_dispatch(
     }
     let (_, position) = match (found.first(), found.get(1)) {
         (Some(Some(left)), Some(Some(right))) => {
+            let left_name = symbol_name(left.method_name);
+            let right_name = symbol_name(right.method_name);
+            // GNU R lets date-time arithmetic win over `Ops.difftime`, so `time + 2 * diff`
+            // shifts the time instead of warning about incompatible methods.
+            let date_arithmetic = |name: &str, minus: bool| {
+                name == "+.POSIXt" || name == "+.Date" || (minus && (name == "-.POSIXt" || name == "-.Date"))
+            };
             if left.method == right.method {
                 (0, 0)
+            } else if right_name == "Ops.difftime" && date_arithmetic(&left_name, true) {
+                (0, 0)
+            } else if left_name == "Ops.difftime" && date_arithmetic(&right_name, false) {
+                (1, 1)
             } else if choose_ops_method(call, args, left, right, false)? {
                 (0, 0)
             } else if choose_ops_method(call, args, right, left, true)? {
                 (1, 1)
             } else {
-                let left_name = symbol_name(left.method_name).into_owned();
-                let right_name = symbol_name(right.method_name).into_owned();
                 crate::conditions::warning_call(
                     call,
                     format!(

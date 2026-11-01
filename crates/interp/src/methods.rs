@@ -10,7 +10,7 @@ use crate::{
     builtin_libraries::{NativeCall, NativeFn},
     conditions::{self, Handler},
     dispatch::{self, MethodsState},
-    eval::{self, BINDING_MISSING},
+    eval,
     interp,
     unwind::{Jump, R, Unwind, error, error_in},
     values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
@@ -181,14 +181,16 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
                 symbol_name(symbol)
             ))
         })?;
-        let missing = cell.has_gp(BINDING_MISSING) || cell.cdr() == missing_arg();
+        let missing = cell.has_gp(gp::BINDING_MISSING) || cell.cdr() == missing_arg();
+        let absent = cell.has_gp(gp::BINDING_ABSENT) || cell.cdr() == missing_arg();
         let mut value = cell.cdr();
         if missing && formal.car() != missing_arg() {
             value = eval::make_promise(formal.car(), method_env)?;
         }
         eval::define(symbol, value, method_env)?;
         if missing && let Some(new_cell) = heap.frame_cell(method_env, symbol) {
-            new_cell.set_gp_bits(BINDING_MISSING, true);
+            new_cell.set_gp_bits(gp::BINDING_MISSING, true);
+            new_cell.set_gp_bits(gp::BINDING_ABSENT, absent);
         }
         formal = formal.cdr();
     }
@@ -344,7 +346,7 @@ unsafe fn bound_missing(symbol: Sexp, env: Sexp) -> R<bool> {
             symbol_name(symbol)
         ))
     })?;
-    Ok(cell.has_gp(BINDING_MISSING) || cell.cdr() == missing_arg())
+    Ok(cell.has_gp(gp::BINDING_MISSING) || cell.cdr() == missing_arg())
 }
 
 /// The class of `...` for dispatch, from the methods package's `.dotsClass`.
