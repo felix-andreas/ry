@@ -1972,8 +1972,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
 - **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
-  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
-  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
+  they close"). `xfig` and `pictex` leave an empty file; the
+  other file devices draw. PostScript has no transparency, so a semi-transparent colour draws
+  opaque where GNU R warns and skips it. Also missing: a display list
   (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
   ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
   layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty

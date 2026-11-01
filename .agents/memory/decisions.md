@@ -2140,12 +2140,13 @@ observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
   a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
   each with the clip rectangle in force, so the drawing routines know nothing about file formats
   and each format is one writer over the same pages. `plot.new` starts a page when the layout's
-  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
-  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
+  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF, PostScript and
+  SVG as vectors, PNG, JPEG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
   system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
   than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
-  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
-  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
+  per page, as GNU R's `%d` names expect. xfig and pictex have no writer yet and leave an empty
+  file. PostScript places the page on its paper as GNU R does (centred, turned for
+  `horizontal = TRUE`), and `paper = "special"` writes an EPS whose bounding box is the page. File behavior otherwise follows GNU
   R: vector devices create their file at open (so a bad path fails there), a pdf without pages
   is still a valid document, and bitmap devices with no page write nothing.
 - **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is

@@ -859,9 +859,9 @@ Each step ends with something real running, and each one is a large, whole chang
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
    loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
-   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
-   `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
-   but write no image.
+   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `postscript`,
+   `svg`, `png`, `jpeg`, `bmp` and `tiff` files with GNU R's geometry, while `xfig` and `pictex`
+   devices open but write no image.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all

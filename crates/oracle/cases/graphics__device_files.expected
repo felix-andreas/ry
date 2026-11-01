@@ -1,0 +1,14 @@
+[stdout]
+| [1] ff d8 ff
+| [1] "%!PS-Adobe-3.0"
+| [1] "%%Page: 1 1" "%%Page: 2 2"
+| [1] "%%Orientation: Landscape"
+| [1] "%!PS-Adobe-3.0 EPSF-3.0"
+| [1] "%%BoundingBox: 0 0 288 216"
+| [1] "page1.ps" "page2.ps"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("page1.ps", "page2.ps")

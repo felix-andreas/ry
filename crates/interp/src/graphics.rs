@@ -849,15 +849,21 @@ unsafe fn paper_device_size(paper: Sexp, width: Sexp, height: Sexp, horizontal: 
     if given.iter().all(|size| size.is_finite() && *size > 0.0) {
         return given;
     }
+    let [paper_width, paper_height] = named_paper(paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
+    let size = [paper_width - 0.5, paper_height - 0.5];
+    if horizontal { [size[1], size[0]] } else { size }
+}
+
+/// The size of the paper a `paper` argument names, with `"default"` taken from
+/// `getOption("papersize")`, or `None` for `"special"`.
+unsafe fn named_paper(paper: Sexp) -> Option<[f64; 2]> {
     let mut paper =
         values::first_string(paper).map_or_else(String::new, |paper| paper.into_owned());
     if paper == "default" {
         paper = values::first_string(crate::envir::get_option("papersize"))
             .map_or_else(|| "a4".to_owned(), |paper| paper.into_owned());
     }
-    let [paper_width, paper_height] = paper_size(&paper).unwrap_or([21.0 / 2.54, 29.7 / 2.54]);
-    let size = [paper_width - 0.5, paper_height - 0.5];
-    if horizontal { [size[1], size[0]] } else { size }
+    paper_size(&paper)
 }
 
 unsafe fn colour_arg(value: Sexp, default: Colour) -> R<Colour> {
@@ -949,18 +955,23 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
 /// ...)`.
 unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
+    let onefile = values::as_logical_scalar(call.arg(10)) != 0;
     let spec = DeviceSpec {
         name: "postscript",
         file: device_file(call.arg(0)),
         bitmap: false,
-        format: None,
+        format: Some(Format::Postscript {
+            onefile,
+            paper: named_paper(call.arg(1)),
+            landscape: horizontal,
+        }),
         size: paper_device_size(call.arg(1), call.arg(6), call.arg(7), horizontal),
         unit_inches: 1.0 / 72.0,
         y_down: false,
         pointsize: values::as_real_scalar(call.arg(9)),
         bg: colour_arg(call.arg(4), TRANSPARENT_WHITE)?,
         fg: colour_arg(call.arg(5), BLACK)?,
-        title: String::new(),
+        title: values::first_string(call.arg(14)).map_or_else(String::new, |title| title.into_owned()),
     };
     open_device(spec)
 }
@@ -1010,10 +1021,14 @@ unsafe fn do_pictex(call: &NativeCall<'_>) -> R<Sexp> {
 unsafe fn do_cairo(call: &NativeCall<'_>) -> R<Sexp> {
     let (name, bitmap, format) = match values::as_integer_scalar(call.arg(1)) {
         2 | 5 => ("png", true, Some(Format::Png)),
-        3 => ("jpeg", true, None),
+        3 => ("jpeg", true, Some(Format::Jpeg { quality: jpeg_quality(values::as_integer_scalar(call.arg(8))) })),
         4 => ("svg", false, Some(Format::Svg)),
         6 => ("cairo_pdf", false, Some(Format::Pdf)),
-        7 => ("cairo_ps", false, None),
+        7 => (
+            "cairo_ps",
+            false,
+            Some(Format::Postscript { onefile: true, paper: None, landscape: false }),
+        ),
         8 => ("tiff", true, Some(Format::Tiff)),
         9 => ("bmp", true, Some(Format::Bmp)),
         _ => return Err(error("invalid type for cairo device")),
@@ -1053,9 +1068,13 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
     let Some((kind, rest)) = display.split_once("::") else {
         return Err(error("unable to start device X11"));
     };
+    let jpeg = rest
+        .split_once(':')
+        .and_then(|(quality, _)| quality.parse::<i32>().ok())
+        .map_or(75, jpeg_quality);
     let (name, format) = match kind {
         "png" => ("png", Some(Format::Png)),
-        "jpeg" => ("jpeg", None),
+        "jpeg" => ("jpeg", Some(Format::Jpeg { quality: jpeg })),
         "bmp" => ("bmp", Some(Format::Bmp)),
         "tiff" => ("tiff", Some(Format::Tiff)),
         _ => return Err(error("unable to start device X11")),
@@ -1088,6 +1107,11 @@ unsafe fn do_x11(call: &NativeCall<'_>) -> R<Sexp> {
         title: String::new(),
     };
     open_device(spec)
+}
+
+/// `jpeg(quality = )` as the encoder takes it, from 1 to 100.
+fn jpeg_quality(quality: i32) -> u8 {
+    if quality == NA_INTEGER { 75 } else { quality.clamp(1, 100) as u8 }
 }
 
 // grDevices: the device list.
