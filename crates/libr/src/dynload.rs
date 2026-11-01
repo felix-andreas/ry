@@ -482,8 +482,15 @@ pub unsafe extern "C" fn R_FindSymbol(
     package: *const c_char,
     _symbol: *mut c_void,
 ) -> Option<DlFunc> {
-    let name = String::from_utf8_lossy(c_bytes(name)).into_owned();
-    let package = String::from_utf8_lossy(c_bytes(package)).into_owned();
+    find_symbol(
+        &String::from_utf8_lossy(c_bytes(name)),
+        &String::from_utf8_lossy(c_bytes(package)),
+    )
+}
+
+/// A routine named `name` in the DLL of `package`, or in any DLL when `package` is empty,
+/// searched from the most recently loaded, registered routines before dynamic symbols.
+pub(crate) unsafe fn find_symbol(name: &str, package: &str) -> Option<DlFunc> {
     let runtime = runtime();
     for dll in runtime.dlls.iter().rev() {
         if !package.is_empty() && package != dll.name {
@@ -501,7 +508,7 @@ pub unsafe extern "C" fn R_FindSymbol(
             }
         }
         if dll.use_dynamic_symbols
-            && let Ok(c_name) = CString::new(name.clone())
+            && let Ok(c_name) = CString::new(name)
         {
             let symbol = libc::dlsym(dll.handle, c_name.as_ptr());
             if !symbol.is_null() {

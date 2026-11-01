@@ -1509,23 +1509,6 @@ int ry_call_d2fcn(d2fcn_p d2fcn, int nr, int n, double *x, double *h, void *stat
     return 0;
 }
 
-/*
- * samin draws its Gaussian steps from norm_rand, which the Rmath module defines. The weak
- * reference lets this library link without that module; samin then reports the gap as an
- * error instead of crashing.
- */
-extern double norm_rand(void) __attribute__((weak));
-
-int ry_norm_rand_available(void)
-{
-    return norm_rand != NULL;
-}
-
-double ry_norm_rand(void)
-{
-    return norm_rand();
-}
-
 /* Fortran's error and warning calls. GNU R caps the message at 255 characters. */
 
 static int ry_fortran_length(const char *message, int length)

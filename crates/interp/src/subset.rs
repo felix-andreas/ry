@@ -9,6 +9,7 @@ use {
         coerce::{self, coerce_vector},
         conditions,
         eval::{self, value_of},
+        random,
         unwind::{R, error},
         values::{
             self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
@@ -69,9 +70,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("row", 1, |call| unsafe { row_col(call, true) }),
     internal("col", 1, |call| unsafe { row_col(call, false) }),
     internal("diag", 3, do_diag),
-    internal("max.col", 2, |call| {
-        Err(call.error("max.col is not supported"))
-    }),
+    internal("max.col", 2, do_max_col),
     internal("shortRowNames", 2, do_short_row_names),
     internal("copyDFattr", 2, do_copy_df_attr),
 ];
@@ -3175,6 +3174,100 @@ unsafe fn row_col(call: &Call<'_>, rows: bool) -> R<Sexp> {
     let dim = values::integer_vector(&[row_count as i32, col_count as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
     Ok(result)
+}
+
+/// `.Internal(max.col(m, ties.method))`, with the method as GNU R's code: 1 random, 2 first,
+/// 3 last.
+unsafe fn do_max_col(call: &Call<'_>) -> R<Sexp> {
+    let matrix = call.arg(0);
+    let dims = get_attr(matrix, symbols().dim);
+    let dims = coerce_vector(dims, SexpType::Integer)?;
+    let (rows, columns) = match values::ints(dims) {
+        &[rows, columns] => (rows.max(0) as usize, columns.max(0) as usize),
+        _ => (length(matrix), 1),
+    };
+    let method = values::as_integer_scalar(call.arg(1));
+    let matrix = coerce_vector(matrix, SexpType::Real)?;
+    let result = alloc(SexpType::Integer, rows)?;
+    max_col(
+        values::reals(matrix),
+        rows,
+        columns,
+        method,
+        values::ints_mut(result),
+    )?;
+    Ok(result)
+}
+
+/// `R_max_col`: the column of each row's maximum of the column-major `matrix`, or `NA` for a
+/// row with a missing value. With `method` 1, entries within a relative 1e-5 of the row's
+/// largest magnitude tie and one of them is drawn at random; 2 takes the first maximum and 3
+/// the last.
+pub unsafe fn max_col(
+    matrix: &[f64],
+    rows: usize,
+    columns: usize,
+    method: i32,
+    maxes: &mut [i32],
+) -> R<()> {
+    let random = method == 1;
+    if random {
+        random::get_rng_state()?;
+    }
+    let entry = |row: usize, column: usize| matrix.get(row + column * rows).copied();
+    for (row, slot) in maxes.iter_mut().enumerate().take(rows) {
+        let mut missing = false;
+        let mut largest = 0.0f64;
+        for column in 0..columns {
+            let value = entry(row, column).unwrap_or(f64::NAN);
+            if value.is_nan() {
+                missing = true;
+                break;
+            }
+            if value.is_finite() {
+                largest = largest.max(value.abs());
+            }
+        }
+        let Some(mut maximum) = entry(row, 0).filter(|_| !missing && columns > 0) else {
+            *slot = NA_INTEGER;
+            continue;
+        };
+        let mut chosen = 0;
+        if random {
+            // Entries are treated as probabilities: values this close to the maximum tie.
+            let tolerance = 1e-5 * largest;
+            let mut ties = 1;
+            for column in 1..columns {
+                let value = entry(row, column).unwrap_or(f64::NAN);
+                if value > maximum + tolerance {
+                    maximum = value;
+                    chosen = column;
+                    ties = 1;
+                } else if value >= maximum - tolerance {
+                    // Reservoir sampling: each tied column ends up chosen with equal
+                    // probability.
+                    ties += 1;
+                    if f64::from(ties) * random::unif_rand()? < 1.0 {
+                        chosen = column;
+                    }
+                }
+            }
+        } else {
+            let last = method == 3;
+            for column in 1..columns {
+                let value = entry(row, column).unwrap_or(f64::NAN);
+                if value > maximum || (last && value == maximum) {
+                    maximum = value;
+                    chosen = column;
+                }
+            }
+        }
+        *slot = chosen as i32 + 1;
+    }
+    if random {
+        random::put_rng_state()?;
+    }
+    Ok(())
 }
 
 unsafe fn do_diag(call: &Call<'_>) -> R<Sexp> {

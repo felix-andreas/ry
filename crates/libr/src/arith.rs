@@ -1,276 +1,44 @@
-//! Arithmetic helpers, sorting and the random number generator.
+//! Arithmetic helpers, sorting and the C API of the random number generator.
 //!
-//! The generator is R's default, the Mersenne Twister with R's seeding and its fix-up into the
-//! open interval (0, 1), and its state lives where R keeps it, in `.Random.seed` in the global
-//! environment, so `GetRNGstate` and `PutRNGstate` exchange it with R code exactly as in GNU R.
+//! The generator is the interpreter's (`interp::random`), so C code and R code share one
+//! stream and every kind `RNGkind` offers, with the state in `.Random.seed` exactly as in GNU R.
 
 use {
-    crate::{
-        boundary::{ApiResult, enter, error},
-        environments::frame_value,
-        globals::R_SeedsSymbol,
-        runtime,
-    },
-    heap::object::{NA_INTEGER, Rcomplex, SexpType, is_na_real},
-    std::{cmp::Ordering, f64::consts::LN_2, ffi::c_int},
+    crate::boundary::enter,
+    heap::object::{NA_INTEGER, Rcomplex, is_na_real},
+    interp::random,
+    std::{cmp::Ordering, ffi::c_int},
 };
-
-const STATE_WORDS: usize = 624;
-/// `.Random.seed[1]` for the default kinds: Mersenne Twister, inversion for normals, and
-/// rejection sampling.
-const DEFAULT_KIND: i32 = 10403;
-const I2_32M1: f64 = 2.328306437080797e-10;
-
-/// `q_k = sum_{i=1..k} (ln 2)^i / i!` for algorithm SA, the partial sums of
-/// `e^(ln 2) - 1 = 1`. `exp_rand` takes the minimum of `k` uniforms for the first `k` with
-/// `u <= q_k`; the last entry rounds to one, so that search always ends.
-const EXPONENTIAL_TAIL: [f64; 16] = {
-    let mut table = [0.0; 16];
-    let mut term = 1.0;
-    let mut sum = 0.0;
-    let mut index = 0;
-    while index < table.len() {
-        term *= LN_2 / (index + 1) as f64;
-        sum += term;
-        table[index] = sum;
-        index += 1;
-    }
-    table
-};
-
-pub struct Rng {
-    /// `dummy[0]` is the position in the state, `dummy[1..]` the state itself, as R lays out
-    /// the seed vector.
-    dummy: [u32; STATE_WORDS + 1],
-}
-
-impl Default for Rng {
-    fn default() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos() as u32 ^ std::process::id());
-        let mut rng = Rng {
-            dummy: [0; STATE_WORDS + 1],
-        };
-        rng.seed(seed);
-        rng
-    }
-}
-
-impl Rng {
-    /// `set.seed(seed)`: R scrambles the seed with a linear congruential generator before it
-    /// fills the state.
-    pub fn seed(&mut self, seed: u32) {
-        let mut seed = seed;
-        for _ in 0..50 {
-            seed = seed.wrapping_mul(69069).wrapping_add(1);
-        }
-        for word in self.dummy.iter_mut() {
-            seed = seed.wrapping_mul(69069).wrapping_add(1);
-            *word = seed;
-        }
-        self.dummy[0] = STATE_WORDS as u32;
-    }
-
-    pub fn unif_rand(&mut self) -> f64 {
-        let value = self.genrand();
-        if value <= 0.0 {
-            0.5 * I2_32M1
-        } else if 1.0 - value <= 0.0 {
-            1.0 - 0.5 * I2_32M1
-        } else {
-            value
-        }
-    }
-
-    fn genrand(&mut self) -> f64 {
-        const UPPER_MASK: u32 = 0x8000_0000;
-        const LOWER_MASK: u32 = 0x7fff_ffff;
-        const MATRIX_A: u32 = 0x9908_b0df;
-        let magnitude = |y: u32| if y & 1 == 1 { MATRIX_A } else { 0 };
-        let mut position = self.dummy[0] as usize;
-        let state = &mut self.dummy[1..];
-        if position >= STATE_WORDS {
-            if position == STATE_WORDS + 1 {
-                seed_genrand(state, 4357);
-            }
-            for index in 0..STATE_WORDS - 397 {
-                let y = (state[index] & UPPER_MASK) | (state[index + 1] & LOWER_MASK);
-                state[index] = state[index + 397] ^ (y >> 1) ^ magnitude(y);
-            }
-            for index in STATE_WORDS - 397..STATE_WORDS - 1 {
-                let y = (state[index] & UPPER_MASK) | (state[index + 1] & LOWER_MASK);
-                state[index] = state[index + 397 - STATE_WORDS] ^ (y >> 1) ^ magnitude(y);
-            }
-            let y = (state[STATE_WORDS - 1] & UPPER_MASK) | (state[0] & LOWER_MASK);
-            state[STATE_WORDS - 1] = state[396] ^ (y >> 1) ^ magnitude(y);
-            position = 0;
-        }
-        let mut y = state[position];
-        position += 1;
-        y ^= y >> 11;
-        y ^= (y << 7) & 0x9d2c_5680;
-        y ^= (y << 15) & 0xefc6_0000;
-        y ^= y >> 18;
-        self.dummy[0] = position as u32;
-        y as f64 * 2.3283064365386963e-10
-    }
-
-    /// A standard normal deviate by inversion, GNU R's default: two uniforms make one with
-    /// more than 32 random bits, since a single 32-bit uniform leaves gaps in the far tails.
-    pub fn norm_rand(&mut self) -> f64 {
-        const BIG: f64 = 134217728.0;
-        let mut u = self.unif_rand();
-        u = (BIG * u).trunc() + self.unif_rand();
-        interp::rmath::qnorm(u / BIG, 0.0, 1.0, true, false)
-    }
-
-    /// A standard exponential deviate by algorithm SA of Ahrens and Dieter (1972), "Computer
-    /// methods for sampling from the exponential and normal distributions".
-    ///
-    /// The deviate is split as `k ln 2 + y` with `y` in `[0, ln 2)`. Since
-    /// `P(X >= k ln 2) = 2^-k`, the count `k` is the number of leading zero bits of one
-    /// uniform, read off by doubling it. What is left of that uniform, `u`, is itself `y`
-    /// when `u <= ln 2`. Otherwise `y` is `ln 2` times the minimum of `k` further uniforms,
-    /// where `k >= 2` is the first index with `u <= q_k` (see `EXPONENTIAL_TAIL`).
-    pub fn exp_rand(&mut self) -> f64 {
-        let mut uniform = self.unif_rand();
-        while uniform <= 0.0 || uniform >= 1.0 {
-            uniform = self.unif_rand();
-        }
-        let mut offset = 0.0;
-        loop {
-            uniform += uniform;
-            if uniform > 1.0 {
-                break;
-            }
-            offset += LN_2;
-        }
-        uniform -= 1.0;
-        if uniform <= LN_2 {
-            return offset + uniform;
-        }
-        let mut smallest = self.unif_rand();
-        for &bound in &EXPONENTIAL_TAIL[1..] {
-            smallest = smallest.min(self.unif_rand());
-            if uniform <= bound {
-                break;
-            }
-        }
-        offset + smallest * LN_2
-    }
-
-    /// `R_unif_index` under rejection sampling: uniform on `0..n` without the bias of
-    /// `floor(n * unif_rand())`.
-    pub fn unif_index(&mut self, n: f64) -> f64 {
-        if n <= 0.0 {
-            return 0.0;
-        }
-        let bits = n.log2().ceil() as u32;
-        loop {
-            let value = self.random_bits(bits);
-            if n > value {
-                return value;
-            }
-        }
-    }
-
-    fn random_bits(&mut self, bits: u32) -> f64 {
-        let mut value: i64 = 0;
-        let mut drawn = 0;
-        while drawn <= bits {
-            let chunk = (self.unif_rand() * 65536.0).floor() as i64;
-            value = value.wrapping_mul(65536).wrapping_add(chunk);
-            drawn += 16;
-        }
-        let mask = if bits >= 63 {
-            i64::MAX
-        } else {
-            (1i64 << bits) - 1
-        };
-        (value & mask) as f64
-    }
-}
-
-fn seed_genrand(state: &mut [u32], seed: u32) {
-    let mut seed = seed;
-    for word in state.iter_mut() {
-        *word = seed & 0xffff_0000;
-        seed = seed.wrapping_mul(69069).wrapping_add(1);
-        *word |= (seed & 0xffff_0000) >> 16;
-        seed = seed.wrapping_mul(69069).wrapping_add(1);
-    }
-}
-
-pub(crate) unsafe fn read_seed() -> ApiResult<()> {
-    let runtime = runtime();
-    let known = *runtime.heap.known();
-    let seed = frame_value(known.global_env, R_SeedsSymbol.get());
-    if seed == known.unbound {
-        return Ok(());
-    }
-    if seed.kind() != SexpType::Integer
-        || crate::vectors::xlength(seed)? != (STATE_WORDS + 2) as isize
-    {
-        return Err(error("'.Random.seed' is not a valid integer vector"));
-    }
-    let values = crate::vectors::integers(seed)?;
-    if values[0] != DEFAULT_KIND {
-        return Err(error(
-            "ry supports only the default RNG kinds (Mersenne-Twister, Inversion, Rejection)",
-        ));
-    }
-    for (word, &value) in runtime.rng.dummy.iter_mut().zip(&values[1..]) {
-        *word = value as u32;
-    }
-    Ok(())
-}
-
-pub(crate) unsafe fn write_seed() -> ApiResult<()> {
-    let runtime = runtime();
-    let seed = runtime
-        .heap
-        .alloc_vector(SexpType::Integer, (STATE_WORDS + 2) as isize)?;
-    runtime.heap.root(seed);
-    let values = seed.slice_mut::<i32>();
-    values[0] = DEFAULT_KIND;
-    for (value, &word) in values[1..].iter_mut().zip(runtime.rng.dummy.iter()) {
-        *value = word as i32;
-    }
-    let global = runtime.heap.known().global_env;
-    runtime.heap.define(global, R_SeedsSymbol.get(), seed)?;
-    Ok(())
-}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetRNGstate() {
-    enter(|| read_seed())
+    enter(|| random::get_rng_state())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PutRNGstate() {
-    enter(|| write_seed())
+    enter(|| random::put_rng_state())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unif_rand() -> f64 {
-    runtime().rng.unif_rand()
+    enter(|| random::unif_rand())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn norm_rand() -> f64 {
-    runtime().rng.norm_rand()
+    enter(|| random::norm_rand())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exp_rand() -> f64 {
-    runtime().rng.exp_rand()
+    enter(|| random::exp_rand())
 }
 
-/// `Sampletype`'s `REJECTION`, the only discrete-uniform method ry implements.
+/// `Sampletype`: 0 for the rounding sampler of R before 3.6.0, 1 for rejection sampling.
 #[unsafe(no_mangle)]
 pub extern "C" fn R_sample_kind() -> c_int {
-    1
+    random::sample_kind_code()
 }
 
 /// `Binomtype`'s `BUGGY_BTPE`: `rbinom` reproduces the stream of GNU R before the BTPE fix.
@@ -281,7 +49,7 @@ pub extern "C" fn R_binom_kind() -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_unif_index(n: f64) -> f64 {
-    runtime().rng.unif_index(n)
+    enter(|| random::unif_index(n))
 }
 
 #[unsafe(no_mangle)]
@@ -715,6 +483,5 @@ pub extern "C" fn R_CheckStack2(_extra: usize) {}
 /// test harness compares sequences against GNU R with it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_set_seed(seed: c_int) {
-    runtime().rng.seed(seed as u32);
-    enter(|| write_seed());
+    enter(|| random::set_seed(seed));
 }

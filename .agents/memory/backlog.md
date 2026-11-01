@@ -2146,8 +2146,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
     Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
     asymptotic test, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's error message for `hashfile(NA)`, the `parallel`
-    package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
-    alternative in mvtnorm, and `NextMethod` in xts.
+    package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, and `NextMethod` in xts.
   - No graphics devices: Matrix's `Simple.R`, gtable, and every vignette that plots (rcmdcheck's
     `R CMD build` of its `bad3` fixture) stop at "graphics devices are not supported by ry yet".
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
@@ -2184,7 +2183,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
-- **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
+- **Missing internals.** Several `.Internal`s still raise "not supported" (`prmatrix`,
   `format.Date`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
@@ -2208,8 +2207,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
   bodies, `example()` echo without `keep.source` (GNU R shows the original text and comments), and
   the "deparse may be incomplete" warning.
-- **The interpreter keeps its own RNG beside libr's.** Both sync through `.Random.seed`, and
-  libr's built-in evaluator is unused while the interpreter is installed.
+- **RNG kinds:** Knuth-TAOCP, Knuth-TAOCP-2002, and the Ahrens-Dieter, Buggy Kinderman-Ramage and
+  user-supplied normal kinds raise "not supported by ry" (`crates/interp/src/random.rs`).
 - **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack

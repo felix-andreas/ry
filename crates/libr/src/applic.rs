@@ -19,13 +19,13 @@
 
 use {
     crate::{
-        arith::{read_seed, write_seed},
         boundary::{ApiResult, enter, error, take_pending, warn, write_console},
         linpack::{Matrix, ddot, dnrm2, triangular_solve},
         runtime,
         utils::format_real_vector,
     },
     heap::object::NA_INTEGER,
+    interp::random,
     std::ffi::{c_char, c_int, c_void},
 };
 
@@ -66,8 +66,6 @@ unsafe extern "C" {
         h: *mut f64,
         state: *mut c_void,
     ) -> c_int;
-    fn ry_norm_rand_available() -> c_int;
-    fn ry_norm_rand() -> f64;
 }
 
 /// Runs one native callback. Handles the callback's API calls hand out are released when it
@@ -880,12 +878,7 @@ pub unsafe extern "C" fn samin(
             *yb = objective.value(best_point)?;
             return Ok(());
         }
-        if ry_norm_rand_available() == 0 {
-            return Err(error(
-                "simulated annealing needs norm_rand, which this build of libR lacks",
-            ));
-        }
-        read_seed()?;
+        random::get_rng_state()?;
         let finite_or_big = |value: f64| if value.is_finite() { value } else { BIG };
         let mut best = finite_or_big(objective.value(best_point)?);
         let mut current_point = best_point.to_vec();
@@ -904,11 +897,11 @@ pub unsafe extern "C" fn samin(
             while held <= tmax && evaluation < maxit {
                 let spread = scale * temperature;
                 for (next, &position) in candidate.iter_mut().zip(&current_point) {
-                    *next = position + spread * ry_norm_rand();
+                    *next = position + spread * random::norm_rand()?;
                 }
                 let value = finite_or_big(objective.value(&mut candidate)?);
                 let rise = value - current;
-                if rise <= 0.0 || runtime().rng.unif_rand() < (-rise / temperature).exp() {
+                if rise <= 0.0 || random::unif_rand()? < (-rise / temperature).exp() {
                     current_point.copy_from_slice(&candidate);
                     current = value;
                     if current <= best {
@@ -932,7 +925,7 @@ pub unsafe extern "C" fn samin(
             ));
         }
         *yb = best;
-        write_seed()
+        random::put_rng_state()
     })
 }
 
@@ -1886,9 +1879,7 @@ pub fn find_interval(
     (count, 0)
 }
 
-/// The column of each row's maximum, 1-based, or `NA` for a row with a missing value. Ties
-/// within a relative 1e-5 of the row's largest magnitude break at random (`ties_meth` 1),
-/// to the first (2) or to the last (3).
+/// `interp::subset::max_col`, which `max.col()` shares.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_max_col(
     matrix: *mut f64,
@@ -1900,66 +1891,16 @@ pub unsafe extern "C" fn R_max_col(
     enter(|| {
         let rows = (*nr).max(0) as usize;
         let columns = (*nc).max(0) as usize;
-        let method = *ties_meth;
-        let random = method == 1;
-        if random {
-            read_seed()?;
+        if rows == 0 {
+            return Ok(());
         }
-        let entry = |row: usize, column: usize| *matrix.add(row + column * rows);
-        for row in 0..rows {
-            let mut missing = false;
-            let mut largest = 0.0f64;
-            for column in 0..columns {
-                let value = entry(row, column);
-                if value.is_nan() {
-                    missing = true;
-                    break;
-                }
-                if value.is_finite() {
-                    largest = largest.max(value.abs());
-                }
-            }
-            if missing || columns == 0 {
-                *maxes.add(row) = NA_INTEGER;
-                continue;
-            }
-            let mut chosen = 0;
-            let mut maximum = entry(row, 0);
-            if random {
-                // Entries are treated as probabilities: values this close to the maximum tie.
-                let tolerance = 1e-5 * largest;
-                let mut ties = 1;
-                for column in 1..columns {
-                    let value = entry(row, column);
-                    if value > maximum + tolerance {
-                        maximum = value;
-                        chosen = column;
-                        ties = 1;
-                    } else if value >= maximum - tolerance {
-                        // Reservoir sampling: each of the tied columns ends up chosen with
-                        // equal probability.
-                        ties += 1;
-                        if f64::from(ties) * runtime().rng.unif_rand() < 1.0 {
-                            chosen = column;
-                        }
-                    }
-                }
-            } else {
-                let last = method == 3;
-                for column in 1..columns {
-                    let value = entry(row, column);
-                    if value > maximum || (last && value == maximum) {
-                        maximum = value;
-                        chosen = column;
-                    }
-                }
-            }
-            *maxes.add(row) = chosen as c_int + 1;
-        }
-        if random {
-            write_seed()?;
-        }
-        Ok(())
+        let matrix: &[f64] = if columns == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(matrix, rows * columns)
+        };
+        let maxes = std::slice::from_raw_parts_mut(maxes, rows);
+        interp::subset::max_col(matrix, rows, columns, *ties_meth, maxes)
     })
 }
 

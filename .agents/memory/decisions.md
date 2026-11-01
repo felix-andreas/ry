@@ -3990,3 +3990,25 @@ explicit allocators".
   is running (`None` during an unwind). `returnValue()` reads the top, so a function called from
   `on.exit` code sees the exiting function's value, as GNU R's `R_ExitContext` gives; cli's
   `cli_process_start` auto-close picks "done" or "failed" from it.
+
+## One random number generator for R code and the C API
+
+- **Before.** libr kept its own Mersenne-Twister-only `arith::Rng`, its own copies of every
+  variate generator in `rmath.rs`, and its own `.Random.seed` reader, which rejected any kind
+  but 10403. The interpreter's `interp::random` held the full GNU-exact generator set. The two
+  synced only through `.Random.seed`, so a package that set `RNGversion("3.5.0")` (mvtnorm) or
+  another kind failed at its first `GetRNGstate`, and `rmultinom` and `max.col` had two diverging
+  implementations each.
+- **Now.** `GetRNGstate`, `PutRNGstate`, `unif_rand`, `norm_rand`, `exp_rand`, `R_unif_index`
+  and `R_sample_kind` call `interp::random`; every `Rf_r*` variate calls
+  `interp::distributions` with `SessionDeviates`; `R_max_col` and `.Internal(max.col)` share
+  `interp::subset::max_col`. libr keeps only the C-level argument checks GNU R makes there
+  (`Rf_rmultinom`'s `NA` marking and probability-sum error).
+- **User-supplied generators.** `RNGkind("user-supplied")` finds `user_unif_rand`,
+  `user_unif_init`, `user_unif_nseed` and `user_unif_seedloc` through the host hook
+  `Hooks::find_native_symbol` (libr's `R_FindSymbol` search), seeds with the scrambled seed, and
+  mirrors the generator's seed words in `.Random.seed`. The deviate is returned unfixed, as in GNU
+  R. The last generator stays loaded across kind switches, like GNU R's `User_unif_fun`
+  (randtoolbox and rngWELL depend on both).
+- **Impact.** One source of truth for the stream and its kinds, about 1,000 fewer lines, and C
+  code draws exactly the numbers R code would. `random__max_col_and_rounding_sampler` pins it.
