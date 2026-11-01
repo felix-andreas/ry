@@ -39,8 +39,7 @@ use {
     salsa::{Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics},
-        file_conditional_writers, file_interface_reads, item_naming, item_tree,
+        diagnostics::{Diagnostic, Severity, parse_stage_diagnostics, warm_project_folds},
         metadata::{
             NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_package,
@@ -870,8 +869,9 @@ impl Worker {
         }
     }
 
-    /// Scans every file's attach facts and applies their union once, then derives every
-    /// item's naming and the per-file folds the project-wide maps read, across all cores.
+    /// Scans every file's attach facts and applies their union once, then derives the per-file
+    /// folds the project-wide maps read, across all cores. Naming every item is left to the
+    /// prime queue: a file's check names only the items its interface reaches.
     fn warm_up(&mut self) {
         if !self.unscanned.is_empty() {
             let paths = mem::take(&mut self.unscanned);
@@ -888,22 +888,18 @@ impl Worker {
             if !self.unscanned.is_empty() {
                 return;
             }
-            // Before naming: every memo that reads the attach set would re-run after it.
+            // Before the folds: every memo that reads the attach set would re-run after it.
             self.apply_attached_union();
         }
         let paths = mem::take(&mut self.unwarmed);
         let cancel = self.cancel.clone();
-        // A cancel can be lost to salsa's uncancel between two items, so a large file
-        // also checks the queue per item and is requeued when it stopped early.
+        // A cancel can be lost to salsa's uncancel between two files, so each file checks the
+        // queue and is requeued when it stopped early.
         let (done, mut rest) = self.in_parallel(paths, |db, file| {
-            for &item in item_tree(db, file) {
-                if cancel.has_queued_jobs() {
-                    return false;
-                }
-                item_naming(db, item);
+            if cancel.has_queued_jobs() {
+                return false;
             }
-            file_interface_reads(db, file);
-            file_conditional_writers(db, file);
+            warm_project_folds(db, file);
             true
         });
         rest.extend(
