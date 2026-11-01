@@ -589,6 +589,89 @@ fn run_with_inline_annotations_off_warns_and_skips_the_checks() {
 }
 
 #[test]
+fn ry_runtime_refuses_class_definitions_when_object_systems_are_off() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let config = "[check]\nobject-systems = false\n";
+    for (code, function) in [
+        ("setClass(\"P\", representation(x = \"numeric\"))\n", "setClass"),
+        ("methods::setRefClass(\"A\")\n", "setRefClass"),
+    ] {
+        let script = format!("cat(\"before\\n\")\n{code}cat(\"after\\n\")\n");
+        let (status, stdout, stderr) =
+            run_project("ry", &[("script.R", &script), ("ry.toml", config)]);
+        assert_eq!(status, Some(1), "{function}: {stderr}");
+        assert!(stdout.contains("before") && !stdout.contains("after"), "{stdout}");
+        assert!(
+            stderr.contains(&format!(
+                "(`[check] object-systems = false`), so `{function}` cannot define"
+            )),
+            "{function}: {stderr}"
+        );
+    }
+    let (status, stdout, stderr) = run_project(
+        "ry",
+        &[("script.R", "setClass(\"P\", representation(x = \"numeric\"))\ncat(\"defined\\n\")\n")],
+    );
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(stdout.contains("defined"), "{stdout}");
+}
+
+#[test]
+fn the_ry_console_refuses_class_definitions_when_object_systems_are_off() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\nobject-systems = false\n",
+    )
+    .expect("write config");
+    let mut session =
+        ReplSession::start_with(Some(directory.path()), &["--no-load", "--runtime", "ry"]);
+    session.expect("console");
+    session.settle(Duration::from_millis(400));
+    session.send("setRefClass(\"A\")\r");
+    session.expect("`setRefClass` cannot define a Reference Class");
+    session.send("1 + 1\r");
+    session.expect("[1] 2");
+    session.quit();
+}
+
+#[test]
+fn piped_input_is_evaluated_and_autoprinted_on_both_runtimes() {
+    use std::io::Write;
+    let directory = tempfile::tempdir().expect("temp dir");
+    for runtime in runtimes() {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+            .args(["repl", "--no-load", "--runtime", runtime])
+            .current_dir(directory.path())
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("start the console");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(b"1 + 1\nf <- function(a) {\n  a * 2\n}\nf(21)\n")
+            .expect("write the commands");
+        let output = child.wait_with_output().expect("console exits at end of input");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{runtime}: {output:?}");
+        assert!(stdout.contains("[1] 2\n"), "{runtime}: {stdout}");
+        assert!(stdout.contains("[1] 42\n"), "{runtime}: {stdout}");
+        assert_eq!(stdout.trim(), "[1] 2\n[1] 42", "{runtime}: no banner, only results");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("Type q() or Ctrl-D"), "{runtime}: {stderr}");
+    }
+}
+
+#[test]
 fn run_in_strict_mode_refuses_untyped_code() {
     let config = "[check]\ntyping = true\nstrict = true\n";
     let untyped = "describe <- function(x) cat(\"a value\\n\")\ndescribe(1)\n";

@@ -61,7 +61,10 @@ pub unsafe fn eval_symbol(symbol: Sexp, env: Sexp) -> R<Sexp> {
     }
     let value = find_var(symbol, env)?;
     if value == unbound() {
-        return Err(error(format!("object '{}' not found", symbol_name(symbol))));
+        return Err(error_in(
+            lexical_call(env),
+            format!("object '{}' not found", symbol_name(symbol)),
+        ));
     }
     if value == missing_arg() {
         return Err(error(format!(
@@ -138,6 +141,21 @@ pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
     Ok(cell.cdr())
 }
 
+/// The call whose frame evaluates code in `env`, which GNU R names in an error about a missing
+/// variable: so a promise forced inside a callee still blames the caller's code, and top-level
+/// code blames no call. An environment no frame owns, like one `eval` was handed, falls back to
+/// the innermost call.
+unsafe fn lexical_call(env: Sexp) -> Sexp {
+    let frames = &interp().frames;
+    if let Some(frame) = frames.iter().rev().find(|frame| frame.env == env) {
+        return frame.call;
+    }
+    if env == values::global_env() {
+        return nil();
+    }
+    crate::unwind::current_call()
+}
+
 /// `findVar`: the value bound to `symbol` from `env` outward, or `R_UnboundValue`. Promises are
 /// returned unforced.
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
@@ -156,7 +174,13 @@ pub unsafe fn find_var_in_frame(symbol: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 /// `findFun`: the first function bound to `symbol` from `env` outward.
-pub unsafe fn find_fun(symbol: Sexp, mut env: Sexp) -> R<Sexp> {
+pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
+    find_called_fun(symbol, env, unbound())
+}
+
+/// `findFun3`: [`find_fun`] for the head of `call`, which a missing function's error names, as
+/// in GNU R.
+pub unsafe fn find_called_fun(symbol: Sexp, mut env: Sexp, call: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let empty = heap.known().empty_env;
     while env != empty {
@@ -177,10 +201,10 @@ pub unsafe fn find_fun(symbol: Sexp, mut env: Sexp) -> R<Sexp> {
         }
         env = env.enclosure();
     }
-    Err(error(format!(
-        "could not find function \"{}\"",
-        symbol_name(symbol)
-    )))
+    Err(error_in(
+        call,
+        format!("could not find function \"{}\"", symbol_name(symbol)),
+    ))
 }
 
 /// Binds `symbol` in `env`'s own frame.
@@ -263,7 +287,7 @@ unsafe fn eval_call(call: Sexp, env: Sexp) -> R<Sexp> {
     crate::unwind::poll_interrupt()?;
     let head = call.car();
     let function = if head.kind() == SexpType::Symbol {
-        find_fun(head, env)?
+        find_called_fun(head, env, call)?
     } else {
         let value = eval(head, env)?;
         if !values::is_function(value) {
@@ -780,6 +804,9 @@ pub unsafe fn run_closure(
             "evaluation nested too deeply: infinite recursion / options(expressions=)?",
         ));
     }
+    if !state.object_systems {
+        refuse_object_system(call, function, sys_parent)?;
+    }
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
     state.frames.push(Frame {
@@ -828,6 +855,40 @@ pub unsafe fn run_closure(
     state.restarts = restarts;
     state.srcref = caller_srcref;
     result
+}
+
+/// With object systems turned off, a call that defines a class (`setClass`, `setRefClass`,
+/// `R6::R6Class`, ...) fails when user code makes it. User code is whatever runs at the global
+/// environment's top level, which covers scripts and the console. Calls made inside a package, an
+/// installed one or a loaded project package, are exempt, so a package that defines classes of its
+/// own keeps loading. The callee is recognized by the name the call uses (`setClass(...)` or
+/// `methods::setClass(...)`) and by the package that owns the closure, so a local function of the
+/// same name is left alone and a renamed alias (`f <- setClass`) is not caught.
+unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
+    let mut head = call.car();
+    if head.kind() == SexpType::Language
+        && head.car().kind() == SexpType::Symbol
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+    {
+        head = head.cdr().cdr().car();
+    }
+    if head.kind() != SexpType::Symbol {
+        return Ok(());
+    }
+    let name = values::symbol_name(head);
+    let Some((system, defines, home)) = syntax::native_values::object_system_function(&name) else {
+        return Ok(());
+    };
+    let owner = crate::dispatch::top_env(function.tag());
+    if crate::envir::namespace_name(owner).as_deref() != Some(home)
+        || crate::dispatch::top_env(sys_parent) != values::global_env()
+    {
+        return Ok(());
+    }
+    Err(error_in(
+        call,
+        syntax::native_values::object_systems_disabled_message(system, defines, &name),
+    ))
 }
 
 /// A `break` or `next` that leaves the closure frame of `env` had no loop to go to, which is an
@@ -1776,7 +1837,7 @@ pub unsafe fn force_and_call(call: Sexp, count: usize, env: Sexp) -> R<Sexp> {
 /// value that evaluating the expression would produce without side effects.
 pub unsafe fn force_and_call_with(call: Sexp, count: usize, env: Sexp, first: Option<Sexp>) -> R<Sexp> {
     let head = call.car();
-    let function = if head.kind() == SexpType::Symbol { find_fun(head, env)? } else { eval(head, env)? };
+    let function = if head.kind() == SexpType::Symbol { find_called_fun(head, env, call)? } else { eval(head, env)? };
     crate::heap().root(function);
     if function.kind() != SexpType::Closure {
         return apply_call(call, function, call.cdr(), env);

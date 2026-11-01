@@ -4,7 +4,7 @@
 use crate::{
     builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
     coerce::{self, coerce_vector},
-    conditions, distributions,
+    conditions, rmath,
     unwind::{R, error},
     values::{
         self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
@@ -13,8 +13,6 @@ use crate::{
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real};
 
 unsafe extern "C" {
-    fn tgamma(x: f64) -> f64;
-    fn lgamma(x: f64) -> f64;
     fn expm1(x: f64) -> f64;
     fn log1p(x: f64) -> f64;
     // C99's complex functions, which GNU R calls. A `double complex` has the ABI of a struct of
@@ -220,10 +218,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),
     internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
-    internal("choose", 2, |call| unsafe { math2(call, distributions::choose) }),
-    internal("lchoose", 2, |call| unsafe { math2(call, distributions::lchoose) }),
-    internal("beta", 2, |call| unsafe { math2(call, |a, b| (gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)).exp()) }),
-    internal("lbeta", 2, |call| unsafe { math2(call, |a, b| gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)) }),
+    internal("choose", 2, |call| unsafe { math2(call, rmath::choose) }),
+    internal("lchoose", 2, |call| unsafe { math2(call, rmath::lchoose) }),
+    internal("beta", 2, |call| unsafe { math2(call, rmath::beta) }),
+    internal("lbeta", 2, |call| unsafe { math2(call, rmath::lbeta) }),
     internal("bitwiseAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
     internal("bitwiseOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
     internal("bitwiseXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
@@ -1057,10 +1055,40 @@ fn complex_divide(a: Rcomplex, b: Rcomplex) -> Rcomplex {
     }
 }
 
-fn complex_multiply(a: Rcomplex, b: Rcomplex) -> Rcomplex {
+/// C99 complex multiplication, which GNU R uses: when the plain formula gives NaN in both parts
+/// but an operand is infinite, the product is recovered as an infinity (C11 Annex G.5.1), so
+/// `1i * complex(real = NaN, imaginary = Inf)` is `-Inf+NaNi`, not `NaN+NaNi`.
+fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
+    let (mut a, mut b, mut c, mut d) = (x.r, x.i, y.r, y.i);
+    let (ac, bd, ad, bc) = (a * c, b * d, a * d, b * c);
+    let real = ac - bd;
+    let imaginary = ad + bc;
+    if !(real.is_nan() && imaginary.is_nan()) {
+        return Rcomplex { r: real, i: imaginary };
+    }
+    let box_infinity = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
+    let zero_nan = |value: f64| if value.is_nan() { 0.0f64.copysign(value) } else { value };
+    let mut recalculate = false;
+    if a.is_infinite() || b.is_infinite() {
+        (a, b) = (box_infinity(a), box_infinity(b));
+        (c, d) = (zero_nan(c), zero_nan(d));
+        recalculate = true;
+    }
+    if c.is_infinite() || d.is_infinite() {
+        (c, d) = (box_infinity(c), box_infinity(d));
+        (a, b) = (zero_nan(a), zero_nan(b));
+        recalculate = true;
+    }
+    if !recalculate && [ac, bd, ad, bc].iter().any(|product| product.is_infinite()) {
+        (a, b, c, d) = (zero_nan(a), zero_nan(b), zero_nan(c), zero_nan(d));
+        recalculate = true;
+    }
+    if !recalculate {
+        return Rcomplex { r: real, i: imaginary };
+    }
     Rcomplex {
-        r: a.r * b.r - a.i * b.i,
-        i: a.r * b.i + a.i * b.r,
+        r: f64::INFINITY * (a * c - b * d),
+        i: f64::INFINITY * (a * d + b * c),
     }
 }
 
@@ -1141,10 +1169,7 @@ unsafe fn complex_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R
                 r: a.r - b.r,
                 i: a.i - b.i,
             },
-            Op::Multiply => Rcomplex {
-                r: a.r * b.r - a.i * b.i,
-                i: a.r * b.i + a.i * b.r,
-            },
+            Op::Multiply => complex_multiply(a, b),
             Op::Divide => complex_divide(a, b),
             Op::Power => complex_power(a, b),
             _ => return Err(error("invalid operation on complex numbers")),
@@ -1497,19 +1522,6 @@ enum Math {
     Trigamma,
 }
 
-pub fn gamma_ln(value: f64) -> f64 {
-    // SAFETY: `lgamma` is a pure libm function.
-    unsafe { lgamma(value) }
-}
-
-pub fn gamma_fn(value: f64) -> f64 {
-    if value == 0.0 || (value < 0.0 && value == value.floor()) {
-        return f64::NAN;
-    }
-    // SAFETY: `tgamma` is a pure libm function.
-    unsafe { tgamma(value) }
-}
-
 fn math_value(function: Math, x: f64) -> f64 {
     use std::f64::consts::PI;
     match function {
@@ -1594,10 +1606,10 @@ fn math_value(function: Math, x: f64) -> f64 {
         Math::Acosh => x.acosh(),
         Math::Asinh => x.asinh(),
         Math::Atanh => x.atanh(),
-        Math::Gamma => gamma_fn(x),
-        Math::Lgamma => gamma_ln(x),
-        Math::Digamma => distributions::psigamma(x, 0.0),
-        Math::Trigamma => distributions::psigamma(x, 1.0),
+        Math::Gamma => rmath::gammafn(x),
+        Math::Lgamma => rmath::lgammafn(x),
+        Math::Digamma => rmath::psigamma(x, 0.0),
+        Math::Trigamma => rmath::psigamma(x, 1.0),
     }
 }
 
@@ -2002,10 +2014,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                         r: accumulator.r + z.r,
                         i: accumulator.i + z.i,
                     },
-                    _ => Rcomplex {
-                        r: accumulator.r * z.r - accumulator.i * z.i,
-                        i: accumulator.r * z.i + accumulator.i * z.r,
-                    },
+                    _ => complex_multiply(accumulator, z),
                 };
                 values::complexes_mut(result)[index] = accumulator;
             }
@@ -3384,8 +3393,9 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `polyroot(z)`: the roots of the polynomial with coefficients `z` in increasing order, by
-/// the Aberth-Ehrlich simultaneous iteration, listed by increasing modulus (the order in which
-/// Jenkins and Traub's deflation tends to find them).
+/// Jenkins and Traub's three-stage algorithm (ACM TOMS 419), which GNU R also uses, so the roots
+/// come out in the order it finds them: zeros at the origin first, then by deflation, roughly
+/// smallest modulus first.
 unsafe fn do_polyroot(call: &Call<'_>) -> R<Sexp> {
     let input = coerce_vector(call.arg(0), SexpType::Complex)?;
     let coefficients: Vec<Rcomplex> = values::complexes(input).to_vec();
@@ -3395,65 +3405,339 @@ unsafe fn do_polyroot(call: &Call<'_>) -> R<Sexp> {
     let Some(degree) = coefficients.iter().rposition(|value| value.r != 0.0 || value.i != 0.0) else {
         return alloc(SexpType::Complex, 0);
     };
-    type C = (f64, f64);
-    let mul = |a: C, b: C| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
-    let div = |a: C, b: C| {
-        let d = b.0 * b.0 + b.1 * b.1;
-        ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
-    };
-    let zeros_at_origin = coefficients.iter().take_while(|value| value.r == 0.0 && value.i == 0.0).count();
-    let polynomial: Vec<C> = coefficients[zeros_at_origin..=degree].iter().map(|value| (value.r, value.i)).collect();
-    let n = polynomial.len() - 1;
-    let lead = polynomial[n];
-    let monic: Vec<C> = polynomial.iter().map(|&value| div(value, lead)).collect();
-    let evaluate = |x: C| -> (C, C) {
-        let mut value = monic[n];
-        let mut derivative = (0.0, 0.0);
-        for k in (0..n).rev() {
-            derivative = mul(derivative, x);
-            derivative = (derivative.0 + value.0, derivative.1 + value.1);
-            value = mul(value, x);
-            value = (value.0 + monic[k].0, value.1 + monic[k].1);
-        }
-        (value, derivative)
-    };
-    let radius = 1.0 + monic[..n].iter().map(|value| value.0.hypot(value.1)).fold(0.0, f64::max);
-    let mut roots: Vec<C> = (0..n)
-        .map(|k| {
-            let angle = 2.0 * std::f64::consts::PI * k as f64 / n as f64 + 0.4;
-            (0.5 * radius * angle.cos(), 0.5 * radius * angle.sin())
-        })
-        .collect();
-    for _ in 0..500 {
-        let mut largest_step = 0.0_f64;
-        for k in 0..n {
-            let (value, derivative) = evaluate(roots[k]);
-            if value == (0.0, 0.0) {
-                continue;
-            }
-            let ratio = div(value, derivative);
-            let mut sum = (0.0, 0.0);
-            for j in 0..n {
-                if j != k {
-                    let inverse = div((1.0, 0.0), (roots[k].0 - roots[j].0, roots[k].1 - roots[j].1));
-                    sum = (sum.0 + inverse.0, sum.1 + inverse.1);
-                }
-            }
-            let denominator = (1.0 - (ratio.0 * sum.0 - ratio.1 * sum.1), -(ratio.0 * sum.1 + ratio.1 * sum.0));
-            let step = div(ratio, denominator);
-            roots[k] = (roots[k].0 - step.0, roots[k].1 - step.1);
-            largest_step = largest_step.max(step.0.hypot(step.1) / roots[k].0.hypot(roots[k].1).max(1e-300));
-        }
-        if largest_step < 1e-15 {
-            break;
-        }
-    }
-    let mut all: Vec<C> = vec![(0.0, 0.0); zeros_at_origin];
-    all.extend(roots);
-    all.sort_by(|a, b| a.0.hypot(a.1).total_cmp(&b.0.hypot(b.1)));
-    let result = alloc(SexpType::Complex, all.len())?;
-    for (slot, root) in values::complexes_mut(result).iter_mut().zip(all) {
+    let highest_first: Vec<(f64, f64)> =
+        coefficients[..=degree].iter().rev().map(|value| (value.r, value.i)).collect();
+    let roots = JenkinsTraub::roots(&highest_first).ok_or_else(|| call.error("root finding code failed"))?;
+    let result = alloc(SexpType::Complex, roots.len())?;
+    for (slot, root) in values::complexes_mut(result).iter_mut().zip(roots) {
         *slot = Rcomplex { r: root.0, i: root.1 };
     }
     Ok(result)
+}
+
+/// The state of the Jenkins-Traub iteration: the deflated polynomial `p` with the highest
+/// coefficient first, the current H polynomial, the shift `s`, and the quotients that Horner
+/// evaluation leaves behind.
+struct JenkinsTraub {
+    p: Vec<(f64, f64)>,
+    h: Vec<(f64, f64)>,
+    saved_h: Vec<(f64, f64)>,
+    quotient_p: Vec<(f64, f64)>,
+    quotient_h: Vec<(f64, f64)>,
+    shift: (f64, f64),
+    p_value: (f64, f64),
+    t: (f64, f64),
+}
+
+const JT_ETA: f64 = f64::EPSILON;
+const JT_ARE: f64 = JT_ETA;
+const JT_MRE: f64 = 2.0 * std::f64::consts::SQRT_2 * JT_ETA;
+
+impl JenkinsTraub {
+    /// The zeros of the polynomial with `coefficients`, highest degree first, or `None` when the
+    /// iteration fails to converge.
+    fn roots(coefficients: &[(f64, f64)]) -> Option<Vec<(f64, f64)>> {
+        let degree = coefficients.len().checked_sub(1)?;
+        let mut roots = Vec::with_capacity(degree);
+        let mut count = coefficients.len();
+        while count > 1 && coefficients[count - 1] == (0.0, 0.0) {
+            roots.push((0.0, 0.0));
+            count -= 1;
+        }
+        let mut state = JenkinsTraub {
+            p: coefficients[..count].to_vec(),
+            h: vec![(0.0, 0.0); count],
+            saved_h: vec![(0.0, 0.0); count],
+            quotient_p: vec![(0.0, 0.0); count],
+            quotient_h: vec![(0.0, 0.0); count],
+            shift: (0.0, 0.0),
+            p_value: (0.0, 0.0),
+            t: (0.0, 0.0),
+        };
+        let moduli: Vec<f64> = state.p.iter().map(|value| value.0.hypot(value.1)).collect();
+        let factor = jt_scale(&moduli);
+        if factor != 1.0 {
+            for value in &mut state.p {
+                *value = (value.0 * factor, value.1 * factor);
+            }
+        }
+        // The shifts start at 45 degrees below the real axis and rotate by 94 degrees each time.
+        let (cos_rotation, sin_rotation) = (-0.069_756_473_744_125_3_f64, 0.997_564_050_259_824_2_f64);
+        let mut direction = (std::f64::consts::FRAC_1_SQRT_2, -std::f64::consts::FRAC_1_SQRT_2);
+        while state.p.len() > 2 {
+            let moduli: Vec<f64> = state.p.iter().map(|value| value.0.hypot(value.1)).collect();
+            let bound = jt_cauchy(&moduli);
+            let mut zero = None;
+            'passes: for _ in 0..2 {
+                state.no_shift(5);
+                for attempt in 1..10 {
+                    direction = (
+                        cos_rotation * direction.0 - sin_rotation * direction.1,
+                        sin_rotation * direction.0 + cos_rotation * direction.1,
+                    );
+                    state.shift = (bound * direction.0, bound * direction.1);
+                    if let Some(found) = state.fixed_shift(10 * attempt) {
+                        zero = Some(found);
+                        break 'passes;
+                    }
+                }
+            }
+            roots.push(zero?);
+            let remaining = state.p.len() - 1;
+            state.p = state.quotient_p[..remaining].to_vec();
+        }
+        if let [first, second] = state.p[..] {
+            roots.push(jt_divide((-second.0, -second.1), first));
+        }
+        Some(roots)
+    }
+
+    /// The first stage: H polynomials without a shift, starting from the derivative of P.
+    fn no_shift(&mut self, iterations: usize) {
+        let count = self.p.len();
+        let n = count - 1;
+        for index in 0..n {
+            let weight = (count - index - 1) as f64;
+            self.h[index] = (weight * self.p[index].0 / n as f64, weight * self.p[index].1 / n as f64);
+        }
+        for _ in 0..iterations {
+            let last_h = self.h[n - 1];
+            let last_p = self.p[n - 1];
+            if last_h.0.hypot(last_h.1) <= JT_ETA * 10.0 * last_p.0.hypot(last_p.1) {
+                for index in (1..n).rev() {
+                    self.h[index] = self.h[index - 1];
+                }
+                self.h[0] = (0.0, 0.0);
+            } else {
+                let t = jt_divide((-self.p[count - 1].0, -self.p[count - 1].1), last_h);
+                for index in (1..n).rev() {
+                    let previous = self.h[index - 1];
+                    self.h[index] = (
+                        t.0 * previous.0 - t.1 * previous.1 + self.p[index].0,
+                        t.0 * previous.1 + t.1 * previous.0 + self.p[index].1,
+                    );
+                }
+                self.h[0] = self.p[0];
+            }
+        }
+    }
+
+    /// The second stage with a fixed shift, handing over to the third stage once the estimates
+    /// settle. Returns the zero found.
+    fn fixed_shift(&mut self, iterations: usize) -> Option<(f64, f64)> {
+        let n = self.p.len() - 1;
+        self.p_value = jt_evaluate(&self.p, self.shift, &mut self.quotient_p);
+        let mut testing = true;
+        let mut passed = false;
+        let mut h_vanishes = self.calculate_t();
+        let mut zero = self.shift;
+        for step in 1..=iterations {
+            let old_t = self.t;
+            self.next_h(h_vanishes);
+            h_vanishes = self.calculate_t();
+            zero = (self.shift.0 + self.t.0, self.shift.1 + self.t.1);
+            if h_vanishes || !testing || step == iterations {
+                continue;
+            }
+            if (self.t.0 - old_t.0).hypot(self.t.1 - old_t.1) >= 0.5 * zero.0.hypot(zero.1) {
+                passed = false;
+                continue;
+            }
+            if !passed {
+                passed = true;
+                continue;
+            }
+            // The weak convergence test passed twice: try the third stage, keeping this H
+            // polynomial and shift to come back to if it fails.
+            self.saved_h[..n].copy_from_slice(&self.h[..n]);
+            let saved_shift = self.shift;
+            if let Some(found) = self.variable_shift(10, zero) {
+                return Some(found);
+            }
+            testing = false;
+            self.h[..n].copy_from_slice(&self.saved_h[..n]);
+            self.shift = saved_shift;
+            self.p_value = jt_evaluate(&self.p, self.shift, &mut self.quotient_p);
+            h_vanishes = self.calculate_t();
+        }
+        self.variable_shift(10, zero)
+    }
+
+    /// The third stage: shifts that follow the estimate, until P is below its rounding error.
+    fn variable_shift(&mut self, iterations: usize, start: (f64, f64)) -> Option<(f64, f64)> {
+        let mut stalled = false;
+        let mut old_modulus = 0.0;
+        let mut relative_step: f64 = 0.0;
+        self.shift = start;
+        for step in 1..=iterations {
+            self.p_value = jt_evaluate(&self.p, self.shift, &mut self.quotient_p);
+            let modulus = self.p_value.0.hypot(self.p_value.1);
+            let shift_modulus = self.shift.0.hypot(self.shift.1);
+            if modulus <= 20.0 * jt_error_bound(&self.quotient_p, shift_modulus, modulus) {
+                return Some(self.shift);
+            }
+            let mut take_fixed_steps = false;
+            if step != 1 {
+                if !stalled && modulus >= old_modulus && relative_step < 0.05 {
+                    // The iteration has stalled, probably on a cluster of zeros: a few fixed
+                    // shift steps into the cluster make one zero dominate.
+                    let factor = relative_step.max(JT_ETA).sqrt();
+                    stalled = true;
+                    let real = self.shift.0 * (factor + 1.0) - self.shift.1 * factor;
+                    self.shift.1 = self.shift.0 * factor + self.shift.1 * (factor + 1.0);
+                    self.shift.0 = real;
+                    self.p_value = jt_evaluate(&self.p, self.shift, &mut self.quotient_p);
+                    for _ in 0..5 {
+                        let vanishes = self.calculate_t();
+                        self.next_h(vanishes);
+                    }
+                    old_modulus = f64::INFINITY;
+                    take_fixed_steps = true;
+                } else if modulus * 0.1 > old_modulus {
+                    return None;
+                }
+            }
+            if !take_fixed_steps {
+                old_modulus = modulus;
+            }
+            let vanishes = self.calculate_t();
+            self.next_h(vanishes);
+            if self.calculate_t() {
+                continue;
+            }
+            relative_step = self.t.0.hypot(self.t.1) / self.shift.0.hypot(self.shift.1);
+            self.shift = (self.shift.0 + self.t.0, self.shift.1 + self.t.1);
+        }
+        None
+    }
+
+    /// `t = -P(s) / H(s)`, or zero when H(s) is negligible, which the result reports.
+    fn calculate_t(&mut self) -> bool {
+        let n = self.p.len() - 1;
+        let h_value = jt_evaluate(&self.h[..n], self.shift, &mut self.quotient_h);
+        let last = self.h[n - 1];
+        let vanishes = h_value.0.hypot(h_value.1) <= JT_ARE * 10.0 * last.0.hypot(last.1);
+        self.t = if vanishes {
+            (0.0, 0.0)
+        } else {
+            jt_divide((-self.p_value.0, -self.p_value.1), h_value)
+        };
+        vanishes
+    }
+
+    /// The next H polynomial from the quotients of the last evaluations.
+    fn next_h(&mut self, h_vanishes: bool) {
+        let n = self.p.len() - 1;
+        for index in 1..n {
+            let previous = self.quotient_h[index - 1];
+            self.h[index] = if h_vanishes {
+                previous
+            } else {
+                (
+                    self.t.0 * previous.0 - self.t.1 * previous.1 + self.quotient_p[index].0,
+                    self.t.0 * previous.1 + self.t.1 * previous.0 + self.quotient_p[index].1,
+                )
+            };
+        }
+        self.h[0] = if h_vanishes { (0.0, 0.0) } else { self.quotient_p[0] };
+    }
+}
+
+/// Horner evaluation of `polynomial` at `x`, leaving the partial sums in `partial`.
+fn jt_evaluate(polynomial: &[(f64, f64)], x: (f64, f64), partial: &mut [(f64, f64)]) -> (f64, f64) {
+    let mut value = polynomial[0];
+    partial[0] = value;
+    for (index, coefficient) in polynomial.iter().enumerate().skip(1) {
+        value = (
+            value.0 * x.0 - value.1 * x.1 + coefficient.0,
+            value.0 * x.1 + value.1 * x.0 + coefficient.1,
+        );
+        partial[index] = value;
+    }
+    value
+}
+
+/// A bound on the rounding error of evaluating the polynomial whose Horner partial sums are
+/// `partial`, at a point of modulus `modulus` where its value has modulus `value_modulus`.
+fn jt_error_bound(partial: &[(f64, f64)], modulus: f64, value_modulus: f64) -> f64 {
+    let mut bound = partial[0].0.hypot(partial[0].1) * JT_MRE / (JT_ARE + JT_MRE);
+    for value in partial {
+        bound = bound * modulus + value.0.hypot(value.1);
+    }
+    bound * (JT_ARE + JT_MRE) - value_modulus * JT_MRE
+}
+
+/// A lower bound on the moduli of the zeros, from the polynomial with coefficient `moduli`
+/// whose constant term is negated (Cauchy's bound), refined by Newton's method.
+fn jt_cauchy(moduli: &[f64]) -> f64 {
+    let count = moduli.len();
+    let n = count - 1;
+    let mut terms = moduli.to_vec();
+    terms[n] = -terms[n];
+    let mut x = ((-terms[n]).ln() - terms[0].ln()) / n as f64;
+    x = x.exp();
+    if terms[n - 1] != 0.0 {
+        x = x.min(-terms[n] / terms[n - 1]);
+    }
+    loop {
+        let candidate = x * 0.1;
+        let value = terms.iter().skip(1).fold(terms[0], |sum, term| sum * candidate + term);
+        if value <= 0.0 {
+            break;
+        }
+        x = candidate;
+    }
+    let mut step = x;
+    let mut partial = vec![0.0; count];
+    while (step / x).abs() > 0.005 {
+        partial[0] = terms[0];
+        for index in 1..count {
+            partial[index] = partial[index - 1] * x + terms[index];
+        }
+        let value = partial[n];
+        let derivative = partial[1..n].iter().fold(partial[0], |sum, term| sum * x + term);
+        step = value / derivative;
+        x -= step;
+    }
+    x
+}
+
+/// A power of two that brings coefficients with these `moduli` away from overflow and underflow,
+/// or 1 when they are safe already.
+fn jt_scale(moduli: &[f64]) -> f64 {
+    let high = f64::MAX.sqrt();
+    let low = f64::MIN_POSITIVE / JT_ETA;
+    let largest = moduli.iter().copied().fold(0.0, f64::max);
+    let smallest = moduli.iter().copied().filter(|value| *value != 0.0).fold(f64::MAX, f64::min);
+    if smallest >= low && largest <= high {
+        return 1.0;
+    }
+    let ratio = low / smallest;
+    let factor = if ratio <= 1.0 {
+        1.0 / (largest.sqrt() * smallest.sqrt())
+    } else if f64::MAX / ratio > largest {
+        1.0
+    } else {
+        ratio
+    };
+    let exponent = (factor.ln() / 2f64.ln() + 0.5) as i32;
+    2f64.powi(exponent)
+}
+
+/// Complex division, infinite when the divisor is zero.
+fn jt_divide(numerator: (f64, f64), divisor: (f64, f64)) -> (f64, f64) {
+    let (a, b) = numerator;
+    let (c, d) = divisor;
+    if c == 0.0 && d == 0.0 {
+        return (f64::MAX, f64::MAX);
+    }
+    if c.abs() < d.abs() {
+        let ratio = c / d;
+        let denominator = d + ratio * c;
+        ((a * ratio + b) / denominator, (b * ratio - a) / denominator)
+    } else {
+        let ratio = d / c;
+        let denominator = c + ratio * d;
+        ((a + b * ratio) / denominator, (b - a * ratio) / denominator)
+    }
 }

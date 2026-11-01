@@ -1,0 +1,30 @@
+[stdout]
+|   a b
+| 1 1 x
+| 2 2 y
+| 3 3 z
+| [1] 01 02 03 04 05 06 07 08
+| $class
+| [1] "unz"
+| 
+| $mode
+| [1] "rb"
+| 
+| $text
+| [1] "binary"
+| 
+| $opened
+| [1] "opened"
+| 
+| $`can write`
+| [1] "no"
+| 
+| [1] "a,b" "1,x"
+| [1] "2,y" "3,z"
+| [1] "cannot locate file 'absent.txt' in zip file '<archive>'"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "cannot locate file 'absent.txt' in zip file '<archive>'"

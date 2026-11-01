@@ -12,7 +12,7 @@ use crate::{
     builtins::{BuiltinDef, Call, internal},
     coerce::{coerce_vector, type_name},
     conditions::warning,
-    distributions::qnorm,
+    rmath::qnorm,
     eval::{define, eval, find_var_in_frame},
     interp,
     unwind::{R, error},

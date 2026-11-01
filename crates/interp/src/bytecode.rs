@@ -1093,7 +1093,7 @@ impl Compiler {
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
-        self.emit(Op::GetFun, &[function, symbol, cache]);
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
         // argument that modifies a variable in place would change an earlier argument's value.
@@ -1133,7 +1133,8 @@ const MARKER_MASK: u32 = BREAK_MARKER | NEXT_MARKER;
 pub fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
-        Op::GetVar | Op::GetFun => 3,
+        Op::GetVar => 3,
+        Op::GetFun => 4,
         Op::SetVar => 2,
         Op::BranchUnlessBuiltin => 2,
         Op::CallBuiltin => 5,
@@ -1335,7 +1336,8 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
         }
         Op::GetFun => {
             let symbol = constants.element(operand(1));
-            let function = lookup_function(symbol, env, constants, caches, operand(2))?;
+            let call = constants.element(operand(3));
+            let function = lookup_function(symbol, env, constants, caches, operand(2), call)?;
             set(operand(0), function);
         }
         Op::BranchUnlessBuiltin => {
@@ -1408,7 +1410,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let found = if operand(3) == 0 {
                 lookup_enclosing_function(symbol, env, constants, caches, operand(2))
             } else {
-                lookup_function(symbol, env, constants, caches, operand(2))
+                lookup_function(symbol, env, constants, caches, operand(2), unbound())
             };
             if !matches!(found, Ok(function) if function == expected) {
                 *pc = operand(4);
@@ -1671,10 +1673,17 @@ unsafe fn lookup_variable(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp
 }
 
 /// A function's value, with GNU R's rule that bindings to non-functions are skipped.
-unsafe fn lookup_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> R<Sexp> {
+unsafe fn lookup_function(
+    symbol: Sexp,
+    env: Sexp,
+    constants: Sexp,
+    caches: Sexp,
+    slot: usize,
+    call: Sexp,
+) -> R<Sexp> {
     let heap = crate::heap();
     if heap.frame_cell(env, symbol).is_some() {
-        return eval::find_fun(symbol, env);
+        return eval::find_called_fun(symbol, env, call);
     }
     let enclosure = env.enclosure();
     if let Some(cell) = cached_cell(enclosure, constants, caches, slot)
@@ -1691,7 +1700,7 @@ unsafe fn lookup_function(symbol: Sexp, env: Sexp, constants: Sexp, caches: Sexp
     if let Some(cell) = resolve(symbol, enclosure, true)? {
         fill_cache(enclosure, cell, constants, caches, slot);
     }
-    eval::find_fun(symbol, env)
+    eval::find_called_fun(symbol, env, call)
 }
 
 /// [`lookup_function`] for a symbol the frame cannot bind: the frame is not probed.
@@ -1705,7 +1714,7 @@ unsafe fn lookup_enclosing_function(symbol: Sexp, env: Sexp, constants: Sexp, ca
             return Ok(value);
         }
     }
-    lookup_function(symbol, env, constants, caches, slot)
+    lookup_function(symbol, env, constants, caches, slot, unbound())
 }
 
 unsafe fn cached_cell(enclosure: Sexp, constants: Sexp, caches: Sexp, slot: usize) -> Option<Sexp> {

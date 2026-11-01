@@ -4,10 +4,11 @@ use crate::stubs::{declaring_namespace, stubs};
 use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
 use rowan::{NodeOrToken, WalkEvent};
 use syntax::ast::BinaryExpr;
+use syntax::native_values::{object_system_function, object_systems_disabled_message};
 use syntax::{SyntaxKind, SyntaxNode, TextRange, is_inline_annotation};
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LintLevel {
     #[default]
@@ -17,7 +18,7 @@ pub enum LintLevel {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
 pub enum NameStyle {
     #[serde(alias = "camelCase")]
     Camel,
@@ -25,7 +26,7 @@ pub enum NameStyle {
     Snake,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct LintConfig {
     pub naming_style: Option<NameStyle>,
@@ -50,24 +51,26 @@ pub struct LintConfig {
     pub object_systems_disabled: bool,
 }
 
-/// Sorted by position. Unmemoized: syntax walks plus per-item naming output are cheap.
+/// Sorted by position.
 pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    let root = parse(db, file).syntax_node();
-    // A file that binds `setClass` itself calls its own function, not the methods one.
-    let mut redefined = Vec::new();
-    for span in item_spans(db, file) {
-        if let Some(naming) = item_naming(db, span.item) {
-            redefined.extend(
-                naming
-                    .bindings
-                    .values()
-                    .filter(|binding| object_system_function(binding.name.as_str()).is_some())
-                    .map(|binding| binding.name.as_str().to_owned()),
-            );
-        }
+    let syntax = file_syntax_lints(db, file, *config);
+    let mut diagnostics = syntax.always.clone();
+    if !syntax.unless_redefined.is_empty() {
+        let redefined: Vec<&str> = item_spans(db, file)
+            .iter()
+            .filter_map(|span| item_naming(db, span.item).as_ref())
+            .flat_map(|naming| naming.bindings.values())
+            .map(|binding| binding.name.as_str())
+            .filter(|name| object_system_function(name).is_some())
+            .collect();
+        diagnostics.extend(
+            syntax
+                .unless_redefined
+                .iter()
+                .filter(|(function, _)| !redefined.contains(&function.as_str()))
+                .map(|(_, diagnostic)| diagnostic.clone()),
+        );
     }
-    syntax_lints(&root, config, &redefined, &mut diagnostics);
     if let Some(severity) = lint_severity(config.unused_parameter, None) {
         let generics = s3_generics(db, file);
         for span in item_spans(db, file) {
@@ -95,6 +98,25 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
     shadow_lints(db, file, config, &mut diagnostics);
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     diagnostics
+}
+
+/// Memoized so that revalidating an untouched file never needs its tree, which may have
+/// been evicted. It reads only syntax, so a cold check can compute it while the tree is
+/// still in memory, before naming has run.
+#[salsa::tracked(returns(ref))]
+pub fn file_syntax_lints(db: &dyn Db, file: SourceFile, config: LintConfig) -> SyntaxLints {
+    let mut lints = SyntaxLints::default();
+    syntax_lints(&parse(db, file).syntax_node(), &config, &mut lints);
+    lints
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct SyntaxLints {
+    always: Vec<Diagnostic>,
+    /// Findings on a bare call to a class-defining function, keyed by its name. A file that
+    /// binds `setClass` itself calls its own function, not the methods one, so these hold
+    /// only when the file does not redefine the name.
+    unless_redefined: Vec<(String, Diagnostic)>,
 }
 
 /// A top-level binding wins over a same-named stub export for every bare read in the project.
@@ -153,12 +175,8 @@ fn shadow_lints(
     }
 }
 
-fn syntax_lints(
-    root: &SyntaxNode,
-    config: &LintConfig,
-    redefined: &[String],
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints) {
+    let diagnostics = &mut lints.always;
     // `#:` annotation regions and inline annotations are type syntax, not R identifiers.
     let mut annotation_depth = 0usize;
     for event in root.preorder_with_tokens() {
@@ -176,7 +194,7 @@ fn syntax_lints(
                 }
                 SyntaxKind::PARAMETER => parameter_name_lint(&node, config, diagnostics),
                 SyntaxKind::CALL_EXPR => {
-                    object_system_lint(&node, config, redefined, diagnostics);
+                    object_system_lint(&node, config, &mut lints.unless_redefined, diagnostics);
                 }
                 _ => {}
             },
@@ -259,8 +277,8 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
 fn object_system_lint(
     call: &SyntaxNode,
     config: &LintConfig,
-    redefined: &[String],
-    diagnostics: &mut Vec<Diagnostic>,
+    unless_redefined: &mut Vec<(String, Diagnostic)>,
+    always: &mut Vec<Diagnostic>,
 ) {
     let Some(callee) = call.first_child() else {
         return;
@@ -282,46 +300,38 @@ fn object_system_lint(
     let Some((system, defines, home)) = object_system_function(&function) else {
         return;
     };
-    match package.as_deref() {
-        Some(package) if package != home => return,
-        None if redefined.contains(&function) => return,
-        _ => {}
+    if package.as_deref().is_some_and(|package| package != home) {
+        return;
     }
+    let mut found = Vec::new();
     let range = name.text_range();
     if config.object_systems_disabled {
-        diagnostics.push(Diagnostic::new(
+        found.push(Diagnostic::new(
             range,
             Severity::Error,
             "object-system",
-            format!(
-                "{system} are turned off in this project (`[check] object-systems = false`), so `{function}` cannot define {defines}. Use a record or a tagged union instead"
-            ),
+            object_systems_disabled_message(system, defines, &function),
         ));
-        return;
+    } else {
+        push_lint(
+            &mut found,
+            config.object_system,
+            Severity::Warning,
+            "object-system",
+            range,
+            format!(
+                "`{function}` defines {defines}. ry recommends a record or a tagged union instead"
+            ),
+        );
     }
-    push_lint(
-        diagnostics,
-        config.object_system,
-        Severity::Warning,
-        "object-system",
-        range,
-        format!("`{function}` defines {defines}. ry recommends a record or a tagged union instead"),
-    );
-}
-
-/// The object system a class-defining function belongs to, what it defines, and its home
-/// package.
-fn object_system_function(function: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    Some(match function {
-        "setClass" => ("S4 classes", "an S4 class", "methods"),
-        "setClassUnion" => ("S4 classes", "an S4 class union", "methods"),
-        "setGeneric" => ("S4 classes", "an S4 generic", "methods"),
-        "setMethod" => ("S4 classes", "an S4 method", "methods"),
-        "setValidity" => ("S4 classes", "an S4 validity check", "methods"),
-        "setRefClass" => ("Reference Classes", "a Reference Class", "methods"),
-        "R6Class" => ("R6 classes", "an R6 class", "R6"),
-        _ => return None,
-    })
+    match package {
+        Some(_) => always.extend(found),
+        None => unless_redefined.extend(
+            found
+                .into_iter()
+                .map(|diagnostic| (function.clone(), diagnostic)),
+        ),
+    }
 }
 
 fn trailing_comma_lint(

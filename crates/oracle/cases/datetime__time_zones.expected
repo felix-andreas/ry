@@ -1,0 +1,69 @@
+[stdout]
+| [1] "2024-03-31 12:00:00 CEST"
+| [1] 1711879200
+| attr(,"tzone")
+| [1] "Europe/Berlin"
+| [1] "2024-03-31 12:00:00 CEST +0200"
+| List of 11
+|  $ sec   : num 0
+|  $ min   : int 0
+|  $ hour  : int 12
+|  $ mday  : int 31
+|  $ mon   : int 2
+|  $ year  : int 124
+|  $ wday  : int 0
+|  $ yday  : int 90
+|  $ isdst : int 1
+|  $ zone  : chr "CEST"
+|  $ gmtoff: int 7200
+|  - attr(*, "tzone")= chr [1:3] "Europe/Berlin" "CET" "CEST"
+|  - attr(*, "balanced")= logi TRUE
+| $names
+|  [1] "sec"    "min"    "hour"   "mday"   "mon"    "year"   "wday"   "yday"  
+|  [9] "isdst"  "zone"   "gmtoff"
+| 
+| $class
+| [1] "POSIXlt" "POSIXt" 
+| 
+| $tzone
+| [1] "Europe/Berlin" "CET"           "CEST"         
+| 
+| $balanced
+| [1] TRUE
+| 
+| [1] "2024-01-15 08:30:00 EST"
+| [1] 1705325400
+| attr(,"tzone")
+| [1] "America/New_York"
+| [1] "2024-01-15 22:30:00 JST"
+| [1] "2024-01-15 13:30:00 UTC"
+| [1] "2024-03-10 01:30:00 EST"
+| [1] "2024-11-03 01:30:00 EDT"
+| [1] "2024-03-09 12:00:00 EST" "2024-03-10 13:00:00 EDT"
+| [3] "2024-03-11 13:00:00 EDT"
+| [1] "2024-06-01 AEST"
+| [1] "Australia/Melbourne" "AEST"                "AEDT"               
+| [1] "UTC"
+| [1] "Asia/Kolkata" "IST"          "+0630"       
+| [1] "2020-07-04 10:00:00 CDT"
+| [1] 1593874800
+| attr(,"tzone")
+| [1] ""
+| [1] "America/Chicago" "CST"             "CDT"            
+| [1] "1969-12-31 18:00:00 CST"
+| [1] "2020-12-25 18:00:00 GMT"
+| [1] 1595696400
+| [1] "2021-05-05 05:05:05 EDT"
+| [1] "2024-03-31 13:00:00 CEST"
+| [1] "2024-10-27 CET"
+| [1] "2024-01-02"
+| [1] "2024-01-01"
+| Time difference of 23 hours
+| [1] "2024-07-01 12:00:00 CEST"
+| [1] "2024-07-01 12:00:00 Nowhere"
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

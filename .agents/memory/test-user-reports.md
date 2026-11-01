@@ -516,3 +516,17 @@ mistakes on purpose, and read the diagnostics. Four findings were small enough t
   not `externalptr` ``), because the boundary check mapped any `{...}` type to list storage. A frame is
   an external pointer, so `mask_of` now leaves it to the checker (`annotations.rs`, one test in
   `test_repl_e2e.rs`).
+
+## The developer-workflow round
+
+Driven on a three-file package with a record type, a tag alias, `match`, stdlib calls and a
+`tests/` script.
+
+- Verified clean: `ry check` across files, `ry fmt`, strict mode on a package (`ry check` and
+  `ry load` both refuse), `ry load` on both runtimes, console reload after an edit, and the LSP's
+  hover, goto-definition, references, rename across files, workspace symbols, completion of
+  library names and record fields, and inlay hints.
+- The loading guide did not say that a package using ry syntax (tags, `match`, records) cannot load
+  on GNU R. It does now.
+- The console's editor needs a terminal that answers the cursor-position query (`ESC [6n`), so
+  scripted driving of the editor needs a pty; piped stdin is read directly and evaluates.

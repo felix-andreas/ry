@@ -1883,28 +1883,8 @@ fn parse_hex_magnitude(text: &str) -> Option<f64> {
 /// The bytes inside a file written by `saveRDS` or `save`, which may be gzip, bzip2 or xz
 /// compressed, or not compressed at all.
 pub fn decompress(bytes: &[u8]) -> ApiResult<Cow<'_, [u8]>> {
-    let failed =
-        |what: &str, problem: String| error(format!("cannot decompress {what} data: {problem}"));
-    if bytes.starts_with(&[0x1F, 0x8B]) {
-        let mut output = Vec::new();
-        flate2::read::MultiGzDecoder::new(bytes)
-            .read_to_end(&mut output)
-            .map_err(|problem| failed("gzip", problem.to_string()))?;
-        Ok(Cow::Owned(output))
-    } else if bytes.starts_with(b"BZh") {
-        let mut output = Vec::new();
-        bzip2_rs::DecoderReader::new(bytes)
-            .read_to_end(&mut output)
-            .map_err(|problem| failed("bzip2", problem.to_string()))?;
-        Ok(Cow::Owned(output))
-    } else if bytes.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
-        let mut output = Vec::new();
-        lzma_rs::xz_decompress(&mut &bytes[..], &mut output)
-            .map_err(|problem| failed("xz", problem.to_string()))?;
-        Ok(Cow::Owned(output))
-    } else {
-        Ok(Cow::Borrowed(bytes))
-    }
+    interp::connections::decompress(bytes)
+        .map_err(|problem| error(format!("cannot decompress data: {problem}")))
 }
 
 /// `readRDS`: the object in a file `saveRDS` wrote. The result is rooted in the current handle
@@ -1975,41 +1955,11 @@ pub fn lazyload_decompress(
     if compression == LazyLoadCompression::None {
         return Ok(Cow::Borrowed(entry));
     }
-    let corrupt = |what: &str| error(format!("lazy-load database entry is corrupt: {what}"));
-    let (size, body) = entry
-        .split_first_chunk::<4>()
-        .ok_or_else(|| corrupt("too short"))?;
-    let size = u32::from_be_bytes(*size) as usize;
-    let (method, data) = match compression {
-        LazyLoadCompression::Typed => {
-            let (&method, data) = body.split_first().ok_or_else(|| corrupt("too short"))?;
-            (method, data)
-        }
-        _ => (b'1', body),
+    let kind = match compression {
+        LazyLoadCompression::Typed => 2,
+        _ => 1,
     };
-    let mut output = Vec::with_capacity(size.min(64 << 20));
-    let outcome = match method {
-        b'1' => flate2::read::ZlibDecoder::new(data)
-            .read_to_end(&mut output)
-            .map(drop)
-            .map_err(|problem| problem.to_string()),
-        b'2' => bzip2_rs::DecoderReader::new(data)
-            .read_to_end(&mut output)
-            .map(drop)
-            .map_err(|problem| problem.to_string()),
-        b'Z' => lzma_rs::lzma2_decompress(&mut &data[..], &mut output)
-            .map_err(|problem| problem.to_string()),
-        b'0' => {
-            output.extend_from_slice(data);
-            Ok(())
-        }
-        other => Err(format!("unknown compression type {other:#04x}")),
-    };
-    outcome.map_err(|problem: String| corrupt(&problem))?;
-    if output.len() != size {
-        return Err(corrupt("its length does not match"));
-    }
-    Ok(Cow::Owned(output))
+    interp::serialize::decompress_record(entry, kind).map(Cow::Owned)
 }
 
 // The C API.

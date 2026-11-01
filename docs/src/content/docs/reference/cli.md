@@ -53,7 +53,7 @@ are in [Formatting rules](/reference/formatting-rules).
 `--experimental-features range_formatting` lets the server format a selection instead of the whole
 file.
 
-`ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
+With standard input piped (`echo '1 + 1' | ry repl`), the console skips the editor, the prompt and the startup banner, evaluates each line, prints the result, and exits at the end of input, as `R --no-echo` does, except that it keeps going after an error. `ry repl --keybindings vi` switches the console to vi keys, and `ry repl -f setup.R` runs a script
 before the first prompt. [The console guide](/guides/console) describes what its completion knows.
 Started inside an R package, `ry repl` [loads it](/guides/loading-packages) and reloads what changed
 before each command; `--no-load` turns that off. `ry repl --runtime ry` (or `RY_RUNTIME=ry`) runs
@@ -75,7 +75,9 @@ must be installed, but no GNU R code runs. Unlike on GNU R, it also turns [inlin
 annotations](/type-checking/inline-annotations#running-annotated-code) into checks at function
 boundaries. This runtime is under construction: a script that calls
 something it lacks stops with an error naming it, such as a missing `.Internal` or a native routine
-of a default package. Graphics devices open and keep their parameters, but they draw nothing.
+of a default package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which
+are written when the device closes or the script ends; `jpeg` and `postscript` devices open but
+write no image yet.
 
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
