@@ -2429,6 +2429,9 @@ unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
                 };
             }
         }
+        SexpType::List if test != NaTest::Na => {
+            return Err(call.error("default method not implemented for type 'list'"));
+        }
         SexpType::List => {
             for index in 0..count {
                 let element = operand.element(index);

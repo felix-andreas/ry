@@ -75,9 +75,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("dataviewer", |call| {
         Err(call.error("View() cannot be used non-interactively"))
     }),
-    ("edit", |call| {
-        Err(call.error("edit() cannot be used non-interactively"))
-    }),
+    ("edit", |call| unsafe { edit(call) }),
     ("fileedit", |call| {
         Err(call.error("file.edit() cannot be used non-interactively"))
     }),
@@ -85,6 +83,35 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
         Err(call.error("select.list() cannot be used non-interactively"))
     }),
 ];
+
+/// `edit(name, file, title, editor)`: writes the object's deparse to the file, runs the editor
+/// on it, and returns what the file then evaluates to. Nothing here needs a console, so an
+/// editor such as `cat` works in a script, as in GNU R.
+const EDIT: &str = r#"
+if (!nzchar(file)) file <- tempfile(fileext = ".R")
+if (!is.null(name) || !file.exists(file)) {
+  control <- c("keepInteger", "showAttributes", "keepNA", "useSource")
+  writeLines(if (is.null(name)) character() else deparse(name, control = control), file)
+}
+if (system(paste(editor, shQuote(file))) != 0L)
+  stop(sprintf("problem with running editor %s", editor), call. = FALSE)
+expressions <- tryCatch(parse(file), error = function(failure) {
+  line <- regmatches(conditionMessage(failure), regexpr("(?<=:)[0-9]+(?=:)", conditionMessage(failure), perl = TRUE))
+  stop(sprintf("an error occurred on line %s\n use a command like\n x <- edit()\n to recover", line), call. = FALSE)
+})
+value <- NULL
+for (expression in expressions) value <- eval(expression, globalenv())
+if (is.function(value) && is.function(name)) environment(value) <- environment(name)
+value
+"#;
+
+unsafe fn edit(call: &NativeCall<'_>) -> R<Sexp> {
+    let env = values::new_env(values::base_namespace())?;
+    for (index, name) in ["name", "file", "title", "editor"].into_iter().enumerate() {
+        crate::heap().define(env, values::install(name)?, call.arg(index))?;
+    }
+    crate::session::eval_text(EDIT, env)
+}
 
 unsafe fn no_sockets(_: &NativeCall<'_>) -> R<Sexp> {
     Err(error("sockets are not supported in ry yet"))

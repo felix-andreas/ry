@@ -1146,8 +1146,10 @@ pub unsafe extern "C" fn ry_run(
         outcome = interp::session::run_text(input, "<input>");
     }
     if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
-        outcome = match std::fs::read_to_string(path) {
-            Ok(text) => interp::session::run_text(&text, path),
+        outcome = match std::fs::read(path) {
+            // GNU R reads a script's bytes in the native encoding without checking them, so a
+            // Latin-1 comment in a UTF-8 session is no reason to refuse the file.
+            Ok(bytes) => interp::session::run_text(&String::from_utf8_lossy(&bytes), path),
             Err(failure) => {
                 let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
                 crate::boundary::write_console(message.as_bytes(), true);

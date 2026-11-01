@@ -269,7 +269,7 @@ impl Deparser {
         }
         // An expression vector written from its source text shows none of its attributes.
         let attributes = self.opts & options::SHOW_ATTRIBUTES != 0
-            && has_shown_attributes(object)
+            && has_shown_attributes(object, self.opts & options::NICE_NAMES != 0)
             && self.expression_srcrefs(object).is_none();
         if attributes {
             self.print("structure(");
@@ -1344,7 +1344,7 @@ unsafe fn s4_parts(object: Sexp) -> Option<S4Parts> {
     Some(S4Parts { class: class_name, slots, data })
 }
 
-unsafe fn has_shown_attributes(object: Sexp) -> bool {
+unsafe fn has_shown_attributes(object: Sexp, nice_names: bool) -> bool {
     if matches!(object.kind(), SexpType::Language | SexpType::Symbol | SexpType::Environment | SexpType::Closure) {
         return false;
     }
@@ -1355,7 +1355,7 @@ unsafe fn has_shown_attributes(object: Sexp) -> bool {
             cell = cell.cdr();
             continue;
         }
-        if tag != symbols().names || !nice_names_ok(object) {
+        if tag != symbols().names || !nice_names || !nice_names_ok(object) {
             return true;
         }
         cell = cell.cdr();
