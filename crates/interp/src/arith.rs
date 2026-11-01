@@ -222,9 +222,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("lchoose", 2, |call| unsafe { math2(call, rmath::lchoose) }),
     internal("beta", 2, |call| unsafe { math2(call, rmath::beta) }),
     internal("lbeta", 2, |call| unsafe { math2(call, rmath::lbeta) }),
-    internal("bitwiseAnd", 2, |call| unsafe { bitwise(call, |a, b| a & b) }),
-    internal("bitwiseOr", 2, |call| unsafe { bitwise(call, |a, b| a | b) }),
-    internal("bitwiseXor", 2, |call| unsafe { bitwise(call, |a, b| a ^ b) }),
+    internal("bitwiseAnd", 2, |call| unsafe {
+        bitwise(call, |a, b| a & b)
+    }),
+    internal("bitwiseOr", 2, |call| unsafe {
+        bitwise(call, |a, b| a | b)
+    }),
+    internal("bitwiseXor", 2, |call| unsafe {
+        bitwise(call, |a, b| a ^ b)
+    }),
     internal("bitwiseNot", 1, do_bitw_not),
     internal("bitwiseShiftL", 2, |call| unsafe {
         bitwise(call, |a, b| ((a as u32) << (b & 31)) as i32)
@@ -882,7 +888,11 @@ pub fn power(base: f64, exponent: f64) -> f64 {
         };
     }
     if base.is_finite() && exponent.is_finite() {
-        return if exponent == 2.0 { base * base } else { base.powf(exponent) };
+        return if exponent == 2.0 {
+            base * base
+        } else {
+            base.powf(exponent)
+        };
     }
     if base.is_nan() || exponent.is_nan() {
         // GNU R's result carries the exponent's payload when both are NaN, so `NA^NaN` is
@@ -905,7 +915,11 @@ pub fn power(base: f64, exponent: f64) -> f64 {
         }
     }
     if exponent.is_infinite() && base >= 0.0 {
-        let grows = if exponent > 0.0 { base >= 1.0 } else { base < 1.0 };
+        let grows = if exponent > 0.0 {
+            base >= 1.0
+        } else {
+            base < 1.0
+        };
         return if grows { f64::INFINITY } else { 0.0 };
     }
     f64::NAN
@@ -1009,10 +1023,20 @@ fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
     let real = ac - bd;
     let imaginary = ad + bc;
     if !(real.is_nan() && imaginary.is_nan()) {
-        return Rcomplex { r: real, i: imaginary };
+        return Rcomplex {
+            r: real,
+            i: imaginary,
+        };
     }
-    let box_infinity = |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
-    let zero_nan = |value: f64| if value.is_nan() { 0.0f64.copysign(value) } else { value };
+    let box_infinity =
+        |value: f64| (if value.is_infinite() { 1.0f64 } else { 0.0 }).copysign(value);
+    let zero_nan = |value: f64| {
+        if value.is_nan() {
+            0.0f64.copysign(value)
+        } else {
+            value
+        }
+    };
     let mut recalculate = false;
     if a.is_infinite() || b.is_infinite() {
         (a, b) = (box_infinity(a), box_infinity(b));
@@ -1029,7 +1053,10 @@ fn complex_multiply(x: Rcomplex, y: Rcomplex) -> Rcomplex {
         recalculate = true;
     }
     if !recalculate {
-        return Rcomplex { r: real, i: imaginary };
+        return Rcomplex {
+            r: real,
+            i: imaginary,
+        };
     }
     Rcomplex {
         r: f64::INFINITY * (a * c - b * d),
@@ -1165,7 +1192,8 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     }
     let left = values::materialize(comparable(call.arg(0))?)?;
     let right = values::materialize(comparable(call.arg(1))?)?;
-    let allowed = |value: Sexp| value.kind().is_atomic() || value.kind() == SexpType::List || value == nil();
+    let allowed =
+        |value: Sexp| value.kind().is_atomic() || value.kind() == SexpType::List || value == nil();
     if !allowed(left) || !allowed(right) {
         return Err(call.error(format!(
             "comparison ({}) is possible only for atomic and list types",
@@ -1178,7 +1206,13 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let result = alloc(SexpType::Logical, count)?;
     // A list operand takes the other operand's type, element by element, as GNU R's `relop`
     // coerces it; two lists have no common type.
-    let operand_kind = |value: Sexp| if value == nil() { SexpType::Logical } else { value.kind() };
+    let operand_kind = |value: Sexp| {
+        if value == nil() {
+            SexpType::Logical
+        } else {
+            value.kind()
+        }
+    };
     let kind = match (operand_kind(left), operand_kind(right)) {
         (SexpType::List, SexpType::List) => {
             return Err(call.error("comparison of these types is not implemented"));
@@ -1203,7 +1237,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 {
                     NA_LOGICAL
                 } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
-                    comparison.holds(if a == b {
+                    comparison.holds(if values::same_string(a, b) {
                         std::cmp::Ordering::Equal
                     } else {
                         std::cmp::Ordering::Less
@@ -1624,7 +1658,10 @@ fn times_minus_i(z: Rcomplex) -> Rcomplex {
 unsafe fn complex_tan(z: Rcomplex) -> Rcomplex {
     let result = ctan(z);
     if z.i.is_finite() && z.i.abs() > 25.0 {
-        return Rcomplex { r: 0.0, i: if z.i > 0.0 { 1.0 } else { -1.0 } };
+        return Rcomplex {
+            r: 0.0,
+            i: if z.i > 0.0 { 1.0 } else { -1.0 },
+        };
     }
     result
 }
@@ -1640,7 +1677,10 @@ unsafe fn complex_asin(z: Rcomplex) -> Rcomplex {
         if x > 1.0 {
             imaginary = -imaginary;
         }
-        return Rcomplex { r: (t1 - t2).asin(), i: imaginary };
+        return Rcomplex {
+            r: (t1 - t2).asin(),
+            i: imaginary,
+        };
     }
     casin(z)
 }
@@ -1648,7 +1688,10 @@ unsafe fn complex_asin(z: Rcomplex) -> Rcomplex {
 unsafe fn complex_acos(z: Rcomplex) -> Rcomplex {
     if z.i == 0.0 && z.r.abs() > 1.0 {
         let asin = complex_asin(z);
-        return Rcomplex { r: std::f64::consts::FRAC_PI_2 - asin.r, i: -asin.i };
+        return Rcomplex {
+            r: std::f64::consts::FRAC_PI_2 - asin.r,
+            i: -asin.i,
+        };
     }
     cacos(z)
 }
@@ -1656,9 +1699,16 @@ unsafe fn complex_acos(z: Rcomplex) -> Rcomplex {
 unsafe fn complex_atan(z: Rcomplex) -> Rcomplex {
     if z.r == 0.0 && z.i.abs() > 1.0 {
         let y = z.i;
-        let real = if y > 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 };
+        let real = if y > 0.0 {
+            std::f64::consts::FRAC_PI_2
+        } else {
+            -std::f64::consts::FRAC_PI_2
+        };
         let imaginary = 0.25 * (((1.0 + y) * (1.0 + y)) / ((1.0 - y) * (1.0 - y))).ln();
-        return Rcomplex { r: real, i: imaginary };
+        return Rcomplex {
+            r: real,
+            i: imaginary,
+        };
     }
     catan(z)
 }
@@ -1770,9 +1820,15 @@ fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
     let larger = z.r.abs().max(z.i.abs());
     let decimals = digits.max(1) - 1 - larger.log10().floor() as i32;
     if z.r == 0.0 || z.i == 0.0 || !larger.is_finite() || decimals > 308 {
-        return Rcomplex { r: signif_digits(z.r, digits), i: signif_digits(z.i, digits) };
+        return Rcomplex {
+            r: signif_digits(z.r, digits),
+            i: signif_digits(z.i, digits),
+        };
     }
-    Rcomplex { r: round_digits(z.r, decimals), i: round_digits(z.i, decimals) }
+    Rcomplex {
+        r: round_digits(z.r, decimals),
+        i: round_digits(z.i, decimals),
+    }
 }
 
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
@@ -2043,9 +2099,9 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
     }
     // `NULL` contributes nothing, and it has no elements to read.
     let items: Vec<Sexp> = items.into_iter().filter(|item| *item != nil()).collect();
-    let kind = items
-        .iter()
-        .fold(SexpType::Logical, |kind, item| coerce::higher_type(kind, item.kind()));
+    let kind = items.iter().fold(SexpType::Logical, |kind, item| {
+        coerce::higher_type(kind, item.kind())
+    });
     match function {
         Summary::Sum => {
             if kind == SexpType::Complex {
@@ -2897,7 +2953,10 @@ unsafe fn do_atan2(call: &Call<'_>) -> R<Sexp> {
         return math2(call, f64::atan2);
     }
     let numeric = |kind| {
-        matches!(kind, SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::Complex)
+        matches!(
+            kind,
+            SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::Complex
+        )
     };
     if !numeric(left.kind()) || !numeric(right.kind()) {
         return Err(call.error("non-numeric argument to mathematical function"));
@@ -2915,10 +2974,16 @@ unsafe fn do_atan2(call: &Call<'_>) -> R<Sexp> {
             // half-plane, and `atan2(0, 0)` has no value.
             if y.r == 0.0 && y.i == 0.0 {
                 undefined = true;
-                Rcomplex { r: NA_REAL, i: NA_REAL }
+                Rcomplex {
+                    r: NA_REAL,
+                    i: NA_REAL,
+                }
             } else {
                 let half = std::f64::consts::FRAC_PI_2;
-                Rcomplex { r: if y.r < 0.0 { -half } else { half }, i: 0.0 }
+                Rcomplex {
+                    r: if y.r < 0.0 { -half } else { half },
+                    i: 0.0,
+                }
             }
         } else {
             let mut angle = complex_atan(complex_divide(y, x));
@@ -3327,18 +3392,31 @@ unsafe fn do_pack_bits(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_polyroot(call: &Call<'_>) -> R<Sexp> {
     let input = coerce_vector(call.arg(0), SexpType::Complex)?;
     let coefficients: Vec<Rcomplex> = values::complexes(input).to_vec();
-    if coefficients.iter().any(|value| !value.r.is_finite() || !value.i.is_finite()) {
+    if coefficients
+        .iter()
+        .any(|value| !value.r.is_finite() || !value.i.is_finite())
+    {
         return Err(call.error("invalid polynomial coefficient"));
     }
-    let Some(degree) = coefficients.iter().rposition(|value| value.r != 0.0 || value.i != 0.0) else {
+    let Some(degree) = coefficients
+        .iter()
+        .rposition(|value| value.r != 0.0 || value.i != 0.0)
+    else {
         return alloc(SexpType::Complex, 0);
     };
-    let highest_first: Vec<(f64, f64)> =
-        coefficients[..=degree].iter().rev().map(|value| (value.r, value.i)).collect();
-    let roots = JenkinsTraub::roots(&highest_first).ok_or_else(|| call.error("root finding code failed"))?;
+    let highest_first: Vec<(f64, f64)> = coefficients[..=degree]
+        .iter()
+        .rev()
+        .map(|value| (value.r, value.i))
+        .collect();
+    let roots = JenkinsTraub::roots(&highest_first)
+        .ok_or_else(|| call.error("root finding code failed"))?;
     let result = alloc(SexpType::Complex, roots.len())?;
     for (slot, root) in values::complexes_mut(result).iter_mut().zip(roots) {
-        *slot = Rcomplex { r: root.0, i: root.1 };
+        *slot = Rcomplex {
+            r: root.0,
+            i: root.1,
+        };
     }
     Ok(result)
 }
@@ -3390,8 +3468,12 @@ impl JenkinsTraub {
             }
         }
         // The shifts start at 45 degrees below the real axis and rotate by 94 degrees each time.
-        let (cos_rotation, sin_rotation) = (-0.069_756_473_744_125_3_f64, 0.997_564_050_259_824_2_f64);
-        let mut direction = (std::f64::consts::FRAC_1_SQRT_2, -std::f64::consts::FRAC_1_SQRT_2);
+        let (cos_rotation, sin_rotation) =
+            (-0.069_756_473_744_125_3_f64, 0.997_564_050_259_824_2_f64);
+        let mut direction = (
+            std::f64::consts::FRAC_1_SQRT_2,
+            -std::f64::consts::FRAC_1_SQRT_2,
+        );
         while state.p.len() > 2 {
             let moduli: Vec<f64> = state.p.iter().map(|value| value.0.hypot(value.1)).collect();
             let bound = jt_cauchy(&moduli);
@@ -3426,7 +3508,10 @@ impl JenkinsTraub {
         let n = count - 1;
         for index in 0..n {
             let weight = (count - index - 1) as f64;
-            self.h[index] = (weight * self.p[index].0 / n as f64, weight * self.p[index].1 / n as f64);
+            self.h[index] = (
+                weight * self.p[index].0 / n as f64,
+                weight * self.p[index].1 / n as f64,
+            );
         }
         for _ in 0..iterations {
             let last_h = self.h[n - 1];
@@ -3567,7 +3652,11 @@ impl JenkinsTraub {
                 )
             };
         }
-        self.h[0] = if h_vanishes { (0.0, 0.0) } else { self.quotient_p[0] };
+        self.h[0] = if h_vanishes {
+            (0.0, 0.0)
+        } else {
+            self.quotient_p[0]
+        };
     }
 }
 
@@ -3609,7 +3698,10 @@ fn jt_cauchy(moduli: &[f64]) -> f64 {
     }
     loop {
         let candidate = x * 0.1;
-        let value = terms.iter().skip(1).fold(terms[0], |sum, term| sum * candidate + term);
+        let value = terms
+            .iter()
+            .skip(1)
+            .fold(terms[0], |sum, term| sum * candidate + term);
         if value <= 0.0 {
             break;
         }
@@ -3623,7 +3715,9 @@ fn jt_cauchy(moduli: &[f64]) -> f64 {
             partial[index] = partial[index - 1] * x + terms[index];
         }
         let value = partial[n];
-        let derivative = partial[1..n].iter().fold(partial[0], |sum, term| sum * x + term);
+        let derivative = partial[1..n]
+            .iter()
+            .fold(partial[0], |sum, term| sum * x + term);
         step = value / derivative;
         x -= step;
     }
@@ -3636,7 +3730,11 @@ fn jt_scale(moduli: &[f64]) -> f64 {
     let high = f64::MAX.sqrt();
     let low = f64::MIN_POSITIVE / JT_ETA;
     let largest = moduli.iter().copied().fold(0.0, f64::max);
-    let smallest = moduli.iter().copied().filter(|value| *value != 0.0).fold(f64::MAX, f64::min);
+    let smallest = moduli
+        .iter()
+        .copied()
+        .filter(|value| *value != 0.0)
+        .fold(f64::MAX, f64::min);
     if smallest >= low && largest <= high {
         return 1.0;
     }

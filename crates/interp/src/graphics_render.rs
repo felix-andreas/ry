@@ -81,7 +81,9 @@ pub enum Format {
     Svg,
     Png,
     /// `quality` from 1 to 100.
-    Jpeg { quality: u8 },
+    Jpeg {
+        quality: u8,
+    },
     Bmp,
     Tiff,
 }
@@ -101,7 +103,11 @@ pub fn write_pages(
         Format::Pdf => {
             return std::fs::write(file_for_page(file, 1), pdf_document(pages, size, title));
         }
-        Format::Postscript { onefile: true, paper, landscape } => {
+        Format::Postscript {
+            onefile: true,
+            paper,
+            landscape,
+        } => {
             let document = postscript_document(pages, size, paper, landscape, title);
             return std::fs::write(file_for_page(file, 1), document);
         }
@@ -110,14 +116,13 @@ pub fn write_pages(
     for (index, page) in pages.iter().enumerate() {
         let bytes = match format {
             Format::Svg => svg_document(page, size).into_bytes(),
-            Format::Postscript { paper, landscape, .. } => {
-                postscript_document(std::slice::from_ref(page), size, paper, landscape, title)
-                    .into_bytes()
-            }
+            Format::Postscript {
+                paper, landscape, ..
+            } => postscript_document(std::slice::from_ref(page), size, paper, landscape, title)
+                .into_bytes(),
             Format::Png | Format::Jpeg { .. } | Format::Bmp | Format::Tiff => {
-                let pixels = rasterize(page, size, resolution).ok_or_else(|| {
-                    std::io::Error::other("the page is too large to rasterize")
-                })?;
+                let pixels = rasterize(page, size, resolution)
+                    .ok_or_else(|| std::io::Error::other("the page is too large to rasterize"))?;
                 match format {
                     Format::Png => pixels
                         .encode_png()
@@ -209,10 +214,26 @@ fn circle_arcs(centre: [f64; 2], radius: f64) -> ([f64; 2], [[[f64; 2]; 3]; 4]) 
     (
         [x + radius, y],
         [
-            [[x + radius, y + handle], [x + handle, y + radius], [x, y + radius]],
-            [[x - handle, y + radius], [x - radius, y + handle], [x - radius, y]],
-            [[x - radius, y - handle], [x - handle, y - radius], [x, y - radius]],
-            [[x + handle, y - radius], [x + radius, y - handle], [x + radius, y]],
+            [
+                [x + radius, y + handle],
+                [x + handle, y + radius],
+                [x, y + radius],
+            ],
+            [
+                [x - handle, y + radius],
+                [x - radius, y + handle],
+                [x - radius, y],
+            ],
+            [
+                [x - radius, y - handle],
+                [x - handle, y - radius],
+                [x, y - radius],
+            ],
+            [
+                [x + handle, y - radius],
+                [x + radius, y - handle],
+                [x + radius, y],
+            ],
         ],
     )
 }
@@ -338,8 +359,10 @@ fn pdf_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
 }
 
 fn deflate(bytes: &[u8]) -> Vec<u8> {
-    let mut encoder =
-        flate2::write::ZlibEncoder::new(Vec::with_capacity(bytes.len() / 4), flate2::Compression::default());
+    let mut encoder = flate2::write::ZlibEncoder::new(
+        Vec::with_capacity(bytes.len() / 4),
+        flate2::Compression::default(),
+    );
     // Writing into a vector cannot fail.
     match encoder.write_all(bytes).and_then(|()| encoder.finish()) {
         Ok(compressed) => compressed,
@@ -602,7 +625,11 @@ fn postscript_document(
             } else {
                 let x = (paper_width - width) / 2.0;
                 let y = (paper_height - height) / 2.0;
-                (media, [x, y, x + width, y + height], format!("{x:.2} {y:.2} translate\n"))
+                (
+                    media,
+                    [x, y, x + width, y + height],
+                    format!("{x:.2} {y:.2} translate\n"),
+                )
             }
         }
     };
@@ -640,7 +667,10 @@ fn postscript_page(out: &mut String, page: &Page) {
     let pt = |value: f64| value * POINTS_PER_INCH;
     if alpha(page.background) > 0 {
         let [red, green, blue, _] = channels(page.background);
-        out.push_str(&format!("{} setrgbcolor 0 0 10000 10000 rectfill\n", pdf_rgb(red, green, blue)));
+        out.push_str(&format!(
+            "{} setrgbcolor 0 0 10000 10000 rectfill\n",
+            pdf_rgb(red, green, blue)
+        ));
     }
     let mut current_clip: Option<Rect> = None;
     for item in &page.items {
@@ -740,7 +770,10 @@ fn postscript_paint(out: &mut String, fill: Option<Colour>, stroke: Option<&Stro
         let [red, green, blue, _] = channels(fill);
         let keep = if stroke.is_some() { "gsave " } else { "" };
         let restore = if stroke.is_some() { " grestore" } else { "" };
-        out.push_str(&format!("{keep}{} setrgbcolor fill{restore}\n", pdf_rgb(red, green, blue)));
+        out.push_str(&format!(
+            "{keep}{} setrgbcolor fill{restore}\n",
+            pdf_rgb(red, green, blue)
+        ));
     }
     if let Some(stroke) = stroke {
         let [red, green, blue, _] = channels(stroke.colour);
@@ -854,9 +887,21 @@ fn svg_document(page: &Page, size: [f64; 2]) -> String {
                 let (sin, cos) = rotation.to_radians().sin_cos();
                 let tx = x(origin[0] - hadj * width * cos);
                 let ty = y(origin[1] - hadj * width * sin);
-                let weight = if face == 2 || face == 4 { " font-weight=\"bold\"" } else { "" };
-                let style = if face == 3 || face == 4 { " font-style=\"italic\"" } else { "" };
-                let family = if face == 5 { "Symbol" } else { "Helvetica, Arial, sans-serif" };
+                let weight = if face == 2 || face == 4 {
+                    " font-weight=\"bold\""
+                } else {
+                    ""
+                };
+                let style = if face == 3 || face == 4 {
+                    " font-style=\"italic\""
+                } else {
+                    ""
+                };
+                let family = if face == 5 {
+                    "Symbol"
+                } else {
+                    "Helvetica, Arial, sans-serif"
+                };
                 out.push_str(&format!(
                     "<text x=\"{tx:.2}\" y=\"{ty:.2}\" transform=\"rotate({:.2} {tx:.2} {ty:.2})\" \
                      font-family=\"{family}\" font-size=\"{points:.2}\"{weight}{style} {}>{}</text>\n",
@@ -881,7 +926,10 @@ fn svg_paint(attribute: &str, colour: Colour) -> String {
     }
     let mut paint = format!("{attribute}=\"rgb({red},{green},{blue})\"");
     if a < 255 {
-        paint.push_str(&format!(" {attribute}-opacity=\"{:.3}\"", f64::from(a) / 255.0));
+        paint.push_str(&format!(
+            " {attribute}-opacity=\"{:.3}\"",
+            f64::from(a) / 255.0
+        ));
     }
     paint
 }
@@ -945,7 +993,12 @@ fn rasterize(page: &Page, size: [f64; 2], resolution: f64) -> Option<tiny_skia::
                     clip.x1 as f32,
                     clip.y1 as f32,
                 )?;
-                mask.fill_path(&PathBuilder::from_rect(rect), FillRule::Winding, false, to_pixels);
+                mask.fill_path(
+                    &PathBuilder::from_rect(rect),
+                    FillRule::Winding,
+                    false,
+                    to_pixels,
+                );
                 Some(mask)
             });
             match mask {
@@ -963,12 +1016,27 @@ fn rasterize(page: &Page, size: [f64; 2], resolution: f64) -> Option<tiny_skia::
             paint.anti_alias = true;
             paint
         };
-        let draw = |pixmap: &mut Pixmap, path: tiny_skia::Path, fill: Option<Colour>, stroke: Option<&Stroke>| {
+        let draw = |pixmap: &mut Pixmap,
+                    path: tiny_skia::Path,
+                    fill: Option<Colour>,
+                    stroke: Option<&Stroke>| {
             if let Some(fill) = fill.filter(|fill| alpha(*fill) > 0) {
-                pixmap.fill_path(&path, &paint_of(fill), FillRule::Winding, to_pixels, Some(mask));
+                pixmap.fill_path(
+                    &path,
+                    &paint_of(fill),
+                    FillRule::Winding,
+                    to_pixels,
+                    Some(mask),
+                );
             }
             if let Some(stroke) = stroke {
-                pixmap.stroke_path(&path, &paint_of(stroke.colour), &skia_stroke(stroke), to_pixels, Some(mask));
+                pixmap.stroke_path(
+                    &path,
+                    &paint_of(stroke.colour),
+                    &skia_stroke(stroke),
+                    to_pixels,
+                    Some(mask),
+                );
             }
         };
         match &item.shape {
@@ -1061,7 +1129,10 @@ fn text_path(
     let face = raster_font(font)?;
     let units = f64::from(face.units_per_em()?);
     let scale = points / POINTS_PER_INCH / units;
-    let glyphs: Vec<_> = text.chars().map(|character| face.glyph_id(character)).collect();
+    let glyphs: Vec<_> = text
+        .chars()
+        .map(|character| face.glyph_id(character))
+        .collect();
     let width: f64 = glyphs
         .iter()
         .map(|glyph| f64::from(face.h_advance_unscaled(*glyph)))
@@ -1154,10 +1225,14 @@ fn raster_font(font: i32) -> Option<&'static ab_glyph::FontVec> {
         ];
         candidates.map(|names| {
             names.iter().find_map(|name| {
-                ["/usr/share/fonts/truetype", "/usr/share/fonts/TTF", "/usr/share/fonts"]
-                    .iter()
-                    .find_map(|directory| std::fs::read(format!("{directory}/{name}")).ok())
-                    .and_then(|bytes| ab_glyph::FontVec::try_from_vec(bytes).ok())
+                [
+                    "/usr/share/fonts/truetype",
+                    "/usr/share/fonts/TTF",
+                    "/usr/share/fonts",
+                ]
+                .iter()
+                .find_map(|directory| std::fs::read(format!("{directory}/{name}")).ok())
+                .and_then(|bytes| ab_glyph::FontVec::try_from_vec(bytes).ok())
             })
         })
     });
@@ -1186,15 +1261,20 @@ fn rgba_rows(pixmap: &tiny_skia::Pixmap) -> Vec<[u8; 4]> {
 /// pixels are composited on white, since the format has no alpha.
 /// A baseline JFIF file of the page composited on white, since JPEG has no alpha.
 fn jpeg(pixmap: &tiny_skia::Pixmap, quality: u8, resolution: f64) -> std::io::Result<Vec<u8>> {
-    let (Ok(width), Ok(height)) = (u16::try_from(pixmap.width()), u16::try_from(pixmap.height()))
-    else {
+    let (Ok(width), Ok(height)) = (
+        u16::try_from(pixmap.width()),
+        u16::try_from(pixmap.height()),
+    ) else {
         return Err(std::io::Error::other("the page is too large for JPEG"));
     };
     let pixels: Vec<u8> = rgba_rows(pixmap).into_iter().flat_map(on_white).collect();
     let mut bytes = Vec::new();
     let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, quality);
     let density = resolution.round().clamp(1.0, f64::from(u16::MAX)) as u16;
-    encoder.set_density(jpeg_encoder::Density::Inch { x: density, y: density });
+    encoder.set_density(jpeg_encoder::Density::Inch {
+        x: density,
+        y: density,
+    });
     encoder
         .encode(&pixels, width, height, jpeg_encoder::ColorType::Rgb)
         .map_err(|failure| std::io::Error::other(failure.to_string()))?;

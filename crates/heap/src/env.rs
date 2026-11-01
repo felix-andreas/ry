@@ -61,7 +61,11 @@ impl Frame {
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
     /// positive).
     pub fn set_hashed(&mut self, size: i32) {
-        self.hash_size = if size > 0 { size as u32 } else { HASH_MINIMUM_SIZE };
+        self.hash_size = if size > 0 {
+            size as u32
+        } else {
+            HASH_MINIMUM_SIZE
+        };
     }
 
     /// Marks every cell bound so far as a closure formal.
@@ -79,17 +83,61 @@ impl Frame {
             let (formals, locals) = self.cells.split_at(formals);
             return locals.iter().rev().chain(formals).copied().collect();
         }
-        // GNU R prepends a new binding to its bucket. It also grows the table as it fills, by a
-        // rule not reproduced here, so a frame with many bindings can list in another order.
-        let size = self.hash_size as usize;
-        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
-        for (position, cell) in self.cells.iter().enumerate() {
-            let hash = unsafe { pjw_hash(cell.car().car().bytes()) } as usize;
-            if let Some(bucket) = buckets.get_mut(hash % size) {
-                bucket.insert(0, position);
+        let (buckets, _) = unsafe { self.hash_buckets() };
+        buckets
+            .iter()
+            .flatten()
+            .map(|&position| self.cells[position])
+            .collect()
+    }
+
+    /// GNU R's hash table for a hashed frame, as positions into the cells, together with the
+    /// table's chain counter, or `None` for an unhashed frame.
+    ///
+    /// The table is replayed from the insertion order. GNU R prepends a new binding to its
+    /// bucket and counts it as a new chain whether or not the bucket was empty. Once that counter
+    /// exceeds 85% of the size, the table grows to `1 + 1.2 * size` buckets, each chain's cells
+    /// move, head first, to the front of their new bucket, and the counter becomes the number of
+    /// non-empty buckets. `env.profile` reports the counter as `nchains`, so it can exceed the
+    /// number of non-empty buckets.
+    ///
+    /// # Safety
+    /// Every cell in the frame must be live, which holds while the environment is reachable.
+    pub unsafe fn hash_table(&self) -> Option<(Vec<Vec<usize>>, usize)> {
+        (self.hash_size != 0).then(|| unsafe { self.hash_buckets() })
+    }
+
+    unsafe fn hash_buckets(&self) -> (Vec<Vec<usize>>, usize) {
+        let hashes: Vec<usize> = self
+            .cells
+            .iter()
+            .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
+            .collect();
+        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); self.hash_size.max(1) as usize];
+        let mut chains = 0usize;
+        for (position, &hash) in hashes.iter().enumerate() {
+            let size = buckets.len();
+            let Some(bucket) = buckets.get_mut(hash % size) else {
+                continue;
+            };
+            bucket.insert(0, position);
+            chains += 1;
+            if chains as f64 > size as f64 * 0.85 {
+                let grown = 1 + (size as f64 * 1.2) as usize;
+                let mut rehashed: Vec<Vec<usize>> = vec![Vec::new(); grown];
+                for &moved in buckets.iter().flatten() {
+                    if let Some(target) = hashes
+                        .get(moved)
+                        .and_then(|hash| rehashed.get_mut(hash % grown))
+                    {
+                        target.insert(0, moved);
+                    }
+                }
+                chains = rehashed.iter().filter(|bucket| !bucket.is_empty()).count();
+                buckets = rehashed;
             }
         }
-        buckets.iter().flatten().map(|&position| self.cells[position]).collect()
+        (buckets, chains)
     }
 
     /// Adds a cell whose symbol the frame does not bind yet.

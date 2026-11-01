@@ -210,6 +210,7 @@ pub(crate) unsafe fn install_all() {
         crate::coerce::BUILTINS,
         crate::subset::BUILTINS,
         crate::strings::BUILTINS,
+        crate::approximate::BUILTINS,
         crate::print::BUILTINS,
         crate::format::BUILTINS,
         crate::frame::BUILTINS,
@@ -244,7 +245,10 @@ pub(crate) unsafe fn install_all() {
             .iter()
             .any(|own| std::ptr::eq(table, *own))
         {
-            register_in(table, *package_ry.get_or_insert_with(|| crate::standard_library::attach()));
+            register_in(
+                table,
+                *package_ry.get_or_insert_with(|| crate::standard_library::attach()),
+            );
         } else {
             register(table);
         }

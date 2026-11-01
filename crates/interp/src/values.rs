@@ -7,8 +7,8 @@ use crate::{
 };
 use heap::{
     Heap, Marker,
-    records::NativeKind,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    records::NativeKind,
     strings::Encoding,
 };
 use std::borrow::Cow;
@@ -343,7 +343,10 @@ pub unsafe fn new_env(enclosure: Sexp) -> R<Sexp> {
 }
 
 pub unsafe fn mkchar(text: &str) -> R<Sexp> {
-    mkchar_bytes(text.as_bytes(), Encoding::Utf8)
+    match unescape_invalid_bytes(text) {
+        Some(bytes) => mkchar_bytes(&bytes, Encoding::Native),
+        None => mkchar_bytes(text.as_bytes(), Encoding::Utf8),
+    }
 }
 
 pub unsafe fn mkchar_bytes(bytes: &[u8], encoding: Encoding) -> R<Sexp> {
@@ -477,7 +480,11 @@ pub unsafe fn named_list(items: &[(&str, Sexp)]) -> R<Sexp> {
 pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
     let mut list = nil();
     for (position, &(tag, value)) in items.iter().enumerate().rev() {
-        let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+        let cell_kind = if position == 0 {
+            kind
+        } else {
+            SexpType::Pairlist
+        };
         list = triple(cell_kind, value, list, tag)?;
     }
     Ok(list)
@@ -591,13 +598,100 @@ pub unsafe fn set_elt(object: Sexp, index: usize, value: Sexp) {
     crate::heap().set_element(object, index, value);
 }
 
-/// A `CHARSXP` as text. Invalid UTF-8 is replaced, which only affects byte-encoded strings.
+/// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
+/// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     let bytes = charsxp.bytes();
     if charsxp.has_gp(gp::LATIN1) {
         return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
     }
-    String::from_utf8_lossy(bytes)
+    escape_invalid_bytes(bytes)
+}
+
+/// Decodes bytes that need not be UTF-8 as text. GNU R keeps a string's bytes as they are, so a
+/// Latin-1 string in a UTF-8 session, or a piece `strsplit(useBytes = TRUE)` cut out of a
+/// character, must survive text processing unchanged. Each byte that is not valid UTF-8 becomes
+/// the private-use character `U+F700 + byte`, which [`mkchar`] and string literals turn back
+/// into the byte. Text that holds those private-use characters itself reads them as the bytes
+/// they stand for.
+pub fn escape_invalid_bytes(bytes: &[u8]) -> Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Cow::Borrowed(text);
+    }
+    let mut text = String::with_capacity(bytes.len() + bytes.len() / 2);
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        for &byte in chunk.invalid() {
+            text.push(char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}'));
+        }
+    }
+    Cow::Owned(text)
+}
+
+/// Decodes bytes as text with every byte past ASCII as its private-use stand-in (see
+/// [`escape_invalid_bytes`]), valid UTF-8 or not, so that text processing sees one character per
+/// byte.
+pub fn escape_high_bytes(bytes: &[u8]) -> Cow<'_, str> {
+    if bytes.is_ascii() {
+        return Cow::Borrowed(std::str::from_utf8(bytes).unwrap_or_default());
+    }
+    Cow::Owned(
+        bytes
+            .iter()
+            .map(|&byte| match byte {
+                0..=0x7F => byte as char,
+                _ => char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}'),
+            })
+            .collect(),
+    )
+}
+
+/// The base of the private-use characters [`escape_invalid_bytes`] maps bytes to.
+const ESCAPED_BYTE_BASE: u32 = 0xF700;
+
+/// The byte `character` stands for, if [`escape_invalid_bytes`] made it from one.
+pub fn escaped_byte(character: char) -> Option<u8> {
+    let code = u32::from(character);
+    (ESCAPED_BYTE_BASE + 0x80..=ESCAPED_BYTE_BASE + 0xFF)
+        .contains(&code)
+        .then(|| (code - ESCAPED_BYTE_BASE) as u8)
+}
+
+/// `text` with every private-use stand-in turned back into its byte, or `None` when it holds
+/// none.
+pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
+    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8.
+    if !text.as_bytes().contains(&0xEF)
+        || !text
+            .chars()
+            .any(|character| escaped_byte(character).is_some())
+    {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len());
+    for character in text.chars() {
+        match escaped_byte(character) {
+            Some(byte) => bytes.push(byte),
+            None => bytes.extend_from_slice(character.encode_utf8(&mut [0u8; 4]).as_bytes()),
+        }
+    }
+    Some(bytes)
+}
+
+/// Whether two `CHARSXP`s hold the same string. The cache keeps one object per bytes and
+/// encoding, so only strings with different encoding marks need a closer look. Those are
+/// compared as text, as GNU R compares them, unless one is marked as bytes, which have no text.
+pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
+    if left == right {
+        return true;
+    }
+    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
+        return false;
+    }
+    if !left.has_gp(gp::LATIN1) && !right.has_gp(gp::LATIN1) {
+        return left.bytes() == right.bytes();
+    }
+    char_str(left) == char_str(right)
 }
 
 /// The text of a symbol's name.
@@ -646,10 +740,7 @@ pub unsafe fn is_function(object: Sexp) -> bool {
 }
 
 pub unsafe fn is_numeric_type(kind: SexpType) -> bool {
-    matches!(
-        kind,
-        SexpType::Logical | SexpType::Integer | SexpType::Real
-    )
+    matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
 }
 
 pub fn is_na_int(value: i32) -> bool {
@@ -844,8 +935,18 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
         return None;
     }
     match dim.kind() {
-        SexpType::Integer => Some(ints(dim).iter().map(|&value| value.max(0) as usize).collect()),
-        SexpType::Real => Some(reals(dim).iter().map(|&value| value.max(0.0) as usize).collect()),
+        SexpType::Integer => Some(
+            ints(dim)
+                .iter()
+                .map(|&value| value.max(0) as usize)
+                .collect(),
+        ),
+        SexpType::Real => Some(
+            reals(dim)
+                .iter()
+                .map(|&value| value.max(0.0) as usize)
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -885,17 +986,29 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 cell.kind(),
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
-                let value = if deep { duplicate(cell.car())? } else { cell.car() };
+                let value = if deep {
+                    duplicate(cell.car())?
+                } else {
+                    cell.car()
+                };
                 items.push((cell.tag(), value, cell.attrib()));
                 cell = cell.cdr();
             }
             let mut list = nil();
             for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
-                let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+                let cell_kind = if position == 0 {
+                    kind
+                } else {
+                    SexpType::Pairlist
+                };
                 list = triple(cell_kind, value, list, tag)?;
                 // The head cell's attributes and flags are the object's, copied below.
                 if position != 0 && attributes != nil() {
-                    let attributes = if deep { duplicate(attributes)? } else { attributes };
+                    let attributes = if deep {
+                        duplicate(attributes)?
+                    } else {
+                        attributes
+                    };
                     heap.set_attrib(list, attributes);
                 }
             }

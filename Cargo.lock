@@ -1784,6 +1784,7 @@ dependencies = [
  "libc",
  "lzma-rust2",
  "regex",
+ "regex-syntax",
  "rowan",
  "rustc-hash 2.1.3",
  "stacker",

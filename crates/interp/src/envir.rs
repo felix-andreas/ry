@@ -75,7 +75,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("detach", 1, do_detach),
     internal("options", -1, do_options).keep_visibility(),
     internal("getOption", 1, do_get_option),
-    builtin("interactive", 0, |_| unsafe { scalar_bool(interp().interactive) }),
+    builtin("interactive", 0, |_| unsafe {
+        scalar_bool(interp().interactive)
+    }),
     internal("getRegisteredNamespace", 1, do_get_registered_namespace),
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
@@ -94,7 +96,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("rapply", 5, do_rapply),
     internal("eapply", 4, do_eapply),
     internal("Filter", -1, |_| unsafe { Ok(nil()) }),
-    internal("env.profile", 1, |_| unsafe { Ok(nil()) }),
+    internal("env.profile", 1, do_env_profile),
     internal("emptyenv", 0, |_| unsafe { Ok(empty_env()) }),
     builtin("...length", 0, do_dots_length),
     builtin("...elt", 1, do_dots_elt).keep_visibility(),
@@ -1186,7 +1188,9 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
         "expressions" => {
             let depth = values::as_integer_scalar(value);
             if !(25..=500_000).contains(&depth) {
-                return Err(error("'expressions' parameter invalid, allowed 25...500000"));
+                return Err(error(
+                    "'expressions' parameter invalid, allowed 25...500000",
+                ));
             }
             scalar_integer(depth)
         }
@@ -1233,7 +1237,10 @@ pub unsafe fn install_default_options() -> R<()> {
         ("verbose", scalar_bool(false)?),
         ("check.bounds", scalar_bool(false)?),
         ("keep.source", scalar_bool(false)?),
-        ("keep.source.pkgs", scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?),
+        (
+            "keep.source.pkgs",
+            scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?,
+        ),
         ("keep.parse.data", scalar_bool(true)?),
         ("keep.parse.data.pkgs", scalar_bool(false)?),
         ("warning.length", scalar_integer(1000)?),
@@ -1518,8 +1525,14 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
             let mut args = Vec::new();
             for (position, &list) in lists.iter().enumerate() {
                 let element = if list.is_object() {
-                    let position_value = values::scalar_integer((index % lengths[position]) as i32 + 1)?;
-                    eval::apply(nil(), subset2, &eval::value_args(&[list, position_value]), call.env)?
+                    let position_value =
+                        values::scalar_integer((index % lengths[position]) as i32 + 1)?;
+                    eval::apply(
+                        nil(),
+                        subset2,
+                        &eval::value_args(&[list, position_value]),
+                        call.env,
+                    )?
                 } else {
                     crate::subset::list_or_vector_element(list, index % lengths[position])?
                 };
@@ -1670,11 +1683,31 @@ unsafe fn do_dots_names(call: &Call<'_>) -> R<Sexp> {
     string_vector(&names)
 }
 
+unsafe fn do_env_profile(call: &Call<'_>) -> R<Sexp> {
+    let env = call.arg(0);
+    if env.kind() != SexpType::Environment {
+        return Err(call.error("argument must be a hashed environment"));
+    }
+    let Some((counts, chains)) = crate::heap().frame_hash_profile(env) else {
+        return Ok(nil());
+    };
+    let counts: Vec<i32> = counts.iter().map(|&count| count as i32).collect();
+    let fields = [
+        ("size", values::scalar_integer(counts.len() as i32)?),
+        ("nchains", values::scalar_integer(chains as i32)?),
+        ("counts", values::integer_vector(&counts)?),
+    ];
+    values::named_list(&fields)
+}
+
 unsafe fn do_formals(call: &Call<'_>) -> R<Sexp> {
     let function = call.arg(0);
     if function.kind() == SexpType::Closure {
         Ok(function.car())
     } else {
+        if !values::is_function(function) {
+            crate::conditions::warning_call(call.call, "argument is not a function")?;
+        }
         Ok(nil())
     }
 }
@@ -1685,7 +1718,7 @@ unsafe fn do_body(call: &Call<'_>) -> R<Sexp> {
         Ok(crate::bytecode::closure_body(function))
     } else {
         if !values::is_function(function) {
-            crate::conditions::warning("argument is not a function")?;
+            crate::conditions::warning_call(call.call, "argument is not a function")?;
         }
         Ok(nil())
     }
@@ -1879,9 +1912,15 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     }
     let package_name = if info.kind() == SexpType::Environment {
         let spec = find_var_in_frame(values::install("spec")?, info)?;
-        values::first_string(spec).map(|text| text.into_owned()).unwrap_or_default()
+        values::first_string(spec)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
     } else {
-        values::first_string(package).map(|text| text.into_owned()).unwrap_or_default()
+        values::first_string(package)
+            .map(|text| text.into_owned())
+            .unwrap_or_default()
     };
-    Err(error(format!("'{name}' is not an exported object from 'namespace:{package_name}'")))
+    Err(error(format!(
+        "'{name}' is not an exported object from 'namespace:{package_name}'"
+    )))
 }

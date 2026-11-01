@@ -23,7 +23,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("unserialize", 2, do_unserialize),
     internal("serialize", -1, do_serialize),
     internal("serializeb", -1, do_serialize),
-    internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
+    internal("lazyLoadDBinsertValue", 5, |call| unsafe {
+        Err(call.error("lazyLoadDBinsertValue is not supported"))
+    }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("loadFromConn2", 3, do_load_from_conn).invisible(),
     internal("saveToConn", 6, do_save_to_conn).invisible(),
@@ -142,7 +144,8 @@ impl Reader<'_> {
     fn string(&mut self, length: usize) -> R<Vec<u8>> {
         if self.format == Format::Ascii {
             let word = self.ascii_word()?;
-            return Ok(crate::lower::unescape_bytes(&word).map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
+            return Ok(crate::lower::unescape_bytes(&word)
+                .map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
         }
         Ok(self.take(length)?.to_vec())
     }
@@ -241,7 +244,8 @@ impl Reader<'_> {
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function = eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                let function =
+                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
                 // GNU R names the object being read when it knows it, else "<unknown>", which
                 // `..getNamespace` compares as a string when the namespace fails to load.
                 let location = values::scalar_string("<unknown>")?;
@@ -742,7 +746,9 @@ impl Writer {
             Format::Xdr => self.bytes.extend_from_slice(&value.to_be_bytes()),
             Format::Binary => self.bytes.extend_from_slice(&value.to_le_bytes()),
             Format::Ascii if value == i32::MIN => self.bytes.extend_from_slice(b"NA\n"),
-            Format::Ascii => self.bytes.extend_from_slice(format!("{value}\n").as_bytes()),
+            Format::Ascii => self
+                .bytes
+                .extend_from_slice(format!("{value}\n").as_bytes()),
         }
     }
 
@@ -782,7 +788,9 @@ impl Writer {
                 b'"' => self.bytes.extend_from_slice(b"\\\""),
                 b'\'' => self.bytes.extend_from_slice(b"\\'"),
                 b'!'..=b'~' => self.bytes.push(byte),
-                _ => self.bytes.extend_from_slice(format!("\\{byte:03o}").as_bytes()),
+                _ => self
+                    .bytes
+                    .extend_from_slice(format!("\\{byte:03o}").as_bytes()),
             }
         }
         self.bytes.push(b'\n');
@@ -794,7 +802,8 @@ impl Writer {
             return;
         }
         for byte in bytes {
-            self.bytes.extend_from_slice(format!("{byte:02x}\n").as_bytes());
+            self.bytes
+                .extend_from_slice(format!("{byte:02x}\n").as_bytes());
         }
     }
 
@@ -1286,7 +1295,13 @@ unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
 
 /// The values bound to `names`, as `(symbol, value)` pairs. Each value stays reachable from
 /// `env`, which keeps it alive.
-unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
+unsafe fn saved_bindings(
+    call: &Call<'_>,
+    names: Sexp,
+    env: Sexp,
+    force: bool,
+    frame_only: bool,
+) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::with_capacity(length(names));
     for index in 0..length(names) {
         let name = values::string_at(names, index).unwrap_or_default();
@@ -1314,20 +1329,31 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
     let compressed = match values::as_integer_scalar(call.arg(1)) {
         1 => from.to_vec(),
         2 => {
-            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         3 => {
             let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         4 => {
             let options = lzma_rust2::XzOptions::with_preset(9);
-            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options).map_err(|failure| call.error(failure.to_string()))?;
-            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
-            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            std::io::Write::write_all(&mut encoder, from)
+                .map_err(|failure| call.error(failure.to_string()))?;
+            encoder
+                .finish()
+                .map_err(|failure| call.error(failure.to_string()))?
         }
         _ => return Err(call.error("invalid 'type' argument")),
     };
@@ -1356,10 +1382,16 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     let mut output = Vec::new();
     let outcome = match kind {
         1 => return raw_vector(from),
-        2 if gzip_header => flate2::read::MultiGzDecoder::new(from).read_to_end(&mut output).map(drop),
+        2 if gzip_header => flate2::read::MultiGzDecoder::new(from)
+            .read_to_end(&mut output)
+            .map(drop),
         2 => ZlibDecoder::new(from).read_to_end(&mut output).map(drop),
-        3 => bzip2::read::MultiBzDecoder::new(from).read_to_end(&mut output).map(drop),
-        4 => lzma_rust2::XzReader::new(from, true).read_to_end(&mut output).map(drop),
+        3 => bzip2::read::MultiBzDecoder::new(from)
+            .read_to_end(&mut output)
+            .map(drop),
+        4 => lzma_rust2::XzReader::new(from, true)
+            .read_to_end(&mut output)
+            .map(drop),
         _ => return Err(call.error("invalid 'type' argument")),
     };
     outcome.map_err(|_| call.error("internal error in memDecompress"))?;
@@ -1399,7 +1431,11 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_serialize(call: &Call<'_>) -> R<Sexp> {
     let selector = values::as_integer_scalar(call.arg(2));
     let format = if call.name() == "serializeb" {
-        if selector == 0 { Format::Binary } else { Format::Xdr }
+        if selector == 0 {
+            Format::Binary
+        } else {
+            Format::Xdr
+        }
     } else {
         match selector {
             1 | 2 => Format::Ascii,

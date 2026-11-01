@@ -180,7 +180,10 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             na_count
         } else if invalid {
             if !allow_na {
-                return Err(error(format!("invalid multibyte string, element {}", index + 1)));
+                return Err(error(format!(
+                    "invalid multibyte string, element {}",
+                    index + 1
+                )));
             }
             NA_INTEGER
         } else {
@@ -335,8 +338,11 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
         return Err(error("non-character argument"));
     }
     let options = pattern_options(false, flag(call.arg(3)), flag(call.arg(2)))?;
+    let use_bytes = flag(call.arg(4));
     let splits: Vec<Option<String>> = if split.kind() == SexpType::String {
-        strings(split)
+        (0..length(split))
+            .map(|index| subject_at(split, index, use_bytes).map(Cow::into_owned))
+            .collect()
     } else {
         Vec::new()
     };
@@ -344,7 +350,7 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
     let count = length(x);
     let result = alloc(SexpType::List, count)?;
     for index in 0..count {
-        let Some(text) = string_at(x, index) else {
+        let Some(text) = subject_at(x, index, use_bytes) else {
             set_elt(result, index, values::scalar_string_charsxp(na_string())?);
             continue;
         };
@@ -1646,7 +1652,8 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
     let value = flag(call.arg(3));
     let invert = flag(call.arg(7));
     let options = pattern_options(flag(call.arg(2)), flag(call.arg(4)), flag(call.arg(5)))?;
-    let pattern = pattern_argument(call.arg(0))?;
+    let use_bytes = flag(call.arg(6));
+    let pattern = pattern_argument(call.arg(0), use_bytes)?;
     if text.kind() != SexpType::String && text != nil() {
         return Err(error("invalid 'text' argument"));
     }
@@ -1661,7 +1668,7 @@ unsafe fn grep(call: &Call<'_>, logical: bool) -> R<Sexp> {
     let matcher = Matcher::compile(&pattern, options)?;
     let mut hits = Vec::with_capacity(count);
     for index in 0..count {
-        let found = match string_at(text, index) {
+        let found = match subject_at(text, index, use_bytes) {
             Some(element) => matcher.find_at(&element, 0)?.is_some(),
             None => false,
         };
@@ -1695,7 +1702,8 @@ unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
     let replacement = call.arg(1);
     let text = call.arg(2);
     let options = pattern_options(flag(call.arg(3)), flag(call.arg(4)), flag(call.arg(5)))?;
-    let pattern = pattern_argument(call.arg(0))?;
+    let use_bytes = flag(call.arg(6));
+    let pattern = pattern_argument(call.arg(0), use_bytes)?;
     if replacement.kind() != SexpType::String || length(replacement) == 0 {
         return Err(error("invalid 'replacement' argument"));
     }
@@ -1718,14 +1726,19 @@ unsafe fn substitute(call: &Call<'_>, global: bool) -> R<Sexp> {
         return Err(error("zero-length pattern"));
     }
     let matcher = Matcher::compile(&pattern, options)?;
-    let replacement = string_at(replacement, 0).map(|text| parse_replacement(&text, options));
+    let replacement =
+        subject_at(replacement, 0, use_bytes).map(|text| parse_replacement(&text, options));
     for index in 0..count {
         let charsxp = text.element(index);
         if charsxp == na_string() {
             set_elt(result, index, na_string());
             continue;
         }
-        let element = values::char_str(charsxp);
+        let element = if use_bytes {
+            values::escape_high_bytes(charsxp.bytes())
+        } else {
+            values::char_str(charsxp)
+        };
         let substituted = match &replacement {
             Some(replacement) => replace(&matcher, &element, replacement, global)?,
             None => matcher.find_at(&element, 0)?.map(|_| String::new()),
@@ -1877,7 +1890,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
     let text = call.arg(1);
     let options = pattern_options(flag(call.arg(2)), flag(call.arg(3)), flag(call.arg(4)))?;
     let use_bytes = flag(call.arg(5));
-    let Some(pattern) = pattern_argument(call.arg(0))? else {
+    let Some(pattern) = pattern_argument(call.arg(0), use_bytes)? else {
         return Err(error("invalid 'pattern' argument"));
     };
     if text.kind() != SexpType::String && text != nil() {
@@ -1895,10 +1908,10 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
     if !global {
         let mut table = MatchTable::new(groups);
         for index in 0..count {
-            match string_at(text, index) {
+            match subject_at(text, index, use_bytes) {
                 None => table.push_na(),
                 Some(element) => match matcher.captures_at(&element, 0)? {
-                    Some(found) => table.push(&element, &found, report.bytes),
+                    Some(found) => table.push(&element, &found),
                     None => table.push_none(),
                 },
             }
@@ -1908,7 +1921,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
     let result = alloc(SexpType::List, count)?;
     for index in 0..count {
         let mut table = MatchTable::new(groups);
-        let Some(element) = string_at(text, index) else {
+        let Some(element) = subject_at(text, index, use_bytes) else {
             set_elt(result, index, na_match()?);
             continue;
         };
@@ -1920,7 +1933,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
             let Some((start, end)) = found.first().copied().flatten() else {
                 break;
             };
-            table.push(&element, &found, report.bytes);
+            table.push(&element, &found);
             position = if start == end {
                 next_boundary(&element, end)
             } else {
@@ -1948,7 +1961,8 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("invalid 'offset' argument"));
     }
     let flag = |index: usize| values::as_logical_scalar(call.arg(index)) == 1;
-    let (ignore_case, fixed, value, all, mut invert) = (flag(3), flag(4), flag(5), flag(6), flag(7));
+    let (ignore_case, fixed, value, all, mut invert) =
+        (flag(3), flag(4), flag(5), flag(6), flag(7));
     if invert && !value {
         warning("argument 'invert = TRUE' will be ignored")?;
         invert = false;
@@ -1964,8 +1978,12 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
     } else {
         let text = translate_regex(&String::from_utf8_lossy(&needle), true);
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
-        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}"))
-            .map_err(|failure| call.error(format!("invalid regular expression '{}': {failure}", String::from_utf8_lossy(&needle))))?;
+        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
+            call.error(format!(
+                "invalid regular expression '{}': {failure}",
+                String::from_utf8_lossy(&needle)
+            ))
+        })?;
         Some(compiled)
     };
     let find = |from: usize| -> Option<(usize, usize)> {
@@ -1973,7 +1991,9 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
             return None;
         }
         match &regex {
-            Some(regex) => regex.find_at(&haystack, from).map(|found| (found.start(), found.end())),
+            Some(regex) => regex
+                .find_at(&haystack, from)
+                .map(|found| (found.start(), found.end())),
             None if needle.is_empty() => Some((from, from)),
             None => haystack[from..]
                 .windows(needle.len())
@@ -2010,7 +2030,10 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
             None => raw(&haystack),
         },
         (true, false) => {
-            let pieces = matches.iter().map(|&(begin, end)| raw(&haystack[begin..end])).collect::<R<Vec<_>>>()?;
+            let pieces = matches
+                .iter()
+                .map(|&(begin, end)| raw(&haystack[begin..end]))
+                .collect::<R<Vec<_>>>()?;
             values::list_vector(&pieces)
         }
         (true, true) => {
@@ -2030,7 +2053,7 @@ unsafe fn do_regexec(call: &Call<'_>) -> R<Sexp> {
     let text = call.arg(1);
     let options = pattern_options(flag(call.arg(2)), false, flag(call.arg(3)))?;
     let use_bytes = flag(call.arg(4));
-    let Some(pattern) = pattern_argument(call.arg(0))? else {
+    let Some(pattern) = pattern_argument(call.arg(0), use_bytes)? else {
         return Err(error("invalid 'pattern' argument"));
     };
     if text.kind() != SexpType::String && text != nil() {
@@ -2041,7 +2064,7 @@ unsafe fn do_regexec(call: &Call<'_>) -> R<Sexp> {
     let count = length(text);
     let result = alloc(SexpType::List, count)?;
     for index in 0..count {
-        let Some(element) = string_at(text, index) else {
+        let Some(element) = subject_at(text, index, use_bytes) else {
             set_elt(result, index, na_match()?);
             continue;
         };
@@ -2050,9 +2073,8 @@ unsafe fn do_regexec(call: &Call<'_>) -> R<Sexp> {
                 .iter()
                 .map(|group| match group {
                     Some((start, end)) => (
-                        position_of(&element, *start, report.bytes) + 1,
-                        position_of(&element, *end, report.bytes)
-                            - position_of(&element, *start, report.bytes),
+                        position_of(&element, *start) + 1,
+                        position_of(&element, *end) - position_of(&element, *start),
                     ),
                     None => (0, 0),
                 })
@@ -2134,11 +2156,11 @@ impl MatchTable {
         }
     }
 
-    fn push(&mut self, text: &str, found: &[Option<(usize, usize)>], bytes: bool) {
+    fn push(&mut self, text: &str, found: &[Option<(usize, usize)>]) {
         let span = |group: Option<&Option<(usize, usize)>>| match group {
             Some(Some((start, end))) => {
-                let first = position_of(text, *start, bytes);
-                (first + 1, position_of(text, *end, bytes) - first)
+                let first = position_of(text, *start);
+                (first + 1, position_of(text, *end) - first)
             }
             _ => (0, 0),
         };
@@ -2216,8 +2238,10 @@ unsafe fn na_match() -> R<Sexp> {
 }
 
 /// The 0-based position of byte `offset` of `text`, in characters unless `bytes`.
-fn position_of(text: &str, offset: usize, bytes: bool) -> i32 {
-    if bytes || text.is_ascii() {
+/// The character position of byte `offset` in `text`. With `useBytes = TRUE` the text holds one
+/// character per byte (see [`subject_at`]), so this counts bytes then.
+fn position_of(text: &str, offset: usize) -> i32 {
+    if text.is_ascii() {
         offset as i32
     } else {
         text[..offset].chars().count() as i32
@@ -2247,15 +2271,35 @@ unsafe fn pattern_options(ignore_case: bool, perl: bool, fixed: bool) -> R<Patte
     })
 }
 
-/// The pattern's first element, or `None` for `NA`.
-unsafe fn pattern_argument(pattern: Sexp) -> R<Option<String>> {
+/// The pattern's first element, or `None` for `NA`, read as [`subject_at`] reads text.
+unsafe fn pattern_argument(pattern: Sexp, bytes: bool) -> R<Option<String>> {
     if pattern.kind() != SexpType::String || length(pattern) == 0 {
         return Err(error("invalid 'pattern' argument"));
     }
     if length(pattern) > 1 {
         warning("argument 'pattern' has length > 1 and only the first element will be used")?;
     }
-    Ok(string_at(pattern, 0).map(Cow::into_owned))
+    Ok(subject_at(pattern, 0, bytes).map(Cow::into_owned))
+}
+
+/// Element `index` of a character vector as the regular expression engine sees it, or `None`
+/// for `NA`. With `useBytes = TRUE` each byte past ASCII becomes a character of its own (see
+/// [`values::escape_high_bytes`]), so the engine matches bytes: `.` takes one byte, case folding
+/// stops at ASCII, and a pattern byte can match inside a multibyte character. Strings made from
+/// the result turn those characters back into the bytes.
+pub(crate) unsafe fn subject_at<'a>(
+    object: Sexp,
+    index: usize,
+    bytes: bool,
+) -> Option<Cow<'a, str>> {
+    if !bytes {
+        return string_at(object, index);
+    }
+    if object.kind() != SexpType::String || index >= length(object) {
+        return None;
+    }
+    let charsxp = object.element(index);
+    (charsxp != na_string()).then(|| values::escape_high_bytes(charsxp.bytes()))
 }
 
 /// The byte ranges of a match (group 0) and of its capture groups, `None` for a group that took
@@ -2376,12 +2420,12 @@ fn matching_error(failure: fancy_regex::Error) -> crate::unwind::Unwind {
 
 /// A translated pattern, with the error TRE reports for a pattern it rejects but the engine
 /// would accept.
-struct Translation {
-    pattern: String,
-    problem: Option<&'static str>,
+pub(crate) struct Translation {
+    pub(crate) pattern: String,
+    pub(crate) problem: Option<&'static str>,
 }
 
-fn translate(pattern: &str, syntax: Syntax) -> Translation {
+pub(crate) fn translate(pattern: &str, syntax: Syntax) -> Translation {
     let chars: Vec<char> = pattern.chars().collect();
     let dialect = Dialect {
         syntax,
@@ -2397,7 +2441,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
     let approximate = syntax == Syntax::Extended
         && (0..chars.len()).any(|index| {
-            (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
+            (index == 0 || chars[index - 1] != '\\')
+                && approximate_settings(&chars, index).is_some()
         });
     let mut groups: Vec<usize> = Vec::new();
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
@@ -2433,7 +2478,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
             // TRE reads `(?:...)` as a group that does not capture, and `(?i)` or `(?i:...)` as
             // a case-insensitive region, as PCRE does.
             '(' if syntax == Syntax::Extended && chars.get(index + 1) == Some(&'?') => {
-                let flags_end = (index + 2..chars.len()).find(|&position| !matches!(chars[position], 'i' | '-'));
+                let flags_end = (index + 2..chars.len())
+                    .find(|&position| !matches!(chars[position], 'i' | '-'));
                 match flags_end.map(|position| (position, chars[position])) {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
@@ -2564,7 +2610,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Syntax {
+pub(crate) enum Syntax {
     /// POSIX extended syntax as TRE reads it in a UTF-8 locale.
     Extended,
     Perl,
@@ -2633,6 +2679,20 @@ fn translate_escape(
         return next;
     }
     match (syntax, escaped) {
+        // Without `(*UCP)` PCRE's word boundary looks at ASCII word characters only, and the
+        // engine's own `\b` cannot be limited to ASCII.
+        (Syntax::Perl, 'b') if !dialect.unicode => {
+            output.push_str(&format!(
+                "(?:(?<=[{PERL_WORD}])(?![{PERL_WORD}])|(?<![{PERL_WORD}])(?=[{PERL_WORD}]))"
+            ));
+            next
+        }
+        (Syntax::Perl, 'B') if !dialect.unicode => {
+            output.push_str(&format!(
+                "(?:(?<=[{PERL_WORD}])(?=[{PERL_WORD}])|(?<![{PERL_WORD}])(?![{PERL_WORD}]))"
+            ));
+            next
+        }
         (_, 'b' | 'B' | 'n' | 't' | 'r' | 'f' | 'v' | '1'..='9')
         | (Syntax::Extended, '<' | '>') => {
             output.push('\\');
@@ -3151,7 +3211,7 @@ fn parse_interval(chars: &[char], index: usize, syntax: Syntax) -> Option<(Strin
 }
 
 #[inline]
-unsafe fn flag(value: Sexp) -> bool {
+pub(crate) unsafe fn flag(value: Sexp) -> bool {
     values::as_logical_scalar(value) == 1
 }
 
