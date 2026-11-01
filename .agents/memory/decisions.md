@@ -3421,6 +3421,13 @@ explicit allocators".
   variable no longer holds the old value, yet a second argument naming it, a nested closure,
   `get(..., parent.frame())`, and an error unwinding through the assignment all read it. Making
   it sound needs escape analysis of the callee plus an undo path, so helpers copy as in GNU R.
+- **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
+  vector, a value vector and an open-addressing index in an integer vector, all in the collector's
+  heap, which a `SEXP`-holding value must be (`decisions.md`, "Data-oriented design and explicit
+  allocators"). Measured on a release build with 1,000,000 calls each: `Dict.len` (no hashing)
+  costs 0.62 us a call, `Dict.get` on a 1M-entry dictionary 0.67 us, and on a one-entry
+  dictionary 0.56 us. Hashing and probing are at most about 15% of a call; the rest is
+  interpreter dispatch, so a new layout cannot pay and the win is in call overhead.
 - **Impact.** Value semantics are unchanged (pinned in
   `crates/interp/tests/test_standard_library.rs`, including the cases that broke the move), nested
   accumulator loops become linear, and incremental analysis is unaffected.
