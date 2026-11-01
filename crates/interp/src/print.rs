@@ -602,6 +602,11 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     let slice = rows * cols;
     let slices: usize = dims[2..].iter().product();
     let dimnames = get_attr(array, symbols().dimnames);
+    let dimnames_names = if dimnames.kind() == SexpType::List {
+        values::names(dimnames)
+    } else {
+        nil()
+    };
     for index in 0..slices {
         let mut label = String::from(", , ");
         let mut remainder = index;
@@ -615,11 +620,17 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
                 nil()
             };
             if names != nil() {
-                parts.push(
-                    values::string_at(names, position)
-                        .map(|text| text.into_owned())
-                        .unwrap_or_default(),
-                );
+                let name = values::string_at(names, position)
+                    .map(|text| text.into_owned())
+                    .unwrap_or_default();
+                // Named dimnames label each slice `dimension = name`, even when the dimension's
+                // own name is empty.
+                if dimnames_names == nil() {
+                    parts.push(name);
+                } else {
+                    let title = values::string_at(dimnames_names, dimension).unwrap_or_default();
+                    parts.push(format!("{title} = {name}"));
+                }
             } else {
                 parts.push((position + 1).to_string());
             }
@@ -632,6 +643,13 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         values::set_attr(matrix, symbols().dim, dim)?;
         if dimnames.kind() == SexpType::List {
             let sub = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
+            if dimnames_names != nil() {
+                let titles = values::string_vector(&[
+                    &values::string_at(dimnames_names, 0).unwrap_or_default(),
+                    &values::string_at(dimnames_names, 1).unwrap_or_default(),
+                ])?;
+                values::set_attr(sub, symbols().names, titles)?;
+            }
             values::set_attr(matrix, symbols().dimnames, sub)?;
         }
         print_matrix(matrix, rows, cols, options, false)?;

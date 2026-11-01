@@ -331,7 +331,7 @@ unsafe fn resolve(
                 if any_positive || any_na {
                     return Err(crate::unwind::error_in(
                         call,
-                        "can't mix positive and negative subscripts",
+                        "only 0's may be mixed with negative subscripts",
                     ));
                 }
                 let mut keep = vec![true; extent];
@@ -1099,10 +1099,10 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
     get_slot(object, symbol, call.call)
 }
 
-/// `R_do_slot`: an S4 slot, which is an attribute, with `.Data` and `.S3Class` special.
 /// The elements a matrix subscript selects from an array with `dims`: one row per element and one
 /// column per dimension, holding indices or (for a character matrix) dimnames. `None` when
-/// `index` is not such a matrix; a row with an `NA` selects `NA`.
+/// `index` is not such a matrix. A row with an `NA` selects `NA`, and a numeric row with a 0
+/// selects nothing.
 unsafe fn matrix_index_positions(
     object: Sexp,
     dims: &[usize],
@@ -1127,15 +1127,26 @@ unsafe fn matrix_index_positions(
         let mut offset = 0usize;
         let mut stride = 1usize;
         let mut na = false;
+        let mut dropped = false;
         for (dimension, &extent) in dims.iter().enumerate() {
             let element = row + dimension * rows;
             let position = if numeric {
-                let value = numeric_element(index, element);
+                let value = numeric_element(index, element).trunc();
                 if value.is_nan() {
                     na = true;
                     break;
                 }
-                if value < 1.0 || value as usize > extent {
+                if value < 0.0 {
+                    return Err(crate::unwind::error_in(
+                        call,
+                        "negative values are not allowed in a matrix subscript",
+                    ));
+                }
+                if value == 0.0 {
+                    dropped = true;
+                    break;
+                }
+                if value as usize > extent {
                     return Err(crate::unwind::error_in(call, "subscript out of bounds"));
                 }
                 value as usize - 1
@@ -1158,11 +1169,14 @@ unsafe fn matrix_index_positions(
             offset += position * stride;
             stride *= extent;
         }
-        positions.push((!na).then_some(offset));
+        if !dropped {
+            positions.push((!na).then_some(offset));
+        }
     }
     Ok(Some(positions))
 }
 
+/// `R_do_slot`: an S4 slot, which is an attribute, with `.Data` and `.S3Class` special.
 pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
     if symbol == symbols().dot_data {
         let methods = interp_methods_function("getDataPart")?;

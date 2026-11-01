@@ -26,3 +26,22 @@ str(seq(as.POSIXct("2020-08-13", tz = "UTC"), by = "hour", length.out = 3))
 print(enc2utf8(c(a = "x")))
 print(tryCatch(enc2utf8(logical()), error = conditionMessage))
 print(tryCatch(enc2native(1), error = conditionMessage))
+
+# A matrix subscript drops rows holding a 0 and selects NA for rows holding an NA.
+x <- matrix(1:6, ncol = 2)
+k <- matrix(c(1, 1, 1, 0, 1, NA), ncol = 2, byrow = TRUE)
+print(x[k])
+print(tryCatch(x[matrix(c(-1, 1), nrow = 1)], error = conditionMessage))
+print(tryCatch(x[-c(1, NA)], error = conditionMessage))
+print(tryCatch(x[c(-1, 2)], error = conditionMessage))
+
+# besselK of a high order stays finite where only the exponentially scaled value overflows.
+print(besselK(100, c(450, 500, 540)))
+print(besselK(100, 450, expon.scaled = TRUE))
+
+# An array with named dimnames titles its rows, columns and slices.
+d <- expand.grid(nu = 1:2, x = 3:4)
+A <- array(1:8, c(2, 2, 2))
+dimnames(A) <- c(attr(d, "out.attrs")$dimnames, list(c("p", "q")))
+print(A)
+print(array(1:8, c(2, 2, 2), dimnames = list(r = c("a", "b"), NULL, s = c("u", "v"))))
