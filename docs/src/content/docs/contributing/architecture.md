@@ -333,6 +333,22 @@ Before the console or `ry load` starts R for a package, it calls the loader's `p
 the sources and derives this whole index on its own threads while base R loads. The first
 `load_all()` then waits for that to finish and only diffs.
 
+Deriving the index means parsing every file, which is most of a cold start, so the first plan of a
+package in a process caches the index across processes. The entry lives in the user's cache
+directory (`$XDG_CACHE_HOME/ry/load-index`, one file per package root), and its key hashes the
+`DESCRIPTION`, `NAMESPACE` and `R/` texts, the strict setting, and a fingerprint of the parser, the
+analysis, the shipped stubs and the loader that `crates/loader/build.rs` computes. On a hit the
+loader syncs the texts into the database without parsing them and hands the backend each file's text
+instead of its tree; ry's runtime then parses only the code it lowers, one top-level item at a time,
+which gives the same tree as the whole file would. Meanwhile a detached thread parses every file on
+a database handle of its own, so the first reload finds the parses memoized, and an edit that reaches
+the database first cancels it.
+
+A fresh load on ry's runtime may also hold back the package's S4 definitions until first use. The
+loader decides which (`DeferredS4` in `crates/loader/src/loader.rs` states the rules), and the
+methods package's class and generic lookups in `crates/interp/src/methods.rs` force them on a miss;
+[package loading](/reference/package-loading#s4-definitions) has the contract.
+
 ### Diagnostics
 
 Diagnostics come in two layers over one source of truth:

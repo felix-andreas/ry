@@ -60,7 +60,12 @@ remove temporary
 f <- function() 1
 x <- 1
 #++++
-nothing to do
+rebuild imports (0 directives)
+source R/a.R
+bind f from R/a.R:1:5
+run R/a.R:2 x <- 1
+sync exports
+run .onLoad
 
 #==== statements
 #---- an_inserted_statement_runs_alone
