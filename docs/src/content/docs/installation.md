@@ -50,6 +50,14 @@ The crate is `ry-lang`, and the command it installs is `ry`.
 nix profile install github:felix-andreas/ry
 ```
 
+## R
+
+`ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry repl`, `ry run`
+and `ry load` need a GNU R installation built as a shared library (see the
+[CLI reference](/reference/cli)). That includes ry's own runtime (`--runtime ry`), which reads base
+R's R sources and the default packages from your GNU R installation instead of shipping them, so
+ry stays independent of R's license.
+
 ## Zed
 
 The Zed extension is not in Zed's registry yet, so install it as a dev extension:

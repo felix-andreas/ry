@@ -261,6 +261,11 @@ pub struct ItemCheck<'db> {
     /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
     /// a pattern that cannot match records nothing.
     pub pattern_types: PatternTypes<'db>,
+    /// The declared type each native record, tuple or tag literal was checked against, at an
+    /// annotated binding, a call argument or a nominal constructor, so completion can offer
+    /// the fields a literal still lacks. Nested literals record nothing: their expectation is
+    /// the enclosing one's field or payload.
+    pub literal_expectations: FxHashMap<ExprId, Ty<'db>>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -447,6 +452,7 @@ pub fn check_item_with_annotation<'db>(
         scheme_arena: Vec::new(),
         recorded: FxHashMap::default(),
         recorded_patterns: FxHashMap::default(),
+        recorded_expectations: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
@@ -567,6 +573,7 @@ pub fn check_item_with_annotation<'db>(
                             for (name, constraint) in &declared.binders {
                                 context.table.rigid_constraints.insert(*name, *constraint);
                             }
+                            context.record_expectation(*value, declared.body);
                             if annotation.is_some_and(|a| !a.trusted)
                                 && !matches!(declared.body.kind(db), TyKind::Unknown | TyKind::Any)
                             {
@@ -613,6 +620,11 @@ pub fn check_item_with_annotation<'db>(
         }
     }
     let pattern_types = PatternTypes(pattern_types.into_boxed_slice());
+    let literal_expectations = context
+        .recorded_expectations
+        .iter()
+        .map(|(&id, &ty)| (id, context.table.resolve(context.db, ty)))
+        .collect();
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -651,6 +663,7 @@ pub fn check_item_with_annotation<'db>(
         match_findings,
         expression_types,
         pattern_types,
+        literal_expectations,
         errors,
         strict_origins: context.strict_origins,
         scheme,
@@ -854,6 +867,7 @@ struct Checker<'db, 'a> {
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: FxHashMap<ExprId, Ty<'db>>,
     recorded_patterns: FxHashMap<PatId, Ty<'db>>,
+    recorded_expectations: FxHashMap<ExprId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
@@ -1505,6 +1519,29 @@ impl<'db> Checker<'db, '_> {
         fits
     }
 
+    /// A losing overload candidate's parameter is not what the literal is checked against, so
+    /// probes record nothing. A parenthesized value records too, because `(amount` is how a
+    /// record literal starts before its first `=`.
+    fn record_expectation(&mut self, value: ExprId, expected: Ty<'db>) {
+        if self.overload_probe_depth > 0 {
+            return;
+        }
+        let module = self.module;
+        let mut inner = value;
+        while let ExpressionKind::Paren(next) = &module.expression(inner).kind {
+            inner = *next;
+        }
+        let is_literal = matches!(
+            module.expression(inner).kind,
+            ExpressionKind::Record(_) | ExpressionKind::Tuple(_) | ExpressionKind::Tag { .. }
+        );
+        if is_literal {
+            self.recorded_expectations.insert(inner, expected);
+        } else if inner != value {
+            self.recorded_expectations.insert(value, expected);
+        }
+    }
+
     /// Follows a native record, tuple or tag literal down to the one component whose type
     /// differs from what is expected, so the mismatch blames that value rather than the whole
     /// literal. `None` when the value is not such a literal or more than one component differs.
@@ -2145,6 +2182,7 @@ impl<'db> Checker<'db, '_> {
         for (name, constraint) in &declared.binders {
             self.table.rigid_constraints.insert(*name, *constraint);
         }
+        self.record_expectation(value, declared.body);
         let resolved_value = self.table.resolve(self.db, value_ty);
         if !self
             .table
@@ -8654,6 +8692,9 @@ impl<'db> Checker<'db, '_> {
         whole_double: bool,
         value: Option<ExprId>,
     ) -> Result<(), TypeError<'db>> {
+        if let Some(value) = value {
+            self.record_expectation(value, expected);
+        }
         let resolved_found = self.table.resolve(self.db, found);
         if matches!(resolved_found.kind(self.db), TyKind::Unknown) {
             return Ok(());
@@ -8749,6 +8790,7 @@ impl<'db> Checker<'db, '_> {
         let nominal = Ty::new(self.db, TyKind::Named(name, arguments.clone()));
         if !matches!(definition.body.kind(self.db), TyKind::Unknown) {
             let representation = apply_definition(self.db, &definition, &arguments);
+            self.record_expectation(value, representation);
             let resolved_value = self.table.resolve(self.db, value_ty);
             if !self
                 .table
