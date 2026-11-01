@@ -2143,6 +2143,41 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 Known gap: an integer `sum` nested in arithmetic or assigned through `:=` still narrows to integer
 and gives NA on overflow, where R gives a double.
 
+## Records, tuples and tags are ry values, not R lists
+
+- **Previous shape (draft only):** a record or tuple was a plain list and a tag a classed list with
+  an `ry_tag` attribute, so R and C code could read them unchanged. That made R's list semantics
+  (attributes, partial `$` matching, `c()` coercion, `names<-`) the semantics of ry's own types,
+  and gave the JIT no fixed layout to rely on.
+- **Chosen shape:** one heap object kind of ry's own (a type code GNU R leaves unused) holding a
+  32-bit interned layout id and eight-byte slots. The layout records the tag (an interned small
+  integer), the field names sorted canonically, and per-slot storage: an unboxed length-one
+  `double`, `integer` or `logical`, or a traced handle. Values are immutable with value semantics.
+- **Types:** `record{...}` and `tuple{...}` are distinct from `list{...}`, since the values differ.
+  Tags are structural; a tag union is an ordinary union, `..` makes it open, and there are no row
+  variables, which keeps the checker Hindley-Milner.
+- **R boundary:** explicit. `as.list()` converts out, `as.record()`/`as.tuple()`/`as.tag()` convert
+  in. Each kind has an implicit class (`ry_record`, `ry_tuple`, `ry_tag`) for `class`, `inherits` and
+  S3 dispatch. Printing, `identical`, `all.equal`, field access, the type predicates and builtins
+  that only store a value (such as `list`) accept native values; every other builtin raises one
+  error that names the conversion. C code sees an opaque object (`TYPEOF` 27): list element moves
+  work and every other accessor raises the same error, because a deep scan at `.Call` would cost
+  time in proportion to the data. `serialize` refuses them, so they never leave the session.
+- **Layout:** keyed on tag and sorted field names only; which slots hold raw scalars is a per-object
+  mask, so same-typed values share a layout id whatever their contents.
+- **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
+  a known type compile to a slot load after one layout-id comparison, and tag tests are integer
+  comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+- **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
+  the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
+  keeps its slot count in header padding, so the collector never reads the layout table.
+- **The refusal is a builtin flag, not a scan:** `BuiltinDef::accepts_native` is set at startup from
+  `records::ACCEPTS_NATIVE`, and `install_all` asserts every listed name exists, so a renamed
+  builtin cannot silently drop off the list. The check tests only top-level arguments, because
+  looking inside lists would cost time in proportion to the data.
+- **Pattern encoding reuses the value constructors** (`.ry_tag`, `.ry_tuple`, `.ry_record`), so a
+  quoted pattern deparses with the same code as a quoted value, and `_`/`..` stay bare symbols.
+
 # Decision record: inline annotations at run time
 
 ry's runtime checks a function's inline parameter and return types at its boundary, and erases

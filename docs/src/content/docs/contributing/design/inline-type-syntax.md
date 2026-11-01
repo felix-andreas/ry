@@ -185,13 +185,9 @@ comment over unchanged code. A record or tuple constructor compiles to `list(...
 system already has both shapes structurally. What a constructor buys is a checked construction site:
 a misspelled or missing field is caught where the mistake is made, rather than at some later read.
 
-**Where the representation is still open: tagged unions.** A tagged union declares that a value is one
-of several kinds, with dispatch that reports the case you forgot. This is the feature with real pull,
-and the one that most needs deliberate design, because its runtime representation is an open choice.
-A field the compiler owns, such as `list(.tag = ...)`, is closed and controllable. R's class
-attribute is open and mutable, and it carries an inheritance this type system does not model.
-Neither is obviously right, and neither should be assumed. Nothing here should be designed until
-inline typing has shipped and the dialect has users.
+**Tagged unions are settled elsewhere.** Records, tuples, tags and `match` exist as native ry
+values with their own runtime representation, not as R lists. The design and its reasoning are in
+[records, tuples and tags](/contributing/design/records-and-tags/).
 
 Two claims an earlier draft made here were false, and are withdrawn. Construction that cannot be
 bypassed is not something only syntax can offer: `@new` is already the only way to introduce a

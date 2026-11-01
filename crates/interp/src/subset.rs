@@ -688,6 +688,9 @@ unsafe fn match_name(names: Sexp, name: &[u8], exact: Option<bool>) -> R<Option<
 }
 
 pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call: Sexp) -> R<Sexp> {
+    if object.kind() == SexpType::Record {
+        return crate::records::subset2(object, indices, call);
+    }
     let object = values::materialize(object)?;
     if object == nil() {
         return Ok(nil());
@@ -908,6 +911,9 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
 }
 
 pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
+    if object.kind() == SexpType::Record {
+        return crate::records::dollar(object, name.bytes(), call);
+    }
     let object = values::materialize(object)?;
     match object.kind() {
         SexpType::List | SexpType::Expression => {
@@ -1426,6 +1432,9 @@ unsafe fn do_subassign2(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[[i]] <- value`.
 pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+    if object.kind() == SexpType::Record {
+        return crate::records::subassign2(object, indices, value, call);
+    }
     let object = values::materialize(object)?;
     if object.kind() == SexpType::Environment {
         let index = indices.first().copied().unwrap_or(nil());
@@ -1556,6 +1565,9 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
 }
 
 pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -> R<Sexp> {
+    if object.kind() == SexpType::Record {
+        return crate::records::dollar_assign(object, name.bytes(), value, call);
+    }
     let object = values::materialize(object)?;
     match object.kind() {
         SexpType::Environment => {

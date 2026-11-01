@@ -1858,8 +1858,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Explicitly out of scope for now
 
-- Tags and discriminated unions, through a stdlib `match` the checker knows about. Design it in
-  `contributing/design/open-questions.md` first.
 - Modelling S3 dispatch, meaning `UseMethod`. It is the prerequisite for an honest `print`,
   `summary` and `plot`.
 - Column-level typing for a data.frame, matrix dimensionality, and real S4 typing.

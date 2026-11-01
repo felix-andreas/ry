@@ -5,7 +5,8 @@
 use heap::{
     Collection, GcStress, Heap, HeapError,
     arena::Arena,
-    object::{NA_REAL, Sexp, SexpType, is_na_real},
+    object::{NA_REAL, Sexp, SexpType, Slot, is_na_real},
+    records::{Fields, Layout},
     strings::Encoding,
 };
 use std::collections::HashSet;
@@ -17,6 +18,14 @@ enum Node {
     List(Vec<usize>),
     Char(Vec<u8>),
     Env(Vec<(usize, usize)>),
+    /// A tuple whose slots hold live nodes or raw doubles.
+    Record(Vec<Item>),
+}
+
+#[derive(Clone, Copy)]
+enum Item {
+    Child(usize),
+    Raw(f64),
 }
 
 struct Model {
@@ -37,6 +46,10 @@ impl Model {
             match self.nodes[index].as_ref().map(|(_, node)| node) {
                 Some(Node::List(children)) => stack.extend(children.iter().copied()),
                 Some(Node::Env(bindings)) => stack.extend(bindings.iter().map(|(_, value)| *value)),
+                Some(Node::Record(items)) => stack.extend(items.iter().filter_map(|item| match item {
+                    Item::Child(child) => Some(*child),
+                    Item::Raw(_) => None,
+                })),
                 _ => {}
             }
         }
@@ -108,6 +121,19 @@ unsafe fn verify(heap: &mut Heap, model: &mut Model) {
                         let cell = heap.frame_cell(sexp, model.symbols[symbol]).expect("bound");
                         let expected = model.nodes[value].as_ref().expect("a live value").0;
                         assert_eq!(cell.cdr(), expected);
+                    }
+                }
+                Node::Record(items) => {
+                    assert_eq!(sexp.kind(), SexpType::Record, "node {index} changed type");
+                    assert_eq!(sexp.record_slot_count(), items.len());
+                    for (position, item) in items.iter().enumerate() {
+                        let expected = match item {
+                            Item::Child(child) => {
+                                Slot::Handle(model.nodes[*child].as_ref().expect("a live child").0)
+                            }
+                            Item::Raw(value) => Slot::Real(*value),
+                        };
+                        assert_eq!(sexp.record_slot(position), expected, "node {index}.{position}");
                     }
                 }
             }
@@ -209,6 +235,43 @@ fn run(seed: u64, steps: usize, stress: bool) {
                         }
                         _ => {}
                     }
+                }
+                9 if !live.is_empty() && rng.chance(1, 2) => {
+                    // A tuple, sometimes wider than the unboxed mask, mixing handles and raw
+                    // doubles; the doubles are fresh scalars, rooted until the tuple holds them.
+                    // A length-one integer child would be stored raw, so children skip those.
+                    let boxed: Vec<usize> = live
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            !matches!(&model.nodes[*index], Some((_, Node::Integers(values))) if values.len() == 1)
+                        })
+                        .collect();
+                    let wide = !boxed.is_empty() && rng.chance(1, 8);
+                    let width = if wide { 64 + rng.below(8) } else { rng.below(6) };
+                    let mut items = Vec::new();
+                    let mut values = Vec::new();
+                    for position in 0..width {
+                        if position < 64 && (boxed.is_empty() || rng.chance(1, 2)) {
+                            let value = (rng.next_u64() % 1000) as f64 / 8.0;
+                            let scalar = heap.alloc_vector(SexpType::Real, 1).expect("alloc");
+                            *(scalar.data() as *mut f64) = value;
+                            heap.root(scalar);
+                            items.push(Item::Raw(value));
+                            values.push(scalar);
+                        } else {
+                            let child = boxed[rng.below(boxed.len())];
+                            items.push(Item::Child(child));
+                            values.push(model.nodes[child].as_ref().expect("live").0);
+                        }
+                    }
+                    let layout = heap.layouts.intern(Layout {
+                        tag: None,
+                        fields: Fields::Positional(width as u32),
+                    });
+                    let sexp = heap.alloc_record(layout, &values).expect("alloc");
+                    model.nodes.push(Some((sexp, Node::Record(items))));
+                    model.roots.push(model.nodes.len() - 1);
                 }
                 7 => {
                     let nil = heap.nil();

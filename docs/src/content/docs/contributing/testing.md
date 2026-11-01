@@ -114,6 +114,9 @@ on purpose.
 - **`crates/semantics/tests/stubs`**: `.Rtypes` declarations. Each case renders the declarations it
   loads, with overload candidates in order, and the problems that make the loader drop a line, in
   the wording the editor and the override report show.
+- **`crates/semantics/tests/typing-inline-off`**: the ordinary rendering with
+  `[check] inline-annotations = false`, which pins the `ry-syntax` warning on records, tuples, tags
+  and `match`, and shows that literals are still typed while `match` coverage is not checked.
 - **`crates/semantics/tests/typing-strict`**: the strict stream. After the ordinary rendering, each
   case appends the file's typing mode and its `strict` diagnostics.
 - **`crates/semantics/tests/typing-imports`**: package metadata. A leading `#namespace ` line supplies
@@ -122,10 +125,11 @@ on purpose.
   text as ordinary comments, so expected offsets are honest. Attaching a package needs no directive:
   a `library(data.table)` statement in the source activates the conditional stub namespace through
   the same scan the hosts run.
-- **`crates/semantics/tests/lints`** and **`lints-style`**: `lints::lint_file`, first under the
-  default configuration and then under `naming-style = "snake_case"`, `unused-parameter = "warn"`,
-  `shadows-builtin = "warn"`, and `shadows-namespace = "warn"`, all of which are off by default. Each
-  case renders every finding as `start..end severity[code] message`, or `clean`. Run both with
+- **`crates/semantics/tests/lints`**, **`lints-style`** and **`lints-object-systems-off`**:
+  `lints::lint_file`, first under the default configuration, then under `naming-style = "snake_case"`,
+  `unused-parameter = "warn"`, `shadows-builtin = "warn"`, and `shadows-namespace = "warn"`, all of
+  which are off by default, and last under `[check] object-systems = false`. Each case renders every
+  finding as `start..end severity[code] message`, or `clean`. Run all three with
   `cargo test -p semantics --test test_lint_fixtures`.
 - **`crates/semantics/tests/load_index`**: the package-load index. A case lists `R/` files, and
   optionally `NAMESPACE` and `DESCRIPTION`, with `#~~~~` separators, and renders the package's name,

@@ -89,3 +89,10 @@ g <- function(x) -> list
 g <- function(x) -> list {
   list(x)
 }
+
+#---- annotated_loop_body_stays_a_binding_once_braced
+repeat x :integer <- 1L
+#++++
+repeat {
+  x: integer <- 1L
+}
