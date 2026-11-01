@@ -21,6 +21,7 @@ use {
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
         },
+        sorted::{SortedMap, SortedSet},
         stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
@@ -319,7 +320,7 @@ pub struct ItemCheck<'db> {
     pub selected_overloads: SortedMap<ExprId, usize>,
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
-    pub masked_reads: SortedMap<ExprId, ()>,
+    pub masked_reads: SortedSet<ExprId>,
     /// Bare names inside a query on a frame with known columns that name no column and
     /// no lexical binding. Reported only when nothing else (a global, a builtin) defines
     /// the name, because R falls back to the enclosing scope for a non-column.
@@ -409,15 +410,68 @@ pub enum CalleeTarget {
     Library,
 }
 
-/// Settled type of every expression the checker recorded, indexed by expression id.
-/// Ids are dense within an item, so a slot per expression costs one word where a hash
-/// entry costs several.
+/// Settled type of every expression the checker recorded, indexed by expression id. Ids are
+/// dense within an item, so each expression has a slot. An item uses few distinct types, so a
+/// slot holds a narrow index into the item's palette of them rather than a pointer: this is
+/// the most numerous memoized table, and the narrow slots make it a quarter of the size.
 #[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
-pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
+pub struct ExpressionTypes<'db> {
+    palette: Box<[Ty<'db>]>,
+    slots: PaletteSlots,
+}
+
+/// One past the palette index, so zero is an expression with no recorded type.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
+enum PaletteSlots {
+    Narrow(Box<[u16]>),
+    /// For an item with more distinct types than a `u16` can count.
+    Wide(Box<[u32]>),
+}
+
+impl Default for PaletteSlots {
+    fn default() -> Self {
+        PaletteSlots::Narrow(Box::default())
+    }
+}
 
 impl<'db> ExpressionTypes<'db> {
     pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
-        self.0.get(id.index())?.as_ref()
+        let slot = match &self.slots {
+            PaletteSlots::Narrow(slots) => u32::from(*slots.get(id.index())?),
+            PaletteSlots::Wide(slots) => *slots.get(id.index())?,
+        };
+        self.palette
+            .get(usize::try_from(slot).ok()?.checked_sub(1)?)
+    }
+}
+
+impl<'db> FromIterator<Option<Ty<'db>>> for ExpressionTypes<'db> {
+    fn from_iter<I: IntoIterator<Item = Option<Ty<'db>>>>(types: I) -> Self {
+        let mut palette = Vec::new();
+        let mut positions: FxHashMap<Ty<'db>, u32> = FxHashMap::default();
+        let slots: Vec<u32> = types
+            .into_iter()
+            .map(|ty| {
+                ty.map_or(0, |ty| {
+                    *positions.entry(ty).or_insert_with(|| {
+                        palette.push(ty);
+                        u32::try_from(palette.len()).unwrap_or(u32::MAX)
+                    })
+                })
+            })
+            .collect();
+        let slots = match slots
+            .iter()
+            .map(|&slot| u16::try_from(slot))
+            .collect::<Result<Box<[u16]>, _>>()
+        {
+            Ok(narrow) => PaletteSlots::Narrow(narrow),
+            Err(_) => PaletteSlots::Wide(slots.into_boxed_slice()),
+        };
+        ExpressionTypes {
+            palette: palette.into_boxed_slice(),
+            slots,
+        }
     }
 }
 
@@ -444,46 +498,6 @@ pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
 impl<'db> PatternTypes<'db> {
     pub fn get(&self, id: PatId) -> Option<Ty<'db>> {
         *self.0.get(id.index())?
-    }
-}
-
-/// A map frozen when its check finishes: pairs sorted by key in one boxed slice. Most items
-/// fill few or none of these side tables, and an empty boxed slice is half an empty hash map,
-/// so the many memoized checks stay small; lookups are a binary search.
-#[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
-pub struct SortedMap<K, V>(Box<[(K, V)]>);
-
-impl<K: Ord, V> SortedMap<K, V> {
-    pub fn get(&self, key: &K) -> Option<&V> {
-        let index = self.0.binary_search_by(|(probe, _)| probe.cmp(key)).ok()?;
-        self.0.get(index).map(|(_, value)| value)
-    }
-
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.get(key).is_some()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.0.iter().map(|(key, value)| (key, value))
-    }
-}
-
-impl<K, V> Default for SortedMap<K, V> {
-    fn default() -> Self {
-        SortedMap(Box::default())
-    }
-}
-
-/// The keys must be distinct, which holds for every source the checker drains: hash maps.
-impl<K: Ord, V> FromIterator<(K, V)> for SortedMap<K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(pairs: I) -> Self {
-        let mut pairs: Vec<(K, V)> = pairs.into_iter().collect();
-        pairs.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-        SortedMap(pairs.into_boxed_slice())
     }
 }
 
@@ -750,12 +764,10 @@ pub fn check_item_with_annotation<'db>(
         }
     }
     let recorded = mem::take(&mut context.recorded.0);
-    let expression_types = ExpressionTypes(
-        recorded
-            .into_iter()
-            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
-            .collect(),
-    );
+    let expression_types: ExpressionTypes = recorded
+        .into_iter()
+        .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+        .collect();
     let mut pattern_types = vec![None; module.pattern_count()];
     for (&id, &ty) in &context.recorded_patterns {
         if let Some(slot) = pattern_types.get_mut(id.index()) {
@@ -818,11 +830,7 @@ pub fn check_item_with_annotation<'db>(
         scheme,
         selected_overloads: context.selected_overloads.into_iter().collect(),
         callee_targets: context.callee_targets.into_iter().collect(),
-        masked_reads: context
-            .masked_reads
-            .into_iter()
-            .map(|id| (id, ()))
-            .collect(),
+        masked_reads: context.masked_reads.into_iter().collect(),
         column_misses: context.column_misses.into_iter().collect(),
         top_level_bindings: top_level_bindings.into_boxed_slice(),
     }
