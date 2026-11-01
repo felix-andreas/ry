@@ -369,7 +369,7 @@ impl Div<usize> for LongDouble {
 /// `total` plus every value in order, rounding after each addition, as a C loop of
 /// `total += values[i]` on a `long double` does.
 pub fn add_all(total: LongDouble, values: &[f64]) -> LongDouble {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
     if let Some(start) = to_x87(total) {
         return from_x87(x87::add_all(start, values));
     }
@@ -381,7 +381,7 @@ pub fn add_all(total: LongDouble, values: &[f64]) -> LongDouble {
 /// `total` plus every `value - offset` in order, rounding after each subtraction and addition,
 /// as GNU R's second pass over the deviations from a mean does.
 pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) -> LongDouble {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
     if let (Some(start), Some(offset)) = (to_x87(total), to_x87(offset)) {
         return from_x87(x87::add_differences(start, values, offset));
     }
@@ -393,7 +393,7 @@ pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) ->
 /// The x87 extended format's bytes: the 64-bit significand with its explicit integer bit, then
 /// the sign and a 15-bit exponent biased by 16383. `None` when the exponent leaves its range,
 /// which only products and quotients of extreme values reach.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(windows)))]
 fn to_x87(value: LongDouble) -> Option<[u8; 10]> {
     let (negative, significand, biased) = match value.0 {
         Repr::Special(special) => {
@@ -427,7 +427,7 @@ fn to_x87(value: LongDouble) -> Option<[u8; 10]> {
     Some(bytes)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(windows)))]
 fn from_x87(bytes: [u8; 10]) -> LongDouble {
     let mut low = [0u8; 8];
     low.copy_from_slice(&bytes[..8]);
@@ -461,8 +461,9 @@ fn from_x87(bytes: [u8; 10]) -> LongDouble {
 }
 
 /// The loops that need speed run on the x87 unit itself, which rounds exactly like the model:
-/// System V leaves its precision control at the full 64-bit significand.
-#[cfg(target_arch = "x86_64")]
+/// System V leaves its precision control at the full 64-bit significand. The Windows x64 CRT
+/// sets it to 53 bits, so Windows keeps the software model.
+#[cfg(all(target_arch = "x86_64", not(windows)))]
 mod x87 {
     use std::arch::asm;
 
