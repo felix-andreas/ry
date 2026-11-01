@@ -178,6 +178,10 @@ on_event(:Scroll)   # fine
 </TabItem>
 </Tabs>
 
+```text ry run runtime=ry strict
+[1] "other"
+```
+
 `match (value) { pattern => result }` tries each arm in order and runs the first that matches. Put
 each arm on its own line, or separate arms with `;` or `,`. The `{` must be on the same line as the
 `)`, which keeps R's own `match()` function working unchanged.
