@@ -2270,7 +2270,7 @@ enum Matcher {
 /// How many compiled patterns [`Matcher::compile`] keeps. R code calls `grepl` and `sub` with the
 /// same few patterns over and over, and building the automaton costs far more than matching one
 /// short string.
-const PATTERN_CACHE_SIZE: usize = 64;
+const PATTERN_CACHE_SIZE: usize = 256;
 
 thread_local! {
     static PATTERN_CACHE: RefCell<FxHashMap<(String, bool, bool), Rc<Regex>>> = RefCell::default();

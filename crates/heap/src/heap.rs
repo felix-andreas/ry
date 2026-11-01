@@ -55,6 +55,10 @@ pub struct Heap {
     mark_stack: Vec<Sexp>,
     strings: StringTable,
     symbols: FxHashMap<Sexp, Sexp>,
+    /// Symbols interned and objects preserved since the last collection. A minor collection marks
+    /// only these: every older entry of the symbol table and the precious set is already marked,
+    /// and walking those tables touched one cold header per entry on every minor collection.
+    new_roots: Vec<Sexp>,
     /// The tag and layout interners of ry's records, tuples and tags.
     pub layouts: Layouts,
     pub roots: Roots,
@@ -310,6 +314,7 @@ impl Heap {
             enclosure_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
+            new_roots: Vec::new(),
             layouts: Layouts::default(),
             roots: Roots {
                 protect: ProtectStack {
@@ -686,6 +691,7 @@ impl Heap {
         let symbol = self.alloc_triple(SexpType::Symbol, name, nil, nil)?;
         symbol.mark_not_mutable();
         self.symbols.insert(name, symbol);
+        self.new_roots.push(symbol);
         Ok(symbol)
     }
 
@@ -966,6 +972,7 @@ impl Heap {
     /// `R_PreserveObject`. Preserving twice needs two releases.
     pub fn preserve(&mut self, object: Sexp) {
         *self.roots.precious.entry(object).or_insert(0) += 1;
+        self.new_roots.push(object);
     }
 
     /// `R_ReleaseObject`. Releasing an object that is not preserved does nothing, as in GNU R.
@@ -1125,7 +1132,7 @@ impl Heap {
         for &object in keep {
             self.mark(object);
         }
-        self.mark_roots();
+        self.mark_roots(kind);
         if kind == Collection::Minor {
             // Old objects are already marked, so their young children are pushed directly.
             for index in 0..self.remembered.len() {
@@ -1168,7 +1175,7 @@ impl Heap {
         }
     }
 
-    unsafe fn mark_roots(&mut self) {
+    unsafe fn mark_roots(&mut self, kind: Collection) {
         let known = self.known;
         for object in known.all() {
             self.mark(object);
@@ -1192,8 +1199,14 @@ impl Heap {
                 mark_stack.push(object);
             }
         };
-        self.roots.precious.keys().for_each(|&object| mark(object));
-        self.symbols.values().for_each(|&symbol| mark(symbol));
+        match kind {
+            Collection::Major => {
+                self.roots.precious.keys().for_each(|&object| mark(object));
+                self.symbols.values().for_each(|&symbol| mark(symbol));
+            }
+            Collection::Minor => self.new_roots.iter().for_each(|&object| mark(object)),
+        }
+        self.new_roots.clear();
         let sources: Vec<Rc<dyn RootSource>> = self
             .sources
             .iter()
@@ -1651,7 +1664,7 @@ impl WellKnown {
 impl Default for GcPolicy {
     fn default() -> Self {
         GcPolicy {
-            young_limit: 8 * 1024 * 1024,
+            young_limit: 32 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: GcStress::Off,

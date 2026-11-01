@@ -538,8 +538,8 @@ pub unsafe fn evaluate_args(
     env: Sexp,
     keep_missing: bool,
     call: Sexp,
-) -> R<Vec<Arg>> {
-    let mut args = Vec::new();
+) -> R<Args> {
+    let mut args = Args::new();
     let result = collect_evaluated_args(arguments, env, keep_missing, call, &mut args);
     for arg in &args {
         arg.value.decrement_refcount();
@@ -555,7 +555,7 @@ unsafe fn collect_evaluated_args(
     env: Sexp,
     keep_missing: bool,
     call: Sexp,
-    args: &mut Vec<Arg>,
+    args: &mut Args,
 ) -> R<()> {
     let dots = symbols().dots;
     let missing = missing_arg();
@@ -755,8 +755,15 @@ pub unsafe fn apply_closure(
     for &actual in &actuals {
         let symbol = formal.tag();
         if actual == missing && formal.car() != missing {
-            let promise = make_promise(formal.car(), env)?;
-            let cell = heap.define_fresh(env, symbol, promise)?;
+            // A literal default evaluates to itself, so it is bound as is: the promise would cost
+            // an allocation and a force on every call that omits it, for the same value.
+            let default = formal.car();
+            let value = if default.kind().is_atomic() || default == nil() {
+                default
+            } else {
+                make_promise(default, env)?
+            };
+            let cell = heap.define_fresh(env, symbol, value)?;
             cell.set_gp_bits(BINDING_MISSING, true);
         } else {
             heap.define_fresh(env, symbol, actual)?;
@@ -973,15 +980,17 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
     if let Some(matched) = match_positional_args(formals, args, missing, dots_symbol)? {
         return Ok(matched);
     }
-    let formal_symbols: Vec<Sexp> = values::pairlist_items(formals)
-        .into_iter()
-        .map(|(tag, _)| tag)
-        .collect();
+    let mut formal_symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        formal_symbols.push(formal.tag());
+        formal = formal.cdr();
+    }
     let count = formal_symbols.len();
-    let mut matched: Vec<Option<Sexp>> = vec![None; count];
-    let mut used = vec![false; args.len()];
+    let mut matched: SmallVec<[Option<Sexp>; 8]> = smallvec::smallvec![None; count];
+    let mut used: SmallVec<[bool; 8]> = smallvec::smallvec![false; args.len()];
     let dots_position = formal_symbols.iter().position(|&symbol| symbol == dots_symbol);
-    let arg_names: Vec<Option<&[u8]>> = args
+    let arg_names: SmallVec<[Option<&[u8]>; 8]> = args
         .iter()
         .map(|arg| {
             if arg.tag.kind() == SexpType::Symbol {
@@ -1018,7 +1027,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
     }
     // Partial matches, only for formals before `...`.
     let partial_limit = dots_position.unwrap_or(count);
-    let mut partial_owner: Vec<Option<usize>> = vec![None; args.len()];
+    let mut partial_owner: SmallVec<[Option<usize>; 8]> = smallvec::smallvec![None; args.len()];
     for (formal_index, &formal) in formal_symbols.iter().enumerate().take(partial_limit) {
         if matched[formal_index].is_some() {
             continue;
@@ -1055,7 +1064,7 @@ pub unsafe fn match_args(formals: Sexp, args: &[Arg], call: Sexp) -> R<Matched> 
         }
     }
     // Positional matches up to `...`; everything left goes to `...`.
-    let mut dots_items: Vec<(Sexp, Sexp)> = Vec::new();
+    let mut dots_items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
     let mut unused: Vec<usize> = Vec::new();
     let mut formal_index = 0;
     for (arg_index, arg) in args.iter().enumerate() {

@@ -1274,7 +1274,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let first = operand(3);
             let count = operand(4);
             let definition = eval::builtin_def(function)?;
-            let mut args = Vec::with_capacity(count);
+            let mut args = eval::Args::with_capacity(count);
             let mut cell = call.cdr();
             for index in 0..count {
                 let value = register(first + index);

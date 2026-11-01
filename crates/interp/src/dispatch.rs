@@ -6,7 +6,7 @@
 use crate::{
     Frame,
     builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
-    eval::{self, apply_closure, call_builtin, forced_promise, value_of},
+    eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
     interp,
     unwind::{R, error},
     values::{
@@ -818,7 +818,7 @@ pub unsafe fn dispatch_or_eval(
     op: Sexp,
     arguments: Sexp,
     env: Sexp,
-) -> R<Result<Sexp, Vec<Arg>>> {
+) -> R<Result<Sexp, Args>> {
     let first = arguments.car();
     if arguments.kind() != SexpType::Pairlist || first == missing_arg() {
         return Ok(Err(eval::evaluate_args(arguments, env, true, call)?));
@@ -826,7 +826,7 @@ pub unsafe fn dispatch_or_eval(
     // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
     // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
     if first == symbols().dots {
-        let promised = eval::promise_args(arguments, env)?.into_vec();
+        let promised = eval::promise_args(arguments, env)?;
         let Some(head) = promised.first() else {
             return Ok(Err(promised));
         };
@@ -851,9 +851,9 @@ pub unsafe fn dispatch_evaluated_subject(
     arguments: Sexp,
     object: Sexp,
     env: Sexp,
-) -> R<Result<Sexp, Vec<Arg>>> {
+) -> R<Result<Sexp, Args>> {
     if !object.is_object() {
-        let mut args = vec![Arg {
+        let mut args: Args = smallvec::smallvec![Arg {
             tag: arguments.tag(),
             value: object,
         }];
@@ -869,7 +869,7 @@ pub unsafe fn dispatch_evaluated_subject(
     {
         return Ok(Ok(value));
     }
-    let mut promised = vec![Arg {
+    let mut promised: Args = smallvec::smallvec![Arg {
         tag: arguments.tag(),
         value: forced_promise(arguments.car(), object)?,
     }];
@@ -881,9 +881,9 @@ unsafe fn dispatch_promised(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,
-    promised: Vec<Arg>,
+    promised: Args,
     env: Sexp,
-) -> R<Result<Sexp, Vec<Arg>>> {
+) -> R<Result<Sexp, Args>> {
     let object = value_of(promised[0].value)?;
     if object.is_object() {
         // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4
@@ -904,7 +904,7 @@ unsafe fn dispatch_promised(
             return Ok(Ok(value));
         }
     }
-    let mut forced = Vec::with_capacity(promised.len());
+    let mut forced = Args::with_capacity(promised.len());
     for arg in &promised {
         let value = if arg.value == missing_arg() || promise_of_missing(arg.value)? {
             missing_arg()
