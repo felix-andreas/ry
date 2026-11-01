@@ -15,7 +15,7 @@ pub mod top_level;
 pub mod types;
 
 use {
-    crate::hir::Symbol,
+    crate::{hir::Symbol, sorted::SortedSet},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -1301,10 +1301,24 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
             .iter()
             .map(|&name| (name, false)),
     );
-    let globals = SalsaGlobals::for_item(db, item, None);
+    // The same lookup as `SalsaGlobals::frame_definition`, keyed by symbol: going through it
+    // would intern a query name per read only to turn it back into a symbol.
+    let frame_binders = item_frame_binders(db, item);
+    let frame_definition = |name: Symbol, deferred: bool| {
+        if deferred && package {
+            return None;
+        }
+        match frame_binders.get(&name) {
+            Some(&(immediate, later)) => match deferred {
+                true => later,
+                false => immediate,
+            },
+            None => frame_binder_of(db, item, name, deferred),
+        }
+    };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
     for name in item_side_names(db, item) {
-        match globals.frame_definition(types::Name::new(db, name.as_str()), false) {
+        match frame_definition(name, false) {
             Some(binder) => push_unique(&mut reads.frame, binder),
             None => {
                 reads.earlier.insert(name);
@@ -1312,7 +1326,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
         }
     }
     for (name, deferred) in lookups {
-        let binder = globals.frame_definition(types::Name::new(db, name.as_str()), deferred);
+        let binder = frame_definition(name, deferred);
         match binder.map(|binder| binder_source(db, binder, name.as_str())) {
             Some(Source::Definition(binder)) => push_unique(&mut reads.frame, binder),
             Some(Source::Statement(binder)) => {
@@ -1365,7 +1379,7 @@ fn layer_source<'a, 'db>(
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
+pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<Symbol> {
     if item_binds_only_own_name(db, item) {
         return item
             .name(db)
@@ -1375,7 +1389,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
             .collect();
     }
     let Some(naming) = item_naming(db, item) else {
-        return BTreeSet::new();
+        return SortedSet::default();
     };
     naming
         .bindings
@@ -1945,19 +1959,16 @@ const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
 fn file_binders<'db>(
     db: &'db dyn Db,
     file: SourceFile,
-) -> FxHashMap<String, Vec<(usize, Item<'db>)>> {
-    let mut binders: FxHashMap<String, Vec<(usize, Item<'db>)>> = FxHashMap::default();
+) -> FxHashMap<Symbol, Vec<(usize, Item<'db>)>> {
+    let mut binders: FxHashMap<Symbol, Vec<(usize, Item<'db>)>> = FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
-        let own_name = item.name(db).clone();
-        if let Some(name) = &own_name {
-            binders.entry(name.clone()).or_default().push((index, item));
+        let own_name = item.name(db).as_deref().map(Symbol::new);
+        if let Some(name) = own_name {
+            binders.entry(name).or_default().push((index, item));
         }
-        for name in item_top_level_names(db, item) {
-            if own_name.as_deref() != Some(name.as_str()) {
-                binders
-                    .entry(name.to_string())
-                    .or_default()
-                    .push((index, item));
+        for &name in item_top_level_names(db, item) {
+            if own_name != Some(name) {
+                binders.entry(name).or_default().push((index, item));
             }
         }
     }
@@ -1976,7 +1987,7 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
-    frame_binder_of(db, item, name.text(db), deferred)
+    frame_binder_of(db, item, Symbol::new(name.text(db)), deferred)
 }
 
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
@@ -2000,8 +2011,8 @@ fn item_frame_binders<'db>(
     for &name in names {
         binders.entry(name).or_insert_with(|| {
             (
-                frame_binder_of(db, item, name.as_str(), false),
-                frame_binder_of(db, item, name.as_str(), true),
+                frame_binder_of(db, item, name, false),
+                frame_binder_of(db, item, name, true),
             )
         });
     }
@@ -2011,11 +2022,11 @@ fn item_frame_binders<'db>(
 fn frame_binder_of<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
-    name: &str,
+    name: Symbol,
     deferred: bool,
 ) -> Option<Item<'db>> {
     let file = *item.file(db);
-    let binders = file_binders(db, file).get(name)?;
+    let binders = file_binders(db, file).get(&name)?;
     if deferred
         && matches!(
             *file.kind(db),
