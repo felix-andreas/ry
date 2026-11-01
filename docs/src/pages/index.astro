@@ -725,6 +725,7 @@ const year = new Date().getFullYear();
                                     tabindex={index === 0 ? 0 : -1}
                                 >
                                     <span class="step-label">{tab.label}</span>
+                                    <span class="visually-hidden">, </span>
                                     <span class="step-where">{index < 2 ? "runs on GNU R" : "needs ry"}</span>
                                 </button>
                             ))
@@ -1773,10 +1774,7 @@ ry check .</code></pre>
                 // Lines stay hidden until the showcase first scrolls into view, then animate in once.
                 let revealed = !reveal || typeof IntersectionObserver === "undefined";
                 if (!revealed) root.classList.add("is-waiting");
-                const venn =
-                    root.dataset.tabs === "migrate"
-                        ? root.closest("section")?.querySelector(".venn-svg")
-                        : null;
+                const venn = root.querySelector(":scope > .venn .venn-svg");
                 const indicator = document.createElement("span");
                 indicator.className = "seg-ind";
                 indicator.setAttribute("aria-hidden", "true");
@@ -1785,9 +1783,14 @@ ry check .</code></pre>
                 function placeIndicator() {
                     const tab = tabs[selectedIndex()];
                     if (!tab) return;
+                    // A pill that has no size yet would otherwise grow in from the tablist's corner.
+                    const snap = !tab.offsetWidth || !parseFloat(indicator.style.width || "0");
+                    if (snap) indicator.classList.remove("is-ready");
                     indicator.style.width = `${tab.offsetWidth}px`;
                     indicator.style.height = `${tab.offsetHeight}px`;
                     indicator.style.transform = `translate(${tab.offsetLeft}px, ${tab.offsetTop}px)`;
+                    if (snap && tab.offsetWidth)
+                        requestAnimationFrame(() => indicator.classList.add("is-ready"));
                 }
                 if (tablist && typeof ResizeObserver !== "undefined")
                     new ResizeObserver(placeIndicator).observe(tablist);
@@ -1800,6 +1803,11 @@ ry check .</code></pre>
                 }
 
                 function activate(index: number, focusTab: boolean) {
+                    // A tab chosen before the reveal fired must never show blank lines.
+                    if (focusTab && !revealed) {
+                        revealed = true;
+                        root.classList.remove("is-waiting");
+                    }
                     const key = tabs[index]?.dataset.key ?? "";
                     tabs.forEach((tab, i) => {
                         const selected = i === index;
@@ -1937,14 +1945,26 @@ ry check .</code></pre>
                 );
                 // Through the click path, so the footer note and shared stage state are never blank.
                 activate(selectedIndex(), false);
-                requestAnimationFrame(() => indicator.classList.add("is-ready"));
+                tablist?.addEventListener(
+                    "scroll",
+                    () => tablist.classList.toggle("is-scrolled", tablist.scrollLeft > 0),
+                    { passive: true },
+                );
 
                 if (typeof IntersectionObserver !== "undefined" && !reduce) {
                     let wasVisible = false;
                     const observer = new IntersectionObserver(
                         (entries) => {
                             for (const entry of entries) {
-                                const visible = entry.intersectionRatio >= 0.3;
+                                // A showcase taller than the viewport never reaches a whole-element ratio.
+                                const visible =
+                                    entry.isIntersecting &&
+                                    entry.intersectionRect.height >=
+                                        0.3 *
+                                            Math.min(
+                                                entry.boundingClientRect.height,
+                                                window.innerHeight,
+                                            );
                                 if (visible && !wasVisible) {
                                     const index = selectedIndex();
                                     if (sharedPanel) {
@@ -3058,7 +3078,7 @@ ry check .</code></pre>
             .seg {
                 position: relative;
                 display: flex;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;
                 gap: 2px;
                 padding: 4px;
                 width: fit-content;
@@ -3086,15 +3106,15 @@ ry check .</code></pre>
                     width 0.42s cubic-bezier(0.22, 1, 0.36, 1),
                     height 0.42s cubic-bezier(0.22, 1, 0.36, 1);
             }
-            /* Below this width the pills wrap rather than hide behind a scroll. */
-            .seg {
-                flex-wrap: nowrap;
-            }
             /* On narrow screens the pills scroll sideways in one row; wrapping would break the track. */
             @media (max-width: 699px) {
                 .seg:not(.seg-steps) {
                     overflow-x: auto;
                     scrollbar-width: none;
+                    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+                    mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+                }
+                .seg.is-scrolled:not(.seg-steps) {
                     -webkit-mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
                     mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
                 }
@@ -4021,7 +4041,6 @@ ry check .</code></pre>
             }
             .seg-steps [role="tab"] {
                 display: flex;
-                align-items: baseline;
                 justify-content: space-between;
                 gap: 1rem;
                 width: 100%;
@@ -4039,7 +4058,17 @@ ry check .</code></pre>
                 font-size: 11px;
                 color: oklch(0.72 0 0);
                 background: oklch(1 0 0 / 0.06);
-                transition: color 0.2s ease, background 0.2s ease;
+                transition:
+                    color 0.2s ease,
+                    background 0.2s ease;
+            }
+            .visually-hidden {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip-path: inset(50%);
+                white-space: nowrap;
             }
             [aria-selected="true"] > .step-where {
                 color: color-mix(in oklch, var(--cap) 85%, white);
@@ -4079,7 +4108,7 @@ ry check .</code></pre>
                 }
             }
 
-            /* Tab switches replay the snippet: code lines rise in, the command types, then output follows. */
+            /* The output waits until the code has landed, so the eye reads source first, then result. */
             .reveal.is-waiting > .stage .pane-src .cl,
             .reveal.is-waiting > .stage .tl {
                 opacity: 0;
@@ -4201,7 +4230,8 @@ ry check .</code></pre>
                 .doclink span {
                     transition: none;
                 }
-                .seg-ind.is-ready {
+                .seg-ind.is-ready,
+                .step-where {
                     transition: none;
                 }
                 #runtime .band-inner::before,

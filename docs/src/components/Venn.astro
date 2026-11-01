@@ -199,7 +199,15 @@ const { id, step } = Astro.props;
       animation: none;
       opacity: 0;
     }
-    [data-step] .v-marker {
+    [data-step] .v-marker,
+    [data-step] .v-left,
+    [data-step] .v-right,
+    [data-step] .v-lens,
+    [data-step] .v-t-left,
+    [data-step] .v-t-mid,
+    [data-step] .v-t-right,
+    [data-step] .v-strict,
+    [data-step] .v-rpp {
       transition: none;
     }
   }
