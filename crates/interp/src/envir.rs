@@ -1070,7 +1070,7 @@ unsafe fn do_options(call: &Call<'_>) -> R<Sexp> {
             args.push(*arg);
         }
     }
-    if args.is_empty() {
+    if call.args.is_empty() {
         interp().visible = true;
         return options_list(None);
     }
