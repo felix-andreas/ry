@@ -155,7 +155,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
-    internal("balancePOSIXlt", 3, |call| unsafe { Ok(call.arg(0)) }),
+    internal("balancePOSIXlt", 3, |call| unsafe {
+        let fill_only = values::as_logical_scalar(call.arg(1)) == 1;
+        let classed = values::as_logical_scalar(call.arg(2)) != 0;
+        balance_posixlt(call, call.arg(0), fill_only, classed)
+    }),
+    builtin("unCfillPOSIXlt", 1, |call| unsafe { balance_posixlt(call, call.arg(0), true, false) }),
     internal("format.Date", 2, |call| unsafe { Err(call.error("format.Date is not supported")) }),
     internal("tzone_name", 0, |_| unsafe { scalar_string("UTC") }),
     internal("bindtextdomain", 2, |_| unsafe { Ok(nil()) }),
@@ -485,7 +490,9 @@ const POSIXLT_NAMES: [&str; 11] = [
     "sec", "min", "hour", "mday", "mon", "year", "wday", "yday", "isdst", "zone", "gmtoff",
 ];
 
-unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
+/// A POSIXlt list for `seconds` since the epoch. `names` go on the `year` component, where GNU R
+/// keeps a date-time's names.
+unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str, names: Sexp) -> R<Sexp> {
     let count = seconds.len();
     let fields: Vec<Sexp> = (0..11)
         .map(|field| match field {
@@ -518,9 +525,12 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         values::set_elt(fields[9], index, values::mkchar("UTC")?);
         values::ints_mut(fields[10])[index] = 0;
     }
+    if names != nil() {
+        values::set_attr(fields[5], symbols().names, names)?;
+    }
     let list = values::list_vector(&fields)?;
-    let names = string_vector(&POSIXLT_NAMES)?;
-    values::set_attr(list, symbols().names, names)?;
+    let field_names = string_vector(&POSIXLT_NAMES)?;
+    values::set_attr(list, symbols().names, field_names)?;
     let class = string_vector(&["POSIXlt", "POSIXt"])?;
     values::set_attr(list, symbols().class, class)?;
     let tzone = values::install("tzone")?;
@@ -535,7 +545,7 @@ unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
     let tz = values::first_string(call.arg(1)).map(|text| text.into_owned()).unwrap_or_default();
     let seconds: Vec<f64> = values::reals(times).to_vec();
-    posixlt_from_seconds(&seconds, &tz)
+    posixlt_from_seconds(&seconds, &tz, values::get_attr(call.arg(0), symbols().names))
 }
 
 unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
@@ -711,7 +721,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             .unwrap_or(NA_REAL);
         seconds.push(value);
     }
-    posixlt_from_seconds(&seconds, &tz)
+    posixlt_from_seconds(&seconds, &tz, values::get_attr(texts, symbols().names))
 }
 
 unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
@@ -720,7 +730,50 @@ unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .map(|&days| if days.is_nan() { NA_REAL } else { days.floor() * 86400.0 })
         .collect();
-    posixlt_from_seconds(&seconds, "UTC")
+    posixlt_from_seconds(&seconds, "UTC", values::get_attr(call.arg(0), symbols().names))
+}
+
+/// GNU R's `balancePOSIXlt`: every component recycled to the longest one's length, the
+/// attribute `balanced` set to `TRUE` (or `NA` when only filled), and the class dropped unless
+/// `classed`. Out-of-range fields such as `mon = 13` are not normalized: the components ry's own
+/// conversions build are always in range.
+unsafe fn balance_posixlt(call: &Call<'_>, x: Sexp, fill_only: bool, classed: bool) -> R<Sexp> {
+    if x.kind() != SexpType::List || length(x) < 9 {
+        return Err(call.error("invalid 'x' argument"));
+    }
+    let balanced = values::install("balanced")?;
+    let mark = values::get_attr(x, balanced);
+    let already = mark.kind() == SexpType::Logical
+        && length(mark) == 1
+        && match values::ints(mark)[0] {
+            NA_INTEGER => fill_only,
+            0 => false,
+            _ => true,
+        };
+    let result = values::shallow_duplicate(x)?;
+    if already {
+        if !classed {
+            values::set_attr(result, values::install("class")?, nil())?;
+        }
+        return Ok(result);
+    }
+    let count = length(x);
+    let longest = (0..count).map(|index| length(x.element(index))).max().unwrap_or(0);
+    for index in 0..count {
+        let component = x.element(index);
+        let current = length(component);
+        if current != longest && current > 0 {
+            let positions: Vec<usize> = (0..longest).map(|position| position % current).collect();
+            let filled = crate::subset::select_elements(component, &positions)?;
+            crate::heap().set_element(result, index, filled);
+        }
+    }
+    if !classed {
+        values::set_attr(result, values::install("class")?, nil())?;
+    }
+    let mark = if fill_only { NA_INTEGER } else { 1 };
+    values::set_attr(result, balanced, values::scalar_logical(mark)?)?;
+    Ok(result)
 }
 
 unsafe fn do_posixlt_to_date(call: &Call<'_>) -> R<Sexp> {
