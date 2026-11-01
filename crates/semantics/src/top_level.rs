@@ -117,9 +117,9 @@ pub fn item_super_assigned_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<S
         return Vec::new();
     };
     let mut names: Vec<Symbol> = module
-        .expressions
+        .kinds()
         .iter()
-        .filter_map(|expression| match &expression.kind {
+        .filter_map(|kind| match kind {
             ExpressionKind::Assign {
                 spelling: AssignSpelling::Super,
                 target,
@@ -183,7 +183,7 @@ fn plain_value(module: &Module, id: ExprId) -> bool {
             matches!(
                 &module.expression(*callee).kind,
                 ExpressionKind::NameRef(name) if matches!(name.as_str(), "c" | "list")
-            ) && arguments.iter().all(|argument| {
+            ) && module[arguments].iter().all(|argument| {
                 argument
                     .value
                     .is_some_and(|value| plain_value(module, value))

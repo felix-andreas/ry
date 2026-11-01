@@ -166,12 +166,12 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
-- **`vapply` over a `data.frame`** (rprojroot, nlme, rmarkdown). The opaque `data.frame` fits no
-  `list` parameter, so `vapply(df, length, numeric(1))` reports "expected `list[T] | T[]`, found
-  `data.frame`". `lapply`, `Filter` and `mclapply` have a trailing `data.frame` overload, but the
-  same overload on `vapply` makes an untyped `X` narrow two ways and turns `vapply(xs, ...)` into
-  `Unknown`. The fix is to give `data.frame` its named-list representation, after which the extra
-  overloads go away.
+- **`lapply`, `vapply` or `Filter` over a `data.frame`** (rprojroot, nlme, rmarkdown). The opaque
+  `data.frame` fits no `list` parameter, so `vapply(df, length, numeric(1))` reports "expected
+  `list[T] | T[]`, found `data.frame`". A trailing `data.frame` overload fixes the call but makes an
+  untyped argument narrow two ways, which turns `lapply(items, f)` on a `NULL`-defaulted parameter
+  and `vapply(xs, ...)` into `Unknown` (`items_of` in `realworld.R.test`). The fix is to give
+  `data.frame` its named-list representation rather than more overloads.
 - **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
   on as a placeholder, but the same signature declared reports the call, so the round-trip test
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a

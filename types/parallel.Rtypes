@@ -5,4 +5,3 @@
 
 mclapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any, [mc.preschedule]: logical, [mc.set.seed]: logical, [mc.silent]: logical, [mc.cores]: double, [mc.cleanup]: logical, [mc.allow.recursive]: logical, [affinity.list]: list[Any] | NULL) -> list[named: U]
 mclapply : <T, U> fn(X: list[T] | T[], FUN: fn(T) -> U, ...: Any, [mc.preschedule]: logical, [mc.set.seed]: logical, [mc.silent]: logical, [mc.cores]: double, [mc.cleanup]: logical, [mc.allow.recursive]: logical, [affinity.list]: list[Any] | NULL) -> list[U]
-mclapply : <U> fn(X: data.frame, FUN: fn(Any) -> U, ...: Any, [mc.preschedule]: logical, [mc.set.seed]: logical, [mc.silent]: logical, [mc.cores]: double, [mc.cleanup]: logical, [mc.allow.recursive]: logical, [affinity.list]: list[Any] | NULL) -> list[named: U]

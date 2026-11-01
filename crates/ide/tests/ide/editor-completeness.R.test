@@ -256,7 +256,7 @@ hover-definition: global 0..5
 definition 0..5
 references: 0..5*
 rename: 1 edit(s)
-type-definition: stub source 0 at `data.frame`
+type-definition: stub source base at `data.frame`
 signature: none
 action: Add inferred type annotation for `frame`
   edit 0..0 -> "#: data.frame\n"
@@ -273,7 +273,7 @@ hover-definition: global 0..4
 definition 0..4
 references: 0..4*
 rename: 1 edit(s)
-type-definition: stub source 0 at `matrix`
+type-definition: stub source base at `matrix`
 signature: none
 action: Add inferred type annotation for `grid`
   edit 0..0 -> "#: matrix\n"

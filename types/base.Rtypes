@@ -539,14 +539,12 @@ apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # `NULL` (`lapply(NULL, f)` is `list()`).
 lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 lapply : <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
-lapply : <U> fn(X: data.frame, FUN: fn(Any) -> U, ...: Any) -> list[named: U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
 Filter : <T> fn(f: fn(T) -> Any, x: T[]) -> T[]
 Filter : <T> fn(f: fn(T) -> Any, x: list[named: T]) -> list[named: T]
 Filter : <T> fn(f: fn(T) -> Any, x: list[T]) -> list[T]
-Filter : fn(f: fn(Any) -> Any, x: data.frame) -> data.frame
 Find : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> T | NULL
 Position : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> integer | NULL
 Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical, [simplify]: logical) -> U
