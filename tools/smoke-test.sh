@@ -73,6 +73,12 @@ lsp_message() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
 if grep -q '"capabilities"' lsp.out; then pass "ry server answers initialize"; else fail "ry server: $(cat lsp.out)"; fi
 
 if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
+	# `ry run` prefers the usual install paths to the R on PATH, so a runner's preinstalled R
+	# could shadow the version the workflow asked for.
+	if [ -z "${R_HOME:-}" ]; then
+		R_HOME=$(R RHOME)
+		export R_HOME
+	fi
 	printf 'cat(sum(1:10), "\\n")\n' >sum.R
 	if [ -e "$scratch/install/libR.so" ] || [ -e "$scratch/install/libR.dylib" ]; then
 		output=$("$ry" run sum.R 2>&1 | tr -d '\r') || true

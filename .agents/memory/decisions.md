@@ -3754,15 +3754,18 @@ explicit allocators".
   ld64.lld merge the two lists). When `dyn.load` opens a Mach-O library whose load commands name
   GNU R's libR (`crates/libr/src/macho.rs`), it opens a copy instead, with that load command
   rewritten in place to `@rpath/libR.dylib` and re-signed ad hoc with `codesign --force --sign -`,
-  because arm64 refuses to map a modified, unsigned image. dyld satisfies a load command from an
+  because arm64 refuses to map a modified, unsigned image. The rewrite also zeroes the compatibility version the
+  load command records (GNU R links libR with its own version, and ry's libR has none, so dyld
+  would refuse it). dyld satisfies a load command from an
   already loaded image whose install name matches, so the copy binds to ry's library. The copy is
-  cached under the user cache directory keyed by path, size and mtime, and a library that names no
+  cached under the user cache directory keyed by the rewrite's version (`REBIND_VERSION` in
+  `dynload.rs`, bumped whenever the rewrite changes), path, size and mtime, and a library that names no
   libR is recorded with a marker so it is read once. The DLL record keeps the original path.
 - **ry-built packages.** `rcmd` links with `-undefined dynamic_lookup` and an empty `LIBR`, so the
   binary records no libR and resolves R's API in the flat lookup that falls back to every loaded
   image. The same build then loads under ry and under GNU R, and needs no rewriting.
 - **Known gaps.** A package that loads a sibling dylib through `@loader_path` breaks in the
-  rebound copy, because the copy lives outside the package's `libs/`. CRAN's own `libRblas.dylib`
+  rebound copy, because the copy lives outside the package's `libs/`. A failed load of a rebound copy says so in its error. CRAN's own `libRblas.dylib`
   could pull in GNU R's libR if a package links it directly; unobserved. The install-name match is
   reasoned from dyld's source and verified only once the release smoke test runs on a Mac.
 - **Windows (designed, not built).** Name the library `R.dll`: the loader reuses an already loaded

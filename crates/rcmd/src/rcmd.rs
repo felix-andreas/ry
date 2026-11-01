@@ -157,8 +157,14 @@ fn make_assignments(text: &str) -> BTreeMap<String, String> {
     let mut variables = BTreeMap::new();
     let mut logical = String::new();
     for line in text.lines() {
+        // make joins a continuation and the whitespace around it into one space.
+        let line = if logical.is_empty() {
+            line
+        } else {
+            line.trim_start()
+        };
         if let Some(stripped) = line.strip_suffix('\\') {
-            logical.push_str(stripped);
+            logical.push_str(stripped.trim_end());
             logical.push(' ');
             continue;
         }
@@ -170,7 +176,8 @@ fn make_assignments(text: &str) -> BTreeMap<String, String> {
         let Some((name, value)) = statement.split_once('=') else {
             continue;
         };
-        let value = value.trim().to_owned();
+        // A `#` starts a comment anywhere on an assignment line, as in make.
+        let value = value.split('#').next().unwrap_or("").trim().to_owned();
         let (name, operator) = match name.trim_end().strip_suffix(['+', '?', ':']) {
             Some(stripped) => (stripped.trim(), name.trim_end().chars().last()),
             None => (name.trim(), None),
@@ -197,8 +204,10 @@ fn make_assignments(text: &str) -> BTreeMap<String, String> {
     variables
 }
 
-/// Expands `$(NAME)` and `${NAME}` in `value`, and `$$` to `$`. An unknown name expands to nothing, as in make,
-/// and the depth bound stops a self-referencing assignment.
+/// Expands `$(NAME)` and `${NAME}` in `value`, including a name built by a nested reference
+/// (`$(CXX$(STD))`), and `$$` to `$`. An unknown name expands to nothing, as in make, and the
+/// depth bound stops a self-referencing assignment. Whitespace inside the value is kept, so a
+/// quoted path with a space survives.
 fn expand_make(
     value: &str,
     variables: &BTreeMap<String, String>,
@@ -210,9 +219,9 @@ fn expand_make(
     while let Some(start) = rest.find('$') {
         expanded.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        let close = match after.chars().next() {
-            Some('(') => ')',
-            Some('{') => '}',
+        let (open, close) = match after.chars().next() {
+            Some('(') => ('(', ')'),
+            Some('{') => ('{', '}'),
             Some('$') => {
                 expanded.push('$');
                 rest = &after[1..];
@@ -224,12 +233,25 @@ fn expand_make(
                 continue;
             }
         };
-        let Some(end) = after.find(close) else {
+        let mut level = 0usize;
+        let end = after.char_indices().find_map(|(index, character)| {
+            if character == open {
+                level += 1;
+            } else if character == close {
+                level -= 1;
+                if level == 0 {
+                    return Some(index);
+                }
+            }
+            None
+        });
+        let Some(end) = end else {
             expanded.push_str(&rest[start..]);
             rest = "";
             break;
         };
-        let name = &after[1..end];
+        let name = expand_make(&after[1..end], variables, home, depth + 1);
+        let name = name.as_str();
         if name == "R_HOME" {
             expanded.push_str(home);
         } else if depth < 16
@@ -240,7 +262,7 @@ fn expand_make(
         rest = &after[end + 1..];
     }
     expanded.push_str(rest);
-    expanded.split_whitespace().collect::<Vec<_>>().join(" ")
+    expanded.trim().to_owned()
 }
 
 /// Where the pieces of an R home come from.
@@ -1649,6 +1671,16 @@ SHLIB_OPENMP_CFLAGS =
         assert_eq!(
             expand_make("$(LOOP) $$ $(R_HOME)", &variables, "/r", 0),
             "$ /r"
+        );
+    }
+
+    #[test]
+    fn make_expansion_nests_drops_comments_and_keeps_quoted_spaces() {
+        let variables = make_assignments("STD = 17 # the default\nCXX17 = clang++\n");
+        assert_eq!(expand_make("$(CXX$(STD))", &variables, "/r", 0), "clang++");
+        assert_eq!(
+            expand_make("-L\"$(R_HOME)/lib\"", &variables, "/My R", 0),
+            "-L\"/My R/lib\""
         );
     }
 }

@@ -13,6 +13,10 @@
 //! offset in the file moves. `@rpath/libR.dylib` is shorter than any absolute path that ends in
 //! `/libR.dylib`, which makes it fit. The edit invalidates the binary's code signature, which
 //! arm64 macOS enforces, so the caller re-signs the copy it loads (`dynload::rebound_copy`).
+//!
+//! A load command also records the compatibility version of the library it names, and GNU R
+//! links libR with its own version (4.5.0, say). dyld refuses a library whose current version is
+//! lower, and ry's libR has none, so the rewrite zeroes the recorded version, which accepts any.
 
 /// The install name of ry's libR (`crates/libr/build.rs` sets it).
 pub const RY_LIBR_INSTALL_NAME: &str = "@rpath/libR.dylib";
@@ -25,12 +29,14 @@ const MACH_HEADER_64_SIZE: usize = 32;
 /// The load commands that name a library: `LC_LOAD_DYLIB`, `LC_LOAD_WEAK_DYLIB`,
 /// `LC_REEXPORT_DYLIB`, `LC_LAZY_LOAD_DYLIB` and `LC_LOAD_UPWARD_DYLIB`.
 const DYLIB_COMMANDS: [u32; 5] = [0xc, 0x8000_0018, 0x8000_001f, 0x20, 0x8000_0023];
+/// The offset of `compatibility_version` in a `dylib_command`.
+const COMPATIBILITY_VERSION_OFFSET: usize = 20;
 
 /// Rewrites every load command of `image` that names GNU R's libR to ry's install name, in
-/// each architecture of a universal binary, and returns how many it rewrote. Zero means the
-/// binary does not link libR (ry built it with `-undefined dynamic_lookup`, or it is not a
-/// package library) and can load as it is. An image that is not a 64-bit Mach-O file, or
-/// is malformed, is an error.
+/// each 64-bit architecture of a universal binary, and returns how many it rewrote. Zero means
+/// the binary does not link libR (ry built it with `-undefined dynamic_lookup`, or it is not a
+/// package library) and can load as it is. A file that is not a 64-bit Mach-O image is left
+/// alone for `dlopen` to accept or refuse; a malformed one is an error.
 pub fn rebind_libr(image: &mut [u8]) -> Result<usize, String> {
     match read_u32_be(image, 0)? {
         FAT_MAGIC | FAT_MAGIC_64 => {
@@ -64,13 +70,15 @@ pub fn rebind_libr(image: &mut [u8]) -> Result<usize, String> {
     }
 }
 
+/// A slice that is not 64-bit (an old i386 or ppc slice of a universal binary) is skipped,
+/// because dyld only ever maps the host's slice.
 fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
     if read_u32_le(image, 0)? != MH_MAGIC_64 {
-        return Err("not a 64-bit Mach-O library".into());
+        return Ok(0);
     }
+    let mut rewritten = 0;
     let command_count = read_u32_le(image, 16)? as usize;
     let mut offset = MACH_HEADER_64_SIZE;
-    let mut rewritten = 0;
     for _ in 0..command_count {
         let command = read_u32_le(image, offset)?;
         let size = read_u32_le(image, offset + 4)? as usize;
@@ -79,7 +87,9 @@ fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
         }
         let end = offset.checked_add(size).ok_or_else(truncated)?;
         if DYLIB_COMMANDS.contains(&command) {
-            let name_start = offset + read_u32_le(image, offset + 8)? as usize;
+            let name_start = offset
+                .checked_add(read_u32_le(image, offset + 8)? as usize)
+                .ok_or_else(truncated)?;
             let field = image.get_mut(name_start..end).ok_or_else(truncated)?;
             let length = field
                 .iter()
@@ -96,6 +106,11 @@ fn rebind_thin(image: &mut [u8]) -> Result<usize, String> {
                 }
                 field.fill(0);
                 field[..replacement.len()].copy_from_slice(replacement);
+                let version = offset + COMPATIBILITY_VERSION_OFFSET;
+                if version + 4 > name_start {
+                    return Err("a library reference overlaps its version fields".into());
+                }
+                image[version..version + 4].fill(0);
                 rewritten += 1;
             }
         }
@@ -303,9 +318,31 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_is_not_mach_o_is_left_for_dlopen() {
+        let mut elf = [0x7f, b'E', b'L', b'F', 0, 0, 0, 0];
+        assert_eq!(rebind_libr(&mut elf), Ok(0));
+    }
+
+    #[test]
+    fn the_recorded_compatibility_version_is_cleared() {
+        let mut bytes = image(&["/opt/R/lib/libR.dylib", "/usr/lib/libSystem.B.dylib"]);
+        let first = MACH_HEADER_64_SIZE + COMPATIBILITY_VERSION_OFFSET;
+        let second = MACH_HEADER_64_SIZE
+            + read_u32_le(&bytes, MACH_HEADER_64_SIZE + 4).unwrap() as usize
+            + COMPATIBILITY_VERSION_OFFSET;
+        assert_eq!(read_u32_le(&bytes, first), Ok(0x10000));
+        assert_eq!(rebind_libr(&mut bytes), Ok(1));
+        assert_eq!(read_u32_le(&bytes, first), Ok(0));
+        assert_eq!(
+            read_u32_le(&bytes, second),
+            Ok(0x10000),
+            "only libR's is cleared"
+        );
+    }
+
+    #[test]
     fn malformed_images_are_errors_not_panics() {
         assert!(rebind_libr(&mut []).is_err());
-        assert!(rebind_libr(&mut [0x7f, b'E', b'L', b'F', 0, 0, 0, 0]).is_err());
         let mut cut = image(&["/opt/R/lib/libR.dylib"]);
         cut.truncate(40);
         assert!(rebind_libr(&mut cut).is_err());
