@@ -2612,6 +2612,42 @@ unsafe fn do_iconv(call: &Call<'_>) -> R<Sexp> {
 /// An open `iconv_t` conversion descriptor, closed on drop.
 struct Converter(libc::iconv_t);
 
+/// `bytes` converted from `from` to UTF-8 up to the first sequence that is invalid in `from`,
+/// and whether the conversion reached the end. `None` means the encoding is unknown. A
+/// connection reads its re-encoded text this way, stopping where GNU R does.
+pub fn convert_to_utf8_prefix(from: &str, bytes: &[u8]) -> Option<(Vec<u8>, bool)> {
+    let converter = Converter::open(from, "UTF-8")?;
+    let mut output = Vec::with_capacity(bytes.len() + 16);
+    let mut buffer = vec![0u8; bytes.len() * 4 + 16];
+    let mut rest = bytes;
+    loop {
+        let mut input_pointer = rest.as_ptr() as *mut libc::c_char;
+        let mut input_left = rest.len();
+        let mut output_pointer = buffer.as_mut_ptr() as *mut libc::c_char;
+        let mut output_left = buffer.len();
+        // SAFETY: the pointers and lengths describe `rest` and `buffer`, which outlive the call;
+        // iconv only reads the input.
+        let status = unsafe {
+            libc::iconv(
+                converter.0,
+                &mut input_pointer,
+                &mut input_left,
+                &mut output_pointer,
+                &mut output_left,
+            )
+        };
+        let error = std::io::Error::last_os_error().raw_os_error();
+        output.extend_from_slice(&buffer[..buffer.len() - output_left]);
+        rest = &rest[rest.len() - input_left..];
+        if status != usize::MAX {
+            return Some((output, true));
+        }
+        if error != Some(libc::E2BIG) {
+            return Some((output, false));
+        }
+    }
+}
+
 impl Converter {
     fn open(from: &str, to: &str) -> Option<Converter> {
         let from = std::ffi::CString::new(from).ok()?;

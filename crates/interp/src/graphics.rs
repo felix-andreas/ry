@@ -5633,7 +5633,24 @@ unsafe fn do_axis_pars(call: &NativeCall<'_>) -> R<Sexp> {
         std::mem::swap(&mut low, &mut high);
     }
     let (first, last, count) = if log {
-        log_axis(10f64.powf(low), 10f64.powf(high), intervals)
+        let (low, high) = (10f64.powf(low), 10f64.powf(high));
+        // A range past the largest double has no decades to tick, and an end that overflows
+        // or underflows is pulled back to the last decade that still is a normal double.
+        if low.is_infinite() {
+            (f64::INFINITY, f64::INFINITY, 1)
+        } else {
+            let high = if high.is_infinite() && low < 1e308 {
+                1e308
+            } else {
+                high
+            };
+            let low = if low < 1e-307 && high >= 1e-307 {
+                1e-307
+            } else {
+                low
+            };
+            log_axis(low, high, intervals)
+        }
     } else {
         linear_axis(low, high, intervals)
     };

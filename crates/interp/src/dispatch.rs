@@ -1444,6 +1444,15 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
     if value.kind() != SexpType::String {
         return Err(call.error("attempt to set invalid 'class' attribute"));
     }
+    // A matrix's implicit class, as `class(m)` reports it, is no attribute either.
+    if length(value) == 2
+        && values::dims(object).is_some_and(|dims| dims.len() == 2)
+        && char_str(value.element(0)) == "matrix"
+        && char_str(value.element(1)) == "array"
+    {
+        set_class_attribute(object, nil())?;
+        return Ok(object);
+    }
     if length(value) == 1 {
         let class = char_str(value.element(0));
         // Setting an implicit class removes the attribute, or coerces.
@@ -1471,10 +1480,6 @@ unsafe fn do_set_class(call: &Call<'_>) -> R<Sexp> {
                         "cannot set class to \"array\" unless the dimension attribute has length > 0",
                     ));
                 }
-                set_class_attribute(object, nil())?;
-                return Ok(object);
-            }
-            "function" if values::is_function(object) => {
                 set_class_attribute(object, nil())?;
                 return Ok(object);
             }

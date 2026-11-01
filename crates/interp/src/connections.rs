@@ -582,6 +582,9 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     let open = values::require_string(call.arg(1), "open")?;
     let blocking = values::require_flag(call.arg(2), "blocking")?;
     let mut raw = values::require_flag(call.arg(5), "raw")?;
+    let text_encoding = values::first_string(call.arg(3))
+        .map(|name| name.into_owned())
+        .filter(|name| !name.is_empty() && name != "native.enc");
     if description.contains("://") {
         return Err(error("ry does not support URL connections yet"));
     }
@@ -618,6 +621,8 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
         path,
         temporary,
         encoding: None,
+        text_encoding,
+        invalid_input: false,
         raw,
         compression: 6,
         stream: None,
@@ -664,6 +669,8 @@ unsafe fn compressed_file(call: &Call<'_>, encoding: Compressed) -> R<Sexp> {
         path: PathBuf::from(expand_path(&description)),
         temporary: false,
         encoding: Some(encoding),
+        text_encoding: None,
+        invalid_input: false,
         raw: false,
         compression: compression.unsigned_abs(),
         stream: None,
@@ -996,6 +1003,11 @@ unsafe fn do_read_lines(call: &Call<'_>) -> R<Sexp> {
         if n > 0 && (lines.len() as i64) < n && !ok {
             return Err(error("too few lines read in readLines"));
         }
+        let encoding = if (*con).UTF8out != 0 && encoding == Encoding::Native {
+            Encoding::Utf8
+        } else {
+            encoding
+        };
         strings_vector(&lines, encoding)
     })
 }
@@ -2847,6 +2859,11 @@ struct FileDevice {
     /// `gzfile()`, `bzfile()` and `xzfile()`: writes compress in this format; reads decompress
     /// whatever format the file is in.
     encoding: Option<Compressed>,
+    /// `file(encoding =)`: text reads re-encode from this encoding to UTF-8.
+    text_encoding: Option<String>,
+    /// The re-encoded text stops at input that is invalid in `text_encoding`; the read that
+    /// reaches that point warns.
+    invalid_input: bool,
     /// `file(raw = TRUE)`: reads never decompress.
     raw: bool,
     compression: u32,
@@ -3046,7 +3063,13 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
                 return Ok(true);
             }
             match open_file(file, mode) {
-                Ok(stream) => file.stream = Some(stream),
+                Ok(stream) => {
+                    // Re-encoded text is UTF-8, and text reads mark it so.
+                    (*con).UTF8out = matches!(stream, Stream::Inflate(_)
+                        if file.text_encoding.is_some() && mode.read && !mode.binary)
+                        as Rboolean;
+                    file.stream = Some(stream);
+                }
                 Err(failure) => {
                     crate::conditions::warning(format!(
                         "cannot open file '{}': {}",
@@ -3193,6 +3216,22 @@ fn open_file(device: &mut FileDevice, mode: Mode) -> std::io::Result<Stream> {
     // `file()` decompresses only in text mode, so `readBin()` sees a compressed file's bytes;
     // the compressed file connections decompress in either mode.
     let decodes = device.encoding.is_some() || !(mode.binary || device.raw);
+    if let Some(text_encoding) = device
+        .text_encoding
+        .as_deref()
+        .filter(|_| mode.read && !mode.write && !mode.binary)
+    {
+        let mut bytes = Vec::new();
+        open_inflate(&device.path)?.reader.read_to_end(&mut bytes)?;
+        let (text, complete) = crate::system::convert_to_utf8_prefix(text_encoding, &bytes)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        device.invalid_input = !complete;
+        return Ok(Stream::Inflate(Inflate {
+            reader: Box::new(std::io::Cursor::new(text)),
+            path: device.path.clone(),
+            position: 0,
+        }));
+    }
     if mode.read && !mode.write && decodes && file_compression(&device.path)?.is_some() {
         return Ok(Stream::Inflate(open_inflate(&device.path)?));
     }
@@ -3389,6 +3428,13 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
             Some(Stream::Inflate(inflate)) => {
                 let count = read_fully(&mut inflate.reader, buffer).map_err(io_error)?;
                 inflate.position += count as u64;
+                if count < buffer.len() && file.invalid_input {
+                    file.invalid_input = false;
+                    let description = CStr::from_ptr((*con).description).to_string_lossy();
+                    crate::conditions::warning(format!(
+                        "invalid input found on input connection '{description}'"
+                    ))?;
+                }
                 Ok(count)
             }
             Some(Stream::Deflate { .. }) => Err(error("cannot read from this connection")),
