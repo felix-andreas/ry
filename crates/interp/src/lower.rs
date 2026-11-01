@@ -1,12 +1,12 @@
 //! R source to R language objects. ry's parser (the `syntax` crate) builds a lossless tree; this
 //! lowers it to exactly the calls, symbols and constants GNU R's parser produces, because R code
 //! inspects them (`quote`, `substitute`, `deparse`, `body`, `match.call`). The pipe `|>` is
-//! rewritten at parse time and `->` becomes `<-`, as in GNU R, and ry's inline type annotations
-//! are dropped.
+//! rewritten at parse time and `->` becomes `<-`, as in GNU R. ry's inline type annotations are
+//! dropped from the language objects, and a function's parameter and return types are registered
+//! as checks at its boundary instead (`annotations`).
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-
     unwind::{R, error},
     values::{self, alloc, install, missing_arg, nil, symbols},
 };
@@ -22,11 +22,15 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// Parses `text` into an expression vector, or reports the first syntax error in GNU R's form.
 pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
     let parse = syntax::parse(text);
-    if let Some(failure) = parse.errors().first() {
+    // A broken `#:` comment is a comment to R, so only R's own grammar can fail a parse.
+    if let Some(failure) = parse.errors().iter().find(|failure| !failure.in_annotation) {
         let offset = usize::from(failure.range.start()).min(text.len());
         let before = &text[..offset];
         let line = before.matches('\n').count() + 1;
-        let column = before.rsplit('\n').next().map_or(0, |line| line.chars().count());
+        let column = before
+            .rsplit('\n')
+            .next()
+            .map_or(0, |line| line.chars().count());
         return Err(error(format!(
             "{source_name}:{line}:{column}: {}",
             failure.message
@@ -47,6 +51,12 @@ pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
     Ok(result)
 }
 
+/// Lowers one expression node of a tree that parsed without errors, such as a top-level item
+/// of a file the analysis already parsed, so a host that holds the tree needs no second parse.
+pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
+    lower(node)
+}
+
 fn is_skipped(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),
@@ -59,9 +69,7 @@ fn is_skipped(node: &SyntaxNode) -> bool {
 
 /// The expression children of a node, without trivia, tokens or annotations.
 fn expression_children(node: &SyntaxNode) -> Vec<SyntaxNode> {
-    node.children()
-        .filter(|child| !is_skipped(child))
-        .collect()
+    node.children().filter(|child| !is_skipped(child)).collect()
 }
 
 fn significant_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
@@ -256,9 +264,7 @@ unsafe fn binary(node: &SyntaxNode) -> R<Sexp> {
 /// `lhs |> f(args)` is `f(lhs, args)`.
 unsafe fn pipe(left: Sexp, right: Sexp) -> R<Sexp> {
     if right.kind() != SexpType::Language {
-        return Err(error(
-            "The pipe operator requires a function call as RHS",
-        ));
+        return Err(error("The pipe operator requires a function call as RHS"));
     }
     let head = right.car();
     if head == symbols().function {
@@ -533,7 +539,10 @@ unsafe fn name_symbol(node: &SyntaxNode) -> R<Sexp> {
 
 /// An identifier's name, without backticks.
 fn identifier(text: &str) -> String {
-    match text.strip_prefix('`').and_then(|rest| rest.strip_suffix('`')) {
+    match text
+        .strip_prefix('`')
+        .and_then(|rest| rest.strip_suffix('`'))
+    {
         Some(inner) => unescape(inner).unwrap_or_else(|_| inner.to_owned()),
         None => text.to_owned(),
     }
@@ -555,6 +564,7 @@ unsafe fn function_definition(node: &SyntaxNode) -> R<Sexp> {
     }
     let formals = values::pairlist(&formals, SexpType::Pairlist)?;
     let body = body.unwrap_or(nil());
+    crate::annotations::register_definition(node, formals, body)?;
     let items = [
         (nil(), symbols().function),
         (nil(), formals),
@@ -671,7 +681,10 @@ fn raw_string(text: &str) -> String {
     let after_r = &text[1..];
     let quote = after_r.chars().next().unwrap_or('"');
     let rest = &after_r[1..];
-    let dashes = rest.chars().take_while(|&character| character == '-').count();
+    let dashes = rest
+        .chars()
+        .take_while(|&character| character == '-')
+        .count();
     let open = rest[dashes..].chars().next().unwrap_or('(');
     let body_start = 1 + 1 + dashes + open.len_utf8();
     let body_end = text.len() - (1 + dashes + 1);
@@ -765,12 +778,16 @@ pub fn unescape(text: &str) -> Result<String, String> {
                     characters.next();
                 }
                 if count == 0 {
-                    return Err(format!("'\\{escape}' used without hex digits in character string"));
+                    return Err(format!(
+                        "'\\{escape}' used without hex digits in character string"
+                    ));
                 }
                 result.push(char::from_u32(value).unwrap_or('\u{fffd}'));
             }
             other => {
-                return Err(format!("'\\{other}' is an unrecognized escape in character string"));
+                return Err(format!(
+                    "'\\{other}' is an unrecognized escape in character string"
+                ));
             }
         }
     }
@@ -785,10 +802,11 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
     let count = values::as_integer_scalar(call.arg(1));
     let text = call.arg(2);
     let (source, name) = if text != nil() {
-        let lines: Vec<String> = values::strings(crate::coerce::coerce_vector(text, SexpType::String)?)
-            .into_iter()
-            .map(|line| line.unwrap_or_else(|| "NA".into()))
-            .collect();
+        let lines: Vec<String> =
+            values::strings(crate::coerce::coerce_vector(text, SexpType::String)?)
+                .into_iter()
+                .map(|line| line.unwrap_or_else(|| "NA".into()))
+                .collect();
         (lines.join("\n"), "<text>".to_owned())
     } else {
         let content = crate::connections::read_all_text(file)?;
@@ -815,9 +833,7 @@ unsafe fn do_str2lang(call: &Call<'_>) -> R<Sexp> {
     let expressions = parse_text(&source, "<text>")?;
     match values::length(expressions) {
         1 => Ok(expressions.element(0)),
-        count => Err(call.error(format!(
-            "parsing result not of length one, but {count}"
-        ))),
+        count => Err(call.error(format!("parsing result not of length one, but {count}"))),
     }
 }
 

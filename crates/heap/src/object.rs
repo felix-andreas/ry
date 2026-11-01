@@ -279,6 +279,11 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// A function definition's formals pairlist (or its body, when it has no formals) for which
+    /// the interpreter registered inline-annotation checks.
+    pub const TYPED_DEFINITION: u16 = 1 << 12;
+    /// A promise whose value an inline parameter annotation checks when it is forced.
+    pub const CHECKED_PROMISE: u16 = 1 << 12;
 }
 
 pub(crate) mod gc_bits {

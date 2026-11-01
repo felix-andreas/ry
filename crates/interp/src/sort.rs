@@ -17,7 +17,9 @@ use crate::{
         symbols,
     },
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real};
+use heap::object::{
+    NA_INTEGER, NA_LOGICAL, NA_REAL_BITS, Rcomplex, Sexp, SexpType, Slot, gp, is_na_real,
+};
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::{
     borrow::Cow,
@@ -55,8 +57,16 @@ pub fn collate(left: &str, right: &str) -> Ordering {
         return left.cmp(right);
     }
     let primary = |text: &str| text.chars().map(primary_weight).collect::<Vec<_>>();
-    let secondary = |text: &str| text.chars().map(|character| base_letter(character).1).collect::<Vec<_>>();
-    let tertiary = |text: &str| text.chars().map(|character| character.is_uppercase()).collect::<Vec<_>>();
+    let secondary = |text: &str| {
+        text.chars()
+            .map(|character| base_letter(character).1)
+            .collect::<Vec<_>>()
+    };
+    let tertiary = |text: &str| {
+        text.chars()
+            .map(|character| character.is_uppercase())
+            .collect::<Vec<_>>()
+    };
     primary(left)
         .cmp(&primary(right))
         .then_with(|| secondary(left).cmp(&secondary(right)))
@@ -199,10 +209,16 @@ unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
             }
         }
         SexpType::String => {
-            let mut items: Vec<Sexp> = (0..length(result)).map(|index| result.element(index)).collect();
+            let mut items: Vec<Sexp> = (0..length(result))
+                .map(|index| result.element(index))
+                .collect();
             items.sort_by(|&left, &right| {
                 let ordering = compare_strings_na_last(left, right);
-                if decreasing { ordering.reverse() } else { ordering }
+                if decreasing {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
             });
             for (index, item) in items.into_iter().enumerate() {
                 values::set_elt(result, index, item);
@@ -239,8 +255,10 @@ unsafe fn do_psort(call: &Call<'_>) -> R<Sexp> {
 /// exposes.
 unsafe fn do_qsort(call: &Call<'_>) -> R<Sexp> {
     let x = call.arg(0);
-    let numeric = matches!(x.kind(), SexpType::Logical | SexpType::Integer | SexpType::Real)
-        && !values::inherits(x, "factor");
+    let numeric = matches!(
+        x.kind(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) && !values::inherits(x, "factor");
     if !numeric {
         return Err(error("argument is not a numeric vector"));
     }
@@ -280,7 +298,11 @@ unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
         .map(|&key| values::materialize(key))
         .collect::<R<Vec<Sexp>>>()?;
     let columns: Vec<Option<Column<'_>>> = keys.iter().map(|&key| column(key)).collect();
-    let routine = if keys.len() == 1 { "orderVector1" } else { "listgreater" };
+    let routine = if keys.len() == 1 {
+        "orderVector1"
+    } else {
+        "listgreater"
+    };
     if keys.len() == 1 && columns[0].is_none() {
         return Err(unimplemented_type(first, routine));
     }
@@ -320,7 +342,9 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     }
     let decreasing = coerce_vector(call.arg(1), SexpType::Logical)?;
     if length(decreasing) != keys.len() {
-        return Err(error("length(decreasing) must match the number of order arguments"));
+        return Err(error(
+            "length(decreasing) must match the number of order arguments",
+        ));
     }
     let directions = values::ints(decreasing)
         .iter()
@@ -356,8 +380,14 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
         let mut ends = Vec::new();
         for position in 1..=order.len() {
             let boundary = position == order.len()
-                || compare_rows(&columns, &directions, order[position - 1], order[position], nas_last, &unsupported)
-                    != Ordering::Equal;
+                || compare_rows(
+                    &columns,
+                    &directions,
+                    order[position - 1],
+                    order[position],
+                    nas_last,
+                    &unsupported,
+                ) != Ordering::Equal;
             if boundary {
                 ends.push(position as i32);
             }
@@ -415,7 +445,11 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
         Some("average") => Ties::Average,
         Some("min") => Ties::Min,
         Some("max") => Ties::Max,
-        _ => return Err(error("invalid ties.method for rank() [should never happen]")),
+        _ => {
+            return Err(error(
+                "invalid ties.method for rank() [should never happen]",
+            ));
+        }
     };
     let mut order: Vec<usize> = (0..count).collect();
     order.sort_by(|&left, &right| column.compare(left, right, true));
@@ -423,7 +457,9 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     let mut start = 0;
     while start < count {
         let mut end = start;
-        while end + 1 < count && column.compare(order[start], order[end + 1], true) == Ordering::Equal {
+        while end + 1 < count
+            && column.compare(order[start], order[end + 1], true) == Ordering::Equal
+        {
             end += 1;
         }
         let rank = match ties {
@@ -471,7 +507,10 @@ unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
         return alloc(SexpType::Logical, 0);
     }
     let duplicated = duplicated_elements(x, call.arg(1), from_last, "duplicated")?;
-    let flags: Vec<i32> = duplicated.iter().map(|&duplicate| duplicate as i32).collect();
+    let flags: Vec<i32> = duplicated
+        .iter()
+        .map(|&duplicate| duplicate as i32)
+        .collect();
     values::logical_vector(&flags)
 }
 
@@ -516,15 +555,33 @@ unsafe fn do_match(call: &Call<'_>) -> R<Sexp> {
     };
     let x = values::materialize(coerce_vector(x, kind)?)?;
     let table = values::materialize(coerce_vector(table, kind)?)?;
+    let incomparables = incomparable_keys(call.arg(3), kind)?;
+    if kind == SexpType::String && incomparables.is_none() && all_ascii(table) && all_ascii(x) {
+        // Interning makes equal ASCII strings one object, `NA` included, so the pointer is the
+        // key and no text is hashed. GNU R's `match` relies on the same property.
+        let mut positions: FxHashMap<Sexp, i32> = FxHashMap::default();
+        positions.reserve(length(table));
+        for index in 0..length(table) {
+            positions
+                .entry(table.element(index))
+                .or_insert(index as i32 + 1);
+        }
+        let result: Vec<i32> = (0..count)
+            .map(|index| positions.get(&x.element(index)).copied().unwrap_or(nomatch))
+            .collect();
+        return values::integer_vector(&result);
+    }
     let mut positions: FxHashMap<Key<'_>, i32> = FxHashMap::default();
     for (index, key) in element_keys(table).into_iter().enumerate() {
         positions.entry(key).or_insert(index as i32 + 1);
     }
-    let incomparables = incomparable_keys(call.arg(3), kind)?;
     let result: Vec<i32> = element_keys(x)
         .into_iter()
         .map(|key| {
-            if incomparables.as_ref().is_some_and(|keys| keys.contains(&key)) {
+            if incomparables
+                .as_ref()
+                .is_some_and(|keys| keys.contains(&key))
+            {
                 return nomatch;
             }
             positions.get(&key).copied().unwrap_or(nomatch)
@@ -630,7 +687,10 @@ unsafe fn check_sortable(x: Sexp) -> R<()> {
 }
 
 unsafe fn unimplemented_type(object: Sexp, routine: &str) -> crate::unwind::Unwind {
-    error(format!("unimplemented type '{}' in '{routine}'\n", object.kind().name()))
+    error(format!(
+        "unimplemented type '{}' in '{routine}'\n",
+        object.kind().name()
+    ))
 }
 
 unsafe fn one_based(order: &[usize]) -> R<Sexp> {
@@ -658,7 +718,9 @@ unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
         SexpType::Real => Some(Column::Real(values::reals(vector))),
         SexpType::Complex => Some(Column::Complex(values::complexes(vector))),
         SexpType::String => Some(Column::String(
-            (0..length(vector)).map(|index| string_at(vector, index)).collect(),
+            (0..length(vector))
+                .map(|index| string_at(vector, index))
+                .collect(),
         )),
         _ => None,
     }
@@ -699,7 +761,9 @@ impl Column<'_> {
         match self {
             Column::Integer(items) => items[left].cmp(&items[right]),
             Column::Grouped(items) => items[left].cmp(&items[right]),
-            Column::Real(items) => items[left].partial_cmp(&items[right]).unwrap_or(Ordering::Equal),
+            Column::Real(items) => items[left]
+                .partial_cmp(&items[right])
+                .unwrap_or(Ordering::Equal),
             Column::Complex(items) => {
                 let (left, right) = (items[left], items[right]);
                 left.r
@@ -722,15 +786,37 @@ impl Column<'_> {
 
     /// As `compare`, with the non-NA values in decreasing order when `decreasing` is set. NA
     /// placement does not depend on the direction.
-    fn compare_directed(&self, left: usize, right: usize, na_last: bool, decreasing: bool) -> Ordering {
+    fn compare_directed(
+        &self,
+        left: usize,
+        right: usize,
+        na_last: bool,
+        decreasing: bool,
+    ) -> Ordering {
         match (self.is_na(left), self.is_na(right)) {
             (true, true) => Ordering::Equal,
-            (true, false) => if na_last { Ordering::Greater } else { Ordering::Less },
-            (false, true) => if na_last { Ordering::Less } else { Ordering::Greater },
+            (true, false) => {
+                if na_last {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (false, true) => {
+                if na_last {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
             (false, false) => {
                 let ordering = self.compare_values(left, right);
                 let decreasing = decreasing && !matches!(self, Column::Grouped(_));
-                if decreasing { ordering.reverse() } else { ordering }
+                if decreasing {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
             }
         }
     }
@@ -864,8 +950,20 @@ fn partial_sort(
         .unwrap_or(0);
     let pivot = positions[chosen];
     select(order, low, high, pivot, compare);
-    partial_sort(order, low, pivot as isize - 1, &positions[..chosen], compare);
-    partial_sort(order, pivot as isize + 1, high, &positions[chosen + 1..], compare);
+    partial_sort(
+        order,
+        low,
+        pivot as isize - 1,
+        &positions[..chosen],
+        compare,
+    );
+    partial_sort(
+        order,
+        pivot as isize + 1,
+        high,
+        &positions[chosen + 1..],
+        compare,
+    );
 }
 
 /// Singleton's quicksort (CACM Algorithm 347, with a varying pivot position and insertion sort
@@ -901,7 +999,11 @@ fn singleton_sort<T: Copy + PartialOrd>(items: &mut [T], index: &mut [i32]) {
                     step = Step::Pop;
                     continue;
                 }
-                ratio = if ratio < 0.5898437 { ratio + 0.0390625 } else { ratio - 0.5859375 };
+                ratio = if ratio < 0.5898437 {
+                    ratio + 0.0390625
+                } else {
+                    ratio - 0.5859375
+                };
                 step = Step::Partition;
             }
             Step::Partition => {
@@ -1004,13 +1106,21 @@ enum Key<'a> {
     Raw(u8),
 }
 
+unsafe fn all_ascii(strings: Sexp) -> bool {
+    (0..length(strings)).all(|index| strings.element(index).has_gp(gp::ASCII))
+}
+
 /// The keys of an atomic vector's elements. Other types give no keys.
 unsafe fn element_keys<'a>(vector: Sexp) -> Vec<Key<'a>> {
     match vector.kind() {
-        SexpType::Logical | SexpType::Integer => {
-            values::ints(vector).iter().map(|&value| Key::Integer(value)).collect()
-        }
-        SexpType::Real => values::reals(vector).iter().map(|&value| Key::Real(real_key(value))).collect(),
+        SexpType::Logical | SexpType::Integer => values::ints(vector)
+            .iter()
+            .map(|&value| Key::Integer(value))
+            .collect(),
+        SexpType::Real => values::reals(vector)
+            .iter()
+            .map(|&value| Key::Real(real_key(value)))
+            .collect(),
         SexpType::Complex => values::complexes(vector)
             .iter()
             .map(|value| {
@@ -1021,8 +1131,13 @@ unsafe fn element_keys<'a>(vector: Sexp) -> Vec<Key<'a>> {
                 }
             })
             .collect(),
-        SexpType::String => (0..length(vector)).map(|index| Key::String(string_at(vector, index))).collect(),
-        SexpType::Raw => values::raws(vector).iter().map(|&value| Key::Raw(value)).collect(),
+        SexpType::String => (0..length(vector))
+            .map(|index| Key::String(string_at(vector, index)))
+            .collect(),
+        SexpType::Raw => values::raws(vector)
+            .iter()
+            .map(|&value| Key::Raw(value))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1055,7 +1170,12 @@ unsafe fn incomparable_keys<'a>(incomparables: Sexp, kind: SexpType) -> R<Option
 
 /// Which elements of `x` repeat an earlier one (a later one with `from_last`). Lists compare
 /// their elements with `identical()`.
-unsafe fn duplicated_elements(x: Sexp, incomparables: Sexp, from_last: bool, what: &str) -> R<Vec<bool>> {
+unsafe fn duplicated_elements(
+    x: Sexp,
+    incomparables: Sexp,
+    from_last: bool,
+    what: &str,
+) -> R<Vec<bool>> {
     if !x.kind().is_vector() {
         return Err(error(format!("{what}() applies only to vectors")));
     }
@@ -1073,7 +1193,10 @@ unsafe fn duplicated_elements(x: Sexp, incomparables: Sexp, from_last: bool, wha
         for index in visit {
             let element = x.element(index);
             let bucket = buckets.entry(structural_hash(element)).or_default();
-            if bucket.iter().any(|&seen| identical(x.element(seen), element, &flags)) {
+            if bucket
+                .iter()
+                .any(|&seen| identical(x.element(seen), element, &flags))
+            {
                 duplicated[index] = true;
             } else {
                 bucket.push(index);
@@ -1087,7 +1210,9 @@ unsafe fn duplicated_elements(x: Sexp, incomparables: Sexp, from_last: bool, wha
     for index in visit {
         let key = &keys[index];
         if !seen.insert(key) {
-            duplicated[index] = !incomparables.as_ref().is_some_and(|keys| keys.contains(key));
+            duplicated[index] = !incomparables
+                .as_ref()
+                .is_some_and(|keys| keys.contains(key));
         }
     }
     Ok(duplicated)
@@ -1182,7 +1307,10 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         SexpType::Real => {
             let (left, right) = (values::reals(x), values::reals(y));
             left.len() == right.len()
-                && left.iter().zip(right).all(|(&a, &b)| reals_identical(a, b, flags))
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(&a, &b)| reals_identical(a, b, flags))
         }
         SexpType::Complex => {
             let (left, right) = (values::complexes(x), values::complexes(y));
@@ -1203,8 +1331,14 @@ unsafe fn identical_skipping(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped: 
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => {
             let (mut left, mut right) = (x, y);
             loop {
-                let left_cell = matches!(left.kind(), SexpType::Pairlist | SexpType::Language | SexpType::Dots);
-                let right_cell = matches!(right.kind(), SexpType::Pairlist | SexpType::Language | SexpType::Dots);
+                let left_cell = matches!(
+                    left.kind(),
+                    SexpType::Pairlist | SexpType::Language | SexpType::Dots
+                );
+                let right_cell = matches!(
+                    right.kind(),
+                    SexpType::Pairlist | SexpType::Language | SexpType::Dots
+                );
                 if !left_cell || !right_cell {
                     return left_cell == right_cell;
                 }
@@ -1294,7 +1428,9 @@ unsafe fn attributes_identical(x: Sexp, y: Sexp, flags: &IdenticalFlags, skipped
     } else {
         left.iter()
             .zip(&right)
-            .all(|(&(tag, value), &(other_tag, other))| tag == other_tag && identical(value, other, flags))
+            .all(|(&(tag, value), &(other_tag, other))| {
+                tag == other_tag && identical(value, other, flags)
+            })
     }
 }
 
@@ -1307,7 +1443,11 @@ fn reals_identical(left: f64, right: f64, flags: &IdenticalFlags) -> bool {
         if left.is_nan() || right.is_nan() {
             return left.is_nan() && right.is_nan();
         }
-        if flags.num_eq { left == right } else { left.to_bits() == right.to_bits() }
+        if flags.num_eq {
+            left == right
+        } else {
+            left.to_bits() == right.to_bits()
+        }
     } else if flags.num_eq && !left.is_nan() && !right.is_nan() {
         left == right
     } else {

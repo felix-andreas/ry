@@ -1,0 +1,17 @@
+[stdout]
+| [1] 11
+| [1] "body starts" "x is forced"
+| [1] 1
+| [1] "a + b"
+| [1] 2
+| [1] 1
+| [1] 8
+| [1] "on.exit runs"
+| [1] 6
+| [1] "plain error"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "plain error"

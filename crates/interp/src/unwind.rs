@@ -9,8 +9,23 @@
 
 use crate::{interp};
 use heap::object::Sexp;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub type R<T> = Result<T, Unwind>;
+
+/// Set by a host's SIGINT handler (an atomic store is async-signal-safe). The evaluator polls it
+/// at every call and every loop back edge, so Ctrl-C stops even a tight loop.
+pub static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Raises a pending user interrupt.
+#[inline]
+pub fn poll_interrupt() -> R<()> {
+    if INTERRUPT_REQUESTED.load(Ordering::Relaxed) {
+        INTERRUPT_REQUESTED.store(false, Ordering::Relaxed);
+        return Err(Unwind::Interrupt);
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub enum Unwind {

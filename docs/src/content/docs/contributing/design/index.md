@@ -30,9 +30,9 @@ the next step needs column vocabularies and depends on how data frame row types 
 
 ### [Inline type syntax](/contributing/design/inline-type-syntax/)
 
-A proposal to write types inline instead of in `#:` comments. The project mandate now requires an
-inline annotation syntax, enabled by default, so the page's recommendation against building it is
-superseded; its design details and costing remain input for the implementation.
+The proposal to write types inline instead of in `#:` comments. Inline annotations are now built
+and on by default (see [inline annotations](/type-checking/inline-annotations)), so the page's
+recommendation against building them is superseded; it remains the record of the design.
 
 ### [REPL design](/contributing/design/repl/)
 
@@ -45,7 +45,8 @@ the design; the open part is feeding live-session facts and pre-evaluation diagn
 How ry becomes an R implementation of its own: an ABI-compatible C API (with measured usage across
 the benchmark's 232-package dependency closure), the object model and GC that API forces, a bytecode
 interpreter with a Cranelift JIT fed by ry's static types, lazy package loading from the analysis
-index, a table type on Polars, and the order to build it in. Nothing on it is implemented.
+index, a table type on Polars, and the order to build it in. The C API, the object model, the
+interpreter and the table engine are built; the JIT is not.
 
 ### [Prior art from new language implementations](/contributing/design/prior-art/)
 
@@ -58,11 +59,11 @@ written as an Open Knowledge Format v0.2 concept document, with sources in its f
 How packages install into ry's runtime (prebuilt GNU R 4.6 binaries load unchanged through the
 ABI-compatible `libR`), how ry chooses between GNU R and its own runtime and between R versions while
 the runtime is incomplete, and what the lazy loader, the analysis and the corpus read from an
-installed library. A package manager of ry's own is left open. Nothing on it is implemented.
+installed library. A package manager of ry's own is left open. Only package installation and the
+explicit runtime choice are implemented.
 
 ### [Records, tuples and tags](/contributing/design/records-and-tags/)
 
-Roc-style records, tuples and tagged unions as ry's replacement for S4, R6 and Reference Classes:
-the literal and type syntax, an exhaustive `match` with destructuring, the runtime representation
-as plain lists and a classed tag list that cross the C API unchanged, and the `object-system` lint
-with the option that turns the old object systems off.
+Roc-style records, tuples and tagged unions as ry's replacement for S4, R6 and Reference Classes.
+They are implemented, and the typing rules have moved to the reference; the page keeps the
+rationale, the runtime representation as ry's own heap objects, and the open questions.

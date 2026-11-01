@@ -148,6 +148,12 @@ pub struct SourceSpan {
     /// Character offsets, which is how R's `substr` counts.
     pub char_start: u32,
     pub char_end: u32,
+    /// Byte offsets into the file as written, where the analysis's syntax tree holds the node,
+    /// so a runtime that lowers that tree needs no second parse.
+    #[serde(default)]
+    pub source_start: u32,
+    #[serde(default)]
+    pub source_end: u32,
 }
 
 impl SourceSpan {
@@ -188,6 +194,8 @@ pub fn file_load_index<'db>(db: &'db dyn Db, file: SourceFile) -> FileLoadIndex<
         let mut span = lines.span(&text, start, end);
         span.char_start = characters.get(&start).copied().unwrap_or(start);
         span.char_end = characters.get(&end).copied().unwrap_or(end);
+        span.source_start = u32::from(range.start());
+        span.source_end = u32::from(range.end());
         span
     };
     let items = spans
@@ -661,6 +669,8 @@ impl LineStarts {
             end,
             char_start: start,
             char_end: end,
+            source_start: start,
+            source_end: end,
         }
     }
 }

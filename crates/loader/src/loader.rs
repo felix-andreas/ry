@@ -1,10 +1,12 @@
 //! The package-development loader: reads a package's sources into the analysis, derives its
 //! load index, and diffs that index against what is loaded to produce a [`Plan`]. A plan says
-//! what to bind, run, and remove, and nothing about how; a backend executes it. The GNU R
-//! backend ([`gnur`]) hands it to R code running in the session, and ry's own runtime will take
-//! the same plan.
+//! what to bind, run, and remove, and nothing about how; a backend executes it. Both runtimes
+//! apply it through the same R code ([`r`]): GNU R parses the code from source text, and ry's
+//! interpreter ([`ry_runtime`]) lowers the analysis's syntax trees.
 
-pub mod gnur;
+pub mod r;
+#[cfg(feature = "runtime")]
+pub mod ry_runtime;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::{Durability, Setter};
@@ -26,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
+use syntax::Parse;
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
 /// reload re-derives only the items whose text changed.
@@ -134,6 +137,10 @@ pub struct Code {
     /// Character offsets into the source file's text.
     pub start: u32,
     pub end: u32,
+    /// Byte offsets of the code's syntax node in the file as written, which a backend that
+    /// lowers the analysis's syntax tree ([`Loader::syntax`]) reads instead of the text.
+    pub source_start: u32,
+    pub source_end: u32,
     /// Whether the code registers S4 classes or methods, after which R refreshes its S4 caches.
     pub registers_s4: bool,
 }
@@ -301,6 +308,14 @@ impl Loader {
         )?;
         self.packages[position].committed = Some(state);
         Ok(())
+    }
+
+    /// The analysis's syntax tree of the source file at `path` (relative to `root`), as the
+    /// last plan read it. A plan's [`Code::source_start`] and [`Code::source_end`] index it.
+    pub fn syntax(&self, root: &Path, path: &str) -> Option<Parse> {
+        let package = self.packages.iter().find(|package| package.root == root)?;
+        let &file = package.files.get(path)?;
+        Some(semantics::parse(&self.db, file))
     }
 
     /// The roots of every package this loader has planned.
@@ -593,6 +608,8 @@ pub fn diff<'text>(
             column: span.column,
             start: span.char_start,
             end: span.char_end,
+            source_start: span.source_start,
+            source_end: span.source_end,
             registers_s4: false,
         }
     };
@@ -603,6 +620,8 @@ pub fn diff<'text>(
         column: item.span.column,
         start: item.span.char_start,
         end: item.span.char_end,
+        source_start: item.span.source_start,
+        source_end: item.span.source_end,
         registers_s4: registers_s4(item),
     };
 
