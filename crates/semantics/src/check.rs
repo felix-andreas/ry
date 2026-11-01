@@ -169,6 +169,21 @@ pub enum TypeErrorKind<'db> {
     HeadInsideExpression {
         column: String,
     },
+    /// An operand of a DataFrame expression whose column type the operation does not take, such
+    /// as `col("region") * 2` on a column of strings. `column` names the column when the operand
+    /// reads one directly.
+    ExpressionOperand {
+        operation: String,
+        column: Option<String>,
+        needs: ExpressionNeeds,
+        found: Ty<'db>,
+    },
+    /// A comparison in a DataFrame expression between strings (or factors) and numbers.
+    ExpressionComparison {
+        operator: &'static str,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    },
     /// `setnames(f, new)` with as many names as the frame has columns, which data.table
     /// requires.
     ColumnNameCount {
@@ -289,6 +304,18 @@ pub enum NativeValueKind {
     Tag,
     Dict,
     Set,
+}
+
+/// What an operation inside a DataFrame expression takes, as the table engine's own typing
+/// decides before it runs a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum ExpressionNeeds {
+    /// Arithmetic and numeric aggregations: logical, integer or double columns.
+    Numbers,
+    /// `!`, `&` and `|`: logical columns, or numbers with zero as `FALSE`.
+    LogicalOrNumbers,
+    /// The test of `Expr.if_else`.
+    Logical,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -7968,6 +7995,12 @@ impl<'db> Checker<'db, '_> {
                     }
                     "Expr.sum" => {
                         let column = argument(self)?;
+                        self.check_expression_operand(
+                            name.as_str(),
+                            first?,
+                            &column,
+                            ExpressionNeeds::Numbers,
+                        );
                         let ty = match element_atomic(db, column.ty) {
                             Some(Atomic::Logical | Atomic::Integer) => vector(Atomic::Integer),
                             _ => vector(Atomic::Double),
@@ -7976,6 +8009,12 @@ impl<'db> Checker<'db, '_> {
                     }
                     "Expr.mean" | "Expr.median" | "Expr.std" | "Expr.var" => {
                         let column = argument(self)?;
+                        self.check_expression_operand(
+                            name.as_str(),
+                            first?,
+                            &column,
+                            ExpressionNeeds::Numbers,
+                        );
                         Some(aggregate(column, vector(Atomic::Double)))
                     }
                     "Expr.min" | "Expr.max" | "Expr.first" | "Expr.last" => {
@@ -8003,11 +8042,26 @@ impl<'db> Checker<'db, '_> {
                     }
                     "Expr.cor" => {
                         let column = argument(self)?;
-                        self.frame_operand(module[arguments].get(1)?.value?, columns, frame)?;
+                        let second = module[arguments].get(1)?.value?;
+                        let other = self.frame_operand(second, columns, frame)?;
+                        for (operand, value) in [(&column, first?), (&other, second)] {
+                            self.check_expression_operand(
+                                name.as_str(),
+                                value,
+                                operand,
+                                ExpressionNeeds::Numbers,
+                            );
+                        }
                         Some(aggregate(column, vector(Atomic::Double)))
                     }
                     "Expr.if_else" => {
-                        self.frame_operand(first?, columns, frame)?;
+                        let test = self.frame_operand(first?, columns, frame)?;
+                        self.check_expression_operand(
+                            name.as_str(),
+                            first?,
+                            &test,
+                            ExpressionNeeds::Logical,
+                        );
                         let yes =
                             self.frame_operand(module[arguments].get(1)?.value?, columns, frame)?;
                         let no =
@@ -8035,11 +8089,32 @@ impl<'db> Checker<'db, '_> {
             ExpressionKind::Unary { operator, operand } => {
                 let column = self.frame_expression(*operand, columns, frame)?;
                 match operator {
-                    UnaryOperator::Not => Some(ComputedColumn {
-                        ty: vector(Atomic::Logical),
-                        ..column
-                    }),
-                    UnaryOperator::Minus | UnaryOperator::Plus => Some(column),
+                    UnaryOperator::Not => {
+                        self.check_expression_operand(
+                            "!",
+                            *operand,
+                            &column,
+                            ExpressionNeeds::LogicalOrNumbers,
+                        );
+                        Some(ComputedColumn {
+                            ty: vector(Atomic::Logical),
+                            ..column
+                        })
+                    }
+                    UnaryOperator::Minus | UnaryOperator::Plus => {
+                        let spelling = if *operator == UnaryOperator::Minus {
+                            "-"
+                        } else {
+                            "+"
+                        };
+                        self.check_expression_operand(
+                            spelling,
+                            *operand,
+                            &column,
+                            ExpressionNeeds::Numbers,
+                        );
+                        Some(column)
+                    }
                     _ => None,
                 }
             }
@@ -8054,6 +8129,7 @@ impl<'db> Checker<'db, '_> {
                 {
                     return None;
                 }
+                self.check_expression_operator(value, *operator, (*lhs, &left), (*rhs, &right));
                 let ty = match operator {
                     BinaryOperator::Add
                     | BinaryOperator::Subtract
@@ -8096,6 +8172,110 @@ impl<'db> Checker<'db, '_> {
                 })
             }
             _ => None,
+        }
+    }
+
+    /// Checks a binary operator's operands against what the table engine accepts: arithmetic
+    /// takes numbers and logicals, `&` and `|` take logicals and numbers, and a comparison never
+    /// pairs strings or factors with numbers. The engine compares an integer with a string by
+    /// formatting it, as R does, but ry reports that pairing too, because a schema that puts a
+    /// number against text is almost always a mistaken column.
+    fn check_expression_operator(
+        &mut self,
+        value: ExprId,
+        operator: BinaryOperator,
+        (lhs, left): (ExprId, &ComputedColumn<'db>),
+        (rhs, right): (ExprId, &ComputedColumn<'db>),
+    ) {
+        let db = self.db;
+        let needs = match operator {
+            BinaryOperator::Add
+            | BinaryOperator::Subtract
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Power
+            | BinaryOperator::Modulo
+            | BinaryOperator::IntegerDivide => ExpressionNeeds::Numbers,
+            BinaryOperator::And | BinaryOperator::Or => ExpressionNeeds::LogicalOrNumbers,
+            BinaryOperator::Less
+            | BinaryOperator::Greater
+            | BinaryOperator::LessEq
+            | BinaryOperator::GreaterEq
+            | BinaryOperator::Equal
+            | BinaryOperator::NotEqual => {
+                let classes = (join_class(db, left.ty), join_class(db, right.ty));
+                if let (Some(JoinClass::Text), Some(JoinClass::Number))
+                | (Some(JoinClass::Number), Some(JoinClass::Text)) = classes
+                    && let Some(spelling) = operator_spelling(operator)
+                {
+                    let kind = TypeErrorKind::ExpressionComparison {
+                        operator: spelling,
+                        left: self.shown_operand_type(lhs, left),
+                        right: self.shown_operand_type(rhs, right),
+                    };
+                    self.errors.push(TypeError {
+                        range: self.blame_range(value),
+                        kind,
+                    });
+                }
+                return;
+            }
+            _ => return,
+        };
+        let spelling = match operator {
+            BinaryOperator::And => "&",
+            BinaryOperator::Or => "|",
+            _ => match operator_spelling(operator) {
+                Some(spelling) => spelling,
+                None => return,
+            },
+        };
+        self.check_expression_operand(spelling, lhs, left, needs);
+        self.check_expression_operand(spelling, rhs, right, needs);
+    }
+
+    /// Reports an operand whose known column type `operation` does not take. An operand of
+    /// unknown type stays silent.
+    fn check_expression_operand(
+        &mut self,
+        operation: &str,
+        value: ExprId,
+        operand: &ComputedColumn<'db>,
+        needs: ExpressionNeeds,
+    ) {
+        let Some(class) = join_class(self.db, operand.ty) else {
+            return;
+        };
+        let fits = match needs {
+            ExpressionNeeds::Numbers | ExpressionNeeds::LogicalOrNumbers => {
+                class != JoinClass::Text
+            }
+            ExpressionNeeds::Logical => class == JoinClass::Logical,
+        };
+        if fits {
+            return;
+        }
+        let kind = TypeErrorKind::ExpressionOperand {
+            operation: operation.to_owned(),
+            column: column_read(self.module, value),
+            needs,
+            found: self.shown_operand_type(value, operand),
+        };
+        self.errors.push(TypeError {
+            range: self.blame_range(value),
+            kind,
+        });
+    }
+
+    /// The type a diagnostic shows for an operand: a column's vector type, or a plain R value's
+    /// own type, so that `1L` reads as `integer` rather than the column it would broadcast to.
+    fn shown_operand_type(&mut self, value: ExprId, operand: &ComputedColumn<'db>) -> Ty<'db> {
+        if operand.reads_column {
+            return operand.ty;
+        }
+        match self.recorded.get(&value) {
+            Some(&ty) if !is_expr_type(self.db, ty) => self.table.resolve(self.db, ty),
+            _ => operand.ty,
         }
     }
 
@@ -13272,6 +13452,24 @@ fn count_column_name(name: Symbol) -> Symbol {
 fn variable_name(module: &Module, id: ExprId) -> Option<Symbol> {
     match module.kind(id) {
         ExpressionKind::NameRef(name) => Some(*name),
+        _ => None,
+    }
+}
+
+/// The column `col("name")` reads, looking through parentheses.
+fn column_read(module: &Module, mut id: ExprId) -> Option<String> {
+    while let ExpressionKind::Paren(inner) = module.kind(id) {
+        id = *inner;
+    }
+    let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
+        return None;
+    };
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if &**name == "col") {
+        return None;
+    }
+    let first = module[arguments].first()?.value?;
+    match module.kind(first) {
+        ExpressionKind::Literal(LiteralKind::String(text)) => Some(module[text].to_string()),
         _ => None,
     }
 }

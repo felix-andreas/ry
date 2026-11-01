@@ -63,7 +63,24 @@ type-mismatch
 ```
 
 Columns have types, so arithmetic follows R's rules: `col("units") * col("price")` is a `double`
-column, a comparison is `logical`, and `Expr.sum` of an `integer` column stays `integer`.
+column, a comparison is `logical`, and `Expr.sum` of an `integer` column stays `integer`. An
+operation on a column whose type cannot take it is reported on that column, such as arithmetic or
+`Expr.sum` on text, and so is a comparison of text with a number:
+
+```r
+doubled <- sales |> DataFrame.with_columns(twice = col("region") * 2)
+big <- sales |> DataFrame.filter(col("region") > 1L)
+```
+
+```text ry check typing continue
+type-mismatch
+
+  x `*` needs numbers, but the column `region` is `character[]`
+
+type-mismatch
+
+  x `>` compares `character[]` with `integer`. An expression compares strings and factors only with strings and factors
+```
 
 ## Annotating a parameter
 
