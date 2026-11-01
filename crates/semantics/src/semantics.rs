@@ -827,8 +827,9 @@ pub fn project_type_definitions<'db>(
 /// Whether any package file binds `name` at top level, including the inner targets of
 /// `a <- b <- value` and conditional writes.
 pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
-    package_definitions(db, files).contains_key(name)
-        || conditional_slot_items(db, files).contains_key(name)
+    let name = Symbol::new(name);
+    package_definitions(db, files).contains_key(&name)
+        || conditional_slot_items(db, files).contains_key(&name)
 }
 
 /// Every name a project file of any kind declares at top level: its named definitions and its
@@ -838,11 +839,7 @@ pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
 pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbol> {
     let mut names = FxHashSet::default();
     for &file in files.files(db) {
-        names.extend(
-            file_definitions(db, file)
-                .iter()
-                .map(|(name, _)| Symbol::new(name)),
-        );
+        names.extend(file_definitions(db, file).iter().map(|&(name, _)| name));
         names.extend(
             file_conditional_writers(db, file)
                 .iter()
@@ -858,7 +855,7 @@ pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbo
 pub fn conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> FxHashMap<String, Vec<Item<'db>>> {
+) -> FxHashMap<Symbol, Vec<Item<'db>>> {
     conditional_writers_of(db, files, DocumentKind::Package)
 }
 
@@ -867,7 +864,7 @@ pub fn conditional_slot_items<'db>(
 pub fn test_conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> FxHashMap<String, Vec<Item<'db>>> {
+) -> FxHashMap<Symbol, Vec<Item<'db>>> {
     conditional_writers_of(db, files, DocumentKind::TestHelper)
 }
 
@@ -875,14 +872,14 @@ fn conditional_writers_of<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     kind: DocumentKind,
-) -> FxHashMap<String, Vec<Item<'db>>> {
-    let mut writers: FxHashMap<String, Vec<Item<'db>>> = FxHashMap::default();
+) -> FxHashMap<Symbol, Vec<Item<'db>>> {
+    let mut writers: FxHashMap<Symbol, Vec<Item<'db>>> = FxHashMap::default();
     for &file in files.files(db) {
         if *file.kind(db) != kind {
             continue;
         }
         for &(name, item) in file_conditional_writers(db, file) {
-            writers.entry(name.to_string()).or_default().push(item);
+            writers.entry(name).or_default().push(item);
         }
     }
     writers
@@ -944,11 +941,11 @@ pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> Packag
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = name.name(db).text(db);
+    let text = Symbol::new(name.name(db).text(db));
     PackageName {
-        winner: package_definitions(db, files).get(text).copied(),
+        winner: package_definitions(db, files).get(&text).copied(),
         conditional_writers: conditional_slot_items(db, files)
-            .get(text)
+            .get(&text)
             .cloned()
             .unwrap_or_default(),
     }
@@ -960,11 +957,11 @@ pub fn test_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageNa
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = name.name(db).text(db);
+    let text = Symbol::new(name.name(db).text(db));
     PackageName {
-        winner: test_definitions(db, files).get(text).copied(),
+        winner: test_definitions(db, files).get(&text).copied(),
         conditional_writers: test_conditional_slot_items(db, files)
-            .get(text)
+            .get(&text)
             .cloned()
             .unwrap_or_default(),
     }
@@ -1017,46 +1014,71 @@ fn statement_binding_recover<'db>(
     value
 }
 
-#[salsa::tracked(returns(ref))]
+/// The last top-level definition of each name across the package files.
 pub fn package_definitions<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> FxHashMap<String, Item<'db>> {
+) -> &'db FxHashMap<Symbol, Item<'db>> {
+    &package_definition_index(db, files).winners
+}
+
+/// The package files' definitions, folded once: a new top-level name re-runs this fold on
+/// every keystroke until the name is complete, so the duplicate check shares its pass.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct DefinitionIndex<'db> {
+    pub winners: FxHashMap<Symbol, Item<'db>>,
+    /// Every file that defines a name the package defines more than once, one entry per
+    /// definition, in project order. Near-empty in a healthy project.
+    pub duplicates: FxHashMap<Symbol, Vec<SourceFile>>,
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn package_definition_index<'db>(db: &'db dyn Db, files: ProjectFiles) -> DefinitionIndex<'db> {
     winners_of(db, files, DocumentKind::Package)
 }
 
 /// The last top-level definition of each name across the helper files, which testthat
 /// sources into the one environment every test file runs in.
 #[salsa::tracked(returns(ref))]
-pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<String, Item<'db>> {
-    winners_of(db, files, DocumentKind::TestHelper)
+pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Item<'db>> {
+    winners_of(db, files, DocumentKind::TestHelper).winners
 }
 
 fn winners_of<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     kind: DocumentKind,
-) -> FxHashMap<String, Item<'db>> {
-    let mut winners = FxHashMap::default();
+) -> DefinitionIndex<'db> {
+    let mut index = DefinitionIndex::default();
     for &file in files.files(db) {
         if *file.kind(db) != kind {
             continue;
         }
-        for (name, item) in file_definitions(db, file) {
-            winners.insert(name.clone(), *item);
+        let definitions = file_definitions(db, file);
+        index.winners.reserve(definitions.len());
+        for &(name, item) in definitions {
+            if let Some(previous) = index.winners.insert(name, item) {
+                index
+                    .duplicates
+                    .entry(name)
+                    .or_insert_with(|| vec![*previous.file(db)])
+                    .push(file);
+            }
         }
     }
-    winners
+    index
 }
 
 /// The file's named function and value items in item order, the candidates for
 /// [`package_definitions`]. Per file for the same reason as [`file_conditional_writers`].
+/// Names are symbols so the project-wide folds hash and copy four bytes per name, which is
+/// what a new top-level binding costs on every keystroke until it is named.
 #[salsa::tracked(returns(ref))]
-pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(String, Item<'db>)> {
+pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(Symbol, Item<'db>)> {
     item_tree(db, file)
         .iter()
         .filter(|item| matches!(*item.kind(db), ItemKind::Function | ItemKind::Value))
-        .filter_map(|&item| Some((item.name(db).clone()?, item)))
+        .filter_map(|&item| Some((Symbol::new(item.name(db).as_deref()?), item)))
         .collect()
 }
 
@@ -1275,35 +1297,26 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
 /// order `SalsaGlobals` resolves them. Memoized per item so the reachability walks of every
 /// item share one edge list each.
 #[salsa::tracked(returns(ref))]
-fn item_interface_edges<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    item: Item<'db>,
-) -> Vec<Item<'db>> {
-    let package_winners = package_definitions(db, files);
-    let package_writers = conditional_slot_items(db, files);
-    let test_winners = test_definitions(db, files);
-    let test_writers = test_conditional_slot_items(db, files);
+fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'db>> {
     let test = matches!(
         *item.file(db).kind(db),
         DocumentKind::Test | DocumentKind::TestHelper
     );
+    // Through the per-name projections, not the project-wide maps: a new top-level name
+    // anywhere changes those maps, and reading them here would re-run every item's edges.
+    let projections = |name: Symbol| {
+        let name = types::QueryName::new(db, types::Name::new(db, name.as_str()));
+        (test.then(|| test_name(db, name)), package_name(db, name))
+    };
     let reads = item_interface_reads(db, item);
     let mut targets: Vec<Item<'db>> = reads.frame.clone();
-    for name in &reads.layered {
-        let name = name.as_str();
-        let layer = |winners: &FxHashMap<String, Item<'db>>,
-                     writers: &'db FxHashMap<String, Vec<Item<'db>>>| {
-            layer_source(
-                winners.get(name).copied(),
-                writers.get(name).map_or(&[][..], Vec::as_slice),
-            )
+    for &name in &reads.layered {
+        let (test_projection, package_projection) = projections(name);
+        let layer = |projection: &'db PackageName<'db>| {
+            layer_source(projection.winner, &projection.conditional_writers)
         };
-        let test_layer = test.then(|| layer(test_winners, test_writers)).flatten();
-        for source in test_layer
-            .into_iter()
-            .chain(layer(package_winners, package_writers))
-        {
+        let test_layer = test_projection.and_then(layer);
+        for source in test_layer.into_iter().chain(layer(package_projection)) {
             match source {
                 Source::Definition(item) | Source::Statement(item) => {
                     push_unique(&mut targets, item);
@@ -1322,10 +1335,10 @@ fn item_interface_edges<'db>(
             }
         }
     }
-    for name in &reads.earlier {
-        let name = name.as_str();
-        let test_winner = test.then(|| test_winners.get(name)).flatten();
-        if let Some(&winner) = test_winner.or_else(|| package_winners.get(name)) {
+    for &name in &reads.earlier {
+        let (test_projection, package_projection) = projections(name);
+        let test_winner = test_projection.and_then(|projection| projection.winner);
+        if let Some(winner) = test_winner.or(package_projection.winner) {
             push_unique(&mut targets, winner);
         }
     }
@@ -1415,7 +1428,7 @@ pub fn interface_group<'db>(
     let mut stack: Vec<usize> = vec![0];
     let mut work: Vec<(usize, usize)> = vec![(0, 0)];
     while let Some(&mut (node, ref mut edge_cursor)) = work.last_mut() {
-        let edges = item_interface_edges(db, files, nodes[node]);
+        let edges = item_interface_edges(db, nodes[node]);
         if let Some(&target) = edges.get(*edge_cursor) {
             *edge_cursor += 1;
             match index_of.get(&target) {
@@ -1452,8 +1465,7 @@ pub fn interface_group<'db>(
                 }
             }
             if node == 0 {
-                let cyclic =
-                    members.len() > 1 || item_interface_edges(db, files, item).contains(&item);
+                let cyclic = members.len() > 1 || item_interface_edges(db, item).contains(&item);
                 if !cyclic {
                     return None;
                 }
@@ -2183,17 +2195,25 @@ fn stub_arithmetic_classes(db: &dyn Db) -> FxHashSet<String> {
     arithmetic_classes_among(library.schemes.keys().map(String::as_str))
 }
 
+/// A union of the per-file sets, which are almost always empty, rather than a scan of every
+/// project name: a new top-level name then costs one file's scan.
 #[salsa::tracked(returns(clone))]
 fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<String> {
-    arithmetic_classes_among(package_definitions(db, files).keys().map(String::as_str))
+    let mut classes = FxHashSet::default();
+    for &file in files.files(db) {
+        if *file.kind(db) == DocumentKind::Package {
+            classes.extend(file_arithmetic_classes(db, file).iter().cloned());
+        }
+    }
+    classes
 }
 
 #[salsa::tracked(returns(ref))]
 fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     arithmetic_classes_among(
-        item_tree(db, file)
+        file_definitions(db, file)
             .iter()
-            .filter_map(|item| item.name(db).as_deref()),
+            .map(|(name, _)| name.as_str()),
     )
 }
 
@@ -2534,7 +2554,7 @@ mod tests {
         let second = SourceFile::new(&db, "limit <- 10L\n".to_owned(), DocumentKind::Package);
         let files = ProjectFiles::new(&db, vec![first, second]);
         let winners = package_definitions(&db, files);
-        let winner = winners.get("limit").expect("winner exists");
+        let winner = winners.get(&Symbol::new("limit")).expect("winner exists");
         assert_eq!(*winner.file(&db), second);
         let scheme = global_scheme(&db, *winner);
         assert_eq!(

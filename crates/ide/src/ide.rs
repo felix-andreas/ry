@@ -508,7 +508,7 @@ fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
 
 fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Option<Item<'db>> {
     package_definitions(db, files)
-        .get(name)
+        .get(&Symbol::new(name))
         .copied()
         .or_else(|| {
             files.files(db).iter().find_map(|&file| {
@@ -626,7 +626,7 @@ pub fn definition(
             .or_else(|| stub_tag_target(db, &name).map(DefinitionTarget::Stub)),
         target @ (Target::Global(_) | Target::S4 { .. }) => {
             if let Target::Global(name) = &target
-                && let Some(winner) = package_definitions(db, files).get(name)
+                && let Some(winner) = package_definitions(db, files).get(&Symbol::new(name))
             {
                 return item_target(db, *winner).map(DefinitionTarget::Project);
             }

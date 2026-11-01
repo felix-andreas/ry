@@ -38,7 +38,15 @@ static SYMBOL_IDS: LazyLock<[Mutex<FxHashMap<&'static str, Symbol>>; SYMBOL_SHAR
     LazyLock::new(|| std::array::from_fn(|_| Mutex::new(FxHashMap::default())));
 
 /// Symbol to spelling. Appending never moves an entry, so a read needs no lock.
-static SYMBOL_TEXT: LazyLock<boxcar::Vec<&'static str>> = LazyLock::new(boxcar::Vec::new);
+static SYMBOL_TEXT: LazyLock<boxcar::Vec<SymbolEntry>> = LazyLock::new(boxcar::Vec::new);
+
+/// What a hot loop asks of a symbol without reading its spelling: the spelling's hash for a
+/// map probe, and its length in characters for the typo scan's length filter.
+struct SymbolEntry {
+    text: &'static str,
+    hash: u64,
+    characters: u32,
+}
 
 thread_local! {
     /// Spellings this thread has interned. Lowering interns every identifier it meets, and
@@ -61,7 +69,8 @@ impl Symbol {
     fn new_shared(text: &str) -> Symbol {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
-        let shard = &SYMBOL_IDS[hasher.finish() as usize % SYMBOL_SHARDS];
+        let text_hash = hasher.finish();
+        let shard = &SYMBOL_IDS[text_hash as usize % SYMBOL_SHARDS];
         // A poisoned shard means another thread died mid-insert; the map is still a valid
         // map of leaked strings, so keep serving it.
         let mut shard = shard
@@ -72,7 +81,11 @@ impl Symbol {
         }
         let interned: &'static str = Box::leak(text.into());
         // Pushed under the shard lock, so one spelling can never get two indexes.
-        let index = SYMBOL_TEXT.push(interned);
+        let index = SYMBOL_TEXT.push(SymbolEntry {
+            text: interned,
+            hash: text_hash,
+            characters: u32::try_from(interned.chars().count()).unwrap_or(u32::MAX),
+        });
         let symbol = Symbol(
             u32::try_from(index + 1)
                 .ok()
@@ -90,6 +103,15 @@ impl Symbol {
     }
 
     pub fn as_str(self) -> &'static str {
+        self.entry().text
+    }
+
+    /// The spelling's length in characters.
+    pub fn characters(self) -> usize {
+        self.entry().characters as usize
+    }
+
+    fn entry(self) -> &'static SymbolEntry {
         SYMBOL_TEXT
             .get(self.0.get() as usize - 1)
             .expect("a symbol indexes the table that minted it")
@@ -153,9 +175,13 @@ impl PartialEq<String> for Symbol {
     }
 }
 
+/// The spelling's hash, computed once when the symbol is minted. Project-wide name maps hash
+/// every name on each rebuild, and hashing the text dominated them. Hashing the index would be
+/// cheaper still, but it depends on which thread met a spelling first, so map iteration order
+/// would differ between runs.
 impl Hash for Symbol {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state);
+        state.write_u64(self.entry().hash);
     }
 }
 
@@ -168,12 +194,6 @@ impl PartialOrd for Symbol {
 impl Ord for Symbol {
     fn cmp(&self, other: &Symbol) -> std::cmp::Ordering {
         self.as_str().cmp(other.as_str())
-    }
-}
-
-impl std::borrow::Borrow<str> for Symbol {
-    fn borrow(&self) -> &str {
-        self.as_str()
     }
 }
 

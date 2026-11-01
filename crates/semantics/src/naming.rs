@@ -277,26 +277,17 @@ impl Context<'_> {
         *self.scope_ids.entry(expression).or_insert(next)
     }
 
-    fn mint_binding(&mut self, name: &str, range: TextRange, kind: BindingKind) -> BindingId {
-        let key = (
-            u32::from(range.start()),
-            u32::from(range.end()),
-            Symbol::new(name),
-        );
+    fn mint_binding(&mut self, name: Symbol, range: TextRange, kind: BindingKind) -> BindingId {
+        let key = (u32::from(range.start()), u32::from(range.end()), name);
         if let Some(&existing) = self.bindings_by_site.get(&key) {
             return existing;
         }
         let id = BindingId(self.next_binding);
         self.next_binding += 1;
         self.bindings_by_site.insert(key, id);
-        self.naming.bindings.insert(
-            id,
-            BindingInfo {
-                name: Symbol::new(name),
-                range,
-                kind,
-            },
-        );
+        self.naming
+            .bindings
+            .insert(id, BindingInfo { name, range, kind });
         id
     }
 
@@ -339,18 +330,18 @@ impl Context<'_> {
         if owned {
             let range = module.range(target);
             let kind = self.assignment_binding_kind();
-            let slot = self.frame_slot(name, range, kind);
-            self.record_write_site(id, name, range, slot, false);
+            let slot = self.frame_slot(*name, range, kind);
+            self.record_write_site(id, *name, range, slot, false);
             self.naming.column_updates.insert(id, slot);
         }
     }
 
-    fn frame_slot(&mut self, name: &str, range: TextRange, kind: BindingKind) -> BindingId {
-        if let Some(&slot) = self.current_scope().slots.get(name) {
+    fn frame_slot(&mut self, name: Symbol, range: TextRange, kind: BindingKind) -> BindingId {
+        if let Some(&slot) = self.current_scope().slots.get(&name) {
             return slot;
         }
         let slot = self.mint_binding(name, range, kind);
-        self.current_scope().slots.insert(Symbol::new(name), slot);
+        self.current_scope().slots.insert(name, slot);
         slot
     }
 
@@ -367,7 +358,7 @@ impl Context<'_> {
             ExpressionKind::Missing | ExpressionKind::Next => {}
             ExpressionKind::Break => self.loop_exits.push(self.flow.clone()),
             ExpressionKind::Literal(_) => {}
-            ExpressionKind::NameRef(name) => self.resolve_read(id, name),
+            ExpressionKind::NameRef(name) => self.resolve_read(id, *name),
             ExpressionKind::Assign {
                 spelling,
                 target,
@@ -402,7 +393,7 @@ impl Context<'_> {
                 if let Some(name) = special_name {
                     self.naming.quiet_operator_reads.insert(*name);
                     // A local `%op%` needs its slot marked too, or it reads as a dead store.
-                    self.mark_slot_read(name);
+                    self.mark_slot_read(*name);
                 }
                 match operator {
                     BinaryOperator::Tilde | BinaryOperator::Help => {}
@@ -423,14 +414,15 @@ impl Context<'_> {
             ExpressionKind::Call { callee, arguments } => {
                 self.resolve(*callee);
                 let callee_name = match module.kind(*callee) {
-                    ExpressionKind::NameRef(name) => Some(name.as_str()),
+                    ExpressionKind::NameRef(name) => Some(name),
                     _ => None,
                 };
-                if let Some(name) = callee_name
+                if let Some(&name) = callee_name
                     && let Some(&slot) = self.naming.resolutions.get(callee)
                 {
                     self.record_callee_fallback(*callee, name, slot);
                 }
+                let callee_name = callee_name.map(|name| name.as_str());
                 // `library(pkg)`, `require(pkg)` and `help(topic)` quote a bare first positional
                 // name. The rule is syntactic: a rebound `library` does not change it.
                 if matches!(callee_name, Some("library" | "require" | "help"))
@@ -630,7 +622,7 @@ impl Context<'_> {
                 let saved_flow = mem::take(&mut self.flow);
                 for parameter in &module[parameters] {
                     let slot =
-                        self.mint_binding(&parameter.name, parameter.range, BindingKind::Parameter);
+                        self.mint_binding(parameter.name, parameter.range, BindingKind::Parameter);
                     self.current_scope().slots.insert(parameter.name, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
@@ -666,7 +658,7 @@ impl Context<'_> {
             } => {
                 self.resolve(*sequence);
                 if let (Some(variable), Some(range)) = (variable, variable_range) {
-                    let slot = self.mint_binding(variable, *range, BindingKind::ForVariable);
+                    let slot = self.mint_binding(*variable, *range, BindingKind::ForVariable);
                     // A top-level loop leaves its variable bound in the global environment.
                     if self.current_scope().kind == ScopeKind::TopLevel {
                         self.naming.super_globals.insert(*variable);
@@ -737,7 +729,7 @@ impl Context<'_> {
             for &leaf in &module[arm.bindings] {
                 if let ExpressionKind::NameRef(name) = module.kind(leaf) {
                     let range = module.range(leaf);
-                    let slot = self.frame_slot(name, range, BindingKind::PatternVariable);
+                    let slot = self.frame_slot(*name, range, BindingKind::PatternVariable);
                     self.naming.resolutions.insert(leaf, slot);
                     self.record_write(slot, Reach::Implicit);
                 }
@@ -921,7 +913,7 @@ impl Context<'_> {
                 if *spelling == AssignSpelling::Destructure {
                     for leaf in destructure_leaves(module, *target).unwrap_or_default() {
                         if let ExpressionKind::NameRef(name) = module.kind(leaf) {
-                            self.frame_slot(name, module.range(leaf), BindingKind::Local);
+                            self.frame_slot(*name, module.range(leaf), BindingKind::Local);
                         }
                     }
                 }
@@ -929,7 +921,7 @@ impl Context<'_> {
                 if *spelling != AssignSpelling::Super
                     && let ExpressionKind::NameRef(name) = module.kind(target)
                 {
-                    self.frame_slot(name, module.range(target), BindingKind::Local);
+                    self.frame_slot(*name, module.range(target), BindingKind::Local);
                 }
                 self.premint_frame_assignments(*value);
             }
@@ -940,7 +932,7 @@ impl Context<'_> {
                 body,
             } => {
                 if let (Some(variable), Some(range)) = (variable, variable_range) {
-                    self.frame_slot(variable, *range, BindingKind::ForVariable);
+                    self.frame_slot(*variable, *range, BindingKind::ForVariable);
                 }
                 self.premint_frame_assignments(*sequence);
                 self.premint_frame_assignments(*body);
@@ -950,7 +942,11 @@ impl Context<'_> {
                 for arm in &module[arms] {
                     for &leaf in &module[arm.bindings] {
                         if let ExpressionKind::NameRef(name) = module.kind(leaf) {
-                            self.frame_slot(name, module.range(leaf), BindingKind::PatternVariable);
+                            self.frame_slot(
+                                *name,
+                                module.range(leaf),
+                                BindingKind::PatternVariable,
+                            );
                         }
                     }
                     if let Some(guard) = arm.guard {
@@ -969,7 +965,7 @@ impl Context<'_> {
     /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
     /// id. A slot resolves when a write reaches the read or the read crosses a function
     /// boundary (a capture); an unassignable slot does not shadow.
-    fn mark_slot_read(&mut self, name: &str) -> Option<(BindingId, bool)> {
+    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, bool)> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
             .scopes
@@ -977,7 +973,7 @@ impl Context<'_> {
             .enumerate()
             .rev()
             .find_map(|(depth, scope)| {
-                let &slot = scope.slots.get(name)?;
+                let &slot = scope.slots.get(&name)?;
                 (self.flow.contains_key(&slot) || depth < function_depth).then_some((depth, slot))
             })?;
         let maybe_undefined = self.mark_slot_reached(name, depth, slot, function_depth);
@@ -988,7 +984,7 @@ impl Context<'_> {
     /// true when some path reaches the read with the slot still unassigned.
     fn mark_slot_reached(
         &mut self,
-        name: &str,
+        name: Symbol,
         depth: usize,
         slot: BindingId,
         function_depth: usize,
@@ -998,7 +994,7 @@ impl Context<'_> {
                 self.read_parameter_slots.insert(slot);
             }
             Some(BindingKind::TopLevel) => {
-                self.naming.used_top_level_names.insert(Symbol::new(name));
+                self.naming.used_top_level_names.insert(name);
             }
             _ => {}
         }
@@ -1026,18 +1022,18 @@ impl Context<'_> {
 
     /// Every enclosing slot that could serve the call is marked read, since the checker may
     /// pick any of them once it knows which bindings hold functions.
-    fn record_callee_fallback(&mut self, callee: ExprId, name: &str, nearest: BindingId) {
+    fn record_callee_fallback(&mut self, callee: ExprId, name: Symbol, nearest: BindingId) {
         let function_depth = self.current_function_depth();
         let Some(nearest_depth) = self
             .scopes
             .iter()
-            .rposition(|scope| scope.slots.get(name) == Some(&nearest))
+            .rposition(|scope| scope.slots.get(&name) == Some(&nearest))
         else {
             return;
         };
         let mut outer = Vec::new();
         for depth in (0..nearest_depth).rev() {
-            let Some(&slot) = self.scopes[depth].slots.get(name) else {
+            let Some(&slot) = self.scopes[depth].slots.get(&name) else {
                 continue;
             };
             if !self.flow.contains_key(&slot) && depth >= function_depth {
@@ -1055,13 +1051,14 @@ impl Context<'_> {
         );
     }
 
-    fn resolve_read(&mut self, id: ExprId, name: &str) {
-        if name == "..." || name.starts_with("..") && name[2..].chars().all(|c| c.is_ascii_digit())
+    fn resolve_read(&mut self, id: ExprId, name: Symbol) {
+        let text = name.as_str();
+        if text == "..." || text.starts_with("..") && text[2..].chars().all(|c| c.is_ascii_digit())
         {
             return;
         }
-        let name = match dot_dot_variable(name) {
-            Some(variable) if self.bracket_depth > 0 => variable,
+        let name = match dot_dot_variable(text) {
+            Some(variable) if self.bracket_depth > 0 => Symbol::new(variable),
             _ => name,
         };
         match self.mark_slot_read(name) {
@@ -1074,12 +1071,12 @@ impl Context<'_> {
             None => {
                 if self.emit {
                     if self.quiet_depth == 0 {
-                        self.naming.non_locals.insert(id, Symbol::new(name));
+                        self.naming.non_locals.insert(id, name);
                         if self.current_function_depth() > 0 {
                             self.naming.deferred_non_locals.insert(id);
                         }
                     } else {
-                        self.naming.quiet_reads.insert(id, Symbol::new(name));
+                        self.naming.quiet_reads.insert(id, name);
                         if self.current_function_depth() > 0 {
                             self.naming.deferred_quiet_reads.insert(id);
                         }
@@ -1091,10 +1088,11 @@ impl Context<'_> {
 
     /// Keeps the named binding alive without making the string a read the checker types.
     fn resolve_function_name_string(&mut self, id: ExprId, name: &str) {
+        let name = Symbol::new(name);
         if self.mark_slot_read(name).is_some() || !self.emit {
             return;
         }
-        self.naming.quiet_reads.insert(id, Symbol::new(name));
+        self.naming.quiet_reads.insert(id, name);
         if self.current_function_depth() > 0 {
             self.naming.deferred_quiet_reads.insert(id);
         }
@@ -1117,9 +1115,9 @@ impl Context<'_> {
                 if let ExpressionKind::NameRef(name) = module.kind(leaf) {
                     let range = module.range(leaf);
                     let kind = self.assignment_binding_kind();
-                    let slot = self.frame_slot(name, range, kind);
+                    let slot = self.frame_slot(*name, range, kind);
                     self.naming.resolutions.insert(leaf, slot);
-                    self.record_write_site(assignment, name, range, slot, false);
+                    self.record_write_site(assignment, *name, range, slot, false);
                 }
             }
             return;
@@ -1128,7 +1126,7 @@ impl Context<'_> {
         match module.kind(target_expression) {
             // `"x" <- 1` is `x <- 1` in R.
             ExpressionKind::NameRef(_) | ExpressionKind::Literal(LiteralKind::String(_)) => {
-                let name = &match module.kind(target_expression) {
+                let name = match module.kind(target_expression) {
                     ExpressionKind::NameRef(name) => *name,
                     ExpressionKind::Literal(LiteralKind::String(text)) => {
                         Symbol::new(&module[text])
@@ -1143,7 +1141,7 @@ impl Context<'_> {
                         // function: `local()` scopes are not functions.
                         let enclosing = (0..self.scopes.len() - 1)
                             .rev()
-                            .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(name)?)));
+                            .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)));
                         match enclosing {
                             Some((depth, slot)) => {
                                 self.naming.resolutions.insert(target, slot);
@@ -1153,7 +1151,7 @@ impl Context<'_> {
                                 // counter's initializer looks like a dead store.
                                 let frame = self.scopes[depth].id;
                                 for write in &mut self.writes {
-                                    if write.scope == frame && write.name == *name {
+                                    if write.scope == frame && write.name == name {
                                         write.used = true;
                                     }
                                 }
@@ -1161,8 +1159,8 @@ impl Context<'_> {
                             }
                             None => {
                                 if self.emit {
-                                    self.naming.non_locals.insert(target, *name);
-                                    self.naming.super_globals.insert(*name);
+                                    self.naming.non_locals.insert(target, name);
+                                    self.naming.super_globals.insert(name);
                                 }
                             }
                         }
@@ -1247,7 +1245,7 @@ impl Context<'_> {
     fn record_write_site(
         &mut self,
         assignment: ExprId,
-        name: &str,
+        name: Symbol,
         range: TextRange,
         slot: BindingId,
         reportable: bool,
@@ -1260,11 +1258,11 @@ impl Context<'_> {
                     .scopes
                     .iter()
                     .rev()
-                    .find(|scope| scope.slots.get(name) == Some(&slot))
+                    .find(|scope| scope.slots.get(&name) == Some(&slot))
                     .map(|scope| scope.id)
                     .unwrap_or_else(|| self.current_scope().id);
                 self.writes.push(AssignmentWrite {
-                    name: Symbol::new(name),
+                    name,
                     range,
                     scope,
                     used: false,
@@ -1316,10 +1314,10 @@ fn declared_masked_verb<'a>(
         .map(|leading| leading.iter().map(String::as_str).collect())
 }
 
-fn replacement_base(module: &Module, target: ExprId) -> Option<(ExprId, &str, TextRange)> {
+fn replacement_base(module: &Module, target: ExprId) -> Option<(ExprId, Symbol, TextRange)> {
     let expression = target;
     match module.kind(expression) {
-        ExpressionKind::NameRef(name) => Some((target, name, module.range(expression))),
+        ExpressionKind::NameRef(name) => Some((target, *name, module.range(expression))),
         ExpressionKind::Field { target: inner, .. }
         | ExpressionKind::Index { target: inner, .. } => replacement_base(module, *inner),
         ExpressionKind::Call { arguments, .. } => module[arguments]

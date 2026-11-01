@@ -338,7 +338,6 @@ pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
     file_definitions(db, file);
     file_conditional_writers(db, file);
     file_type_definitions(db, file);
-    top_level_binding_names(db, file);
     type_declaration_names(db, file);
     file_global_variable_declarations(db, file);
 }
@@ -476,7 +475,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             }
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
@@ -500,7 +499,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             let NonLocalRead::Unresolved { suggestion } =
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name)
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name)
             else {
                 continue;
             };
@@ -555,12 +554,13 @@ fn classify_non_local_read(
     check: &ItemCheck<'_>,
     naming: &ItemNaming,
     expression: &ExprId,
-    name: &str,
+    symbol: Symbol,
 ) -> NonLocalRead {
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
-    if let Some(&earliest) = frame_slot_positions(db, file).get(name)
+    let name = symbol.as_str();
+    if let Some(&earliest) = frame_slot_positions(db, file).get(&symbol)
         && (earliest < item_index
             || naming.deferred_non_locals.contains(expression)
             || naming.deferred_quiet_reads.contains(expression))
@@ -588,7 +588,7 @@ fn classify_non_local_read(
             let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
-        || super_globals(db, file).contains(name)
+        || super_globals(db, file).contains(&symbol)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -1417,36 +1417,13 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
     sites
 }
 
-/// Range-free, so the project-wide duplicate map depends only on which names
-/// exist and survives body edits unchanged.
+/// Near-empty in healthy projects, so its value-equality firewall holds: a new name that
+/// duplicates nothing leaves every file's duplicate check untouched.
 #[salsa::tracked(returns(ref))]
-fn top_level_binding_names(db: &dyn Db, file: SourceFile) -> Vec<String> {
-    let mut names = Vec::new();
-    for &item in item_tree(db, file) {
-        if !matches!(*item.kind(db), ItemKind::Function | ItemKind::Value) {
-            continue;
-        }
-        if let Some(name) = item.name(db).clone() {
-            names.push(name);
-        }
-    }
-    names
-}
-
-/// Near-empty in healthy projects, so its value-equality firewall holds.
-#[salsa::tracked(returns(ref))]
-fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<String, Vec<SourceFile>> {
-    let mut sites: FxHashMap<String, Vec<SourceFile>> = FxHashMap::default();
-    for &project_file in files.files(db) {
-        if *project_file.kind(db) != DocumentKind::Package {
-            continue;
-        }
-        for name in top_level_binding_names(db, project_file) {
-            sites.entry(name.clone()).or_default().push(project_file);
-        }
-    }
-    sites.retain(|_, files| files.len() >= 2);
-    sites
+fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Vec<SourceFile>> {
+    crate::package_definition_index(db, files)
+        .duplicates
+        .clone()
 }
 
 /// Each site warns: per-site winner semantics make every earlier binding dead.
@@ -1462,9 +1439,9 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     if map.is_empty() {
         return Vec::new();
     }
-    let mut own_duplicated: Vec<&str> = Vec::new();
-    for name in top_level_binding_names(db, file) {
-        if map.contains_key(name) && !own_duplicated.contains(&name.as_str()) {
+    let mut own_duplicated: Vec<Symbol> = Vec::new();
+    for &(name, _) in file_definitions(db, file) {
+        if map.contains_key(&name) && !own_duplicated.contains(&name) {
             own_duplicated.push(name);
         }
     }
@@ -1472,13 +1449,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     for name in own_duplicated {
         let mut sites: Vec<(SourceFile, TextRange)> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
-        for &site_file in &map[name] {
+        for &site_file in &map[&name] {
             if seen_files.contains(&site_file) {
                 continue;
             }
             seen_files.push(site_file);
             for (site_name, range) in top_level_name_sites(db, site_file) {
-                if site_name == name {
+                if *site_name == name {
                     sites.push((site_file, *range));
                 }
             }
@@ -1613,7 +1590,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
             }
             seen_files.push(site_file);
             for (site_name, range) in type_declaration_sites(db, site_file) {
-                if site_name == name {
+                if *site_name == name {
                     sites.push((site_file, *range));
                 }
             }
@@ -1863,16 +1840,21 @@ fn project_typo_suggestion<'db>(
     name: Name<'db>,
     tests: bool,
 ) -> Option<String> {
+    let text = name.text(db);
+    let characters = text.chars().count();
     let test_names = tests
         .then(|| crate::test_definitions(db, files).keys())
         .into_iter()
         .flatten();
+    // The scan reruns whenever any file adds a name, so it filters on the interned length
+    // and reads only the spellings that could be within budget.
     nearest_name(
-        name.text(db),
+        text,
         crate::package_definitions(db, files)
             .keys()
             .chain(test_names)
-            .map(String::as_str),
+            .filter(|candidate| candidate.characters().abs_diff(characters) <= 2)
+            .map(|candidate| candidate.as_str()),
     )
 }
 
@@ -1923,7 +1905,8 @@ pub(crate) fn nearest_name<'a>(
     let mut current: Vec<usize> = Vec::new();
     let mut best: Option<(usize, &str)> = None;
     for candidate in candidates {
-        if candidate == name {
+        // Most candidates fail on length alone, and counting is cheaper than collecting.
+        if candidate == name || candidate.chars().count().abs_diff(name_characters.len()) > budget {
             continue;
         }
         candidate_characters.clear();
@@ -2157,7 +2140,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         };
         for (expression, name) in &naming.non_locals {
             if !matches!(
-                classify_non_local_read(db, file, item_index, &check, naming, expression, name),
+                classify_non_local_read(db, file, item_index, &check, naming, expression, *name),
                 NonLocalRead::Tolerated
             ) {
                 continue;
