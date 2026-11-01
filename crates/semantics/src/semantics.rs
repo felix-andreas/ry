@@ -660,9 +660,9 @@ fn expression_annotations<'db>(
     for (statement, comment) in targets {
         let range = hir::significant_range(&statement);
         let Some(index) = module
-            .expressions
+            .ranges()
             .iter()
-            .position(|expression| expression.range == range)
+            .position(|&candidate| candidate == range)
         else {
             continue;
         };
@@ -1451,7 +1451,7 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
         {
             check.strict_origins.push(check::StrictOrigin {
                 expression: root,
-                range: module.expression(root).range,
+                range: module.range(root),
                 kind: check::StrictOriginKind::RecursiveUnknown(name),
             });
         }
@@ -2238,19 +2238,19 @@ mod tests {
         );
         let add = function_item(&db, file, "add");
         let before = item_hir(&db, add).clone().expect("add lowers");
-        let root = before.expression(before.root.expect("has root"));
-        let hir::ExpressionKind::Assign { value, .. } = &root.kind else {
+        let root = before.root.expect("has root");
+        let hir::ExpressionKind::Assign { value, .. } = before.kind(root) else {
             panic!("expected an assignment root, got {root:?}");
         };
-        let hir::ExpressionKind::Function { parameters, body } = &before.expression(*value).kind
-        else {
+        let hir::ExpressionKind::Function { parameters, body } = &before.kind(*value) else {
             panic!("expected a function value");
         };
+        let parameters = &before[parameters];
         assert_eq!(parameters.len(), 2);
         assert_eq!(parameters[0].name, "x");
         assert_eq!(parameters[1].name, "y");
         assert!(parameters[1].default.is_some());
-        let hir::ExpressionKind::Binary { operator, .. } = &before.expression(*body).kind else {
+        let hir::ExpressionKind::Binary { operator, .. } = &before.kind(*body) else {
             panic!("expected a binary body");
         };
         assert_eq!(*operator, hir::BinaryOperator::Add);

@@ -132,7 +132,7 @@ pub fn hover(
         .find_map(|id| check.expression_types.get(&id).map(|ty| (id, *ty)))?;
     let ty = without_impossible_vectors(db, ty);
 
-    let (lines, definition) = match &hir.expression(expression).kind {
+    let (lines, definition) = match &hir.kind(expression) {
         ExpressionKind::NameRef(name) => {
             // The item's own top-level name renders the exported scheme, not the initializer's
             // type: `#: @new` brands the scheme even when the initializer is `Unknown`.
@@ -163,10 +163,7 @@ pub fn hover(
     };
 
     Some(Hover {
-        range: trim_trailing_trivia(
-            file.text(db),
-            hir.expression(expression).range + position.item_offset,
-        ),
+        range: trim_trailing_trivia(file.text(db), hir.range(expression) + position.item_offset),
         lines,
         definition,
     })
@@ -193,7 +190,7 @@ fn member_at<'db>(
         let start = name_range.start().checked_sub(TextSize::from(1))?;
         Some(TextRange::new(start, name_range.end()))
     };
-    for (index, pattern) in hir.patterns.iter().enumerate() {
+    for (index, pattern) in hir.patterns().iter().enumerate() {
         if !pattern.range.contains_inclusive(relative) {
             continue;
         }
@@ -210,7 +207,7 @@ fn member_at<'db>(
                 }
             }
             PatternKind::Record { fields, .. } => {
-                if let Some(field) = fields
+                if let Some(field) = hir[fields]
                     .iter()
                     .find(|field| field.name_range.contains_inclusive(relative))
                 {
@@ -224,13 +221,13 @@ fn member_at<'db>(
             _ => {}
         }
     }
-    for (index, expression) in hir.expressions.iter().enumerate() {
-        if !expression.range.contains_inclusive(relative) {
+    for (index, (kind, &range)) in hir.kinds().iter().zip(hir.ranges()).enumerate() {
+        if !range.contains_inclusive(relative) {
             continue;
         }
-        match &expression.kind {
+        match kind {
             ExpressionKind::Record(fields) => {
-                if let Some(field) = fields
+                if let Some(field) = hir[fields]
                     .iter()
                     .find(|field| field.name_range.contains_inclusive(relative))
                 {
@@ -261,13 +258,13 @@ fn member_at<'db>(
                 });
             }
             ExpressionKind::Literal(LiteralKind::String(name)) => {
-                if let Some(columns) = dataframe_columns_for(db, hir, check, expression.range)
+                if let Some(columns) = dataframe_columns_for(db, hir, check, range)
                     && let Some(column) = columns
                         .iter()
-                        .find(|column| column.name.text(db) == name.as_ref())
+                        .find(|column| column.name.text(db) == name.as_str())
                 {
                     return Some(Member {
-                        range: expression.range,
+                        range,
                         label: Some(name.to_string()),
                         ty: column.ty,
                     });
@@ -278,9 +275,14 @@ fn member_at<'db>(
                 arguments,
                 ..
             } => {
-                if let Some(member) =
-                    updated_column_at(db, hir, check, ExprId(index as u32), arguments, relative)
-                {
+                if let Some(member) = updated_column_at(
+                    db,
+                    hir,
+                    check,
+                    ExprId(index as u32),
+                    &hir[arguments],
+                    relative,
+                ) {
                     return Some(member);
                 }
             }
@@ -330,32 +332,29 @@ fn updated_column_at<'db>(
         let ExpressionKind::Call {
             callee,
             arguments: update,
-        } = &hir.expression(value).kind
+        } = &hir.kind(value)
         else {
             continue;
         };
-        if !matches!(&hir.expression(*callee).kind, ExpressionKind::NameRef(name) if name.as_str() == ":=")
-        {
+        if !matches!(&hir.kind(*callee), ExpressionKind::NameRef(name) if name.as_str() == ":=") {
             continue;
         }
-        let Some(target) = update.first().and_then(|argument| argument.value) else {
+        let Some(target) = hir[update].first().and_then(|argument| argument.value) else {
             continue;
         };
-        let target = hir.expression(target);
-        if !target.range.contains_inclusive(relative) {
+        if !hir.range(target).contains_inclusive(relative) {
             continue;
         }
-        let (name, range) = match &target.kind {
-            ExpressionKind::NameRef(name) => (name.to_string(), target.range),
+        let (name, range) = match hir.kind(target) {
+            ExpressionKind::NameRef(name) => (name.to_string(), hir.range(target)),
             // `c("a", "b") := ...`: the string under the cursor names the column.
-            ExpressionKind::Call { arguments, .. } => arguments
+            ExpressionKind::Call { arguments, .. } => hir[arguments]
                 .iter()
                 .filter_map(|argument| argument.value)
-                .map(|value| hir.expression(value))
-                .find(|value| value.range.contains_inclusive(relative))
-                .and_then(|value| match &value.kind {
+                .find(|&value| hir.range(value).contains_inclusive(relative))
+                .and_then(|value| match hir.kind(value) {
                     ExpressionKind::Literal(LiteralKind::String(text)) => {
-                        Some((text.to_string(), value.range))
+                        Some((text.to_string(), hir.range(value)))
                     }
                     _ => None,
                 })?,
@@ -512,7 +511,7 @@ pub fn hover_debug(db: &dyn Db, file: SourceFile, offset: TextSize) -> Vec<Debug
     {
         sections.push(DebugSection {
             title: "Lowering",
-            body: format!("{:#?}", hir.expression(expression)),
+            body: format!("{:#?} @ {:?}", hir.kind(expression), hir.range(expression)),
         });
         if let Some(naming) = item_naming(db, position.item) {
             let body = match naming.resolutions.get(&expression) {
@@ -698,12 +697,11 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             .map(|(id, _)| *id)
             .collect();
 
-        for (index, expression) in hir.expressions.iter().enumerate() {
-            let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
+        for (index, kind) in hir.kinds().iter().enumerate() {
+            let ExpressionKind::Assign { target, value, .. } = kind else {
                 continue;
             };
-            let target_expression = hir.expression(*target);
-            if !matches!(target_expression.kind, ExpressionKind::NameRef(_)) {
+            if !matches!(hir.kind(*target), ExpressionKind::NameRef(_)) {
                 continue;
             }
             let id = ExprId(index as u32);
@@ -718,7 +716,7 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                 continue;
             };
             hints.push(InlayHint {
-                offset: target_expression.range.end() + node.text_range().start(),
+                offset: hir.range(*target).end() + node.text_range().start(),
                 label: format!(": {label}"),
             });
         }
@@ -730,11 +728,10 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
 /// A value that already names its own type: a nominal constructor `@Money(1)`, whose hint would
 /// repeat `Money`, and a payload-free tag such as `:None`, whose hint would repeat the tag.
 fn spells_its_type(hir: &Module, item_node: &SyntaxNode, value: ExprId) -> bool {
-    let expression = hir.expression(value);
-    if matches!(expression.kind, ExpressionKind::Tag { payload: None, .. }) {
+    if matches!(hir.kind(value), ExpressionKind::Tag { payload: None, .. }) {
         return true;
     }
-    let range = expression.range + item_node.text_range().start();
+    let range = hir.range(value) + item_node.text_range().start();
     item_node.text_range().contains_range(range)
         && matches!(
             item_node.covering_element(range),
@@ -877,8 +874,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     // The innermost call whose callee has a function type wins, so a cursor in `list(...)`
     // inside `f(...)` still shows `f`.
     let mut calls: Vec<(TextRange, ExprId)> = hir
-        .expressions
-        .iter()
+        .expressions()
         .enumerate()
         .filter(|(_, expression)| {
             matches!(expression.kind, ExpressionKind::Call { .. })
@@ -890,7 +886,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     calls.sort_by_key(|(range, id)| (range.len(), range.start(), id.0));
 
     let (callee, function, overloads, arguments) = calls.iter().find_map(|(_, id)| {
-        let ExpressionKind::Call { callee, arguments } = &hir.expression(*id).kind else {
+        let ExpressionKind::Call { callee, arguments } = &hir.kind(*id) else {
             return None;
         };
         let function = check
@@ -910,7 +906,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
     if let Some(schemes) = overloads {
         let mut signatures: Vec<SignatureData> = schemes
             .iter()
-            .map(|scheme| scheme_signature(db, scheme, arguments, hir, position.relative))
+            .map(|scheme| scheme_signature(db, scheme, &hir[arguments], hir, position.relative))
             .collect();
         let selected = check.selected_overloads.get(&callee).copied().unwrap_or(0);
         // The committed candidate renders instantiated with this call site's types.
@@ -920,7 +916,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
             *entry = scheme_signature(
                 db,
                 &TypeScheme::monomorphic(function),
-                arguments,
+                &hir[arguments],
                 hir,
                 position.relative,
             );
@@ -948,7 +944,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
         signatures: vec![scheme_signature(
             db,
             &scheme,
-            arguments,
+            &hir[arguments],
             hir,
             position.relative,
         )],
@@ -957,7 +953,7 @@ pub fn signature_help(db: &dyn Db, file: SourceFile, offset: TextSize) -> Option
 }
 
 fn callee_name(hir: &Module, callee: ExprId) -> Option<String> {
-    match &hir.expression(callee).kind {
+    match &hir.kind(callee) {
         ExpressionKind::NameRef(name) => Some(name.to_string()),
         ExpressionKind::Namespace { name, .. } => name.map(|name| name.to_string()),
         _ => None,
@@ -1303,11 +1299,11 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             if !ranges_overlap(target_range, viewport) {
                 continue;
             }
-            let Some(assign_range) = hir.expressions.iter().find_map(|expression| {
+            let Some(assign_range) = hir.expressions().find_map(|expression| {
                 let ExpressionKind::Assign { target, .. } = &expression.kind else {
                     return None;
                 };
-                (hir.expression(*target).range == unused.range || expression.range == unused.range)
+                (hir.range(*target) == unused.range || expression.range == unused.range)
                     .then_some(trim_trailing_trivia(text, expression.range + item_offset))
             }) else {
                 continue;
@@ -1342,11 +1338,11 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
             .iter()
             .map(|(id, _)| *id)
             .collect();
-        for (index, expression) in hir.expressions.iter().enumerate() {
+        for (index, expression) in hir.expressions().enumerate() {
             let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
                 continue;
             };
-            let ExpressionKind::NameRef(name) = &hir.expression(*target).kind else {
+            let ExpressionKind::NameRef(name) = &hir.kind(*target) else {
                 continue;
             };
             let id = ExprId(index as u32);
@@ -2402,17 +2398,16 @@ fn string_subscript_completion(
 
     let string_range = string_token.text_range() - position.item_offset;
     let target = hir
-        .expressions
-        .iter()
+        .expressions()
         .find_map(|expression| match &expression.kind {
             ExpressionKind::Index {
                 double: true,
                 target,
                 arguments,
-            } if arguments.iter().any(|argument| {
+            } if hir[arguments].iter().any(|argument| {
                 argument
                     .value
-                    .is_some_and(|value| hir.expression(value).range == string_range)
+                    .is_some_and(|value| hir.range(value) == string_range)
             }) =>
             {
                 Some(*target)
@@ -2455,43 +2450,39 @@ fn dataframe_columns_for<'a, 'db>(
     check: &'a ItemCheck<'db>,
     string_range: TextRange,
 ) -> Option<&'a [RecordField<'db>]> {
-    let is_column_string = hir
-        .expressions
-        .iter()
-        .any(|expression| match &expression.kind {
-            ExpressionKind::Call { callee, arguments } => {
-                let in_arguments = |arguments: &[Argument]| {
-                    arguments.iter().any(|argument| {
-                        argument
-                            .value
-                            .is_some_and(|value| hir.expression(value).range == string_range)
-                    })
-                };
-                match &hir.expression(*callee).kind {
-                    ExpressionKind::NameRef(name) if name.as_str() == "col" => arguments
-                        .first()
-                        .is_some_and(|argument| in_arguments(std::slice::from_ref(argument))),
-                    ExpressionKind::NameRef(name) if is_dataframe_verb(name) => {
-                        arguments.get(1..).is_some_and(in_arguments)
-                    }
-                    _ => false,
+    let is_column_string = hir.expressions().any(|expression| match &expression.kind {
+        ExpressionKind::Call { callee, arguments } => {
+            let in_arguments = |arguments: &[Argument]| {
+                arguments.iter().any(|argument| {
+                    argument
+                        .value
+                        .is_some_and(|value| hir.range(value) == string_range)
+                })
+            };
+            match &hir.kind(*callee) {
+                ExpressionKind::NameRef(name) if name.as_str() == "col" => hir[arguments]
+                    .first()
+                    .is_some_and(|argument| in_arguments(std::slice::from_ref(argument))),
+                ExpressionKind::NameRef(name) if is_dataframe_verb(name) => {
+                    hir[arguments].get(1..).is_some_and(in_arguments)
                 }
+                _ => false,
             }
-            _ => false,
-        });
+        }
+        _ => false,
+    });
     if !is_column_string {
         return None;
     }
     let (_, subject) = hir
-        .expressions
-        .iter()
+        .expressions()
         .filter_map(|expression| match &expression.kind {
             ExpressionKind::Call { callee, arguments }
                 if expression.range.contains_range(string_range)
-                    && matches!(&hir.expression(*callee).kind, ExpressionKind::NameRef(name) if is_dataframe_verb(name)) =>
+                    && matches!(&hir.kind(*callee), ExpressionKind::NameRef(name) if is_dataframe_verb(name)) =>
             {
-                let subject = arguments.first()?.value?;
-                (!hir.expression(subject).range.contains_range(string_range))
+                let subject = hir[arguments].first()?.value?;
+                (!hir.range(subject).contains_range(string_range))
                     .then_some((expression.range.len(), subject))
             }
             _ => None,
@@ -2793,8 +2784,7 @@ fn dollar_completions(
         let hir = item_hir(db, position.item).as_ref()?;
         let check = item_check(db, position.item)?;
         let (_, target) = hir
-            .expressions
-            .iter()
+            .expressions()
             .filter_map(|expression| match &expression.kind {
                 ExpressionKind::Field { target, .. }
                     if !expression.range.is_empty()
@@ -3147,8 +3137,7 @@ fn subject_along<'db>(
     let check = item_check(db, position.item)?;
     let match_range = match_node.text_range() - position.item_offset;
     let scrutinee = hir
-        .expressions
-        .iter()
+        .expressions()
         .find_map(|expression| match &expression.kind {
             ExpressionKind::Match { scrutinee, .. } if expression.range == match_range => {
                 Some(*scrutinee)
@@ -3312,8 +3301,7 @@ fn literal_expected_fields(
     };
     let expectation_at = |node: &SyntaxNode| {
         let range = node.text_range() - position.item_offset;
-        hir.expressions
-            .iter()
+        hir.expressions()
             .enumerate()
             .filter(|(_, expression)| expression.range == range)
             .find_map(|(index, _)| check.literal_expectations.get(&ExprId(index as u32)))
@@ -3405,15 +3393,14 @@ fn frame_query_completions(
         let hir = item_hir(db, position.item).as_ref()?;
         let check = item_check(db, position.item)?;
         let target = hir
-            .expressions
-            .iter()
+            .expressions()
             .filter_map(|expression| match &expression.kind {
                 ExpressionKind::Index {
                     double: false,
                     target,
                     ..
                 } if expression.range.contains(position.relative)
-                    && hir.expression(*target).range.end() < position.relative =>
+                    && hir.range(*target).end() < position.relative =>
                 {
                     Some((expression.range.len(), *target))
                 }
@@ -3784,7 +3771,7 @@ fn active_parameter(
         .filter(|argument| {
             argument
                 .value
-                .is_some_and(|value| hir.expression(value).range.end() < cursor)
+                .is_some_and(|value| hir.range(value).end() < cursor)
         })
         .count();
 
@@ -4011,10 +3998,8 @@ fn target_at<'db>(
         let binding = match callee_target {
             Some(CalleeTarget::Slot(binding)) => Some(binding),
             Some(CalleeTarget::Project | CalleeTarget::Library) => {
-                let ExpressionKind::NameRef(name) = &item_hir(db, position.item)
-                    .as_ref()?
-                    .expression(expression)
-                    .kind
+                let ExpressionKind::NameRef(name) =
+                    &item_hir(db, position.item).as_ref()?.kind(expression)
                 else {
                     return None;
                 };
@@ -4255,13 +4240,12 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
         });
     }
     let targets: BTreeSet<ExprId> = hir
-        .expressions
-        .iter()
+        .expressions()
         .flat_map(|expression| match &expression.kind {
             ExpressionKind::Assign { target, .. } => vec![*target],
-            ExpressionKind::Match { arms, .. } => arms
+            ExpressionKind::Match { arms, .. } => hir[arms]
                 .iter()
-                .flat_map(|arm| arm.bindings.iter().copied())
+                .flat_map(|arm| hir[arm.bindings].iter().copied())
                 .collect(),
             _ => Vec::new(),
         })
@@ -4299,15 +4283,12 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
 /// The part of a read that spells `name`: a data.table `..name` read inside `[` refers to the
 /// variable `name`, so a rename must keep its `..` prefix.
 fn name_range(hir: &Module, expression: ExprId, name: &str) -> TextRange {
-    let expression = hir.expression(expression);
-    match &expression.kind {
+    let range = hir.range(expression);
+    match hir.kind(expression) {
         ExpressionKind::NameRef(spelled) if dot_dot_variable(spelled) == Some(name) => {
-            TextRange::new(
-                expression.range.start() + TextSize::from(2),
-                expression.range.end(),
-            )
+            TextRange::new(range.start() + TextSize::from(2), range.end())
         }
-        _ => expression.range,
+        _ => range,
     }
 }
 
@@ -4326,8 +4307,7 @@ impl PositionedItem<'_> {
             return Vec::new();
         };
         let mut containing: Vec<(TextSize, bool, ExprId)> = hir
-            .expressions
-            .iter()
+            .expressions()
             .enumerate()
             .filter(|(_, expression)| {
                 !expression.range.is_empty() && expression.range.contains_inclusive(self.relative)

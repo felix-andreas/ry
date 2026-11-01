@@ -430,7 +430,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if binding.kind == BindingKind::TopLevel {
                 continue;
             }
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -445,7 +445,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(message) = namespace_read_message(db, read) else {
                 continue;
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -465,7 +465,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             else {
                 continue;
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             let display = display_name(name);
             let suggestion = suggestion
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
@@ -497,7 +497,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 Some(frame) => format!("the frame `{frame}`"),
                 None => "this frame".to_owned(),
             };
-            let range = module.expression(*expression).range + offset;
+            let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
@@ -1719,10 +1719,10 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
         let Some(root) = module.root else {
             continue;
         };
-        let ExpressionKind::Call { callee, arguments } = &module.expression(root).kind else {
+        let ExpressionKind::Call { callee, arguments } = module.kind(root) else {
             continue;
         };
-        let is_global_variables = match &module.expression(*callee).kind {
+        let is_global_variables = match module.kind(*callee) {
             ExpressionKind::NameRef(name) => name == "globalVariables",
             ExpressionKind::Namespace { package, name, .. } => {
                 package.as_deref() == Some("utils") && name.as_deref() == Some("globalVariables")
@@ -1732,26 +1732,29 @@ fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<
         if !is_global_variables {
             continue;
         }
-        let Some(first) = arguments.first().and_then(|argument| argument.value) else {
+        let Some(first) = module[arguments]
+            .first()
+            .and_then(|argument| argument.value)
+        else {
             continue;
         };
         let mut collect = |id| {
-            if let ExpressionKind::Literal(LiteralKind::String(value)) = &module.expression(id).kind
+            if let ExpressionKind::Literal(LiteralKind::String(value)) = module.kind(id)
                 && !value.is_empty()
             {
                 declared.insert(value.to_string());
             }
         };
-        match &module.expression(first).kind {
+        match module.kind(first) {
             ExpressionKind::Call {
                 callee: inner,
                 arguments: entries,
             } if matches!(
-                &module.expression(*inner).kind,
+                module.kind(*inner),
                 ExpressionKind::NameRef(name) if name == "c"
             ) =>
             {
-                for entry in entries {
+                for entry in &module[entries] {
                     if let Some(value) = entry.value {
                         collect(value);
                     }
@@ -1795,11 +1798,11 @@ const DISPATCH_VARIABLES: [&str; 6] = [
 fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
     item_spans(db, file).iter().any(|span| {
         item_hir(db, span.item).as_ref().is_some_and(|module| {
-            module.expressions.iter().any(|expression| {
-                let ExpressionKind::Call { callee, .. } = &expression.kind else {
+            module.kinds().iter().any(|kind| {
+                let ExpressionKind::Call { callee, .. } = kind else {
                     return false;
                 };
-                match &module.expression(*callee).kind {
+                match module.kind(*callee) {
                     ExpressionKind::NameRef(name) => name == "R6Class",
                     ExpressionKind::Namespace { name, .. } => name.as_deref() == Some("R6Class"),
                     _ => false,
@@ -1997,7 +2000,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             && let Some(root) = module.root
             && let Some(name_range) = item_name_range(db, item)
         {
-            let root_range = module.expression(root).range;
+            let root_range = module.range(root);
             let statement_range = root_range + offset;
             // The finding goes on the name, but a syntax error anywhere in the statement
             // suppresses it.
@@ -2129,7 +2132,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ) {
                 continue;
             }
-            diagnostics.push(Diagnostic::new(module.expression(*expression).range + offset, Severity::Error, "strict", format!(
+            diagnostics.push(Diagnostic::new(module.range(*expression) + offset, Severity::Error, "strict", format!(
                     "strict mode: nothing this project can see defines `{}`. It is silent only because an attached package's exports are unknown. Declare the package with a `.Rtypes` stub to check it",
                     display_name(name)
                 )));
@@ -2148,9 +2151,9 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let mut assignment_targets = FxHashMap::default();
-        for expression in &module.expressions {
-            if let ExpressionKind::Assign { target, value, .. } = &expression.kind
-                && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
+        for kind in module.kinds() {
+            if let ExpressionKind::Assign { target, value, .. } = kind
+                && let ExpressionKind::NameRef(name) = module.kind(*target)
             {
                 assignment_targets.insert(*value, *name);
             }
