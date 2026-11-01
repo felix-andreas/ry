@@ -7,6 +7,7 @@
 //! GNU R is one such engine, and ry's runtime will be another.
 
 pub mod bench;
+pub mod install;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

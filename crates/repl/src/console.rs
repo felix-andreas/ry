@@ -18,7 +18,7 @@ use reedline::{
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_uchar};
+use std::ffi::{CString, c_char, c_int, c_uchar};
 use std::io::{BufRead, IsTerminal, Write, stderr, stdin, stdout};
 use std::panic::catch_unwind;
 use std::path::PathBuf;
@@ -31,11 +31,16 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let batch = options.batch;
     let routines = std::mem::take(&mut options.routines);
     let startup = std::mem::take(&mut options.startup);
+    let arguments = std::mem::take(&mut options.arguments)
+        .into_iter()
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ReplError("a script argument contains a NUL byte".into()))?;
     install(options, false)?;
     install_sigint_handler();
     // A batch run prints only what its code prints, and so does a console reading a pipe.
     let quiet = batch || !stdin().is_terminal();
-    api.initialize(read_console, write_console_ex, quiet)?;
+    api.initialize(read_console, write_console_ex, quiet, &arguments)?;
     api.register_call_routines(&routines);
     for statement in &startup {
         api.eval(statement);

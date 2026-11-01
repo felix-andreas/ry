@@ -78,6 +78,8 @@ pub struct RunOptions {
     /// End the session when the script is consumed; a top-level error quits with
     /// a failing status.
     pub batch: bool,
+    /// What the script reads with `commandArgs(trailingOnly = TRUE)`.
+    pub arguments: Vec<String>,
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
     pub filter: Option<Box<dyn InputFilter>>,

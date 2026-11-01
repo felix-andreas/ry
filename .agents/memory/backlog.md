@@ -35,10 +35,11 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **Compiled code builds with GNU R's toolchain**: on ry's runtime `R.home()` is GNU R's, so
-  `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links GNU R's `libR.so`. It loads
-  because ry's `libR.so` already holds that soname. Pointing `R.home()` at `crates/rcmd`'s R home
-  would make the build ry's own.
+- **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run --runtime ry`,
+  `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
+  GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
+  loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
+  on ry, would make the build ry's own.
 - **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
@@ -310,6 +311,62 @@ protects construction but nothing after it.
   error; the checker rejects it statically, so only `Unknown` code reaches it.
 - The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
   touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
+
+## Open: strict mode restricts what a file's top level runs
+
+User direction: under strict mode, library code should not run arbitrary statements when it loads,
+either through a restricted top level or through a purity system. Today strict mode checks types
+only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\n")` checks clean.
+
+- **Option A, a definitions-only top level.** In a strict library file, every top-level statement
+  defines something: a function, a `type` or `alias`, an import (`library()`, `requireNamespace()`),
+  a class through a definition form (below), or a constant whose value calls only functions that a
+  declaration marks pure (arithmetic, `c()`, `list()`, `paste()`, the standard library, record and
+  tag constructors) and reads only other constants. Anything else, such as `cat()` or `options()`,
+  is a `strict` error that names where the statement belongs: in a function, in `.onLoad`, or in
+  the script `ry run` starts. Entry files keep an unrestricted top level: the `ry run` script, test
+  files and the console.
+- **Option B, purity inference in the Roc style.** Roc infers whether each function is effectful,
+  writes an effectful type with `=>` and an effectful name with `!`, lets only effectful functions
+  call effectful ones, and so rejects `message = greet!("Sam")` at the top level and evaluates every
+  top-level constant at compile time. Roc has no effect polymorphism by design, so a higher-order
+  function exists twice, as `Try.map_ok` and `Try.map_ok!` (Roc's `docs/langref/functions.md`).
+- **Recommendation: A, with purity as a declared bit on declarations, never inferred.**
+  - Checking speed: A is a syntactic check per top-level item plus a per-name lookup of the `pure`
+    bit. B adds an effect to every function type and solves it over the call graph, with a fixpoint
+    over each recursive group.
+  - R compatibility: `lapply`, `Map`, `Reduce`, `do.call` and `purrr::map` take pure and effectful
+    functions under one name, so B could not copy Roc's two names and would need effect
+    polymorphism, an extra variable in the types R code calls most. Every base and package
+    declaration would also need an effect, and R's effects hide everywhere (`runif` advances
+    `.Random.seed`, an assignment into an environment or R6 object mutates shared state). A needs the
+    `pure` bit only on the functions a constant may call, which is a small set.
+  - Firewalls: an inferred effect is derived from a body, so in a function's type it would let one
+    added `cat()` change the interface of every transitive caller. The runtime design keeps "free of
+    effects" as a body fact in its own query for exactly this reason (`r-runtime.md`, "The runtime
+    body facts"). Under A the top-level items stop depending on execution order, so each one stays
+    independent.
+  - R already wants this: an installed package's `R/` code runs when the package is installed, to
+    build its lazy-load database, so a top-level effect in package code is already a bug, and R's
+    convention puts load-time work in `.onLoad`. A turns that convention into a check.
+- **Object systems and wrappers.** Non-strict files are unchanged. In a strict file, `setClass`,
+  `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` and `R6Class` count as
+  definition forms: registering a class is an effect, but a declarative one. Read the list from
+  `syntax::native_values::object_system_function`, which the object-systems lint and the run-time
+  refusal already share, so the three cannot drift; the lint still warns. `f <- memoise(f)` passes
+  when `memoise`'s declaration is marked pure, since creating its cache is allocation, which Roc also
+  allows in pure code. `utils::globalVariables()` is declarative and passes; `makeActiveBinding` and
+  `delayedAssign` need a decision each.
+- **Lazy loading.** `ry load` binds each function as a promise and runs every other top-level
+  statement at load time in `Collate` order (`reference/package-loading.md`). Under A, a strict
+  package's constants are pure, so the loader can bind them as promises too: a load runs only the
+  class definition forms and `.onLoad`, a reload reruns nothing until a name is used, and a constant
+  that reads a name defined later in collation order works. Pure constants could later be evaluated
+  once and cached with the bytecode, as Roc evaluates top-level constants at compile time.
+- **Open questions.** Which files outside a package are library files (perhaps every file except
+  the `ry run` entry and test files). Whether a constant may call a project function marked
+  `#: @pure`, checked shallowly against its callees' declarations rather than inferred. Update
+  `type-checking/strict-mode.mdx` and the reference's strict mode section when it ships.
 
 ## Open: the JIT
 
@@ -2034,10 +2091,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
-- **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
-  compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
-  exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
-  GNU R until then, because configure scripts run R code through them.
+- **`R -f` and `R CMD BATCH` do not echo input.** `ry_run` runs a file like `Rscript`, so
+  `R -f` without `--no-echo` and `BATCH` output omit the `> ` echoed code GNU R prints.
+- **`exists(name, registry)` on the namespace registry segfaults** (its enclosure is NULL, as in
+  GNU R, where the lookup errors "use of NULL environment is defunct" instead).
+- **`lazyLoad()` returns visibly** (prints `NULL` at top level); GNU R's result is invisible.
 - **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
   negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the

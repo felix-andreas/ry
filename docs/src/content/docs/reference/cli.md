@@ -66,7 +66,8 @@ the console on ry's own interpreter, which loads no package and runs no startup 
 `ry run script.R` runs a script and exits. A top-level error stops it with exit status 1, as with
 `Rscript`. Unlike `Rscript`, the session is interactive, so `interactive()` returns `TRUE`. R's
 startup banner is not printed, so the output is only what the script prints. Arguments after the
-file reach the script through `commandArgs(trailingOnly = TRUE)`.
+file reach the script through `commandArgs(trailingOnly = TRUE)`. Put `--` before an argument that
+starts with a dash: `ry run script.R -- --verbose`.
 
 Before anything runs, `ry run` checks the script and `ry repl` checks each command against the
 project's `ry.toml`. They print the [inline annotation](/type-checking/inline-annotations) warnings,
@@ -88,8 +89,8 @@ current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits
 Unlike `ry run`, it uses ry's own runtime by default, and `--runtime gnu-r` (or `RY_RUNTIME=gnu-r`)
 loads on GNU R instead.
 `ry load --r-entry` prints the R code that gives a plain R session the same `load_all()`, for
-`source(pipe("ry load --r-entry"))`. `load_all()` is available in `ry repl` and `ry run` sessions
-on GNU R too, but not yet with `--runtime ry`.
+`source(pipe("ry load --r-entry"))`. `load_all()` is also available in `ry run` on either runtime and in `ry repl` on GNU R, but not yet
+in `ry repl --runtime ry`.
 
 ## debug
 

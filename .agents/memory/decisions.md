@@ -108,6 +108,41 @@ accepts `character`, which no numeric binder covers. Never say these functions h
 scheme. A gradual checker that cannot describe the standard library is not usable. A user's `#:` annotation stays pure
 Hindley-Milner, which is what keeps the user-facing promise honest.
 
+## ry has no macros
+
+This is a user directive: compile time and type-checking speed rank highest, so ry adds no macro
+system, syntactic or procedural.
+
+- **Why.** A macro makes what a file means depend on code that runs before checking. Every check
+  then pays for expansion, an item's names can no longer be read from its syntax, and an edit to a
+  macro invalidates every site that expands it, which defeats the per-item firewalls. Vx, which has
+  `macro_rules`, confines expansion to its own phase before name resolution so that it cannot break
+  parallel per-body checking, and its notes cite rustc, where macro expansion and name resolution
+  are still serial (`docs/language_rules_for_a_parallel_compiler.md` in vx-lang/Vx).
+- **R's own non-standard evaluation stays.** `quote`, `substitute`, `bquote`, `eval`, tidy
+  evaluation and data masks keep working, because existing R code must run unchanged. The checker
+  treats them as ordinary R calls (the recognized data masks read bare names as columns, and `eval()`
+  returns `Any`), and ry builds nothing on top of them.
+- **Prior art.** Roc's language reference describes no macros; it evaluates top-level constants at
+  compile time instead. Bend lists "no macros beyond compile-time templates" among its limitations.
+  goose's reference describes no macros; its `const for` copies a fragment once per field, variant
+  or type at specialization time, as its form of reflection. Vx has `macro_rules`, restricted as
+  above.
+- **What replaces common macro uses.**
+  - Derived behavior, such as Rust's `derive` for printing, equality or serialization, comes from
+    structural types: with no declaration, `print((x = 1, y = 2))` prints `(x = 1, y = 2)`, and
+    `identical()` compares two records by value.
+  - Boilerplate repeated over types is written once with generics (`<T> fn(...)`) and the standard
+    library's higher-order functions.
+  - Code generation happens outside the language, in a script that writes ordinary files the checker
+    reads, as `scripts/export-manifests.R` writes the export manifests; `.Rtypes` stubs declare what
+    R code cannot express.
+  - Values computed ahead of time are pure top-level constants, which strict mode's planned
+    definitions-only top level makes possible (`backlog.md`, "strict mode restricts what a file's
+    top level runs").
+- **Consequence.** Reject any proposal that expands or generates code before checking, including
+  generation driven by annotations inside the checker.
+
 ## An overload set is a bounded, ordered probe
 
 A function whose result type depends on the argument type gets an ordered overload set, on the stub
@@ -1969,14 +2004,25 @@ primitives, and nothing built or installed packages.
 - **Header export coverage is checked by the compiler** (`-aux-info` and `-E` in
   `tests/test_headers.rs`), not by scanning header text, because rename macros and struct fields
   defeat a text scan.
-- **Package installation is the `rcmd` crate.** ry's R home has ry's headers and `libR.so`, an
-  `etc/Makeconf` written for ry, `share/make/shlib.mk`, and a `bin/R` that runs `ry-rcmd`, so
-  `configure` scripts asking `R CMD config` get ry's toolchain. A source install compiles `src/`
-  as `R CMD INSTALL` does and records `RyBuilt:`; the R-level half (lazy-load database, help,
-  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript`, and `bin/R`
-  for anything but `R CMD` and `R RHOME`, run GNU R for the R code configure scripts and
-  `Makevars` evaluate (`R -f tools/examples.R`): an explicit build-time delegation that the
-  interpreter replaces, not a fallback on failure.
+- **Package installation is the `rcmd` crate, and it runs on ry.** ry's R home has ry's
+  headers and `libR.so`, an `etc/Makeconf` written for ry and `share/make/shlib.mk`. It links
+  everything else from GNU R's home: the `library/` packages (base R's R code), `share/`,
+  `etc/` and the `R CMD` scripts in `bin/` (build, check, Rdconv, ...). Its own `bin/R`,
+  `bin/Rscript` and `bin/Rcmd` exec `ry-rcmd`, which answers `R CMD INSTALL|SHLIB|config` and
+  `R RHOME` in Rust and runs every other command line (`-e`, `-f`, a script, stdin) on ry's
+  interpreter by dlopening the home's `libR.so` and calling `ry_run`. GNU R's `R CMD` scripts
+  call back into `bin/R`, so they run on ry too; no GNU R process runs at install time.
+  - Install: Rust configures and compiles `src/`, then an embedded R driver
+    (`crates/rcmd/src/install.R`) runs the R-level half on ry with GNU R's own `tools`
+    functions, in `tools:::.install_packages`' order (DESCRIPTION and `Meta/`, collated code,
+    `sysdata`, lazy data, demos, `inst/`, the lazy-load database, Rd objects and help indices,
+    vignette index, `nsInfo`), then test-loads in a fresh ry process. Reusing `tools` keeps the
+    installed layout GNU R's byte for byte in structure, so GNU R can read what ry installs.
+  - **Nothing is byte-compiled.** ry compiles closures itself when they run, and GNU R
+    bytecode in a lazy-load database is read back as its source expression anyway, so a GNU R
+    compile step would only cost install time. `ByteCompile: yes` is ignored.
+  - The previous shape delegated `bin/R` and `bin/Rscript` to GNU R and kept `R/` as sources;
+    both are gone.
 - **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
   algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
   which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random

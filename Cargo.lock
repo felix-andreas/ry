@@ -3352,6 +3352,9 @@ dependencies = [
 [[package]]
 name = "rcmd"
 version = "0.3.2-beta"
+dependencies = [
+ "libloading",
+]
 
 [[package]]
 name = "recursive"

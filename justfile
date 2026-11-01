@@ -263,6 +263,15 @@ package-tests *args:
     cargo build -q --release -p ry-lang -p libr
     ORACLE_RY=target/release/ry cargo run -q --release -p oracle -- packages {{ args }}
 
+# Assemble ry's R home in .corpus/ry-home: bin/R, bin/Rscript and R CMD run on ry's runtime.
+ry-home:
+    cargo build -q --release -p libr -p rcmd
+    ./target/release/ry-rcmd assemble .corpus/ry-home --include crates/libr/include --libr target/release/libR.so
+
+# Install the closure from source on ry's runtime into .corpus/ry-library: `just corpus-ry-install [--jobs N] [PKG...]`.
+corpus-ry-install *args: ry-home
+    cargo run -q --release -p oracle -- install {{ args }}
+
 # The differential oracle: `just oracle verify`, `record`, `compare` or `show FILE`.
 oracle *args:
     cargo run -q -p oracle -- {{ args }}
