@@ -25,7 +25,7 @@ note() { printf '%s%s%s\n' "$dim" "$1" "$reset"; }
 show() {
 	local display="" word
 	for word in "$@"; do
-		if [[ "$word" =~ ^[A-Za-z0-9_./:=+-]+$ ]]; then display+=" $word"; else display+=" $(printf '%q' "$word")"; fi
+		if [[ "$word" =~ ^[A-Za-z0-9_./:=+-]+$ ]]; then display+=" $word"; else display+=" '${word//\'/\'\\\'\'}'"; fi
 	done
 	printf '\n%s$%s%s\n' "$cyan" "$display" "$reset"
 	local status=0
