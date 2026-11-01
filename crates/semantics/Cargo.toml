@@ -8,9 +8,11 @@ publish = false
 path = "src/semantics.rs"
 
 [dependencies]
+boxcar.workspace = true
 rowan.workspace = true
 rustc-hash.workspace = true
 salsa.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
 stacker.workspace = true
+sniff = { path = "../sniff" }
 syntax = { path = "../syntax" }

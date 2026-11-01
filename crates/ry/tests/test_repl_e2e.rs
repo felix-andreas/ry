@@ -481,6 +481,18 @@ fn run_executes_annotated_code_on_both_runtimes() {
 }
 
 #[test]
+fn ry_runtime_admits_a_frame_for_a_frame_annotation() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let script = "total <- function(sales: frame{team: character, amount: double}) -> double sum(sales$amount)\n\
+        print(total(frame(team = \"a\", amount = 2)))\n";
+    let (status, stdout, stderr) = run_project("ry", &[("script.R", script)]);
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(stdout.contains("[1] 2"), "{stdout}");
+}
+
+#[test]
 fn ry_runtime_checks_arguments_and_returns_at_the_boundary() {
     if !ry_runtime_available() {
         return;
@@ -574,6 +586,58 @@ fn run_with_inline_annotations_off_warns_and_skips_the_checks() {
             "{runtime}: {stderr}"
         );
     }
+}
+
+#[test]
+fn ry_runtime_refuses_class_definitions_when_object_systems_are_off() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let config = "[check]\nobject-systems = false\n";
+    for (code, function) in [
+        ("setClass(\"P\", representation(x = \"numeric\"))\n", "setClass"),
+        ("methods::setRefClass(\"A\")\n", "setRefClass"),
+    ] {
+        let script = format!("cat(\"before\\n\")\n{code}cat(\"after\\n\")\n");
+        let (status, stdout, stderr) =
+            run_project("ry", &[("script.R", &script), ("ry.toml", config)]);
+        assert_eq!(status, Some(1), "{function}: {stderr}");
+        assert!(stdout.contains("before") && !stdout.contains("after"), "{stdout}");
+        assert!(
+            stderr.contains(&format!(
+                "(`[check] object-systems = false`), so `{function}` cannot define"
+            )),
+            "{function}: {stderr}"
+        );
+    }
+    let (status, stdout, stderr) = run_project(
+        "ry",
+        &[("script.R", "setClass(\"P\", representation(x = \"numeric\"))\ncat(\"defined\\n\")\n")],
+    );
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(stdout.contains("defined"), "{stdout}");
+}
+
+#[test]
+fn the_ry_console_refuses_class_definitions_when_object_systems_are_off() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        directory.path().join("ry.toml"),
+        "[check]\nobject-systems = false\n",
+    )
+    .expect("write config");
+    let mut session =
+        ReplSession::start_with(Some(directory.path()), &["--no-load", "--runtime", "ry"]);
+    session.expect("console");
+    session.settle(Duration::from_millis(400));
+    session.send("setRefClass(\"A\")\r");
+    session.expect("`setRefClass` cannot define a Reference Class");
+    session.send("1 + 1\r");
+    session.expect("[1] 2");
+    session.quit();
 }
 
 #[test]

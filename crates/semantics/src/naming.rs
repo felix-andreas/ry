@@ -6,6 +6,7 @@ use crate::hir::{
     Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module, PatId,
     PatternKind, Symbol, UnaryOperator, destructure_leaves,
 };
+use crate::sorted::{SortedMap, SortedSet};
 use rustc_hash::FxHashMap;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,38 +49,86 @@ pub struct NamespaceRead {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemNaming {
-    pub bindings: BTreeMap<BindingId, BindingInfo>,
-    pub resolutions: BTreeMap<ExprId, BindingId>,
-    pub maybe_undefined: BTreeSet<ExprId>,
-    pub non_locals: BTreeMap<ExprId, Symbol>,
+    pub bindings: SortedMap<BindingId, BindingInfo>,
+    pub resolutions: SortedMap<ExprId, BindingId>,
+    pub maybe_undefined: SortedSet<ExprId>,
+    pub non_locals: SortedMap<ExprId, Symbol>,
     /// The subset of `non_locals` read inside a nested function, which runs when called.
-    pub deferred_non_locals: BTreeSet<ExprId>,
+    pub deferred_non_locals: SortedSet<ExprId>,
     /// Unresolved reads in a quiet context (data masking, opaque operators): never reported,
     /// but they keep cross-item bindings alive, since masked code falls back to enclosing ones.
-    pub quiet_reads: BTreeMap<ExprId, Symbol>,
-    pub deferred_quiet_reads: BTreeSet<ExprId>,
+    pub quiet_reads: SortedMap<ExprId, Symbol>,
+    pub deferred_quiet_reads: SortedSet<ExprId>,
     /// `%op%` names read as operators; by name because the operator is a token, not a `NameRef`.
-    pub quiet_operator_reads: BTreeSet<Symbol>,
-    pub unused_assignments: Vec<UnusedAssignment>,
-    pub unused_parameters: Vec<UnusedAssignment>,
+    pub quiet_operator_reads: SortedSet<Symbol>,
+    pub unused_assignments: Box<[UnusedAssignment]>,
+    pub unused_parameters: Box<[UnusedAssignment]>,
     /// Own top-level slots read within the item; the cross-item unused check seeds them as used.
-    pub used_top_level_names: BTreeSet<Symbol>,
+    pub used_top_level_names: SortedSet<Symbol>,
     /// Slots read or super-assigned from a nested function: every write stays observable.
-    pub captured_slots: BTreeSet<BindingId>,
+    pub captured_slots: SortedSet<BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
-    pub masked_subsets: BTreeSet<ExprId>,
+    pub masked_subsets: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
     /// a new write of that slot, so later reads see the added or removed column.
-    pub column_updates: BTreeMap<ExprId, BindingId>,
+    pub column_updates: SortedMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
-    pub namespace_reads: BTreeMap<ExprId, NamespaceRead>,
+    pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
     /// `<<-` targets with no enclosing binding: R creates them in the global environment.
-    pub super_globals: BTreeSet<Symbol>,
+    pub super_globals: SortedSet<Symbol>,
     /// Targets R parses but refuses at run time (a computed value or a number); reads inside
     /// them are suppressed as consequences of the mistake.
-    pub invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
+    pub invalid_assignment_targets: Box<[InvalidAssignmentTarget]>,
     /// Alternatives of a `p | q` pattern that leave out a name another alternative binds.
-    pub or_pattern_mismatches: Vec<OrPatternMismatch>,
+    pub or_pattern_mismatches: Box<[OrPatternMismatch]>,
+}
+
+/// `ItemNaming` while resolution builds it; frozen into compact sorted slices at the end.
+#[derive(Default)]
+struct NamingDraft {
+    bindings: BTreeMap<BindingId, BindingInfo>,
+    resolutions: BTreeMap<ExprId, BindingId>,
+    maybe_undefined: BTreeSet<ExprId>,
+    non_locals: BTreeMap<ExprId, Symbol>,
+    deferred_non_locals: BTreeSet<ExprId>,
+    quiet_reads: BTreeMap<ExprId, Symbol>,
+    deferred_quiet_reads: BTreeSet<ExprId>,
+    quiet_operator_reads: BTreeSet<Symbol>,
+    unused_assignments: Vec<UnusedAssignment>,
+    unused_parameters: Vec<UnusedAssignment>,
+    used_top_level_names: BTreeSet<Symbol>,
+    captured_slots: BTreeSet<BindingId>,
+    masked_subsets: BTreeSet<ExprId>,
+    column_updates: BTreeMap<ExprId, BindingId>,
+    namespace_reads: BTreeMap<ExprId, NamespaceRead>,
+    super_globals: BTreeSet<Symbol>,
+    invalid_assignment_targets: Vec<InvalidAssignmentTarget>,
+    or_pattern_mismatches: Vec<OrPatternMismatch>,
+}
+
+impl NamingDraft {
+    fn freeze(self) -> ItemNaming {
+        ItemNaming {
+            bindings: self.bindings.into(),
+            resolutions: self.resolutions.into(),
+            maybe_undefined: self.maybe_undefined.into(),
+            non_locals: self.non_locals.into(),
+            deferred_non_locals: self.deferred_non_locals.into(),
+            quiet_reads: self.quiet_reads.into(),
+            deferred_quiet_reads: self.deferred_quiet_reads.into(),
+            quiet_operator_reads: self.quiet_operator_reads.into(),
+            unused_assignments: self.unused_assignments.into_boxed_slice(),
+            unused_parameters: self.unused_parameters.into_boxed_slice(),
+            used_top_level_names: self.used_top_level_names.into(),
+            captured_slots: self.captured_slots.into(),
+            masked_subsets: self.masked_subsets.into(),
+            column_updates: self.column_updates.into(),
+            namespace_reads: self.namespace_reads.into(),
+            super_globals: self.super_globals.into(),
+            invalid_assignment_targets: self.invalid_assignment_targets.into_boxed_slice(),
+            or_pattern_mismatches: self.or_pattern_mismatches.into_boxed_slice(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,13 +170,13 @@ pub fn resolve_item(module: &Module, masked_verbs: &FxHashMap<String, Vec<String
         deferred_depth: 0,
         quoted_depth: 0,
         bracket_depth: 0,
-        naming: ItemNaming::default(),
+        naming: NamingDraft::default(),
     };
     if let Some(root) = module.root {
         context.resolve(root);
     }
     context.collect_unused();
-    context.naming
+    context.naming.freeze()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +243,7 @@ struct Context<'a> {
     /// Inside a single `[`'s index arguments, where data.table reads `..name` as the variable
     /// `name` from the enclosing scope.
     bracket_depth: u32,
-    naming: ItemNaming,
+    naming: NamingDraft,
 }
 
 impl Context<'_> {
@@ -244,6 +293,33 @@ impl Context<'_> {
     }
 
     /// The current frame's slot for `name`, minted at this site if the frame has none yet.
+    /// A frame's `:=` is copy-on-write, which ry models as a new write of the subject's slot,
+    /// so later reads see the updated columns. It writes only a slot the current scope already
+    /// owns (a top-level name, a local, or a parameter): on any other subject, such as a global
+    /// `data.table` updated inside a function, the update works by reference, so it must not
+    /// shadow the subject with a local binding that would capture navigation and rename. The
+    /// target's own read keeps its resolution, since it reads the value before the update.
+    fn record_column_update(&mut self, id: ExprId, target: ExprId) {
+        let module = self.module;
+        let ExpressionKind::NameRef(name) = &module.expression(target).kind else {
+            return;
+        };
+        if self.quoted_depth != 0 {
+            return;
+        }
+        let owned = match self.current_scope().kind {
+            ScopeKind::TopLevel => true,
+            ScopeKind::Function | ScopeKind::Local => self.current_scope().slots.contains_key(name),
+        };
+        if owned {
+            let range = module.expression(target).range;
+            let kind = self.assignment_binding_kind();
+            let slot = self.frame_slot(name, range, kind);
+            self.record_write_site(id, name, range, slot, false);
+            self.naming.column_updates.insert(id, slot);
+        }
+    }
+
     fn frame_slot(&mut self, name: &str, range: TextRange, kind: BindingKind) -> BindingId {
         if let Some(&slot) = self.current_scope().slots.get(name) {
             return slot;
@@ -358,6 +434,18 @@ impl Context<'_> {
                         self.resolve_switch(arguments);
                         return;
                     }
+                    // data.table's `setnames(f, ...)` and `setcolorder(f, ...)` change the
+                    // frame's columns by reference, which ry models like `:=`: a new write of
+                    // the subject's slot.
+                    Some("setnames" | "setcolorder") if !arguments.is_empty() => {
+                        self.resolve_arguments(arguments);
+                        if let Some(subject) =
+                            arguments[0].value.filter(|_| arguments[0].name.is_none())
+                        {
+                            self.record_column_update(id, subject);
+                        }
+                        return;
+                    }
                     // A quoting form binds nothing inside it. Reads are still walked, as deferred,
                     // because `eval` may run the expression later. Quiet too: a quoted name need
                     // not exist yet, as in `quote(x <- 1)`.
@@ -451,24 +539,8 @@ impl Context<'_> {
                 // function, `:=` works by reference, so it must not shadow the subject with a
                 // local binding that would capture navigation and rename. The target's own
                 // read keeps its resolution, since it reads the value before the update.
-                if !*double
-                    && self.quoted_depth == 0
-                    && let ExpressionKind::NameRef(name) = &module.expression(*target).kind
-                    && is_column_update(module, arguments)
-                {
-                    let owned = match self.current_scope().kind {
-                        ScopeKind::TopLevel => true,
-                        ScopeKind::Function | ScopeKind::Local => {
-                            self.current_scope().slots.contains_key(name)
-                        }
-                    };
-                    if owned {
-                        let range = module.expression(*target).range;
-                        let kind = self.assignment_binding_kind();
-                        let slot = self.frame_slot(name, range, kind);
-                        self.record_write_site(id, name, range, slot, false);
-                        self.naming.column_updates.insert(id, slot);
-                    }
+                if !*double && is_column_update(module, arguments) {
+                    self.record_column_update(id, *target);
                 }
             }
             ExpressionKind::Field { target, .. } => self.resolve(*target),

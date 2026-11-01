@@ -229,9 +229,7 @@ pub unsafe extern "C" fn R_RunWeakRefFinalizer(weak: Sexp) {
 pub unsafe extern "C" fn R_RunExitFinalizers() {
     let exiting = runtime().heap.take_exit_finalizers();
     let mark = runtime().heap.handle_mark();
-    for &weak in &exiting {
-        runtime().heap.root(weak);
-    }
+    crate::boundary::root_finalizable(&exiting);
     for weak in exiting {
         run_finalizer(weak);
     }

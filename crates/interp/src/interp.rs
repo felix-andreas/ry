@@ -153,6 +153,11 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// The innermost complex assignment running: its replacement call, the whole assignment,
+    /// and the frame depth it runs at. GNU R evaluates the replacement inside a context for the
+    /// assignment, so a builtin replacement function reports its errors and warnings against
+    /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
+    pub assignment_call: Option<(Sexp, Sexp, usize)>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// The text `geterrmessage()` returns.
@@ -181,6 +186,9 @@ pub struct Interp {
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
+    /// off when the project sets `[check] object-systems = false`.
+    pub object_systems: bool,
 }
 
 struct InterpState {
@@ -261,6 +269,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         primitive_formals: FxHashMap::default(),
         symbols,
         visible: true,
+        assignment_call: None,
         warnings: Vec::new(),
         error_message: String::new(),
         show_error_messages: true,
@@ -277,6 +286,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
+        object_systems: true,
     });
     heap.add_root_source(Rc::new(InterpRoots));
     values::Globals::install();

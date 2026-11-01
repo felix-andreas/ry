@@ -249,6 +249,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         );
     }
 
+    print_memo_census(&db);
+
     println!();
     println!("slowest files (typecheck):");
     let mut by_typecheck: Vec<usize> = (0..records.len()).collect();
@@ -288,6 +290,42 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
 
     Ok(())
 }
+
+/// Salsa's own census: how many memos each query holds and their inline size plus
+/// bookkeeping (dependency edges are the bulk of the metadata). Heap behind a value is
+/// not counted, so read it beside the phase growth above.
+fn print_memo_census(db: &RootDatabase) {
+    let info = <dyn salsa::Database>::memory_usage(db);
+    let mut queries: Vec<_> = info.queries.iter().collect();
+    queries.sort_by_key(|(_, query)| Reverse(query.size_of_metadata() + query.size_of_fields()));
+    println!();
+    println!("memo census (count, inline value size, salsa metadata):");
+    for (name, query) in queries.iter().take(MEMO_CENSUS_ROWS) {
+        println!(
+            "  {name:<40} {:>9} {:>9.1} MiB {:>9.1} MiB",
+            query.count(),
+            query.size_of_fields() as f64 / MEBIBYTE,
+            query.size_of_metadata() as f64 / MEBIBYTE,
+        );
+    }
+    let mut structs: Vec<_> = info
+        .structs
+        .iter()
+        .filter(|entry| entry.count() > 0)
+        .collect();
+    structs.sort_by_key(|entry| Reverse(entry.size_of_metadata() + entry.size_of_fields()));
+    for entry in structs.iter().take(MEMO_CENSUS_ROWS) {
+        println!(
+            "  {:<40} {:>9} {:>9.1} MiB {:>9.1} MiB",
+            entry.debug_name(),
+            entry.count(),
+            entry.size_of_fields() as f64 / MEBIBYTE,
+            entry.size_of_metadata() as f64 / MEBIBYTE,
+        );
+    }
+}
+
+const MEMO_CENSUS_ROWS: usize = 16;
 
 /// Appended `#` keystrokes keep item identity, so the burst measures
 /// steady-state revalidation.

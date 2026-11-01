@@ -1,0 +1,17 @@
+[stdout]
+| [1] "m"  "zz" "c"  "a"  "b" 
+| [1] "m"  "zz" "c"  "a"  "b" 
+| [1] "a"  "b"  "c"  "m"  "zz"
+| [1] "a" "b"
+| [1] "a"  "b"  "c"  "zz" "m" 
+| [1] "aa" "y"  "x" 
+| [1] "r" "q" "p"
+| [1] "m"  "zz" "c"  "a"  "b" 
+| [1] "q" "z" "a" "b"
+| [1] "m"  "zz" "a"  "b" 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| c("m", "zz", "a", "b")

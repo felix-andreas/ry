@@ -149,7 +149,10 @@ pub fn with_fixture_project<R>(
     })
 }
 
-/// Logs every query execution, for asserting what an edit re-runs.
+/// Marks a log entry as a revalidated memo rather than an execution.
+const VALIDATED: &str = "validated ";
+
+/// Logs every query execution and revalidation, for asserting what an edit re-runs.
 #[salsa::db]
 #[derive(Clone)]
 pub struct ProbeDatabase {
@@ -164,11 +167,14 @@ impl Default for ProbeDatabase {
         let log = executed.clone();
         ProbeDatabase {
             storage: salsa::Storage::new(Some(Box::new(move |event| {
-                if let salsa::EventKind::WillExecute { database_key } = event.kind {
-                    log.lock()
-                        .expect("probe log")
-                        .push(format!("{database_key:?}"));
-                }
+                let entry = match event.kind {
+                    salsa::EventKind::WillExecute { database_key } => format!("{database_key:?}"),
+                    salsa::EventKind::DidValidateMemoizedValue { database_key } => {
+                        format!("{VALIDATED}{database_key:?}")
+                    }
+                    _ => return,
+                };
+                log.lock().expect("probe log").push(entry);
             }))),
             splice_cache: Arc::default(),
             executed,
@@ -207,6 +213,22 @@ impl ProbeDatabase {
             .iter()
             .map(|query| {
                 let prefix = format!("{query}(");
+                executed
+                    .iter()
+                    .filter(|entry| entry.starts_with(&prefix))
+                    .count()
+            })
+            .collect()
+    }
+
+    /// How many memos of each query in `queries` were revalidated without running since the
+    /// previous drain; drains the log.
+    pub fn validations_since(&self, queries: &[&str]) -> Vec<usize> {
+        let executed = mem::take(&mut *self.executed.lock().expect("probe log"));
+        queries
+            .iter()
+            .map(|query| {
+                let prefix = format!("{VALIDATED}{query}(");
                 executed
                     .iter()
                     .filter(|entry| entry.starts_with(&prefix))

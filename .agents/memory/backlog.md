@@ -1623,7 +1623,8 @@ check.
 
 `function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every
 other overload set. Wrapping a standard-library numeric function in one of your own throws the types
-away.
+away. `sum` no longer has an `Any` fallback (it rejects strings), so a `sum` wrapper gives `Unknown`
+rather than `Any`.
 
 The cause is the fact-beats-guess rule. The `Any` fallback fits while binding nothing, so it beats
 every candidate that would narrow `x`.
@@ -1853,18 +1854,29 @@ The end-to-end guard rests on the corpus suites.
   and give plain subjects a fast path again if they regressed.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
-- **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
-  variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
-- **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
-  name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
-  instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
-- **Engine:** under `.EACHI`, `sum(.N)` reads the raw group row count rather than the matched
-  count (`single_value` does not rewrite the argument), and `parse_strings` uses Polars' string
-  cast, which is unverified against R for padded (`" 3"`) and hex (`"0x1A"`) strings.
-- **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
-  so `lapply(.SD, sum)` over a character column is silent.
-- **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
-  checked. The engine refuses a factor joined to a number and a number written into a factor.
+- **Checker:** `.SDcols` as positions or `patterns()`, `(cols) := ...` through a variable, and
+  `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
+- **Checker nits:** `x < "b"` on a factor gives the generic comparison message, and `factor == 1` is
+  flagged although R allows it.
+- **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
+  `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
+  under ry's runtime an attached data.table still runs its own versions, which return a
+  `data.table` and reject a frame. The runtime needs these names routed to the engine
+  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
+  installs, before the checker's types are true at run time. The `[` bridge
+  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
+  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
+  and decline to data.table otherwise.
+- **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
+  `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
+  unknown columns (the spread columns are data values); a data path resolves against the project
+  root only, because `SourceFile` carries no path.
+- **`dcast` with an aggregate runs at data.table's speed, not faster** (`crates/table/benches/ops_benchmark.rs`
+  against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
+  through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
+  `ops::key_digits`, as `unique` does, would skip the general grouping.
+- **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
+  on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
   type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
@@ -1889,6 +1901,25 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
+- **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
+  - `rawConnection` and `writeBin` are missing from the interpreter (libr has them, unregistered),
+    and cli renders every testthat failure through `rawConnection`, so about 21 packages stop there.
+  - About 12 packages (DBI, glue, withr, vctrs, lubridate, hms, readxl, later, lgr, tidyselect,
+    pkgbuild, blob) crash in the collector marking a dead handle, only in long runs. Reproduce
+    with `gctorture(TRUE)` on a profiling build.
+  - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
+    `rm()` and `gc()`, so it is finalized in a later block.
+  - Smaller classes: ALTREP in checkmate, `latin1` encoding in fastmap, `file_access` names in fs,
+    `gsub` with a Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in
+    Bessel's asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, and the
+    `parallel` package's DLL for doParallel.
+  - `eval(quote(next))` inside a loop reports no loop context.
+  - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
+    different order (`heap::env::Frame::listed_cells`).
+  - The graphics device keeps a display list but draws nothing.
+- **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
+  differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
+  unimplemented one when it is called) or printer details (complex numbers, wide matrices).
 - **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
   (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
   optimum along a slightly different path, so values agree to about seven digits only.
@@ -2574,21 +2605,26 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 3.4 s | 760 MiB | 1005 `unused` (genuine) | 2 / 47 ms | 3 / 48 ms |
-| data science | 3.6 s | 756 MiB | none | 2 / 55 ms | 2 / 56 ms |
-| biostatistics | 2.8 s | 790 MiB | none | 2 / 45 ms | 2 / 44 ms |
+| finance | 2.7-2.8 s | 566 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
+| data science | 3.5-3.7 s | 572 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
+| biostatistics | 2.8-2.9 s | 575 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
 
-Before the cold-path work the same machine measured 6.1, 6.7 and 6.2 s, about 1 GiB each, and
-3 to 5 ms / 95 to 120 ms edit latency.
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. Before tree
+eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
+47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak memory is about 1.8 KiB per line with tests, with no single dominant holder left: rowan
-  trees, then per-item naming `BTreeMap`s (`resolutions`, `non_locals`, `bindings`), check memos
-  (`errors`, `selected_overloads`, `masked_reads` as hash maps), and a second copy of each file's
-  source text (`SourceFile` and the checked document). Next steps: dense `Vec`s indexed by `ExprId`
-  for the naming maps, one source copy, `CallArgument.name` and `StrictOriginKind` as `Symbol`, and
-  a smaller `Expression` layout. Salsa's LRU eviction runs only at revision boundaries, so it cannot
-  shrink a single cold CLI pass; the CLI stays at memoize-everything.
+- Peak memory of `ry check` is about 1.4 KiB per line with tests. Trees are evicted
+  (`decisions.md`, "Syntax trees are evicted"), so the holders left are HIR, naming and check memos
+  and salsa's per-memo metadata (about 17 MiB for `file_diagnostics` alone). Next steps: box the
+  rare `ItemNaming`/`ItemCheck` fields, cut the `frame_binder` memo count, `CallArgument.name` and
+  `StrictOriginKind` as `Symbol`, and a smaller `Expression` layout.
+- The server keeps every tree (about 200 MiB on a benchmark code base) because LRU eviction cost
+  about 10 ms per settled re-check. Find which memo values force rebuilding evicted trees in the
+  settled wave; with those memoized, the server could evict too.
+- Interning names as `Symbol` added about 7 ms to the settled re-check (not isolated: `Symbol`
+  hashes and orders through its string). Durability more than recovered it, but the cost is still
+  there to win back.
 - Parses outside salsa remain in `server.rs` range formatting (re-parses the document text per request instead of reading `semantics::parse`) and the `ry debug` dumps; route range formatting through the memoized tree.
 - The CLI forgets the database instead of dropping it (about 0.9 s of frees on these code bases), so
   `check` cannot reuse a process for a second analysis without leaking the first.
@@ -2612,3 +2648,26 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
 - Joins without `on =` (key joins) and `x[]`.
 - The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
+
+## Open: findings from the records, library and frame round
+
+- **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
+  as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
+  which makes a diagnostic differ from the user's own definition. Show the declaration order.
+- **`@Money(list(amount = "x", ...))` blames the whole `list(...)` call.** The wrong field's value is
+  the precise range.
+- **A join column missing from both frames is reported twice at one range**, once per frame
+  (`sales[ids, on = "teem"]`). One finding naming both frames would be quieter.
+- **Strict mode reports an `if (x < 0) stop(...)` guard** as an undetermined type (already on
+  `strict-mode.mdx`); a function that ends in `stop()` should type as `Never` there.
+- **`ry run` on a debug build is unusable for loops** (a 20M-iteration loop took over three minutes
+  against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
+  against a release build.
+
+## Open: findings from the developer-workflow round
+
+- **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
+  function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
+  Position[]`; the second member is the vector view of the same element type and adds noise.
+- **A piped `ry repl` prints nothing.** With stdin not a terminal the console reads no commands and
+  exits silently; it should either evaluate stdin or say it needs a terminal.

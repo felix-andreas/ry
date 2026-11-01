@@ -588,14 +588,12 @@ pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Vec<Arg>> {
                 return Err(error("'...' used in an incorrect context"));
             }
         } else {
-            let value = match expression.kind() {
-                SexpType::Symbol | SexpType::Language | SexpType::Promise
-                    if expression != missing_arg() =>
-                {
-                    make_promise(expression, env)?
-                }
-                SexpType::Bytecode => make_promise(expression, env)?,
-                _ => expression,
+            // A constant gets a promise too, as in GNU R: native code such as lazyeval reads a
+            // promise's environment to tell whether it was forced.
+            let value = if expression == missing_arg() {
+                expression
+            } else {
+                make_promise(expression, env)?
             };
             args.push(Arg {
                 tag: arguments.tag(),
@@ -712,6 +710,7 @@ pub unsafe fn apply_closure(
         formal = formal.cdr();
         index += 1;
     }
+    heap.mark_frame_formals(env);
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
@@ -743,6 +742,9 @@ pub unsafe fn run_closure(
             call,
             "evaluation nested too deeply: infinite recursion / options(expressions=)?",
         ));
+    }
+    if !state.object_systems {
+        refuse_object_system(call, function, sys_parent)?;
     }
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
@@ -794,6 +796,40 @@ pub unsafe fn run_closure(
     result
 }
 
+/// With object systems turned off, a call that defines a class (`setClass`, `setRefClass`,
+/// `R6::R6Class`, ...) fails when user code makes it. User code is whatever runs at the global
+/// environment's top level, which covers scripts and the console. Calls made inside a package, an
+/// installed one or a loaded project package, are exempt, so a package that defines classes of its
+/// own keeps loading. The callee is recognized by the name the call uses (`setClass(...)` or
+/// `methods::setClass(...)`) and by the package that owns the closure, so a local function of the
+/// same name is left alone and a renamed alias (`f <- setClass`) is not caught.
+unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
+    let mut head = call.car();
+    if head.kind() == SexpType::Language
+        && head.car().kind() == SexpType::Symbol
+        && matches!(&*values::symbol_name(head.car()), "::" | ":::")
+    {
+        head = head.cdr().cdr().car();
+    }
+    if head.kind() != SexpType::Symbol {
+        return Ok(());
+    }
+    let name = values::symbol_name(head);
+    let Some((system, defines, home)) = syntax::native_values::object_system_function(&name) else {
+        return Ok(());
+    };
+    let owner = crate::dispatch::top_env(function.tag());
+    if crate::envir::namespace_name(owner).as_deref() != Some(home)
+        || crate::dispatch::top_env(sys_parent) != values::global_env()
+    {
+        return Ok(());
+    }
+    Err(error_in(
+        call,
+        syntax::native_values::object_systems_disabled_message(system, defines, &name),
+    ))
+}
+
 /// A `break` or `next` that leaves the closure frame of `env` had no loop to go to, which is an
 /// error that `try()` can catch, reported against the closure's call as in GNU R.
 fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
@@ -843,9 +879,21 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         interp().handlers = interp().frames[depth - 1].handlers.clone();
         let exit = eval(expression, env);
         interp().handlers = saved_handlers;
-        if let Err(unwind) = exit {
-            outcome = Err(unwind);
-            break;
+        match exit {
+            // `on.exit(return(x))` makes `x` the frame's value.
+            Err(unwind) if unwind.returns_to(env) => {
+                let Unwind::Jump(jump) = unwind else {
+                    unreachable!()
+                };
+                if let Jump::Return { value, .. } = *jump {
+                    outcome = Ok(value);
+                }
+            }
+            Err(unwind) => {
+                outcome = Err(unwind);
+                break;
+            }
+            Ok(_) => {}
         }
     }
     crate::heap().release_handles(mark);
@@ -1238,20 +1286,29 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     let mut value = nil();
     interp().visible = true;
     let srcrefs = values::get_attr(call.call, symbols().srcref);
-    if srcrefs == nil() {
-        for arg in call.args {
-            value = eval(arg.value, call.env)?;
-        }
-        return Ok(value);
-    }
     // The first srcref is the brace's own; each statement runs with its srcref current, which
     // the calls it makes record for `sys.call` and `traceback`.
     let saved = interp().srcref;
+    // Only the last value stays rooted, so an object a statement drops can be collected (and
+    // finalized) by a `gc()` later in the same block.
+    let mark = crate::heap().handle_mark();
     for (index, arg) in call.args.iter().enumerate() {
-        interp().srcref = statement_srcref(srcrefs, index + 1);
+        if srcrefs != nil() {
+            interp().srcref = statement_srcref(srcrefs, index + 1);
+        }
         let result = eval(arg.value, call.env);
         interp().srcref = saved;
-        value = result?;
+        crate::heap().release_handles(mark);
+        match result {
+            Ok(next) => {
+                crate::heap().root(next);
+                value = next;
+            }
+            Err(unwind) => {
+                unwind.root();
+                return Err(unwind);
+            }
+        }
     }
     Ok(value)
 }
@@ -2085,7 +2142,11 @@ pub unsafe fn complex_assign(
         }
         items.push((symbols.value, value_promise));
         let setter_call = values::pairlist(&items, SexpType::Language)?;
-        replacement = apply_setter(setter_call, whole, env)?;
+        let depth = interp().frames.len();
+        let outer = interp().assignment_call.replace((setter_call, whole, depth));
+        let result = apply_setter(setter_call, whole, env);
+        interp().assignment_call = outer;
+        replacement = result?;
     }
     assign_symbol(inner, replacement, env, superassign)
 }

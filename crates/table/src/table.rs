@@ -13,11 +13,14 @@
 pub mod convert;
 pub mod ffi;
 mod group;
+pub mod io;
 mod join;
 mod kernel;
+pub mod ops;
 pub mod query;
 
 use convert::RVector;
+use ops::sort_frame;
 use polars::prelude::{
     ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr, Series,
 };
@@ -49,6 +52,8 @@ pub enum Error {
     SchemaSyntax(String),
     #[error("invalid query: {0}")]
     Query(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Polars(#[from] polars::error::PolarsError),
 }
@@ -385,15 +390,8 @@ impl Table {
 
     /// Sorts the table by `columns` and records them as its key, as `setkey` does.
     pub fn set_key(&mut self, columns: &[&str]) -> Result<()> {
-        let frame = std::mem::take(&mut self.frame);
-        let mut sorted = frame.sort(
-            columns
-                .iter()
-                .copied()
-                .map(PlSmallStr::from)
-                .collect::<Vec<_>>(),
-            Default::default(),
-        )?;
+        let ascending: Vec<(&str, bool)> = columns.iter().map(|name| (*name, false)).collect();
+        let mut sorted = sort_frame(&self.frame, &ascending)?;
         sorted.rechunk_mut_par();
         self.frame = sorted;
         self.key = columns.iter().copied().map(PlSmallStr::from).collect();

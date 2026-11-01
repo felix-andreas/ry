@@ -25,6 +25,35 @@ most typed examples in the docs offer both. Inline annotations are on by default
 `Rscript` cannot run the file unless it goes through `ry run`. Comments keep the file plain R that
 every other tool can read.
 
+## Data that the checker understands
+
+R has no good way to say "a record with these fields" or "either a success or an error". ry adds both,
+and the checker follows them exactly:
+
+```r
+alias Shape = :Circle(radius: double) | :Rect(width: double, height: double) | :Empty
+
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+```
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+```
+
+[Records, tuples and tags](/type-checking/records-and-tags) replace the S4, R6 and Reference Class
+code that nothing can check. A [standard library](/reference/standard-library) modeled on Roc's
+(`Result`, `List`, `Str`, `Num`, `Dict`, `Set`) returns these values instead of `NA` or a warning,
+and [frames](/type-checking/frames) are a built-in table whose columns the checker knows, so a
+misspelled column in a query is an error before the query runs. All of this runs on
+ry's own runtime (`ry run --runtime ry`) and not on GNU R.
+
 ## Fast enough for every keystroke
 
 ry is written in Rust, and after an edit it re-checks only what the edit could affect, so findings
@@ -51,8 +80,7 @@ packages run unchanged with static typing on top. Today it is a type-checked R t
 a language server, a formatter, a loader that runs a package from its sources, and a console that
 runs your installed R. Beside these, the first parts of a runtime exist. There is an ABI-compatible C API for compiled
 packages, and an interpreter (`ry run --runtime ry`) that already checks
-[inline annotations](/type-checking/inline-annotations) while it runs. There is also an engine for a
-typed table type. The runtime is incomplete: it still reads base R from your GNU R installation, and a
+[inline annotations](/type-checking/inline-annotations) while it runs. The runtime is incomplete: it still reads base R from your GNU R installation, and a
 script that uses something it lacks stops with an error that names it. For real work, run on GNU R.
 
 ## Status
