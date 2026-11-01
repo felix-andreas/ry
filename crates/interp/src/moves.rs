@@ -103,7 +103,6 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
             NativeKind::Dict | NativeKind::Set
         )
         || value.refcount() != 1
-        || standard_library::entry_count(value) == 0
         || !eval::reuse_permitted(env, value)
         || !movable(call, function, target, env)
     {
@@ -148,7 +147,57 @@ pub unsafe fn call_moving(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
         let original = original(&finished)?;
         heap.set_binding_value(finished.cell, original)?;
     }
+    if result.is_ok() && !finished.ended && finished.callee != nil() {
+        release_parameter(&finished, function)?;
+    }
     result.map(Some)
+}
+
+/// Drops the finished callee frame's reference to the moved value, or to whatever an update
+/// put in its place, so the caller's next `d <- helper(d, k)` finds it unshared again. Without
+/// this the dead frame would keep the result shared, and every later call would copy it.
+///
+/// The frame is unreachable once the call returns: while the move lasted only inert builtins
+/// ran (any closure would have ended it), none of which keeps a frame, and the body creates no
+/// closure that could have captured it. The heap does not count an environment's enclosure as
+/// a reference, so the environment's own refcount cannot show this, as GNU R's
+/// `R_CleanupEnvir` uses it to.
+unsafe fn release_parameter(finished: &Move, function: Sexp) -> R<()> {
+    let formals = function.car();
+    let mut formal = formals;
+    while formal.kind() == SexpType::Pairlist {
+        if creates_closure(formal.car()) {
+            return Ok(());
+        }
+        formal = formal.cdr();
+    }
+    if creates_closure(crate::bytecode::source_body(function)) {
+        return Ok(());
+    }
+    let heap = crate::heap();
+    if let Some(cell) = heap.frame_cell(finished.callee, formals.tag()) {
+        heap.set_binding_value(cell, nil())?;
+    }
+    Ok(())
+}
+
+/// Whether evaluating `expression` may create a closure, which would capture its frame.
+unsafe fn creates_closure(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
+    }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol && &*symbol_name(head) == "function" {
+        return true;
+    }
+    let mut cell = expression;
+    while cell.kind() == SexpType::Language || cell.kind() == SexpType::Pairlist {
+        if creates_closure(cell.car()) {
+            return true;
+        }
+        cell = cell.cdr();
+    }
+    false
 }
 
 /// Called as a closure starts running on `env`. The callee of the innermost move records its

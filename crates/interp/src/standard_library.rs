@@ -3091,7 +3091,6 @@ pub(crate) unsafe fn collection_prefix(
     collection.write()
 }
 
-/// The number of entries of a dictionary or set, `length()`'s answer for one.
 // Compiled code. The optimizing tier calls the hot collection builtins through these, without
 // an argument list or a handle scope. `None` means the call would raise an error, and compiled
 // code then hands the call back to tier 0, which raises it.
@@ -3153,6 +3152,7 @@ pub unsafe fn compiled_get_result(dict: Sexp, position: Option<usize>) -> R<Sexp
     }
 }
 
+/// The number of entries of a dictionary or set, `length()`'s answer for one.
 pub(crate) unsafe fn entry_count(object: Sexp) -> usize {
     match object.record_slot(0) {
         Slot::Handle(keys) => length(keys),
