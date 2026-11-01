@@ -2060,6 +2060,10 @@ The end-to-end guard rests on the corpus suites.
   0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
   bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
   `setkey` is at parity (0.026 s on both).
+- **Uninitialized vector payloads are read through `&mut [T]`.** `alloc_vector_uninit` (and
+  `Rf_allocVector`, which uses it) hands out numeric payloads that callers such as
+  `crates/libr/src/frame_altrep.rs` and `crates/interp/src/values.rs` fill through `slice_mut`,
+  which forms a reference to uninitialized memory. Fill through raw pointers or `MaybeUninit`.
 - **`rbindlist` and `fwrite` trail GNU R by 10 to 25% inside `tools/bench/table/ops.R`.** At 1e7
   rows the best of two ops.R runs has `rbindlist` at 1.07 s against 0.85 s and `fwrite` at 0.99 s
   against 0.76 s, while run alone after `fread` (best of 8) ry is faster: 0.76 s against 0.87 s

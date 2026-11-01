@@ -31,15 +31,15 @@ const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 /// of one, the next large vector placed there faults it back in and the kernel zeroes whole huge
 /// pages, compacting memory to find them. data.table's `rbindlist` on 1e7 rows went from about
 /// one second to six once earlier work had left purged arenas behind. mimalloc reads the option
-/// when it creates its first arena, so it is set from a constructor that runs when the library
-/// loads.
+/// each time it reserves an arena, so it is set from a constructor that runs when the library
+/// loads, as a default that `MIMALLOC_ARENA_EAGER_COMMIT` can still override.
 #[cfg(target_os = "linux")]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static LAZY_ARENA_COMMIT: extern "C" fn() = {
     extern "C" fn lazy_arena_commit() {
-        // SAFETY: setting an option has no preconditions.
-        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        // SAFETY: setting an option's default has no preconditions.
+        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
     }
     lazy_arena_commit
 };
