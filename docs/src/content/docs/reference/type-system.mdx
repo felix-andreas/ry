@@ -527,6 +527,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   or set element may have. `complex` and `raw` are left out.
 - `scalar numeric` admits a scalar `integer` or `double`, which is both bounds at once. It is what an
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
+- `item` admits what an [Array](#arrays) can hold: a scalar `logical`, `integer`, `double` or
+  `character`, or a ry value. `as.Array : <T: item> fn(x: list[T]) -> Array<T>` uses it.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call.
@@ -925,6 +927,75 @@ exceptions are the functions the runtime lets them through: those that understan
 (`is.null`, `class`, `inherits`), and those that store a value without looking inside it (`list`,
 `lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
+
+## Arrays
+
+An Array is ry's strict typed vector. The user guide is [Arrays](/type-checking/arrays/); this
+section is its typing contract. The `[...]` literal is inline syntax, so with
+`[check] inline-annotations = false` each literal is a `ry-syntax` warning, and it is still typed.
+The type `Array<T>` may be written in `#:` comments either way.
+
+### Array literals
+
+`[a, b, c]` types as `Array<T>`, where `T` is the type of the first item. Every other item must have
+exactly that type: items are never converted into each other, so `[1L, 2.5]` is a `type-mismatch` at
+`2.5`. The one exception is tags, whose types join into a tag union, so `[:Ok(1), :Err("no")]` is an
+`Array<:Ok(double) | :Err(character)>`.
+
+An item is a scalar-like `logical`, `integer`, `double` or `character`, or a ry value: a record,
+tuple, tag, dictionary, set or another Array. Any other item type is a `type-mismatch`, and so is the
+literal `NA`. A type does not say whether a value is missing, so an item computed by R code may still
+be `NA`, and the constructor stops with an error on it when the code runs. It also checks that atomic
+items share one type; that ry values share one type is checked only by the checker. In an annotation, `Array<T>` with any other `T`,
+such as `Array<double[]>` or `Array<double | NULL>`, is an `annotation` error.
+
+The empty literal `[]` takes its item type from an annotation, as in `#: Array<character>`, or else
+is `Array<Unknown>` until a use such as `List.append(xs, 1L)` gives it one.
+
+### Arrays and R vectors
+
+- `Array<T>` fits `T[]` when `T` is atomic, and `list[T]` when `T` is a ry value, so an Array passes
+  to any R function that takes a vector or a list.
+- A plain R vector never fits `Array<T>`. `as.Array(x)` converts one: a `T[]` gives `Array<T>`, and a
+  `list[T]` gives `Array<T>` when `T` is a ry value (the `item` constraint).
+- At run time `as.Array()` stops with an error on an `NA` or a classed object, and drops names.
+  Setting any attribute on an Array turns it into a plain R vector.
+
+### Array operators
+
+An elementwise operator takes two Arrays with the same item type, or an Array and a scalar-like value
+of the item type. `integer` and `double` never mix, and an R vector operand is a `type-mismatch`
+whose message suggests `as.Array()`.
+
+| Operator | Items | Result |
+| --- | --- | --- |
+| `+ - * %% %/%`, unary `-` | `integer` or `double` | `Array<T>` |
+| `/ ^` | `integer` or `double` | `Array<double>` |
+| `== != < > <= >=` | atomic | `Array<logical>` |
+| `& \| !` | `logical` | `Array<logical>` |
+
+When the code runs, two Arrays of different lengths are an error rather than recycled, and a result
+that holds `NA` or `NaN`, such as an integer overflow, is an error. An operator on Arrays of ry
+values is an error.
+
+### Array indexing
+
+- `xs[[i]]` takes one `integer` or `double` position and types as `T`.
+- `xs[i]` takes positions, a `logical` mask, or no index, and types as `Array<T>`.
+- A `character` index, or more than one index, is a `type-mismatch`, because an Array has one
+  dimension and no names.
+- When the code runs, positions follow R where R gives no `NA`: a negative position leaves an item
+  out and a zero selects nothing. A position past the end, an `NA` position, or a mask of a different
+  length is an error, never `NA`.
+- A replacement through `[<-` or `[[<-` must be an item of the item type, or for `[<-` an Array of
+  them with one item per position, which is never recycled. When the code runs, a position past the
+  end or an Array of the wrong length is an error. A replacement that is not an item of the item
+  type, such as `NA` or an R vector, is a `type-mismatch` in checked code; when R code does it, as
+  base `ifelse()` does with its `test` argument, the result is the plain R vector R would build.
+
+`for (x in xs)` binds `x` as `T`. Every `List` function of the
+[standard library](/reference/standard-library/) that takes a collection has an Array overload, so
+`List.map` on an `Array<T>` returns an Array and `List.len` returns its length.
 
 ## Function types
 

@@ -25,8 +25,8 @@ use {
         stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            QueryName, RecordField, Ty, TyKind, TypeScheme, map_child_types, substitute_rigid,
-            union_of,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
+            substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -176,6 +176,7 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let (what, range) = match node.kind() {
                 SyntaxKind::RECORD_EXPR => ("record", node.text_range()),
                 SyntaxKind::TUPLE_EXPR => ("tuple", node.text_range()),
+                SyntaxKind::ARRAY_EXPR => ("Array", node.text_range()),
                 SyntaxKind::TAG_EXPR => ("tag", node.text_range()),
                 // The arms can be long, so the head `match (x)` stands for the expression.
                 _ => {
@@ -2208,11 +2209,24 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     let mut renderer = TypeRenderer::default();
     match &error.kind {
-        TypeErrorKind::Mismatch { expected, found } => format!(
-            "expected `{}`, found `{}`",
-            renderer.render(db, *expected),
-            renderer.render(db, *found)
-        ),
+        TypeErrorKind::Mismatch { expected, found } => {
+            let mut message = format!(
+                "expected `{}`, found `{}`",
+                renderer.render(db, *expected),
+                renderer.render(db, *found)
+            );
+            // An R vector never becomes an Array implicitly, because the conversion checks
+            // every item; say which call does it.
+            if array_element(db, *expected).is_some()
+                && matches!(
+                    found.kind(db),
+                    TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            {
+                message.push_str(". Convert an R vector with `as.Array()`");
+            }
+            message
+        }
         TypeErrorKind::AssignmentForRecord { field, expected } => format!(
             "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
             renderer.render(db, *expected)
@@ -2379,14 +2393,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 required,
                 returns,
                 constraint,
+                required_constraint,
             } => {
                 let required = renderer.render(db, *required);
-                match constraint {
-                    Some(constraint) => format!(
+                match (constraint, required_constraint) {
+                    (Some(constraint), _) => format!(
                         "this function must return `{required}`, but its body produces {}",
                         constraint_description(*constraint)
                     ),
-                    None => format!(
+                    (None, Some(required_constraint)) => format!(
+                        "this function must return {}, but it returns `{}`",
+                        constraint_description(*required_constraint),
+                        renderer.render(db, *returns)
+                    ),
+                    (None, None) => format!(
                         "this function must return `{required}`, but it returns `{}`",
                         renderer.render(db, *returns)
                     ),
@@ -2617,6 +2637,61 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
+            "this item is `{}`, but the Array's first item is `{}`. An Array's items share one type and are never converted into each other",
+            renderer.render(db, *found),
+            renderer.render(db, *first)
+        ),
+        TypeErrorKind::ArrayItemType { found } => format!(
+            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ArrayOperands {
+            operator,
+            left,
+            right,
+        } => {
+            let head = format!(
+                "`{operator}` is not defined between `{}` and `{}`",
+                renderer.render(db, *left),
+                renderer.render(db, *right)
+            );
+            let is_r_vector = |ty: Ty<'_>| {
+                matches!(
+                    ty.kind(db),
+                    TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            };
+            let reason = if is_r_vector(*left) || is_r_vector(*right) {
+                "Convert the R vector with `as.Array()` first"
+            } else if left == right
+                || array_element(db, *left) == Some(*right)
+                || array_element(db, *right) == Some(*left)
+            {
+                match *operator {
+                    "&" | "|" => "On Arrays it takes `logical` items",
+                    _ => "On Arrays it takes `integer` or `double` items",
+                }
+            } else {
+                "Both sides must have one item type, and `integer` and `double` are never converted into each other"
+            };
+            format!("{head}. {reason}")
+        }
+        TypeErrorKind::ArrayIndex { double, found } => {
+            let rule = if *double {
+                "`x[[i]]` on an Array takes one position, an `integer` or `double`"
+            } else {
+                "`x[i]` on an Array takes one index: positions, or a `logical` mask"
+            };
+            match found {
+                Some(found) => format!(
+                    "{rule}, but this index is `{}`. An Array has one dimension and no names",
+                    renderer.render(db, *found)
+                ),
+                None => format!("{rule}. An Array has one dimension and no names"),
+            }
+        }
+        TypeErrorKind::ArrayMissingValue => "an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),
         TypeErrorKind::ConflictingTags { first, second } => format!(
             "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
             renderer.render(db, *first),
@@ -2867,6 +2942,9 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         }
         Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        Constraint::ArrayItem => {
+            "an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag)"
+        }
     }
 }
 

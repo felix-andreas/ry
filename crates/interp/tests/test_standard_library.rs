@@ -861,12 +861,17 @@ fn declarations_and_runtime_bind_the_same_names() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../types/ry.exports");
     let manifest = fs::read_to_string(&manifest)
         .unwrap_or_else(|failure| panic!("cannot read {}: {failure}", manifest.display()));
-    // The list conversions are base builtins, listed in the manifest only for the checker.
+    // The list and Array conversions are base builtins, listed in the manifest only for the
+    // checker.
+    let outside = |name: &str| {
+        matches!(
+            name,
+            "as.record" | "as.tuple" | "as.tag" | "as.Array" | "is.Array"
+        )
+    };
     let exported: BTreeSet<String> = manifest
         .lines()
-        .filter(|line| {
-            !line.starts_with('#') && !matches!(*line, "as.record" | "as.tuple" | "as.tag")
-        })
+        .filter(|line| !line.starts_with('#') && !outside(line))
         .map(str::to_owned)
         .collect();
     // An S3 method such as `Ops.Expr` is declared for the checker but registered, not exported.
@@ -878,7 +883,7 @@ fn declarations_and_runtime_bind_the_same_names() {
     let declared: BTreeSet<String> = declarations()
         .into_iter()
         .map(|(name, _)| name)
-        .filter(|name| !registered.contains(name.as_str()))
+        .filter(|name| !outside(name) && !registered.contains(name.as_str()))
         .collect();
     let mut bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
     bound.extend(frame::package_functions().map(str::to_owned));
