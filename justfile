@@ -53,7 +53,7 @@ bench *args:
     cargo build --release -p ry-lang
     python3 -I tools/bench/run.py {{ args }}
 
-# Regenerates the benchmark table in why-ry.md: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
+# Regenerates the benchmark table in why-ry.mdx: each program untyped on GNU R, untyped on ry, and typed in strict mode on ry.
 bench-why *args:
     cargo build --release -p ry-lang -p libr
     python3 -I tools/bench/why/run.py {{ args }}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measures the programs behind the benchmark table in docs/src/content/docs/why-ry.md: each one
+"""Measures the programs behind the benchmark table in docs/src/content/docs/why-ry.mdx: each one
 untyped on GNU R, untyped on ry, and typed in strict mode on ry. Engines alternate per program so
 they never share the CPU. Prints the machine, the R version and a Markdown table of best times.
 
