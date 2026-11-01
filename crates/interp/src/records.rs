@@ -329,9 +329,8 @@ pub unsafe fn cached_field(object: Sexp, name: Sexp, shape: Sexp) -> R<Option<Se
 }
 
 unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
-    let layout = layout(object);
-    let text = String::from_utf8_lossy(name);
-    match layout.kind() {
+    let text = || String::from_utf8_lossy(name);
+    match native_kind(object) {
         NativeKind::Tag => Err(error_in(
             call,
             "a tag has no fields; read its payload with `match`",
@@ -346,21 +345,33 @@ unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
         )),
         NativeKind::Tuple => Err(error_in(
             call,
-            format!("a tuple has no field `{text}`; read its items by position, as in `x[[1L]]`"),
+            format!(
+                "a tuple has no field `{}`; read its items by position, as in `x[[1L]]`",
+                text()
+            ),
         )),
-        NativeKind::Record => layout
-            .names()
-            .iter()
-            .position(|field| field.car().bytes() == name)
-            .ok_or_else(|| {
+        NativeKind::Record => {
+            // Searched in place: the error path below is the only one that needs a copy.
+            let found = crate::heap()
+                .layouts
+                .get(object.record_layout())
+                .and_then(|layout| {
+                    layout
+                        .names()
+                        .iter()
+                        .position(|field| field.car().bytes() == name)
+                });
+            found.ok_or_else(|| {
                 error_in(
                     call,
                     format!(
-                        "the record has no field `{text}`; its fields are {}",
-                        field_list(&layout)
+                        "the record has no field `{}`; its fields are {}",
+                        text(),
+                        field_list(&layout(object))
                     ),
                 )
-            }),
+            })
+        }
     }
 }
 
@@ -372,7 +383,8 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
         ));
     };
     let index = *index;
-    match native_kind(object) {
+    let kind = native_kind(object);
+    match kind {
         NativeKind::Dict => {
             return Err(error_in(
                 call,
@@ -390,8 +402,7 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
     if index.kind() == SexpType::String && length(index) == 1 {
         return field_index(object, index.element(0).bytes(), call);
     }
-    let layout = layout(object);
-    if layout.kind() == NativeKind::Tag {
+    if kind == NativeKind::Tag {
         return Err(error_in(
             call,
             "a tag has no items; read its payload with `match`",
@@ -404,9 +415,9 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
         ));
     }
     let position = values::as_real_scalar(index);
-    let count = layout.slot_count();
+    let count = object.record_slot_count();
     if position.is_nan() || position < 1.0 || position.trunc() as usize > count {
-        let what = if layout.kind() == NativeKind::Record {
+        let what = if kind == NativeKind::Record {
             "record"
         } else {
             "tuple"
