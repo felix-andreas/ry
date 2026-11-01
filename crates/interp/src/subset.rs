@@ -2916,8 +2916,9 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         }
     }
     // An S4 argument hands the call to the methods package's hidden `cbind` or `rbind`, which
-    // dispatch on `cbind2` and `rbind2`.
-    if items.iter().any(|arg| coerce::is_s4(arg.value)) {
+    // dispatch on `cbind2` and `rbind2`. Their default methods bind with a deparse level of
+    // -1, which marks the call as already coming from there.
+    if deparse_level != -1 && items.iter().any(|arg| coerce::is_s4(arg.value)) {
         let registry = crate::heap().known().namespace_registry;
         let methods = value_of(eval::find_var_in_frame(
             values::install("methods")?,

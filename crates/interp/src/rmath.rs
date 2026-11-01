@@ -24,6 +24,7 @@
 // `do ... while (a > b)` they follow does; `a <= b` would loop forever.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+use crate::linalg::format_g;
 use std::{cell::RefCell, ffi::c_int, rc::Rc};
 
 pub const DBL_EPSILON: f64 = f64::EPSILON;
@@ -1073,6 +1074,83 @@ fn bd0(x: f64, np: f64) -> f64 {
     x * (x / np).ln() + np - x
 }
 
+/// `bd0` as an unevaluated sum `high + low`. A plain double holds the deviance only to an
+/// absolute precision of an ulp of itself or, away from `x == np`, of `x`, which `exp(-bd0)`
+/// turns into a relative error of the density; the Poisson density needs it to the last digit.
+fn bd0_extended(x: f64, np: f64) -> (f64, f64) {
+    let ratio = x / np;
+    let plain = bd0(x, np);
+    // Past about 1e300 the product below overflows, and a deviance anywhere near that size
+    // leaves no density for the extra digits to refine.
+    if !(ratio.is_finite() && ratio > 0.0) || !(plain < 1e300) {
+        return (plain, 0.0);
+    }
+    let ratio_low = (-ratio).mul_add(np, x) / np;
+    let log_ratio = ln_double_double((ratio, ratio_low));
+    let product = double_double_mul_f64(log_ratio, x);
+    let difference = two_sum(np, -x);
+    double_double_add(product, difference)
+}
+
+/// The natural logarithm of a double-double, by `2 atanh((m - 1)/(m + 1))` on the mantissa
+/// reduced to [1/sqrt(2), sqrt(2)], where the series loses nothing to cancellation.
+fn ln_double_double(value: (f64, f64)) -> (f64, f64) {
+    const LN_2: (f64, f64) = (std::f64::consts::LN_2, 2.319_046_813_846_299_6e-17);
+    let mut exponent = value.0.log2().floor();
+    let mut scale = 2f64.powf(-exponent);
+    if value.0 * scale > std::f64::consts::SQRT_2 {
+        exponent += 1.0;
+        scale *= 0.5;
+    }
+    let mantissa = (value.0 * scale, value.1 * scale);
+    let numerator = two_sum(mantissa.0 - 1.0, mantissa.1);
+    let denominator = double_double_add(two_sum(mantissa.0, 1.0), (mantissa.1, 0.0));
+    let s = double_double_div(numerator, denominator);
+    let s_squared = double_double_mul(s, s);
+    let mut power = s;
+    let mut sum = s;
+    for k in 1..200 {
+        power = double_double_mul(power, s_squared);
+        let term = double_double_div(power, ((2 * k + 1) as f64, 0.0));
+        sum = double_double_add(sum, term);
+        if term.0.abs() <= 1e-34 * sum.0.abs() {
+            break;
+        }
+    }
+    let twice = (2.0 * sum.0, 2.0 * sum.1);
+    double_double_add(twice, double_double_mul_f64(LN_2, exponent))
+}
+
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    let error = (a - (sum - b_virtual)) + (b - b_virtual);
+    (sum, error)
+}
+
+fn double_double_add(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let (sum, error) = two_sum(a.0, b.0);
+    let error = error + a.1 + b.1;
+    two_sum(sum, error)
+}
+
+fn double_double_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let product = a.0 * b.0;
+    let error = a.0.mul_add(b.0, -product) + (a.0 * b.1 + a.1 * b.0);
+    two_sum(product, error)
+}
+
+fn double_double_mul_f64(a: (f64, f64), b: f64) -> (f64, f64) {
+    double_double_mul(a, (b, 0.0))
+}
+
+fn double_double_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let quotient = a.0 / b.0;
+    let remainder = double_double_add(a, double_double_mul((-quotient, 0.0), b));
+    let correction = remainder.0 / b.0;
+    two_sum(quotient, correction)
+}
+
 pub fn lbeta(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         return a + b;
@@ -1581,7 +1659,8 @@ pub fn pnorm_both(x: f64, tail: c_int, log: bool) -> (f64, f64) {
         let xsq = (at * 16.0).trunc() / 16.0;
         let del = (at - xsq) * (at + xsq);
         if log {
-            *cumulative = (-xsq * xsq * 0.5) - del * 0.5 + temp.ln();
+            // Halving before squaring keeps x near sqrt(DBL_MAX) finite.
+            *cumulative = (-0.5 * xsq * xsq) - del * 0.5 + temp.ln();
             if (lower && x > 0.0) || (upper && x <= 0.0) {
                 *complementary = (-(-xsq * xsq * 0.5).exp() * (-del * 0.5).exp() * temp).ln_1p();
             }
@@ -1870,7 +1949,19 @@ pub fn dpois_raw(x: f64, lambda: f64, log: bool) -> f64 {
         }
         return d_exp(-lambda + x * lambda.ln() - lgammafn(x + 1.0), log);
     }
-    d_fexp(M_2PI * x, -stirlerr(x) - bd0(x, lambda), log)
+    let (high, low) = bd0_extended(x, lambda);
+    let low = low + stirlerr(x);
+    // 2 pi x overflows for x near DBL_MAX, where sqrt(2 pi) sqrt(x) does not.
+    let root = M_SQRT_2PI * x.sqrt();
+    if log {
+        -low - high - root.ln()
+    } else if low.abs() > 1.0 {
+        // The low part stays below an ulp of the high part, which here is beyond the range
+        // where the density is representable.
+        (-(high + low)).exp() / root
+    } else {
+        (-low).exp() * (-high).exp() / root
+    }
 }
 
 pub fn dpois(x: f64, lambda: f64, log: bool) -> f64 {
@@ -1942,6 +2033,14 @@ pub fn pgamma(x: f64, shape: f64, scale: f64, lower: bool, log: bool) -> f64 {
             dt0(lower, log)
         } else {
             dt1(lower, log)
+        };
+    }
+    // An infinite shape moves all the mass to infinity.
+    if shape == f64::INFINITY {
+        return if x == f64::INFINITY {
+            dt1(lower, log)
+        } else {
+            dt0(lower, log)
         };
     }
     regularized_gamma(x, shape, lower, log)
@@ -3906,8 +4005,12 @@ fn bgrat(a: f64, b: f64, x: f64, y: f64, w: &mut f64, eps: f64, ierr: &mut i32, 
         } else if n == N_TERMS {
             *ierr = 4;
             warning(format!(
-                "bgrat(a={a}, b={b}, x={x}) *no* convergence: NOTIFY R-core!\n dj={dj}, rel.err={}",
-                dj.abs() / (sum + l)
+                "bgrat(a={}, b={}, x={}) *no* convergence: NOTIFY R-core!\n dj={}, rel.err={}",
+                format_g(a),
+                format_g(b),
+                format_g(x),
+                format_g(dj),
+                format_g(dj.abs() / (sum + l))
             ));
         }
     }
@@ -4690,6 +4793,15 @@ fn gamln(a: f64) -> f64 {
 /// smaller tail's log probability, safeguarded by bisection, so the answer is the root of
 /// `pbeta` to the last bits wherever `pbeta` itself is accurate.
 pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
+    // The search probes pbeta far from the quantile, where its series may fail to converge
+    // without that touching the answer, so those warnings are not the caller's.
+    let raised = WARNINGS.with(|warnings| warnings.borrow().len());
+    let quantile = qbeta_search(alpha, p, q, lower, log);
+    WARNINGS.with(|warnings| warnings.borrow_mut().truncate(raised));
+    quantile
+}
+
+fn qbeta_search(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     if alpha.is_nan() || p.is_nan() || q.is_nan() {
         return alpha + p + q;
     }
@@ -4770,8 +4882,19 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     let mut hi = 0.5_f64;
     for _ in 0..1000 {
         let value = pbeta(t, a, b, t_lower, true);
+        if value.is_nan() {
+            // pbeta's asymptotic expansion fails for an extreme second shape far from the
+            // quantile; the quantile lies nearer 0, where it converges.
+            hi = t;
+            t = if lo == 0.0 {
+                hi * 1e-3
+            } else {
+                (lo * hi).sqrt()
+            };
+            continue;
+        }
         let difference = direction * (value - target);
-        if difference == 0.0 || value.is_nan() {
+        if difference == 0.0 {
             break;
         }
         if difference > 0.0 {
@@ -4809,6 +4932,31 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     let miss = |x: f64| (pbeta(x, p, q, lower, log) - alpha).abs();
     let mut best = quantile;
     let mut best_miss = miss(best);
+    // The log-scale solve resolves a probability only to |log p| ulps, which near 1e-60 is
+    // about a hundred ulps of p itself, so a few Newton steps on the caller's own scale
+    // recover the digits a small probability represents exactly.
+    for _ in 0..8 {
+        if best_miss == 0.0 || !(best > 0.0 && best < 1.0) {
+            break;
+        }
+        let value = pbeta(best, p, q, lower, log);
+        let density = dbeta(best, p, q, false);
+        let slope = if lower { density } else { -density };
+        let slope = if log { slope / value.exp() } else { slope };
+        if !(slope.is_finite() && slope != 0.0) {
+            break;
+        }
+        let next = best - (value - alpha) / slope;
+        if !(next > 0.0 && next < 1.0) {
+            break;
+        }
+        let next_miss = miss(next);
+        if next_miss >= best_miss {
+            break;
+        }
+        best = next;
+        best_miss = next_miss;
+    }
     // A quantile of exactly 0 or 1 is a tail probability below the double range, which no
     // interior double improves on.
     let directions: &[fn(f64) -> f64] = if quantile > 0.0 && quantile < 1.0 {
@@ -4833,6 +4981,12 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
             }
             break;
         }
+    }
+    // GNU R never returns a subnormal beta quantile: it gives 0 or 2^-1024, whichever has
+    // the probability nearer the target, and its own tests rely on that.
+    if best < f64::MIN_POSITIVE {
+        let floor = f64::MIN_POSITIVE / 4.0;
+        best = if miss(floor) < miss(0.0) { floor } else { 0.0 };
     }
     best
 }
@@ -4964,10 +5118,15 @@ fn discrete_quantile(
     maximum: f64,
     distribution: &dyn Fn(f64, bool, bool) -> f64,
 ) -> f64 {
-    // GNU R's search accepts a value within 8 epsilon of the target probability (2 on the log
-    // scale); a wider slack returns the quantile below when adjacent CDF values near 1 differ by
-    // a few ulps.
-    let slack = if log { 2.0 } else { 8.0 } * DBL_EPSILON * p.abs();
+    // The search accepts a value within 64 epsilon of the target probability, relative to
+    // the nearer end of [0, 1]: near 1, adjacent CDF values differ by a few ulps of 1, and a
+    // slack relative to p itself would return the quantile below. On the log scale the
+    // slack is 16 epsilon of the log probability.
+    let slack = if log {
+        16.0 * DBL_EPSILON * p.abs()
+    } else {
+        64.0 * DBL_EPSILON * p.abs().min(1.0 - p)
+    };
     let reached = |y: f64| {
         let value = distribution(y, lower, log);
         value.is_nan()
@@ -5457,7 +5616,12 @@ pub fn qpois(p: f64, lambda: f64, lower: bool, log: bool) -> f64 {
         return f64::NAN;
     }
     if lambda == 0.0 {
-        return 0.0;
+        let outside = if log {
+            p > 0.0
+        } else {
+            !(0.0..=1.0).contains(&p)
+        };
+        return if outside { f64::NAN } else { 0.0 };
     }
     if let Some(boundary) = q_p01_boundaries(p, lower, log, 0.0, f64::INFINITY) {
         return boundary;
