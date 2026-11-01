@@ -275,6 +275,10 @@ protects construction but nothing after it.
 - **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
   `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
   so they are tier-0 or base gaps, not JIT ones.
+- **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
+  may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
+  while the environment still holds the old value; and an allocation failure inside `boxed()`
+  (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
 
 ## Open: performance and memory
 
