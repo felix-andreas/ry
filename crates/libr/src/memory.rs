@@ -553,6 +553,21 @@ pub unsafe extern "C" fn R_maxLength(vector: Sexp) -> R_xlen_t {
 
 // Protection.
 
+/// What GNU R's inline `LENGTH` calls on a long vector; tcltk links against it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_BadLongVector(_object: *mut Header, file: *const c_char, line: c_int) {
+    enter(|| {
+        let file = if file.is_null() { String::new() } else { String::from_utf8_lossy(c_bytes(file)).into_owned() };
+        Err::<(), _>(error(format!("long vectors not supported yet: {file}:{line}")))
+    })
+}
+
+/// What GNU R's inline `PROTECT` calls when the protect stack is full; tcltk links against it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn R_signal_protect_error() {
+    enter(|| Err::<(), _>(error("protect(): protection stack overflow")))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_protect(object: *mut Header) -> *mut Header {
     // Native code protects every temporary, so only an overflow enters the boundary to raise.

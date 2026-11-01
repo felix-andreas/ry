@@ -332,6 +332,8 @@ SEXP Rf_lazy_duplicate(SEXP);
 SEXP Rf_lengthgets(SEXP, R_len_t);
 SEXP Rf_xlengthgets(SEXP, R_xlen_t);
 SEXP Rf_protect(SEXP);
+void R_signal_protect_error(void);
+void R_BadLongVector(SEXP x, const char *file, int line);
 void Rf_unprotect(int);
 void Rf_unprotect_ptr(SEXP);
 void R_ProtectWithIndex(SEXP, PROTECT_INDEX *);
