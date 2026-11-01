@@ -40,6 +40,8 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ## Long-term
 
+- **Positioning:** one toolchain for R, a type system on top of R, R++ for everything ry runs (R plus its additions) and R-- for strict mode, sold through a four-step migration that the docs sidebar mirrors (`decisions.md`, "positioning"). Keep the landing page, `why-ry.mdx` and the sidebar on the same step names.
+
 ### Runtime traps
 
 - **The interpreter is process-global, so an `interp` integration test binary holds exactly one `#[test]`**; a second test in parallel threads crashes. A symbol's name bytes are `symbol.car().bytes()`; `Sexp::bytes()` on the symbol itself reads garbage.
