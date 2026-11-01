@@ -307,7 +307,10 @@ fn expectations_match_a_fresh_gnu_r_run() {
                 .zip(&recorded.values)
                 .all(|(fresh, recorded)| tokens_agree(fresh, recorded, tolerance));
         if fresh.name != recorded.name || !values_agree || fresh.printed != recorded.printed {
-            stale.push(format!("case {:?} (recorded as {:?})", fresh.name, recorded.name));
+            stale.push(format!(
+                "case {:?} (recorded as {:?})",
+                fresh.name, recorded.name
+            ));
         }
     }
     for (fresh, recorded) in fresh_pretty.iter().zip(&recorded_pretty) {

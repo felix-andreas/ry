@@ -1525,7 +1525,9 @@ unsafe fn deferred_length(object: Sexp) -> ApiResult<R_xlen_t> {
 
 unsafe fn deferred_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
     if index < 0 || index >= deferred_length(object)? {
-        return Err(error("attempt to access an element of a deferred string out of bounds"));
+        return Err(error(
+            "attempt to access an element of a deferred string out of bounds",
+        ));
     }
     let nil = runtime().nil();
     let converted = object.cdr();

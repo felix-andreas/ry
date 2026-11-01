@@ -710,7 +710,9 @@ static GRAPHICS_SYSTEMS: std::sync::Mutex<[usize; MAX_GRAPHICS_SYSTEMS]> =
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
     let claimed = {
-        let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut systems = GRAPHICS_SYSTEMS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let free = systems.iter().position(|&slot| slot == 0);
         if let Some(free) = free {
             systems[free] = callback;
@@ -727,8 +729,13 @@ pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
 /// `GEunregisterSystem(index)`: frees a graphics system's slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
-    let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    match usize::try_from(index).ok().and_then(|index| systems.get_mut(index)) {
+    let mut systems = GRAPHICS_SYSTEMS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match usize::try_from(index)
+        .ok()
+        .and_then(|index| systems.get_mut(index))
+    {
         Some(slot) if *slot != 0 => *slot = 0,
         _ => {
             drop(systems);
@@ -737,8 +744,51 @@ pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
     }
 }
 
-fn unsupported_message() -> crate::boundary::Unwind {
-    error("graphics devices are not supported by ry yet")
+/// `GEPretty(&low, &high, &intervals)`: rounds an axis range outward to pretty tick values,
+/// which needs no device.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn GEPretty(low: *mut f64, high: *mut f64, intervals: *mut c_int) {
+    if low.is_null() || high.is_null() || intervals.is_null() {
+        return;
+    }
+    if !(*low).is_finite() || !(*high).is_finite() {
+        raise(error("infinite axis extents in GEPretty"));
+    }
+    let (first, last, count) = interp::graphics::linear_axis(*low, *high, *intervals);
+    *low = first;
+    *high = last;
+    *intervals = count;
+}
+
+/// `Rf_CreateAtVector(axp, usr, intervals, log)`: the tick positions for an axis whose
+/// `par("xaxp")`-style parameters are `axp` and whose limits (not logged) are `usr`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Rf_CreateAtVector(
+    axp: *const f64,
+    usr: *const f64,
+    intervals: c_int,
+    log: crate::Rboolean,
+) -> Sexp {
+    enter(|| {
+        if axp.is_null() {
+            return Err(error("invalid axis parameters"));
+        }
+        let axp = [*axp, *axp.add(1), *axp.add(2)];
+        // Callers such as grid pass no limits for a linear axis, which only a log axis reads.
+        let usr = if usr.is_null() {
+            [axp[0], axp[1]]
+        } else {
+            [*usr, *usr.add(1)]
+        };
+        let log = log != crate::FALSE;
+        interp::values::real_vector(&interp::graphics::at_vector(axp, usr, intervals, log))
+    })
+}
+
+fn unsupported_message(entry: &str) -> crate::boundary::Unwind {
+    error(format!(
+        "graphics devices are not supported by ry yet (needed by '{entry}')"
+    ))
 }
 
 macro_rules! unsupported {
@@ -747,7 +797,7 @@ macro_rules! unsupported {
             /// Needs a graphics device, which ry does not have yet.
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn $name() {
-                raise(unsupported_message())
+                raise(unsupported_message(stringify!($name)))
             }
         )*
     };
@@ -792,7 +842,6 @@ unsupported!(
     GEplaySnapshot,
     GEPolygon,
     GEPolyline,
-    GEPretty,
     GERaster,
     GErecordGraphicOperation,
     GErecording,
@@ -808,7 +857,6 @@ unsupported!(
     GEText,
     GEXspline,
     Rf_GAxisPars,
-    Rf_CreateAtVector,
     Rf_eval_with_gd,
     Rf_desc2GEDesc,
     fromDeviceHeight,
@@ -923,7 +971,7 @@ pub unsafe extern "C" fn R_GE_checkVersionOrDie(version: c_int) {
 /// `R_CheckDeviceAvailable()`: there is no device list to add a device to.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_CheckDeviceAvailable() {
-    raise(unsupported_message())
+    raise(unsupported_message("R_CheckDeviceAvailable"))
 }
 
 #[unsafe(no_mangle)]

@@ -3,14 +3,14 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
 use R::{
-    frame_altrep::{expose_column, expose_table, import_column},
     altrep::{dataptr, dataptr_or_null, int_elt, length, no_na, real_elt, sexp_elt},
     attributes::get_attrib,
+    frame_altrep::{expose_column, expose_table, import_column},
     globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol},
     runtime,
 };
+use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
 use table::{
     Table,
     convert::{RVector, is_na_real},

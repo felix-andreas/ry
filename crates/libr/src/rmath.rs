@@ -311,7 +311,6 @@ pub extern "C" fn wilcox_free() {}
 #[unsafe(no_mangle)]
 pub extern "C" fn signrank_free() {}
 
-
 // Random variates. Each generator consumes uniforms in the order of the published algorithm
 // GNU R implements, so a seed gives GNU R's stream.
 
@@ -1314,4 +1313,3 @@ fn format_g(value: f64) -> String {
     }
     format!("{value:e}")
 }
-
