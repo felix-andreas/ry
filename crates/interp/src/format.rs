@@ -753,7 +753,12 @@ unsafe fn do_format_c(call: &Call<'_>) -> R<Sexp> {
             let value = crate::subset::numeric_element(vector, index);
             c_format(value, &format, digits, &flag, mode == "integer")
         };
-        let text = apply_width(&text, width, &flag);
+        // GNU R writes an `fg` zero as a bare "0", whatever the width.
+        let text = if format == "fg" && text == "0" {
+            text
+        } else {
+            apply_width(&text, width, &flag)
+        };
         values::set_elt(result, index, values::mkchar(&text)?);
     }
     Ok(result)
@@ -809,7 +814,9 @@ pub fn c_format(value: f64, format: &str, digits: i32, flag: &str, integer: bool
         "f" => format!("{:.*}", precision.unwrap_or(6), value),
         "e" => scientific_text(value, precision.unwrap_or(6)),
         "E" => scientific_text(value, precision.unwrap_or(6)).to_uppercase(),
-        "g" | "G" | "fg" => {
+        // formatC passes a negative `digits` to ask `fg` to keep trailing zeros.
+        "fg" => fixed_significant(value, digits.unsigned_abs().max(1) as usize, digits < 0 || flag.contains('#')),
+        "g" | "G" => {
             let significant = precision.unwrap_or(6).max(1);
             let text = c_general(value, significant, flag.contains('#'));
             if format == "G" {
@@ -857,6 +864,27 @@ pub fn c_general(value: f64, significant: usize, keep_zeros: bool) -> String {
         }
     };
     text
+}
+
+/// `formatC`'s `fg`: `significant` digits in fixed notation, never in scientific. Digits left of
+/// the decimal point are all kept, and `keep_zeros` keeps trailing zeros and a bare point.
+fn fixed_significant(value: f64, significant: usize, keep_zeros: bool) -> String {
+    if value == 0.0 {
+        return "0".into();
+    }
+    let text = format!("{:.*e}", significant.saturating_sub(1), value.abs());
+    let exponent: i32 = text
+        .split_once('e')
+        .map_or(0, |(_, exponent)| exponent.parse().unwrap_or(0));
+    let decimals = (significant as i32 - 1 - exponent).max(0) as usize;
+    let text = format!("{value:.decimals$}");
+    if !keep_zeros {
+        trim_zeros(&text).to_owned()
+    } else if decimals == 0 {
+        format!("{text}.")
+    } else {
+        text
+    }
 }
 
 fn trim_zeros(text: &str) -> &str {

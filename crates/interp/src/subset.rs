@@ -511,11 +511,19 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
         && index != missing_arg()
     {
         let dim = values::integer_vector(&[indices.len() as i32])?;
+        let dim_names = values::names(get_attr(object, symbols().dim));
+        if dim_names != nil() {
+            values::set_attr(dim, symbols().names, dim_names)?;
+        }
         values::set_attr(result, symbols().dim, dim)?;
         let dimnames = get_attr(object, symbols().dimnames);
         if dimnames != nil() && dimnames.element(0) != nil() {
             let selected = select_elements(dimnames.element(0), &indices)?;
             let new_dimnames = values::list_vector(&[selected])?;
+            let dimnames_names = values::names(dimnames);
+            if dimnames_names != nil() {
+                values::set_attr(new_dimnames, symbols().names, dimnames_names)?;
+            }
             values::set_attr(result, symbols().dimnames, new_dimnames)?;
             values::remove_attr(result, symbols().names);
         }
@@ -620,6 +628,10 @@ unsafe fn array_subset(
         .map(|&dimension| new_dims[dimension] as i32)
         .collect();
     let dim = values::integer_vector(&dim_values)?;
+    let dim_names = values::names(get_attr(object, symbols().dim));
+    if dim_names != nil() {
+        values::set_attr(dim, symbols().names, select_elements(dim_names, &kept)?)?;
+    }
     values::set_attr(result, symbols().dim, dim)?;
     if kept
         .iter()
@@ -2217,13 +2229,6 @@ unsafe fn do_set_dim(call: &Call<'_>) -> R<Sexp> {
     }
     values::remove_attr(object, symbols().names);
     values::remove_attr(object, symbols().dimnames);
-    let dims = if dims.attrib() != nil() {
-        let copy = values::duplicate(dims)?;
-        values::clear_attributes(copy);
-        copy
-    } else {
-        dims
-    };
     values::set_attr(object, symbols().dim, dims)?;
     Ok(object)
 }
@@ -2610,8 +2615,6 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
             copy_element(data, position % count, result, position)?;
         }
     }
-    let dims = values::duplicate(dims)?;
-    values::clear_attributes(dims);
     values::set_attr(result, symbols().dim, dims)?;
     if dimnames != nil() && length(dimnames) > 0 {
         set_dimnames(result, dimnames, call.call)?;
@@ -2778,6 +2781,10 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
     if resize {
         let dim_values: Vec<i32> = new_dims.iter().map(|&extent| extent as i32).collect();
         let dim = values::integer_vector(&dim_values)?;
+        let dim_names = values::names(get_attr(object, symbols().dim));
+        if dim_names != nil() {
+            values::set_attr(dim, symbols().names, select_elements(dim_names, &order)?)?;
+        }
         values::set_attr(result, symbols().dim, dim)?;
         let dimnames = get_attr(object, symbols().dimnames);
         if dimnames != nil() {

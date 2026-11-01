@@ -415,9 +415,6 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     }
     let x = real_values(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
-    if length(x_argument) == 0 {
-        return Err(call.error("'x' is empty"));
-    }
     let has_y = y_argument != values::nil();
     let (y, y_columns) = if has_y {
         let (y_rows, y_columns) = matrix_shape(y_argument);
