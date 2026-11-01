@@ -889,9 +889,10 @@ pub unsafe fn run_closure(
 /// `R6::R6Class`, ...) fails when project code makes it. Project code is whatever runs with the
 /// global environment as its top level, which covers scripts and the console, or inside a
 /// namespace `ry load` built, which carries `.__ry_loader__.`. Calls made inside an installed
-/// package are exempt, so a dependency that defines classes of its own keeps loading. The callee is recognized by the name the call uses (`setClass(...)` or
-/// `methods::setClass(...)`) and by the package that owns the closure, so a local function of the
-/// same name is left alone and a renamed alias (`f <- setClass`) is not caught.
+/// package are exempt, so a dependency that defines classes of its own keeps loading. The
+/// callee is recognized by the name the call uses (`setClass(...)` or `methods::setClass(...)`)
+/// and by the package that owns the closure, so a local function of the same name is left alone
+/// and a renamed alias (`f <- setClass`) is not caught.
 unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
     let mut head = call.car();
     if head.kind() == SexpType::Language
@@ -2031,8 +2032,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
             env = crate::envir::sys_frame(which, call.env)?;
         }
         _ => {
-            return Err(call
-                .error("invalid 'envir' argument of type '".to_string() + env.kind().name() + "'"));
+            return Err(call.error(
+                "invalid 'envir' argument of type '".to_string() + env.kind().name() + "'",
+            ));
         }
     }
     // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame

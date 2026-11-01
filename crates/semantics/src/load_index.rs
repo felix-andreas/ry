@@ -416,20 +416,35 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
             items: file_items(db, package_file.file),
         })
         .collect();
+    // Each name's writer count and the position of its first writer, in load order.
+    let mut writers: FxHashMap<&str, (u32, usize)> = FxHashMap::default();
+    let items = files.iter().flat_map(|file| &file.items.items);
+    for (position, item) in items.enumerate() {
+        for name in &item.binds {
+            writers.entry(name.as_str()).or_insert((0, position)).0 += 1;
+        }
+    }
     // Seen once and from a lazy definition: lazy. Seen again: eager.
     let mut names: FxHashMap<String, bool> = FxHashMap::default();
+    let mut position = 0;
     for (package_file, file) in sources.files(db).iter().zip(&files) {
         let strict = file_is_strict(db, sources, package_file.file);
         let loaded = &file_load_index(db, package_file.file).items;
-        for (position, item) in file.items.items.iter().enumerate() {
+        for (index, item) in file.items.items.iter().enumerate() {
             // Strict mode refuses a top-level statement with an effect, so evaluating a
-            // constant's value later, at first use, observes the same thing as evaluating
-            // it at load.
+            // constant's value later, at first use, observes the same thing as evaluating it
+            // at load, provided every package name the value mentions is written once and
+            // before it: a later or second write would change what a late evaluation reads.
             let lazy = item.binding.as_ref().is_some_and(|binding| {
                 binding.function
                     || (strict
                         && is_constant_candidate(item)
-                        && loaded.get(position).is_some_and(|loaded| {
+                        && item.mentions.iter().all(|name| {
+                            writers
+                                .get(name.as_str())
+                                .is_none_or(|&(count, first)| count == 1 && first < position)
+                        })
+                        && loaded.get(index).is_some_and(|loaded| {
                             *item_top_level(db, loaded.item) == TopLevel::Constant
                         }))
             });
@@ -441,6 +456,7 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
                     }
                 }
             }
+            position += 1;
         }
     }
     Arc::new(PackageIndex {

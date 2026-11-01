@@ -7,7 +7,9 @@
 //! loader bind it lazily. Purity is declared (`@pure`), never inferred, and each declaration is
 //! a per-item `bool`, so editing a function's body never reaches the code that calls it.
 
-use crate::hir::{AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol};
+use crate::hir::{
+    AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol, UnaryOperator,
+};
 use crate::stubs::stubs;
 use crate::types::Name;
 use crate::{
@@ -169,13 +171,23 @@ impl Classifier<'_> {
                 target,
                 value,
             } if self.binds_name(*target) => self.binding(*value),
+            // zeallot's `c(a, b) %<-% value` binds names like `<-` does.
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Destructure,
+                value,
+                ..
+            } => self.binding(*value),
             ExpressionKind::Call { callee, .. } if self.declares(*callee) => TopLevel::Definition,
             ExpressionKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => {
-                if let Some(effect) = self.effect(*condition, &mut None) {
+                // `if (requireNamespace("x", quietly = TRUE))` only loads a package, as a
+                // top-level `requireNamespace()` may.
+                if !self.imports(*condition)
+                    && let Some(effect) = self.effect(*condition, &mut None)
+                {
                     return effect;
                 }
                 for branch in std::iter::once(*then_branch).chain(*else_branch) {
@@ -208,6 +220,26 @@ impl Classifier<'_> {
             } if self.binds_name(*target) => self.binding(*value),
             ExpressionKind::Call { callee, .. } if self.declares(*callee) => TopLevel::Definition,
             _ => self.effect(value, &mut None).unwrap_or(TopLevel::Constant),
+        }
+    }
+
+    /// Whether `condition` is an import call, possibly negated.
+    fn imports(&self, condition: ExprId) -> bool {
+        match &self.module.expression(condition).kind {
+            ExpressionKind::Call { callee, arguments } => {
+                self.callee_name(*callee)
+                    .is_some_and(|(_, name)| IMPORTS.contains(&name))
+                    && arguments
+                        .iter()
+                        .filter_map(|argument| argument.value)
+                        .all(|argument| self.effect(argument, &mut None).is_none())
+            }
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            }
+            | ExpressionKind::Paren(operand) => self.imports(*operand),
+            _ => false,
         }
     }
 
@@ -308,9 +340,17 @@ impl Classifier<'_> {
             ExpressionKind::Binary {
                 operator: BinaryOperator::Tilde,
                 ..
+            }
+            | ExpressionKind::Unary {
+                operator: UnaryOperator::Tilde,
+                ..
             } => None,
             ExpressionKind::Binary {
                 operator: BinaryOperator::Help,
+                ..
+            }
+            | ExpressionKind::Unary {
+                operator: UnaryOperator::Help,
                 ..
             } => found(Effect::Call {
                 callee: "?".to_owned(),
@@ -324,6 +364,13 @@ impl Classifier<'_> {
                 let target_name = self.root_name(*target);
                 match (spelling, locals.as_mut()) {
                     (AssignSpelling::Super, _) => found(Effect::SuperAssignment),
+                    (AssignSpelling::Destructure, Some(names)) => {
+                        self.pattern_names(*target, names);
+                        self.effect(*value, locals)
+                    }
+                    (AssignSpelling::Destructure, None) => {
+                        found(Effect::NestedAssignment { target: None })
+                    }
                     (AssignSpelling::Local | AssignSpelling::Equals, Some(names)) => {
                         match &self.module.expression(*target).kind {
                             ExpressionKind::NameRef(name) => {
@@ -379,6 +426,21 @@ impl Classifier<'_> {
             .child_ids()
             .into_iter()
             .find_map(|child| self.effect(child, locals))
+    }
+
+    /// Adds the names a zeallot pattern such as `c(a, c(b, ...rest))` binds.
+    fn pattern_names(&self, pattern: ExprId, names: &mut FxHashSet<Symbol>) {
+        match &self.module.expression(pattern).kind {
+            ExpressionKind::NameRef(name) => {
+                names.insert(*name);
+            }
+            ExpressionKind::Call { arguments, .. } => {
+                for value in arguments.iter().filter_map(|argument| argument.value) {
+                    self.pattern_names(value, names);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The variable an assignment target writes: `x` in `x`, `names(x)`, `x$a[[1]]`.

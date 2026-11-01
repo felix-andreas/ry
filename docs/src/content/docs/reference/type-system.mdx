@@ -3243,7 +3243,8 @@ or helper under `tests/`, and each console command. Entries may run anything at 
 A top-level statement of a library file is a definition when it is one of these:
 
 - `name <- value` or `name = value` whose value is a function, a class definition form, or a
-  constant (below), including a chain such as `a <- b <- function(x) x`.
+  constant (below), including a chain such as `a <- b <- function(x) x`. zeallot's
+  `c(a, b) %<-% value` counts the same way.
 - A call to a class definition form: `setClass`, `setClassUnion`, `setGeneric`, `setMethod`,
   `setReplaceMethod`, `setValidity`, `setOldClass`, `setAs`, `setRefClass`, or `R6Class`, bare or
   namespace-qualified. Their arguments are not inspected.
@@ -3251,8 +3252,9 @@ A top-level statement of a library file is a definition when it is one of these:
   `attachNamespace`) or only declares something (`globalVariables`, `suppressForeignCheck`,
   `delayedAssign`, `makeActiveBinding`, `.S3method`, `registerS3method`).
 - A `type` or `alias` definition, or an expression with no effect, such as `NULL`.
-- An `if` whose condition has no effect and whose branches are definitions, or a `{` block of
-  definitions.
+- An `if` whose condition has no effect, or is an import call such as
+  `requireNamespace("x", quietly = TRUE)` (negated or not), and whose branches are definitions, or a
+  `{` block of definitions.
 
 A constant's initializer must have no effect. Literals, names, `pkg::name`, function literals,
 formulas, and the built-in operators have none. A call has none when its function is declared pure
@@ -3295,8 +3297,10 @@ re-checks only that function, and removing the marker re-checks only the stateme
 
 `ry load` binds a library file's functions lazily, and under strict mode its constants too: a constant
 whose name has exactly one top-level writer becomes a promise that evaluates its initializer on first
-use. Because the initializer has no effect, evaluating it later gives the value a load would have
-computed. A reload binds the constant again whenever anything its initializer reaches changed, such
+use. Every package name the initializer mentions must also be written exactly once, by a statement
+earlier in collation order, and otherwise the constant runs eagerly in order. Because the initializer
+has no effect and what it reads cannot change after it, evaluating it later gives the value a load
+would have computed. A reload binds the constant again whenever anything its initializer reaches changed, such
 as the body of a pure function it calls.
 
 ### Untyped parameters

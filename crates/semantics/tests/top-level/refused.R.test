@@ -110,3 +110,11 @@ if (interactive()) message("hello")
 == R/main.R
 effect: if (interactive()) message("hello")
 4..17 error[strict] strict mode: this calls `interactive`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+
+#---- help_requests
+#~~~~ R/main.R
+?mean
+#++++
+== R/main.R
+effect: ?mean
+0..5 error[strict] strict mode: this calls `?`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts

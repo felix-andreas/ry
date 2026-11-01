@@ -233,7 +233,10 @@ fn a_loaded_package_cannot_define_classes_when_object_systems_are_off() {
     let root = package(&[
         ("DESCRIPTION", "Package: classless\nVersion: 1.0\n"),
         ("ry.toml", "[check]\nobject-systems = false\n"),
-        ("R/a.R", "make_account <- function() setRefClass(\"Account\")\n"),
+        (
+            "R/a.R",
+            "make_account <- function() setRefClass(\"Account\")\n",
+        ),
     ]);
     let output = ry_load(root.path(), &["cat(\"loaded\\n\")", "make_account()"]);
     let printed = text(&output);
@@ -245,6 +248,30 @@ fn a_loaded_package_cannot_define_classes_when_object_systems_are_off() {
         ),
         "{printed}"
     );
+}
+
+#[test]
+fn a_strict_project_binds_pure_constants_lazily_on_both_runtimes() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: tally\nVersion: 1.0\n"),
+        ("ry.toml", "[check]\nstrict = true\n"),
+        (
+            "R/a.R",
+            "#: fn(x: double[]) -> double[]\nscale_up <- function(x) x * 2\n#: double[]\nbase <- c(1, 2)\n",
+        ),
+    ]);
+    for runtime in ["ry", "gnu-r"] {
+        let output = ry_load_on(runtime, root.path(), &["print(base)"]);
+        let printed = text(&output);
+        assert!(output.status.success(), "{runtime}: {printed}");
+        assert!(
+            printed.contains("2 definitions bound lazily, 0 top-level statements run"),
+            "{runtime}: {printed}"
+        );
+    }
 }
 
 #[test]

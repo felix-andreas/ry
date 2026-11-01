@@ -75,7 +75,9 @@ impl Evaluator for Interpreter {
             .into_iter()
             .map(|line| line.unwrap_or_else(|| "NA".into()))
             .collect();
-        let Ok(expressions) = interp::lower::parse_with_srcfile(&lines.join("\n"), "<text>", srcfile) else {
+        let Ok(expressions) =
+            interp::lower::parse_with_srcfile(&lines.join("\n"), "<text>", srcfile)
+        else {
             return Ok(ParseOutcome {
                 expressions: runtime().nil(),
                 status: ParseStatus::Error,
@@ -131,7 +133,12 @@ impl Evaluator for Interpreter {
         };
         Ok(match index {
             0 => state.srcref,
-            _ => state.frames.iter().rev().nth(index - 1).map_or(runtime().nil(), |frame| frame.srcref),
+            _ => state
+                .frames
+                .iter()
+                .rev()
+                .nth(index - 1)
+                .map_or(runtime().nil(), |frame| frame.srcref),
         })
     }
 
@@ -261,11 +268,10 @@ unsafe fn task_callback_routine(routine: TaskCallbackRoutine, args: &[Sexp]) -> 
             unsafe extern "C" fn(Sexp, Sexp, Sexp, Sexp) -> Sexp,
             DlFunc,
         >(ry_add_r_task_callback),
-        TaskCallbackRoutine::Remove => {
-            std::mem::transmute::<unsafe extern "C" fn(Sexp) -> Sexp, DlFunc>(
-                ry_remove_r_task_callback,
-            )
-        }
+        TaskCallbackRoutine::Remove => std::mem::transmute::<
+            unsafe extern "C" fn(Sexp) -> Sexp,
+            DlFunc,
+        >(ry_remove_r_task_callback),
         TaskCallbackRoutine::Names => {
             std::mem::transmute::<unsafe extern "C" fn() -> Sexp, DlFunc>(ry_task_callback_names)
         }
@@ -508,13 +514,23 @@ impl crate::boundary::Handout for Option<Sexp> {
 // The builtins the interpreter calls native code through.
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
-    builtin(".Call", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
-    builtin(".External", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".Call", -1, |call| unsafe {
+        dot_call(call, RoutineKind::Call)
+    }),
+    builtin(".External", -1, |call| unsafe {
+        dot_call(call, RoutineKind::External)
+    }),
     builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
-    builtin(".Call.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
-    builtin(".External.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".Call.graphics", -1, |call| unsafe {
+        dot_call(call, RoutineKind::Call)
+    }),
+    builtin(".External.graphics", -1, |call| unsafe {
+        dot_call(call, RoutineKind::External)
+    }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
-    builtin(".Fortran", -1, |call| unsafe { dot_c(call, RoutineKind::Fortran) }),
+    builtin(".Fortran", -1, |call| unsafe {
+        dot_c(call, RoutineKind::Fortran)
+    }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
@@ -572,7 +588,11 @@ fn tagged_values(call: &Call<'_>) -> Vec<(Sexp, Sexp)> {
 
 /// A native routine through `.Call`, `.External`, `.C` or `.Fortran`, with `external2` for an
 /// `.External` routine that `.External2` calls. The first argument is `.NAME`.
-unsafe fn native_call(builtin_call: &Call<'_>, kind: RoutineKind, external2: bool) -> ApiResult<Sexp> {
+unsafe fn native_call(
+    builtin_call: &Call<'_>,
+    kind: RoutineKind,
+    external2: bool,
+) -> ApiResult<Sexp> {
     let call = builtin_call.call;
     let arguments = &tagged_values(builtin_call);
     let what = kind.interface();
@@ -1013,7 +1033,8 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
             .find(|dll| std::ptr::eq(&***dll, address.cast::<Dll>()))
             .map(|dll| dll.name.clone())
             .or_else(|| {
-                interp::values::first_string(package.external_protected()).map(|text| text.into_owned())
+                interp::values::first_string(package.external_protected())
+                    .map(|text| text.into_owned())
             })
     } else {
         None
@@ -1025,10 +1046,16 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
     // `.Call("name")` by string, while `useDynLib(pkg, name)` resolves names through here.
     let packages: Vec<String> = match package_name {
         Some(package) => vec![package],
-        None => runtime().dlls.iter().rev().map(|dll| dll.name.clone()).collect(),
+        None => runtime()
+            .dlls
+            .iter()
+            .rev()
+            .map(|dll| dll.name.clone())
+            .collect(),
     };
     for package in packages {
-        let Some((kind, function, arity)) = crate::dynload::registered_routine(&name, &package) else {
+        let Some((kind, function, arity)) = crate::dynload::registered_routine(&name, &package)
+        else {
             continue;
         };
         let dll = runtime()
@@ -1174,13 +1201,17 @@ pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
 /// Set when S4, R6 and Reference Class definitions in user code are allowed.
 pub const RUN_FLAG_OBJECT_SYSTEMS: c_int = 1 << 1;
 
+/// Set when the project is in strict mode, so the package loader binds pure constants lazily.
+pub const RUN_FLAG_STRICT: c_int = 1 << 2;
+
 /// Every flag `ry_run` and `ry_repl` understand.
-pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS;
+pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS | RUN_FLAG_STRICT;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
     interp::interp().annotations.enabled = flags & RUN_FLAG_ANNOTATION_CHECKS != 0;
     interp::interp().object_systems = flags & RUN_FLAG_OBJECT_SYSTEMS != 0;
+    loader::ry_runtime::set_strict(flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Reads one chunk of console input after showing `prompt`: writes at most `length - 1` bytes

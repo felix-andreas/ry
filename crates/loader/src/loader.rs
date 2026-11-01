@@ -29,7 +29,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
 use syntax::Parse;
@@ -46,18 +46,10 @@ pub struct Loader {
     /// which constants call only pure functions; any other load never reads them, so it skips
     /// their parse.
     stubs_installed: bool,
-}
-
-/// How the host tells the loader whether a package's `ry.toml` turns strict mode on: the
-/// loader reads package sources, not ry's configuration.
-static STRICT_DEFAULT: OnceLock<fn(&Path) -> bool> = OnceLock::new();
-
-/// Registers how [`Loader::plan`] finds `[check] strict` for a package root. Without one, a
-/// package is strict only in the files whose `# typing: strict` directive says so.
-pub fn set_strict_default(resolve: fn(&Path) -> bool) {
-    if STRICT_DEFAULT.set(resolve).is_err() {
-        panic!("the strict-mode resolver is registered once per process");
-    }
+    /// Whether the project's `ry.toml` turns strict mode on, which the host reads and sets
+    /// with [`Loader::set_strict`]: the loader reads package sources, not ry's configuration.
+    /// Off, a file is strict only when its `# typing: strict` directive says so.
+    strict: bool,
 }
 
 /// A package's sources as the loader reads them.
@@ -236,6 +228,12 @@ pub fn find_package_root(path: &Path) -> Result<PathBuf, LoadError> {
 }
 
 impl Loader {
+    /// Sets whether the project's configuration turns strict mode on for every package this
+    /// loader plans from then on.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
     /// Reads the package at or above `path` and plans loading it. Without a committed state, or
     /// with `full`, the plan builds the namespace from scratch; otherwise it patches the loaded
     /// one. The plan stays pending until [`Loader::commit`].
@@ -458,7 +456,7 @@ impl Loader {
             files,
             sysdata: file_hash(&root.join("R").join("sysdata.rda"))?,
             compiled: compiled_fingerprint(&root.join("src"))?,
-            strict: STRICT_DEFAULT.get().is_some_and(|resolve| resolve(root)),
+            strict: self.strict,
         })
     }
 
@@ -665,12 +663,14 @@ pub fn diff<'text>(
         .collect();
     let new_items = dirty_items(&new_dirty_files);
 
-    // Names whose laziness flipped, because a second writer appeared or went away. Only a
-    // dirty item can change a writer count, so only their names are candidates.
-    let flipped: FxHashSet<&str> = old_items
-        .iter()
-        .chain(&new_items)
-        .flat_map(|(_, item)| item.binds.iter().map(String::as_str))
+    // Names whose laziness flipped: a second writer appeared or went away, or, for a constant
+    // of a strict file, a name it mentions or a function it calls changed in another file.
+    // The latter can flip a name no dirty item writes, so every name is a candidate.
+    let flipped: FxHashSet<&str> = old
+        .names
+        .keys()
+        .chain(index.names.keys())
+        .map(String::as_str)
         .filter(|name| old.is_lazy(name) != index.is_lazy(name))
         .collect();
 

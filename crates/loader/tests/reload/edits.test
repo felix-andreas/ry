@@ -324,3 +324,23 @@ version <- Sys.getenv("VERSION")
 #++++
 source R/a.R
 run R/a.R:2 version <- Sys.getenv("VERSION")
+
+#---- a_constant_reading_a_name_written_again_later_turns_eager
+#~~~~ R/a.R
+# typing: strict
+z <- 1
+#~~~~ R/b.R
+# typing: strict
+y <- z + 1
+#~~~~ before R/c.R
+# typing: strict
+w <- 3
+#~~~~ after R/c.R
+# typing: strict
+z <- 2
+#++++
+source R/c.R
+remove w
+run R/a.R:2 z <- 1
+run R/b.R:2 y <- z + 1
+run R/c.R:2 z <- 2

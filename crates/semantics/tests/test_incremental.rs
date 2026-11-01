@@ -377,9 +377,10 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     settle(&db, &files);
     assert_eq!(
         db.validations_since(&["item_interface_reads", "item_top_level_names"]),
-        [1, 1],
+        [1, 0],
         "the project-wide name maps fold per-file memos, so an edit verifies only the edited \
-         file's one item and none of the five in the untouched files"
+         file's one item and none of the five in the untouched files, and a function item \
+         writes only its own name, so the conditional writers never name it"
     );
 }
 

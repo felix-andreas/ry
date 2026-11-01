@@ -121,3 +121,21 @@ effect: options(digits = 3)
 == scripts/run.R
 effect: x <- Sys.getenv("HOME")
 effect: cat(x, "\n")
+
+#---- destructuring_guarded_imports_and_formulas
+#~~~~ R/main.R
+c(low, high) %<-% list(1, 10)
+total <- local({
+  c(u, v) %<-% list(1, 2)
+  u + v
+})
+if (requireNamespace("utils", quietly = TRUE)) utils::globalVariables("x")
+if (!requireNamespace("stats", quietly = TRUE)) NULL
+shape <- ~ x + y
+#++++
+== R/main.R
+constant: c(low, high) %<-% list(1, 10)
+constant: total <- local({
+definition: if (requireNamespace("utils", quietly = TRUE)) utils::globalVariables("x")
+definition: if (!requireNamespace("stats", quietly = TRUE)) NULL
+constant: shape <- ~ x + y
