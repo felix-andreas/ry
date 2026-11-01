@@ -236,6 +236,13 @@ That means `R_VERSION` and `Rversion.h`, and also `R_SVN_REVISION`: data.table's
 `R_VERSION < R_Version(4, 6, 0) || R_SVN_REVISION < 89077` (and `< 89194` for `R_mapAttrib`), so ry
 must report a revision of at least 89194 or data.table takes the backport.
 
+In practice the runtime runs the base R code of the GNU R installation its R home links, so ry
+presents that installation's version. `R.version`, `getRversion()` and the home's generated
+`Rversion.h` all come from its `library/base/DESCRIPTION`, and the revision is raised to at least
+89194. Linked to R 4.6, ry presents 4.6 as recommended here. Linked to an older R, such as the 4.3.3
+the corpus baseline runs on, it presents that version, because a package whose C code takes the 4.6
+branches while its R code runs on a 4.3 base breaks (rlang's `ns_registry_env()` is one example).
+
 A real non-API surface remains after that, unguarded: the promise accessors in `rlang`, `vctrs`,
 `lazyeval` and `magrittr` and `PRCODE`/`PRENV` in Rcpp's `Promise.h`, `ATTRIB` and `SET_ATTRIB`,
 `IS_UTF8` and `IS_ASCII` in `stringi`, `fansi` and data.table's `forder.c`, `Rf_findVarInFrame` in
@@ -425,6 +432,19 @@ Package libraries load with `dlopen`, then `R_init_<pkg>` runs and registers its
 package and name. ry builds source packages itself (`R CMD INSTALL` semantics, `Makevars`, the
 compiler flags `R CMD config` reports), and installs prebuilt binaries when the platform matches.
 
+A package library built by GNU R must bind its API calls to ry's `libR`, not GNU R's. On Linux it
+names its dependency by soname, `libR.so`, and ry's library carries that soname and is loaded with
+`RTLD_GLOBAL` first, so the dynamic loader reuses it. Mach-O binds each symbol to a named library
+instead (the two-level namespace), and CRAN's binaries name
+`/Library/Frameworks/R.framework/Versions/4.x-arm64/Resources/lib/libR.dylib` while Homebrew's name
+its own `libR.dylib`. ry therefore loads a copy of each such library whose `libR` load command is
+rewritten in place to `@rpath/libR.dylib`, the install name of ry's `libR.dylib`, and re-signed ad
+hoc (`crates/libr/src/macho.rs`, `crates/libr/src/dynload.rs`). dyld matches that load command
+against the already loaded image with the same install name, so the package binds to ry. Packages
+that `rcmd` builds on macOS link with `-undefined dynamic_lookup` and record no `libR` at all, so
+the same build loads under ry and under GNU R. `decisions.md` ("macOS packages bind to ry's libR")
+has the reasoning.
+
 ### Threads
 
 R's API is single-threaded, and so is ry's R-level evaluation. Packages such as `RcppParallel`,
@@ -514,8 +534,10 @@ that the gain over a good interpreter is real but modest.
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
 - **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
-  tenth entry, and a running loop compiles after 500 backward jumps and continues in compiled code
-  at the loop header (on-stack replacement).
+  1000th entry, and a running loop compiles after 10,000 backward jumps and continues in compiled
+  code at the loop header (on-stack replacement). The thresholds are high because Cranelift is an
+  optimizing compiler: a lower one compiled the methods package's code that a package load runs
+  only a few dozen times, which made the load slower.
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -955,9 +977,13 @@ Each step ends with something real running, and each one is a large, whole chang
    installed. All 23 recorded `.Call` routines that need no evaluation return what GNU R returns
    (`tests/test_corpus_calls.rs`). The `rcmd` crate compiles packages from source as
    `R CMD INSTALL` does: 111 of the 113 compiled packages in the pinned sources build and load.
-   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. The
-   R-level half of installation (the lazy-load database, `Meta/` and help indices) is R code that
-   `rcmd` does not run yet, although the interpreter now exists.
+   Rblpapi needs Bloomberg's proprietary blpapi3 library and Rmpfr needs the MPFR headers. `rcmd`
+   also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
+   on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
+   packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
+   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
+   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
@@ -971,6 +997,13 @@ Each step ends with something real running, and each one is a large, whole chang
    runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
    helpers to it is next.
 
+9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
+   `@rpath/libR.dylib` and the full export list, GNU R's package binaries are rebound to it (section
+   4), and `rcmd` reads its toolchain from GNU R's `Makeconf`. All of this is verified by
+   cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
+   the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
+   Windows is next (section 11).
+
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
 break every package. The C API and the object model are designed first, as section 2 argues, and the
@@ -978,8 +1011,21 @@ JIT fits around them.
 
 ## 11. Open questions
 
-- **Windows.** The C layer and the `dlopen` path need a Windows equivalent; the REPL's Windows work
-  (`contributing/design/repl.md`) is the starting point.
+- **Windows runtime.** Designed, not built. The design:
+  - The library is named `R.dll`. Windows reuses an already loaded module with the same base name,
+    so a package DLL built with Rtools, which imports from `R.dll`, binds to ry's copy once ry has
+    loaded it, with no rewriting.
+  - Exports come from a generated `.def` file holding the same names as the Linux version script,
+    and `libr`'s build emits the matching import library for packages that `rcmd` builds.
+  - The headers' `LibExtern` becomes `__declspec(dllimport) extern` under `_WIN32`, because data
+    exports such as `R_NilValue` need an import thunk on Windows.
+  - Package DLLs load with `LoadLibraryExW` and `LOAD_WITH_ALTERED_SEARCH_PATH`, so a package's own
+    dependent DLLs in its `libs/x64/` resolve.
+
+  The gap: the interpreter uses about 70 Unix-only libc items (`iconv`, `glob`, `popen`, signals,
+  `getpwuid` and others), and `libr`'s C layer includes `dlfcn.h` and `sys/select.h`, so neither
+  compiles for Windows yet. R home discovery from the registry and Program Files exists and serves
+  `ry R` today.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,
   but it costs install time.

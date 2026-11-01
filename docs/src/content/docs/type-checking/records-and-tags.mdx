@@ -48,7 +48,7 @@ area <- function(s) {
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 non-exhaustive-match
 
   x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
@@ -66,7 +66,7 @@ point <- (x = 1, y = 2)
 point$x + point$y
 ```
 
-```text
+```text ry run runtime=ry exact
 $ ry run points.R
 [1] 3
 ```
@@ -105,7 +105,7 @@ moved <- origin$xx
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x field `xx` does not exist in `Record{x: double, y: double}`
@@ -139,7 +139,7 @@ bad <- :Ok("five")
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `integer`, found `character`
@@ -177,6 +177,10 @@ on_event(:Scroll)   # fine
 
 </TabItem>
 </Tabs>
+
+```text ry run runtime=ry strict
+[1] "other"
+```
 
 `match (value) { pattern => result }` tries each arm in order and runs the first that matches. Put
 each arm on its own line, or separate arms with `;` or `,`. The `{` must be on the same line as the
@@ -223,7 +227,7 @@ describe <- function(result) {
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 non-exhaustive-match
 
   x this `match` does not handle `:Ok(_)`: add an arm for it, or a catch-all `_ => ...` arm
@@ -322,7 +326,7 @@ point <- (x = 1, y = 2)
 sum(point)
 ```
 
-```text
+```text ry check typing
 type-mismatch
 
   x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
@@ -332,7 +336,7 @@ A few R functions do accept them, such as `length()`, `print()`, `format()`, `id
 `list()`, and so do the functions your own project defines. If the checker misses a case, the code
 still stops when it runs, with the same fix in the message:
 
-```text
+```text ry run runtime=ry
 Error in sum(point) :
   `point` is a ry record, not an R object; convert it with `as.list()`
 Execution halted

@@ -194,7 +194,7 @@ impl BuiltinDef {
         }
     }
 
-    fn is_internal(&self) -> bool {
+    pub fn is_internal(&self) -> bool {
         matches!(self.kind, Kind::Internal | Kind::InternalSpecial)
     }
 

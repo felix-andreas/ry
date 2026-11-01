@@ -1,5 +1,5 @@
 /*
- * ry's declaration of R's graphics engine API, source- and layout-compatible with R 4.6.
+ * ry's declaration of R's graphics engine API, source- and layout-compatible with R 4.3 to 4.6.
  *
  * Devices such as ragg and svglite fill in these structures and pass them to the engine, so the
  * struct layouts, enum values and constants are a binary interface and match GNU R's exactly.
@@ -8,6 +8,8 @@
  */
 #ifndef R_GRAPHICSENGINE_H_
 #define R_GRAPHICSENGINE_H_
+
+#include <Rversion.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +24,14 @@ extern "C" {
 #define R_GE_group 15
 #define R_GE_glyphs 16
 #define R_GE_fontVar 17
+
+/* The version follows the R release the headers present, as GNU R's does, so a device built
+   here and a binary built for that release expect the same engine. */
+#if R_VERSION >= R_Version(4, 6, 0)
 #define R_GE_version R_GE_fontVar
+#else
+#define R_GE_version R_GE_glyphs
+#endif
 
 int R_GE_getVersion(void);
 void R_GE_checkVersionOrDie(int version);
@@ -127,8 +136,10 @@ void GEaddDevice(pGEDevDesc dd);
 void GEaddDevice2(pGEDevDesc dd, const char *name);
 void GEaddDevice2f(pGEDevDesc dd, const char *name, const char *file);
 void GEkillDevice(pGEDevDesc dd);
+#if R_VERSION >= R_Version(4, 6, 0)
 pDevDesc GEcreateDD(void);
 void GEfreeDD(pDevDesc dd);
+#endif
 pGEDevDesc GEcreateDevDesc(pDevDesc dev);
 void GEdestroyDevDesc(pGEDevDesc dd);
 void *GEsystemState(pGEDevDesc dd, int index);
@@ -253,7 +264,9 @@ SEXP CreateAtVector(double axp[], const double usr[], int nint, Rboolean logflag
 #define GAxisPars Rf_GAxisPars
 void GAxisPars(double *min, double *max, int *n, Rboolean log, int axis);
 
+#if R_VERSION >= R_Version(4, 6, 0)
 SEXP Rf_eval_with_gd(SEXP expr, SEXP rho, pGEDevDesc dd);
+#endif
 #define eval_with_gd Rf_eval_with_gd
 
 /* Fill patterns: gradients and tilings a device reads through these accessors. */
@@ -368,18 +381,22 @@ SEXP R_GE_glyphY(SEXP glyphs);
 SEXP R_GE_glyphFont(SEXP glyphs);
 SEXP R_GE_glyphSize(SEXP glyphs);
 SEXP R_GE_glyphColour(SEXP glyphs);
+#if R_VERSION >= R_Version(4, 5, 0)
 SEXP R_GE_glyphRotation(SEXP glyphs);
 Rboolean R_GE_hasGlyphRotation(SEXP glyphs);
+#endif
 const char *R_GE_glyphFontFile(SEXP glyphFont);
 int R_GE_glyphFontIndex(SEXP glyphFont);
 const char *R_GE_glyphFontFamily(SEXP glyphFont);
 double R_GE_glyphFontWeight(SEXP glyphFont);
 int R_GE_glyphFontStyle(SEXP glyphFont);
 const char *R_GE_glyphFontPSname(SEXP glyphFont);
+#if R_VERSION >= R_Version(4, 6, 0)
 int R_GE_glyphFontNumVar(SEXP glyphFont);
 const char *R_GE_glyphFontVarAxis(SEXP glyphFont, int index);
 double R_GE_glyphFontVarValue(SEXP glyphFont, int index);
 const char *R_GE_glyphFontVarFormatted(SEXP glyphFont, int index);
+#endif
 
 void GEGlyph(int n, int *glyphs, double *x, double *y, SEXP font, double size, int colour,
              double rot, pGEDevDesc dd);

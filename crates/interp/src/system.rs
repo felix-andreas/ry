@@ -116,7 +116,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         map_paths(call, |path| Path::new(path).is_dir())
     }),
     internal("file.info", 2, do_file_info),
-    internal("list.files", 8, do_list_files),
+    internal("list.files", -1, do_list_files),
     internal("list.dirs", 3, do_list_dirs),
     internal("normalizePath", 3, do_normalize_path),
     internal("path.expand", 1, |call| unsafe {
@@ -203,7 +203,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("mem.maxVSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("mem.maxNSize", 1, |_| unsafe { scalar_real(f64::INFINITY) }),
     internal("quit", 3, do_quit),
-    internal("system", 3, do_system),
+    internal("system", -1, do_system),
     internal("Cstack_info", 0, |_| unsafe {
         values::integer_vector(&[7969177, 0, 1, NA_INTEGER])
     }),
@@ -226,7 +226,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("as.POSIXlt", 2, do_as_posixlt),
     internal("as.POSIXct", 2, do_as_posixct),
-    internal("format.POSIXlt", 3, do_format_posixlt),
+    internal("format.POSIXlt", -1, do_format_posixlt),
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
     internal("POSIXlt2Date", 1, do_posixlt_to_date),
@@ -299,14 +299,11 @@ pub fn missing_r_home() -> Option<String> {
     located_r_home().as_ref().err().cloned()
 }
 
+/// GNU R's usual home on the platform, which `R.home()` reports when no installation was found.
+#[cfg(target_os = "macos")]
+const FALLBACK_R_HOME: &str = "/Library/Frameworks/R.framework/Resources";
+#[cfg(not(target_os = "macos"))]
 const FALLBACK_R_HOME: &str = "/usr/lib/R";
-
-const CANDIDATE_R_HOMES: &[&str] = &[
-    "/usr/lib/R",
-    "/usr/local/lib/R",
-    "/opt/R/lib/R",
-    "/usr/lib64/R",
-];
 
 fn located_r_home() -> &'static Result<String, String> {
     static HOME: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
@@ -330,11 +327,12 @@ fn find_r_home() -> Result<String, String> {
         ));
     }
     let mut searched = vec!["R_HOME (not set)".to_owned()];
-    for candidate in CANDIDATE_R_HOMES {
-        if usable(candidate) {
-            return Ok((*candidate).to_owned());
+    for candidate in crate::gnu_r_home::candidate_r_homes() {
+        let candidate = candidate.to_string_lossy().into_owned();
+        if usable(&candidate) {
+            return Ok(candidate);
         }
-        searched.push((*candidate).to_owned());
+        searched.push(candidate);
     }
     match std::process::Command::new("R").arg("RHOME").output() {
         Ok(output) if output.status.success() => {
@@ -715,11 +713,14 @@ impl Zone {
                 };
                 return instant - correction + fraction - shift;
             }
+            // In a spring-forward gap glibc's `mktime` reads the clock with the offset before
+            // the gap unless told the time is daylight time, so an unknown DST flag lands
+            // after the gap: New York's 02:30 becomes 03:30 EDT.
             AmbiguousOffset::Gap { before, after } => {
-                if isdst == 0 {
-                    before
-                } else {
+                if isdst == 1 {
                     after
+                } else {
+                    before
                 }
             }
             // glibc's `mktime` resolves a repeated time with the offset in force at the wall
@@ -1484,10 +1485,22 @@ unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
     values::set_attr(result, symbols().names, padded)
 }
 
+/// `format.POSIXlt(x, format, usetz)`, plus R 4.4's `digits`. A bare `%OS` prints that many
+/// decimals; before R 4.4 the C code read them from `options("digits.secs")` itself.
 unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let formats = call.arg(1);
     let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
+    let digits = if call.len() > 3 {
+        call.arg(3)
+    } else {
+        crate::envir::get_option("digits.secs")
+    };
+    let second_digits = if digits == nil() {
+        0
+    } else {
+        values::as_integer_scalar(digits).clamp(0, 6)
+    };
     let seconds = posixlt_seconds(list)?;
     let count = seconds.len();
     let result = alloc(SexpType::String, count)?;
@@ -1516,9 +1529,21 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             values::set_elt(result, index, values::mkchar(text)?);
             continue;
         }
-        let format = values::string_at(formats, index % length(formats).max(1))
+        let mut format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_else(|| "%Y-%m-%d %H:%M:%S".into());
+        if second_digits > 0 {
+            let pieces: Vec<&str> = format.split("%OS").collect();
+            let mut widened = pieces[0].to_owned();
+            for piece in &pieces[1..] {
+                widened.push_str("%OS");
+                if !piece.starts_with(|character: char| character.is_ascii_digit()) {
+                    widened.push_str(&second_digits.to_string());
+                }
+                widened.push_str(piece);
+            }
+            format = widened;
+        }
         // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
         let dst = if length(isdst) > 0 {
             crate::subset::numeric_element(isdst, index % length(isdst))
@@ -1902,9 +1927,15 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         }
         let (offset, _, _) = zone.offset_at(seconds[index]);
         if seconds[index] + offset as f64 != time.whole {
-            // A time in a spring-forward gap keeps its wall-clock fields and reports the zone
-            // in force after the gap, where the wall clock read with the earlier offset lands.
-            let (_, dst, abbreviation) = zone.offset_at(time.whole - offset as f64);
+            // A time in a spring-forward gap keeps its wall-clock fields. Through R 4.3 it
+            // reports the zone in force after the gap, where the wall clock read with the
+            // earlier offset lands; from R 4.4 on its DST flag is unknown and its zone empty.
+            let (dst, abbreviation) = if r_at_least(4, 4) {
+                (-1, String::new())
+            } else {
+                let (_, dst, abbreviation) = zone.offset_at(seconds[index]);
+                (dst as i32, abbreviation)
+            };
             let wall = broken_down(time.whole);
             values::ints_mut(fields[1])[index] = wall.minute as i32;
             values::ints_mut(fields[2])[index] = wall.hour as i32;
@@ -1913,7 +1944,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             values::ints_mut(fields[5])[index] = wall.year as i32 - 1900;
             values::ints_mut(fields[6])[index] = wall.weekday as i32;
             values::ints_mut(fields[7])[index] = wall.yearday as i32;
-            values::ints_mut(fields[8])[index] = dst as i32;
+            values::ints_mut(fields[8])[index] = dst;
             values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
         }
     }
@@ -2056,14 +2087,18 @@ unsafe fn do_list_files(call: &Call<'_>) -> R<Sexp> {
     let ignore_case = values::as_logical_scalar(call.arg(5)) == 1;
     let include_dirs = values::as_logical_scalar(call.arg(6)) == 1;
     let no_dots = values::as_logical_scalar(call.arg(7)) == 1;
+    // R 4.5 added `fixed`, which matches the pattern as a literal string.
+    let fixed = values::as_logical_scalar(call.arg(8)) == 1;
     let regex = match &pattern {
         Some(pattern) => Some(
-            regex::RegexBuilder::new(&crate::strings::translate_regex(pattern, true))
-                .case_insensitive(ignore_case)
-                .build()
-                .map_err(|failure| {
-                    error(format!("invalid 'pattern' regular expression: {failure}"))
-                })?,
+            regex::RegexBuilder::new(&if fixed {
+                regex::escape(pattern)
+            } else {
+                crate::strings::translate_regex(pattern, true)
+            })
+            .case_insensitive(ignore_case)
+            .build()
+            .map_err(|failure| error(format!("invalid 'pattern' regular expression: {failure}")))?,
         ),
         None => None,
     };
@@ -2356,28 +2391,170 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
-    let platform = format!("{}-pc-linux-gnu", std::env::consts::ARCH);
+    // GNU R's own platform strings, which packages match on (`grepl("darwin", R.version$os)`).
+    // CRAN's macOS builds target Darwin 20, the first release with Apple silicon.
+    let os = if cfg!(target_os = "macos") {
+        "darwin20"
+    } else {
+        "linux-gnu"
+    };
+    let vendor = if cfg!(target_os = "macos") {
+        "apple"
+    } else {
+        "pc"
+    };
+    let arch = std::env::consts::ARCH;
+    let platform = format!("{arch}-{vendor}-{os}");
+    let version = r_version();
+    let (year, month, day) = (
+        version.date.get(0..4).unwrap_or(""),
+        version.date.get(5..7).unwrap_or(""),
+        version.date.get(8..10).unwrap_or(""),
+    );
     let fields: Vec<(&str, String)> = vec![
         ("platform", platform.clone()),
-        ("arch", std::env::consts::ARCH.to_owned()),
-        ("os", "linux-gnu".to_owned()),
-        ("system", format!("{}, linux-gnu", std::env::consts::ARCH)),
+        ("arch", arch.to_owned()),
+        ("os", os.to_owned()),
+        ("system", format!("{arch}, {os}")),
         ("status", String::new()),
-        ("major", "4".to_owned()),
-        ("minor", "3.3".to_owned()),
-        ("year", "2024".to_owned()),
-        ("month", "02".to_owned()),
-        ("day", "29".to_owned()),
-        ("svn rev", "86002".to_owned()),
+        ("major", version.major.to_string()),
+        ("minor", format!("{}.{}", version.minor, version.patch)),
+        ("year", year.to_owned()),
+        ("month", month.to_owned()),
+        ("day", day.to_owned()),
+        ("svn rev", version.revision.to_string()),
         ("language", "R".to_owned()),
-        ("version.string", "R version 4.3.3 (2024-02-29)".to_owned()),
-        ("nickname", "Angel Food Cake".to_owned()),
+        (
+            "version.string",
+            format!(
+                "R version {}.{}.{} ({})",
+                version.major, version.minor, version.patch, version.date
+            ),
+        ),
+        ("nickname", version.nickname.clone()),
     ];
     let items: Vec<(&str, Sexp)> = fields
         .iter()
         .map(|(name, value)| Ok((*name, scalar_string(value)?)))
         .collect::<R<_>>()?;
     values::named_list(&items)
+}
+
+/// The version of the GNU R whose base packages the session loads, which is the version the
+/// session presents (`R.version`, `getRversion()`, the `Built:` field it writes). Presenting
+/// that version, rather than a fixed one, is what keeps base R's own version checks honest:
+/// `library()` warns about a package built under a newer R by comparing its `Built:` field
+/// with `R.version`, and the default packages were built by exactly the R in `R_HOME`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    /// The release date, `YYYY-MM-DD`.
+    pub date: String,
+    /// The Subversion revision, at least [`MINIMUM_SVN_REVISION`].
+    pub revision: u32,
+    pub nickname: String,
+}
+
+impl RVersion {
+    /// GNU R's `R_Version(major, minor, patch)`, as `R_VERSION` and the serialization header
+    /// encode a version.
+    pub fn code(&self) -> i32 {
+        ((self.major << 16) + (self.minor << 8) + self.patch) as i32
+    }
+
+    pub fn number(&self) -> String {
+        format!("{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// Whether the emulated R is `major.minor` or later. Behavior that GNU R changed between
+/// supported releases follows the release in `R_HOME`, so the base packages' R code and the
+/// internals it calls always agree.
+pub fn r_at_least(major: u32, minor: u32) -> bool {
+    let version = r_version();
+    (version.major, version.minor) >= (major, minor)
+}
+
+/// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
+/// guard for them also checks the revision, so ry reports at least this one
+/// (`rcmd::MINIMUM_SVN_REVISION` writes the same floor into `Rversion.h`).
+pub const MINIMUM_SVN_REVISION: u32 = 89194;
+
+/// The oldest GNU R whose base packages ry's runtime loads. Older releases call internals
+/// with argument lists ry does not implement.
+pub const OLDEST_SUPPORTED_R: (u32, u32) = (4, 3);
+
+/// The version of the R in [`r_home`], read once.
+pub fn r_version() -> &'static RVersion {
+    static VERSION: std::sync::OnceLock<RVersion> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| read_r_version(&r_home()))
+}
+
+/// Reads the version from the installation itself: the base package's `DESCRIPTION` holds
+/// the version that `library()`'s checks compare against, and `SVN-REVISION` in the GNU R home
+/// that base really lives in holds the revision and release date. ry's own R home links
+/// `library/base` from a GNU R home, so the link is resolved first. The session cannot start
+/// without a base package ([`missing_r_home`]), so a missing one is a broken installation.
+pub fn read_r_version(home: &str) -> RVersion {
+    let base = Path::new(home).join("library/base");
+    let path = base.join("DESCRIPTION");
+    let description = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("cannot read the base package's {}: {error}", path.display())
+    });
+    let field = |text: &str, name: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_owned())
+        })
+    };
+    let version = field(&description, "Version")
+        .unwrap_or_else(|| panic!("{} has no Version field", path.display()));
+    let mut parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    let gnu_home = std::fs::canonicalize(&base)
+        .ok()
+        .and_then(|base| Some(base.parent()?.parent()?.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(home));
+    let svn = std::fs::read_to_string(gnu_home.join("SVN-REVISION")).unwrap_or_default();
+    let built_date = field(&description, "Built")
+        .and_then(|built| built.split(';').nth(2).map(|date| date.trim().to_owned()))
+        .and_then(|date| date.get(0..10).map(str::to_owned));
+    let date = field(&svn, "Last Changed Date")
+        .or(built_date)
+        .unwrap_or_default();
+    let revision = field(&svn, "Revision")
+        .and_then(|revision| revision.parse().ok())
+        .unwrap_or(0);
+    // Debian keeps the headers outside R_HOME and names them in the `R_INCLUDE_DIR` that
+    // `bin/R` exports.
+    let shared_include = std::env::var_os("R_INCLUDE_DIR").map(PathBuf::from);
+    let nickname = [gnu_home.join("include"), Path::new(home).join("include")]
+        .into_iter()
+        .chain(shared_include)
+        .find_map(|include| {
+            let header = std::fs::read_to_string(include.join("Rversion.h")).ok()?;
+            header.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("#define R_NICK")?;
+                Some(rest.trim().trim_matches('"').to_owned())
+            })
+        })
+        .unwrap_or_default();
+    RVersion {
+        major,
+        minor,
+        patch,
+        date,
+        revision: revision.max(MINIMUM_SVN_REVISION),
+        nickname,
+    }
 }
 
 unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
@@ -3073,13 +3250,24 @@ pub unsafe fn init_locale() {
         libc::LC_TIME,
         libc::LC_MONETARY,
         libc::LC_MESSAGES,
-        libc::LC_PAPER,
-        libc::LC_MEASUREMENT,
+        LC_PAPER,
+        LC_MEASUREMENT,
     ] {
         libc::setlocale(category, c"".as_ptr());
     }
     crate::sort::refresh_collation();
 }
+
+/// macOS's C library has no paper or measurement category. `setlocale` rejects an unknown
+/// category, so on macOS these read as `""` and cannot be set, as in GNU R there.
+#[cfg(target_os = "linux")]
+const LC_PAPER: libc::c_int = libc::LC_PAPER;
+#[cfg(target_os = "linux")]
+const LC_MEASUREMENT: libc::c_int = libc::LC_MEASUREMENT;
+#[cfg(not(target_os = "linux"))]
+const LC_PAPER: libc::c_int = -1;
+#[cfg(not(target_os = "linux"))]
+const LC_MEASUREMENT: libc::c_int = -1;
 
 /// The C library category for `Sys.setlocale`'s category number, which indexes
 /// `c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME",
@@ -3093,8 +3281,8 @@ fn locale_category(number: i32) -> Option<libc::c_int> {
         5 => libc::LC_NUMERIC,
         6 => libc::LC_TIME,
         7 => libc::LC_MESSAGES,
-        8 => libc::LC_PAPER,
-        9 => libc::LC_MEASUREMENT,
+        8 => LC_PAPER,
+        9 => LC_MEASUREMENT,
         _ => return None,
     })
 }

@@ -189,7 +189,7 @@ frame <- data.frame(a = 1)
 gap: @if-unknown integer <- frame$a
 known: @if-unknown integer <- "a"
 #++++
-frame: Unknown
+frame: data.frame
 gap: integer
 known: Unknown
 93..96 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `character`. Drop the annotation, or use `#:` to check the type or `@trust` to override it

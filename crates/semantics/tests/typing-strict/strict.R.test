@@ -78,12 +78,12 @@ first <- value
 second <- value
 third <- value
 #++++
-frame: Unknown
+frame: data.frame
 value: Unknown
 first: Unknown
 second: Unknown
 third: Unknown
-9..26 error[strict] strict mode: could not determine the type of `frame`; add a type annotation
+36..43 error[strict] strict mode: could not determine the type of `value`; add a type annotation
 
 #==== directives
 #---- typing_comment_sets_the_mode

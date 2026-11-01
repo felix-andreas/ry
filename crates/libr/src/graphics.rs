@@ -21,9 +21,6 @@ use {
     std::ffi::{c_char, c_int, c_uint, c_void},
 };
 
-/// The graphics engine version ry presents: R 4.6's (`R_GE_fontVar`).
-pub const GE_VERSION: c_int = 17;
-
 /// R's packed colour: red in the low byte, then green, blue and alpha.
 pub type RColor = c_uint;
 
@@ -1551,18 +1548,21 @@ unsafe fn write_metrics([a, d, w]: [f64; 3], ascent: *mut f64, descent: *mut f64
 
 #[unsafe(no_mangle)]
 pub extern "C" fn R_GE_getVersion() -> c_int {
-    GE_VERSION
+    graphics_engine::engine_version()
 }
 
 /// `R_GE_checkVersionOrDie(version)`: GNU R accepts only its own version, but ry's engine reads
 /// every device description from version 14 on, so packages built against R 4.1 to 4.6 run.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GE_checkVersionOrDie(version: c_int) {
-    if !(graphics_engine::OLDEST_ENGINE_VERSION..=GE_VERSION).contains(&version) {
+    if !(graphics_engine::OLDEST_ENGINE_VERSION..=graphics_engine::NEWEST_ENGINE_VERSION)
+        .contains(&version)
+    {
         raise(error(format!(
             "Graphics API version mismatch: the device expects version {version}, ry provides \
-             versions {} to {GE_VERSION}",
-            graphics_engine::OLDEST_ENGINE_VERSION
+             versions {} to {}",
+            graphics_engine::OLDEST_ENGINE_VERSION,
+            graphics_engine::NEWEST_ENGINE_VERSION
         )));
     }
 }

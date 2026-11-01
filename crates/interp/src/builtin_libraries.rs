@@ -367,7 +367,10 @@ unsafe fn native_symbol(
     Ok(entry)
 }
 
-/// GNU R 4.3's registered routines of these packages: package, interface, name and arity.
+/// The registered routines of these packages: package, interface, name and arity. It is the
+/// union over every supported GNU R (4.3 on), because each release's namespace refers only to
+/// the routines it knows; an arity of -1 marks a routine whose argument list changed between
+/// releases, whose implementation accepts each.
 const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("parallel", RoutineKind::Call, "nextStream", 1),
     ("parallel", RoutineKind::Call, "nextSubStream", 1),
@@ -439,7 +442,7 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("utils", RoutineKind::Call, "sockwrite", 2),
     ("utils", RoutineKind::External, "download", 6),
     ("utils", RoutineKind::External, "unzip", 7),
-    ("utils", RoutineKind::External, "Rprof", 9),
+    ("utils", RoutineKind::External, "Rprof", -1),
     ("utils", RoutineKind::External, "Rprofmem", 3),
     ("utils", RoutineKind::External, "countfields", 6),
     ("utils", RoutineKind::External, "readtablehead", 7),
@@ -530,6 +533,10 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("stats", RoutineKind::Call, "influence", 3),
     ("stats", RoutineKind::Call, "pKolmogorov2x", 2),
     ("stats", RoutineKind::Call, "pKS2", 2),
+    ("stats", RoutineKind::Call, "pkolmogorov_two_exact", 2),
+    ("stats", RoutineKind::Call, "pkolmogorov_two_limit", 3),
+    ("stats", RoutineKind::Call, "dpermdist1", 1),
+    ("stats", RoutineKind::Call, "dpermdist2", 2),
     ("stats", RoutineKind::Call, "psmirnov_exact", 6),
     ("stats", RoutineKind::Call, "ksmooth", 5),
     ("stats", RoutineKind::Call, "SplineCoef", 3),
@@ -668,7 +675,7 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("stats", RoutineKind::Fortran, "hcass2", 6),
     ("stats", RoutineKind::Fortran, "kmns", 17),
     ("stats", RoutineKind::Fortran, "eureka", 6),
-    ("stats", RoutineKind::Fortran, "stl", 18),
+    ("stats", RoutineKind::Fortran, "stl", -1),
     ("stats", RoutineKind::External, "compcases", -1),
     ("stats", RoutineKind::External, "doD", 2),
     ("stats", RoutineKind::External, "deriv", 5),
@@ -707,7 +714,7 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("grDevices", RoutineKind::External, "PicTeX", 6),
     ("grDevices", RoutineKind::External, "PostScript", 19),
     ("grDevices", RoutineKind::External, "XFig", 14),
-    ("grDevices", RoutineKind::External, "PDF", 20),
+    ("grDevices", RoutineKind::External, "PDF", -1),
     ("grDevices", RoutineKind::External, "devCairo", 12),
     ("grDevices", RoutineKind::External, "devcap", 1),
     ("grDevices", RoutineKind::External, "devcapture", 1),
@@ -779,6 +786,8 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("tools", RoutineKind::Call, "dirchmod", 2),
     ("tools", RoutineKind::Call, "getfmts", 1),
     ("tools", RoutineKind::Call, "Rmd5", 1),
+    ("tools", RoutineKind::Call, "Rsha256", 1),
+    ("tools", RoutineKind::Call, "remove_dot_segments_wrapper", 1),
     ("tools", RoutineKind::Call, "check_nonASCII", 2),
     ("tools", RoutineKind::Call, "check_nonASCII2", 1),
     ("tools", RoutineKind::Call, "doTabExpand", 2),
@@ -791,6 +800,6 @@ const ROUTINES: &[(&str, RoutineKind, &str, i32)] = &[
     ("tools", RoutineKind::Call, "splitString", 2),
     ("tools", RoutineKind::Call, "package_dependencies_scan", 1),
     ("tools", RoutineKind::Call, "nonASCII", 1),
-    ("tools", RoutineKind::External, "parseLatex", 4),
+    ("tools", RoutineKind::External, "parseLatex", -1),
     ("tools", RoutineKind::External, "parseRd", 9),
 ];

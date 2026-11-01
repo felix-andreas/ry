@@ -83,6 +83,34 @@ pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
     read_bytes(bytes, &ReadOptions::default())
 }
 
+/// Any bytes either read into a table whose columns are the ones the sniffer promised, in its
+/// order, or fail with an error; a table that reads also writes. Nothing panics. Shared with the
+/// coverage-guided `fuzz/` target.
+pub fn check_csv_input(bytes: &[u8]) {
+    let Ok(table) = read_csv_bytes(bytes) else {
+        return;
+    };
+    let promised: Vec<String> = sniff::sniff(bytes)
+        .columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    let read: Vec<String> = table
+        .schema()
+        .columns
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    assert_eq!(
+        read, promised,
+        "the columns read differ from the sniffed ones for {bytes:?}"
+    );
+    let mut written = Vec::new();
+    if let Err(error) = write_csv_to(&table, &mut written) {
+        panic!("a table read from {bytes:?} does not write: {error}");
+    }
+}
+
 fn read_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B, options: &ReadOptions) -> Result<Table> {
     let layout = sniff::sniff(bytes.as_ref());
     if layout.columns.is_empty() {

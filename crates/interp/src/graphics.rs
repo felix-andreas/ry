@@ -5690,10 +5690,18 @@ fn colour_name(colour: Colour) -> String {
 /// A colour given as hex digits or a name, without palette indices.
 fn parse_colour_spec(text: &str) -> Result<Colour, String> {
     if let Some(digits) = text.strip_prefix('#') {
-        let valid =
-            matches!(digits.len(), 6 | 8) && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
+        // The short forms `#RGB` and `#RGBA` arrived in R 4.4.
+        let short = crate::system::r_at_least(4, 4) && matches!(digits.len(), 3 | 4);
+        let valid = (short || matches!(digits.len(), 6 | 8))
+            && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
         if !valid {
             return Err("invalid RGB specification".to_owned());
+        }
+        if short {
+            let nibble =
+                |index: usize| 17 * u32::from_str_radix(&digits[index..=index], 16).unwrap_or(0);
+            let alpha = if digits.len() == 4 { nibble(3) } else { OPAQUE };
+            return Ok(rgba(nibble(0), nibble(1), nibble(2), alpha));
         }
         let byte = |index: usize| u32::from_str_radix(&digits[index..index + 2], 16).unwrap_or(0);
         let alpha = if digits.len() == 8 { byte(6) } else { OPAQUE };

@@ -74,7 +74,8 @@ it runs the driver through `ry run --runtime ry` with the workspace's debug buil
 `ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
 build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
-the compiled tier on every case. Without `--engine` or `ORACLE_ENGINE` the second engine
+the compiled tier on every case. `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
+`RY_GC_STRESS=1`, which collects before every allocation once the script starts. Without `--engine` or `ORACLE_ENGINE` the second engine
 is a stub and `compare` skips every case. `ORACLE_ENGINE=ry` (or `ry-jit`, or any command line) makes
 `cargo test -p oracle` also require the engine to match GNU R on every case.
 
@@ -130,6 +131,10 @@ with `.corpus/ry-library` ahead of `.corpus/library` (which still supplies the `
 records results under `ry-installed`, beside the `ry` results of `ry run --runtime ry`, with the
 table in `.corpus/tests/summary-installed.md`.
 
+GNU R's binaries of graphics devices refuse ry's graphics engine, which is one version newer than
+the one R 4.3.3 built them against, so a package whose tests plot through svglite needs svglite
+installed on ry: `just corpus-ry-install svglite` builds it from source.
+
 ## Running against another GNU R
 
 The harness uses whichever GNU R is first on `PATH`. Two environment variables point it elsewhere,
@@ -142,12 +147,25 @@ ORACLE_RSCRIPT=/opt/R/4.6.2/bin/Rscript just oracle packages   # the package cor
 ```
 
 `ORACLE_R` covers `verify`, `record` and `compare`. `ORACLE_RSCRIPT` covers `packages` and `bench`.
-The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs: `verify` under
-4.6.2 passes 90 of 105 cases against 102 of 105 under 4.3.3, mostly in `stats`, `s4` and printing.
-Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing rig puts its
-`R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in `/usr/local/bin` to keep
-the system R as the default. Whether ry's own runtime can load the newer R's base library through
-`R_HOME` is untested.
+When `ORACLE_R` is set, the `ry` engine of `compare` also runs with `R_HOME` set to that R's home,
+so ry's runtime loads the same base library and emulates the same version as the GNU R it is
+compared with. That makes `compare` the check for a new R release:
+
+```sh
+ORACLE_R=/opt/R/4.6.1/bin/R just oracle compare --engine ry
+```
+
+Under R 4.6.1, `compare` passes 118 of 125 cases, against 124 of 125 under 4.3.3. Four of the
+remaining differences come from how that GNU R was built: OpenBLAS changes the last digits of `lm`
+and `arima` results, glibc's `mktime` resolves a repeated wall-clock time differently after it has
+seen a time in a spring-forward gap, and the sign of `NA^NaN` depends on the compiler. One case
+calls `C_pKS2`, a routine R 4.6 removed; GNU R 4.6 fails it, while ry keeps every version's routines
+and runs it. `stats__lbfgsb` differs under every version.
+
+The recorded `.expected` files come from R 4.3.3, so a newer R legitimately differs under
+`verify`. Record into a separate checkout, or keep the 4.3.3 output as the contract. Installing
+rig puts its `R` ahead of the system one on `PATH`; remove the `R` and `Rscript` links in
+`/usr/local/bin` to keep the system R as the default.
 
 ## The benchmark generator
 

@@ -35,8 +35,19 @@ pub const BUILTINS: &[BuiltinDef] = &[internal("recordGraphics", 3, |call| unsaf
     record_graphics(call)
 })];
 
-/// `R_GE_version`: the graphics engine version ry presents, R 4.6's.
-pub const ENGINE_VERSION: c_int = 17;
+/// The newest engine version whose device description ry reads, R 4.6's (`R_GE_fontVar`).
+pub const NEWEST_ENGINE_VERSION: c_int = 17;
+
+/// `R_GE_version` as the emulated R reports it: 16 (`R_GE_glyphs`) through R 4.5 and 17 from
+/// R 4.6. Device binaries built for a release compare it with their own, and `replayPlot()`
+/// compares it with a recorded plot's, so it follows the base packages ry runs.
+pub fn engine_version() -> c_int {
+    if crate::system::r_at_least(4, 6) {
+        NEWEST_ENGINE_VERSION
+    } else {
+        16
+    }
+}
 
 /// Degrees to radians as GNU R's engine converts them, which can differ from `to_radians` in
 /// the last bit and so move an antialiased pixel.
@@ -2970,7 +2981,7 @@ pub unsafe fn create_snapshot(dd: *mut GEDevDesc) -> R<Sexp> {
     values::set_attr(
         snapshot,
         values::install("engineVersion")?,
-        scalar_integer(ENGINE_VERSION)?,
+        scalar_integer(engine_version())?,
     )?;
     Ok(snapshot)
 }
@@ -2978,15 +2989,16 @@ pub unsafe fn create_snapshot(dd: *mut GEDevDesc) -> R<Sexp> {
 /// `GEplaySnapshot`.
 pub unsafe fn play_snapshot(snapshot: Sexp, dd: *mut GEDevDesc) -> R<()> {
     let version = values::get_attr(snapshot, values::install("engineVersion")?);
+    let current = engine_version();
     if version == nil() {
         crate::conditions::warning(format!(
-            "snapshot recorded with different graphics engine version (pre 11 - this is version {ENGINE_VERSION})"
+            "snapshot recorded with different graphics engine version (pre 11 - this is version {current})"
         ))?;
     } else {
         let recorded = values::as_integer_scalar(version);
-        if recorded != ENGINE_VERSION {
+        if recorded != current {
             crate::conditions::warning(format!(
-                "snapshot recorded with different graphics engine version ({recorded} - this is version {ENGINE_VERSION})"
+                "snapshot recorded with different graphics engine version ({recorded} - this is version {current})"
             ))?;
         }
     }

@@ -64,13 +64,13 @@ lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: 
 
 Besides values, a stub can declare a type. A line `@type NAME` declares an *opaque nominal type*: a
 named type with no inspectable representation, for standard-library values the type grammar cannot
-describe structurally, such as `data.frame`, `factor`, `connection`, or `Date`.
+describe structurally, such as `factor`, `connection`, or `Date`.
 
 An opaque nominal is compatible only with itself, and a value of it can only come from a function
 declared to return it. So `Sys.Date()` is a `Date`, and passing it where a `factor` is expected is a
 type error. The functions that *consume* such values usually keep `Any` parameters, because R
 coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an opaque
-nominal gives `Unknown` rather than an error, so `df$amount` and `df[rows, ]` stay usable, and strict
+nominal gives `Unknown` rather than an error, so value-dependent access stays usable, and strict
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
@@ -86,10 +86,19 @@ A stub can also declare a structural alias, written exactly like a project's `#:
 
 The alias then works in every annotation, as `Result<integer, :NotFound>`.
 
+A stub type may also declare a representation, written `@type NAME {REPRESENTATION}` exactly like
+a project's `#: @type`. `types/base.Rtypes` declares `@type data.frame {list[named: Unknown]}`, so
+a data frame passes wherever a named list is expected, as `lapply(frame, f)` needs, and `$` and
+`[[` read its columns as `Unknown`, which strict mode reports at the read. Unlike a project's own nominal type, a mismatch against a stub type does
+not suggest `@new`, because its values come from their own constructors such as `read.csv()`.
+Declare the class's operator and `[` methods beside it when R keeps or changes the class, as
+`[.data.frame` and `Arith.data.frame` do: dispatch looks at the declared class before the
+representation.
+
 A type name may contain an interior dot, as `data.frame` does, and a project's own `@type` or
-`@alias` of the same name shadows the stub's type. The structural form
-`@type NAME {REPRESENTATION}` cannot be written in `.Rtypes`: a stub's `@type` is always opaque,
-and a `@type` line whose name is not a plain identifier is reported as an error on its own line.
+`@alias` of the same name shadows the stub's type. A type declaration that does not load, such as a
+`@type` line whose name is not a plain identifier or whose representation does not parse, is
+reported as an error on its own line, and its name stays unknown to the rest of the file.
 
 ### Data-masking functions
 

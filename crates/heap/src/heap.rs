@@ -141,6 +141,26 @@ pub enum GcStress {
     EveryAllocation,
 }
 
+/// When `RY_GC_STRESS` turns collection stress on for a whole run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GcStressStart {
+    /// `RY_GC_STRESS=startup`: from the heap's first allocation, base R's loading included.
+    Startup,
+    /// Any other non-empty value but `0`: once the session has started, so a script runs under
+    /// stress without paying for base R's loading under it. The host that runs the script
+    /// switches it on.
+    Script,
+}
+
+/// The collection stress `RY_GC_STRESS` asks for, if any.
+pub fn gc_stress_requested() -> Option<GcStressStart> {
+    match std::env::var("RY_GC_STRESS").as_deref() {
+        Err(_) | Ok("" | "0") => None,
+        Ok("startup") => Some(GcStressStart::Startup),
+        Ok(_) => Some(GcStressStart::Script),
+    }
+}
+
 pub struct GcPolicy {
     /// Bytes of young allocation that trigger a minor collection while the old generation is
     /// small; past twice this size, half the old generation's bytes trigger one instead.
@@ -433,7 +453,16 @@ impl Heap {
             return Err(HeapError::TooLong);
         }
         let size = object_size(kind, length as usize).ok_or(HeapError::TooLong)?;
-        let object = self.allocate(kind, size, &[])?;
+        // Vectors of handles are filled below, so only the header needs zeroing first.
+        let zeroed = if matches!(
+            kind,
+            SexpType::String | SexpType::List | SexpType::Expression
+        ) {
+            VECTOR_DATA_OFFSET
+        } else {
+            size
+        };
+        let object = self.allocate_with(kind, size, &[], zeroed)?;
         object.set_length_and_capacity(length, length);
         match kind {
             SexpType::String => {
@@ -1843,7 +1872,10 @@ impl Default for GcPolicy {
             young_limit: 8 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
-            stress: GcStress::Off,
+            stress: match gc_stress_requested() {
+                Some(GcStressStart::Startup) => GcStress::EveryAllocation,
+                _ => GcStress::Off,
+            },
             verify: std::env::var_os("RY_GC_VERIFY").is_some(),
         }
     }

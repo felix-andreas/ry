@@ -1065,7 +1065,7 @@ count_positive <- function() {
 }
 #++++
 count_positive: Unknown
-124..129 error[type-mismatch] `count` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
+143..150 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #==== text_processing
 #---- word_statistics_is_clean
