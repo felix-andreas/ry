@@ -2931,3 +2931,30 @@ first lines R had already read, leaving R mid-command.
 - **Rationale for the user's framing being kept:** the user proposed this structure. It was kept
   because each step maps to a real, shipped feature with real output, and because R++/R-- is a
   compact way to say "a superset you can opt into, and a safe subset you can enforce".
+
+## Nominal and structural types cover both product and sum types
+
+- **Shape:** every record, tuple or tag union is structural by default (`alias` only names it), and
+  `type Name = ...` (or `#: @type`) wraps it in a nominal type. That gives a 2x2 grid, structural or
+  nominal for product and for sum types, with one mechanism instead of a separate "declared record"
+  or "declared union" concept. The user guide teaches it as a table in
+  `type-checking/records-and-tags.mdx`; the contract is the reference section "Nominal records,
+  tuples and tags".
+- **Construction:** `@Name(...)` is the only constructor, and its parentheses are the value's own,
+  so `@Point(x = 1, y = 2)` is a record and `@UserId(id = 1L,)` a one-field record. A bare value of
+  the right shape is refused, which keeps construction in one checked place, like Roc's opaque
+  `@Name`. A separate constructor syntax (`Point(x = 1)`) was rejected because it collides with R
+  calls. `@Point((x = 1, y = 2))` still works, because the inner parentheses are only R grouping, but the docs never write it.
+- **Previous weakness:** the checker handled the nominal wrapper only at assignment. `match`
+  exhaustiveness, pattern checks, field writes, `$` completion and the native-value-to-R check all
+  looked at the nominal head and saw no shape, so a nominal union was never checked for coverage,
+  bindings lost their nominal type, and field writes went unchecked.
+- **Target:** each of those reads projects the nominal value to its representation through the
+  visible type definitions (`exhaustiveness::structural`, `Checker::structural`, `ide::representation`),
+  so the definition stays the single source of truth for the shape. Binding patterns keep the
+  nominal type. Exhaustiveness splits on constructors only while a row has a constructor head, which
+  is what lets a recursive `type Tree<T>` terminate.
+- **Impact:** no new stored state, and the projection reads per-name definitions that each item
+  already depends on, so incremental analysis is unchanged. The `nominal_grid` typing group, the
+  nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
+  pin the behavior.
