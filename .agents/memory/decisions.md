@@ -807,8 +807,8 @@ carries its own annotation).
 
 **Both spellings on one statement** merge per slot (value, parameter, rest, return), and type
 parameters pair by position (the comment's are renamed to the inline names first), with the inline
-side winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
-(`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
+side winning, except that a coercion (`@trust`, `@if-unknown`, `@new`) governs the value wherever it
+is written, and the inline one wins when both sides carry one (`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
 file-absolute ranges, comparing types after alias expansion and union-member sorting, so the warning
 can point at both written types. Positional comment parameter types pair with formals the way
 `check_declared_function` pairs them.
@@ -833,6 +833,38 @@ A parameter a `#:` block also names keeps the comment's `[name]`, which is check
 
 **Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
 `lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.
+
+## Inline type definitions, coercions and nominal constructors
+
+**Syntax.** `type Name<T: c> = TYPE` declares a nominal type and `alias Name = TYPE` an alias, as
+statements at the top level of a file; `x: @trust T <- v` (also `@if-unknown`, `@new`) is a coercing
+binding; and `@Name(value)` or `@Name<Args>(value)` constructs a nominal value, the expression form of
+`#: @new Name`. Docs: `reference/type-system.mdx#inline-annotation-syntax`.
+
+**Why it is unambiguous.** Two names in a row are not valid R, and neither is `@` at the start of an
+expression, so none of these forms gives a valid R program a new reading. `type` and `alias` are
+contextual: the definition is recognized only at a statement start with the defined name on the same
+line, so `type <- 1`, `alias(type)` and `type` as a parameter keep working. A nested definition is an
+`annotation` error rather than a silent new scope, because a type's scope is the file. Rejected:
+`@type Name = T` (reads as a decorator, and `@` at statement start would collide with the constructor),
+and `newtype` (a second keyword for no new meaning).
+
+**Leading `|`.** A union may open with `|`, in `#:` comments too, and inline a union continues onto a
+line that starts with `|`. No R statement starts with `|`, so this never swallows the next statement,
+and it lets a tagged union list one member per line.
+
+**One meaning.** A definition lowers to the same `NamedDefinition` as its `#:` block, and every
+consumer reads definitions through `file_type_definitions`. A `#:` definition directly above an
+inline one of the same name is one definition written twice (`paired_comment_definition`): with
+inline annotations on, the inline one is used and any disagreement in kind, parameters, constraints
+or body is an `annotation-mismatch` warning; with them off, the comment applies alone. An unpaired
+inline definition with inline annotations off still declares its name, with an `Unknown` body, so
+uses of the name do not turn into unknown-type errors on top of the `inline-annotation` warning.
+
+**Erasure and run time.** Erasure turns a definition into its `#: @type`/`#: @alias` comment, so the
+erased program still declares the type, drops the `@Name` of a constructor, leaving `(value)`, and drops
+a coercing binding's `: @trust T`. The runtime skips definitions and lowers `@Name(value)` to its
+parenthesized value; a nominal type has no run-time representation.
 
 ## Testing doctrine for `syntax`
 

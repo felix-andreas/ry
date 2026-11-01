@@ -49,6 +49,8 @@ pub struct Annotation<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct NamedDefinition<'db> {
     pub alias: bool,
+    /// Written as `type Name = TYPE` rather than in a `#:` comment, so tools show it that way.
+    pub inline: bool,
     pub name: Name<'db>,
     /// Type parameters; the body references them as rigid variables.
     pub parameters: Vec<Name<'db>>,
@@ -1126,6 +1128,7 @@ impl<'db> Lowering<'db> {
         self.binders.truncate(saved);
         Some(NamedDefinition {
             alias,
+            inline: node.kind() == SyntaxKind::TYPE_DEFINITION,
             name: Name::new(self.db, name),
             parameters: parameters.into_iter().map(|(name, _)| name).collect(),
             body,

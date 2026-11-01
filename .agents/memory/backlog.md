@@ -1151,6 +1151,13 @@ The message says to add a type annotation, and no annotation form silences it. `
   idempotent, so it is deliberate, and it is undocumented.
 - **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
   annotations with a blank line" when there is only one annotation.**
+- **The deep formatter fuzz finds a non-idempotent `#:` block** when a string literal spans lines
+  inside it (shrunk input: `"#: n(x: ineger) ->' oo\n#' roxygendouble\n..."`). The bounded fuzz in the
+  default suite passes; the deep run does not.
+- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
+  definition may also be written inline as `type` or `alias`.
+- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
+  states the type.
 - **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
   missing fence.
 
