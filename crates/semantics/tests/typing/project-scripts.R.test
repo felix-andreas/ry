@@ -169,6 +169,18 @@ limit: integer
 == tests/testthat/test-a.R
 limit: character
 
+#---- test_file_bindings_stay_in_their_file
+#~~~~ tests/testthat/test-a.R
+make <- function(x) x
+#~~~~ tests/testthat/test-b.R
+built <- make()
+#++++
+== tests/testthat/test-a.R
+make: <T> fn(x: T) -> T
+== tests/testthat/test-b.R
+built: Unknown
+9..13 warning[unresolved] I could not resolve `make` in this package, its imports, or builtins.
+
 #---- helper_is_visible_to_every_test_file
 #~~~~ R/a.R
 add <- function(x, y) x + y
@@ -183,3 +195,36 @@ add: <T: numeric> fn(x: T, y: T) -> T
 input: fn() -> integer
 == tests/testthat/test-add.R
 total: integer
+
+#---- a_test_block_calls_its_own_helper
+#~~~~ tests/testthat/helper-block.R
+test_that <- function(desc, code) invisible(code)
+#~~~~ tests/testthat/test-trace.R
+test_that("first", {
+  f <- function() g()
+  g <- function() 1L
+  f()
+})
+test_that("second", {
+  g <- function(dots) dots
+  g(2L)
+})
+#++++
+== tests/testthat/helper-block.R
+test_that: <T, U> fn(desc: T, code: U) -> U
+== tests/testthat/test-trace.R
+integer
+integer
+
+#---- test_call_skips_a_value_to_reach_the_package_function
+#~~~~ R/a.R
+path <- function(...) paste(...)
+#~~~~ tests/testthat/test-path.R
+path <- path("a")
+again <- path("b")
+#++++
+== R/a.R
+path: fn(...: Any) -> character
+== tests/testthat/test-path.R
+path: character
+again: character

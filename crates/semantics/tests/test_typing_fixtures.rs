@@ -11,7 +11,7 @@ use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_so
 use semantics::testing::with_fixture_project;
 use semantics::{
     AnalysisSettings, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile,
-    file_typing_mode, item_check, item_hir, item_tree,
+    file_typing_mode, item_check, item_hir, item_tree, test_document_kind,
 };
 use std::path::Path;
 use syntax::SyntaxKind;
@@ -29,11 +29,11 @@ fn render_case(
             .map(|(path, text)| {
                 let kind = if path.starts_with("R/") {
                     DocumentKind::Package
-                } else if path
+                } else if let Some(file_name) = path
                     .strip_prefix("tests/testthat/")
-                    .is_some_and(|rest| !rest.contains('/'))
+                    .filter(|rest| !rest.contains('/'))
                 {
-                    DocumentKind::Test
+                    test_document_kind(file_name)
                 } else {
                     DocumentKind::Script
                 };

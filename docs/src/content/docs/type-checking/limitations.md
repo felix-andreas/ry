@@ -29,10 +29,10 @@ definitions plus the package's. `source()` is not followed, so a function from a
 reported as unresolved where you call it, and as unused where you define it. Moving shared helpers
 into `R/` makes them visible to every script.
 
-Files directly under `tests/testthat/` see the package's definitions and each other's, but add
-nothing to the package, so a variable a test assigns never changes what a name means under `R/`.
-Sharing one environment between test files is more permissive than testthat: a name one test file
-defines and another uses resolves in ry but fails when the tests run.
+Files directly under `tests/testthat/` see the package's definitions and the `helper-*.R` and
+`setup-*.R` files' definitions, but add nothing to the package, so a variable a test assigns never
+changes what a name means under `R/`. Each test file's own bindings stay in that file, as they do
+when testthat runs it.
 
 `ry check` reads the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents, but the language server does
 not analyze them and `ry fmt` skips them.

@@ -82,11 +82,24 @@ impl Db for RootDatabase {
 pub enum DocumentKind {
     /// A file of the package namespace (`R/`).
     Package,
-    /// A testthat file. It reads the package namespace and the bindings of the other test
-    /// files, but contributes nothing to the package namespace.
+    /// A testthat test file (`tests/testthat/test-*.R`). testthat runs each one in its own
+    /// environment, so it reads its own bindings, the helpers and the package namespace, and
+    /// contributes to none of them.
     Test,
+    /// A testthat helper or setup file (`helper-*.R`, `setup-*.R`), which testthat sources
+    /// into the environment every test file runs in.
+    TestHelper,
     /// A standalone script, which reads the package namespace and its own bindings only.
     Script,
+}
+
+/// The kind of a file directly in `tests/testthat/`, from its name alone.
+pub fn test_document_kind(file_name: &str) -> DocumentKind {
+    if file_name.starts_with("helper") || file_name.starts_with("setup") {
+        DocumentKind::TestHelper
+    } else {
+        DocumentKind::Test
+    }
 }
 
 #[salsa::input(debug)]
@@ -678,13 +691,13 @@ pub fn conditional_slot_items<'db>(
     conditional_writers_of(db, files, DocumentKind::Package)
 }
 
-/// The test files' counterpart of [`conditional_slot_items`].
+/// The helper files' counterpart of [`conditional_slot_items`].
 #[salsa::tracked(returns(ref))]
 pub fn test_conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
 ) -> FxHashMap<String, Vec<Item<'db>>> {
-    conditional_writers_of(db, files, DocumentKind::Test)
+    conditional_writers_of(db, files, DocumentKind::TestHelper)
 }
 
 fn conditional_writers_of<'db>(
@@ -805,12 +818,11 @@ pub fn package_definitions<'db>(
     winners_of(db, files, DocumentKind::Package)
 }
 
-/// The last top-level definition of each name across the test files. testthat sources the
-/// helper files into one environment shared by every test file, and attributing every test
-/// file's bindings to that environment keeps helper calls resolving whatever file holds them.
+/// The last top-level definition of each name across the helper files, which testthat
+/// sources into the one environment every test file runs in.
 #[salsa::tracked(returns(ref))]
 pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<String, Item<'db>> {
-    winners_of(db, files, DocumentKind::Test)
+    winners_of(db, files, DocumentKind::TestHelper)
 }
 
 fn winners_of<'db>(
@@ -1367,7 +1379,9 @@ fn file_binders<'db>(
 
 /// An immediate read sees the nearest earlier writer in the file (R sources top-down).
 /// A deferred read (inside a closure) sees the file's last writer in a script; in a
-/// package it sees the project-wide winner instead, so callers skip this query.
+/// package it sees the project-wide winner instead, so callers skip this query. In a test
+/// file it sees the reading statement's own writer first: each `test_that` block runs in its
+/// own environment, so a helper it defines is the one its closures call.
 #[salsa::tracked(returns(copy))]
 fn frame_binder<'db>(
     db: &'db dyn Db,
@@ -1377,6 +1391,15 @@ fn frame_binder<'db>(
 ) -> Option<Item<'db>> {
     let file = *item.file(db);
     let binders = file_binders(db, file).get(name.text(db))?;
+    if deferred
+        && matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+        && binders.iter().any(|&(_, binder)| binder == item)
+    {
+        return Some(item);
+    }
     let visible = match deferred {
         true => &binders[..],
         false => {
@@ -1408,11 +1431,16 @@ impl<'db> SalsaGlobals<'db> {
     }
 
     /// The namespaces a read of `name` searches past the item's own frame, nearest first: a
-    /// test file sees the test files' bindings before the package namespace.
+    /// test or helper file sees the helpers' bindings before the package namespace.
     fn layers(&self, name: types::Name<'db>) -> impl Iterator<Item = &'db PackageName<'db>> {
         let files = self.files;
         let test = files
-            .filter(|_| *self.file.kind(self.db) == DocumentKind::Test)
+            .filter(|_| {
+                matches!(
+                    *self.file.kind(self.db),
+                    DocumentKind::Test | DocumentKind::TestHelper
+                )
+            })
             .map(|files| test_name(self.db, files, name));
         let package = files.map(|files| package_name(self.db, files, name));
         test.into_iter().chain(package)
@@ -1496,6 +1524,38 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return self.binder_scheme(item, interned);
         }
         Some(global_scheme(self.db, self.winner(interned)?))
+    }
+
+    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if *self.file.kind(self.db) == DocumentKind::Package {
+            return self.scheme(name, false);
+        }
+        let interned = types::Name::new(self.db, name.to_owned());
+        if let Some(layer) = self
+            .files
+            .map(|files| package_name(self.db, files, interned))
+        {
+            if let Some(item) = layer.winner {
+                return Some(global_scheme(self.db, item));
+            }
+            if let Some(scheme) = self.conditional_slot_scheme(layer, interned) {
+                return Some(scheme);
+            }
+        }
+        stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
+    }
+
+    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        if *self.file.kind(self.db) == DocumentKind::Package {
+            return None;
+        }
+        let interned = types::Name::new(self.db, name.to_owned());
+        self.layers(interned).find_map(|layer| {
+            layer
+                .winner
+                .map(|item| global_scheme(self.db, item))
+                .or_else(|| self.conditional_slot_scheme(layer, interned))
+        })
     }
 
     fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
@@ -1588,6 +1648,27 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
 
     fn library_candidates(&self, name: &str) -> Option<Vec<types::TypeScheme<'db>>> {
         self.base.library_candidates(name)
+    }
+
+    /// Only a package file's group can hold a namespace member.
+    fn namespace_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        match self.members.get(name) {
+            Some(scheme) if *self.base.file.kind(self.base.db) == DocumentKind::Package => {
+                Some(scheme.clone())
+            }
+            _ => self.base.namespace_scheme(name),
+        }
+    }
+
+    /// A member is read from the round table here too: through the base it would re-enter
+    /// the group.
+    fn enclosing_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
+        match self.members.get(name) {
+            Some(scheme) if *self.base.file.kind(self.base.db) != DocumentKind::Package => {
+                Some(scheme.clone())
+            }
+            _ => self.base.enclosing_scheme(name),
+        }
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {

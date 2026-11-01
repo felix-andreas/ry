@@ -19,7 +19,9 @@ use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
     shipped_stub_sources, stub_source_problems,
 };
-use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{
+    AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile, test_document_kind,
+};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZero;
@@ -538,21 +540,26 @@ pub(crate) fn exclude_matcher(
 /// Vendored dependency infrastructure rather than project code; scopes only the walk.
 const VENDORED_DIRECTORIES: [&str; 5] = ["renv", "packrat", "revdep", ".Rproj.user", ".Rcheck"];
 
-/// `R/` files form the package namespace, and the files directly in `tests/testthat/` share
-/// testthat's environment, which reads that namespace without adding to it. Every surface
-/// assigning a [`DocumentKind`] must call this, or it analyses a different program. Not the
-/// ordering key: that is `R/` membership alone.
+/// `R/` files form the package namespace. Of the files directly in `tests/testthat/`, the
+/// helper and setup files fill the environment testthat runs every test file in, and the rest
+/// are test files, each in its own child of it. Every surface assigning a [`DocumentKind`]
+/// must call this, or it analyses a different program. Not the ordering key: that is `R/`
+/// membership alone.
 pub(crate) fn document_kind(path: &Path, root: &Path) -> DocumentKind {
     if path.starts_with(root.join("R")) {
-        DocumentKind::Package
-    } else if path
-        .parent()
-        .is_some_and(|parent| parent == root.join("tests").join("testthat"))
-    {
-        DocumentKind::Test
-    } else {
-        DocumentKind::Script
+        return DocumentKind::Package;
     }
+    if path
+        .parent()
+        .is_none_or(|parent| parent != root.join("tests").join("testthat"))
+    {
+        return DocumentKind::Script;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    test_document_kind(file_name)
 }
 
 pub(crate) fn collect_r_files(

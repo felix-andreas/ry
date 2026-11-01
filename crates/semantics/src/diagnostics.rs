@@ -575,7 +575,12 @@ fn classify_non_local_read(
         return NonLocalRead::Resolvable;
     }
     let files = ProjectFiles::try_get(db);
-    let test_files = files.filter(|_| *file.kind(db) == DocumentKind::Test);
+    let test_files = files.filter(|_| {
+        matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+    });
     if crate::package_scheme_exists(db, name)
         || test_files.is_some_and(|files| {
             crate::test_definitions(db, files).contains_key(name)

@@ -323,6 +323,16 @@ pub trait GlobalEnv<'db> {
     /// the stubs list without a type.
     fn library_candidates(&self, name: &str) -> Option<Vec<TypeScheme<'db>>>;
 
+    /// What a call reaches once its lookup has left the file's top-level frame without finding
+    /// a function, the library aside. A package file's frame is the namespace itself, so it
+    /// reaches nothing; a test or helper file's frame encloses in the helpers' environment and
+    /// the namespace, and a script's in the namespace.
+    fn enclosing_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+
+    /// What the project's own `pkg::name` reads: the package namespace, then the library.
+    /// A test file's or a script's own bindings and the helpers' are not in the namespace.
+    fn namespace_scheme(&self, name: &str) -> Option<TypeScheme<'db>>;
+
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
     fn type_definitions(&self) -> &'db FxHashMap<Name<'db>, NamedDefinition<'db>>;
@@ -1394,7 +1404,7 @@ impl<'db> Checker<'db, '_> {
                 match validated.as_ref().and_then(|name| {
                     let globals = self.globals?;
                     if reaches_project {
-                        globals.scheme(name, false)
+                        globals.namespace_scheme(name)
                     } else {
                         globals.library_candidates(name)?.pop()
                     }
@@ -4545,6 +4555,15 @@ impl<'db> Checker<'db, '_> {
             if self.callable(scheme.body) != Callable::No {
                 return FunctionLookup::Ordinary;
             }
+            if let Some(enclosing) = self
+                .globals
+                .and_then(|globals| globals.enclosing_scheme(non_local))
+                && self.callable(enclosing.body) != Callable::No
+            {
+                self.callee_targets.insert(callee, CalleeTarget::Project);
+                let ty = self.instantiate(&enclosing);
+                return FunctionLookup::Found(self.record(callee, ty));
+            }
             return match self.library_function(name) {
                 Some(candidates) => FunctionLookup::Library(name, candidates),
                 None => FunctionLookup::Ordinary,
@@ -4574,11 +4593,11 @@ impl<'db> Checker<'db, '_> {
                 }
             }
         }
-        // The top-level frame is the project's namespace, so past it only the library remains.
-        if !reaches_top_level
-            && let Some(scheme) = self
-                .globals
-                .and_then(|globals| globals.scheme(&name, deferred))
+        let project = self.globals.and_then(|globals| match reaches_top_level {
+            false => globals.scheme(&name, deferred),
+            true => globals.enclosing_scheme(&name),
+        });
+        if let Some(scheme) = project
             && self.callable(scheme.body) != Callable::No
         {
             if nearest_callable == Callable::Untyped {

@@ -2021,11 +2021,14 @@ upper_names <- function(x) {
 - A binding whose type is definitely not a function (`NULL`, an atomic vector, a list, a record, a
   tuple, a tag or a frame) is skipped. The lookup tries the enclosing frames' slots of the same name,
   then the package's top-level binding, then the library. A top-level `l10n_info <- NULL` therefore
-  leaves `l10n_info()` calling base's function.
+  leaves `l10n_info()` calling base's function. In a package file the top level is the namespace
+  itself, so past it only the library remains. A test file's top level encloses in the helpers'
+  bindings and then the package namespace, and a script's in the namespace, so
+  `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
 - A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
 - A binding with no type information yet, such as an unannotated parameter nothing has constrained
-  or a parameter annotated with a type parameter `T`, may hold anything. When an outer binding of the same name is a function, the call could reach
-  either one, so it types as `Unknown` and constrains neither: `function(x, names) names(x)` does not
+  or a parameter annotated with a type parameter `T`, may hold anything. When an outer binding of
+  the same name is a function, the call could reach either one, so it types as `Unknown` and constrains neither: `function(x, names) names(x)` does not
   make `names` a function parameter. With no function of that name further out, the call checks
   against the binding as usual, so `function(x, callback) callback(x)` still infers `callback` as a
   function.
@@ -2045,9 +2048,10 @@ scoping.
   `dplyr` (see [stubs](/type-checking/stubs)).
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
-  and wins over a stub namespace of the same name. The name itself is not validated, because a
-  package exports names its sources never bind: re-exports, S4 generics from `setGeneric`, datasets
-  under `data/`, and bindings installed by `.onLoad`.
+  and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
+  a script `pathpkg::path` skips that file's own `path` binding. The name itself is not validated,
+  because a package exports names its sources never bind: re-exports, S4 generics from
+  `setGeneric`, datasets under `data/`, and bindings installed by `.onLoad`.
 - When the stubs declare `name` in `pkg`, the qualified read has the stub's type. A project binding
   of the same name does not change it: `base::date()` calls base's `date` even when the package
   defines its own `date`. A name that only the namespace's [export manifest](#standard-library-exports) lists
@@ -2296,15 +2300,20 @@ types, plus their own local bindings and type declarations:
 - Duplicate top-level value names inside a script do not produce the package-global duplicate-binding
   warning; they behave like ordinary rebinding.
 
-Files directly under `tests/testthat/` are test files. testthat runs them in an environment whose
-parent is the package namespace, so a test file reads the package's names but never adds to them:
+Files directly under `tests/testthat/` are test files, except that a file whose name starts with
+`helper` or `setup` is a helper file. testthat sources the helper files into one environment whose
+parent is the package namespace, and runs each test file in its own child of that environment. A
+test or helper file therefore reads the package's names but never adds to them:
 
-- A test file resolves a name first in its own sequential scope, exactly like a script, then in the
-  test files' shared namespace, then in the package-global namespace.
-- The test files' shared namespace holds the top-level bindings of every test file, the last one in
-  project order winning. testthat sources the `helper-*.R` and `setup-*.R` files into one environment
-  that every test file sees, and attributing every test file's bindings to it keeps a helper call
-  resolving wherever the helper lives.
+- A test or helper file resolves a name first in its own sequential scope, exactly like a script,
+  then in the helpers' namespace, then in the package-global namespace.
+- The helpers' namespace holds the top-level bindings of every helper file, the last one in project
+  order winning. A test file's own bindings are invisible to every other test file, so a name one
+  test file defines and another reads is an unresolved name.
+- Inside a closure, a test file's name resolves to the binding written by the same top-level
+  statement when there is one, and otherwise to the file's last binding. Each `test_that()` block
+  is one statement, so `f <- function() g()` calls the `g` its own block defines even when a later
+  block defines another `g`.
 - A test file's bindings are invisible to package files, so `names <- letters[1:4]` in a test does
   not change what `names` means under `R/`, and a package file reading a name that only a test
   defines is an unresolved name.

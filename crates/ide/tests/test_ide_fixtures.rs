@@ -7,7 +7,7 @@ use ide::{
 };
 use semantics::stubs::{StubSources, install_shipped_stubs};
 use semantics::testing::{ProbeDatabase, with_fixture_project};
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
+use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile, test_document_kind};
 use std::path::Path;
 use syntax::testing::{run_fixture_suite, split_files};
 use syntax::{TextRange, TextSize};
@@ -30,11 +30,11 @@ fn render(source: &str) -> String {
         }
         let kind = match path {
             Some(path)
-                if path
+                if let Some(file_name) = path
                     .strip_prefix("tests/testthat/")
-                    .is_some_and(|rest| !rest.contains('/')) =>
+                    .filter(|rest| !rest.contains('/')) =>
             {
-                DocumentKind::Test
+                test_document_kind(file_name)
             }
             Some(path) if !path.starts_with("R/") => DocumentKind::Script,
             _ => DocumentKind::Package,
