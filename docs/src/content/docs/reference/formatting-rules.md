@@ -346,6 +346,22 @@ fn <- function() call(
 )
 ```
 
+**A function assigned across a line break** joins the line of its name, so its body is indented like every other function's. A comment after the assignment operator keeps the break.
+
+```r
+# Before formatting
+`OHLC` <-
+function(x)
+{
+    x[, 1:4]
+}
+
+# After formatting
+`OHLC` <- function(x) {
+  x[, 1:4]
+}
+```
+
 **Anonymous functions (lambda expressions):** Anonymous functions using `\` are formatted the same way as named functions, supporting both single-line and multiline bodies.
 
 ```r
@@ -359,7 +375,7 @@ lapply(data, \(x) {
 
 ### Switch calls
 
-`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`.
+`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`. The same holds for any argument whose value is left empty, before a comma or a closing bracket: `exprs(x = , ... = )`.
 
 ```r
 result <- switch(
@@ -383,6 +399,20 @@ data[[ "name" ]]
 # After formatting
 data[row, col]
 data[["name"]]
+```
+
+**An empty index** keeps a space after every comma, so a hole between two commas cannot read as one separator. Only the space after the opening bracket goes:
+
+```r
+# Before formatting
+data[ ,1]
+data[1,]
+data[rows,,drop=FALSE]
+
+# After formatting
+data[, 1]
+data[1, ]
+data[rows, , drop = FALSE]
 ```
 
 ### Extract and namespace operators
@@ -701,6 +731,19 @@ if (condition)
 # After formatting
 if (condition) {
   action()
+}
+```
+
+A comment that ends the header line goes after the added `{`, so the brace never sits alone on the next line:
+
+```r
+# Before formatting
+if (n == 1L) # a single date
+  exact <- TRUE
+
+# After formatting
+if (n == 1L) { # a single date
+  exact <- TRUE
 }
 ```
 

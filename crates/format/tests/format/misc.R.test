@@ -349,3 +349,68 @@ lapply(
   },
   pSD = poolSD
 )
+
+#---- a_hole_between_commas_keeps_both_spaces
+x[from:to,,drop=FALSE]
+x[ , , 1]
+#++++
+x[from:to, , drop = FALSE]
+x[, , 1]
+
+#---- a_dangling_equals_keeps_its_space_before_the_closer
+new_function(exprs(x = , ... =), body)
+#++++
+new_function(exprs(x = , ... = ), body)
+
+#---- a_function_assigned_across_a_line_break_joins_its_name
+`OHLCV` <-
+function (x)
+{
+    if (is.OHLCV(x))
+        return(x[, 1])
+    NULL
+}
+g <- # the comment keeps the break
+  function(x) x
+#++++
+`OHLCV` <- function(x) {
+  if (is.OHLCV(x)) {
+    return(x[, 1])
+  }
+  NULL
+}
+g <- # the comment keeps the break
+  function(x) x
+
+#---- an_added_brace_goes_before_a_comment_trailing_the_header
+if(i_len == 1L)  # IFF we are using ISO8601 subsetting
+  USE_EXTRACT <- TRUE
+if (a) # one
+  # two
+  b else # three
+  c
+for (i in x) # loop
+  f(i)
+#++++
+if (i_len == 1L) { # IFF we are using ISO8601 subsetting
+  USE_EXTRACT <- TRUE
+}
+if (a) { # one
+  # two
+  b
+} else { # three
+  c
+}
+for (i in x) { # loop
+  f(i)
+}
+
+#---- an_added_function_brace_goes_before_a_trailing_comment
+f <- function(x) # c
+  # d
+  x + 1
+#++++
+f <- function(x) { # c
+  # d
+  x + 1
+}

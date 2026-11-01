@@ -1067,10 +1067,17 @@ impl Formatter<'_> {
                         .and_then(SyntaxNode::first_token)
                         .is_some_and(|token| token.kind() == COLON)
                 }));
+        // A function assigned across a line break (`f <-` then `function(x)`
+        // below it) joins its name, so its body does not sit one level deeper
+        // than every other function's.
         let break_after_operator = elements[operator_index + 1..]
             .iter()
             .find(|element| element.as_node().is_some())
-            .is_some_and(|rhs| !self.same_line(operator.text_range(), rhs.text_range()));
+            .is_some_and(|rhs| {
+                !self.same_line(operator.text_range(), rhs.text_range())
+                    && !(matches!(operator.kind(), LESS_MINUS | LESS2_MINUS | EQ)
+                        && rhs.kind() == FUNCTION_DEF)
+            });
 
         let mut seen_operator = false;
         for (index, (previous, element)) in with_previous(&elements).enumerate() {
@@ -1322,7 +1329,7 @@ impl Formatter<'_> {
         let trailing_space = !is_literal
             && close_previous_token
                 .as_ref()
-                .is_none_or(|token| token.kind() == COMMA);
+                .is_none_or(|token| matches!(token.kind(), COMMA | EQ));
         // Hug: some argument starts on the open line and ends on the closer's
         // line. A multiline signature always expands one parameter per line.
         let hug = node.kind() != PARAMETER_LIST
@@ -1347,9 +1354,10 @@ impl Formatter<'_> {
                         if expand && !is_empty {
                             self.newline(level);
                         } else if trailing_space {
-                            // Also for all-empty lists (`alist(, )`) and
-                            // collapsed multiline lists, which must match what
-                            // their single-line output reformats to.
+                            // Also for all-empty lists (`alist(, )`), a
+                            // dangling `=` (`f(... = )`), and collapsed
+                            // multiline lists, which must match what their
+                            // single-line output reformats to.
                             self.space();
                         }
                         seen_close = true;
@@ -1373,9 +1381,13 @@ impl Formatter<'_> {
                             }))
                     {
                         self.newline(level + 1);
-                    } else if last_token_before(node, start).is_some_and(|token| token.kind() == EQ)
+                    } else if last_token_before(node, start)
+                        .is_some_and(|token| matches!(token.kind(), EQ | COMMA))
                     {
-                        // A fall-through argument (`z = ,`) keeps its space.
+                        // A fall-through argument (`z = ,`) keeps its space,
+                        // and so does a hole between two commas
+                        // (`x[i, , drop = FALSE]`), which glued would read as
+                        // one separator.
                         self.space();
                     }
                     self.out.push(',');
@@ -1650,10 +1662,21 @@ impl Formatter<'_> {
             self.line(head.text_range().start()) == self.line(body.text_range().start())
         });
 
-        for (previous, element) in with_previous(&elements) {
+        let mut opened = false;
+        for (index, (previous, element)) in with_previous(&elements).enumerate() {
             let after_comment = previous.is_some_and(is_comment);
             match element.kind() {
-                COMMENT | ANNOTATION => self.place_comment(previous, element, level, level),
+                COMMENT | ANNOTATION => {
+                    if is_multiline && !is_same_line && !opened {
+                        opened = self.open_brace_before_comment(
+                            previous,
+                            element,
+                            &elements[index + 1..],
+                            |candidate| Some(candidate) == body,
+                        );
+                    }
+                    self.place_comment(previous, element, level + usize::from(opened), level);
+                }
                 PURE_MARKER => {
                     self.element(element, level, false);
                     self.out.push(' ');
@@ -1667,6 +1690,9 @@ impl Formatter<'_> {
                 RETURN_TYPE => {
                     self.space_or_newline(after_comment, level);
                     self.element(element, level, false);
+                }
+                _ if Some(element) == body && opened => {
+                    self.close_opened_brace(element, level);
                 }
                 _ if Some(element) == body => {
                     self.space_or_newline(after_comment, level);
@@ -1693,7 +1719,8 @@ impl Formatter<'_> {
         let mut seen_close = false;
         let mut indent_comments = false;
         let mut is_alternative = false;
-        for (previous, element) in with_previous(&elements) {
+        let mut opened = false;
+        for (index, (previous, element)) in with_previous(&elements).enumerate() {
             let after_comment = previous.is_some_and(is_comment);
             match element.kind() {
                 ELSE_KW => {
@@ -1701,12 +1728,22 @@ impl Formatter<'_> {
                     self.element(element, level, false);
                     is_alternative = true;
                 }
-                COMMENT | ANNOTATION => self.place_comment(
-                    previous,
-                    element,
-                    level + usize::from(indent_comments),
-                    level,
-                ),
+                COMMENT | ANNOTATION => {
+                    if seen_close && is_multiline && !opened {
+                        opened = self.open_brace_before_comment(
+                            previous,
+                            element,
+                            &elements[index + 1..],
+                            |body| !(body.kind() == IF_EXPR && is_alternative),
+                        );
+                    }
+                    self.place_comment(
+                        previous,
+                        element,
+                        level + usize::from(indent_comments || opened),
+                        level,
+                    );
+                }
                 L_PAREN => {
                     indent_comments = true;
                     self.space_or_newline(after_comment, level);
@@ -1727,6 +1764,10 @@ impl Formatter<'_> {
                     } else {
                         self.continuation(element, level);
                     }
+                }
+                _ if opened => {
+                    self.close_opened_brace(element, level);
+                    opened = false;
                 }
                 _ => {
                     self.space_or_newline(after_comment, level);
@@ -1760,7 +1801,8 @@ impl Formatter<'_> {
 
         let mut seen_close = false;
         let mut indent_comments = false;
-        for (previous, element) in with_previous(&elements) {
+        let mut opened = false;
+        for (index, (previous, element)) in with_previous(&elements).enumerate() {
             let after_comment = previous.is_some_and(is_comment);
             match element.kind() {
                 IN_KW => {
@@ -1771,12 +1813,22 @@ impl Formatter<'_> {
                     }
                     self.element(element, level, false);
                 }
-                COMMENT | ANNOTATION => self.place_comment(
-                    previous,
-                    element,
-                    level + usize::from(indent_comments),
-                    level,
-                ),
+                COMMENT | ANNOTATION => {
+                    if seen_close && !opened {
+                        opened = self.open_brace_before_comment(
+                            previous,
+                            element,
+                            &elements[index + 1..],
+                            |_| true,
+                        );
+                    }
+                    self.place_comment(
+                        previous,
+                        element,
+                        level + usize::from(indent_comments || opened),
+                        level,
+                    );
+                }
                 L_PAREN => {
                     indent_comments = true;
                     self.space_or_newline(after_comment, level);
@@ -1806,8 +1858,13 @@ impl Formatter<'_> {
                     }
                 }
                 _ if element.as_node().is_some() && seen_close => {
-                    self.space_or_newline(after_comment, level);
-                    self.braced_body(element, level);
+                    if opened {
+                        self.close_opened_brace(element, level);
+                        opened = false;
+                    } else {
+                        self.space_or_newline(after_comment, level);
+                        self.braced_body(element, level);
+                    }
                 }
                 _ => self.element(element, level, false),
             }
@@ -1931,6 +1988,37 @@ impl Formatter<'_> {
             self.newline(level);
             self.out.push('}');
         }
+    }
+
+    /// A comment trailing a header whose body gets added braces
+    /// (`if (x) # why` above an unbraced body) goes after the new `{` rather
+    /// than leaving the brace alone on the next line. Returns whether it
+    /// opened the brace; the body then goes through [`Self::close_opened_brace`].
+    fn open_brace_before_comment(
+        &mut self,
+        previous: Option<&SyntaxElement>,
+        comment: &SyntaxElement,
+        rest: &[SyntaxElement],
+        braces_body: impl Fn(&SyntaxElement) -> bool,
+    ) -> bool {
+        let opens = self.trails(previous, comment)
+            && rest
+                .iter()
+                .find(|element| !is_comment(element))
+                .is_some_and(|body| {
+                    body.as_node().is_some() && body.kind() != BRACE_EXPR && braces_body(body)
+                });
+        if opens {
+            self.out.push_str(" {");
+        }
+        opens
+    }
+
+    fn close_opened_brace(&mut self, body: &SyntaxElement, level: usize) {
+        self.newline(level + 1);
+        self.element(body, level + 1, false);
+        self.newline(level);
+        self.out.push('}');
     }
 
     fn continuation(&mut self, element: &SyntaxElement, level: usize) {

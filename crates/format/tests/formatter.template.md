@@ -270,6 +270,17 @@ fn <- function() call(
   )
 ```
 
+**A function assigned across a line break** joins the line of its name, so its body is indented like every other function's. A comment after the assignment operator keeps the break.
+
+```r
+# function_definitions_assigned_across_lines : compare
+`OHLC` <-
+function(x)
+{
+    x[, 1:4]
+}
+```
+
 **Anonymous functions (lambda expressions):** Anonymous functions using `\` are formatted the same way as named functions, supporting both single-line and multiline bodies.
 
 ```r
@@ -284,7 +295,7 @@ lapply(data, \(x) {
 
 ### Switch calls
 
-`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`.
+`switch()` calls are formatted like any other function call. A fallthrough case keeps a spaced `=` with nothing after it: `"b" = ,`. The same holds for any argument whose value is left empty, before a comma or a closing bracket: `exprs(x = , ... = )`.
 
 ```r
 # switch_statements : format
@@ -305,6 +316,15 @@ result <- switch(
 # subsetting : compare
 data[ row,col ]
 data[[ "name" ]]
+```
+
+**An empty index** keeps a space after every comma, so a hole between two commas cannot read as one separator. Only the space after the opening bracket goes:
+
+```r
+# subsetting_empty_index : compare
+data[ ,1]
+data[1,]
+data[rows,,drop=FALSE]
 ```
 
 ### Extract and namespace operators
@@ -558,6 +578,14 @@ Therefore, the formatter always adds braces to **`if` expressions** and **functi
 # auto_bracing_conditional_statements : compare
 if (condition)
   action()
+```
+
+A comment that ends the header line goes after the added `{`, so the brace never sits alone on the next line:
+
+```r
+# auto_bracing_trailing_comment : compare
+if (n == 1L) # a single date
+  exact <- TRUE
 ```
 
 For a control flow structure such as a `for`, `while`, or `repeat` loop, the formatter always adds braces around the body, whatever its length, because a single-line loop is not allowed. See [Loops](#loops).
