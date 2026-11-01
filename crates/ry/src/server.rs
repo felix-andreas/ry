@@ -316,8 +316,10 @@ impl ServerState {
     where
         F: FnOnce(&mut Worker) + Send + 'static,
     {
-        self.cancel.cancel();
+        // Counted first: a helper whose query returns as the cancel lands loses the flag
+        // to salsa's uncancel, and only the counter then stops it before the next file.
         self.cancel.job_sent();
+        self.cancel.cancel();
         if self.sender.send(Job::Run(Box::new(build))).is_err() {
             panic!("analysis worker is gone; cannot apply a notification");
         }
@@ -805,13 +807,25 @@ impl Worker {
             self.apply_attached_union();
         }
         let paths = mem::take(&mut self.unwarmed);
-        let (_, rest) = self.in_parallel(paths, |db, file| {
+        let cancel = self.cancel.clone();
+        // A cancel can be lost to salsa's uncancel between two items, so a large file
+        // also checks the queue per item and is requeued when it stopped early.
+        let (done, mut rest) = self.in_parallel(paths, |db, file| {
             for &item in item_tree(db, file) {
+                if cancel.has_queued_jobs() {
+                    return false;
+                }
                 item_naming(db, item);
             }
             file_interface_reads(db, file);
             file_conditional_writers(db, file);
+            true
         });
+        rest.extend(
+            done.into_iter()
+                .filter(|(_, complete)| !complete)
+                .map(|(path, _)| path),
+        );
         self.unwarmed = rest;
         if self.unwarmed.is_empty() {
             // Open files so far published only their parse diagnostics.
@@ -2436,14 +2450,23 @@ impl LanguageServer for ServerState {
                     thread::sleep(Duration::from_millis(5));
                 }
             }
-            // The warm-up's end asks the client to pull again.
+            // The warm-up's end asks the client to pull again, so a client that cannot
+            // be asked waits for the full report instead of keeping a parse-only one.
             if !worker.unwarmed.is_empty()
+                && worker.supports_diagnostic_refresh
                 && let Some(&file) = worker.files.get(&path)
             {
-                let config = worker.config.clone();
-                let rendered = worker.fast_diagnostics(file, &config);
-                let diagnostics = worker.finish_diagnostics(file, rendered);
-                return Ok(diagnostic_report(diagnostics, params.previous_result_id));
+                let report = worker.cancellable(|worker| {
+                    let config = worker.config.clone();
+                    let rendered = worker.fast_diagnostics(file, &config);
+                    worker.finish_diagnostics(file, rendered)
+                });
+                return match report {
+                    Ok(diagnostics) => {
+                        Ok(diagnostic_report(diagnostics, params.previous_result_id))
+                    }
+                    Err(_) => Err(diagnostics_cancelled_error()),
+                };
             }
             match worker.cancellable(|worker| worker.settled_diagnostics(&path)) {
                 Ok(Some(diagnostics)) => {
