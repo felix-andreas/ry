@@ -405,7 +405,7 @@ pub unsafe extern "C" fn R_mkClosure(formals: Sexp, body: Sexp, env: Sexp) -> Se
 
 /// The expression a compiled body stands for: GNU R keeps it as the first constant of the
 /// bytecode's constant pool (code in the first slot, constants in the second).
-unsafe fn bytecode_expression(body: Sexp) -> Sexp {
+pub(crate) unsafe fn bytecode_expression(body: Sexp) -> Sexp {
     if body.kind() != SexpType::Bytecode {
         return body;
     }

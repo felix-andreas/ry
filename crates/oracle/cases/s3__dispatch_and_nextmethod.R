@@ -24,3 +24,10 @@ toString(m)
 length.stack <- function(x) length(unclass(x)$items)
 s <- structure(list(items = 1:5), class = "stack")
 length(s)
+
+# With the first formal unsupplied, UseMethod dispatches on the first supplied argument.
+first_missing <- function(x, y) UseMethod("first_missing")
+first_missing.foo <- function(x, y) "foo"
+first_missing.default <- function(x, y) "default"
+first_missing(y = structure(1, class = "foo"))
+first_missing()

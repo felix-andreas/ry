@@ -2,7 +2,9 @@
 //! `unlist`, lengths, names, dims, and attributes.
 
 use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special},
+    builtins::{
+        Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
+    },
     coerce::{self, coerce_vector},
     conditions,
     eval::{self, value_of},
@@ -412,7 +414,10 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
         let data = s4_data_part(object);
         if data == nil() {
-            return Err(crate::unwind::error_in(call, "object of type 'S4' is not subsettable"));
+            return Err(crate::unwind::error_in(
+                call,
+                "object of type 'S4' is not subsettable",
+            ));
         }
         return subset(data, indices, drop, call);
     }
@@ -703,7 +708,10 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
         let data = s4_data_part(object);
         if data == nil() {
-            return Err(crate::unwind::error_in(call, "this S4 class is not subsettable"));
+            return Err(crate::unwind::error_in(
+                call,
+                "this S4 class is not subsettable",
+            ));
         }
         return subset2(data, indices, exact, call);
     }
@@ -803,7 +811,8 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     let names = values::names(object);
     if index.kind() == SexpType::String
         && matches!(object.kind(), SexpType::List | SexpType::Expression)
-        && (index.element(0).bytes().is_empty() || match_name(names, index.element(0).bytes(), exact)?.is_none())
+        && (index.element(0).bytes().is_empty()
+            || match_name(names, index.element(0).bytes(), exact)?.is_none())
     {
         // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
         return Ok(nil());
@@ -841,7 +850,11 @@ unsafe fn single_position(
         SexpType::String => {
             let wanted = index.element(0);
             // An empty name means "no name", so it never selects an element.
-            let found = if wanted.bytes().is_empty() { None } else { match_name(names, wanted.bytes(), exact)? };
+            let found = if wanted.bytes().is_empty() {
+                None
+            } else {
+                match_name(names, wanted.bytes(), exact)?
+            };
             match found {
                 Some(position) => Ok(position),
                 None => Err(crate::unwind::error_in(call, "subscript out of bounds")),
@@ -1182,6 +1195,12 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
     let object = values::materialize(object)?;
     let value = values::materialize(value)?;
+    // A pairlist value assigns its elements, as a list would.
+    let value = if value.kind() == SexpType::Pairlist {
+        values::pairlist_to_list(value)?
+    } else {
+        value
+    };
     if object.kind() == SexpType::Pairlist || object.kind() == SexpType::Language {
         let list = values::pairlist_to_list(object)?;
         let result = subassign(list, indices, value, call)?;
@@ -1641,7 +1660,8 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
 struct Flattener {
     kind: SexpType,
     values: Vec<(Sexp, usize)>,
-    names: Vec<String>,
+    /// `None` is an NA name, which GNU R keeps as NA unless a tag is prefixed to it.
+    names: Vec<Option<String>>,
     any_names: bool,
     recursive: bool,
     use_names: bool,
@@ -1668,7 +1688,7 @@ impl Flattener {
         if is_list && self.recursive && value.kind() != SexpType::Language {
             for index in 0..count {
                 let name = self.child_name(tag, element_names, index, count);
-                self.add(value.element(index), &name)?;
+                self.add(value.element(index), name.as_deref().unwrap_or("NA"))?;
             }
             return Ok(());
         }
@@ -1677,7 +1697,7 @@ impl Flattener {
         }
         if !value.kind().is_vector() {
             self.values.push((value, usize::MAX));
-            self.names.push(tag.to_owned());
+            self.names.push(Some(tag.to_owned()));
             return Ok(());
         }
         for index in 0..count {
@@ -1688,27 +1708,32 @@ impl Flattener {
         Ok(())
     }
 
-    unsafe fn child_name(&self, tag: &str, names: Sexp, index: usize, count: usize) -> String {
+    unsafe fn child_name(
+        &self,
+        tag: &str,
+        names: Sexp,
+        index: usize,
+        count: usize,
+    ) -> Option<String> {
         if !self.use_names {
-            return String::new();
+            return Some(String::new());
         }
         let inner = if names != nil() && index < length(names) {
-            values::string_at(names, index)
-                .map_or_else(|| "NA".to_owned(), |text| text.into_owned())
+            values::string_at(names, index).map(|text| text.into_owned())
         } else {
-            String::new()
+            Some(String::new())
         };
-        match (tag.is_empty(), inner.is_empty()) {
-            (true, _) => inner,
-            (false, false) => format!("{tag}.{inner}"),
-            (false, true) => {
-                if count == 1 {
-                    tag.to_owned()
-                } else {
-                    format!("{tag}{}", index + 1)
-                }
-            }
+        if tag.is_empty() {
+            return inner;
         }
+        let inner = inner.unwrap_or_else(|| "NA".to_owned());
+        Some(if !inner.is_empty() {
+            format!("{tag}.{inner}")
+        } else if count == 1 {
+            tag.to_owned()
+        } else {
+            format!("{tag}{}", index + 1)
+        })
     }
 
     unsafe fn kind_of(&mut self, value: Sexp) -> R<()> {
@@ -1744,7 +1769,7 @@ impl Flattener {
             }
         }
         if self.any_names && self.use_names {
-            let names = string_vector(&self.names)?;
+            let names = values::string_vector_na(&self.names)?;
             values::set_attr(result, symbols().names, names)?;
         }
         Ok(result)
@@ -2622,7 +2647,9 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
             values::set_attr(result, symbols().dimnames, list)?;
         }
     } else if dimnames != nil() {
-        let all_dimnames: Vec<Sexp> = (0..dims.len()).map(|dimension| dimnames.element(dimension)).collect();
+        let all_dimnames: Vec<Sexp> = (0..dims.len())
+            .map(|dimension| dimnames.element(dimension))
+            .collect();
         let names = dropped_names(&kept, &all_dimnames);
         if names != nil() {
             values::set_attr(result, symbols().names, names)?;
@@ -2637,7 +2664,11 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
 fn dropped_names(kept: &[usize], dimnames: &[Sexp]) -> Sexp {
     let named: Vec<Sexp> = match kept {
         [dimension] => dimnames.get(*dimension).copied().into_iter().collect(),
-        _ => dimnames.iter().copied().filter(|names| *names != nil()).collect(),
+        _ => dimnames
+            .iter()
+            .copied()
+            .filter(|names| *names != nil())
+            .collect(),
     };
     match named.as_slice() {
         [names] => *names,
@@ -2666,12 +2697,18 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 while expression.kind() == SexpType::Promise {
                     expression = expression.cdr();
                 }
-                items.push(Arg { tag: cell.tag(), value: value_of(item)? });
+                items.push(Arg {
+                    tag: cell.tag(),
+                    value: value_of(item)?,
+                });
                 expressions.push(expression);
                 cell = cell.cdr();
             }
         } else {
-            items.push(Arg { tag: arg.tag, value: eval::eval(arg.value, call.env)? });
+            items.push(Arg {
+                tag: arg.tag,
+                value: eval::eval(arg.value, call.env)?,
+            });
             expressions.push(arg.value);
         }
     }
@@ -2684,14 +2721,20 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         }
         let classes = crate::dispatch::implicit_class(arg.value)?;
         for index in 0..length(classes) {
-            let symbol = values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
-            if let Some(method) = crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())? {
+            let symbol =
+                values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
+            if let Some(method) =
+                crate::dispatch::lookup_method(symbol, call.env, values::base_namespace())?
+            {
                 return eval::apply(call.call, method, &items, call.env);
             }
         }
     }
-    let (items, expressions): (Vec<Arg>, Vec<Sexp>) =
-        items.into_iter().zip(expressions).filter(|(arg, _)| arg.value != nil()).unzip();
+    let (items, expressions): (Vec<Arg>, Vec<Sexp>) = items
+        .into_iter()
+        .zip(expressions)
+        .filter(|(arg, _)| arg.value != nil())
+        .unzip();
     if items.is_empty() {
         return Ok(nil());
     }

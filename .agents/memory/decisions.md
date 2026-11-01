@@ -2689,6 +2689,20 @@ first lines R had already read, leaving R mid-command.
 
 - `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.
 
+## Corpus package tests: compatibility details that are easy to get wrong
+
+- **Hashed frames list in GNU R's order.** `ls()`, `as.list(env)` and `mget` over a hashed environment follow GNU R's bucket order, and packages' snapshot tests record that order. `heap::env::Frame::listed_cells` replays GNU R's table instead of storing one: buckets from the PJW hash, an insert prepends to its bucket, and when the count passes 0.85 of the size the table grows to `size * 1.2 + 1` and rehashes in bucket order, resetting the count to the occupied buckets. The global environment is hashed from its creation, as in GNU R. Replaying keeps the frame's own storage the single source of truth, at the cost of rebuilding the order on each listing, which only listing functions pay.
+- **String encodings.** Strings intern by pointer, and `mkchar` marks non-ASCII text UTF-8. `Encoding<-` and `iconv` mark text that is valid UTF-8 as UTF-8 even when asked for "unknown", because the session is UTF-8 and a second pointer for the same text would make `==` fail (desc's `read_dcf` broke on duplicate fields). Latin-1 strings stay a separate pointer, and `==` compares them by text through `values::same_text`; `match()` and `unique()` do not yet (`backlog.md`).
+- **A sink's connection is a GC root** (`connections::Table::trace`), because GNU R preserves the connection object while output goes to it, and the collector otherwise finalized and closed it under `capture.output`.
+- **S4 dispatch on an unsupplied argument dispatches on NULL**, as GNU R's `GetObject` does, even when the argument has a default (`dispatch::dispatch_object`).
+- **Queued finalizers root their weak reference's key, value and finalizer** (`libr::boundary::root_finalizable`), because the collector never traces a weak reference's fields and an earlier finalizer can allocate. `RY_GC_VERIFY=1` checks the write barrier's invariant before every minor collection, which is the quickest way to tell a missing barrier from a missing root.
+
+## One serializer writer, in libr
+
+- **Previous shape.** The interpreter (`crates/interp/src/serialize.rs`) had its own writer behind `.Internal(serialize)`, `serializeToConn` and `saveToConn`, and libr (`crates/libr/src/serialize.rs`) had the full `R_Serialize` writer that `saveRDS` and native code used. The interpreter's copy wrote only XDR version 3, so `serialize(x, NULL, version = 2)` gave version-3 bytes and digest's hashes of version-2 serializations were wrong.
+- **What was duplicated.** Two writers for one format, which drift: the interpreter's lacked versions, ASCII, native byte order and refhooks.
+- **Target shape.** libr's writer is the only one. libr registers the four internals (`serialize`, `serializeb`, `serializeToConn`, `saveToConn`) through `interp::register_builtins`, the same way the loader's builtins arrive, because the interpreter cannot depend on libr. The header is written one field per output call, as GNU R does, since digest's `spooky` algorithm counts the calls through a custom output function.
+- **Impact.** One source of truth for the format, version-2 output and refhooks for free, and digest's suite passes. The readers are still duplicated (`interp::serialize`'s `unserialize` and libr's `R_Unserialize`); `backlog.md` tracks merging them the same way.
 ## The cold check searches green trees and caches globals per item check
 
 - **Before.** Every whole-file tree reader (parse-stage diagnostics, annotation sites, attached namespaces, used tokens) walked the red tree with `descendants()`, building a red node per element, about 8 ns each. One item check read `frame_definition` and `package_name` through salsa for every reference, and each read interned a key tuple and verified a memo. `map_child_types` re-interned every type it visited, even when nothing changed.
@@ -2802,6 +2816,13 @@ first lines R had already read, leaving R mid-command.
   an `isdst` that contradicts the zone's rule shifts the reading by an hour, even in a zone with
   no daylight saving time, except for `"UTC"` and `"GMT"`, which GNU R converts itself; and a
   year outside jiff's range moves by whole 400-year cycles, which keeps the calendar and weekdays.
+- **A repeated (fall-back) wall time takes the offset in force at the wall time read as UTC**,
+  which is what glibc's `mktime` does with `isdst = -1`, so Berlin's 02:30 reads as CET while New
+  York's 01:30 reads as EDT. `strptime` keeps a spring-forward gap's wall-clock fields.
+- **The locale comes from the C library.** The session calls `setlocale` for the categories GNU R
+  sets at startup (numbers stay C), `Sys.setlocale`/`Sys.getlocale` go through it, and `sort()`
+  reads `LC_COLLATE` from it (`sort::refresh_collation`) instead of a fixed C.UTF-8 answer, which
+  is what withr's `local_locale` tests and C-collation sorts observe.
 - **`nlm`, `nlminb` and `polyroot` are written from the published algorithms**, not GNU R's code:
   Dennis and Schnabel's UNCMIN for `nlm`, a trust-region quasi-Newton method behind PORT's
   `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
