@@ -64,8 +64,11 @@ impl ReplSession {
             .expect("openpty");
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ry"));
         command.args(arguments);
-        if let Some(directory) = directory {
-            command.cwd(directory);
+        // portable-pty starts the child in $HOME when no directory is given, and a build
+        // sandbox's HOME (Nix uses /homeless-shelter) need not exist.
+        match directory {
+            Some(directory) => command.cwd(directory),
+            None => command.cwd(std::env::current_dir().expect("the test's working directory")),
         }
         let child = pair.slave.spawn_command(command).expect("spawn repl");
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
