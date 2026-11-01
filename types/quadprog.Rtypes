@@ -2,4 +2,5 @@
 # with the first `meq` constraints as equalities.
 @alias QPSolution {list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}}
 
-solve.QP : @pure fn(Dmat: matrix, dvec: double[], Amat: matrix, bvec: double[], [meq]: integer, [factorized]: logical) -> QPSolution
+# `dvec` and `bvec` are read as vectors, so a one-column matrix works as well.
+solve.QP : @pure fn(Dmat: matrix, dvec: double[] | matrix, Amat: matrix, bvec: double[] | matrix, [meq]: integer, [factorized]: logical) -> QPSolution

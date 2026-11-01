@@ -171,8 +171,9 @@ seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any,
 seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
 seq : @pure fn(...: Any) -> Any
 seq.int : @pure Any
-rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
-rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any) -> Any
+# `rep` ignores the arguments it does not know, so `rep(".", n, collapse = TRUE)` runs.
+rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> T[]
+rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any, ...: Any) -> Any
 rep_len : @pure fn(x: Any, length.out: Any) -> Any
 
 # Type predicates: a single logical, computed from the whole value.

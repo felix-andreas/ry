@@ -1386,7 +1386,7 @@ because the forwarded `...` may be empty. So `dedup(basename, paths)` is accepte
 `basename` takes a single argument. A call that passes nothing but the forwarded `...`, as in
 `function(callback) function(...) callback(...)`, gives the parameter the type `fn(...: Any) -> T`,
 which any function satisfies, including one with required parameters such as
-`function(path) paste0(path, "/cache")`. An annotation `fn(...: Any) -> T` means the same. R
+`function(path) paste0(path, "/cache")` or `function(endpoint, ...) paste(endpoint, ...)`. An annotation `fn(...: Any) -> T` means the same. R
 expands an argument whose value is `...` whatever its name, so `func(x, ... = ...)` forwards the
 dots exactly as `func(x, ...)` does.
 

@@ -41,11 +41,8 @@ discard : fn(.x: Any, .p: Any, ...: Any) -> Any
 reduce : <T, A> fn(.x: list[T] | T[], .f: fn(A, T) -> A, ...: Any, [.init]: A, [.dir]: character) -> A
 
 # Adverbs wrap a function and only build the wrapper, so they are pure.
-# `possibly()` returns `otherwise` where `.f` fails; one candidate per arity
-# keeps the argument types.
-possibly : @pure <A, R, O> fn(.f: fn(A) -> R, [otherwise]: O, [quiet]: logical) -> fn(A) -> R | O
-possibly : @pure <A, B, R, O> fn(.f: fn(A, B) -> R, [otherwise]: O, [quiet]: logical) -> fn(A, B) -> R | O
-possibly : @pure <A, B, C, R, O> fn(.f: fn(A, B, C) -> R, [otherwise]: O, [quiet]: logical) -> fn(A, B, C) -> R | O
+# `possibly()` returns `otherwise` where `.f` fails. The wrapper takes any
+# arguments: a candidate per arity would keep their types but drop their names,
+# and `safely(gh)(endpoint, branch = branch)` passes them by name.
 possibly : @pure <R, O> fn(.f: fn(...: Any) -> R, [otherwise]: O, [quiet]: logical) -> fn(...: Any) -> R | O
-safely : @pure <A, R, O> fn(.f: fn(A) -> R, [otherwise]: O, [quiet]: logical) -> fn(A) -> list{result: R | O, error: Any}
 safely : @pure <R, O> fn(.f: fn(...: Any) -> R, [otherwise]: O, [quiet]: logical) -> fn(...: Any) -> list{result: R | O, error: Any}

@@ -1349,7 +1349,11 @@ fn pair_parameters<'db>(
     let mut rest = Vec::new();
     match (&actual.variadic, &expected.variadic) {
         (Some(actual_variadic), Some(expected_variadic)) => {
-            if actual_variadic.preceding_named != expected_variadic.preceding_named {
+            // `fn(...: Any) -> T` promises nothing about the parameters before `...`,
+            // so any function fits it, whatever it names ahead of its own `...`.
+            if !forwards_anything
+                && actual_variadic.preceding_named != expected_variadic.preceding_named
+            {
                 return None;
             }
             rest.push((expected_variadic.element, actual_variadic.element));

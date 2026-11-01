@@ -1367,3 +1367,35 @@ counts <- function(words) vapply(words, function(word) paste(word, collapse = " 
 #++++
 counts: Unknown
 84..94 error[type-mismatch] expected `character[] | character`, found `double[]`
+#---- a_returned_closure_with_named_parameters_fits_a_dots_only_callback
+#: <R> fn(f: fn(...: Any) -> R) -> R
+wrap <- function(f) f()
+maker <- function(tr) {
+  force(tr)
+  function(endpoint, ...) paste(endpoint, ..., tr)
+}
+use <- function(tr) {
+  gh <- maker(tr)
+  wrap(gh)
+}
+#++++
+wrap: <T> fn(f: fn(...: Any) -> T) -> T
+maker: <T, U> fn(tr: T) -> fn(endpoint: U, ...: Any) -> character
+use: <T> fn(tr: T) -> character
+
+#---- a_returned_closure_does_not_fit_a_typed_dots_callback
+#: <R> fn(f: fn(...: double) -> R) -> R
+wrap <- function(f) f(1)
+maker <- function(tr) {
+  force(tr)
+  function(endpoint, other, ...) paste(endpoint, ..., tr)
+}
+use <- function(tr) {
+  gh <- maker(tr)
+  wrap(gh)
+}
+#++++
+wrap: <T> fn(f: fn(...: double) -> T) -> T
+maker: <T, U, V> fn(tr: T) -> fn(endpoint: U, [other]: V, ...: Any) -> character
+use: Unknown
+208..210 error[type-mismatch] expected `fn(...: double) -> T`, found `fn(endpoint: U, [other]: V, ...: Any) -> character`
