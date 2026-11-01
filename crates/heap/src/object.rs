@@ -25,8 +25,31 @@ use {
         ffi::c_void,
         fmt,
         ptr::NonNull,
+        sync::OnceLock,
     },
 };
+
+/// Reads and writes elements of ALTREP string and list vectors. Only the C API host knows the
+/// classes' methods, so it installs these; the heap and the interpreter then treat every vector
+/// alike.
+#[derive(Clone, Copy)]
+pub struct AltrepElements {
+    pub read: unsafe fn(Sexp, usize) -> Sexp,
+    pub write: unsafe fn(Sexp, usize, Sexp),
+}
+
+static ALTREP_ELEMENTS: OnceLock<AltrepElements> = OnceLock::new();
+
+/// Installs the accessors behind [`Sexp::element`] and `Heap::set_element` for ALTREP
+/// instances. Later calls keep the first.
+pub fn install_altrep_elements(elements: AltrepElements) {
+    ALTREP_ELEMENTS.get_or_init(|| elements);
+}
+
+/// The installed ALTREP accessors, for an object that has the ALTREP flag.
+pub(crate) fn altrep_elements() -> Option<&'static AltrepElements> {
+    ALTREP_ELEMENTS.get()
+}
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -726,9 +749,17 @@ impl Sexp {
         unsafe { self.slice::<u8>() }
     }
 
-    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`.
+    /// An element of a `STRSXP`, `VECSXP` or `EXPRSXP`. An ALTREP instance has no element
+    /// storage, so its class's `Elt` method answers through the accessor the host installed.
     pub unsafe fn element(self, index: usize) -> Sexp {
-        unsafe { *(self.data() as *const Sexp).add(index) }
+        unsafe {
+            if self.is_altrep()
+                && let Some(elements) = ALTREP_ELEMENTS.get()
+            {
+                return (elements.read)(self, index);
+            }
+            *(self.data() as *const Sexp).add(index)
+        }
     }
 
     pub(crate) unsafe fn set_element_unbarriered(self, index: usize, value: Sexp) {

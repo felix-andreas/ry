@@ -1847,7 +1847,7 @@ signature in two languages for no safety gain.
 there was no previous source of truth; the choices that settle architecture are these.
 
 - **One installed package directory serves GNU R 4.6 and ry's runtime,** because ry's `libR` is
-  ABI-compatible and presents as R 4.6. ry treats the `Built:` field as GNU R does (refusing only
+  ABI-compatible with R 4.6's headers and reports the version of the GNU R it loads base R from. ry treats the `Built:` field as GNU R does (refusing only
   pre-3.0.0 builds), so existing libraries load unchanged. A package built under ry carries an extra
   `RyBuilt:` field until the oracle shows ry-built binaries load under GNU R, and the corpus is built
   only by GNU R.
@@ -3328,6 +3328,34 @@ first lines R had already read, leaving R mid-command.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
 
+## What keeps a dropped object alive: registers, handles, caches and dying finalizers
+
+GNU R finalizes an object at the first full `gc()` after its last reference goes, and R6, lgr's buffered appenders and processx all depend on that timing. Four places in ry's runtime held a reference GNU R does not have.
+
+- **The register file and the handle stack.** Both are roots. Tier-0 bytecode released handles only on a backward jump and never cleared a statement's temporaries, so a straight-line body kept everything it had touched until it returned. A statement of a `{` now ends with `Op::EndStatement dst start end`, which clears the block's result register and the statement's temporaries (registers are allocated in stack order, so they are exactly `start..end`) and releases the activation's handles, as the back edge already did. The AST interpreter's `do_begin` roots only the last value for the same reason. Compiled code shares the same register window, so the JIT lowers the op to inline `NULL` stores (`Action::Clear`), kills those registers in its liveness, and leaves handle release to tier 0's back edges and the activation's exit.
+- **Bytecode inline caches.** A cache holds the environment a lookup started from and the cell it found, so a body shared between closures (R6's `clone()` rebinds copied methods with `environment<-`) kept the original object's environment alive. A major collection empties every cache it traces (`Heap::trace`, `major_marking`) instead of marking through it; the next lookup refills it. Minor collections still trace them, so the retention lasts at most until the next full collection, which is when GNU R would finalize anyway.
+- **Tier-1 code.** A compiled body embeds its enclosure and the cells its lookups speculated on, and the body outlives any one closure (R6 gives every object's methods the same body). The TIER1 external pointer therefore protects a weak reference keyed on the enclosure, whose value lists what the machine code embeds. While the enclosure lives everything stays reachable; once it dies, `compiled_for` frees the code and clears TIER1, which is safe because a running activation keeps its own enclosure reachable.
+- **Removed binding cells.** A cell can outlive its frame entry while a cache holds it, so `remove_binding` sets the cell's value to the unbound marker and a stale cell reaches nothing.
+- **Dying finalizers.** Marking a dying weak reference's key, value and finalizer can make another weak reference's key reachable after the ephemeron fixpoint ended, and that reference's value and finalizer were then swept while it stayed registered (processx's exit finalizers ran freed closures). `process_weak_refs` now takes every dying reference off the list before marking any of them, then queues and marks them all. What they reach can no longer be a registered reference's key that missed the fixpoint, because every reference still registered has a key the fixpoint already marked, as GNU R's `CheckFinalizers` does.
+- **Visibility of a variable read.** Reading a variable can force a promise, whose expression then decides whether the value prints (`withCallingHandlers(f(), ...)` stays invisible when `f()` is). Compiled code sets the visible flag before the load, not after it, and the analysis treats the flag as unknown after a load that may force.
+- **Expression vectors.** `eval()` of an expression vector (`eval::eval_all`, which is how testthat runs a test file) releases each element's handles before the next element runs, exactly as `{` does, so a `gc()` in one top-level statement of a test file finalizes what an earlier statement dropped (lgr's `AppenderBuffer` flushes on destruction this way).
+- **Impact:** finalizer timing matches GNU R in the oracle cases `evaluation__block_finalizers`, `evaluation__expression_vector_finalizers` and `evaluation__finalizers_in_compiled_code`. The cost is one instruction per block statement in tier 0 and a cache refill after each major collection. No effect on static analysis.
+
+## ALTREP elements go through the class methods everywhere
+
+- **Previous shape.** libr's C entry points dispatched ALTREP `Elt` methods, but the interpreter read and wrote vector elements through `Sexp::element` and `Heap::set_element`, which read raw storage. About 370 interpreter call sites then saw an ALTREP instance's private triple instead of its elements (nanoarrow's character columns crashed DBI's arrow round trip).
+- **Target shape.** `heap::object::install_altrep_elements` takes a read and a write function, which libr installs at startup, and `Sexp::element` and `Heap::set_element` dispatch to them for an ALTREP object, so there is one access path and no call site can forget it. The accessor cannot fail, so an unwind from the method (an error, a condition handler's jump, an interrupt) is parked in the interpreter (`interp::unwind::park`) and raised as soon as the builtin that made the read returns (`call_builtin`), before its value reaches any R code, so `tryCatch(x[[2]], ...)` catches it; a read outside a builtin raises it at the evaluator's next poll instead. Meanwhile the read returns `NA` (strings) or `NULL`. `length()` asks the class's `Length` method, and `[[` on a string or list instance reads only the element it selects, so an R caller runs `Elt` exactly where GNU R does (`r_code_reads_only_the_string_elements_it_asks_for` in `crates/libr/tests/test_altrep.rs`). Numeric instances are still materialized whole for slice access. Making `element` fallible would touch every call site for a case only ALTREP classes reach. An ALTREP instance is never marked mutable, so the interpreter copies it before modifying it in place, as GNU R's `DATAPTR` contract implies.
+
+## POSIX regular expressions run on an automaton when they need the longest match
+
+- **Previous shape.** TRE patterns (`perl = FALSE`) ran on fancy-regex with `leftmost_longest`, which sends every variable-width pattern to the backtracker. lgr's `(.*z.*){10}` never finished.
+- **Target shape.** `Matcher::Automaton` keeps two regex-automata `meta::Regex` beside the fancy one: a leftmost-first search gives the match start, and an anchored `MatchKind::All` search from there gives the longest end, which is POSIX's leftmost-longest rule in linear time. Capture groups still come from fancy-regex, and the callers that do not report groups (`regexpr` and `gregexpr` without `perl`, `sub` and `gsub` without backreferences) never ask for them. Patterns regex-automata cannot compile, such as ones with backreferences, stay on fancy-regex.
+
+## Smaller runtime choices
+
+- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
+- **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports ASCII as GNU R does and utf8's formatting under `LC_ALL=C` escapes what GNU R escapes.
+
 ## libR commits mimalloc arenas lazily, and handle vectors are not zeroed before their fill
 
 - **Previous shape.** `libR.so` declares its own mimalloc, separate from the `ry` binary's, and only the binary turned off eager arena commit. In `libR` an eagerly committed arena is backed by transparent huge pages, so after earlier work had purged parts of it, the next large vector faulted them back in and the kernel zeroed and compacted whole huge pages. Every `Rf_allocVector` also zeroed the whole vector, which GNU R does not do for numbers, and a character vector or list was zeroed and then filled.
@@ -3711,6 +3739,24 @@ explicit allocators".
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
 
+## A DataFrame column reads back as a plain vector, not an Array
+
+- `DataFrame(price = [12.5, 9.99])` checks each column as an Array, then stores it as the plain
+  vector, and `df$price` reads back a plain `double[]`, statically and at run time.
+- Typing the read as `Array<T>` was rejected: a frame's later steps can put `NA` into a column (a
+  left join's unmatched rows), so the column type would have to be tracked per verb and an
+  `NA`-holding column would need a second representation. One column type keeps the schema the
+  single source of truth. `as.Array(df$x)` is the checked way back, and it fails on an `NA`.
+
+## mimalloc's purge delay stays at its default
+
+- Raising `MIMALLOC_PURGE_DELAY` (or calling `mi_option_set` for `purge_delay` in
+  `crates/libr/src/libr.rs`) keeps freed pages resident. Measured on the whole db-benchmark script
+  with lazy arena commit (`LAZY_ARENA_COMMIT` in the same file), never purging was 7% faster and
+  raised peak memory by 1.4 GB. The option is process-wide, so every R program would pay the
+  memory for a gain that lies mostly in CSV loading. The numbers are in the backlog item "Large
+  allocations page-fault on every query"; revisit with a per-query arena, which keeps the gain without the global cost.
+
 ## Releases are built natively per platform, with the runtime beside the binary
 
 - **Before.** `just release` cross-built `ry` alone for three targets with nix and zig on one
@@ -3812,6 +3858,18 @@ explicit allocators".
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
 
+## The C headers declare the API of the presented R version
+
+- ry presents the R version of its base `DESCRIPTION` (4.3.3), and packages branch on `R_VERSION`
+  to backport newer API. If the headers declared every name ry implements, those backports would
+  collide (rlang's `ANY_ATTRIB`, `CLEAR_ATTRIB` and `R_mapAttrib`, yaml's `R_mkClosure`), and names
+  newer R removed would be missing (Rcpp's `VECTOR_PTR` below 4.5).
+- So every declaration GNU R added in 4.4, 4.5 or 4.6 sits behind `#if R_VERSION >= R_Version(...)`,
+  with the version taken from GNU R's own headers, and `VECTOR_PTR` is declared below 4.5. The
+  headers include `Rversion.h`, which `ry-rcmd assemble` generates for the home.
+- The crate's fallback `Rversion.h` says 4.6, so ry's own tests and code built straight against
+  `crates/libr/include` still see every name. `libR.so` exports all of them regardless.
+
 ## macOS packages bind to ry's libR
 
 - **Before.** `crates/libr/build.rs` set the export list and soname for Linux only, so a macOS
@@ -3851,3 +3909,30 @@ explicit allocators".
   rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
   `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
   The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).
+
+## The runtime emulates the GNU R version it loads base R from
+
+- **Before.** ry's runtime always presented as R 4.6 at the R level, while its internals followed
+  R 4.3's behavior, so base R 4.6's own R code failed its `Built:` check or called internals that
+  had changed or did not exist yet.
+- **Now.** The version comes from the base package in `R_HOME` (`interp::system::r_version`:
+  `library/base/DESCRIPTION` for the version, `SVN-REVISION` of the GNU R home that base links to
+  for the revision and date, clamped to at least 89194). `R.version`, `getRversion()`, the `Built:`
+  check, the serialization writer version and the `Rversion.h` that `rcmd` generates all report it. Behavior that GNU R changed between versions is gated with
+  `interp::system::r_at_least(major, minor)` at the one place it differs (strptime in a DST gap,
+  `psignrank` rounding, `%*%` argument counts, `rbind`/`cbind` passing `deparse.level` to S3
+  methods, `is.atomic(NULL)`, complex formatting, short hex colours, the graphics engine version).
+  Additions such as `Tailcall`, `Exec`, `declare` and zstd compression exist under every version,
+  because no older base R calls them.
+- **Range.** GNU R 4.3 and later; an older `R_HOME` stops `ry run` with an error naming the version.
+  The oracle and the interp and ry test suites are run under 4.3.3 and 4.6.1 (`ORACLE_R` and
+  `R_HOME` select the installation). Gates for 4.4 and 4.5 were placed from GNU R's sources and
+  NEWS, not from running those versions.
+- **The default packages' routine table is the union over versions** (`builtin_libraries.rs`), so
+  a routine GNU R removed (`C_pKS2` in 4.6) still resolves. Base R's own code never calls a removed
+  routine, so the extra entries are harmless; a script calling one directly differs from GNU R.
+- **The C API surface stays R 4.6's whatever the version,** because a newer API is a superset; only
+  the version macros in the generated `Rversion.h` follow base. A package compiled from source must
+  be reinstalled when the linked base version changes.
+- **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
+  right result but not constant stack depth; true tail calls are in `backlog.md`.

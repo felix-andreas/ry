@@ -8,12 +8,17 @@
 
 use {
     crate::{Error, Result},
+    foldhash::HashMap,
     polars::prelude::{
-        BooleanChunked, ChunkUnique, DataType, Float64Chunked, FrozenCategories, Int32Chunked,
-        IntoSeries, NewChunkedArray, PlSmallStr, Series, StringChunked,
+        BooleanChunked, DataType, Float64Chunked, FrozenCategories, Int32Chunked, IntoSeries,
+        NewChunkedArray, PlSmallStr, Series, StringChunked, UInt32Chunked,
     },
     polars_arrow::{array::PrimitiveArray, bitmap::Bitmap, datatypes::ArrowDataType},
     polars_buffer::{Buffer, SharedStorage},
+    rayon::{
+        iter::{IntoParallelRefMutIterator, ParallelIterator},
+        slice::ParallelSliceMut,
+    },
 };
 
 /// R's `NA_integer_`, which is also `NA` for a logical vector.
@@ -227,19 +232,55 @@ pub fn enum_dtype(levels: &[String]) -> Result<DataType> {
     )?))
 }
 
-/// A string column as a factor with R's default levels, its distinct values sorted, as
-/// `factor(x)` makes them.
+/// A string column as a factor with its distinct values as levels, sorted in byte order, which is
+/// what `factor(x)` gives in R's C locale.
+///
+/// The codes come from one pass that numbers each distinct string as it first appears, so the
+/// strings are hashed once and never copied; sorting then touches only the distinct values, and
+/// a final pass renumbers the codes into level order. Going through Polars' own string-to-`Enum`
+/// cast instead looks every row up again in the new categories, which costs several times more
+/// on a column with millions of distinct values.
 pub fn string_to_factor(series: &Series) -> Result<Series> {
     let strings = series.cast(&DataType::String)?;
-    let mut levels: Vec<String> = strings
-        .str()?
-        .unique()?
-        .iter()
-        .flatten()
-        .map(str::to_string)
-        .collect();
-    levels.sort_unstable();
-    Ok(strings.cast(&enum_dtype(&levels)?)?)
+    let chunked = strings.str()?;
+    let mut numbering: HashMap<&str, u32> = HashMap::default();
+    let mut distinct: Vec<&str> = Vec::new();
+    let mut codes: Vec<u32> = Vec::with_capacity(chunked.len());
+    for value in chunked.iter() {
+        codes.push(match value {
+            Some(value) => *numbering.entry(value).or_insert_with(|| {
+                distinct.push(value);
+                (distinct.len() - 1) as u32
+            }),
+            None => u32::MAX,
+        });
+    }
+    drop(numbering);
+    let mut order: Vec<u32> = (0..distinct.len() as u32).collect();
+    order.par_sort_unstable_by_key(|first_seen| distinct[*first_seen as usize]);
+    let mut rank = vec![0u32; distinct.len()];
+    for (position, first_seen) in order.iter().enumerate() {
+        rank[*first_seen as usize] = position as u32;
+    }
+    codes.par_iter_mut().for_each(|code| {
+        // A missing row's code is masked by the validity bitmap, so any level stands in for it.
+        *code = rank.get(*code as usize).copied().unwrap_or(0)
+    });
+    let dtype = DataType::from_frozen_categories(FrozenCategories::new(
+        order
+            .iter()
+            .map(|first_seen| distinct[*first_seen as usize]),
+    )?);
+    let validity =
+        (chunked.null_count() > 0).then(|| chunked.iter().map(|value| value.is_some()).collect());
+    let physical = UInt32Chunked::with_chunk(
+        series.name().clone(),
+        PrimitiveArray::new(ArrowDataType::UInt32, codes.into(), validity),
+    )
+    .into_series()
+    .cast(&dtype.to_physical())?;
+    // SAFETY: every code is the position of its string among the dtype's categories.
+    Ok(unsafe { physical.from_physical_unchecked(&dtype) }?)
 }
 
 fn validity<T>(values: &[T], valid: impl Fn(&T) -> bool) -> Option<Bitmap> {

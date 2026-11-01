@@ -2915,7 +2915,7 @@ that take a DataFrame directly would close the gap.
 variable keeps its name:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))   # DataFrame{team: character[], amount: double[]}
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: character[], amount: double[]}
 ```
 
 An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
@@ -3043,7 +3043,7 @@ sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 of `.SD`, each typed as `g` applied to that column alone. Under `by`, the group columns come first:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales <- DataFrame(team = ["a", "b"], units = [1L, 2L], price = [1.5, 2.5])
 sales[, lapply(.SD, sum), by = team]
 # DataFrame{team: character[], units: integer[], price: double[]}
 sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
@@ -3058,7 +3058,7 @@ type-mismatch
 
   x this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
    --[main.R:2:27]
- 1 | sales <- DataFrame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ 1 | sales <- DataFrame(team = ["a", "b"], units = [1L, 2L], price = [1.5, 2.5])
  2 | print(sales[, lapply(.SD, function(v) v * 2)])
    |                           ^^^^^^^^^^^^^^^^^
 ```
@@ -3103,7 +3103,7 @@ columns ry cannot see, so the result has unknown columns.
 An alias taken earlier keeps the old type, and `y := NULL` removes the column:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])
 before <- sales
 sales[, tax := amount * 0.2]    # sales: DataFrame{team: character[], amount: double[], tax: double[]}
 before$tax                      # error: the frame `before` has no column `tax`. Its columns are `team`, `amount`
@@ -3144,7 +3144,7 @@ by reference, needs. When that name is a global frame, later reads in the same f
 the updated columns, while other top-level code keeps the frame's declared type:
 
 ```r
-sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])
 with_tax <- function() {
   sales[, tax := amount * 0.2]
   sales$tax                       # double[]
@@ -3202,8 +3202,8 @@ columns of `i` that no condition uses, renamed `i.name` when `x` has the same na
 repeats takes the first free numeric suffix, as R's `make.unique` gives it:
 
 ```r
-events <- DataFrame(id = 1:3, t = c(1, 2, 3), v = c("a", "b", "c"))
-windows <- DataFrame(id = 1:2, lo = c(0, 1), hi = c(2L, 5L))
+events <- DataFrame(id = 1:3, t = [1, 2, 3], v = ["a", "b", "c"])
+windows <- DataFrame(id = 1:2, lo = [0, 1], hi = [2L, 5L])
 events[windows, on = .(id, t >= lo)]           # DataFrame{id: integer[], t: double[], v: character[], hi: integer[]}
 events[windows, on = .(t >= lo, t < hi)]       # DataFrame{id: integer[], t: double[], v: character[], t.1: integer[], i.id: integer[]}
 ```
@@ -3221,7 +3221,7 @@ the order of their conditions and named as in the join's layout, followed by `j`
 the rows the row matched, and `.N` counts those rows:
 
 ```r
-counts <- DataFrame(t = c(1, 2, 3), v = c(10L, 20L, 30L))
+counts <- DataFrame(t = [1, 2, 3], v = [10L, 20L, 30L])
 counts[windows, on = .(t >= lo), .(n = .N, total = sum(v), wide = if (hi > 2L) "yes" else "no"), by = .EACHI]
 # DataFrame{t: double[], n: integer[], total: integer[], wide: character[]}
 ```

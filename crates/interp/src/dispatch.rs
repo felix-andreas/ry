@@ -471,18 +471,16 @@ unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
 }
 
 /// The value of the first supplied argument among a call's matched arguments.
-unsafe fn first_supplied(mut promargs: Sexp) -> R<Sexp> {
-    while promargs.kind() == SexpType::Pairlist {
-        let value = promargs.car();
-        if value.kind() == SexpType::Dots {
-            return value_of(value.car());
-        }
-        if value != missing_arg() {
-            return value_of(value);
-        }
-        promargs = promargs.cdr();
+unsafe fn first_supplied(promargs: Sexp) -> R<Sexp> {
+    if promargs.kind() != SexpType::Pairlist {
+        return Ok(nil());
     }
-    Ok(nil())
+    // GNU R's GetObject takes the first argument even when it was left empty.
+    match promargs.car() {
+        value if value.kind() == SexpType::Dots => value_of(value.car()),
+        value if value == missing_arg() => Ok(nil()),
+        value => value_of(value),
+    }
 }
 
 unsafe fn apply_method(
@@ -757,6 +755,22 @@ pub unsafe fn try_builtin_dispatch(
     args: &[Arg],
     env: Sexp,
 ) -> R<Option<Sexp>> {
+    // From R 4.4 on, the matrix products count their arguments before they dispatch, so
+    // `` `%*%`(x) `` is an error even when `x` has a method.
+    if definition.generic == Generic::MatrixOps && crate::system::r_at_least(4, 4) {
+        let required = if definition.name == "%*%" { 2 } else { 1 };
+        let passed = args.len().min(2);
+        if passed < required {
+            let noun = if passed == 1 { "argument" } else { "arguments" };
+            return Err(crate::unwind::error_in(
+                call,
+                format!(
+                    "{passed} {noun} passed to '{}' which requires at least {required}",
+                    definition.name
+                ),
+            ));
+        }
+    }
     let Some(first) = args.first() else {
         return Ok(None);
     };

@@ -384,7 +384,6 @@ protects construction but nothing after it.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
 - The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
   would let compiled loops run strict arithmetic without the generic call.
-- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 - An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
   as well as the Array error, because the check runs after R's operator. Muffle the warning when the
@@ -433,6 +432,11 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
   untyped code, minus the boundary checks.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
+- **`uniroot(extendInt = "yes")` loops to its iteration limit under `RY_JIT=force`** after another
+  closure with a formal named `f` ran first (`stats__optimize_and_integrate`, the `ry-jit` engine
+  only). The `while` condition `f.lower * f.upper > 0` keeps reading the old `f.upper` after the
+  body reassigns it inside `is.na(f.upper <- f(...))`; both are formals with defaults
+  (`defaulted`). Already on main before the statement-clearing work.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
@@ -501,10 +505,6 @@ change that does not pay.
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
-6. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
-   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
-   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
-   only alongside other work in that file.
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
@@ -2009,11 +2009,18 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
-  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
-  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
-  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
-  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
+- **Large allocations page-fault on every query.** mimalloc returns freed memory to the OS after
+  10 ms, so a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena
+  commit and the one-pass factor conversion, the whole db-benchmark script (load plus all
+  questions) runs 97 s at 6.7 GB peak by default and 91 s at 8.1 GB with `MIMALLOC_PURGE_DELAY=-1`.
+  The delay is process-wide and trades resident memory in every R program, so it stays at
+  mimalloc's default. Keeping scratch small (the grouped median) and a per-query arena remain the
+  targeted fixes.
+- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
+  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
+  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
+  31 s for the same file. A factor representation that keeps the levels as a plain string array
+  and maps them only on demand would remove the 6 s.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
@@ -2106,22 +2113,38 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   constant or a symbol is not checked. The `ry run` preflight analyzes the
   script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
   file defines, which `ry check` accepts.
+- **`Tailcall` does not reuse the caller's frame** (`do_tailcall` in `crates/interp/src/eval.rs`), so
+  a deep tail-recursive loop written with it still grows the stack. GNU R 4.6 replaces the frame.
+- **R 4.4 and 4.5 are supported by reading GNU R's sources, not by running them.** Install both and
+  run the oracle and the interp and ry suites under each (`ORACLE_R`, `R_HOME`). Under 4.6.1 seven
+  oracle cases differ, mostly for build reasons (OpenBLAS digits, glibc `mktime` state, a NaN
+  payload), plus one that calls the removed `C_pKS2`; `contributing/corpus-and-oracle.md` lists them.
 - **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
-    full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
-    was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
-  - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
-    `rm()` and `gc()`, so it is finalized in a later block.
-  - `getParseData` returns `NULL` (see the source-references item below), and cli's
-    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
-  - Regular expressions fancy-regex cannot compile: rcmdcheck's `(?<q>...)\g{q}` backreference,
-    and lubridate's quantified lookahead `(?=\D+)?`. A non-constant-size pattern runs on
-    fancy-regex's backtracking VM because of `leftmost_longest`; a DFA leftmost-longest search
-    (regex-automata's `MatchKind::All`, anchored at the leftmost-first start) would avoid it.
+  - cli's "message if there is a sink" test: `sink(con, type = "message")` does not divert
+    stderr to the connection, and writes to a file connection are not flushed before it closes.
+    Both belong to the move of connection builtins onto `libr::connections`.
+  - `.Internal(inspect(x))` is missing.
+  - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
+    that hard-codes an id would differ (none in the corpus does).
+  - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
+    ry's environments and bytecode have their own layout. Only relative comparisons are portable.
+  - Each ALTREP string or list element read through `Sexp::element` pushes a handle that lives
+    until the enclosing scope ends, so a builtin walking a 10M-element nanoarrow column pushes 10M
+    handles. Materialize once in bulk paths, or root only where the element survives an
+    allocation.
+  - The TRE matcher now compiles three regexes per pattern, which costs `grepl` in a loop with no
+    matcher cache.
+  - `getParseData`'s comment parents (`comment_parent` in `crates/interp/src/lower.rs`) scan every
+    row per comment, quadratic in a heavily commented file parsed with `keep.source = TRUE`. The
+    builder knows each comment's enclosing node while it walks, so record it there.
+  - Tier-1 code is freed once its enclosure dies (`compiled_for` in `crates/jit/src/jit.rs`), on
+    the reasoning that a running activation keeps its closure, and so its enclosure, alive. An
+    activation whose closure's environment is replaced while it runs (`environment(f) <- e`
+    inside `f`) would break that. No repro yet; write one before changing the code.
   - Two unserializers: `interp::serialize`'s reader and libr's `R_Unserialize`. The writer is
     already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
     same way.
@@ -2133,15 +2156,20 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
       reports an error; quantified lookarounds and lookarounds in non-capturing groups.
     - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
-  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
-    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
-  - withr: `RNGkind` lacks "Marsaglia-Multicarry", "Buggy Kinderman-Ramage" and "Rounding", and
-    the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
   - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
     Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
-    asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
+    asymptotic test, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's error message for `hashfile(NA)`, the `parallel`
     package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
     alternative in mvtnorm, and `NextMethod` in xts.
+  - No graphics devices: Matrix's `Simple.R`, gtable, and every vignette that plots (rcmdcheck's
+    `R CMD build` of its `bad3` fixture) stop at "graphics devices are not supported by ry yet".
+  - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
+    (and magick) must be installed from source on ry, which `oracle install` does. magick's
+    configure needs Magick++ (`libmagick++-dev`), which the container lacks.
+  - pak fails to install in a parallel `oracle install --jobs 4` (its `install.libs.R` finds no
+    `DONE`) and installs alone; the cause is not known.
+  - pkgbuild's "warnings can be turned into errors": GNU R's `R CMD build` script on ry does not
+    turn a build warning into an error.
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).
@@ -2151,8 +2179,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
   `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
   values agree to about seven digits only.
-- **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
-  stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
+- **Source references differ in console srcfiles.** In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
   expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
   the column of a second expression after `;` differ. `.Internal(.traceback(x))`, the helper
