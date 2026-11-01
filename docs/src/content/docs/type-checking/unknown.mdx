@@ -47,8 +47,8 @@ through `UseMethod()` are `Any`, and strict mode does not report them.
 
 A base data frame's columns are not typed, so `df$amount` is `Unknown`. An annotation such as
 `df: data.frame` checks that a data frame arrives, but not which columns it has. ry's built-in
-[frame](/reference/type-system#frames) is the typed alternative: its columns, queries, updates and
-joins are all checked. For analysis code this is the gap that
-matters most, and `data.frame()` is usually the first place strict mode reports. Bare column names
+[`DataFrame`](/type-checking/dataframes) is the typed alternative, with every column, query and join checked.
+For analysis code this is the gap that matters most, and `data.frame()` is usually the first place
+strict mode reports. Bare column names
 inside dplyr verbs and the other data-masking functions are recognized, as
 [checking code](/guides/checking#names) shows.

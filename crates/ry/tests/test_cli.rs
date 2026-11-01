@@ -815,6 +815,24 @@ fn check_reads_the_package_namespace_past_a_test_file_s_bindings() {
     );
 }
 
+#[test]
+fn check_accepts_exports_made_at_run_time_or_found_on_the_search_path() {
+    let directory = project(&[
+        ("DESCRIPTION", "Package: expkg\n"),
+        ("NAMESPACE", "export(bgRed)\nexport(diff)\nS3method(diff,thing)\n"),
+        (
+            "R/a.R",
+            "styles <- list(bgRed = 41L)\nfor (style in names(styles)) assign(style, styles[[style]])\ndiff.thing <- function(x, ...) x\n",
+        ),
+    ]);
+    let output = ry(directory.path(), &["check", "."]);
+    assert!(
+        !output.stderr.contains("is exported but"),
+        "every export is bound: {}",
+        output.stderr
+    );
+}
+
 // The caret pads by terminal cells, not characters, so it sits beneath the glyph.
 #[test]
 fn check_reports_character_columns_and_aligns_the_caret() {

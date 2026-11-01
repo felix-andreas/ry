@@ -64,7 +64,7 @@ match (shape) {
       NameRef shape
     arm
       pattern tag :Circle
-        pattern record
+        pattern Record
           field radius =
             pattern bind r
       Binary Multiply
@@ -74,7 +74,7 @@ match (shape) {
           Literal Double("2")
     arm
       pattern tag :Rect
-        pattern record ..
+        pattern Record ..
           field width =
             pattern bind w
       if

@@ -127,10 +127,13 @@ rest (a bare `setClass` call is reported only when the file does not bind `setCl
 two annotations disagree only when their types differ once aliases expand).
 
 The CLI's cold check leans on this to cap its peak. It runs three passes over the files, largest
-first, in batches spread over the cores, and calls `trigger_lru_eviction` between batches:
-`diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is resident,
-then every item is named, then the diagnostics are assembled. Each file is therefore parsed exactly
-once, and at most a few batches of trees are alive at a time. `RootDatabase::one_shot` also turns
+first, spread over the cores. The first pass works in batches and calls `trigger_lru_eviction`
+between them: `diagnostics::derive_from_syntax` computes every tree-derived fact while the tree is
+resident. The second pass names every item and derives its interface and top-level read sets, and
+the third assembles the diagnostics. Neither later pass reads a tree. Naming runs as one batch
+with no barriers, and the diagnostics pass evicts between larger batches, which bounds the peak on
+a project with many findings. Each file is therefore parsed exactly once, and at most a few batches of trees
+are alive at a time. `RootDatabase::one_shot` also turns
 off the splice cache, which would otherwise keep the previous tree of every file. A
 `test_incremental.rs` case pins the one-parse property.
 
@@ -138,14 +141,26 @@ Most tree readers look for a handful of node kinds in a large file, and a red-tr
 red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
 takes a predicate over a green node and its parent, and builds red nodes only for the matches and
 their ancestors, while `syntax::for_each_token` visits token texts with no red nodes at all. The
-parse invariants check both against the red walks on every parsed program.
+per-file site collectors share one walk, `file_syntax_sites`, and the syntax lints walk the green
+tree with `syntax::walk_green`, building a red node (`syntax::node_at`) only where a cheap green
+test says a lint may fire. The parse invariants check these against the red walks on every parsed
+program.
 
-The cold check is CPU-bound and scales about 3.8 times on 4 cores, so per-file constant costs set its
-wall time. Two of them are worth knowing. Every salsa read of a tracked function with several
-arguments interns its key and verifies a memo, which is why one item check caches the frame
-definitions and package names it looks up in `SalsaGlobals`. And mimalloc commits its arenas lazily
-(`crates/ry/src/main.rs`): eager commit made the kernel zero huge pages that a short-lived process
-never touched.
+The cold check is CPU-bound and scales about 3 times on 4 cores, so per-file constant costs set its
+wall time. Several of them are worth knowing:
+
+- Every salsa read of a tracked function with several arguments interns its key and verifies a
+  memo. So one item check resolves all its frame binders in one query (`item_frame_binders`) and
+  caches the package names and schemes it looks up in `SalsaGlobals`. `package_name` and
+  `test_name` take only the name and read `ProjectFiles` themselves.
+- Salsa's interning takes a shard lock, and the atomics that track an interned value's last use
+  bounce between cores. `Name` and `Ty` are interned with `revisions = usize::MAX`, so they are never
+  collected and skip that bookkeeping, and `Symbol::new` checks a thread-local table before the
+  shared one.
+- The CLI creates every input at high durability except the attached namespaces, which it sets
+  after the first pass. Memos that never read that set skip verification in the new revision.
+- mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
+  huge pages that a short-lived process never touched.
 
 The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
 bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
@@ -208,6 +223,13 @@ A walk over the whole project reads small per-item projections instead of full n
 slots. Both are tiny tracked queries whose values survive an edit that only shifts ranges. The
 typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
 instead of running again.
+
+The walks reach those projections through one tracked memo per file (`file_definitions`,
+`file_interface_reads`, `file_conditional_writers`), never directly. After a keystroke salsa must
+confirm that a project-wide map is still valid, and it does so by checking the map's dependencies.
+Read per file, that is about 500 memos on a 300,000-line project, and every one outside the edited
+file passes on durability alone (see "The language server"). Read per item, it was about 56,000
+memos, which cost every editor request about 35 ms right after a keystroke.
 
 A check never reads a project-wide map either. Each lookup it makes across items goes through a
 firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
@@ -275,16 +297,31 @@ and all the documents, and the database handle deliberately never leaves it.
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** The worker first serves any settled publish it owes for the most
-  recently edited file. With nothing owed, it warms up the rest of the workspace one file at a time
-  and never publishes that work. Idle work that gets cancelled is requeued.
+  recently edited file. Next it lowers the durability of documents opened since (see below). With
+  nothing else to do, it warms up the rest of the workspace one file at a time and never publishes
+  that work. Idle work that gets cancelled is requeued.
+- **A request preempts idle work.** A request is queued first and then cancels the idle unit in
+  flight, if any, so a hover never waits for a background file to finish. A request never cancels
+  another request or a sync.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
 - **Only edited files change at low durability.** A workspace file enters the database at
-  `Durability::MEDIUM`, its first `didChange` lowers it to `LOW`, and closing it restores `MEDIUM`.
-  An edit then revalidates every memo that reads only other files by durability alone, without
-  walking its dependencies, which took a fifth off the settled re-check on the benchmark code
-  bases. A `test_incremental.rs` case pins that an edit never revisits the other files' trees.
+  `Durability::MEDIUM`, an open document is lowered to `LOW`, and closing it restores `MEDIUM`. The
+  stubs, settings, package metadata and data-file inputs are `MEDIUM` too, because a memo is only
+  as durable as its least durable input and nearly every memo reads the stubs. An edit then
+  revalidates every memo that reads only other files by durability alone, without walking its
+  dependencies. `test_incremental.rs` pins that an edit never revisits the other files' trees or
+  items.
+- **The project file list is `LOW` from the start.** Salsa never backdates a memo whose durability
+  drops, so if the project-wide maps started at `MEDIUM`, a file's first `LOW` write would change
+  them, then every `package_name`, then every item check in the project (about 2 s on a
+  300,000-line project). They read `ProjectFiles`, so a `LOW` list keeps them `LOW` throughout, and
+  the first edit re-derives only the edited file's own memos. `didOpen` leaves text that matches
+  the disk untouched, which would otherwise be a `MEDIUM` write that invalidates the whole project,
+  and idle time rewrites it at `LOW` so that the first keystroke does not pay for that file's share.
+  A setter that names no durability keeps the field's current one, so every write to a source file
+  names it.
 - **Positions convert only at the protocol edge**, against the target document's own text, in the
   negotiated encoding. That is UTF-16 by default, and UTF-8 when the client offers it. Signature-help
   label offsets are always UTF-16, as the LSP specification requires.

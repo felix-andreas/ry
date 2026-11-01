@@ -1,5 +1,5 @@
-//! Frames, ry's built-in table, as runtime values. A frame is an external pointer that owns a
-//! [`table::Table`], classed `"frame"`. The table is the only copy of the data: a column becomes
+//! `DataFrame`, ry's built-in table, as a runtime value. A DataFrame is an external pointer that
+//! owns a [`table::Table`], classed `"DataFrame"`. The table is the only copy of the data: a column becomes
 //! an R vector only when R code reads it.
 //!
 //! `x[i, j, by]` on a frame never reaches the `[` primitive. The evaluator and the bytecode hand
@@ -30,10 +30,10 @@ use rustc_hash::FxHashSet;
 use std::{cell::Cell, ffi::c_void};
 use table::{
     ColumnType, Table,
-    convert::{self, RVector, is_na_real, string_to_factor},
+    convert::{self, RVector, is_na_real},
     polars::prelude::{
-        ChunkAgg, Column, CsvReadOptions, CsvWriter, DataFrame, DataType, IntoColumn, IntoLazy,
-        ParquetReader, ParquetWriter, PlSmallStr, SerReader, SerWriter, col,
+        Column, DataFrame, DataType, IntoColumn, IntoLazy,
+        ParquetWriter, PlSmallStr, col,
     },
     query::{
         self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
@@ -49,23 +49,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".frame_read_parquet", 1, do_read_parquet),
     builtin(".frame_write_csv", 2, do_write_csv).invisible(),
     builtin(".frame_write_parquet", 2, do_write_parquet).invisible(),
-    builtin(".frame_type", 1, do_frame_type),
+    builtin(".frame_schema", 1, do_frame_schema),
     builtin(".frame_key", 1, do_frame_key),
     builtin(".frame_copy", 1, do_frame_copy),
     builtin(".frame_setkey", 3, do_frame_setkey).invisible(),
-    builtin("print.frame", -1, do_print).invisible(),
-    builtin("$.frame", 2, do_dollar),
-    builtin("[[.frame", -1, do_column),
-    builtin("[.frame", -1, do_bracket_values),
-    builtin("$<-.frame", 3, do_set_column),
-    builtin("[[<-.frame", 3, do_set_column),
-    builtin("names.frame", 1, do_names),
-    builtin("dim.frame", 1, do_dim),
-    builtin("dimnames.frame", 1, do_dimnames),
-    builtin("length.frame", 1, do_length),
-    builtin("as.list.frame", -1, do_to_list),
-    builtin("head.frame", -1, do_head),
-    builtin("tail.frame", -1, do_tail),
+    builtin("print.DataFrame", -1, do_print).invisible(),
+    builtin("$.DataFrame", 2, do_dollar),
+    builtin("[[.DataFrame", -1, do_column),
+    builtin("[.DataFrame", -1, do_bracket_values),
+    builtin("$<-.DataFrame", 3, do_set_column),
+    builtin("[[<-.DataFrame", 3, do_set_column),
+    builtin("names.DataFrame", 1, do_names),
+    builtin("dim.DataFrame", 1, do_dim),
+    builtin("dimnames.DataFrame", 1, do_dimnames),
+    builtin("length.DataFrame", 1, do_length),
+    builtin("as.list.DataFrame", -1, do_to_list),
+    builtin("head.DataFrame", -1, do_head),
+    builtin("tail.DataFrame", -1, do_tail),
 ];
 
 /// A registered namespace in the shape `loadNamespace` builds, so `ry::setkey` and
@@ -89,8 +89,8 @@ local({
 /// Exports every function of the namespace, the standard library's included, and attaches them
 /// as `package:ry` at position 2. The builtins bind the standard library in a `package:ry` just
 /// above base, which plain code without base R uses; once the default packages are attached, that
-/// environment is replaced by the full package in front of them, so `frame` masks
-/// `graphics::frame` and `ry::List.map` resolves through the namespace.
+/// environment is replaced by the full package in front of them, so `col` masks `base::col` and
+/// `ry::List.map` resolves through the namespace.
 const ATTACH: &str = r#"
 local({
   ns <- asNamespace("ry")
@@ -107,34 +107,33 @@ local({
 })
 "#;
 
-/// The user-facing functions, attached as `package:ry` right after the default packages so that
-/// `frame` wins over `graphics::frame`, which it still calls when given no arguments.
+/// The user-facing functions, attached as `package:ry` right after the default packages.
 const PACKAGE: &str = r#"
-frame <- .frame_new
-as.frame <- function(x) .frame_from_list(x)
-is.frame <- function(x) inherits(x, "frame")
-frame_type <- function(x) .frame_type(x)
-frame_read_csv <- function(path, strings_as_factors = FALSE) .frame_read_csv(path, strings_as_factors)
-frame_read_parquet <- function(path) .frame_read_parquet(path)
-frame_write_csv <- function(x, path) .frame_write_csv(x, path)
-frame_write_parquet <- function(x, path) .frame_write_parquet(x, path)
+DataFrame <- .frame_new
+as.DataFrame <- function(x) .frame_from_list(x)
+is.DataFrame <- function(x) inherits(x, "DataFrame")
+DataFrame.schema <- function(df) .frame_schema(df)
+DataFrame.read_csv <- function(path, strings_as_factors = FALSE) .frame_read_csv(path, strings_as_factors)
+DataFrame.read_parquet <- function(path) .frame_read_parquet(path)
+DataFrame.write_csv <- function(df, path) .frame_write_csv(df, path)
+DataFrame.write_parquet <- function(df, path) .frame_write_parquet(df, path)
 setkey <- function(x, ...) {
-  if (!inherits(x, "frame")) return(data.table::setkey(x, ...))
+  if (!inherits(x, "DataFrame")) return(data.table::setkey(x, ...))
   columns <- vapply(as.list(substitute(list(...)))[-1L], function(e) {
     if (is.character(e)) e else deparse(e)
   }, "")
   .frame_setkey(substitute(x), columns, parent.frame())
 }
 setkeyv <- function(x, cols, ...) {
-  if (!inherits(x, "frame")) return(data.table::setkeyv(x, cols, ...))
+  if (!inherits(x, "DataFrame")) return(data.table::setkeyv(x, cols, ...))
   .frame_setkey(substitute(x), cols, parent.frame())
 }
 key <- function(x) {
-  if (!inherits(x, "frame")) return(data.table::key(x))
+  if (!inherits(x, "DataFrame")) return(data.table::key(x))
   .frame_key(x)
 }
 copy <- function(x) {
-  if (!inherits(x, "frame")) return(data.table::copy(x))
+  if (!inherits(x, "DataFrame")) return(data.table::copy(x))
   .frame_copy(x)
 }
 "#;
@@ -149,11 +148,11 @@ local({
     structure(.frame_to_list(x), class = "data.frame", row.names = .set_row_names(dim(x)[[1L]]))
   }
   environment(to_data_frame) <- ns
-  registerS3method("as.data.frame", "frame", to_data_frame, envir = ns)
+  registerS3method("as.data.frame", "DataFrame", to_data_frame, envir = ns)
   to_data_table <- function(x, ...) data.table::setDT(to_data_frame(x))[]
   environment(to_data_table) <- list2env(list(to_data_frame = to_data_frame), parent = ns)
   setHook(packageEvent("data.table", "onLoad"), function(...) {
-    registerS3method("as.data.table", "frame", to_data_table, envir = asNamespace("data.table"))
+    registerS3method("as.data.table", "DataFrame", to_data_table, envir = asNamespace("data.table"))
   })
   # `package:ry` binds these names so that they also take frames. Binding the same functions in
   # `package:data.table` keeps them working on frames once data.table is attached above ry, and
@@ -172,16 +171,20 @@ local({
 /// The names `package:ry` binds beyond the standard library, read from the package's source so
 /// that the declarations in `types/ry.Rtypes` can be checked against them.
 pub fn package_functions() -> impl Iterator<Item = &'static str> {
-    PACKAGE.lines().filter_map(|line| line.split_once(" <- ").map(|(name, _)| name)).filter(|name| !name.starts_with(' '))
+    PACKAGE
+        .lines()
+        .chain(crate::dataframe::PACKAGE.lines()).filter_map(|line| line.split_once(" <- ").map(|(name, _)| name)).filter(|name| !name.starts_with(' '))
 }
 
 /// Attaches `package:ry` at position 2 of the search path.
 pub unsafe fn attach_package() -> R<()> {
     let namespace = crate::session::eval_text(NAMESPACE, values::global_env())?;
     crate::session::eval_text(PACKAGE, namespace)?;
+    crate::session::eval_text(crate::dataframe::PACKAGE, namespace)?;
     crate::data_table::attach(namespace)?;
     crate::session::eval_text(ATTACH, values::global_env())?;
     crate::session::eval_text(METHODS, values::global_env())?;
+    crate::session::eval_text(crate::dataframe::METHODS, values::global_env())?;
     Ok(())
 }
 
@@ -221,7 +224,7 @@ pub unsafe fn wrap(table: Table) -> R<Sexp> {
     };
     heap.root(object);
     heap.alloc_weak_ref(object, nil(), nil(), finalize as *const () as usize, false)?;
-    set_attr(object, symbols().class, scalar_string("frame")?)?;
+    set_attr(object, symbols().class, scalar_string("DataFrame")?)?;
     Ok(object)
 }
 
@@ -240,7 +243,7 @@ unsafe extern "C" fn finalize(object: Sexp) {
 #[allow(clippy::mut_from_ref)]
 pub unsafe fn table_of<'a>(object: Sexp) -> R<&'a mut Table> {
     if !is_frame(object) {
-        return Err(error("not a frame"));
+        return Err(error("not a DataFrame"));
     }
     Ok(&mut *object.external_address().cast::<Table>())
 }
@@ -340,13 +343,13 @@ unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Col
     let Some(contents) = column_contents(value)? else {
         return Err(error_in(
             call,
-            format!("column `{name}` is a {}, which a frame cannot hold", value.kind().name()),
+            format!("column `{name}` is a {}, which a DataFrame cannot hold", value.kind().name()),
         ));
     };
     let contents = recycle(contents, height).ok_or_else(|| {
         error_in(
             call,
-            format!("column `{name}` has {} rows, but the frame has {height}", length(value)),
+            format!("column `{name}` has {} rows, but the DataFrame has {height}", length(value)),
         )
     })?;
     convert::to_series(PlSmallStr::from(name), contents)
@@ -399,7 +402,7 @@ unsafe fn table_from_list(list: Sexp, call: Sexp) -> R<Table> {
         return Ok(table_of(list)?.fork());
     }
     if list.kind() != SexpType::List {
-        return Err(error_in(call, "a frame is built from a list, a data.frame or a data.table"));
+        return Err(error_in(call, "a DataFrame is built from a list, a data.frame or a data.table"));
     }
     let names = values::names(list);
     let columns: Vec<(String, Sexp)> = (0..length(list))
@@ -420,11 +423,6 @@ unsafe fn table_from_list(list: Sexp, call: Sexp) -> R<Table> {
 
 unsafe fn do_frame_new(call: &Call<'_>) -> R<Sexp> {
     let pieces = argument_pieces(call.args, call.env)?;
-    if pieces.is_empty() {
-        let plot_new = crate::lower::parse_text("graphics::plot.new()", "<frame>")?;
-        heap().root(plot_new);
-        return eval::eval(plot_new.element(0), call.env);
-    }
     let mut columns = Vec::with_capacity(pieces.len());
     for (position, piece) in pieces.iter().enumerate() {
         let value = piece.value()?;
@@ -476,56 +474,37 @@ unsafe fn do_read_csv(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
     let factors = values::require_flag(call.arg(1), "strings_as_factors")?;
     let fail = |failure: &dyn std::fmt::Display| error_in(call.call, format!("cannot read `{path}`: {failure}"));
-    let frame = CsvReadOptions::default()
-        .with_has_header(true)
-        .try_into_reader_with_file_path(Some(path.clone().into()))
-        .and_then(|reader| reader.finish())
-        .map_err(|failure| fail(&failure))?;
-    let height = frame.height();
-    let mut columns = Vec::with_capacity(frame.width());
-    for column in frame.into_columns() {
-        let series = column.as_materialized_series();
-        let series = match series.dtype() {
-            DataType::String if factors => string_to_factor(series).map_err(|failure| fail(&failure))?,
-            // R reads a whole-number column as integer when every value fits, and as double
-            // otherwise, as `fread` does without bit64.
-            DataType::Int64 => {
-                let values = series.i64().map_err(|failure| fail(&failure))?;
-                let fits = |value: Option<i64>| {
-                    value.is_none_or(|value| value > i64::from(i32::MIN) && value <= i64::from(i32::MAX))
-                };
-                let target = if fits(values.min()) && fits(values.max()) {
-                    DataType::Int32
-                } else {
-                    DataType::Float64
-                };
-                series.cast(&target).map_err(|failure| fail(&failure))?
-            }
-            _ => series.clone(),
-        };
-        columns.push(series.into_column());
+    let table = table::io::read_csv(std::path::Path::new(&path)).map_err(|failure| fail(&failure))?;
+    if !factors {
+        return wrap(table);
     }
-    let frame = DataFrame::new(height, columns).map_err(|failure| fail(&failure))?;
+    let mut frame = table.into_frame();
+    let text: Vec<_> = frame
+        .columns()
+        .iter()
+        .filter(|column| column.dtype().is_string())
+        .map(|column| column.name().clone())
+        .collect();
+    for name in text {
+        let column = frame.column(&name).map_err(|failure| fail(&failure))?;
+        let factor = convert::string_to_factor(column.as_materialized_series()).map_err(|failure| fail(&failure))?;
+        frame.with_column(factor.into_column()).map_err(|failure| fail(&failure))?;
+    }
     wrap(Table::new(frame).map_err(|failure| fail(&failure))?)
 }
 
 unsafe fn do_read_parquet(call: &Call<'_>) -> R<Sexp> {
     let path = values::require_string(call.arg(0), "path")?;
-    let fail = |failure: &dyn std::fmt::Display| error_in(call.call, format!("cannot read `{path}`: {failure}"));
-    let file = std::fs::File::open(&path).map_err(|failure| fail(&failure))?;
-    let frame = ParquetReader::new(file).finish().map_err(|failure| fail(&failure))?;
-    wrap(Table::new(frame).map_err(|failure| fail(&failure))?)
+    let table = table::lazy::read_parquet(std::path::Path::new(&path), &table::io::ReadOptions::default())
+        .map_err(|failure| error_in(call.call, format!("cannot read `{path}`: {failure}")))?;
+    wrap(table)
 }
 
 unsafe fn do_write_csv(call: &Call<'_>) -> R<Sexp> {
     let table = table_of(call.arg(0))?;
     let path = values::require_string(call.arg(1), "path")?;
-    let fail = |failure: &dyn std::fmt::Display| error_in(call.call, format!("cannot write `{path}`: {failure}"));
-    let mut file = std::fs::File::create(&path).map_err(|failure| fail(&failure))?;
-    let mut frame = table.frame().clone();
-    CsvWriter::new(&mut file)
-        .finish(&mut frame)
-        .map_err(|failure| fail(&failure))?;
+    table::io::write_csv(table, std::path::Path::new(&path))
+        .map_err(|failure| error_in(call.call, format!("cannot write `{path}`: {failure}")))?;
     Ok(call.arg(0))
 }
 
@@ -541,8 +520,14 @@ unsafe fn do_write_parquet(call: &Call<'_>) -> R<Sexp> {
     Ok(call.arg(0))
 }
 
-unsafe fn do_frame_type(call: &Call<'_>) -> R<Sexp> {
-    scalar_string(&table_of(call.arg(0))?.schema().to_string())
+/// The column types as a named character vector, `c(id = "integer", ...)`.
+unsafe fn do_frame_schema(call: &Call<'_>) -> R<Sexp> {
+    let schema = table_of(call.arg(0))?.schema();
+    let types: Vec<String> = schema.columns.iter().map(|(_, kind)| kind.name().to_string()).collect();
+    let names: Vec<String> = schema.columns.iter().map(|(name, _)| name.to_string()).collect();
+    let vector = string_vector(&types)?;
+    set_attr(vector, symbols().names, string_vector(&names)?)?;
+    Ok(vector)
 }
 
 unsafe fn do_frame_key(call: &Call<'_>) -> R<Sexp> {
@@ -563,7 +548,7 @@ unsafe fn do_frame_setkey(call: &Call<'_>) -> R<Sexp> {
     let name = call.arg(0);
     let env = call.arg(2);
     if name.kind() != SexpType::Symbol {
-        return Err(error_in(call.call, "`setkey` on a frame needs the frame's variable name"));
+        return Err(error_in(call.call, "`setkey` on a DataFrame needs the DataFrame's variable name"));
     }
     let subject = eval::eval(name, env)?;
     let mut table = table_of(subject)?.fork();
@@ -614,7 +599,7 @@ unsafe fn column_at(table: &Table, index: Sexp, call: Sexp) -> R<&Column> {
             table
                 .frame()
                 .column(&name)
-                .map_err(|_| error_in(call, format!("the frame has no column `{name}`")))
+                .map_err(|_| error_in(call, format!("the DataFrame has no column `{name}`")))
         }
         SexpType::Integer | SexpType::Real => {
             let position = values::as_integer_scalar(index);
@@ -622,7 +607,7 @@ unsafe fn column_at(table: &Table, index: Sexp, call: Sexp) -> R<&Column> {
                 .ok()
                 .and_then(|position| position.checked_sub(1))
                 .and_then(|position| columns.get(position))
-                .ok_or_else(|| error_in(call, format!("the frame has no column {position}")))
+                .ok_or_else(|| error_in(call, format!("the DataFrame has no column {position}")))
         }
         _ => Err(error_in(call, "a column is selected by name or by position")),
     }
@@ -673,7 +658,7 @@ unsafe fn do_length(call: &Call<'_>) -> R<Sexp> {
 }
 
 fn r_count(count: usize) -> R<i32> {
-    i32::try_from(count).map_err(|_| error("the frame is too large for an R integer"))
+    i32::try_from(count).map_err(|_| error("the DataFrame is too large for an R integer"))
 }
 
 unsafe fn do_head(call: &Call<'_>) -> R<Sexp> {
@@ -725,7 +710,7 @@ unsafe fn do_bracket_values(call: &Call<'_>) -> R<Sexp> {
         let positions = row_positions(rows, result.height(), call.call)?;
         result = match execute(&mut result, Query { rows: Rows::Positions(positions), ..Query::default() }, call.call)? {
             Output::Table(table) => table,
-            _ => return Err(call.error("the row selection did not produce a frame")),
+            _ => return Err(call.error("the row selection did not produce a DataFrame")),
         };
     }
     if let Some(&columns) = positional.get(1)
@@ -747,7 +732,7 @@ unsafe fn column_names(table: &Table, selection: Sexp, call: Sexp) -> R<Vec<PlSm
                 let name = name.unwrap_or_default();
                 match schema.column(&name) {
                     Some(_) => Ok(PlSmallStr::from(name)),
-                    None => Err(error_in(call, format!("the frame has no column `{name}`"))),
+                    None => Err(error_in(call, format!("the DataFrame has no column `{name}`"))),
                 }
             })
             .collect(),
@@ -784,7 +769,7 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
             if flags.len() != height && flags.len() != 1 {
                 return Err(error_in(
                     call,
-                    format!("the row selection has {} values, but the frame has {height} rows", flags.len()),
+                    format!("the row selection has {} values, but the DataFrame has {height} rows", flags.len()),
                 ));
             }
             Ok((0..height)
@@ -819,7 +804,7 @@ unsafe fn row_positions(index: Sexp, height: usize, call: Sexp) -> R<Vec<u32>> {
                 if value.is_nan() || value as usize > height {
                     return Err(error_in(
                         call,
-                        format!("row {} is out of range for a frame of {height} rows", format_position(value)),
+                        format!("row {} is out of range for a DataFrame of {height} rows", format_position(value)),
                     ));
                 }
                 if value >= 1.0 {
@@ -853,7 +838,7 @@ unsafe fn render(table: &mut Table) -> R<String> {
     let width = table.width();
     if width == 0 || height == 0 {
         let names: Vec<String> = table.frame().get_column_names().iter().map(|name| name.to_string()).collect();
-        let mut text = format!("Empty frame ({height} rows and {width} cols)");
+        let mut text = format!("Empty DataFrame ({height} rows and {width} cols)");
         if !names.is_empty() {
             text.push_str(": ");
             text.push_str(&names.join(","));
@@ -873,7 +858,7 @@ unsafe fn render(table: &mut Table) -> R<String> {
         .output
     {
         Output::Table(shown) => shown,
-        _ => return Err(error("printing a frame did not select rows")),
+        _ => return Err(error("printing a DataFrame did not select rows")),
     };
     let labels: Vec<String> = positions.iter().map(|position| format!("{}:", position + 1)).collect();
     let separator_width = if split.is_some() { 3 } else { 0 };
@@ -1158,12 +1143,7 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
                     0 => &mut parts.i,
                     1 => &mut parts.j,
                     2 => &mut parts.by,
-                    _ => {
-                        return Err(error_in(
-                            call,
-                            "a frame query takes at most `i`, `j` and `by`",
-                        ));
-                    }
+                    _ => return Err(error_in(call, "a DataFrame query takes at most `i`, `j` and `by`")),
                 };
                 positional += 1;
                 if !piece.is_missing() {
@@ -1187,10 +1167,7 @@ pub(crate) unsafe fn parse_parts(call: Sexp, env: Sexp, strict: bool) -> R<Parts
                     "with" => &mut parts.with,
                     "drop" | "verbose" | "allow.cartesian" if !strict => continue,
                     other => {
-                        return Err(error_in(
-                            call,
-                            format!("frame queries do not support `{other} =`"),
-                        ));
+                        return Err(error_in(call, format!("DataFrame queries do not support `{other} =`")));
                     }
                 };
                 if !piece.is_missing() {
@@ -1245,7 +1222,7 @@ unsafe fn finish(table: &mut Table, query: Query, call: Sexp) -> R<Sexp> {
     match execute(table, query, call)? {
         Output::Table(result) => wrap(result),
         Output::Vector(series) => column_value(&series.into_column()),
-        Output::Updated => Err(error_in(call, "the query updated the frame unexpectedly")),
+        Output::Updated => Err(error_in(call, "the query updated the DataFrame unexpectedly")),
     }
 }
 
@@ -1290,7 +1267,7 @@ unsafe fn assign(
     if name.kind() != SexpType::Symbol {
         return Err(error_in(
             call,
-            "`:=` updates a frame stored in a variable; assign it to one first, as in `y <- lst$a; y[, z := 1]`",
+            "`:=` updates a DataFrame stored in a variable; assign it to one first, as in `y <- lst$a; y[, z := 1]`",
         ));
     }
     if subject.refcount() <= 1 {
@@ -1332,10 +1309,7 @@ impl Lowering<'_> {
             return eval::eval(expression, env);
         }
         if !is_pure(expression, env)? {
-            return Err(error_in(
-                self.call,
-                "the query evaluates an expression that may have side effects",
-            ));
+            return Err(error_in(self.call, "the query evaluates an expression that may have side effects"));
         }
         conditions::quietly(|| eval::eval(expression, env))?
             .ok_or_else(|| error_in(self.call, "the query raised a condition"))
@@ -1346,16 +1320,12 @@ impl Lowering<'_> {
             && let Some((expression, env)) = piece.unevaluated()
             && !is_pure(expression, env)?
         {
-            return Err(error_in(
-                self.call,
-                "the query evaluates an expression that may have side effects",
-            ));
+            return Err(error_in(self.call, "the query evaluates an expression that may have side effects"));
         }
         if !self.strict {
             return piece.value();
         }
-        conditions::quietly(|| piece.value())?
-            .ok_or_else(|| error_in(self.call, "the query raised a condition"))
+        conditions::quietly(|| piece.value())?.ok_or_else(|| error_in(self.call, "the query raised a condition"))
     }
 
     unsafe fn rows(&self, piece: &Piece, parts: &Parts) -> R<Option<Rows>> {
@@ -1401,10 +1371,7 @@ impl Lowering<'_> {
             return self.join(other, parts).map(Rows::Join);
         }
         if parts.on.is_some() {
-            return Err(error_in(
-                self.call,
-                "a join with `on =` needs a frame as `i`",
-            ));
+            return Err(error_in(self.call, "a join with `on =` needs a DataFrame as `i`"));
         }
         row_positions(value, self.height, self.call).map(Rows::Positions)
     }
@@ -1430,12 +1397,7 @@ impl Lowering<'_> {
                 Some("all") => Mult::All,
                 Some("first") => Mult::First,
                 Some("last") => Mult::Last,
-                _ => {
-                    return Err(error_in(
-                        self.call,
-                        "`mult =` takes \"all\", \"first\" or \"last\"",
-                    ));
-                }
+                _ => return Err(error_in(self.call, "`mult =` takes \"all\", \"first\" or \"last\"")),
             },
             None => Mult::All,
         };
@@ -1465,9 +1427,7 @@ impl Lowering<'_> {
                         let text = values::require_string(value, "on")?;
                         self.condition(tag_name(tag).as_deref(), &text)?
                     }
-                    SexpType::Language if tag_name(tag).is_none() => {
-                        self.condition(None, &deparse_condition(value)?)?
-                    }
+                    SexpType::Language if tag_name(tag).is_none() => self.condition(None, &deparse_condition(value)?)?,
                     _ => return Err(error_in(self.call, "`on =` takes column names")),
                 };
                 conditions.push(condition);
@@ -1485,9 +1445,7 @@ impl Lowering<'_> {
             let tag = if is_nil(names) {
                 None
             } else {
-                values::string_at(names, index)
-                    .filter(|name| !name.is_empty())
-                    .map(|name| name.into_owned())
+                values::string_at(names, index).filter(|name| !name.is_empty()).map(|name| name.into_owned())
             };
             for part in text.split(',') {
                 conditions.push(self.condition(tag.as_deref(), part)?);
@@ -1511,10 +1469,7 @@ impl Lowering<'_> {
             if let Some((own, other)) = text.split_once(symbol) {
                 let (own, other) = (own.trim(), other.trim());
                 if own.is_empty() || other.is_empty() {
-                    return Err(error_in(
-                        self.call,
-                        format!("`on =` cannot read the condition `{text}`"),
-                    ));
+                    return Err(error_in(self.call, format!("`on =` cannot read the condition `{text}`")));
                 }
                 return Ok(On::new(own, comparison, other));
             }
@@ -1544,10 +1499,7 @@ impl Lowering<'_> {
         }
         if is_call_to(expression, ".") || is_call_to(expression, "list") {
             let mut columns = Vec::new();
-            for (position, (tag, item)) in values::pairlist_items(expression.cdr())
-                .into_iter()
-                .enumerate()
-            {
+            for (position, (tag, item)) in values::pairlist_items(expression.cdr()).into_iter().enumerate() {
                 let name = match tag_name(tag) {
                     Some(name) => name,
                     None if item.kind() == SexpType::Symbol => symbol_column_name(item),
@@ -1563,10 +1515,7 @@ impl Lowering<'_> {
         if is_call_to(expression, "lapply") && length(expression) >= 3 {
             let target = expression.cdr().car();
             let function = expression.cdr().cdr().car();
-            if target.kind() == SexpType::Symbol
-                && symbol_name(target) == ".SD"
-                && function.kind() == SexpType::Symbol
-            {
+            if target.kind() == SexpType::Symbol && symbol_name(target) == ".SD" && function.kind() == SexpType::Symbol {
                 let Some(aggregate) = aggregate_named(&symbol_name(function)) else {
                     return Ok(None);
                 };
@@ -1586,14 +1535,7 @@ impl Lowering<'_> {
                     .into_iter()
                     .map(|name| {
                         let arg = Box::new(Expr::Column(name.clone()));
-                        (
-                            name,
-                            Expr::Aggregate {
-                                function: aggregate,
-                                arg,
-                                na_rm,
-                            },
-                        )
+                        (name, Expr::Aggregate { function: aggregate, arg, na_rm })
                     })
                     .collect();
                 return Ok(Some(Select::Columns(columns)));
@@ -1623,10 +1565,8 @@ impl Lowering<'_> {
         }
         if !self.mentions_columns(expression) {
             let value = self.evaluate(expression)?;
-            if matches!(
-                value.kind(),
-                SexpType::String | SexpType::Integer | SexpType::Real
-            ) && !values::inherits(value, "factor")
+            if matches!(value.kind(), SexpType::String | SexpType::Integer | SexpType::Real)
+                && !values::inherits(value, "factor")
             {
                 return self.columns_from_value(value).map(Some);
             }
@@ -1638,10 +1578,7 @@ impl Lowering<'_> {
         // A grouped bare symbol names its column after itself, as data.table does, while every
         // other grouped value is `V1`.
         if expression.kind() == SexpType::Symbol && by.as_ref().is_some_and(|by| !by.is_empty()) {
-            return Ok(Some(Select::Columns(vec![(
-                PlSmallStr::from(symbol_column_name(expression)),
-                expr,
-            )])));
+            return Ok(Some(Select::Columns(vec![(PlSmallStr::from(symbol_column_name(expression)), expr)])));
         }
         Ok(Some(Select::Value(expr)))
     }
@@ -1656,33 +1593,18 @@ impl Lowering<'_> {
                     if self.is_column(&name) {
                         Ok(PlSmallStr::from(name))
                     } else {
-                        Err(error_in(
-                            self.call,
-                            format!("the frame has no column `{name}`"),
-                        ))
+                        Err(error_in(self.call, format!("the DataFrame has no column `{name}`")))
                     }
                 })
                 .collect::<R<_>>()?,
-            SexpType::Integer | SexpType::Real | SexpType::Logical => {
-                row_positions(value, height, self.call)?
-                    .into_iter()
-                    .filter_map(|position| self.schema.columns.get(position as usize))
-                    .map(|(name, _)| name.clone())
-                    .collect()
-            }
-            _ => {
-                return Err(error_in(
-                    self.call,
-                    "`j` selects columns by name or by position here",
-                ));
-            }
-        };
-        Ok(Select::Columns(
-            names
+            SexpType::Integer | SexpType::Real | SexpType::Logical => row_positions(value, height, self.call)?
                 .into_iter()
-                .map(|name| (name.clone(), Expr::Column(name)))
+                .filter_map(|position| self.schema.columns.get(position as usize))
+                .map(|(name, _)| name.clone())
                 .collect(),
-        ))
+            _ => return Err(error_in(self.call, "`j` selects columns by name or by position here")),
+        };
+        Ok(Select::Columns(names.into_iter().map(|name| (name.clone(), Expr::Column(name))).collect()))
     }
 
     /// The columns `.SD` covers: `.SDcols`, or every column that is not a group.
@@ -1716,20 +1638,10 @@ impl Lowering<'_> {
         if from.kind() != SexpType::Symbol || to.kind() != SexpType::Symbol {
             return None;
         }
-        let position = |name: &str| {
-            self.schema
-                .columns
-                .iter()
-                .position(|(column, _)| column == name)
-        };
+        let position = |name: &str| self.schema.columns.iter().position(|(column, _)| column == name);
         let (from, to) = (position(&symbol_name(from))?, position(&symbol_name(to))?);
         let (from, to) = if from <= to { (from, to) } else { (to, from) };
-        Some(
-            self.schema.columns[from..=to]
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
-        )
+        Some(self.schema.columns[from..=to].iter().map(|(name, _)| name.clone()).collect())
     }
 
     unsafe fn assignments(&self, expression: Sexp) -> R<Option<Select>> {
@@ -1748,10 +1660,7 @@ impl Lowering<'_> {
                     if value.kind() != SexpType::String {
                         return Err(error_in(self.call, "the left side of `:=` names columns"));
                     }
-                    values::strings(value)
-                        .into_iter()
-                        .map(Option::unwrap_or_default)
-                        .collect()
+                    values::strings(value).into_iter().map(Option::unwrap_or_default).collect()
                 }
             };
             if names.len() == 1 {
@@ -1761,26 +1670,15 @@ impl Lowering<'_> {
                 if values.len() != names.len() {
                     return Err(error_in(
                         self.call,
-                        format!(
-                            "`:=` names {} columns but gives {} values",
-                            names.len(),
-                            values.len()
-                        ),
+                        format!("`:=` names {} columns but gives {} values", names.len(), values.len()),
                     ));
                 }
-                pairs.extend(
-                    names
-                        .into_iter()
-                        .zip(values.into_iter().map(|(_, value)| value)),
-                );
+                pairs.extend(names.into_iter().zip(values.into_iter().map(|(_, value)| value)));
             } else {
                 return Ok(None);
             }
         } else {
-            return Err(error_in(
-                self.call,
-                "`:=` takes `name := value` or named arguments",
-            ));
+            return Err(error_in(self.call, "`:=` takes `name := value` or named arguments"));
         }
         let mut assignments = Vec::with_capacity(pairs.len());
         for (name, value) in pairs {
@@ -1802,25 +1700,14 @@ impl Lowering<'_> {
         if let Some(expression) = piece.expression() {
             if expression.kind() == SexpType::Symbol && self.is_column(&symbol_name(expression)) {
                 let name = symbol_name(expression).into_owned();
-                return Ok(Some(vec![(
-                    PlSmallStr::from(name.as_str()),
-                    Expr::Column(name.into()),
-                )]));
+                return Ok(Some(vec![(PlSmallStr::from(name.as_str()), Expr::Column(name.into()))]));
             }
             if let Some(range) = self.column_range(expression) {
-                return Ok(Some(
-                    range
-                        .into_iter()
-                        .map(|name| (name.clone(), Expr::Column(name)))
-                        .collect(),
-                ));
+                return Ok(Some(range.into_iter().map(|name| (name.clone(), Expr::Column(name))).collect()));
             }
             if is_call_to(expression, ".") || is_call_to(expression, "list") {
                 let mut groups = Vec::new();
-                for (position, (tag, item)) in values::pairlist_items(expression.cdr())
-                    .into_iter()
-                    .enumerate()
-                {
+                for (position, (tag, item)) in values::pairlist_items(expression.cdr()).into_iter().enumerate() {
                     let name = match tag_name(tag) {
                         Some(name) => name,
                         None if item.kind() == SexpType::Symbol => symbol_name(item).into_owned(),
@@ -1846,10 +1733,7 @@ impl Lowering<'_> {
             for name in text.unwrap_or_default().split(',') {
                 let name = name.trim();
                 if !self.is_column(name) {
-                    return Err(error_in(
-                        self.call,
-                        format!("the frame has no column `{name}`"),
-                    ));
+                    return Err(error_in(self.call, format!("the DataFrame has no column `{name}`")));
                 }
                 groups.push((PlSmallStr::from(name), Expr::Column(name.into())));
             }
@@ -1868,9 +1752,7 @@ impl Lowering<'_> {
                 if self.is_column(&name) {
                     return Ok(Some(Expr::Column(PlSmallStr::from(name.as_ref()))));
                 }
-                if name.starts_with(".SD")
-                    || matches!(name.as_ref(), ".I" | ".GRP" | ".BY" | ".NGRP")
-                {
+                if name.starts_with(".SD") || matches!(name.as_ref(), ".I" | ".GRP" | ".BY" | ".NGRP") {
                     return Ok(None);
                 }
                 let lookup = match name.strip_prefix("..") {
@@ -1896,15 +1778,9 @@ impl Lowering<'_> {
         }
         let name = symbol_name(head);
         let items = values::pairlist_items(expression.cdr());
-        let positional: Vec<Sexp> = items
-            .iter()
-            .filter(|(tag, _)| is_nil(*tag))
-            .map(|(_, value)| *value)
-            .collect();
+        let positional: Vec<Sexp> = items.iter().filter(|(tag, _)| is_nil(*tag)).map(|(_, value)| *value).collect();
         let unary = |op: UnaryOp, this: &Self| -> R<Option<Expr>> {
-            Ok(this
-                .expr(positional[0])?
-                .map(|inner| Expr::Unary(op, Box::new(inner))))
+            Ok(this.expr(positional[0])?.map(|inner| Expr::Unary(op, Box::new(inner))))
         };
         match (name.as_ref(), positional.len(), items.len()) {
             ("(", 1, 1) => self.expr(positional[0]),
@@ -1916,9 +1792,7 @@ impl Lowering<'_> {
                 let Some(op) = binary_op(operator) else {
                     return Ok(None);
                 };
-                let (Some(left), Some(right)) =
-                    (self.expr(positional[0])?, self.expr(positional[1])?)
-                else {
+                let (Some(left), Some(right)) = (self.expr(positional[0])?, self.expr(positional[1])?) else {
                     return Ok(None);
                 };
                 Ok(Some(Expr::Binary(op, Box::new(left), Box::new(right))))
@@ -1929,31 +1803,21 @@ impl Lowering<'_> {
                 let Ok(count) = usize::try_from(count) else {
                     return Ok(None);
                 };
-                Ok(self
-                    .expr(positional[0])?
-                    .map(|inner| Expr::Head(Box::new(inner), count)))
+                Ok(self.expr(positional[0])?.map(|inner| Expr::Head(Box::new(inner), count)))
             }
             ("cor", 2, 2) => {
-                let (Some(left), Some(right)) =
-                    (self.expr(positional[0])?, self.expr(positional[1])?)
-                else {
+                let (Some(left), Some(right)) = (self.expr(positional[0])?, self.expr(positional[1])?) else {
                     return Ok(None);
                 };
                 Ok(Some(Expr::Correlation(Box::new(left), Box::new(right))))
             }
             ("ifelse" | "fifelse", 3, 3) => {
-                let (Some(test), Some(yes), Some(no)) = (
-                    self.expr(positional[0])?,
-                    self.expr(positional[1])?,
-                    self.expr(positional[2])?,
-                ) else {
+                let (Some(test), Some(yes), Some(no)) =
+                    (self.expr(positional[0])?, self.expr(positional[1])?, self.expr(positional[2])?)
+                else {
                     return Ok(None);
                 };
-                Ok(Some(Expr::IfElse(
-                    Box::new(test),
-                    Box::new(yes),
-                    Box::new(no),
-                )))
+                Ok(Some(Expr::IfElse(Box::new(test), Box::new(yes), Box::new(no))))
             }
             (function, 1, _) if aggregate_named(function).is_some() => {
                 let Some(aggregate) = aggregate_named(function) else {
@@ -1999,9 +1863,7 @@ impl Lowering<'_> {
                 if head.kind() == SexpType::Language && self.mentions(head, specials) {
                     return true;
                 }
-                if head.kind() == SexpType::Symbol
-                    && matches!(symbol_name(head).as_ref(), "$" | "@")
-                {
+                if head.kind() == SexpType::Symbol && matches!(symbol_name(head).as_ref(), "$" | "@") {
                     return self.mentions(expression.cdr().car(), specials);
                 }
                 while cell.kind() == SexpType::Pairlist {
@@ -2099,7 +1961,7 @@ fn binary_op(name: &str) -> Option<BinaryOp> {
 }
 
 /// A single R value as a literal of the IR, or `None` for anything longer or of another type.
-unsafe fn literal(value: Sexp) -> Option<Expr> {
+pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
     if length(value) != 1 {
         return None;
     }
@@ -2176,12 +2038,7 @@ unsafe fn fallback(
     let (call, env) = (lowering.call, lowering.env);
     let by = match by {
         Some(by) if by.iter().all(|(_, expr)| matches!(expr, Expr::Column(_))) => by,
-        _ => {
-            return Err(error_in(
-                call,
-                "a computed group in `by` that ry cannot run as a query is not supported yet",
-            ));
-        }
+        _ => return Err(error_in(call, "a computed group in `by` that ry cannot run as a query is not supported yet")),
     };
     let positions: Option<Vec<u32>> = match rows {
         Some(Rows::All) => None,
@@ -2189,10 +2046,7 @@ unsafe fn fallback(
         // R code in `j` would need `i`'s columns in its data mask too, and rows of `i` without
         // a match have no position in `x`.
         Some(Rows::Join(_)) => {
-            return Err(error_in(
-                call,
-                "a join whose `j` ry cannot run as a query is not supported yet",
-            ));
+            return Err(error_in(call, "a join whose `j` ry cannot run as a query is not supported yet"));
         }
         Some(rows) => {
             // The IR selects the rows, and the positions follow from a row number column.
@@ -2213,15 +2067,10 @@ unsafe fn fallback(
     let Some(piece) = &parts.j else {
         return subset_rows(table, positions.unwrap_or_default(), call);
     };
-    let expression = piece
-        .expression()
-        .ok_or_else(|| error_in(call, "`j` could not be evaluated"))?;
+    let expression = piece.expression().ok_or_else(|| error_in(call, "`j` could not be evaluated"))?;
     if is_call_to(expression, ":=") {
         if !by.is_empty() {
-            return Err(error_in(
-                call,
-                "`:=` with `by` on an expression ry cannot run as a query is not supported yet",
-            ));
+            return Err(error_in(call, "`:=` with `by` on an expression ry cannot run as a query is not supported yet"));
         }
         let assignments = fallback_assignments(expression, env, call)?;
         let height = table.height();
@@ -2265,14 +2114,7 @@ unsafe fn fallback(
         // Only `i` needed R; the IR runs `j` on the selected rows.
         let mut rows_table = rows_table;
         let select = select.unwrap_or_default();
-        return finish(
-            &mut rows_table,
-            Query {
-                select,
-                ..Query::default()
-            },
-            call,
-        );
+        return finish(&mut rows_table, Query { select, ..Query::default() }, call);
     }
     let group_names: Vec<PlSmallStr> = by.iter().map(|(name, _)| name.clone()).collect();
     let sd_columns = lowering.sd_columns(parts, &by)?;
@@ -2284,15 +2126,7 @@ unsafe fn fallback(
         }
         return Ok(value);
     }
-    grouped_fallback(
-        &rows_table,
-        &group_names,
-        &sd_columns,
-        parts.keyed,
-        expression,
-        env,
-        call,
-    )
+    grouped_fallback(&rows_table, &group_names, &sd_columns, parts.keyed, expression, env, call)
 }
 
 /// The zero-based positions of the rows a lowered row selection keeps.
@@ -2328,7 +2162,7 @@ unsafe fn selected(table: &mut Table, positions: Vec<u32>, call: Sexp) -> R<Tabl
     };
     match execute(table, query, call)? {
         Output::Table(result) => Ok(result),
-        _ => Err(error_in(call, "the row selection did not produce a frame")),
+        _ => Err(error_in(call, "the row selection did not produce a DataFrame")),
     }
 }
 
@@ -2474,18 +2308,10 @@ unsafe fn grouped_fallback(
         .clone()
         .lazy()
         .with_row_index(ROW_INDEX, None)
-        .group_by_stable(
-            group_names
-                .iter()
-                .map(|name| col(name.clone()))
-                .collect::<Vec<_>>(),
-        )
+        .group_by_stable(group_names.iter().map(|name| col(name.clone())).collect::<Vec<_>>())
         .agg([col(ROW_INDEX)]);
     if keyed {
-        grouping = grouping.sort(
-            group_names.iter().cloned().collect::<Vec<_>>(),
-            Default::default(),
-        );
+        grouping = grouping.sort(group_names.iter().cloned().collect::<Vec<_>>(), Default::default());
     }
     let groups = grouping.collect().map_err(|failure| fail(&failure))?;
     let rows_column = groups.column(ROW_INDEX).map_err(|failure| fail(&failure))?;
@@ -2494,9 +2320,7 @@ unsafe fn grouped_fallback(
     let mut names: Vec<String> = Vec::new();
     let mut pieces: Vec<Vec<Sexp>> = Vec::new();
     for group_number in 0..rows_list.len() {
-        let Some(rows) = rows_list.get_as_series(group_number) else {
-            continue;
-        };
+        let Some(rows) = rows_list.get_as_series(group_number) else { continue };
         let rows: Vec<u32> = rows
             .idx()
             .map_err(|failure| fail(&failure))?
@@ -2505,14 +2329,7 @@ unsafe fn grouped_fallback(
         let mut subset = table.fork();
         let group_table = selected(&mut subset, rows.clone(), call)?;
         let value = scope(|| {
-            let mask = data_mask(
-                &group_table,
-                Some((group_number, &rows)),
-                expression,
-                env,
-                sd_columns,
-                call,
-            )?;
+            let mask = data_mask(&group_table, Some((group_number, &rows)), expression, env, sd_columns, call)?;
             eval::eval(expression, mask)
         })?;
         if is_nil(value) {
@@ -2525,14 +2342,9 @@ unsafe fn grouped_fallback(
                     let name = if is_nil(item_names) {
                         None
                     } else {
-                        values::string_at(item_names, index)
-                            .filter(|name| !name.is_empty())
-                            .map(|name| name.into_owned())
+                        values::string_at(item_names, index).filter(|name| !name.is_empty()).map(|name| name.into_owned())
                     };
-                    (
-                        name.unwrap_or_else(|| format!("V{}", index + 1)),
-                        value.element(index),
-                    )
+                    (name.unwrap_or_else(|| format!("V{}", index + 1)), value.element(index))
                 })
                 .collect()
         } else {
@@ -2542,16 +2354,9 @@ unsafe fn grouped_fallback(
             names = items.iter().map(|(name, _)| name.clone()).collect();
             pieces = vec![Vec::new(); names.len()];
         } else if items.len() != names.len() {
-            return Err(error_in(
-                call,
-                "every group's `j` must produce the same columns",
-            ));
+            return Err(error_in(call, "every group's `j` must produce the same columns"));
         }
-        let count = items
-            .iter()
-            .map(|(_, item)| length(*item))
-            .max()
-            .unwrap_or(0);
+        let count = items.iter().map(|(_, item)| length(*item)).max().unwrap_or(0);
         for (slot, (_, item)) in pieces.iter_mut().zip(&items) {
             let item = if length(*item) == count {
                 *item
@@ -2572,9 +2377,7 @@ unsafe fn grouped_fallback(
         let combined = crate::subset::combine(&items)?;
         heap().root(combined);
         let column = to_column(name, combined, result.height(), call)?;
-        result
-            .set_column(column)
-            .map_err(|failure| table_error(call, failure))?;
+        result.set_column(column).map_err(|failure| table_error(call, failure))?;
     }
     wrap(result)
 }

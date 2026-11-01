@@ -19,7 +19,12 @@
 //! exist to catch it.
 
 use crate::env::Frame;
-use std::{cell::Cell, ffi::c_void, fmt, ptr::NonNull};
+use std::{
+    cell::{Cell, UnsafeCell},
+    ffi::c_void,
+    fmt,
+    ptr::NonNull,
+};
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.
 #[repr(u8)]
@@ -269,6 +274,9 @@ pub mod gp {
     pub const UTF8: u16 = 1 << 3;
     pub const S4_OBJECT: u16 = 1 << 4;
     pub const CACHED: u16 = 1 << 5;
+    /// GNU R's `GROWABLE_MASK` on a vector, the same bit as `CACHED` on a string. ry keeps
+    /// growability in the heap's resizable flag, and `LEVELS` reports it through this bit.
+    pub const GROWABLE: u16 = 1 << 5;
     pub const ASCII: u16 = 1 << 6;
     /// The encoding bits that distinguish two interned strings with the same bytes.
     pub const ENCODING: u16 = BYTES | LATIN1 | UTF8;
@@ -285,6 +293,10 @@ pub mod gp {
     /// time, so they do not move the heap's binding epoch, and cached lookups never resolve
     /// through one.
     pub const FUNCTION_FRAME: u16 = 1 << 8;
+    /// A binding cell, or a symbol, that a compiled function lookup depends on. Rebinding the
+    /// cell, or binding the symbol in a function frame, moves the heap's binding epoch, so
+    /// compiled code revalidates its lookups only when the epoch moved.
+    pub const WATCHED: u16 = 1 << 10;
     /// A function definition's formals pairlist (or its body, when it has no formals) for which
     /// the interpreter registered inline-annotation checks.
     pub const TYPED_DEFINITION: u16 = 1 << 12;
@@ -348,13 +360,11 @@ pub(crate) struct SymbolObject {
 #[repr(C)]
 pub(crate) struct EnvironmentObject {
     pub header: Header,
-    pub frame: Cell<*mut Frame>,
+    /// The frame lives inside the object, so a closure call's environment costs one heap
+    /// allocation and no malloc while its bindings fit the frame's inline cells.
+    pub frame: UnsafeCell<Frame>,
     pub enclosure: Cell<Sexp>,
     pub spare: Cell<usize>,
-    /// Where `frame` points. The frame lives in the environment's own slot, because a closure
-    /// call makes an environment, and a separate allocation for its frame would double the
-    /// allocator traffic of every call.
-    pub storage: std::mem::MaybeUninit<Frame>,
 }
 
 #[repr(C)]
@@ -649,6 +659,25 @@ impl Sexp {
         unsafe { self.payload::<VectorObject>().capacity.get() }
     }
 
+    /// A `CHARSXP`'s intern hash, the high half of its capacity field.
+    pub unsafe fn char_hash(self) -> u32 {
+        unsafe { (self.capacity() as u64 >> 32) as u32 }
+    }
+
+    /// A `CHARSXP`'s `TRUELENGTH`, the low half of its capacity field. data.table's string
+    /// kernels set and read the truelength of every string they meet, so it lives in the string
+    /// itself and costs a load, as in GNU R.
+    pub unsafe fn char_truelength(self) -> i32 {
+        unsafe { self.capacity() as u64 as u32 as i32 }
+    }
+
+    pub unsafe fn set_char_truelength(self, value: i32) {
+        unsafe {
+            let hash = self.capacity() as u64 & !0xFFFF_FFFF;
+            self.set_capacity((hash | u64::from(value as u32)) as isize);
+        }
+    }
+
     pub(crate) unsafe fn set_capacity(self, capacity: isize) {
         unsafe { self.payload::<VectorObject>().capacity.set(capacity) }
     }
@@ -719,20 +748,8 @@ impl Sexp {
         unsafe { self.payload::<EnvironmentObject>().frame.get() }
     }
 
-    pub(crate) unsafe fn set_frame_ptr(self, frame: *mut Frame) {
-        unsafe { self.payload::<EnvironmentObject>().frame.set(frame) }
-    }
-
-    /// The uninitialized space for this environment's frame.
     pub(crate) unsafe fn symbol_payload(self) -> &'static SymbolObject {
         unsafe { &*self.0.as_ptr().cast::<SymbolObject>() }
-    }
-
-    pub(crate) unsafe fn frame_storage(self) -> *mut Frame {
-        unsafe {
-            let payload = self.0.as_ptr().cast::<EnvironmentObject>();
-            std::ptr::addr_of_mut!((*payload).storage).cast::<Frame>()
-        }
     }
 
     pub unsafe fn enclosure(self) -> Sexp {

@@ -155,6 +155,7 @@ for (item in list(1L)) {
   b0 item for-variable 5..9
   13..17 list -> non-local
   27..31 item -> b0
+  super-globals: item
 
 #---- a_top_level_loop_accumulator_reads_out_of_the_item_first
 # The first iteration reads the name's cross-item binding, so the read leaves
@@ -169,6 +170,7 @@ for (index in 1:3) {
   23..28 total <- b1
   32..37 total -> b1 maybe-undefined
   40..45 index -> b0
+  super-globals: index
   used top-level: total
 
 #==== unresolved_reads
@@ -182,13 +184,14 @@ missing_name
 # A qualified read inside a construct the checker treats as opaque is not
 # recorded, so nothing validates the export of a name the checker never claimed
 # to understand.
-f <- function(a) a & stats::median(1:3)
+f <- function(a) a %undeclared% stats::median(1:3)
 #++++
 # f
   b0 a parameter 14..15
   b1 f top-level 0..1
   0..1 f <- b1
   17..18 a -> b0
+  operator reads: %undeclared%
 
 #---- an_internal_qualified_read_records_the_triple_colon
 f <- function() tools:::toHTML(1L)

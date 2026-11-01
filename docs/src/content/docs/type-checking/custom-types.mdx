@@ -10,6 +10,15 @@ Every type so far is *structural*: two types are the same if they have the same 
 other. That is the right default for R, where values are plain data, but it cannot tell Celsius from
 Fahrenheit, or a user ID from an email address.
 
+`alias` names a shape and keeps it structural, while `type` declares a *nominal* type, distinct by
+name. Both work for every kind of type, including ry's own
+[records, tuples and tag unions](/type-checking/records-and-tags/#structural-or-nominal):
+
+| | Records and tuples | Tag unions |
+| --- | --- | --- |
+| **Structural** | `alias Point = Record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
+| **Nominal** | `type Celsius = Record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
+
 ## Nominal types
 
 A *nominal* type is distinct by name, even from a type with the same shape. `type` declares one,

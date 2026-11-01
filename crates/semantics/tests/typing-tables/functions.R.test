@@ -1,27 +1,27 @@
 #==== setnames
 #---- renaming_some_columns_changes_the_binding
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setnames(prices, "price", "close")
 closing <- prices$close
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], close: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], close: double[]}
 closing: double[]
-101..108 warning[unused] `closing` is assigned but never used.
+105..112 warning[unused] `closing` is assigned but never used.
 
 #---- renaming_every_column
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setnames(prices, c("key", "close"))
 keys <- prices$key
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{key: integer[], close: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{key: integer[], close: double[]}
 keys: integer[]
-102..106 warning[unused] `keys` is assigned but never used.
+106..110 warning[unused] `keys` is assigned but never used.
 
 #---- a_user_function_named_setnames_keeps_its_subject_s_type
 setnames <- function(x, name) invisible(x)
@@ -38,235 +38,235 @@ wrong: Unknown
 
 #---- the_old_column_must_exist
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setnames(prices, "prce", "close")
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-75..81 warning[unused] `prices` is assigned but never used.
-83..89 error[type-mismatch] the frame `prices` has no column `prce`. Did you mean `price`?
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+79..85 warning[unused] `prices` is assigned but never used.
+87..93 error[type-mismatch] the frame `prices` has no column `prce`. Did you mean `price`?
 
 #---- skip_absent_ignores_a_missing_column
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setnames(prices, c("prce", "id"), c("close", "key"), skip_absent = TRUE)
 keys <- prices$key
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{key: integer[], price: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{key: integer[], price: double[]}
 keys: integer[]
-139..143 warning[unused] `keys` is assigned but never used.
+143..147 warning[unused] `keys` is assigned but never used.
 
 #---- every_column_needs_a_name
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setnames(prices, c("key", "close", "extra"))
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame
-75..81 warning[unused] `prices` is assigned but never used.
-83..109 error[type-mismatch] this frame has 2 columns, but 3 names are given
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame
+79..85 warning[unused] `prices` is assigned but never used.
+87..113 error[type-mismatch] this frame has 2 columns, but 3 names are given
 
 #---- a_renamed_column_is_gone_under_its_old_name
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setnames(prices, "price", "close")
 cheap <- prices[price < 2]
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], close: double[]}
-cheap: frame{id: integer[], close: double[]}
-101..106 warning[unused] `cheap` is assigned but never used.
-117..122 warning[unresolved] the frame `prices` has no column `price`, and nothing else defines that name.
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], close: double[]}
+cheap: DataFrame{id: integer[], close: double[]}
+105..110 warning[unused] `cheap` is assigned but never used.
+121..126 warning[unresolved] the frame `prices` has no column `price`, and nothing else defines that name.
 
 #==== setcolorder
 #---- named_columns_move_to_the_front
 library(data.table)
-prices <- frame(id = 1:3, ticker = c("a", "b", "c"), price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, ticker = c("a", "b", "c"), price = c(1, 2, 3))
 setcolorder(prices, c("price", "ticker"))
 #++++
 Any
-prices: frame{id: integer[], ticker: character[], price: double[]}
-frame{price: double[], ticker: character[], id: integer[]}
-105..111 warning[unused] `prices` is assigned but never used.
+prices: DataFrame{id: integer[], ticker: character[], price: double[]}
+DataFrame{price: double[], ticker: character[], id: integer[]}
+109..115 warning[unused] `prices` is assigned but never used.
 
 #---- an_unknown_column_is_reported
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setcolorder(prices, "close")
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-78..84 warning[unused] `prices` is assigned but never used.
-86..93 error[type-mismatch] the frame `prices` has no column `close`. Its columns are `id`, `price`
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+82..88 warning[unused] `prices` is assigned but never used.
+90..97 error[type-mismatch] the frame `prices` has no column `close`. Its columns are `id`, `price`
 
 #==== setkey_and_setorder
 #---- key_columns_must_exist
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setkey(prices, id)
 setkey(prices, idd)
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-100..103 error[type-mismatch] the frame `prices` has no column `idd`. Its columns are `id`, `price`
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+104..107 error[type-mismatch] the frame `prices` has no column `idd`. Its columns are `id`, `price`
 
 #---- order_columns_may_be_negated
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setorder(prices, id, -price)
 setorder(prices, -pirce)
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-113..118 error[type-mismatch] the frame `prices` has no column `pirce`. Did you mean `price`?
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+117..122 error[type-mismatch] the frame `prices` has no column `pirce`. Did you mean `price`?
 
 #---- string_forms_check_their_names
 library(data.table)
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 setkeyv(prices, c("id", "price"))
 setorderv(prices, "close")
 #++++
 Any
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-118..125 error[type-mismatch] the frame `prices` has no column `close`. Its columns are `id`, `price`
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+122..129 error[type-mismatch] the frame `prices` has no column `close`. Its columns are `id`, `price`
 
 #==== rbindlist
 #---- pieces_stack_by_position_and_widen
 library(data.table)
-first <- frame(id = 1:2, value = 1:2)
-second <- frame(key = 3:4, amount = c(0.5, 1.5))
+first <- DataFrame(id = 1:2, value = 1:2)
+second <- DataFrame(key = 3:4, amount = c(0.5, 1.5))
 stacked <- rbindlist(list(first, second))
 #++++
 Any
-first: frame{id: integer[], value: integer[]}
-second: frame{key: integer[], amount: double[]}
-stacked: frame{id: integer[], value: double[]}
-107..114 warning[unused] `stacked` is assigned but never used.
+first: DataFrame{id: integer[], value: integer[]}
+second: DataFrame{key: integer[], amount: double[]}
+stacked: data.table{id: integer[], value: double[]}
+115..122 warning[unused] `stacked` is assigned but never used.
 
 #---- use_names_matches_columns_by_name
 library(data.table)
-first <- frame(id = 1:2, label = c("a", "b"))
-second <- frame(label = c("c", "d"), id = 3:4)
+first <- DataFrame(id = 1:2, label = c("a", "b"))
+second <- DataFrame(label = c("c", "d"), id = 3:4)
 stacked <- rbindlist(list(first, second), use.names = TRUE)
 #++++
 Any
-first: frame{id: integer[], label: character[]}
-second: frame{label: character[], id: integer[]}
-stacked: frame{id: integer[], label: character[]}
-113..120 warning[unused] `stacked` is assigned but never used.
+first: DataFrame{id: integer[], label: character[]}
+second: DataFrame{label: character[], id: integer[]}
+stacked: data.table{id: integer[], label: character[]}
+121..128 warning[unused] `stacked` is assigned but never used.
 
 #---- fill_unions_the_columns
 library(data.table)
-first <- frame(id = 1:2, label = c("a", "b"))
-second <- frame(id = c(3, 4), price = c(1, 2))
+first <- DataFrame(id = 1:2, label = c("a", "b"))
+second <- DataFrame(id = c(3, 4), price = c(1, 2))
 stacked <- rbindlist(list(first, second), fill = TRUE)
 #++++
 Any
-first: frame{id: integer[], label: character[]}
-second: frame{id: double[], price: double[]}
-stacked: frame{id: double[], label: character[], price: double[]}
-113..120 warning[unused] `stacked` is assigned but never used.
+first: DataFrame{id: integer[], label: character[]}
+second: DataFrame{id: double[], price: double[]}
+stacked: data.table{id: double[], label: character[], price: double[]}
+121..128 warning[unused] `stacked` is assigned but never used.
 
 #---- an_id_column_names_or_numbers_each_piece
 library(data.table)
-first <- frame(id = 1:2)
-second <- frame(id = 3:4)
+first <- DataFrame(id = 1:2)
+second <- DataFrame(id = 3:4)
 numbered <- rbindlist(list(first, second), idcol = TRUE)
 named <- rbindlist(list(a = first, b = second), idcol = "source")
 #++++
 Any
-first: frame{id: integer[]}
-second: frame{id: integer[]}
-numbered: frame{.id: integer[], id: integer[]}
-named: frame{source: character[], id: integer[]}
-71..79 warning[unused] `numbered` is assigned but never used.
-128..133 warning[unused] `named` is assigned but never used.
+first: DataFrame{id: integer[]}
+second: DataFrame{id: integer[]}
+numbered: data.table{.id: integer[], id: integer[]}
+named: data.table{source: character[], id: integer[]}
+79..87 warning[unused] `numbered` is assigned but never used.
+136..141 warning[unused] `named` is assigned but never used.
 
 #---- factors_and_strings_stack_into_a_factor
 library(data.table)
-first <- frame(label = factor(c("a", "b")))
-second <- frame(label = c("c", "d"))
+first <- DataFrame(label = factor(c("a", "b")))
+second <- DataFrame(label = c("c", "d"))
 stacked <- rbindlist(list(first, second))
 #++++
 Any
-first: frame{label: factor}
-second: frame{label: character[]}
-stacked: frame{label: factor}
-101..108 warning[unused] `stacked` is assigned but never used.
+first: DataFrame{label: factor}
+second: DataFrame{label: character[]}
+stacked: data.table{label: factor}
+109..116 warning[unused] `stacked` is assigned but never used.
 
 #---- unknown_pieces_give_unknown_columns
 library(data.table)
-pieces <- list(frame(id = 1:2), frame(id = 3:4))
+pieces <- list(DataFrame(id = 1:2), DataFrame(id = 3:4))
 stacked <- rbindlist(pieces)
 #++++
 Any
-pieces: list{frame{id: integer[]}, frame{id: integer[]}}
-stacked: frame
-69..76 warning[unused] `stacked` is assigned but never used.
+pieces: list{DataFrame{id: integer[]}, DataFrame{id: integer[]}}
+stacked: data.table
+77..84 warning[unused] `stacked` is assigned but never used.
 
 #==== melt_and_dcast
 #---- measures_stack_under_variable_and_value
 library(data.table)
-wide <- frame(id = 1:2, low = c(1L, 2L), high = c(1.5, 2.5))
+wide <- DataFrame(id = 1:2, low = c(1L, 2L), high = c(1.5, 2.5))
 long <- melt(wide, id.vars = "id", measure.vars = c("low", "high"))
 #++++
 Any
-wide: frame{id: integer[], low: integer[], high: double[]}
-long: frame{id: integer[], variable: factor, value: double[]}
-81..85 warning[unused] `long` is assigned but never used.
+wide: DataFrame{id: integer[], low: integer[], high: double[]}
+long: data.table{id: integer[], variable: factor, value: double[]}
+85..89 warning[unused] `long` is assigned but never used.
 
 #---- the_measures_default_to_every_other_column
 library(data.table)
-wide <- frame(id = 1:2, low = c(1L, 2L), high = c(3L, 4L))
+wide <- DataFrame(id = 1:2, low = c(1L, 2L), high = c(3L, 4L))
 long <- melt(wide, id.vars = "id", variable.name = "level", value.name = "amount")
 #++++
 Any
-wide: frame{id: integer[], low: integer[], high: integer[]}
-long: frame{id: integer[], level: factor, amount: integer[]}
-79..83 warning[unused] `long` is assigned but never used.
+wide: DataFrame{id: integer[], low: integer[], high: integer[]}
+long: data.table{id: integer[], level: factor, amount: integer[]}
+83..87 warning[unused] `long` is assigned but never used.
 
 #---- a_text_variable_when_asked
 library(data.table)
-wide <- frame(id = 1:2, low = c(1L, 2L), high = c(3L, 4L))
+wide <- DataFrame(id = 1:2, low = c(1L, 2L), high = c(3L, 4L))
 long <- melt(wide, measure.vars = c("low", "high"), variable.factor = FALSE)
 #++++
 Any
-wide: frame{id: integer[], low: integer[], high: integer[]}
-long: frame{id: integer[], variable: character[], value: integer[]}
-79..83 warning[unused] `long` is assigned but never used.
+wide: DataFrame{id: integer[], low: integer[], high: integer[]}
+long: data.table{id: integer[], variable: character[], value: integer[]}
+83..87 warning[unused] `long` is assigned but never used.
 
 #---- a_missing_measure_is_reported
 library(data.table)
-wide <- frame(id = 1:2, low = c(1L, 2L))
+wide <- DataFrame(id = 1:2, low = c(1L, 2L))
 long <- melt(wide, id.vars = "id", measure.vars = c("low", "hgh"))
 #++++
 Any
-wide: frame{id: integer[], low: integer[]}
+wide: DataFrame{id: integer[], low: integer[]}
 long: Unknown
-61..65 warning[unused] `long` is assigned but never used.
-120..125 error[type-mismatch] the frame `wide` has no column `hgh`. Its columns are `id`, `low`
+65..69 warning[unused] `long` is assigned but never used.
+124..129 error[type-mismatch] the frame `wide` has no column `hgh`. Its columns are `id`, `low`
 
 #---- dcast_gives_a_frame
 library(data.table)
-long <- frame(id = c(1L, 1L), level = c("low", "high"), amount = c(1, 2))
+long <- DataFrame(id = c(1L, 1L), level = c("low", "high"), amount = c(1, 2))
 wide <- dcast(long, id ~ level, value.var = "amount", fun.aggregate = sum)
 #++++
 Any
-long: frame{id: integer[], level: character[], amount: double[]}
-wide: frame
-94..98 warning[unused] `wide` is assigned but never used.
+long: DataFrame{id: integer[], level: character[], amount: double[]}
+wide: data.table
+98..102 warning[unused] `wide` is assigned but never used.
 
 #==== vector_helpers
 #---- helpers_keep_or_report_their_element_types
@@ -334,3 +334,16 @@ Any
 x: integer[]
 chosen: character[]
 39..45 warning[unused] `chosen` is assigned but never used.
+
+#==== conversions
+#---- to_and_from_data_table_keep_the_columns
+library(data.table)
+sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
+table <- as.data.table(sales)
+back <- as.DataFrame(table)
+#++++
+Any
+sales: DataFrame{region: character[], units: integer[]}
+table: data.table{region: character[], units: integer[]}
+back: DataFrame{region: character[], units: integer[]}
+112..116 warning[unused] `back` is assigned but never used.

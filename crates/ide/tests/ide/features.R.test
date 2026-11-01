@@ -50,7 +50,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
-completion (47): count, count.fields, Str.count_utf8_bytes, List.count_if, c.noquote, capture.output, chol.default, chooseOpsMethod.default
+completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 hint @1: <T: numeric> fn(count: T) -> double
 
 #---- function_name
@@ -69,7 +69,7 @@ action: Add inferred type annotation for `g`
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(x: T) -> T\n"
   edit 28..28 -> "#: fn() -> double\n"
-completion (23): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Str.to_double
+completion (26): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, Str.to_double
 hint @6: <T: numeric> fn(x: T) -> T
 hint @29: fn() -> double
 
@@ -182,7 +182,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T: numeric> fn(count: T) -> double\n"
-completion (47): count, count.fields, Str.count_utf8_bytes, List.count_if, c.noquote, capture.output, chol.default, chooseOpsMethod.default
+completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 hint @1: <T: numeric> fn(count: T) -> double
 
 #---- global_cross_item
@@ -417,8 +417,8 @@ signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
 parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
-signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
-parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
 signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `h`
@@ -441,8 +441,8 @@ signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
 parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
 signature: fn(...: difftime, [na.rm]: logical) -> difftime
 parameters: [...: difftime] | [na.rm]: logical
-signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
-parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: data.frame | DataFrame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | DataFrame | matrix] | [na.rm]: logical
 signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
 parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
 action: Add inferred type annotation for `h`
@@ -509,15 +509,19 @@ hint @5: <T> fn(x: T) -> T
 config <- list(alpha = 1, beta = "b")
 use <- function() config$al$0
 #++++
-hover 63..65: al: Unknown
+hover 63..65: al: double
 definition: none
 references: none
 rename: none
 signature: none
+action: Add inferred type annotation for `use`
+  edit 38..38 -> "#: fn() -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: list{alpha: double, beta: character}\n"
+  edit 38..38 -> "#: fn() -> double\n"
 completion (1): alpha
 hint @6: list{alpha: double, beta: character}
+hint @41: fn() -> double
 
 #---- namespace_exports
 h <- function() stats::med$0
@@ -537,7 +541,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (52): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
+completion (55): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
 
 #==== annotation_types
 #---- goto_type_definition
@@ -764,7 +768,7 @@ action: Add inferred type annotation for `f`
 action: Add inferred type annotations for the whole file
   edit 18..18 -> "  #: double\n"
   edit 0..0 -> "#: fn() -> double\n"
-completion (14): dead, defaultDumpName, delayedAssign, Dict.keep_shared, .Deprecated, model.frame.default, model.matrix.default, conditionMessage.condition
+completion (17): dead, DataFrame.head, DataFrame.read_csv, DataFrame.read_parquet, defaultDumpName, delayedAssign, Dict.keep_shared, .Deprecated
 hint @1: fn() -> double
 hint @24: double
 
@@ -781,7 +785,7 @@ action: Add inferred type annotation for `count`
   edit 0..0 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (47): count, count.fields, Str.count_utf8_bytes, List.count_if, c.noquote, capture.output, chol.default, chooseOpsMethod.default
+completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 hint @5: integer
 
 #---- string_subscript_fields
@@ -831,7 +835,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (24): D, DT, DF2formula, Dict.contains, Dict.drop_if, Dict.empty, Dict.from_list, Dict.get
+completion (42): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -844,23 +848,23 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (24): D, DT, DF2formula, Dict.contains, Dict.drop_if, Dict.empty, Dict.from_list, Dict.get
+completion (42): D, DT, DataFrame, DataFrame.columns, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 
 #---- a_frame_update_types_later_reads
-sales <- frame(a = 1)
+sales <- DataFrame(a = 1)
 sales[, y := 1]
 sal$0es$y
 #++++
-hover 38..43: sales: frame{a: double[], y: double[]}
+hover 42..47: sales: DataFrame{a: double[], y: double[]}
 hover-definition: global 0..5
 definition 0..5
-references: 0..5*, 22..27, 38..43
+references: 0..5*, 26..31, 42..47
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: frame{a: double[]}\n"
+  edit 0..0 -> "#: DataFrame{a: double[]}\n"
 completion (128+): sales, BJsales, BJsales.lead, sample, sample.int, sapply, savePlot, scale
-hint @5: frame{a: double[]}
+hint @5: DataFrame{a: double[]}
 
 #---- a_parameter_update_keeps_the_parameter
 f <- function(sales) {

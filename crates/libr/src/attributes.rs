@@ -546,7 +546,12 @@ pub unsafe extern "C" fn UNSET_S4_OBJECT(object: Sexp) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LEVELS(object: Sexp) -> c_int {
-    object.gp() as c_int
+    // Packages built against GNU R before 4.6, data.table among them, test a vector's growable
+    // bit by reading `LEVELS(x) & GROWABLE_MASK` directly.
+    let growable = object.kind().is_vector()
+        && object.kind() != SexpType::Char
+        && runtime().heap.is_resizable(object);
+    (object.gp() | if growable { gp::GROWABLE } else { 0 }) as c_int
 }
 
 #[unsafe(no_mangle)]

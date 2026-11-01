@@ -12,3 +12,4 @@ path = "src/ide.rs"
 [dependencies]
 semantics = { path = "../semantics" }
 syntax = { path = "../syntax" }
+salsa.workspace = true

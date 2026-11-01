@@ -514,11 +514,9 @@ that the gain over a good interpreter is real but modest.
 `crates/jit` implements the core of this design for loops; the rest of the list above is still
 ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 
-- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body that contains a
-  loop compiles on its tenth entry, and a running loop compiles after 500 backward jumps and
-  continues in compiled code at the loop header (on-stack replacement). A body without a loop stays
-  in tier 0, because without direct calls the cost of entering compiled code and forcing arguments
-  through helpers is larger than what it saves.
+- **When it compiles.** Tier 0 counts entries and backward jumps per body. A body compiles on its
+  tenth entry, and a running loop compiles after 500 backward jumps and continues in compiled code
+  at the loop header (on-stack replacement).
 - **The IR.** The analysis turns the bytecode and its type feedback (one byte per instruction) into
   a typed plan: one action per instruction plus the abstract state before it, which records each
   register's and variable's type and where each variable's value lives. Cranelift's frontend builds
@@ -531,7 +529,17 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   its environment. The environment object still exists, but compiled code writes a variable back
   only before something that could observe it runs (a generic call, a dispatching operation, the
   first read of a formal whose default is an expression, a return, a deoptimization) and reloads it
-  after something that could change it. Promises are not elided.
+  after something that could change it.
+- **Calls.** A call to a frame-safe closure whose binding was resolved at compile time is direct:
+  effect-free arguments are evaluated eagerly and passed as already forced promises, bound by
+  position without the general matcher. Evaluating early is invisible only if nothing can assign
+  what an argument reads before the callee forces it, so the callee must be frame-safe: its body
+  and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
+  The call goes through tier 0 instead when a calling handler is established, because a handler
+  could run R code in between. A call of a small closure defined in the same body, which computes a scalar
+  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  against one global binding epoch, which the heap bumps whenever a watched binding changes or a
+  watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is
   speculated against the binding epoch. A failed guard boxes the live values, writes back the dirty
   variables and the loop states, and continues in tier 0 at the guarded instruction; the code is
@@ -547,8 +555,9 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
 - **The C API and the collector.** Every boxed value compiled code holds is stored in the register
   window or a slot's root cell, which the collector scans, so every object is a valid `SEXP` at every
   allocation and every helper call.
-- **Not yet built:** direct calls between compiled closures, promise elision, the use of static
-  types as early profiles, and freeing the machine code of invalidated bodies.
+- **Not yet built:** calls from compiled code straight into the callee's compiled code (a direct
+  call still enters through tier 0's call path and allocates a frame and forced promises), the use
+  of static types as early profiles, and freeing the machine code of invalidated bodies.
 
 ### How the static types feed the JIT
 
@@ -681,15 +690,20 @@ kernels lack a query planner. A custom engine would spend years re-deriving what
 
 The engine is `crates/table` and its query IR; `crates/interp/src/frame.rs` makes frames
 interpreter values and lowers queries into the IR, and `crates/libr/src/frame_altrep.rs` exposes
-columns as ALTREP vectors to native code. The user guide is [Frames](/guides/frames/).
+columns as ALTREP vectors to native code. The user guide is [DataFrames](/guides/dataframes/).
 
-- **The type is `frame`, and a frame is an external pointer that owns a Polars `DataFrame`.** The
-  name is not `table`, because base R's `table()` and its `"table"` class must keep working. The
-  constructor is `frame(...)`, the runtime class is `"frame"` alone (a frame is no `data.frame`;
-  `as.data.frame()` and `as.frame()` convert), and the checker types it as
-  `frame{id: integer[], price: double[], ticker: character[]}` (the "Frames" section of the typing
-  reference). Column references in a query are checked, and the data-masking draft gets the row
-  type it was waiting for.
+- **The type is `DataFrame`, an external pointer that owns a Polars `DataFrame`.** The runtime
+  class is `"DataFrame"` alone (a DataFrame is no `data.frame`; `as.data.frame()` and
+  `as.DataFrame()` convert), and the checker types it as
+  `DataFrame{id: integer[], price: double[], ticker: character[]}` (the "DataFrames" section of the
+  typing reference). `LazyFrame` holds a plan instead of a table, and `GroupBy` a DataFrame or plan
+  plus its keys.
+- **The primary API is Polars' verbs over expressions** (`DataFrame.select`, `with_columns`,
+  `filter`, `group_by` + `GroupBy.agg`, `sort`, `join`, `head`, with `col("x")` expressions), all
+  qualified names in `package:ry`. Every verb builds a step of `table::lazy::Plan`, and an eager
+  verb collects at once. The planner pushes filters below `with_columns` and projections, and pushes
+  filters, needed columns and row limits into a file scan. The bracket syntax below stays as
+  data.table compatibility and lowers to the same IR.
 - **A column reaches R code as a copied R vector, and native code as an ALTREP vector over the
   Arrow buffer.** The interpreter copies a column when R code reads it (`$`, `as.list`, a data
   mask), which is cheap next to the query. The ALTREP path in `libr` is built but no interpreter
@@ -710,7 +724,7 @@ columns as ALTREP vectors to native code. The user guide is [Frames](/guides/fra
   `NaN` with low word 1954) are rewritten into validity at the boundary. A vector coming in from R
   is copied into a new Arrow buffer; only a column R never materialized comes back zero-copy.
 - **Queries go through a small IR to a Polars lazy plan.** The evaluator and the bytecode hand
-  `tbl[...]` on a frame to the lowering before `i`, `j` and `by` are evaluated, so
+  `tbl[...]` on a DataFrame to the lowering before `i`, `j` and `by` are evaluated, so
   `tbl[price > 0, .(total = sum(price)), by = ticker]` becomes a `Query` (rows, `j`, `by`, `keyby`), which lowers to one lazy frame, so the
   planner sees the whole query and every grouping expression runs as a Polars kernel. The IR covers
   filters, ordering, positions, projections, grouped aggregation over data.table's GForce set (`sum`,
@@ -919,8 +933,8 @@ Each step ends with something real running, and each one is a large, whole chang
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
-   IR, ALTREP exposure and the checker's `frame` type exist (section 7); the interpreter now
-   runs frames, and data.table's queries run on the engine. Routing data.table's readers, writers and
+   IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
+   runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
    helpers to it is next.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,

@@ -251,7 +251,11 @@ The crate root is `src/table.rs`. It is ry's built-in typed table, an engine ove
 
 ## `rcmd`
 
-The library root is `src/rcmd.rs`, and the binary `ry-rcmd` (`src/main.rs`) is what `bin/R` in ry's
-R home runs. `assemble` creates the R home (headers, `libR.so`, `etc/Makeconf`,
-`share/make/shlib.mk`, `bin/R`, `bin/Rscript`); `install`, `shlib` and `config` are
-`R CMD INSTALL`, `R CMD SHLIB` and `R CMD config`.
+The library root is `src/rcmd.rs`, and the binary `ry-rcmd` (`src/main.rs`) is what `bin/R`,
+`bin/Rscript` and `bin/Rcmd` in ry's R home run. `assemble` creates the R home (headers,
+`libR.so`, `etc/Makeconf`, `share/make/shlib.mk`, links to GNU R's packages, `share/`, `etc/`
+and `R CMD` scripts, and the three front-end scripts); `ry-rcmd assemble` is its command line.
+`install`, `shlib` and `config` are `R CMD INSTALL`, `R CMD SHLIB` and `R CMD config`.
+`r_command_line` and `rscript_command_line` parse GNU R's front-end arguments into a `Session`
+that `main.rs` runs through `ry_run` in the home's `libR.so`. `src/install.R` is the R-level
+half of `R CMD INSTALL`, embedded and run on ry after the compile.

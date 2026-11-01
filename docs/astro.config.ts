@@ -6,6 +6,7 @@ import starlightThemeBlack from 'starlight-theme-black'
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://ry-lang.org',
 	// Every page published before the docs were reorganised keeps working.
 	redirects: {
 		'/formatter': '/guides/formatting',
@@ -61,39 +62,51 @@ export default defineConfig({
 						{ slug: 'installation' },
 					],
 				},
+				// The groups follow the migration story on the landing page and in why-ry.md: classic R
+				// first (steps 1 and 2), then what ry adds on top of R (steps 3 and 4).
 				{
-					label: 'Using ry',
+					label: '1. Check the code you have',
 					items: [
 						{ slug: 'guides/checking' },
 						{ slug: 'guides/formatting' },
 						{ slug: 'guides/editors' },
 						{ slug: 'guides/console' },
-						{ slug: 'guides/frames' },
 						{ slug: 'guides/loading-packages' },
 					],
 				},
 				{
-					label: 'Type checking',
+					label: '2. Type your code',
 					items: [
 						{ slug: 'type-checking/overview' },
 						{ slug: 'type-checking/annotations' },
-						{ slug: 'type-checking/inline-annotations' },
 						{ slug: 'type-checking/vectors-and-lists' },
 						{ slug: 'type-checking/null' },
 						{ slug: 'type-checking/functions' },
 						{ slug: 'type-checking/custom-types' },
-						{ slug: 'type-checking/records-and-tags' },
-						{ slug: 'type-checking/frames' },
 						{ slug: 'type-checking/unknown' },
-						{ slug: 'type-checking/strict-mode' },
 						{ slug: 'type-checking/stubs' },
 						{ slug: 'type-checking/limitations' },
 					],
 				},
 				{
+					label: '3. Switch to inline types',
+					items: [
+						{ slug: 'type-checking/inline-annotations' },
+					],
+				},
+				{
+					label: "4. Go fully typed",
+					items: [
+						{ slug: 'type-checking/records-and-tags' },
+						{ slug: 'type-checking/dataframes' },
+						{ slug: 'guides/dataframes' },
+						{ slug: 'reference/standard-library' },
+						{ slug: 'type-checking/strict-mode' },
+					],
+				},
+				{
 					label: 'Reference',
 					items: [
-						{ slug: 'reference/standard-library' },
 						{ slug: 'reference/configuration' },
 						{ slug: 'reference/cli' },
 						{ slug: 'reference/package-loading' },
@@ -120,6 +133,8 @@ export default defineConfig({
 			components: {
 				PageTitle: './src/components/PageTitle.astro',
 			},
+			// Adds the `<link rel="alternate" type="text/markdown">` to every page.
+			routeMiddleware: './src/routeData.ts',
 			customCss: ['./src/tailwind.css'],
 			plugins: [
 				starlightThemeBlack({

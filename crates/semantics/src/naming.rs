@@ -74,7 +74,8 @@ pub struct ItemNaming {
     pub column_updates: SortedMap<ExprId, BindingId>,
     /// Qualified reads outside quiet contexts.
     pub namespace_reads: SortedMap<ExprId, NamespaceRead>,
-    /// `<<-` targets with no enclosing binding: R creates them in the global environment.
+    /// Names R creates in the global environment as a side effect: `<<-` targets with no
+    /// enclosing binding, and the variables of top-level `for` loops.
     pub super_globals: SortedSet<Symbol>,
     /// Targets R parses but refuses at run time (a computed value or a number); reads inside
     /// them are suppressed as consequences of the mistake.
@@ -402,10 +403,7 @@ impl Context<'_> {
                     BinaryOperator::Tilde | BinaryOperator::Help => {}
                     // Operands of unmodeled operators still resolve (for IDE navigation), but
                     // unresolved reads stay quiet: the construct is opaque to the checker.
-                    BinaryOperator::And
-                    | BinaryOperator::Or
-                    | BinaryOperator::Pipe
-                    | BinaryOperator::Special => {
+                    BinaryOperator::Pipe | BinaryOperator::Special => {
                         self.quiet_depth += 1;
                         self.resolve(*lhs);
                         self.resolve(*rhs);
@@ -655,6 +653,10 @@ impl Context<'_> {
                 self.resolve(*sequence);
                 if let (Some(variable), Some(range)) = (variable, variable_range) {
                     let slot = self.mint_binding(variable, *range, BindingKind::ForVariable);
+                    // A top-level loop leaves its variable bound in the global environment.
+                    if self.current_scope().kind == ScopeKind::TopLevel {
+                        self.naming.super_globals.insert(*variable);
+                    }
                     self.current_scope().slots.insert(*variable, slot);
                     self.record_write(slot, Reach::Implicit);
                 }

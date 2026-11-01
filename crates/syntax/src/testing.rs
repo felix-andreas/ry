@@ -563,6 +563,53 @@ fn check_green_search(root: &crate::SyntaxNode, input: &str) {
         text, input,
         "green token walk lost text for input {input:?}"
     );
+    let descendants: Vec<crate::SyntaxNode> = root.descendants().collect();
+    let mut visited = Vec::new();
+    let mut green_text = String::new();
+    let mut open = 0usize;
+    crate::walk_green(root, |event| match event {
+        crate::GreenEvent::Enter {
+            node,
+            parent,
+            range,
+        } => {
+            open += 1;
+            visited.push((node.kind(), parent.map(crate::GreenRef::kind), range));
+        }
+        crate::GreenEvent::Leave(_) => open -= 1,
+        crate::GreenEvent::Token { text, range, .. } => {
+            assert_eq!(usize::from(range.start()), green_text.len());
+            green_text.push_str(text);
+        }
+    });
+    assert_eq!(open, 0, "green walk left nodes open for input {input:?}");
+    assert_eq!(
+        green_text, input,
+        "green walk lost text for input {input:?}"
+    );
+    let expected: Vec<_> = descendants
+        .iter()
+        .map(|node| {
+            let parent = (node != root)
+                .then(|| node.parent().map(|parent| parent.kind()))
+                .flatten();
+            (node.kind(), parent, node.text_range())
+        })
+        .collect();
+    assert_eq!(
+        visited, expected,
+        "green node walk diverged for input {input:?}"
+    );
+    for node in &descendants {
+        let first = descendants
+            .iter()
+            .find(|other| other.kind() == node.kind() && other.text_range() == node.text_range());
+        assert_eq!(
+            crate::node_at(root, node.kind(), node.text_range()).as_ref(),
+            first,
+            "node_at missed a node for input {input:?}"
+        );
+    }
     let subtrees = root.children().take(3);
     for node in std::iter::once(root.clone()).chain(subtrees) {
         for modulus in [1, 3, 7] {

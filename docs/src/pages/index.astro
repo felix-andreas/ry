@@ -1,4 +1,5 @@
 ---
+import Venn from "../components/Venn.astro";
 import "@fontsource/geist-sans/400.css";
 import "@fontsource/geist-sans/500.css";
 import "@fontsource/geist-sans/600.css";
@@ -51,72 +52,265 @@ const lspFeatures = [
     },
 ];
 
-const analysisTabs = [
+// Every snippet below was run through the real binary (`ry check`, `ry run --runtime ry`), and
+// its output is pasted verbatim; re-run rather than hand-edit.
+type Sample = {
+    key: string;
+    label: string;
+    file: string;
+    code: string;
+    command: string;
+    output: string;
+    note?: string;
+};
+
+const runtimeTabs: Sample[] = [
     {
-        key: "lint",
-        label: "Lints",
-        split: "1fr",
-        file: "R/sales.R",
-        config: "no configuration",
-        note:
-            "Unresolved names and lints, with no setup.",
+        key: "unions",
+        label: "Tagged unions",
+        file: "shapes.R",
+        code: `alias Shape = :Circle(radius: double) | :Rect(width: double, height: double)
+
+area <- function(shape: Shape) -> double {
+  match (shape) {
+    :Circle(radius = r) => pi * r^2
+    :Rect(width = w, height = h) => w * h
+  }
+}
+
+area(:Rect(width = 3, height = 4))`,
+        command: "ry run --runtime ry shapes.R",
+        output: `[1] 12`,
     },
     {
-        key: "types",
-        label: "Type errors",
-        split: "1.3fr",
-        file: "R/pricing.R",
-        config: "ry.toml · [check] typing = true",
-        note:
-            "Annotations are <code>#:</code> comments.",
+        key: "nominal",
+        label: "Nominal types",
+        file: "R/temps.R",
+        code: `type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
+
+boiling <- function() -> Celsius {
+  @Celsius(degrees = 100,)
+}
+
+reading: Fahrenheit <- boiling()`,
+        command: "ry check",
+        output: `type-mismatch
+
+  x expected \`Fahrenheit\`, found \`Celsius\`
+   --[R/temps.R:8:24]
+ 7 |
+ 8 | reading: Fahrenheit <- boiling()
+   |                        ^^^^^^^^^`,
     },
     {
-        key: "inference",
-        label: "Inference",
-        split: "2fr",
-        file: "R/booking.R",
-        config: "ry.toml · [check] typing = true",
-        note:
-            "No annotations. Inferred signatures shown in grey.",
+        key: "records",
+        label: "Records",
+        file: "people.R",
+        code: `alias Person = Record{name: character, age: integer}
+
+greet <- function(person: Person) -> character {
+  paste("hi", person$name)
+}
+
+ada <- (name = "ada", age = 36L)
+greet(ada)
+ada$email`,
+        command: "ry run --runtime ry people.R",
+        output: `[1] "hi ada"
+Error in ada$email :
+  the record has no field \`email\`; its fields are \`age\`, \`name\``,
+    },
+    {
+        key: "dataframe",
+        label: "DataFrame",
+        file: "sales.R",
+        code: `sales <- DataFrame(
+  region = c("eu", "us", "eu", "us"),
+  units = c(3L, 5L, 2L, 1L),
+  price = c(1.5, 2, 4, 3)
+)
+sales |>
+  DataFrame.filter(col("units") > 1L) |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(revenue = (col("units") * col("price")) |> Expr.sum())`,
+        command: "ry run --runtime ry sales.R",
+        output: `   region revenue
+   <char>   <num>
+1:     eu    12.5
+2:     us    10.0`,
+        note: "About twice as fast as data.table on 1 million rows.",
+    },
+    {
+        key: "stdlib",
+        label: "Standard library",
+        file: "ids.R",
+        code: `ids <- List.map_try(Str.split_on("3,1,x", ","), Str.to_integer)
+
+match (ids) {
+  :Ok(values) => List.sum(values)
+  :Err(reason) => reason
+}`,
+        command: "ry run --runtime ry ids.R",
+        output: `:InvalidNumStr`,
     },
 ];
 
-const formatterTabs = [
+const migrationTabs: Sample[] = [
     {
-        key: "spacing",
-        label: "Spacing",
-        file: "totals.R",
-        meta: "operators, commas, quotes",
-        note: "Spaces around operators and after commas, double quotes.",
+        key: "step-check",
+        label: "1. Check the code you have",
+        file: "R/pricing.R",
+        code: `net_price <- function(price, rate) {
+  price * (1 - ratee)
+}`,
+        command: "ry check",
+        output: `unresolved
+
+  ! I could not resolve \`ratee\` in this package, its imports, or builtins. Did you mean \`rate\`?
+   --[R/pricing.R:2:16]
+ 1 | net_price <- function(price, rate) {
+ 2 |   price * (1 - ratee)
+   |                ^^^^^`,
     },
     {
-        key: "braces",
-        label: "Braces & loops",
-        file: "regions.R",
-        meta: "loop and if bodies",
-        note: "Loop bodies, and if bodies that span lines, always get braces.",
+        key: "step-comments",
+        label: "2. Type your code",
+        file: "R/pricing.R",
+        code: `#: fn(price: double, rate: double) -> double
+net_price <- function(price, rate) {
+  price * (1 - rate)
+}
+
+net_price(100, "0.2")`,
+        command: "ry check",
+        output: `type-mismatch
+
+  x expected \`double\`, found \`character\`
+   --[R/pricing.R:6:16]
+ 5 |
+ 6 | net_price(100, "0.2")
+   |                ^^^^^`,
     },
     {
-        key: "indent",
-        label: "Indentation",
-        file: "options.R",
-        meta: "multi-line call arguments",
-        note: "One indent step per level. Line breaks are kept.",
-    },
-    {
-        key: "annotations",
-        label: "Annotations",
+        key: "step-inline",
+        label: "3. Switch to inline types",
         file: "pricing.R",
-        meta: "#: type annotations",
-        note:
-            "Valid annotations are normalized. Others are left as written.",
+        code: `net_price <- function(
+  price: double,
+  rate: double
+) -> double {
+  price * (1 - rate)
+}
+rate <- eval(parse(text = '"0.2"'))
+net_price(100, rate)`,
+        command: "ry run --runtime ry pricing.R",
+        output: `Error in net_price(100, rate) :
+  argument \`rate\` must be \`double\`, not \`character\``,
+    },
+    {
+        key: "step-ry",
+        label: "4. Go fully typed",
+        file: "R/payments.R",
+        code: `alias Payment = :Paid(amount: double) | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+  }
+}`,
+        command: "ry check",
+        output: `non-exhaustive-match
+
+  x this \`match\` does not handle \`:Pending\`: add an arm for it, or a catch-all \`_ => ...\` arm
+   --[R/payments.R:4:3]
+ 3 | balance <- function(payment: Payment) -> double {
+ 4 |   match (payment) {
+   |   ^^^^^^^^^^^^^^^`,
     },
 ];
+
+const escapeHtml = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const KEYWORDS = new Set([
+    "function", "if", "else", "for", "while", "in", "return", "match", "alias", "type",
+    "TRUE", "FALSE", "NULL", "NA",
+]);
+const TYPE_NAMES = new Set([
+    "double", "integer", "character", "logical", "Record", "Result", "Shape", "Person",
+    "Payment", "Celsius", "Fahrenheit",
+]);
+
+// A small R tokenizer that emits the same `t-*` classes as the captured editor mocks.
+function highlightR(source: string): string {
+    const token =
+        /(#.*$)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(\b\d+(?:\.\d+)?L?\b)|([:@][A-Z]\w*)|([A-Za-z_.][\w.]*)|(\s+)|(.)/gm;
+    return source
+        .split("\n")
+        .map((line, index) => {
+            let html = "";
+            for (const match of line.matchAll(token)) {
+                const [text, comment, string, number, tag, word] = match;
+                const escaped = escapeHtml(text);
+                let cls = "t-op";
+                if (comment) cls = "t-com";
+                else if (string) cls = "t-str";
+                else if (number) cls = "t-num";
+                else if (tag) cls = "t-type";
+                else if (word)
+                    cls = KEYWORDS.has(word)
+                        ? "t-kw"
+                        : TYPE_NAMES.has(word)
+                          ? "t-type"
+                          : line.slice((match.index ?? 0) + text.length).startsWith("(")
+                            ? "t-fn"
+                            : "t-id";
+                else if (/^\s+$/.test(text)) {
+                    html += escaped;
+                    continue;
+                }
+                html += `<span class="${cls}">${escaped}</span>`;
+            }
+            return `<div class="cl" style="--i:${index}"><span class="ln" aria-hidden="true">${index + 1}</span><span class="cx">${html}</span></div>`;
+        })
+        .join("\n");
+}
+
+// Colors raw `ry` output the way the terminal shows it. `--j` orders the lines for the reveal.
+function terminal(command: string, output: string): string {
+    const lines = output.split("\n").map((line, index) => {
+        const order = `style="--j:${index + 1}"`;
+        const escaped = escapeHtml(line);
+        if (line === "") return `<div class="tl gap"></div>`;
+        if (index === 0 && /^[a-z-]+$/.test(line)) {
+            const severity = output.includes("\n  ! ") ? "dwarn" : "derr";
+            return `<div class="tl" ${order}><span class="${severity}">${escaped}</span></div>`;
+        }
+        const message = line.match(/^  ([x!]) (.*)$/);
+        if (message) {
+            const severity = message[1] === "x" ? "derr" : "dwarn";
+            return `<div class="tl msg" ${order}><span class="${severity}">  ${message[1]} </span><span class="dmsg">${escapeHtml(message[2])}</span></div>`;
+        }
+        if (line.startsWith("   --[")) return `<div class="tl" ${order}><span class="darrow">${escaped}</span></div>`;
+        const gutter = line.match(/^( *\d* \|)(.*)$/);
+        if (gutter) {
+            const rest = gutter[2];
+            const body = /^ *\^+$/.test(rest)
+                ? rest.replace(/\^+/, (carets) => `<span class="dcaret-err">${carets}</span>`)
+                : escapeHtml(rest);
+            return `<div class="tl" ${order}><span class="dgutter">${escapeHtml(gutter[1])}</span>${body}</div>`;
+        }
+        if (line.startsWith("Error")) return `<div class="tl msg" ${order}><span class="derr">${escaped}</span></div>`;
+        return `<div class="tl msg" ${order}>${escaped}</div>`;
+    });
+    return [`<div class="tl tl-cmd" style="--j:0"><span class="sh">$</span> ${escapeHtml(command)}</div>`, ...lines].join("\n");
+}
 
 const ideCode = `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com"># one sale, and what is left of it after fees</span></span></div>
 <div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">sale</span><span class="inlay" data-for="inlay">: list{region: character, amount: double, closed: logical}</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">, </span><span class="t-id">closed</span><span class="t-op"> = </span><span class="t-kw">TRUE</span><span class="t-op">)</span></span></div>
 <div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="tok" data-mark="def-target references rename"><span class="t-id">margin</span></span><span class="inlay" data-for="inlay">: &lt;T: numeric, U: numeric&gt; fn(gross: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span><span class="renamebadge" data-for="rename" aria-hidden="true">3 edits · 2 files</span></span></div>
+<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="tok" data-mark="def-target references rename"><span class="t-id">margin</span></span><span class="inlay" data-for="inlay">: &lt;T: numeric, U: numeric&gt; fn(gross: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) { </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">) }</span><span class="renamebadge" data-for="rename" aria-hidden="true">3 edits · 2 files</span></span></div>
 <div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"></span></div>
 <div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-id">net</span><span class="inlay" data-for="inlay">: double</span><span class="t-op"> &lt;- </span><span class="tok t-fn" data-mark="def-source references rename-ghost"><span class="t-id">margin</span></span><span class="t-op">(</span><span class="t-id" data-mark="hover-anchor"><span class="t-id">sale</span></span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">, </span><span class="t-num">0.18</span><span class="t-op">)</span><span class="card hovercard" data-for="hover" aria-hidden="true"><code class="card-code"><span class="t-id">sale</span>: <span class="t-type">list{region: character, amount: double, closed: logical}</span></code><span class="card-meta">Package global, defined at <code>R/sales.R:2:1</code></span><span class="card-notch"></span></span><span class="caretbar" data-for="completion" aria-hidden="true"></span><span class="card comp" data-for="completion" aria-hidden="true"><span class="comp-row is-active"><span class="ckind">field</span><span class="cname">amount</span><span class="cdetail">double</span></span><span class="comp-row"><span class="ckind">field</span><span class="cname">closed</span><span class="cdetail">logical</span></span><span class="comp-row"><span class="ckind">field</span><span class="cname">region</span><span class="cdetail">character</span></span></span></span></div>
 <div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-id">label</span><span class="inlay" data-for="inlay">: character</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-id">sale</span><span class="t-op">$</span><span class="t-id">region</span><span class="t-op">, </span><span class="t-str">": "</span><span class="t-op">, </span><span class="t-fn">round</span><span class="t-op">(</span><span class="t-id">net</span><span class="t-op">, </span><span class="t-num">2</span><span class="t-op">))</span></span></div>
@@ -124,25 +318,6 @@ const ideCode = `<div class="cl" data-line="1"><span class="ln" aria-hidden="tru
 <div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-id">label</span><span class="t-op">)</span></span></div>`;
 
 const analysisCode = {
-    lint: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">read_sales</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">path</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-op">  </span><span class="t-fn">read.csv</span><span class="t-op">(</span><span class="t-id">path</span><span class="t-op">, </span><span class="t-id">stringsAsFactors</span><span class="t-op"> = </span><span class="t-kw">FALSE</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"></span></div>
-<div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-id">top_regions</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-id">n</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">  </span><span class="t-id">ranked</span><span class="t-op"> </span><span class="squig warn"><span class="t-op">=</span></span><span class="t-op"> </span><span class="t-id">sales</span><span class="t-op">[</span><span class="t-fn">order</span><span class="t-op">(-</span><span class="t-id">sales</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">), ]</span></span></div>
-<div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-op">  </span><span class="t-fn">head</span><span class="t-op">(</span><span class="t-fn">unique</span><span class="t-op">(</span><span class="t-id">ranked</span><span class="t-op">$</span><span class="t-id">region</span><span class="t-op">), </span><span class="t-id">n</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"></span></div>
-<div class="cl" data-line="10"><span class="ln" aria-hidden="true">10</span><span class="cx"><span class="t-id">report</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-id">regions</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="11"><span class="ln" aria-hidden="true">11</span><span class="cx"><span class="t-op">  </span><span class="t-fn">message</span><span class="t-op">(</span><span class="squig warn"><span class="t-id">nrwo</span></span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">), </span><span class="t-str">" rows in "</span><span class="t-op">, </span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">regions</span><span class="t-op">), </span><span class="t-str">" regions"</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="12"><span class="ln" aria-hidden="true">12</span><span class="cx"><span class="t-op">  </span><span class="t-fn">invisible</span><span class="t-op">(</span><span class="t-id">regions</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="13"><span class="ln" aria-hidden="true">13</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="14"><span class="ln" aria-hidden="true">14</span><span class="cx"></span></div>
-<div class="cl" data-line="15"><span class="ln" aria-hidden="true">15</span><span class="cx"><span class="t-id">sales</span><span class="t-op"> &lt;- </span><span class="t-fn">read_sales</span><span class="t-op">(</span><span class="t-str">"sales.csv"</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="16"><span class="ln" aria-hidden="true">16</span><span class="cx"><span class="t-id">regions</span><span class="t-op"> &lt;- </span><span class="t-fn">top_regions</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-num">5</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="17"><span class="ln" aria-hidden="true">17</span><span class="cx"></span></div>
-<div class="cl" data-line="18"><span class="ln" aria-hidden="true">18</span><span class="cx"><span class="t-id">verbose</span><span class="t-op"> &lt;- </span><span class="squig warn"><span class="t-id">T</span></span></span></div>
-<div class="cl" data-line="19"><span class="ln" aria-hidden="true">19</span><span class="cx"><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-id">verbose</span><span class="t-op">) </span><span class="t-fn">report</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-id">regions</span><span class="t-op">)</span></span></div>`,
     types: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#: fn(gross: </span><span class="t-type">double</span><span class="t-com">, rate: </span><span class="t-type">double</span><span class="t-com">) -&gt; </span><span class="t-type">double</span></span></div>
 <div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">net_of_fees</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
 <div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">  </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
@@ -161,53 +336,9 @@ const analysisCode = {
 <div class="cl" data-line="16"><span class="ln" aria-hidden="true">16</span><span class="cx"><span class="t-id">quote</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">)</span></span></div>
 <div class="cl" data-line="17"><span class="ln" aria-hidden="true">17</span><span class="cx"><span class="t-id">total</span><span class="t-op"> &lt;- </span><span class="t-fn">book_total</span><span class="t-op">(</span><span class="t-id">quote</span><span class="t-op">)</span></span></div>
 <div class="cl" data-line="18"><span class="ln" aria-hidden="true">18</span><span class="cx"><span class="t-id">label</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"total: "</span><span class="t-op">, </span><span class="t-id">total</span><span class="t-op">)</span></span></div>`,
-    inference: `<div class="cl" data-line="1"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">net_of_fees</span><span class="inlay is-on">: &lt;T: numeric, U: numeric&gt; fn(gross: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="2"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-op">  </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="3"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="4"><span class="ln" aria-hidden="true">4</span><span class="cx"></span></div>
-<div class="cl" data-line="5"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-id">fee_rate</span><span class="inlay is-on">: &lt;T&gt; fn(region: T) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="6"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">  </span><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-id">region</span><span class="t-op"> == </span><span class="t-str">"north"</span><span class="t-op">) </span><span class="t-num">0.18</span><span class="t-op"> </span><span class="t-kw">else</span><span class="t-op"> </span><span class="t-num">0.22</span></span></div>
-<div class="cl" data-line="7"><span class="ln" aria-hidden="true">7</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="8"><span class="ln" aria-hidden="true">8</span><span class="cx"></span></div>
-<div class="cl" data-line="9"><span class="ln" aria-hidden="true">9</span><span class="cx"><span class="t-id">book_total</span><span class="inlay is-on">: &lt;T, U: numeric&gt; fn(rows: T, rate: U) -&gt; double</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">rows</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) {</span></span></div>
-<div class="cl" data-line="10"><span class="ln" aria-hidden="true">10</span><span class="cx"><span class="t-op">  </span><span class="t-fn">net_of_fees</span><span class="t-op">(</span><span class="t-id">rows</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="11"><span class="ln" aria-hidden="true">11</span><span class="cx"><span class="t-op">}</span></span></div>
-<div class="cl" data-line="12"><span class="ln" aria-hidden="true">12</span><span class="cx"></span></div>
-<div class="cl" data-line="13"><span class="ln" aria-hidden="true">13</span><span class="cx"><span class="t-id">quote</span><span class="inlay is-on">: list{region: character, amount: double}</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> = </span><span class="t-str">"north"</span><span class="t-op">, </span><span class="t-id">amount</span><span class="t-op"> = </span><span class="t-num">1240.5</span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="14"><span class="ln" aria-hidden="true">14</span><span class="cx"><span class="t-id">total</span><span class="t-op"> &lt;- </span><span class="t-fn">book_total</span><span class="t-op">(</span><span class="t-id">quote</span><span class="t-op">, </span><span class="squig err"><span class="t-str">"0.18"</span></span><span class="t-op">)</span></span></div>
-<div class="cl" data-line="15"><span class="ln" aria-hidden="true">15</span><span class="cx"><span class="t-id">label</span><span class="inlay is-on">: character</span><span class="t-op"> &lt;- </span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"total: "</span><span class="t-op">, </span><span class="t-id">total</span><span class="t-op">)</span></span></div>`,
 };
 
 const analysisOutput = {
-    lint: `<div class="tl"><span class="sh">$</span> ry check</div>
-<div class="tl"><span class="dwarn">assignment-operator</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="dwarn">  ! </span><span class="dmsg">Use &lt;-, not =, for assignment</span></div>
-<div class="tl"><span class="darrow">   --[R/sales.R:6:10]</span></div>
-<div class="tl"><span class="dgutter"> 5 |</span> top_regions &lt;- function(sales, n) {</div>
-<div class="tl"><span class="dgutter"> 6 |</span>   ranked = sales[order(-sales$amount), ]</div>
-<div class="tl"><span class="dgutter">   |</span>          <span class="dcaret-warn">^</span></div>
-<div class="tl"><span class="dgutter"> 7 |</span>   head(unique(ranked$region), n)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dwarn">unresolved</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="dwarn">  ! </span><span class="dmsg">I could not resolve \`nrwo\` in this package, its imports, or builtins. Did you mean \`nrow\`?</span></div>
-<div class="tl"><span class="darrow">    --[R/sales.R:11:11]</span></div>
-<div class="tl"><span class="dgutter"> 10 |</span> report &lt;- function(sales, regions) {</div>
-<div class="tl"><span class="dgutter"> 11 |</span>   message(nrwo(sales), &quot; rows in &quot;, length(regions), &quot; regions&quot;)</div>
-<div class="tl"><span class="dgutter">    |</span>           <span class="dcaret-warn">^^^^</span></div>
-<div class="tl"><span class="dgutter"> 12 |</span>   invisible(regions)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dwarn">boolean-shorthand</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="dwarn">  ! </span><span class="dmsg">Use TRUE, not T, for Boolean values</span></div>
-<div class="tl"><span class="darrow">    --[R/sales.R:18:12]</span></div>
-<div class="tl"><span class="dgutter"> 17 |</span> </div>
-<div class="tl"><span class="dgutter"> 18 |</span> verbose &lt;- T</div>
-<div class="tl"><span class="dgutter">    |</span>            <span class="dcaret-warn">^</span></div>
-<div class="tl"><span class="dgutter"> 19 |</span> if (verbose) report(sales, regions)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dsum">3 problems in 1 file</span></div>`,
     types: `<div class="tl"><span class="sh">$</span> ry check</div>
 <div class="tl"><span class="derr">type-mismatch</span></div>
 <div class="tl gap"></div>
@@ -219,28 +350,9 @@ const analysisOutput = {
 <div class="tl"><span class="dgutter"> 14 |</span> }</div>
 <div class="tl gap"></div>
 <div class="tl"><span class="dsum">1 problem in 1 file</span></div>`,
-    inference: `<div class="tl"><span class="sh">$</span> ry check</div>
-<div class="tl"><span class="derr">type-mismatch</span></div>
-<div class="tl gap"></div>
-<div class="tl msg"><span class="derr">  x </span><span class="dmsg">expected a numeric value (\`integer\` or \`double\`), found \`character\`</span></div>
-<div class="tl"><span class="darrow">    --[R/booking.R:14:28]</span></div>
-<div class="tl"><span class="dgutter"> 13 |</span> quote &lt;- list(region = &quot;north&quot;, amount = 1240.5)</div>
-<div class="tl"><span class="dgutter"> 14 |</span> total &lt;- book_total(quote, &quot;0.18&quot;)</div>
-<div class="tl"><span class="dgutter">    |</span>                            <span class="dcaret-err">^^^^^^</span></div>
-<div class="tl"><span class="dgutter"> 15 |</span> label &lt;- paste0(&quot;total: &quot;, total)</div>
-<div class="tl gap"></div>
-<div class="tl"><span class="dsum">1 problem in 1 file</span></div>`,
 };
 
 const formatterCode = {
-    spacing: {
-        before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">totals</span><span class="t-op">&lt;-</span><span class="t-fn">sapply</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">,</span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">s</span><span class="t-op">)</span><span class="t-id">s</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">top</span><span class="t-op">&lt;-</span><span class="t-id">sales</span><span class="t-op">[</span><span class="t-id">totals</span><span class="t-op">&gt;</span><span class="t-id">threshold</span><span class="t-op"> ,]</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">'kept: '</span><span class="t-op">,</span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">),</span><span class="t-str">' of '</span><span class="t-op">,</span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">)))</span></span></div>`,
-        after: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">totals</span><span class="t-op"> &lt;- </span><span class="t-fn">sapply</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">, </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">s</span><span class="t-op">) </span><span class="t-id">s</span><span class="t-op">$</span><span class="t-id">amount</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">top</span><span class="t-op"> &lt;- </span><span class="t-id">sales</span><span class="t-op">[</span><span class="t-id">totals</span><span class="t-op"> &gt; </span><span class="t-id">threshold</span><span class="t-op">, ]</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-fn">message</span><span class="t-op">(</span><span class="t-fn">paste0</span><span class="t-op">(</span><span class="t-str">"kept: "</span><span class="t-op">, </span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">), </span><span class="t-str">" of "</span><span class="t-op">, </span><span class="t-fn">length</span><span class="t-op">(</span><span class="t-id">sales</span><span class="t-op">)))</span></span></div>`,
-    },
     braces: {
         before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-kw">for</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op"> </span><span class="t-kw">in</span><span class="t-op"> </span><span class="t-id">regions</span><span class="t-op">) </span><span class="t-fn">accumulate</span><span class="t-op">(</span><span class="t-id">region</span><span class="t-op">)</span></span></div>
 <div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-kw">if</span><span class="t-op">(</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">)==</span><span class="t-num">0</span><span class="t-op">)</span></span></div>
@@ -251,28 +363,6 @@ const formatterCode = {
 <div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-kw">if</span><span class="t-op"> (</span><span class="t-fn">nrow</span><span class="t-op">(</span><span class="t-id">top</span><span class="t-op">) == </span><span class="t-num">0</span><span class="t-op">) {</span></span></div>
 <div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="ws">··</span><span class="t-fn">warning</span><span class="t-op">(</span><span class="t-str">"no rows"</span><span class="t-op">)</span></span></div>
 <div class="cl is-changed" style="--i:5"><span class="ln" aria-hidden="true">6</span><span class="cx"><span class="t-op">}</span></span></div>`,
-    },
-    indent: {
-        before: `<div class="cl" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">opts</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="ws">······</span><span class="t-id">host</span><span class="t-op"> = </span><span class="t-str">"localhost"</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="ws">·</span><span class="t-id">port</span><span class="t-op"> = </span><span class="t-num">8080</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="ws">········</span><span class="t-id">retries</span><span class="t-op"> = </span><span class="t-num">3</span></span></div>
-<div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-op">)</span></span></div>`,
-        after: `<div class="cl" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-id">opts</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span></span></div>
-<div class="cl is-changed" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="ws">··</span><span class="t-id">host</span><span class="t-op"> = </span><span class="t-str">"localhost"</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="ws">··</span><span class="t-id">port</span><span class="t-op"> = </span><span class="t-num">8080</span><span class="t-op">,</span></span></div>
-<div class="cl is-changed" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="ws">··</span><span class="t-id">retries</span><span class="t-op"> = </span><span class="t-num">3</span></span></div>
-<div class="cl" style="--i:4"><span class="ln" aria-hidden="true">5</span><span class="cx"><span class="t-op">)</span></span></div>`,
-    },
-    annotations: {
-        before: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#:fn( gross:</span><span class="t-type">double</span><span class="t-com">,rate:</span><span class="t-type">double</span><span class="t-com"> )-&gt;</span><span class="t-type">double</span></span></div>
-<div class="cl" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">margin</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-com">#: list[ named : </span><span class="t-type">double</span><span class="t-com"> ]</span></span></div>
-<div class="cl" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-id">weights</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">a</span><span class="t-op"> = </span><span class="t-num">1.0</span><span class="t-op">)</span></span></div>`,
-        after: `<div class="cl is-changed" style="--i:0"><span class="ln" aria-hidden="true">1</span><span class="cx"><span class="t-com">#: fn(gross: </span><span class="t-type">double</span><span class="t-com">, rate: </span><span class="t-type">double</span><span class="t-com">) -&gt; </span><span class="t-type">double</span></span></div>
-<div class="cl" style="--i:1"><span class="ln" aria-hidden="true">2</span><span class="cx"><span class="t-id">margin</span><span class="t-op"> &lt;- </span><span class="t-kw">function</span><span class="t-op">(</span><span class="t-id">gross</span><span class="t-op">, </span><span class="t-id">rate</span><span class="t-op">) </span><span class="t-id">gross</span><span class="t-op"> * (</span><span class="t-num">1</span><span class="t-op"> - </span><span class="t-id">rate</span><span class="t-op">)</span></span></div>
-<div class="cl is-changed" style="--i:2"><span class="ln" aria-hidden="true">3</span><span class="cx"><span class="t-com">#: list[named: </span><span class="t-type">double</span><span class="t-com">]</span></span></div>
-<div class="cl" style="--i:3"><span class="ln" aria-hidden="true">4</span><span class="cx"><span class="t-id">weights</span><span class="t-op"> &lt;- </span><span class="t-fn">list</span><span class="t-op">(</span><span class="t-id">a</span><span class="t-op"> = </span><span class="t-num">1.0</span><span class="t-op">)</span></span></div>`,
     },
 };
 
@@ -285,11 +375,11 @@ const year = new Date().getFullYear();
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>
-            ry: a language server, type checker, and formatter for R
+            ry: one toolchain and a type system for R
         </title>
         <meta
             name="description"
-            content="ry is a toolchain for R, written in Rust: a language server, a linter, a type checker, and a formatter."
+            content="ry is one toolchain for R, written in Rust, with a type system on top of R: it checks the R code you have, adds records, tagged unions and a typed table, and runs it on its own runtime."
         />
         <link rel="icon" href="/favicon.svg" />
         <script is:inline>
@@ -438,331 +528,235 @@ const year = new Date().getFullYear();
                 </div>
             </section>
 
-            <section id="language-server" class="band showband accent-cyan">
+            <section id="toolchain" class="band showband accent-cyan">
                 <div class="band-inner">
                     <header class="band-head">
-                        <h2>Language server</h2>
-                        <p class="lede">
-                            Works in any editor that supports LSP.
-                        </p>
+                        <h2>One toolchain</h2>
+                        <p class="lede">Checks, formats and navigates the R you have today.</p>
                     </header>
-
-                    <div
-                        class="showcase ide"
-                        data-tabs="ide"
-                        data-feature="completion"
-                    >
+                    <div class="showcase" data-tabs="toolchain">
+                        <div class="seg" role="tablist" aria-label="Tools">
+                            <button role="tab" id="tab-checker" aria-controls="panel-checker" aria-selected="true" tabindex="0">Type checker</button>
+                            <button role="tab" id="tab-formatter" aria-controls="panel-formatter" aria-selected="false" tabindex="-1">Formatter</button>
+                            <button role="tab" id="tab-lsp" aria-controls="panel-lsp" aria-selected="false" tabindex="-1">Language server</button>
+                        </div>
+                        <div class="stage split" role="tabpanel" id="panel-checker" aria-labelledby="tab-checker" tabindex="0" style="--split: 1.3fr">
+                            <div class="stage-body">
+                                <div class="pane pane-src">
+                                    <div class="code" set:html={analysisCode.types} />
+                                </div>
+                                <div class="pane pane-out">
+                                    <div class="term" set:html={analysisOutput.types} />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="stage split fmt" role="tabpanel" id="panel-formatter" aria-labelledby="tab-formatter" tabindex="0" hidden>
+                            <div class="stage-body">
+                                <div class="pane pane-src">
+                                    <div class="code" set:html={formatterCode.braces.before} />
+                                </div>
+                                <div class="pane pane-out">
+                                    <div class="code" set:html={formatterCode.braces.after} />
+                                </div>
+                            </div>
+                        </div>
+                        <div class="lsp-panel" role="tabpanel" id="panel-lsp" aria-labelledby="tab-lsp" tabindex="0" hidden>
                         <div
-                            class="seg"
-                            role="tablist"
-                            aria-label="Language server features"
+                            class="showcase ide"
+                            data-tabs="ide"
+                            data-feature="completion"
                         >
-                            {
-                                lspFeatures.map((feature, index) => (
-                                    <button
-                                        role="tab"
-                                        id={`tab-${feature.key}`}
-                                        data-key={feature.key}
-                                        aria-controls="ide-panel"
-                                        aria-selected={
-                                            index === 0 ? "true" : "false"
-                                        }
-                                        tabindex={index === 0 ? 0 : -1}
+                            <div
+                                class="seg"
+                                role="tablist"
+                                aria-label="Language server features"
+                            >
+                                {
+                                    lspFeatures.map((feature, index) => (
+                                        <button
+                                            role="tab"
+                                            id={`tab-${feature.key}`}
+                                            data-key={feature.key}
+                                            aria-controls="ide-panel"
+                                            aria-selected={
+                                                index === 0 ? "true" : "false"
+                                            }
+                                            tabindex={index === 0 ? 0 : -1}
+                                        >
+                                            {feature.label}
+                                        </button>
+                                    ))
+                                }
+                            </div>
+
+                            <div
+                                class="stage"
+                                role="tabpanel"
+                                id="ide-panel"
+                                aria-labelledby="tab-completion"
+                                tabindex="0"
+                            >
+                                <div class="stage-head">
+                                    <span class="ftabs">
+                                        <span class="ftab is-active">sales.R</span>
+                                        <span class="ftab">report.R</span>
+                                    </span>
+                                    <span class="stage-meta"
+                                        ><span class="dot" aria-hidden="true"
+                                        ></span>ry</span
                                     >
-                                        {feature.label}
-                                    </button>
-                                ))
-                            }
+                                </div>
+
+                                <div class="stage-body ide-body">
+                                    <div class="code-scroll">
+                                        <div class="code" set:html={ideCode} />
+                                    </div>
+                                    <div class="peek" data-for="references">
+                                        <div class="peek-head">
+                                            <span class="peek-count">3</span> references
+                                        </div>
+                                        <div class="peek-row">
+                                            <span class="peek-file">R/sales.R</span
+                                            ><span class="peek-pos">4:1</span><span
+                                                class="peek-src"
+                                                ><mark>margin</mark> &lt;- function(gross,
+                                                rate) &#123; gross * (1 - rate) &#125;</span
+                                            >
+                                        </div>
+                                        <div class="peek-row">
+                                            <span class="peek-file">R/sales.R</span
+                                            ><span class="peek-pos">6:8</span><span
+                                                class="peek-src"
+                                                >net &lt;- <mark>margin</mark
+                                                >(sale$amount, 0.18)</span
+                                            >
+                                        </div>
+                                        <div class="peek-row">
+                                            <span class="peek-file">R/report.R</span
+                                            ><span class="peek-pos">2:28</span><span
+                                                class="peek-src"
+                                                >paste0(sale$region, " ", <mark
+                                                    >margin</mark
+                                                >(sale$amount, rate))</span
+                                            >
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
                         </div>
 
-                        <div
-                            class="stage"
-                            role="tabpanel"
-                            id="ide-panel"
-                            aria-labelledby="tab-completion"
-                            tabindex="0"
-                        >
-                            <div class="stage-head">
-                                <span class="ftabs">
-                                    <span class="ftab is-active">sales.R</span>
-                                    <span class="ftab">report.R</span>
-                                </span>
-                                <span class="stage-meta"
-                                    ><span class="dot" aria-hidden="true"
-                                    ></span>ry</span
-                                >
-                            </div>
-
-                            <div class="stage-body ide-body">
-                                <div class="code-scroll">
-                                    <div class="code" set:html={ideCode} />
-                                </div>
-                                <div class="peek" data-for="references">
-                                    <div class="peek-head">
-                                        <span class="peek-count">3</span> references
-                                    </div>
-                                    <div class="peek-row">
-                                        <span class="peek-file">R/sales.R</span
-                                        ><span class="peek-pos">4:1</span><span
-                                            class="peek-src"
-                                            ><mark>margin</mark> &lt;- function(gross,
-                                            rate) gross * (1 - rate)</span
-                                        >
-                                    </div>
-                                    <div class="peek-row">
-                                        <span class="peek-file">R/sales.R</span
-                                        ><span class="peek-pos">6:8</span><span
-                                            class="peek-src"
-                                            >net &lt;- <mark>margin</mark
-                                            >(sale$amount, 0.18)</span
-                                        >
-                                    </div>
-                                    <div class="peek-row">
-                                        <span class="peek-file">R/report.R</span
-                                        ><span class="peek-pos">2:28</span><span
-                                            class="peek-src"
-                                            >paste0(sale$region, " ", <mark
-                                                >margin</mark
-                                            >(sale$amount, rate))</span
-                                        >
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="stage-foot">
-                                <span class="foot-notes">
-                                    {
-                                        lspFeatures.map((feature) => (
-                                            <span
-                                                class="foot-note"
-                                                data-for={feature.key}
-                                            >
-                                                {feature.note}
-                                            </span>
-                                        ))
-                                    }
-                                </span>
-                                <span class="foot-methods" aria-hidden="true">
-                                    {
-                                        lspFeatures.map((feature) => (
-                                            <code
-                                                class="foot-method"
-                                                data-for={feature.key}
-                                            >
-                                                {feature.method}
-                                            </code>
-                                        ))
-                                    }
-                                </span>
-                            </div>
                         </div>
                     </div>
-
-                    <p class="band-foot">
-                        <a class="doclink" href="/guides/editors"
-                            >Editor features <span aria-hidden="true"
-                                >→</span
-                            ></a
-                        >
-                    </p>
                 </div>
             </section>
 
-            <section
-                id="code-analysis"
-                class="band showband band-spotlight accent-violet"
-            >
+            <section id="runtime" class="band showband band-spotlight accent-violet">
                 <div class="band-inner">
                     <header class="band-head">
-                        <h2>Checker</h2>
-                        <p class="lede">
-                            Lints out of the box. Type checking with
-                            <code>[check] typing = true</code>.
-                        </p>
+                        <h2>A backwards-compatible R runtime</h2>
+                        <p class="lede">Runs your R unchanged, and adds the types R is missing.</p>
                     </header>
-
-                    <div class="showcase" data-tabs="check">
-                        <div
-                            class="seg"
-                            role="tablist"
-                            aria-label="What ry check reports"
-                        >
-                            {
-                                analysisTabs.map((tab, index) => (
-                                    <button
-                                        role="tab"
-                                        id={`tab-${tab.key}`}
-                                        aria-controls={`panel-${tab.key}`}
-                                        aria-selected={
-                                            index === 0 ? "true" : "false"
-                                        }
-                                        tabindex={index === 0 ? 0 : -1}
-                                    >
-                                        {tab.label}
-                                    </button>
-                                ))
-                            }
-                        </div>
-
+                    <div class="showcase reveal" data-tabs="runtime">
+                    <div class="seg" role="tablist" aria-label="Runtime features">
                         {
-                            analysisTabs.map((tab, index) => (
-                                <div
-                                    class="stage split"
-                                    role="tabpanel"
-                                    id={`panel-${tab.key}`}
-                                    aria-labelledby={`tab-${tab.key}`}
-                                    tabindex="0"
-                                    hidden={index !== 0}
-                                    style={`--split: ${tab.split}`}
+                            runtimeTabs.map((tab, index) => (
+                                <button
+                                    role="tab"
+                                    id={`tab-${tab.key}`}
+                                    data-key={tab.key}
+                                    aria-controls={`panel-${tab.key}`}
+                                    aria-selected={index === 0 ? "true" : "false"}
+                                    tabindex={index === 0 ? 0 : -1}
                                 >
-                                    <div class="stage-head">
-                                        <span class="ftabs">
-                                            <span class="ftab is-active">
-                                                {tab.file}
-                                            </span>
-                                        </span>
-                                        <span class="stage-meta">
-                                            {tab.config}
-                                        </span>
-                                    </div>
-                                    <div class="stage-body">
-                                        <div class="pane pane-src">
-                                            <div
-                                                class="code"
-                                                set:html={analysisCode[tab.key]}
-                                            />
-                                        </div>
-                                        <div class="pane pane-out">
-                                            <div
-                                                class="term"
-                                                set:html={
-                                                    analysisOutput[tab.key]
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                    <div class="stage-foot">
-                                        <span
-                                            class="foot-note is-on"
-                                            set:html={tab.note}
-                                        />
-                                        <code class="foot-method is-on">
-                                            exit 1
-                                        </code>
-                                    </div>
-                                </div>
+                                    {tab.label}
+                                </button>
                             ))
                         }
                     </div>
-
-                    <p class="band-foot">
-                        <a class="doclink" href="/type-checking/overview"
-                            >Tour <span aria-hidden="true">→</span></a
-                        >
-                        <a class="doclink" href="/reference/diagnostic-codes"
-                            >Diagnostic codes <span aria-hidden="true">→</span></a
-                        >
-                    </p>
+                    {
+                        runtimeTabs.map((tab, index) => (
+                            <div
+                                class="stage split stage-hero"
+                                style="--split: 1.5fr"
+                                role="tabpanel"
+                                id={`panel-${tab.key}`}
+                                aria-labelledby={`tab-${tab.key}`}
+                                tabindex="0"
+                                hidden={index !== 0}
+                            >
+                                <div class="stage-head">
+                                    <span class="ftabs"><span class="ftab is-active">{tab.file}</span></span>
+                                    <span class="stage-meta"><span class="dot" aria-hidden="true"></span>{tab.command.split(" ").slice(0, 2).join(" ")}</span>
+                                </div>
+                                <div class="stage-body">
+                                    <div class="pane pane-src">
+                                        <div class="code" set:html={highlightR(tab.code)} />
+                                    </div>
+                                    <div class="pane pane-out">
+                                        <div class="term" set:html={terminal(tab.command, tab.output)} />
+                                    </div>
+                                </div>
+                                {tab.note && <p class="stage-note">{tab.note}</p>}
+                            </div>
+                        ))
+                    }
+                    </div>
                 </div>
             </section>
 
-            <section id="formatter" class="band showband accent-emerald dotted">
+            <section id="migrate" class="band showband accent-emerald">
                 <div class="band-inner">
                     <header class="band-head">
-                        <h2>Formatter</h2>
-                        <p class="lede">
-                            Normalizes spacing, indentation, and braces. Keeps
-                            your line breaks.
-                        </p>
+                        <h2>Take your R code into the future</h2>
+                        <p class="lede">Use ry today on the code you have, and move it to typed code one step at a time.</p>
                     </header>
-
-                    <div class="showcase fmt" data-tabs="fmt">
-                        <div
-                            class="seg"
-                            role="tablist"
-                            aria-label="Formatter examples"
-                        >
-                            {
-                                formatterTabs.map((tab, index) => (
-                                    <button
-                                        role="tab"
-                                        id={`tab-${tab.key}`}
-                                        aria-controls={`panel-${tab.key}`}
-                                        aria-selected={
-                                            index === 0 ? "true" : "false"
-                                        }
-                                        tabindex={index === 0 ? 0 : -1}
-                                    >
-                                        {tab.label}
-                                    </button>
-                                ))
-                            }
-                        </div>
-
+                    <div class="showcase reveal path" data-tabs="migrate">
+                    <div class="venn"><Venn id="ry-venn-home" step={1} /></div>
+                    <div class="seg seg-steps" role="tablist" aria-label="Steps">
                         {
-                            formatterTabs.map((tab, index) => (
-                                <div
-                                    class="stage split"
-                                    role="tabpanel"
-                                    id={`panel-${tab.key}`}
-                                    aria-labelledby={`tab-${tab.key}`}
-                                    tabindex="0"
-                                    hidden={index !== 0}
+                            migrationTabs.map((tab, index) => (
+                                <button
+                                    role="tab"
+                                    id={`tab-${tab.key}`}
+                                    data-key={tab.key}
+                                    aria-controls={`panel-${tab.key}`}
+                                    aria-selected={index === 0 ? "true" : "false"}
+                                    tabindex={index === 0 ? 0 : -1}
                                 >
-                                    <div class="stage-head">
-                                        <span class="ftabs">
-                                            <span class="ftab is-active">
-                                                {tab.file}
-                                            </span>
-                                        </span>
-                                        <span class="stage-meta">
-                                            {tab.meta}
-                                        </span>
-                                    </div>
-                                    <div class="stage-body">
-                                        <div class="pane pane-src">
-                                            <div class="pane-label">
-                                                as written
-                                            </div>
-                                            <div
-                                                class="code"
-                                                set:html={
-                                                    formatterCode[tab.key]
-                                                        .before
-                                                }
-                                            />
-                                        </div>
-                                        <div class="pane pane-out">
-                                            <div class="pane-label">ry fmt</div>
-                                            <div
-                                                class="code"
-                                                set:html={
-                                                    formatterCode[tab.key].after
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-                                    <div class="stage-foot">
-                                        <code class="foot-cmd is-on">
-                                            <span class="sh">$</span> ry fmt
-                                            --diff {tab.file}
-                                        </code>
-                                        <span
-                                            class="foot-note is-on"
-                                            set:html={tab.note}
-                                        />
-                                    </div>
-                                </div>
+                                    <span class="step-label">{tab.label}</span>
+                                    <span class="visually-hidden">, </span>
+                                    <span class="step-where">{index < 2 ? "runs on GNU R" : "needs ry"}</span>
+                                </button>
                             ))
                         }
                     </div>
-
-                    <p class="band-foot">
-                        <a class="doclink" href="/reference/formatting-rules"
-                            >Formatter rules <span aria-hidden="true">→</span
-                            ></a
-                        >
-                    </p>
+                    {
+                        migrationTabs.map((tab, index) => (
+                            <div
+                                class="stage split"
+                                role="tabpanel"
+                                id={`panel-${tab.key}`}
+                                aria-labelledby={`tab-${tab.key}`}
+                                tabindex="0"
+                                hidden={index !== 0}
+                            >
+                                <div class="stage-head">
+                                    <span class="ftabs"><span class="ftab is-active">{tab.file}</span></span>
+                                    <span class="stage-meta"><span class="dot" aria-hidden="true"></span>{tab.command.split(" ").slice(0, 2).join(" ")}</span>
+                                </div>
+                                <div class="stage-body">
+                                    <div class="pane pane-src">
+                                        <div class="code" set:html={highlightR(tab.code)} />
+                                    </div>
+                                    <div class="pane pane-out">
+                                        <div class="term" set:html={terminal(tab.command, tab.output)} />
+                                    </div>
+                                </div>
+                            </div>
+                        ))
+                    }
+                    </div>
                 </div>
             </section>
 
@@ -771,27 +765,9 @@ const year = new Date().getFullYear();
                 <div class="closer-scrim" aria-hidden="true"></div>
                 <div class="col closer-col">
                     <h2>Install</h2>
-                    <div class="steps">
-                        <div class="step">
-                            <p class="step-label">1 &middot; Install</p>
-                            <pre
-                                class="codeblock"><code>cargo install --git https://github.com/felix-andreas/ry ry-lang</code></pre>
-                        </div>
-                        <div class="step">
-                            <p class="step-label">
-                                2 &middot; Run it on your project
-                            </p>
-                            <pre
-                                class="codeblock"><code>ry fmt .     <span class="c-muted"># format</span>
-ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
-                        </div>
-                    </div>
-                    <p class="band-note">
-                        No Rust toolchain? Download a
-                        <a class="inline-link" href="https://github.com/felix-andreas/ry/releases"
-                            >prebuilt release</a
-                        >, or install the VS Code extension, which bundles one.
-                    </p>
+                    <pre
+                        class="codeblock"><code>cargo install --git https://github.com/felix-andreas/ry ry-lang
+ry check .</code></pre>
                     <div class="cta-cluster">
                         <a class="cta cta-lg" href="/getting-started"
                             >Get started</a
@@ -1773,9 +1749,9 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 const reduce = window.matchMedia(
                     "(prefers-reduced-motion: reduce)",
                 ).matches;
-                const tablist = root.querySelector('[role="tablist"]');
+                const tablist = root.querySelector(':scope > [role="tablist"]');
                 const tabs = Array.from(
-                    root.querySelectorAll('[role="tab"]'),
+                    root.querySelectorAll(':scope > [role="tablist"] > [role="tab"]'),
                 ) as HTMLElement[];
                 if (!tabs.length) return;
                 const sharedPanel = root.classList.contains("ide");
@@ -1794,6 +1770,30 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     root.querySelectorAll(".foot-methods > .foot-method"),
                 ) as HTMLElement[];
                 let renameTimer = 0;
+                const reveal = root.classList.contains("reveal") && !reduce;
+                // Lines stay hidden until the showcase first scrolls into view, then animate in once.
+                let revealed = !reveal || typeof IntersectionObserver === "undefined";
+                if (!revealed) root.classList.add("is-waiting");
+                const venn = root.querySelector(":scope > .venn .venn-svg");
+                const indicator = document.createElement("span");
+                indicator.className = "seg-ind";
+                indicator.setAttribute("aria-hidden", "true");
+                tablist?.prepend(indicator);
+                tablist?.classList.add("has-ind");
+                function placeIndicator() {
+                    const tab = tabs[selectedIndex()];
+                    if (!tab) return;
+                    // A pill that has no size yet would otherwise grow in from the tablist's corner.
+                    const snap = !tab.offsetWidth || !parseFloat(indicator.style.width || "0");
+                    if (snap) indicator.classList.remove("is-ready");
+                    indicator.style.width = `${tab.offsetWidth}px`;
+                    indicator.style.height = `${tab.offsetHeight}px`;
+                    indicator.style.transform = `translate(${tab.offsetLeft}px, ${tab.offsetTop}px)`;
+                    if (snap && tab.offsetWidth)
+                        requestAnimationFrame(() => indicator.classList.add("is-ready"));
+                }
+                if (tablist && typeof ResizeObserver !== "undefined")
+                    new ResizeObserver(placeIndicator).observe(tablist);
 
                 function selectedIndex() {
                     const found = tabs.findIndex(
@@ -1803,6 +1803,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
 
                 function activate(index: number, focusTab: boolean) {
+                    // A tab chosen before the reveal fired must never show blank lines.
+                    if (focusTab && !revealed) {
+                        revealed = true;
+                        root.classList.remove("is-waiting");
+                    }
                     const key = tabs[index]?.dataset.key ?? "";
                     tabs.forEach((tab, i) => {
                         const selected = i === index;
@@ -1826,8 +1831,17 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                         if (key === "rename") playRename();
                     } else {
                         const panel = panels[index];
-                        if (panel) playFormat(panel);
+                        if (panel) playPanel(panel);
                     }
+                    if (venn) venn.setAttribute("data-step", String(index + 1));
+                    if (tablist && tablist.scrollWidth > tablist.clientWidth) {
+                        const tab = tabs[index];
+                        tablist.scrollTo({
+                            left: tab.offsetLeft - (tablist.clientWidth - tab.offsetWidth) / 2,
+                            behavior: reduce ? "auto" : "smooth",
+                        });
+                    }
+                    placeIndicator();
                     for (const note of footNotes)
                         note.classList.toggle(
                             "is-on",
@@ -1841,11 +1855,17 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                     if (focusTab) tabs[index].focus();
                 }
 
-                function playFormat(panel: HTMLElement) {
-                    if (reduce || !root.classList.contains("fmt")) return;
-                    panel.classList.remove("is-playing");
+                function playPanel(panel: HTMLElement) {
+                    if (reduce) return;
+                    const playing = root.classList.contains("fmt")
+                        ? "is-playing"
+                        : reveal && revealed
+                          ? "is-entering"
+                          : "";
+                    if (!playing) return;
+                    panel.classList.remove(playing);
                     void panel.offsetWidth;
-                    panel.classList.add("is-playing");
+                    panel.classList.add(playing);
                 }
 
                 function renameTargets() {
@@ -1925,13 +1945,26 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 );
                 // Through the click path, so the footer note and shared stage state are never blank.
                 activate(selectedIndex(), false);
+                tablist?.addEventListener(
+                    "scroll",
+                    () => tablist.classList.toggle("is-scrolled", tablist.scrollLeft > 0),
+                    { passive: true },
+                );
 
                 if (typeof IntersectionObserver !== "undefined" && !reduce) {
                     let wasVisible = false;
                     const observer = new IntersectionObserver(
                         (entries) => {
                             for (const entry of entries) {
-                                const visible = entry.intersectionRatio >= 0.3;
+                                // A showcase taller than the viewport never reaches a whole-element ratio.
+                                const visible =
+                                    entry.isIntersecting &&
+                                    entry.intersectionRect.height >=
+                                        0.3 *
+                                            Math.min(
+                                                entry.boundingClientRect.height,
+                                                window.innerHeight,
+                                            );
                                 if (visible && !wasVisible) {
                                     const index = selectedIndex();
                                     if (sharedPanel) {
@@ -1941,9 +1974,14 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                                             "rename"
                                         )
                                             playRename();
-                                    } else {
+                                    } else if (!revealed) {
+                                        revealed = true;
+                                        root.classList.remove("is-waiting");
                                         const panel = panels[index];
-                                        if (panel) playFormat(panel);
+                                        if (panel) playPanel(panel);
+                                    } else if (!reveal) {
+                                        const panel = panels[index];
+                                        if (panel) playPanel(panel);
                                     }
                                 }
                                 wasVisible = visible;
@@ -2949,31 +2987,6 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 padding: 0.02rem 0.32rem;
                 font-size: 0.86em;
             }
-            .steps {
-                display: grid;
-                gap: 1.25rem;
-                margin: 1.4rem 0 0;
-            }
-            .step .codeblock {
-                margin: 0.5rem 0 0;
-            }
-            .step-label {
-                margin: 0;
-                font-family: "Geist Mono", monospace;
-                font-size: 0.78rem;
-                letter-spacing: 0.03em;
-                color: var(--muted);
-            }
-            .band-note {
-                margin: 1.1rem 0 0;
-                max-width: 58ch;
-                color: var(--muted);
-                font-size: 0.95rem;
-            }
-            .band-note code {
-                color: var(--foreground);
-                font-size: 0.88em;
-            }
 
             .doclink {
                 display: inline-flex;
@@ -3005,6 +3018,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 border-bottom-color: var(--foreground);
             }
 
+            .venn {
+                max-width: 660px;
+                margin: 0 auto 2.4rem;
+                color: var(--foreground);
+            }
             .codeblock {
                 margin: 1.4rem 0 0;
                 background: var(--code-bg);
@@ -3041,7 +3059,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 grid-row: 1;
             }
             /* One shared grid cell, so switching tabs never shifts the page. */
-            .showcase > .stage {
+            .showcase > .stage,
+            .showcase > .lsp-panel {
                 grid-row: 2;
                 grid-column: 1;
             }
@@ -3057,24 +3076,50 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             }
 
             .seg {
+                position: relative;
                 display: flex;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;
                 gap: 2px;
-                padding: 3px;
+                padding: 4px;
                 width: fit-content;
                 max-width: 100%;
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                background: color-mix(
-                    in oklab,
-                    var(--code-bg) 72%,
-                    transparent
-                );
+                border: 1px solid oklch(1 0 0 / 0.07);
+                border-radius: 11px;
+                background: oklch(1 0 0 / 0.025);
             }
-            /* Below this width the pills wrap rather than hide behind a scroll. */
-            @media (min-width: 700px) {
-                .seg {
-                    flex-wrap: nowrap;
+            /* One pill slides to the selected tab; the script sizes it from the tab's own box. */
+            .seg-ind {
+                position: absolute;
+                top: 0;
+                left: 0;
+                z-index: 0;
+                border-radius: 7px;
+                pointer-events: none;
+                background: oklch(0.27 0.004 286);
+                box-shadow:
+                    0 1px 2px oklch(0 0 0 / 0.45),
+                    inset 0 1px 0 oklch(1 0 0 / 0.07);
+            }
+            .seg-ind.is-ready {
+                transition:
+                    transform 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+                    width 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+                    height 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+            }
+            /* On narrow screens the pills scroll sideways in one row; wrapping would break the track. */
+            @media (max-width: 699px) {
+                .seg:not(.seg-steps) {
+                    overflow-x: auto;
+                    scrollbar-width: none;
+                    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+                    mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+                }
+                .seg.is-scrolled:not(.seg-steps) {
+                    -webkit-mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+                    mask-image: linear-gradient(90deg, transparent, #000 14px, #000 calc(100% - 22px), transparent);
+                }
+                .seg:not(.seg-steps)::-webkit-scrollbar {
+                    display: none;
                 }
             }
             .seg [role="tab"] {
@@ -3085,9 +3130,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 letter-spacing: -0.005em;
                 color: var(--muted);
                 background: transparent;
+                position: relative;
+                z-index: 1;
                 border: none;
-                border-radius: 5px;
-                padding: 0.44rem 0.8rem;
+                border-radius: 7px;
+                padding: 0.46rem 0.85rem;
                 cursor: pointer;
                 white-space: nowrap;
                 transition:
@@ -3096,26 +3143,28 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             }
             .seg [role="tab"]:hover {
                 color: var(--foreground);
-                background: oklch(1 0 0 / 0.05);
             }
             .seg [role="tab"][aria-selected="true"] {
                 color: var(--foreground);
-                font-weight: 550;
-                background: color-mix(
-                    in oklch,
-                    var(--cap) 15%,
-                    oklch(1 0 0 / 0.03)
-                );
-                box-shadow: inset 0 0 0 1px
-                    color-mix(in oklch, var(--cap) 40%, transparent);
+                background: oklch(1 0 0 / 0.09);
+                box-shadow:
+                    0 1px 2px oklch(0 0 0 / 0.5),
+                    inset 0 1px 0 oklch(1 0 0 / 0.07);
+            }
+            .seg.has-ind [role="tab"][aria-selected="true"] {
+                background: transparent;
+                box-shadow: none;
+            }
+            .seg.has-ind [role="tab"]:hover:not([aria-selected="true"]) {
+                background: oklch(1 0 0 / 0.04);
             }
             .seg [role="tab"]:focus-visible {
-                outline: 2px solid
-                    color-mix(in oklch, var(--cap) 65%, transparent);
+                outline: 2px solid oklch(1 0 0 / 0.6);
                 outline-offset: 1px;
             }
 
             .stage {
+                position: relative;
                 --pane-bg: var(--code-bg);
                 /* Unitless: an `em` would resolve against the frame's font size, not the code's. */
                 --lh: 1.62;
@@ -3647,6 +3696,13 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .stage.split .pane + .pane {
                 border-left: 1px solid var(--border);
             }
+            .stage-note {
+                margin: 0;
+                padding: 0.6rem 1rem;
+                border-top: 1px solid var(--border);
+                color: var(--muted);
+                font-size: 0.85rem;
+            }
             .stage.split .pane-out {
                 background: color-mix(in oklab, var(--pane-bg) 88%, #000);
             }
@@ -3656,9 +3712,8 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             @media (max-width: 900px) {
                 .stage.split .stage-body {
                     grid-template-columns: minmax(0, 1fr);
-                    /* Leftover cell height collects once at the bottom instead of twice. */
-                    grid-auto-rows: min-content;
-                    align-content: start;
+                    /* The shared cell is as tall as the tallest panel; the output pane absorbs the rest. */
+                    grid-template-rows: auto 1fr;
                 }
                 .stage.split .pane + .pane {
                     border-left: 0;
@@ -3722,8 +3777,11 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .tl {
                 white-space: pre;
             }
+            /* A wrapped message continues under its own text, not under the severity marker. */
             .tl.msg {
                 white-space: pre-wrap;
+                padding-left: 4ch;
+                text-indent: -4ch;
             }
             .tl.gap {
                 height: calc(var(--lh) * 1em);
@@ -3870,11 +3928,252 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 }
             }
 
+
+            /* The runtime band: centered, taller, with a slow aura behind the stage. */
+            #runtime.showband {
+                padding-block: clamp(4.5rem, 9vw, 7.5rem);
+            }
+            #runtime .band-head {
+                margin-inline: auto;
+                text-align: center;
+            }
+            #runtime .lede {
+                margin-inline: auto;
+            }
+            #runtime .showcase > .seg {
+                justify-self: center;
+            }
+            #runtime::after {
+                content: "";
+                position: absolute;
+                inset: 0;
+                z-index: 0;
+                pointer-events: none;
+                background-image:
+                    linear-gradient(oklch(1 0 0 / 0.05) 1px, transparent 1px),
+                    linear-gradient(90deg, oklch(1 0 0 / 0.05) 1px, transparent 1px);
+                background-size: 56px 56px;
+                background-position: center top;
+                -webkit-mask-image: radial-gradient(60% 55% at 50% 45%, #000 20%, transparent 75%);
+                mask-image: radial-gradient(60% 55% at 50% 45%, #000 20%, transparent 75%);
+            }
+            #runtime .band-inner::before {
+                content: "";
+                position: absolute;
+                inset: 30% 4% -6%;
+                z-index: -1;
+                pointer-events: none;
+                background:
+                    radial-gradient(45% 55% at 28% 50%, color-mix(in oklch, var(--cap-violet) 34%, transparent), transparent 70%),
+                    radial-gradient(40% 55% at 74% 55%, color-mix(in oklch, oklch(0.68 0.16 255) 26%, transparent), transparent 70%);
+                filter: blur(48px);
+                animation: aura 16s ease-in-out infinite alternate;
+            }
+            @keyframes aura {
+                from {
+                    transform: translate3d(-2%, 0, 0) scale(1);
+                }
+                to {
+                    transform: translate3d(2%, -3%, 0) scale(1.06);
+                }
+            }
+            .stage-hero {
+                --code-size: 14px;
+                border-color: color-mix(in oklch, var(--cap) 10%, var(--border));
+                box-shadow:
+                    0 50px 120px -50px color-mix(in oklch, var(--cap) 50%, transparent),
+                    0 30px 70px -50px oklch(0 0 0 / 0.9);
+            }
+            .stage-hero::before {
+                content: "";
+                position: absolute;
+                top: 0;
+                left: 12%;
+                right: 12%;
+                z-index: 3;
+                height: 1px;
+                background: linear-gradient(90deg, transparent, color-mix(in oklch, var(--cap) 80%, transparent), transparent);
+            }
+            .stage-hero .code {
+                padding-block: 20px;
+            }
+            .stage-hero .term {
+                padding: 20px 22px;
+            }
+            .stage-hero .stage-note {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.7rem 1.1rem;
+                color: color-mix(in oklch, var(--cap) 55%, var(--foreground));
+                background: color-mix(in oklch, var(--cap) 6%, transparent);
+            }
+            .stage-hero .stage-note::before {
+                content: "";
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: var(--cap);
+                box-shadow: 0 0 10px var(--cap);
+            }
+            @media (max-width: 1100px) {
+                .stage-hero {
+                    --code-size: 13px;
+                }
+            }
+            @media (max-width: 640px) {
+                .stage-hero {
+                    --code-size: 11.5px;
+                }
+                .stage-hero .term {
+                    padding: 14px;
+                }
+            }
+
+            /* The typing path: steps and their code on the left, the diagram beside them, so the marker moves next to the tab you click. */
+            .path > .venn {
+                margin: 0;
+                max-width: none;
+                container-type: inline-size;
+            }
+            .path > .seg-steps {
+                flex-direction: column;
+                flex-wrap: nowrap;
+                width: 100%;
+                padding: 6px;
+            }
+            .seg-steps [role="tab"] {
+                display: flex;
+                justify-content: space-between;
+                gap: 1rem;
+                width: 100%;
+                align-items: center;
+                padding: 1rem 1.1rem;
+                font-size: 15px;
+                text-align: left;
+                white-space: normal;
+            }
+            .step-where {
+                flex: none;
+                padding: 0.12rem 0.5rem;
+                border-radius: 999px;
+                font-family: "Geist Mono", ui-monospace, monospace;
+                font-size: 11px;
+                color: oklch(0.72 0 0);
+                background: oklch(1 0 0 / 0.06);
+                transition:
+                    color 0.2s ease,
+                    background 0.2s ease;
+            }
+            .visually-hidden {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip-path: inset(50%);
+                white-space: nowrap;
+            }
+            [aria-selected="true"] > .step-where {
+                color: color-mix(in oklch, var(--cap) 85%, white);
+                background: color-mix(in oklch, var(--cap) 16%, transparent);
+            }
+            @media (min-width: 900px) {
+                .path {
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                    column-gap: clamp(1.5rem, 3.5vw, 3rem);
+                    row-gap: 1rem;
+                }
+                .path > .seg-steps {
+                    grid-row: 1;
+                    grid-column: 1;
+                }
+                .path .seg-steps [role="tab"] {
+                    padding: 0.8rem 1rem;
+                }
+                .showcase.path > .stage {
+                    grid-row: 2;
+                    grid-column: 1;
+                }
+                .path > .venn {
+                    grid-row: 1 / 3;
+                    grid-column: 2;
+                    align-self: start;
+                    position: sticky;
+                    top: 6rem;
+                }
+                /* Half the frame is too narrow for code beside output, so the output sits below the code. */
+                .path > .stage .stage-body {
+                    grid-template-columns: minmax(0, 1fr);
+                    grid-template-rows: auto 1fr;
+                }
+                .path > .stage .pane + .pane {
+                    border-left: 0;
+                    border-top: 1px solid var(--border);
+                }
+            }
+            @media (max-width: 420px) {
+                .seg-steps [role="tab"] {
+                    font-size: 14px;
+                    gap: 0.6rem;
+                }
+            }
+            @media (max-width: 899px) {
+                .path > .venn {
+                    grid-row: 1;
+                    width: 100%;
+                    max-width: 520px;
+                    margin: 0 auto;
+                }
+                .path > .seg-steps {
+                    grid-row: 2;
+                }
+                .showcase.path > .stage {
+                    grid-row: 3;
+                }
+            }
+
+            /* The output waits until the code has landed, so the eye reads source first, then result. */
+            .reveal.is-waiting > .stage .pane-src .cl,
+            .reveal.is-waiting > .stage .tl {
+                opacity: 0;
+            }
+            .reveal > .stage.is-entering .pane-src .cl {
+                animation: lineIn 0.46s cubic-bezier(0.22, 1, 0.36, 1) both;
+                animation-delay: calc(var(--i, 0) * 34ms);
+            }
+            .reveal > .stage.is-entering .tl {
+                animation: lineIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+                animation-delay: calc(640ms + var(--j, 0) * 55ms);
+            }
+            .reveal > .stage.is-entering .tl-cmd {
+                animation: typeIn 0.5s steps(24, end) 160ms both;
+            }
+            @keyframes lineIn {
+                from {
+                    opacity: 0;
+                    transform: translateY(6px);
+                }
+                to {
+                    opacity: 1;
+                    transform: none;
+                }
+            }
+            @keyframes typeIn {
+                from {
+                    clip-path: inset(0 100% 0 0);
+                }
+                to {
+                    clip-path: inset(0 0 0 0);
+                }
+            }
+
+
             .band-closer {
                 position: relative;
                 overflow: hidden;
                 border-bottom: none;
                 display: grid;
+                grid-template-columns: minmax(0, 1fr);
                 align-items: center;
                 min-height: clamp(36rem, 92vh, 54rem);
             }
@@ -3900,6 +4199,7 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
             .closer-col {
                 position: relative;
                 z-index: 2;
+                width: 100%;
                 max-width: var(--prose);
                 margin: 0 auto;
                 /* Set by the closer parallax handler; never set under reduced motion. */
@@ -3954,6 +4254,13 @@ ry check .   <span class="c-muted"># lint and type-check</span></code></pre>
                 .doclink span {
                     transition: none;
                 }
+                .seg-ind.is-ready,
+                .step-where {
+                    transition: none;
+                }
+                #runtime .band-inner::before,
+                .reveal > .stage.is-entering .pane-src .cl,
+                .reveal > .stage.is-entering .tl,
                 .caretbar,
                 .ide[data-feature="rename"] [data-mark~="rename"]::after,
                 .ide[data-feature="definition"] .cl[data-line="4"],

@@ -3,11 +3,14 @@ title: Getting started
 description: What ry is, how to install it, and your first check
 ---
 
-ry is a type-checked toolchain for R, written in Rust: a checker, a language server, a formatter, a
-package loader, and a console. It finds mistakes in your R code before it runs (a misspelled name, a
-wrong argument, a `NULL` you forgot) and works on the code you already have, with nothing to
-annotate or configure first. It is also growing into an implementation of R itself, which
-[Why ry](/why-ry#where-ry-is-going) describes.
+ry finds the mistakes R reports only when a line runs (a misspelled name, a wrong argument, a
+`NULL` you forgot) while you type, in the R code you already have. It checks, formats, loads and
+runs R from one tool configured by one `ry.toml`, and it adds a type system on top of R that takes
+your code, one step at a time, to typed code that is safe to change.
+
+This page covers the first two of the
+[four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,
+then turning on types.
 
 ## Install
 
@@ -20,9 +23,10 @@ annotate or configure first. It is also growing into an implementation of R itse
 
 [Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 
-## Check a project
+## Step 1: check the code you have
 
-Run `ry check` in a project directory:
+Run `ry check` in a project directory. Files under `R/` are read as a package that shares one
+namespace, as R loads them, and every other `.R` file is a script read from top to bottom:
 
 ```r
 # R/discount.R
@@ -44,11 +48,9 @@ unresolved
 1 problem in 1 file
 ```
 
-R itself would report this only when the line runs. Files under `R/` are read as a package that
-shares one namespace, as R loads them, and every other `.R` file is a script read from top to
-bottom.
+R itself would report this only when the line runs.
 
-## Turn on type checking
+## Step 2: turn on type checking
 
 Type errors are opt-in. Add a `ry.toml` to the project root:
 
@@ -57,7 +59,7 @@ Type errors are opt-in. Add a `ry.toml` to the project root:
 typing = true
 ```
 
-ry already infers a type for every value from how it is used. Now it also reports the mismatches:
+ry already infers types from how values are used. Now it also reports the mismatches:
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
@@ -78,7 +80,8 @@ type-mismatch
 
 ## Next
 
-- [Why ry](/why-ry): what it is good at, and what it deliberately leaves out
 - [Checking code](/guides/checking): every kind of finding, and how to silence one
-- [Type checking](/type-checking/overview): how inference and annotations work
-- [Loading packages](/guides/loading-packages): `ry load` and `ry repl` run a package from its sources, lazily
+- [Type checking](/type-checking/overview): how inference and `#:` annotations work
+- [Inline annotations](/type-checking/inline-annotations): step 3, types written in the code itself
+- [Records and tags](/type-checking/records-and-tags) and [strict mode](/type-checking/strict-mode):
+  step 4, ry's own types and code that is typed throughout

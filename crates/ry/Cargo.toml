@@ -30,6 +30,7 @@ libmimalloc-sys = { version = "0.1.49", features = ["extended"], optional = true
 console.workspace = true
 ignore.workspace = true
 miette.workspace = true
+rustc-hash.workspace = true
 salsa.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_ignored = "0.1"

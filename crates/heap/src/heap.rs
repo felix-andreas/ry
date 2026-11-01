@@ -140,7 +140,8 @@ pub enum GcStress {
 }
 
 pub struct GcPolicy {
-    /// Bytes of young allocation that trigger a minor collection.
+    /// Bytes of young allocation that trigger a minor collection while the old generation is
+    /// small; past twice this size, half the old generation's bytes trigger one instead.
     pub young_limit: usize,
     /// Old-generation bytes that trigger a major collection after a minor one.
     pub old_limit: usize,
@@ -277,6 +278,21 @@ pub type HeapResult<T> = Result<T, HeapError>;
 const SLOT_SIZES: [usize; 17] = [
     32, 40, 48, 64, 80, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048,
 ];
+/// The size class for each object size in 8-byte words, so allocation finds its class with one
+/// load instead of a search through `SLOT_SIZES`.
+const SIZE_CLASS_BY_WORDS: [u8; 2048 / 8 + 1] = {
+    let mut table = [0u8; 2048 / 8 + 1];
+    let mut units = 0;
+    let mut class = 0;
+    while units < table.len() {
+        while SLOT_SIZES[class] < units * 8 {
+            class += 1;
+        }
+        table[units] = class as u8;
+        units += 1;
+    }
+    table
+};
 const PAGE_SIZE: usize = 64 * 1024;
 const LARGE_CLASS: u8 = u8::MAX;
 const POISON: u8 = 0xDB;
@@ -374,6 +390,25 @@ impl Heap {
 
     /// A vector of `length` elements. Atomic elements start zeroed, character elements as `""`
     /// and list elements as `NULL`, as in GNU R.
+    /// A vector of plain numbers whose elements are not initialized, for a kernel that writes
+    /// every element before anything reads the vector. Skipping the zeroing matters for the
+    /// large results of whole-vector arithmetic.
+    ///
+    /// # Safety
+    /// The caller must write every element before the vector is read.
+    pub unsafe fn alloc_vector_uninit(&mut self, kind: SexpType, length: usize) -> HeapResult<Sexp> {
+        if !matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw) {
+            return self.alloc_vector(kind, length as isize);
+        }
+        if length > MAX_VECTOR_LENGTH as usize {
+            return Err(HeapError::TooLong);
+        }
+        let size = object_size(kind, length).ok_or(HeapError::TooLong)?;
+        let object = self.allocate_with(kind, size, &[], VECTOR_DATA_OFFSET)?;
+        object.set_length_and_capacity(length as isize, length as isize);
+        Ok(object)
+    }
+
     pub unsafe fn alloc_vector(&mut self, kind: SexpType, length: isize) -> HeapResult<Sexp> {
         if !kind.is_vector() {
             return Err(HeapError::InvalidVectorType { kind, length });
@@ -518,7 +553,7 @@ impl Heap {
     ) -> HeapResult<Sexp> {
         let size = object_size(kind, 0).ok_or(HeapError::TooLong)?;
         let keep = [first, second, third, extra.unwrap_or(first)];
-        let object = self.allocate_with(kind, size, &keep, false)?;
+        let object = self.allocate_with(kind, size, &keep, 0)?;
         object.set_car_unbarriered(first);
         object.set_cdr_unbarriered(second);
         object.set_tag_unbarriered(third);
@@ -559,11 +594,14 @@ impl Heap {
     }
 
     pub unsafe fn alloc_environment(&mut self, enclosure: Sexp) -> HeapResult<Sexp> {
+        self.alloc_environment_with_capacity(enclosure, 0)
+    }
+
+    /// An environment whose frame has room for `bindings` bindings before it grows.
+    pub unsafe fn alloc_environment_with_capacity(&mut self, enclosure: Sexp, bindings: usize) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
         let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
-        let frame = object.frame_storage();
-        frame.write(Frame::default());
-        object.set_frame_ptr(frame);
+        std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
         object.set_enclosure_unbarriered(enclosure);
         Ok(object)
     }
@@ -655,7 +693,7 @@ impl Heap {
             return Ok(found);
         }
         let object = self.new_char(bytes, bits)?;
-        object.set_capacity(hash as isize);
+        object.set_capacity((u64::from(hash) << 32) as isize);
         object.set_gp_bits(gp::CACHED, true);
         self.strings.insert(hash, object);
         Ok(object)
@@ -786,6 +824,25 @@ impl Heap {
         }
     }
 
+    /// Ends every escape once the outermost native call returns. Native code may store through
+    /// a writable element pointer only while the call that took it runs (GNU R's collector never
+    /// sees those stores at all), so each escaped vector that is old is remembered instead: the
+    /// next minor collection rescans it once, catching the stores made meanwhile, and from then
+    /// on it is an ordinary object whose stores go through the barrier. Without this a column a
+    /// package touched once would be rescanned by every minor collection for the rest of the
+    /// session.
+    pub unsafe fn retire_escaped(&mut self) {
+        let mut escaped = std::mem::take(&mut self.escaped);
+        for vector in escaped.drain(..) {
+            vector.set_gc_bit(gc_bits::ESCAPED, false);
+            if vector.gc_bits() & (gc_bits::MARK | gc_bits::REMEMBERED) == gc_bits::MARK {
+                vector.set_gc_bit(gc_bits::REMEMBERED, true);
+                self.remembered.push(vector);
+            }
+        }
+        self.escaped = escaped;
+    }
+
     // Environments.
 
     fn is_symbol_frame(&self, env: Sexp) -> bool {
@@ -820,7 +877,7 @@ impl Heap {
         }
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
-        if !env.has_gp(gp::FUNCTION_FRAME) {
+        if !env.has_gp(gp::FUNCTION_FRAME) || symbol.has_gp(gp::WATCHED) {
             self.binding_epoch += 1;
             bump_symbol_epoch(symbol);
         }
@@ -856,6 +913,9 @@ impl Heap {
             return Err(HeapError::LockedBinding {
                 name: String::from_utf8_lossy(cell.car().car().bytes()).into_owned(),
             });
+        }
+        if cell.has_gp(gp::WATCHED) {
+            self.binding_epoch += 1;
         }
         self.store(cell, cell.cdr(), value);
         cell.set_cdr_unbarriered(value);
@@ -1046,36 +1106,40 @@ impl Heap {
     // Collection.
 
     unsafe fn allocate(&mut self, kind: SexpType, size: usize, keep: &[Sexp]) -> HeapResult<Sexp> {
-        self.allocate_with(kind, size, keep, true)
+        self.allocate_with(kind, size, keep, size)
     }
 
-    /// `allocate`, leaving the body uninitialized unless `zeroed`: a caller that writes every
-    /// field itself, as a triple's does, saves clearing the slot on the hottest allocation path.
-    unsafe fn allocate_with(
-        &mut self,
-        kind: SexpType,
-        size: usize,
-        keep: &[Sexp],
-        zeroed: bool,
-    ) -> HeapResult<Sexp> {
+    /// Allocates an object and zeroes its first `zeroed` bytes. The rest is left as it was,
+    /// which only a vector of plain numbers that its caller fills in may rely on.
+    unsafe fn allocate_with(&mut self, kind: SexpType, size: usize, keep: &[Sexp], zeroed: usize) -> HeapResult<Sexp> {
         self.maybe_collect(size, keep);
-        let class = SLOT_SIZES.iter().position(|&slot| slot >= size);
+        let class = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).copied();
         let (memory, size_class, gc) = match class {
             Some(class) => {
+                let class = class as usize;
                 let memory = match self.classes[class].free.pop() {
                     Some(memory) => memory,
                     None => self.grow_class(class)?,
                 };
-                if zeroed {
-                    std::ptr::write_bytes(memory.as_ptr(), 0, size);
+                // Every slot size is a multiple of 8 bytes, and zeroing word by word keeps the
+                // common small object clear of a call into `memset`.
+                let words = memory.as_ptr().cast::<u64>();
+                for word in 0..SLOT_SIZES[class].min(zeroed.next_multiple_of(8)) / 8 {
+                    words.add(word).write(0);
                 }
                 (memory, class as u8, 0)
             }
             None => {
                 let layout = Layout::from_size_align(size, 16)
                     .map_err(|_| HeapError::CannotAllocate { bytes: size })?;
-                let memory = NonNull::new(std::alloc::alloc_zeroed(layout))
-                    .ok_or(HeapError::CannotAllocate { bytes: size })?;
+                let memory = if zeroed >= size {
+                    NonNull::new(std::alloc::alloc_zeroed(layout))
+                } else {
+                    NonNull::new(std::alloc::alloc(layout)).inspect(|memory| {
+                        std::ptr::write_bytes(memory.as_ptr(), 0, zeroed);
+                    })
+                }
+                .ok_or(HeapError::CannotAllocate { bytes: size })?;
                 (memory, LARGE_CLASS, gc_bits::LARGE)
             }
         };
@@ -1131,7 +1195,10 @@ impl Heap {
                 self.collect_keeping(kind, keep);
             }
             GcStress::Off => {
-                if self.young_bytes + request > self.policy.young_limit {
+                // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect
+                // on every large vector a big session allocates, rescanning the young ones each time.
+                let budget = self.policy.young_limit.max(self.old_bytes / 2);
+                if self.young_bytes + request > budget {
                     self.collect_keeping(Collection::Minor, keep);
                     if self.old_bytes > self.policy.old_limit {
                         self.collect_keeping(Collection::Major, keep);
@@ -1166,9 +1233,27 @@ impl Heap {
                 let parent = self.remembered[index];
                 self.mark_stack.push(parent);
             }
+            // An escaped character vector can only have come to hold CHARSXPs, which point at
+            // nothing, so marking every young CHARSXP covers whatever native code stored into it
+            // without rereading its elements, each a cache miss on another object's header. A
+            // young CHARSXP that is in fact garbage survives until the next major collection.
+            let mut escaped_strings = false;
             for index in 0..self.escaped.len() {
                 let parent = self.escaped[index];
-                self.mark_stack.push(parent);
+                if parent.kind() == SexpType::String && !parent.is_altrep() && parent.is_marked() {
+                    escaped_strings = true;
+                    self.mark(parent.attrib());
+                } else {
+                    self.mark_stack.push(parent);
+                }
+            }
+            if escaped_strings {
+                for index in 0..self.young.len() {
+                    let object = self.young[index];
+                    if object.kind() == SexpType::Char {
+                        self.mark(object);
+                    }
+                }
             }
         }
         self.drain();
@@ -1290,11 +1375,8 @@ impl Heap {
             }
             Shape::Environment => {
                 self.mark(object.enclosure());
-                let frame = object.frame_ptr();
-                if !frame.is_null() {
-                    for &cell in (*frame).cells() {
-                        self.mark(cell);
-                    }
+                for &cell in (*object.frame_ptr()).cells() {
+                    self.mark(cell);
                 }
             }
             Shape::ExternalPtr => {
@@ -1519,11 +1601,7 @@ impl Heap {
 
     unsafe fn free(&mut self, object: Sexp) {
         if object.kind() == SexpType::Environment && !object.is_altrep() {
-            let frame = object.frame_ptr();
-            if !frame.is_null() {
-                std::ptr::drop_in_place(frame);
-                object.set_frame_ptr(std::ptr::null_mut());
-            }
+            std::ptr::drop_in_place(object.frame_ptr());
         }
         self.stats.objects_freed += 1;
         let class = object.size_class();
@@ -1632,10 +1710,7 @@ impl Drop for Heap {
                         if object.kind_byte() == SexpType::Environment as u8
                             && object.flags() & flag_bits::ALTREP == 0
                         {
-                            let frame = object.frame_ptr();
-                            if !frame.is_null() {
-                                std::ptr::drop_in_place(frame);
-                            }
+                            std::ptr::drop_in_place(object.frame_ptr());
                         }
                     }
                     std::alloc::dealloc(

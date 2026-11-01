@@ -21,7 +21,7 @@ identity2: <T> fn(x: T) -> T
 #---- a_type_variable_shared_by_two_parameters_is_generic
 choose <- function(flag, a, b) if (flag) a else b
 #++++
-choose: <T> fn(flag: logical, a: T, b: T) -> T
+choose: <T> fn(flag: logical, [a]: T, [b]: T) -> T
 
 #---- a_constrained_parameter_is_typed
 increment <- function(x) x + 1L
