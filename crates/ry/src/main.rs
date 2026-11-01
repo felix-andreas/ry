@@ -165,7 +165,9 @@ fn main() -> ExitCode {
 /// Runs `file` and exits with its status: 1 for a top-level error or a script strict mode
 /// refuses, 2 when the script cannot be read or the runtime cannot start.
 fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode {
-    let source = match fs::read_to_string(file) {
+    // R reads a script in the session's encoding, so a Latin-1 script is valid R; the runtime
+    // reads the bytes itself, and the check sees them with invalid UTF-8 replaced.
+    let source = match fs::read(file) {
         Ok(source) => source,
         Err(error) => {
             cli::error(&format!("cannot read {}: {error}", file.display()));
@@ -175,7 +177,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
     let Some(mut preflight) = Preflight::discover(file, file.to_path_buf()) else {
         return ExitCode::from(2);
     };
-    if preflight.check(&source) == Verdict::Refuse {
+    if preflight.check(&String::from_utf8_lossy(&source)) == Verdict::Refuse {
         return ExitCode::from(1);
     }
     match runtime {
@@ -184,6 +186,7 @@ fn run_script(runtime: Runtime, file: &Path, arguments: Vec<String>) -> ExitCode
             None,
             &arguments,
             runtime_flags(preflight.config()),
+            None,
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),
@@ -249,10 +252,10 @@ fn run_console(
     let filter: Box<dyn repl::InputFilter> =
         Box::new(ConsoleFilter::new(preflight, runtime == Runtime::GnuR));
     let completer = Some(Box::new(AnalysisCompleter::new()) as Box<dyn repl::SessionCompleter>);
-    let load = load_package
-        .then(load::current_package)
-        .flatten()
-        .map(|root| load::load_statement(&root, true));
+    let package = load_package.then(load::current_package).flatten();
+    let load = package
+        .as_ref()
+        .map(|root| load::load_statement(root, true));
     match runtime {
         // ry's runtime carries its own loader, so it needs only the load statement.
         Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
@@ -262,11 +265,15 @@ fn run_console(
                 input,
                 filter: Some(filter),
                 completer,
+                package,
                 ..repl::RunOptions::default()
             },
             flags,
         )),
         Runtime::GnuR => {
+            if let Some(root) = package {
+                load::prepare(root);
+            }
             let mut startup = vec![load::embedded_runtime()];
             startup.extend(load);
             gnu_r_exit(repl::run(repl::RunOptions {
@@ -335,6 +342,7 @@ fn run_load(
             Some(&input),
             &[],
             runtime_flags(preflight.config()),
+            Some(&root),
         )),
         Runtime::GnuR => gnu_r_exit(repl::run(repl::RunOptions {
             routines: load::call_routines(),

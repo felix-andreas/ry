@@ -307,7 +307,7 @@ fn a_deep_reexport_chain_resolves_fully() {
 #[test]
 fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     let mut db = ProbeDatabase::default();
-    let settings = AnalysisSettings::new(&db, true);
+    let settings = AnalysisSettings::new(&db, true, true);
     let files = db.project(&[
         "typed <- function(x: integer) -> integer x\n",
         "untyped <- function(x) x + 1L\n",
@@ -412,10 +412,10 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     // untouched item recomputing its reads.
     assert_eq!(
         db.executions_since(&["item_interface_reads", "item_top_level_names"]),
-        [0, 1],
-        "only the edited item re-derives its top-level names, for its own file's frame binders; \
-         its naming backdates, so nothing recomputes interface reads, and none of the five items \
-         in the untouched files reruns either"
+        [0, 0],
+        "the edited item's top-level names read only its memoized own-name flag, which backdates; \
+         its naming backdates too, so nothing recomputes interface reads, and none of the five \
+         items in the untouched files reruns either"
     );
 }
 
@@ -553,14 +553,15 @@ fn package(
 }
 
 const LOAD_QUERIES: &[&str] = &[
-    "item_load",
     "file_items",
+    "file_binds",
+    "package_bindings",
     "item_immediate_reads",
     "package_index",
 ];
 
 #[test]
-fn a_body_edit_rederives_one_item_of_the_load_index() {
+fn a_body_edit_rederives_one_file_of_the_load_index() {
     let mut db = ProbeDatabase::default();
     let (sources, files) = package(
         &db,
@@ -583,8 +584,8 @@ fn a_body_edit_rederives_one_item_of_the_load_index() {
     let index = package_index(&db, sources);
     assert_eq!(
         db.executions_since(LOAD_QUERIES),
-        [1, 1, 0, 1],
-        "only the edited item's load facts and its own file's layer run again"
+        [1, 1, 0, 0, 1],
+        "only the edited file's layer runs again, and its bindings stop at the firewall"
     );
     assert_eq!(
         index.files[0].items.items[0].hash,
@@ -607,7 +608,7 @@ fn a_namespace_edit_rederives_no_item() {
         .set_namespace(&mut db)
         .to("export(first)\nexport(value)\n".to_owned());
     let index = package_index(&db, sources);
-    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 1]);
+    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 0, 1]);
     assert_eq!(index.namespace.exports, ["first", "value"]);
 }
 
@@ -626,7 +627,7 @@ fn moving_a_statement_down_keeps_its_load_facts() {
     package_index(&db, sources);
     assert_eq!(
         db.executions_since(LOAD_QUERIES),
-        [0, 1, 0, 1],
+        [1, 1, 0, 0, 1],
         "positions are per-file facts, so only the file layer runs again"
     );
 }

@@ -53,6 +53,11 @@ pub struct Heap {
     /// Large objects allocated since the last collection, which a minor collection sweeps.
     young_large: Vec<Sexp>,
     remembered: Vec<Sexp>,
+    /// The last store target the barrier found unmarked. Marks are set only during a collection,
+    /// which clears this, so until then a store into it needs no barrier work. Native code fills
+    /// a fresh vector one `SET_STRING_ELT` at a time, and this makes each of those stores one
+    /// compare instead of a mark-bitmap lookup.
+    young_parent: Option<Sexp>,
     escaped: Vec<Sexp>,
     weak_refs: Vec<Sexp>,
     /// Weak references whose keys died, kept alive with their keys until their finalizers run.
@@ -70,7 +75,11 @@ pub struct Heap {
     sources: Vec<(u64, Rc<dyn RootSource>)>,
     next_source_id: u64,
     policy: GcPolicy,
+    /// Bytes of small objects allocated since the last collection.
     young_bytes: usize,
+    /// Bytes of large vectors allocated since the last collection, kept apart from
+    /// `young_bytes` because they have their own budget.
+    young_large_bytes: usize,
     old_bytes: usize,
     stats: GcStats,
     inhibit: u32,
@@ -177,9 +186,12 @@ pub fn gc_stress_requested() -> Option<GcStressStart> {
 }
 
 pub struct GcPolicy {
-    /// Bytes of young allocation that trigger a minor collection while the old generation is
+    /// Bytes of young small objects that trigger a minor collection while the old generation is
     /// small; past twice this size, half the old generation's bytes trigger one instead.
     pub young_limit: usize,
+    /// Bytes of young large vectors that trigger a minor collection, which also grows to half
+    /// the old generation.
+    pub young_large_limit: usize,
     /// Old-generation bytes that trigger a major collection after a minor one.
     pub old_limit: usize,
     pub min_old_limit: usize,
@@ -323,6 +335,7 @@ impl Heap {
             large: FxHashSet::default(),
             young_large: Vec::new(),
             remembered: Vec::new(),
+            young_parent: None,
             escaped: Vec::new(),
             weak_refs: Vec::new(),
             ready_to_finalize: Vec::new(),
@@ -348,6 +361,7 @@ impl Heap {
             next_source_id: 0,
             policy,
             young_bytes: 0,
+            young_large_bytes: 0,
             old_bytes: 0,
             stats: GcStats::default(),
             inhibit: 1,
@@ -701,7 +715,7 @@ impl Heap {
             return Err(HeapError::TooLong);
         }
         let object = self.allocate(SexpType::Record, size, values)?;
-        let slots: Vec<Slot> = values
+        let slots: smallvec::SmallVec<[Slot; 4]> = values
             .iter()
             .enumerate()
             .map(|(index, &value)| slot_for(value, index))
@@ -798,18 +812,25 @@ impl Heap {
 
     // Stores, each through the write barrier and the reference counts.
 
-    #[inline]
+    #[inline(always)]
     pub unsafe fn write_barrier(&mut self, parent: Sexp, child: Sexp) {
-        if parent.gc_bits() & gc_bits::REMEMBERED == 0
-            && self.space.is_marked(parent)
-            && !self.space.is_marked(child)
-        {
+        if self.young_parent == Some(parent) || parent.gc_bits() & gc_bits::REMEMBERED != 0 {
+            return;
+        }
+        self.write_barrier_slow(parent, child);
+    }
+
+    #[inline(never)]
+    unsafe fn write_barrier_slow(&mut self, parent: Sexp, child: Sexp) {
+        if !self.space.is_marked(parent) {
+            self.young_parent = Some(parent);
+        } else if !self.space.is_marked(child) {
             parent.set_gc_bit(gc_bits::REMEMBERED, true);
             self.remembered.push(parent);
         }
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn store(&mut self, parent: Sexp, old: Sexp, new: Sexp) {
         if parent.flags() & flag_bits::UNTRACKED == 0 {
             new.increment_refcount();
@@ -844,13 +865,52 @@ impl Heap {
         cell.set_tag_unbarriered(value);
     }
 
+    /// Stores `count` elements of `from`, starting at `from_start`, into `to` from `to_start`,
+    /// as `set_element` would one at a time but with one barrier decision for the whole run.
+    /// Neither vector may be ALTREP, both ranges must be in bounds, and when `to` is `from` the
+    /// ranges must not overlap.
+    pub unsafe fn copy_elements(
+        &mut self,
+        to: Sexp,
+        to_start: usize,
+        from: Sexp,
+        from_start: usize,
+        count: usize,
+    ) {
+        debug_assert!(
+            to != from || to_start + count <= from_start || from_start + count <= to_start,
+            "copy_elements ranges overlap"
+        );
+        let tracked = to.flags() & flag_bits::UNTRACKED == 0;
+        for offset in 0..count {
+            let value = from.stored_element(from_start + offset);
+            if tracked {
+                value.increment_refcount();
+                to.stored_element(to_start + offset).decrement_refcount();
+            }
+            to.set_element_unbarriered(to_start + offset, value);
+        }
+        if count == 0 || self.young_parent == Some(to) || to.gc_bits() & gc_bits::REMEMBERED != 0 {
+            return;
+        }
+        if !self.space.is_marked(to) {
+            self.young_parent = Some(to);
+            return;
+        }
+        if (0..count).any(|offset| !self.space.is_marked(to.stored_element(to_start + offset))) {
+            to.set_gc_bit(gc_bits::REMEMBERED, true);
+            self.remembered.push(to);
+        }
+    }
+
+    #[inline(always)]
     pub unsafe fn set_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
         if vector.is_altrep()
             && let Some(elements) = crate::object::altrep_elements()
         {
             return (elements.write)(vector, index, value);
         }
-        self.store(vector, vector.element(index), value);
+        self.store(vector, vector.stored_element(index), value);
         vector.set_element_unbarriered(index, value);
     }
 
@@ -964,13 +1024,13 @@ impl Heap {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
         let size = object_size(SexpType::Binding, 0).ok_or(HeapError::TooLong)?;
         let request = size * bindings.len();
-        if self.collection_due(request) {
+        if self.collection_due(request, false) {
             let keep: SmallVec<[Sexp; 16]> = bindings
                 .iter()
                 .map(|binding| binding.value)
                 .chain([env])
                 .collect();
-            self.maybe_collect(request, &keep);
+            self.maybe_collect(request, false, &keep);
         }
         let nil = self.known.nil;
         let frame = &mut *env.frame_ptr();
@@ -1127,6 +1187,15 @@ impl Heap {
         }
     }
 
+    /// The binding count of each bucket of `env`'s hash table and the table's chain counter, as
+    /// GNU R's `env.profile` reports them, or `None` when the frame is not hashed.
+    pub unsafe fn frame_hash_profile(&self, env: Sexp) -> Option<(Vec<usize>, usize)> {
+        if self.is_symbol_frame(env) || env == self.known.empty_env {
+            return None;
+        }
+        unsafe { (*env.frame_ptr()).hash_profile() }
+    }
+
     /// Marks the bindings of a closure frame made so far as its formals.
     pub unsafe fn mark_frame_formals(&mut self, env: Sexp) {
         (*env.frame_ptr()).mark_formals();
@@ -1224,7 +1293,8 @@ impl Heap {
         keep: &[Sexp],
         zeroed: usize,
     ) -> HeapResult<Sexp> {
-        self.maybe_collect(size, keep);
+        let large = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).is_none();
+        self.maybe_collect(size, large, keep);
         self.allocate_uncollected(kind, size, zeroed)
     }
 
@@ -1277,12 +1347,14 @@ impl Heap {
         if size_class == LARGE_CLASS {
             self.large.insert(object);
             self.young_large.push(object);
+            self.young_large_bytes += size;
+        } else {
+            self.young_bytes += size;
         }
-        self.young_bytes += size;
         Ok(object)
     }
 
-    unsafe fn maybe_collect(&mut self, request: usize, keep: &[Sexp]) {
+    unsafe fn maybe_collect(&mut self, request: usize, large: bool, keep: &[Sexp]) {
         if self.inhibit > 0 {
             return;
         }
@@ -1297,7 +1369,7 @@ impl Heap {
                 self.collect_keeping(kind, keep);
             }
             GcStress::Off => {
-                if self.collection_due(request) {
+                if self.collection_due(request, large) {
                     self.collect_keeping(Collection::Minor, keep);
                     if self.old_bytes > self.policy.old_limit {
                         self.collect_keeping(Collection::Major, keep);
@@ -1307,8 +1379,9 @@ impl Heap {
         }
     }
 
-    /// Whether allocating `request` more bytes runs a collection.
-    fn collection_due(&self, request: usize) -> bool {
+    /// Whether allocating `request` more bytes, as one large vector or as small objects, runs a
+    /// collection.
+    fn collection_due(&self, request: usize, large: bool) -> bool {
         if self.inhibit > 0 {
             return false;
         }
@@ -1317,8 +1390,16 @@ impl Heap {
         }
         // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
         // every large vector a big session allocates, rescanning the young ones each time.
-        let budget = self.policy.young_limit.max(self.old_bytes / 2);
-        self.young_bytes + request > budget
+        // Large vectors get a budget of their own. They do not crowd the nursery's cache, and
+        // a reader such as `fread` allocates every column before filling any, so charging
+        // them to the nursery would buy a collection per column that rescans the columns
+        // already allocated.
+        let grown = self.old_bytes / 2;
+        if large {
+            self.young_large_bytes + request > self.policy.young_large_limit.max(grown)
+        } else {
+            self.young_bytes + request > self.policy.young_limit.max(grown)
+        }
     }
 
     /// Runs a collection now. Every live object must be reachable from a root.
@@ -1331,6 +1412,7 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        self.young_parent = None;
         self.major_marking = kind == Collection::Major;
         if kind == Collection::Major {
             self.clear_marks();
@@ -1389,13 +1471,20 @@ impl Heap {
                 self.strings.remove_dead(&self.space);
                 self.sweep_all();
                 self.stats.major_collections += 1;
-                self.policy.old_limit = (self.old_bytes * 2).max(self.policy.min_old_limit);
+                // The limit falls back towards twice what survived by an eighth per major
+                // collection rather than at once, as GNU R shrinks its trigger. Otherwise every
+                // explicit `gc()` between two large operations would drop the limit below the
+                // next one's peak and buy a full collection in the middle of it.
+                self.policy.old_limit = (self.old_bytes * 2)
+                    .max(self.policy.old_limit / 8 * 7)
+                    .max(self.policy.min_old_limit);
             }
         }
         for parent in self.remembered.drain(..) {
             parent.set_gc_bit(gc_bits::REMEMBERED, false);
         }
         self.young_bytes = 0;
+        self.young_large_bytes = 0;
         self.inhibit -= 1;
     }
 
@@ -1862,6 +1951,8 @@ impl Default for GcPolicy {
             // A larger nursery collects less often but touches more fresh memory before its
             // first collection, and first touches are what a short-lived process pays for most.
             young_limit: 8 * 1024 * 1024,
+            // GNU R's initial vector heap trigger, `R_VSIZE`.
+            young_large_limit: 64 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: match gc_stress_requested() {

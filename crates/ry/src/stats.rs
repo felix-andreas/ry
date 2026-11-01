@@ -90,9 +90,10 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
         .durability(Durability::MEDIUM)
         .new(&db);
-    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
-        .durability(Durability::MEDIUM)
-        .new(&db);
+    let _: AnalysisSettings =
+        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
+            .durability(Durability::MEDIUM)
+            .new(&db);
     let metadata = PackageMetadata::builder(
         normalized_imports(&namespace_file.imports),
         description_source

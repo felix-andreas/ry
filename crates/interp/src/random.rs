@@ -260,7 +260,7 @@ unsafe fn do_sample(call: &Call<'_>) -> R<Sexp> {
 /// `.Internal(sample2(n, size))`: sampling without replacement by redrawing duplicates, which
 /// `sample.int` uses when `size` is small next to a large `n`.
 unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
-    let population = as_real_scalar(call.arg(0));
+    let population = as_real_scalar(call.arg(0)).floor();
     let size = as_integer_scalar(call.arg(1));
     if !(0.0..=4.5e15).contains(&population) || (size > 0 && population == 0.0) {
         return Err(error("invalid first argument"));
@@ -299,7 +299,7 @@ unsafe fn do_sample2(call: &Call<'_>) -> R<Sexp> {
 
 /// Sampling with equal probabilities. Populations beyond the integer range give doubles.
 unsafe fn sample_uniform(population: Sexp, size: Sexp, replace: bool) -> R<Sexp> {
-    let count = as_real_scalar(population);
+    let count = as_real_scalar(population).floor();
     let size = vector_size(size)?;
     if !(0.0..=4.5e15).contains(&count) || (size > 0 && count == 0.0) {
         return Err(error("invalid first argument"));

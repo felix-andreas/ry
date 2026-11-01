@@ -28,7 +28,10 @@ use {
     std::{
         ffi::c_void,
         path::{Path, PathBuf},
-        sync::{LazyLock, Mutex, PoisonError},
+        sync::{
+            LazyLock, Mutex, PoisonError,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
     },
     syntax::{Parse, SyntaxNode, TextRange, TextSize},
@@ -95,9 +98,32 @@ struct Pending {
     trees: FxHashMap<String, Parse>,
 }
 
+/// Kept outside the session, so setting it never waits for a [`prepare`] that holds the
+/// session.
+static STRICT: AtomicBool = AtomicBool::new(false);
+
 /// Whether the project is in strict mode, which the host reads from its `ry.toml`.
 pub fn set_strict(strict: bool) {
-    session().loader.set_strict(strict);
+    STRICT.store(strict, Ordering::Relaxed);
+}
+
+/// Starts analyzing the package at or above `path` on a thread of its own and returns at once,
+/// so the analysis overlaps starting R and the load that follows finds it done. That load
+/// waits for the session while this holds it.
+pub fn prepare(path: PathBuf, strict: bool) {
+    set_strict(strict);
+    let spawned = thread::Builder::new()
+        .name("ry-loader-prepare".to_owned())
+        .stack_size(ANALYSIS_STACK_SIZE)
+        .spawn(move || {
+            let mut session = session();
+            session.loader.set_strict(strict);
+            session.loader.prepare(&path);
+        });
+    if let Err(error) = spawned {
+        // Preparing only saves time: without the thread, the load derives everything itself.
+        drop(error);
+    }
 }
 
 fn session() -> std::sync::MutexGuard<'static, Session> {
@@ -126,6 +152,7 @@ unsafe fn do_plan(call: &Call<'_>) -> R<Sexp> {
 
 fn plan(root: &str, full: bool) -> RValue {
     let mut session = session();
+    session.loader.set_strict(STRICT.load(Ordering::Relaxed));
     let plan = match session.loader.plan(Path::new(root), full) {
         Ok(plan) => plan,
         Err(failure) => return error_value(&failure.to_string()),

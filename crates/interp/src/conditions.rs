@@ -16,7 +16,7 @@ use {
     },
     heap::{
         Marker,
-        object::{Sexp, SexpType},
+        object::{NA_INTEGER, Sexp, SexpType},
     },
     std::rc::Rc,
 };
@@ -168,10 +168,44 @@ pub unsafe fn make_condition(message: &str, call: Sexp, classes: &[&str]) -> R<S
     Ok(condition)
 }
 
+/// Signals an error condition of `classes` that carries `fields` after its message and call,
+/// as `stop(condition)` would. GNU R raises a few errors this way, such as
+/// `MissingSubscriptError`, so that handlers can tell them apart. The result is the unwind to
+/// propagate.
+pub unsafe fn classed_error(
+    call: Sexp,
+    message: &str,
+    classes: &[&str],
+    fields: &[(&str, Sexp)],
+) -> Unwind {
+    let signal = || -> R<Unwind> {
+        let mut items = vec![
+            ("message", scalar_string(message)?),
+            ("call", resolve_call(call)),
+        ];
+        items.extend_from_slice(fields);
+        let condition = values::named_list(&items)?;
+        values::set_attr(condition, symbols().class, values::string_vector(classes)?)?;
+        let stop = values::call(values::install("stop")?, &[condition])?;
+        eval::eval(stop, values::base_namespace())?;
+        Ok(crate::unwind::error_in(call, message))
+    };
+    match signal() {
+        Ok(unwind) | Err(unwind) => unwind,
+    }
+}
+
 /// GNU R's default error handler: prints the message, then goes to top level.
 pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
+    if let Err(unwind) = crate::moves::handling_error() {
+        return unwind;
+    }
     let state = interp();
-    let text = format_error(call, message);
+    // GNU R formats the message into a buffer of `warning.length` bytes after the
+    // `Error in ` (or `Error: `) head, so a longer one loses its tail.
+    let limit = (warning_length() + 1).saturating_sub(if call == nil() { 8 } else { 10 });
+    let message = truncate_at_char(message, limit);
+    let mut text = format_error(call, message);
     state.error_message = text.clone();
     if state.in_error > 0 {
         write_console(text.as_bytes(), true);
@@ -190,11 +224,17 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         if (traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some())
             && let Some(traceback) = concise_traceback(call)
         {
-            write_console(format!("Calls: {traceback}\n").as_bytes(), true);
+            let line = format!("Calls: {traceback}\n");
+            write_console(line.as_bytes(), true);
+            // `geterrmessage()` shows the traceback too, as GNU R appends it to the buffer.
+            text.push_str(&line);
+            interp().error_message = text.clone();
         }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
-            print_warnings();
+            if let Err(unwind) = print_warnings() {
+                return unwind;
+            }
         }
     }
     let mut outcome = jump(Jump::TopLevel);
@@ -224,7 +264,58 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         outcome = unwind;
     }
     interp().in_error -= 1;
+    // Going to top level means invoking the innermost `abort` restart, so code that
+    // establishes its own (`withRestarts(expr, abort = ...)`) regains control after the error.
+    if matches!(&outcome, Unwind::Jump(target) if matches!(**target, Jump::TopLevel)) {
+        match user_abort_restart() {
+            Ok(Some(target)) => return target,
+            Ok(None) => {}
+            Err(unwind) => return unwind,
+        }
+    }
     outcome
+}
+
+/// `getOption("warning.length")`, GNU R's limit on the bytes of a warning or error message.
+pub unsafe fn warning_length() -> usize {
+    match values::as_integer_scalar(crate::envir::get_option("warning.length")) {
+        length if length > 0 && length != NA_INTEGER => length as usize,
+        _ => 1000,
+    }
+}
+
+/// `text` cut to at most `limit` bytes, on a character boundary.
+pub fn truncate_at_char(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// The jump that invokes the innermost `abort` restart established in R code, if any.
+unsafe fn user_abort_restart() -> R<Option<Unwind>> {
+    let mut entry = interp().restarts.clone();
+    while let Some(candidate) = entry {
+        let restart = candidate.restart;
+        if restart.kind() == SexpType::List
+            && length(restart) >= 2
+            && restart.element(1) != nil()
+            && values::first_string(restart.element(0)).as_deref() == Some("abort")
+        {
+            interp().restarts = candidate.next.clone();
+            let arguments = values::list_vector(&[])?;
+            return Ok(Some(jump(Jump::Return {
+                env: restart.element(1),
+                value: arguments,
+            })));
+        }
+        entry = candidate.next.clone();
+    }
+    Ok(None)
 }
 
 /// The calls on the stack, innermost first and without the innermost `skip`, each deparsed and
@@ -279,12 +370,21 @@ unsafe fn concise_traceback(call: Sexp) -> Option<String> {
     {
         return None;
     }
-    let mut text = names.join(" -> ");
-    if text.chars().count() > 300 {
-        text = format!(
-            "... -> {}",
-            names[names.len().saturating_sub(5)..].join(" -> ")
-        );
+    // Built from the innermost call outwards; once the chain passes 50 bytes, only the
+    // outermost function is added, after "...".
+    let mut text = String::new();
+    let mut outermost = None;
+    for name in names.iter().rev() {
+        if outermost.is_some() || text.len() > 50 {
+            outermost = Some(name);
+        } else if text.is_empty() {
+            text = name.clone();
+        } else {
+            text = format!("{name} -> {text}");
+        }
+    }
+    if let Some(outermost) = outermost {
+        text = format!("{outermost} ... {text}");
     }
     Some(text)
 }
@@ -335,6 +435,14 @@ pub unsafe fn warning(message: impl Into<String>) -> R<()> {
 
 /// GNU R's default warning handler.
 pub unsafe fn default_warning(call: Sexp, message: &str) -> R<()> {
+    let limit = warning_length();
+    let truncated;
+    let message = if message.len() >= limit {
+        truncated = format!("{} [... truncated]", truncate_at_char(message, limit));
+        truncated.as_str()
+    } else {
+        message
+    };
     let level = crate::envir::get_option("warn");
     let level = if level == nil() {
         0
@@ -377,10 +485,10 @@ unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
 }
 
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
-pub unsafe fn print_warnings() {
+pub unsafe fn print_warnings() -> R<()> {
     let warnings = std::mem::take(&mut interp().warnings);
     if warnings.is_empty() {
-        return;
+        return Ok(());
     }
     let mut text = String::new();
     if warnings.len() == 1 {
@@ -426,12 +534,14 @@ pub unsafe fn print_warnings() {
         }
     }
     write_console(text.as_bytes(), true);
-    let last = values::install("last.warning");
-    if let Ok(last) = last {
-        let items: Vec<(&str, Sexp)> = Vec::new();
-        drop(items);
-        drop(last);
-    }
+    // `warnings()` reads the printed warnings back from `last.warning` in the base environment.
+    let items: Vec<(&str, Sexp)> = warnings
+        .iter()
+        .map(|(call, message)| (message.as_str(), *call))
+        .collect();
+    let last = values::named_list(&items)?;
+    crate::heap().define(values::base_env(), values::install("last.warning")?, last)?;
+    Ok(())
 }
 
 // The internals.
@@ -452,7 +562,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal(".invokeRestart", 2, do_invoke_restart),
     internal(".addTryHandlers", 0, |_| Ok(nil())).invisible(),
     internal(".addGlobHands", 5, do_add_global_handlers).invisible(),
-    internal("warnings", 0, |_| Ok(nil())),
     internal("interruptsSuspended", -1, |_| unsafe {
         values::scalar_bool(false)
     }),
@@ -617,14 +726,17 @@ unsafe fn do_geterrmessage(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_seterrmessage(call: &Call<'_>) -> R<Sexp> {
-    interp().error_message = message_text(call.arg(0))?;
+    let message = message_text(call.arg(0))?;
+    // GNU R keeps the message in an 8192-byte C buffer, so a longer one loses its tail.
+    let message = truncate_at_char(&message, 8191).to_owned();
+    interp().error_message = message;
     Ok(nil())
 }
 
 unsafe fn do_print_deferred_warnings(_call: &Call<'_>) -> R<Sexp> {
     if !interp().warnings.is_empty() {
         write_console(b"In addition: ", true);
-        print_warnings();
+        print_warnings()?;
     }
     Ok(nil())
 }

@@ -320,5 +320,6 @@ db-benchmark's ten group-by and five join questions, three `:=` update loops and
 join, at ten million rows (db-benchmark's 0.5 GB size) on 4 cores, take 5.2 s on DataFrames and
 26.2 s on data.table using every thread, best of two runs each, with the same checksums, and
 DataFrames are faster on every question. data.table's own functions (`fread`, `setkey`, `rbindlist`,
-`melt` and the rest) run data.table's C code, at the speed they have under GNU R. The
+`melt` and the rest) run data.table's C code, and at ten million rows each is as fast as under
+GNU R or faster (`tstrsplit` 3.7 s against 5.7 s, `fread` 2.4 s against 3.2 s). The
 [design notes](/contributing/design/r-runtime/#7-the-table-type) describe the benchmark.

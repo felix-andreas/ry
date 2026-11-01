@@ -9,7 +9,13 @@ pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
 pub use reedline;
-use std::{error::Error, fmt, io::IsTerminal, path::PathBuf};
+use std::{
+    error::Error,
+    ffi::{CString, c_char, c_int, c_void},
+    fmt,
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug)]
 pub struct ReplError(pub String);
@@ -82,6 +88,9 @@ pub struct RunOptions {
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
     pub filter: Option<Box<dyn InputFilter>>,
+    /// The package `startup` loads. ry's runtime starts analyzing it while base R loads; GNU R
+    /// ignores it.
+    pub package: Option<PathBuf>,
 }
 
 /// Returns only when R ends. R assumes it owns the thread it initializes on, so
@@ -99,9 +108,13 @@ pub fn run_on_ry_runtime(
     input: Option<&str>,
     arguments: &[String],
     flags: RuntimeFlags,
+    package: Option<&Path>,
 ) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int};
     let library = ry_runtime()?;
+    if let Some(package) = package {
+        prepare_package(library, package, flags);
+    }
     type Run = unsafe extern "C" fn(
         *const c_char,
         *const c_char,
@@ -172,6 +185,9 @@ pub fn run_console_on_ry_runtime(
         ));
     }
     let library = ry_runtime()?;
+    if let Some(package) = &options.package {
+        prepare_package(library, package, flags);
+    }
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
     type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
@@ -201,14 +217,10 @@ pub fn run_console_on_ry_runtime(
 
 /// Reads the debug client's next message for [`debug_on_ry_runtime`]; `libr::eval::DebugReceive`
 /// states the contract.
-pub type DebugReceive = unsafe extern "C" fn(
-    std::ffi::c_int,
-    *mut usize,
-    *mut std::ffi::c_void,
-) -> *const std::ffi::c_char;
+pub type DebugReceive = unsafe extern "C" fn(c_int, *mut usize, *mut c_void) -> *const c_char;
 
 /// Sends one message to the debug client; `libr::eval::DebugSend` states the contract.
-pub type DebugSend = unsafe extern "C" fn(*const std::ffi::c_char, usize, *mut std::ffi::c_void);
+pub type DebugSend = unsafe extern "C" fn(*const c_char, usize, *mut c_void);
 
 /// Runs a Debug Adapter Protocol server on ry's runtime, which talks to the client through
 /// `receive` and `send` with `data` passed back to both, and returns the debugged program's
@@ -220,18 +232,27 @@ pub type DebugSend = unsafe extern "C" fn(*const std::ffi::c_char, usize, *mut s
 pub unsafe fn debug_on_ry_runtime(
     receive: DebugReceive,
     send: DebugSend,
-    data: *mut std::ffi::c_void,
+    data: *mut c_void,
     flags: RuntimeFlags,
 ) -> Result<i32, ReplError> {
     let library = ry_runtime()?;
-    type Adapter = unsafe extern "C" fn(
-        DebugReceive,
-        DebugSend,
-        *mut std::ffi::c_void,
-        std::ffi::c_int,
-    ) -> std::ffi::c_int;
+    type Adapter = unsafe extern "C" fn(DebugReceive, DebugSend, *mut c_void, c_int) -> c_int;
     let adapter = runtime_entry::<Adapter>(library, "ry_debug_adapter")?;
     Ok(unsafe { adapter(receive, send, data, flags.bits()) })
+}
+
+/// Has ry's runtime start analyzing the package at `package` in the background. Preparing
+/// only saves time, so a runtime without the entry point, or a path with a NUL byte, loads the
+/// package without it.
+fn prepare_package(library: &'static RuntimeLibrary, package: &Path, flags: RuntimeFlags) {
+    type Prepare = unsafe extern "C" fn(*const c_char, c_int);
+    let (Ok(prepare), Ok(path)) = (
+        runtime_entry::<Prepare>(library, "ry_loader_prepare"),
+        CString::new(package.to_string_lossy().as_bytes()),
+    ) else {
+        return;
+    };
+    unsafe { prepare(path.as_ptr(), flags.bits()) };
 }
 
 /// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.

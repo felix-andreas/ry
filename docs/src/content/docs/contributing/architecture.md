@@ -30,8 +30,9 @@ illegal dependency unrepresentable.
 - **`semantics`** holds the salsa database and every analysis query: the per-item item tree and HIR,
   naming, interned types, Hindley-Milner inference, the stub corpus, the lints, and the point where
   diagnostics leave the analysis. It depends on `syntax` and salsa.
-- **`ide`** implements the editor features (hover, navigation, rename, completion, inlay hints,
-  signature help, code actions, and symbols) as pure reads of `semantics` queries at byte offsets.
+- **`ide`** implements the editor features (hover, navigation, rename, call hierarchy, completion,
+  inlay hints, signature help, code actions and fixes, symbols and the outline, folding, selection
+  ranges, and semantic tokens) as pure reads of `semantics` queries at byte offsets.
   Anything to do with the editor protocol lives in the server, never here.
 - **`format`** is the formatter. It depends on `syntax` alone, and because the compiler enforces
   that, it can never come to depend on an analysis result.
@@ -48,8 +49,8 @@ illegal dependency unrepresentable.
   `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
-  allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
-  environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
+  allocation in bitmap-managed pages, the non-moving generational collector and its roots,
+  `CHARSXP` interning, symbols, environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
   `heap`, `interp`, `jit`, `table` and `loader`. Its design is the draft at
@@ -98,8 +99,13 @@ The analysis of a project has five inputs:
   from `DESCRIPTION`.
 - `StubSources` is a set-once singleton carrying the `.Rtypes` corpus.
 - `AnalysisSettings` is a singleton carrying the configuration that changes what analysis means
-  rather than which findings a host publishes, today only `[check] inline-annotations`. It is read
-  only where an inline annotation exists, so toggling it re-checks only the items that have one.
+  rather than which findings a host publishes: `[check] inline-annotations` and `[check] strict`.
+  The first is read only where an inline annotation exists, so toggling it re-checks only the
+  items that have one. The second is the project default behind `semantics::file_is_strict`,
+  which decides a file's mode for the check (its `# typing:` directive wins). The package loader
+  keeps its own `load_index::file_is_strict`, which reads the loaded package's default instead. A check records the
+  origins strict mode reports only for an item in a strict file, so a project that is not strict
+  never builds that table.
 
 The package loader adds a sixth, `PackageSources`, described [below](#the-package-load-index).
 
@@ -120,15 +126,23 @@ kind, its name, its parent, and a disambiguator, which makes it stable when othe
 inserted around it. An edit inside one item therefore leaves the derived values of its siblings
 equal, and salsa's early cutoff prunes all the work downstream of them.
 
-### Syntax trees stay resident
+### Syntax trees stay resident in the server, and `ry check` releases them once
 
-Every host keeps every rowan tree. Salsa's LRU would bound memory, but each read of an LRU query
-records its use under one mutex per query, and the cold check reads `item_syntax` often enough
-on all cores that the lock cost about a sixth of its wall time, for about 80 MB saved on a
-300,000-line package. Every query that reads a tree is still a memoized query whose result is
-small: the item HIR and annotations, `parse_stage_diagnostics`, `file_error_ranges`, the
-annotation references and agreement candidates in `diagnostics.rs`, `item_name_range`, and
-`lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
+The server keeps every rowan tree, because an edit reparses one file and every other tree stays
+valid. `ry check` reads each tree in its first pass only, so it releases them all once that pass
+has derived everything later passes read (`semantics::release_trees`), which takes about 65 MiB
+off the peak of a 300,000-line package. The tree queries are declared with an LRU capacity of
+zero, and salsa records nothing on a read at capacity zero. `release_trees` raises the capacity
+to one, touches every tree on one thread, evicts, and lowers it again, so the parallel passes
+never pay the per-read mutex that a nonzero capacity takes (it cost about a sixth of the cold
+check's wall time when the capacities stayed set). The released file trees come back to the
+caller, and each naming worker frees the tree of the file it is about to name, so the frees run on
+all cores. A tree read after the release still works, by reparsing that file.
+
+Every query that reads a tree is a memoized query whose result is small: the item HIR and
+annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
+agreement candidates in `diagnostics.rs`, `item_name_range`, `item_binds_only_own_name`,
+`top_level::item_declared_pure`, and `lints::file_syntax_lints`. So a check never walks another file's tree, and revalidating an
 untouched file after an edit elsewhere never walks its own. A finding that also needs naming or
 the project's declarations is split in two: the syntax-only half is memoized, and a cheap step
 joins it with the rest (a bare `setClass` call is reported only when the file does not bind
@@ -296,20 +310,28 @@ decision log records that design.
 order plus the `NAMESPACE` and `DESCRIPTION` text, as separate fields so a `NAMESPACE` edit never
 re-derives an item. The index has three layers, and each depends only on the one below:
 
-- `item_load` gives one item's content hash (of the text R evaluates, with inline annotations
-  erased), whether it is a function definition, and the S4, R6 and S3 registrations it makes. It
-  reads only `item_syntax`, so it is the per-item firewall. `item_immediate_reads` gives the names a
-  statement reads while it runs, which excludes reads inside the functions it defines.
-- `file_items` joins one file's items with their positions in the erased text, which keeps every
-  line break, so line numbers match the file on disk.
-- `package_index` joins the files and decides which names are bound lazily: a name whose one writer
-  is a function definition.
+- `file_load_index` erases one file's inline annotations, keeping every line break so line numbers
+  match the file on disk, and records each item's position in that text. `file_items` then gives
+  each item its content hash (of its erased text), whether it is a function definition, the names
+  it writes and reads while it runs (`item_immediate_reads`, which excludes reads inside the
+  functions it defines), and the S4, R6 and S3 registrations it makes. Both read one file only.
+- `file_binds` reduces one file to the names it binds and how, and `package_bindings` joins those
+  into which names are bound lazily: a name whose one writer is a function definition. A body edit
+  leaves a file's binds equal, so salsa backdates them and the join, which is the firewall that
+  keeps an edit from reaching every file's bindings.
+- `package_index` joins the files and the bindings into what a plan diffs.
 
 A reload depends on all of a package's files, so salsa would revisit every file's memos after any
 edit. The loader avoids that with durability: a file starts at high durability and drops to low on
 its first edit, and salsa skips verifying memos that depend only on inputs at a durability nothing
 changed at. The diff then looks inside only the files whose hash changed, plus the eager code of
-every file, which is all an edit can reach. `test_incremental.rs` pins the per-item contract.
+every file, which is all an edit can reach. Lowering a file's durability makes its first edit verify
+every memo once (about 20 ms at 326,000 lines), and later edits of that file skip the check.
+`test_incremental.rs` pins the per-file contract.
+
+Before the console or `ry load` starts R for a package, it calls the loader's `prepare`, which reads
+the sources and derives this whole index on its own threads while base R loads. The first
+`load_all()` then waits for that to finish and only diffs.
 
 ### Diagnostics
 
@@ -319,8 +341,8 @@ Diagnostics come in two layers over one source of truth:
   refusals of malformed `#:` blocks and inline annotations, and, while inline annotations are turned
   off, a warning at each one. All of them are pure functions of the parse and `AnalysisSettings`.
 - `file_diagnostics(file)` adds the naming findings (unresolved and unused names) and the type
-  errors. The strict-mode origins are rendered separately by `strict_diagnostics(file)`, so a host
-  publishes them only under `[check] strict` or a per-file directive.
+  errors. The strict-mode findings are rendered separately by `strict_diagnostics(file)`, which is
+  empty unless `file_is_strict` holds (`[check] strict` or the file's own directive).
 
 The host, meaning the server or the CLI, then gates diagnostic classes by configuration, applies
 per-file `# typing:` overrides, escalates unresolved names to errors under strict mode, appends the
