@@ -2677,11 +2677,16 @@ slot, so the slot's type reflects the update:
   - a list-like `list[T]` becomes `list[T | V]`, and stays list-like;
   - a record-like or tuple-like container is left unchanged, because widening a shape whose fields
     are individually known would throw away precision the code has not given up.
+- A write through `[`, `x[i] <- v` or `x[i, j] <- v`, on an atomic `x` with an atomic `v` coerces
+  `x` to the wider of the two atomic types, as R does. So after `prob <- rep(NA, n)`, the write
+  `prob[i] <- 0.5` makes `prob` a `double[]`, and `x[1] <- "a"` makes a numeric `x` a
+  `character[]`. A scalar `x` stays a scalar, because a type carries no length. A `[` write on a
+  list, or of a value that is not atomic, leaves `x` as it was.
 - A write through a chain of accessors, such as `x[[1]]$private <- v` or `x$a$b <- v`, rewrites
   each container on the way back to the root: the innermost one takes `v` by the rules above, and
   each enclosing one takes the rewritten child at its own step. A step whose position is known
   (`$name`, `[["name"]]`, or `[[1]]`) updates that field or position, and a computed `[[i]]` step
-  follows the computed-key rules above. A write through a `[` or `@` step is not tracked. So after
+  follows the computed-key rules above. A `@` step, or a `[` step before the last, is not tracked. So after
   `old <- list(list(private = NULL)); old[[1]]$private <- list(deep_clone = 1)`, reading
   `old[[1]]$private$deep_clone` is a `double`. Writing a field of a `NULL` grows it into a one-field
   record, as R does, so `x <- NULL; x$a <- 1` makes `x` a `list{a: double}`.

@@ -1131,3 +1131,22 @@ pick <- function() if ("yes") 1L else 0L
 #++++
 pick: Unknown
 23..28 error[type-mismatch] expected `logical`, found `character`
+
+#---- an_element_write_widens_an_atomic_vector_to_the_written_type
+probabilities <- function(q) {
+  prob <- rep(NA, length(q))
+  prob[q > 0] <- 0.5
+  prob
+}
+#++++
+probabilities: <T> fn(q: T) -> double[]
+
+#---- an_element_write_of_text_makes_the_vector_text
+labelled <- function() {
+  x <- c(1, 2)
+  x[1] <- "a"
+  x + 1
+}
+#++++
+labelled: Unknown
+56..57 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character[]`

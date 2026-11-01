@@ -1177,7 +1177,9 @@ enum ReplacementStep {
     Field(String),
     Position(usize),
     Element,
-    /// `x[i]`, `x@a`, or a replacement call such as `names(x)`: not modeled.
+    /// `x[i]` or `x[i, j]`, which coerces an atomic container to the wider atomic type.
+    Slice,
+    /// `x@a`, or a replacement call such as `names(x)`: not modeled.
     Other,
     /// `formals(f) <- v` or `body(f) <- v` rewrites the function itself, so its prior
     /// signature no longer describes it.
@@ -3117,7 +3119,8 @@ impl<'db> Checker<'db, '_> {
     /// A nested write (`x[[1]]$a <- v`) rewrites each container on the way back up the
     /// spine: the innermost one takes the value, and each enclosing one takes the
     /// rewritten child. An intermediate container the spine cannot describe reads as
-    /// `Unknown`, and a step it cannot model (`x[i]`, `x@a`) leaves its container as it was.
+    /// `Unknown`, and a step it cannot model (`x@a`, `x[i]` on a list) leaves its container as
+    /// it was.
     fn replacement_written_type(
         &mut self,
         lhs: ExprId,
@@ -3169,9 +3172,12 @@ impl<'db> Checker<'db, '_> {
                     _ => ReplacementStep::Other,
                 },
             )),
-            ExpressionKind::Field { target, .. } | ExpressionKind::Index { target, .. } => {
-                Some((*target, ReplacementStep::Other))
-            }
+            ExpressionKind::Index {
+                double: false,
+                target,
+                ..
+            } => Some((*target, ReplacementStep::Slice)),
+            ExpressionKind::Field { target, .. } => Some((*target, ReplacementStep::Other)),
             ExpressionKind::Call { callee, arguments } => {
                 let rewrites = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) => {
@@ -3359,6 +3365,23 @@ impl<'db> Checker<'db, '_> {
             let mut items = items.clone();
             items[*position] = value;
             return Ty::new(self.db, TyKind::Tuple(items));
+        }
+        // R coerces the whole vector when the written value has a wider type, so
+        // `prob <- rep(NA, n); prob[i] <- 0.5` leaves `prob` a `double[]`.
+        if matches!(step, ReplacementStep::Slice) {
+            let (Some(container), Some(written)) = (
+                combine_operand_atomic(self.db, prior),
+                combine_operand_atomic(self.db, value),
+            ) else {
+                return prior;
+            };
+            let element = scalar(self.db, promote_combine_atomic(container, written));
+            // A type carries no length, so a scalar stays a scalar as it does after `x[1] <- 2L`.
+            return match prior.kind(self.db) {
+                TyKind::Scalar(_) => element,
+                TyKind::NamedVector(_) => Ty::new(self.db, TyKind::NamedVector(element)),
+                _ => Ty::new(self.db, TyKind::Vector(element)),
+            };
         }
         if !matches!(
             step,
