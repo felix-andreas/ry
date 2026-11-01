@@ -722,6 +722,11 @@ pub extern "C" fn jit_real_modulo(a: f64, b: f64) -> f64 {
     arith::real_modulo(a, b)
 }
 
+/// `%/%` on doubles, as the interpreter computes it.
+pub extern "C" fn jit_real_integer_divide(a: f64, b: f64) -> f64 {
+    arith::real_integer_divide(a, b)
+}
+
 /// `%%` on integers: `NA` for an `NA` operand or a zero divisor, else the sign of the divisor.
 pub extern "C" fn jit_integer_modulo(a: i32, b: i32) -> i32 {
     if a == NA_INTEGER || b == NA_INTEGER || b == 0 {

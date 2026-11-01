@@ -473,8 +473,9 @@ impl Simulation {
         writeln!(out, "data files {layouts:?}").ok();
         writeln!(
             out,
-            "inline annotations {:?}\nconfig {:?}",
+            "inline annotations {:?}\nstrict {:?}\nconfig {:?}",
             semantics::AnalysisSettings::get(db).inline_annotations(db),
+            semantics::AnalysisSettings::get(db).strict(db),
             ConfigView(&worker.config)
         )
         .ok();

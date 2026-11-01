@@ -174,6 +174,8 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
         let _ = crate::item_hir(db, item);
         let _ = crate::item_annotations(db, item);
         let _ = item_name_range(db, item);
+        let _ = crate::item_binds_only_own_name(db, item);
+        let _ = crate::top_level::item_declared_pure(db, item);
     }
 }
 
@@ -583,7 +585,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
-        for (expression, miss) in &check.column_misses {
+        for (expression, miss) in check.column_misses.iter() {
             let Some(name) = naming
                 .non_locals
                 .get(expression)
@@ -2346,11 +2348,15 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Published by hosts only under `[check] strict` or the per-file directive. An
-/// origin that is an assignment's value is phrased against the assigned name.
+/// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
+/// strict origins for. An origin that is an assignment's value is phrased against the assigned
+/// name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    if !crate::file_is_strict(db, file) {
+        return diagnostics;
+    }
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
     let broken_ranges = file_error_ranges(db, file);

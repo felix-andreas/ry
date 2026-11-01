@@ -369,7 +369,10 @@ pub unsafe fn new_env(enclosure: Sexp) -> R<Sexp> {
 }
 
 pub unsafe fn mkchar(text: &str) -> R<Sexp> {
-    mkchar_bytes(text.as_bytes(), Encoding::Utf8)
+    match unescape_invalid_bytes(text) {
+        Some(bytes) => mkchar_bytes(&bytes, Encoding::Native),
+        None => mkchar_bytes(text.as_bytes(), Encoding::Utf8),
+    }
 }
 
 pub unsafe fn mkchar_bytes(bytes: &[u8], encoding: Encoding) -> R<Sexp> {
@@ -646,13 +649,104 @@ pub unsafe fn set_elt(object: Sexp, index: usize, value: Sexp) {
     crate::heap().set_element(object, index, value);
 }
 
-/// A `CHARSXP` as text. Invalid UTF-8 is replaced, which only affects byte-encoded strings.
+/// A `CHARSXP` as text. A byte that is not valid UTF-8 becomes its private-use stand-in (see
+/// [`escape_invalid_bytes`]), which [`mkchar`] turns back into the byte.
 pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
     let bytes = charsxp.bytes();
+    // Strict validation runs a word at a time over ASCII, where the lossy decoder steps through
+    // chunks. The bit is only a hint, since native code can set any of a string's flags.
+    if charsxp.has_gp(gp::ASCII)
+        && let Ok(text) = std::str::from_utf8(bytes)
+    {
+        return Cow::Borrowed(text);
+    }
     if charsxp.has_gp(gp::LATIN1) {
         return Cow::Owned(bytes.iter().map(|&byte| byte as char).collect());
     }
-    String::from_utf8_lossy(bytes)
+    // GNU R reads a string declared as bytes through its `\xNN` spelling wherever it needs
+    // text, so printing, formatting and pasting show the escapes rather than decoded characters.
+    if charsxp.has_gp(gp::BYTES) {
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            if byte.is_ascii() {
+                text.push(char::from(byte));
+            } else {
+                text.push_str(&format!("\\x{byte:02x}"));
+            }
+        }
+        return Cow::Owned(text);
+    }
+    escape_invalid_bytes(bytes)
+}
+
+/// Decodes bytes that need not be UTF-8 as text. GNU R keeps a string's bytes as they are, so a
+/// Latin-1 string in a UTF-8 session, or a piece `strsplit(useBytes = TRUE)` cut out of a
+/// character, must survive text processing unchanged. Each byte that is not valid UTF-8 becomes
+/// the private-use character `U+F700 + byte`, which [`mkchar`] and string literals turn back
+/// into the byte. Text that holds those private-use characters itself reads them as the bytes
+/// they stand for.
+pub fn escape_invalid_bytes(bytes: &[u8]) -> Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Cow::Borrowed(text);
+    }
+    let mut text = String::with_capacity(bytes.len() + bytes.len() / 2);
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        for &byte in chunk.invalid() {
+            text.push(char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}'));
+        }
+    }
+    Cow::Owned(text)
+}
+
+/// Decodes bytes as text with every byte past ASCII as its private-use stand-in (see
+/// [`escape_invalid_bytes`]), valid UTF-8 or not, so that text processing sees one character per
+/// byte.
+pub fn escape_high_bytes(bytes: &[u8]) -> Cow<'_, str> {
+    if bytes.is_ascii() {
+        return Cow::Borrowed(std::str::from_utf8(bytes).unwrap_or_default());
+    }
+    Cow::Owned(
+        bytes
+            .iter()
+            .map(|&byte| match byte {
+                0..=0x7F => byte as char,
+                _ => char::from_u32(ESCAPED_BYTE_BASE + u32::from(byte)).unwrap_or('\u{fffd}'),
+            })
+            .collect(),
+    )
+}
+
+/// The base of the private-use characters [`escape_invalid_bytes`] maps bytes to.
+const ESCAPED_BYTE_BASE: u32 = 0xF700;
+
+/// The byte `character` stands for, if [`escape_invalid_bytes`] made it from one.
+pub fn escaped_byte(character: char) -> Option<u8> {
+    let code = u32::from(character);
+    (ESCAPED_BYTE_BASE + 0x80..=ESCAPED_BYTE_BASE + 0xFF)
+        .contains(&code)
+        .then(|| (code - ESCAPED_BYTE_BASE) as u8)
+}
+
+/// `text` with every private-use stand-in turned back into its byte, or `None` when it holds
+/// none.
+pub fn unescape_invalid_bytes(text: &str) -> Option<Vec<u8>> {
+    // Every stand-in encodes as `EF 9E xx` or `EF 9F xx` in UTF-8.
+    if !text.as_bytes().contains(&0xEF)
+        || !text
+            .chars()
+            .any(|character| escaped_byte(character).is_some())
+    {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len());
+    for character in text.chars() {
+        match escaped_byte(character) {
+            Some(byte) => bytes.push(byte),
+            None => bytes.extend_from_slice(character.encode_utf8(&mut [0u8; 4]).as_bytes()),
+        }
+    }
+    Some(bytes)
 }
 
 /// Whether two distinct interned strings hold the same text. Strings intern by bytes and
@@ -850,7 +944,10 @@ pub unsafe fn clear_attributes(object: Sexp) {
 }
 
 pub unsafe fn names(object: Sexp) -> Sexp {
-    if matches!(object.kind(), SexpType::Pairlist | SexpType::Language) {
+    if matches!(
+        object.kind(),
+        SexpType::Pairlist | SexpType::Language | SexpType::Dots
+    ) {
         return pairlist_names(object).unwrap_or(nil());
     }
     if object.kind() == SexpType::Environment {
@@ -1243,6 +1340,7 @@ pub unsafe fn pairlist_to_list(list: Sexp) -> R<Sexp> {
     let items = pairlist_items(list);
     let values: Vec<Sexp> = items.iter().map(|(_, value)| *value).collect();
     let result = list_vector(&values)?;
+    copy_attributes(list, result)?;
     if items.iter().any(|(tag, _)| *tag != nil()) {
         let names = alloc(SexpType::String, items.len())?;
         for (index, (tag, _)) in items.iter().enumerate() {

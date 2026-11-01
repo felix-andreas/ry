@@ -1,0 +1,507 @@
+//! A software model of the x87 80-bit `long double` that GNU R accumulates sums and means in.
+//!
+//! GNU R's `sum`, `mean`, `rowSums`, `cov` and friends add doubles into a `long double`, whose
+//! 64-bit significand rounds differently from both plain doubles and compensated summation.
+//! Matching it bit for bit is what makes `mean(c(1:9, -1e300, 1e300))` exactly 0, as in GNU R,
+//! rather than the more accurate 45/11 that an error-tracking sum gives.
+
+use std::ops::{Add, AddAssign, Div, Mul, Sub};
+
+/// A value with a 64-bit significand and an unbounded exponent, rounded to nearest even after
+/// every operation the way x87 extended precision is. Infinities and NaN keep their double.
+#[derive(Clone, Copy, Debug)]
+pub struct LongDouble(Repr);
+
+#[derive(Clone, Copy, Debug)]
+enum Repr {
+    /// `significand * 2^exponent`, with the top bit of a nonzero significand set.
+    Finite {
+        negative: bool,
+        significand: u64,
+        exponent: i32,
+    },
+    Special(f64),
+}
+
+/// Guard bits kept below an aligned significand, enough for a correctly rounded sum.
+const GUARD: u32 = 62;
+
+impl LongDouble {
+    pub const ZERO: LongDouble = LongDouble(Repr::Finite {
+        negative: false,
+        significand: 0,
+        exponent: 0,
+    });
+
+    pub fn to_f64(self) -> f64 {
+        match self.0 {
+            Repr::Special(value) => value,
+            Repr::Finite {
+                negative,
+                significand,
+                exponent,
+            } => {
+                let magnitude = if significand == 0 {
+                    0.0
+                } else {
+                    significand_to_f64(significand, exponent)
+                };
+                if negative { -magnitude } else { magnitude }
+            }
+        }
+    }
+
+    pub fn is_finite(self) -> bool {
+        self.to_f64().is_finite()
+    }
+
+    /// The correctly rounded square root, as `sqrtl` gives it.
+    pub fn sqrt(self) -> LongDouble {
+        let Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } = self.0
+        else {
+            return LongDouble(Repr::Special(self.to_f64().sqrt()));
+        };
+        if significand == 0 {
+            return self;
+        }
+        if negative {
+            return LongDouble(Repr::Special(f64::NAN));
+        }
+        // Widen to 127 or 128 bits with an even exponent left over, so the integer root has
+        // exactly 64 bits.
+        let shift = if (exponent - 63) % 2 == 0 { 63 } else { 64 };
+        let radicand = (significand as u128) << shift;
+        let mut root = (radicand as f64).sqrt() as u128 + (1 << 13);
+        loop {
+            let next = (root + radicand / root) / 2;
+            if next >= root {
+                break;
+            }
+            root = next;
+        }
+        // An integer radicand is never exactly halfway between two roots, so rounding to
+        // nearest only asks whether it passes `root^2 + root`.
+        let rounded = if radicand - root * root > root {
+            root + 1
+        } else {
+            root
+        };
+        round_wide(false, rounded, (exponent - shift) / 2)
+    }
+
+    /// The largest integer not above the value, as `floorl` gives it.
+    pub fn floor(self) -> LongDouble {
+        let Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } = self.0
+        else {
+            return self;
+        };
+        if significand == 0 || exponent >= 0 {
+            return self;
+        }
+        let fraction_bits = exponent.unsigned_abs();
+        let (whole, has_fraction) = if fraction_bits >= 64 {
+            (0, true)
+        } else {
+            (
+                significand >> fraction_bits,
+                significand & ((1u64 << fraction_bits) - 1) != 0,
+            )
+        };
+        let whole = if negative && has_fraction {
+            whole as u128 + 1
+        } else {
+            whole as u128
+        };
+        if whole == 0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        round_wide(negative, whole, 0)
+    }
+
+    fn negate(self) -> LongDouble {
+        match self.0 {
+            Repr::Special(value) => LongDouble(Repr::Special(-value)),
+            Repr::Finite {
+                negative,
+                significand,
+                exponent,
+            } => LongDouble(Repr::Finite {
+                negative: !negative,
+                significand,
+                exponent,
+            }),
+        }
+    }
+}
+
+impl From<f64> for LongDouble {
+    fn from(value: f64) -> LongDouble {
+        if !value.is_finite() {
+            return LongDouble(Repr::Special(value));
+        }
+        let negative = value.is_sign_negative();
+        if value == 0.0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        let bits = value.to_bits();
+        let biased = ((bits >> 52) & 0x7ff) as i32;
+        let fraction = bits & ((1 << 52) - 1);
+        let (raw, exponent) = if biased == 0 {
+            (fraction, -1074)
+        } else {
+            (fraction | (1 << 52), biased - 1075)
+        };
+        let shift = raw.leading_zeros();
+        LongDouble(Repr::Finite {
+            negative,
+            significand: raw << shift,
+            exponent: exponent - shift as i32,
+        })
+    }
+}
+
+impl Add for LongDouble {
+    type Output = LongDouble;
+
+    fn add(self, other: LongDouble) -> LongDouble {
+        let (
+            Repr::Finite {
+                negative: left_negative,
+                significand: left,
+                exponent: left_exponent,
+            },
+            Repr::Finite {
+                negative: right_negative,
+                significand: right,
+                exponent: right_exponent,
+            },
+        ) = (self.0, other.0)
+        else {
+            return LongDouble(Repr::Special(self.to_f64() + other.to_f64()));
+        };
+        if right == 0 {
+            if left == 0 {
+                // Only `-0 + -0` is negative zero under round to nearest.
+                return LongDouble(Repr::Finite {
+                    negative: left_negative && right_negative,
+                    significand: 0,
+                    exponent: 0,
+                });
+            }
+            return self;
+        }
+        if left == 0 {
+            return other;
+        }
+        let ((big_negative, big, big_exponent), (small_negative, small, small_exponent)) =
+            if (left_exponent, left) >= (right_exponent, right) {
+                (
+                    (left_negative, left, left_exponent),
+                    (right_negative, right, right_exponent),
+                )
+            } else {
+                (
+                    (right_negative, right, right_exponent),
+                    (left_negative, left, left_exponent),
+                )
+            };
+        let big_wide = (big as u128) << GUARD;
+        let small_wide = (small as u128) << GUARD;
+        let distance = (big_exponent - small_exponent) as u32;
+        // Bits shifted out of the smaller operand survive as a sticky low bit, which is all the
+        // rounding step needs to know about them.
+        let small_aligned = if distance >= 127 {
+            1
+        } else {
+            let shifted = small_wide >> distance;
+            let lost = small_wide & ((1u128 << distance) - 1);
+            shifted | u128::from(lost != 0)
+        };
+        let total = if big_negative == small_negative {
+            big_wide + small_aligned
+        } else {
+            big_wide - small_aligned
+        };
+        if total == 0 {
+            return LongDouble::ZERO;
+        }
+        round_wide(big_negative, total, big_exponent - GUARD as i32)
+    }
+}
+
+impl Sub for LongDouble {
+    type Output = LongDouble;
+
+    fn sub(self, other: LongDouble) -> LongDouble {
+        self + other.negate()
+    }
+}
+
+impl Mul for LongDouble {
+    type Output = LongDouble;
+
+    fn mul(self, other: LongDouble) -> LongDouble {
+        let (
+            Repr::Finite {
+                negative: left_negative,
+                significand: left,
+                exponent: left_exponent,
+            },
+            Repr::Finite {
+                negative: right_negative,
+                significand: right,
+                exponent: right_exponent,
+            },
+        ) = (self.0, other.0)
+        else {
+            return LongDouble(Repr::Special(self.to_f64() * other.to_f64()));
+        };
+        let negative = left_negative != right_negative;
+        if left == 0 || right == 0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        round_wide(
+            negative,
+            left as u128 * right as u128,
+            left_exponent + right_exponent,
+        )
+    }
+}
+
+impl AddAssign<f64> for LongDouble {
+    fn add_assign(&mut self, value: f64) {
+        *self = *self + LongDouble::from(value);
+    }
+}
+
+impl Div for LongDouble {
+    type Output = LongDouble;
+
+    fn div(self, other: LongDouble) -> LongDouble {
+        let (
+            Repr::Finite {
+                negative: left_negative,
+                significand: left,
+                exponent: left_exponent,
+            },
+            Repr::Finite {
+                negative: right_negative,
+                significand: right,
+                exponent: right_exponent,
+            },
+        ) = (self.0, other.0)
+        else {
+            return LongDouble(Repr::Special(self.to_f64() / other.to_f64()));
+        };
+        if right == 0 {
+            return LongDouble(Repr::Special(self.to_f64() / other.to_f64()));
+        }
+        let negative = left_negative != right_negative;
+        if left == 0 {
+            return LongDouble(Repr::Finite {
+                negative,
+                significand: 0,
+                exponent: 0,
+            });
+        }
+        // Both significands have their top bit set, so the first quotient has at least 64
+        // bits; two more bits and a sticky bit make the rounding exact.
+        let numerator = (left as u128) << 64;
+        let divisor = right as u128;
+        let (quotient, remainder) = (numerator / divisor, numerator % divisor);
+        let extra = (remainder << 2) / divisor;
+        let sticky = u128::from((remainder << 2) % divisor != 0);
+        round_wide(
+            negative,
+            (quotient << 2) | extra | sticky,
+            left_exponent - right_exponent - 66,
+        )
+    }
+}
+
+/// Division by a count, which is how every GNU R mean finishes.
+impl Div<usize> for LongDouble {
+    type Output = LongDouble;
+
+    fn div(self, count: usize) -> LongDouble {
+        let Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } = self.0
+        else {
+            return LongDouble(Repr::Special(self.to_f64() / count as f64));
+        };
+        if count == 0 {
+            return LongDouble(Repr::Special(self.to_f64() / 0.0));
+        }
+        if significand == 0 {
+            return self;
+        }
+        let numerator = (significand as u128) << 64;
+        let divisor = count as u128;
+        let quotient = numerator / divisor;
+        let sticky = u128::from(numerator % divisor != 0);
+        round_wide(negative, quotient | sticky, exponent - 64)
+    }
+}
+
+/// Rounds `wide * 2^exponent` to a 64-bit significand, ties to even.
+fn round_wide(negative: bool, wide: u128, exponent: i32) -> LongDouble {
+    let width = 128 - wide.leading_zeros();
+    let (significand, exponent) = if width <= 64 {
+        let shift = 64 - width;
+        ((wide << shift) as u64, exponent - shift as i32)
+    } else {
+        let shift = width - 64;
+        let kept = wide >> shift;
+        let rest = wide & ((1u128 << shift) - 1);
+        let half = 1u128 << (shift - 1);
+        let rounded = if rest > half || (rest == half && kept & 1 == 1) {
+            kept + 1
+        } else {
+            kept
+        };
+        if rounded >> 64 != 0 {
+            ((rounded >> 1) as u64, exponent + shift as i32 + 1)
+        } else {
+            (rounded as u64, exponent + shift as i32)
+        }
+    };
+    LongDouble(Repr::Finite {
+        negative,
+        significand,
+        exponent,
+    })
+}
+
+/// The double nearest `significand * 2^exponent`, ties to even, with gradual underflow.
+fn significand_to_f64(significand: u64, exponent: i32) -> f64 {
+    // The value lies in [2^top, 2^(top + 1)).
+    let top = exponent + 63;
+    if top > 1023 {
+        return f64::INFINITY;
+    }
+    // A normal double keeps 53 bits; a subnormal one keeps fewer, down to its 2^-1074 unit.
+    let dropped = if top >= -1022 {
+        11
+    } else {
+        11 + (-1022 - top) as u32
+    };
+    if dropped > 65 {
+        return 0.0;
+    }
+    let wide = significand as u128;
+    let kept = wide >> dropped;
+    let rest = wide & ((1u128 << dropped) - 1);
+    let half = 1u128 << (dropped - 1);
+    let rounded = if rest > half || (rest == half && kept & 1 == 1) {
+        kept + 1
+    } else {
+        kept
+    };
+    scale(rounded as f64, exponent + dropped as i32)
+}
+
+/// `value * 2^power`, exact whenever the result is representable.
+fn scale(mut value: f64, mut power: i32) -> f64 {
+    let step = 2f64.powi(600);
+    let inverse = 2f64.powi(-600);
+    while power > 600 {
+        value *= step;
+        power -= 600;
+    }
+    while power < -600 {
+        value *= inverse;
+        power += 600;
+    }
+    value * 2f64.powi(power)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sum(values: &[f64]) -> f64 {
+        let mut total = LongDouble::ZERO;
+        for &value in values {
+            total += value;
+        }
+        total.to_f64()
+    }
+
+    #[test]
+    fn huge_terms_swallow_small_ones_like_x87() {
+        let values: Vec<f64> = (1..=9).map(f64::from).chain([-1e300, 1e300]).collect();
+        assert_eq!(sum(&values), 0.0);
+    }
+
+    #[test]
+    fn extra_bits_survive_until_the_final_rounding() {
+        // 2^53 + 1 is not a double, but the 64-bit significand holds it until 1 more arrives.
+        let two_53 = 2f64.powi(53);
+        assert_eq!(sum(&[two_53, 1.0, 1.0]), two_53 + 2.0);
+        assert_eq!(two_53 + 1.0 + 1.0, two_53);
+    }
+
+    #[test]
+    fn round_trips_doubles_and_subnormals() {
+        for value in [1.0, -0.1, 1e-310, f64::MIN_POSITIVE, f64::MAX, 5e-324] {
+            assert_eq!(LongDouble::from(value).to_f64(), value);
+        }
+    }
+
+    #[test]
+    fn division_rounds_once_to_the_double() {
+        let third = LongDouble::from(1.0) / 3;
+        assert_eq!(third.to_f64(), 1.0 / 3.0);
+        let mean = (LongDouble::from(0.1) + LongDouble::from(0.2) + LongDouble::from(0.3)) / 3;
+        assert_eq!(mean.to_f64(), 0.2);
+    }
+
+    #[test]
+    fn products_round_to_the_extended_significand() {
+        let third = LongDouble::from(1.0) / 3;
+        let product = third * LongDouble::from(3.0);
+        assert_eq!(product.to_f64(), 1.0);
+        assert_eq!(
+            (LongDouble::from(-2.0) * LongDouble::from(0.75)).to_f64(),
+            -1.5
+        );
+    }
+
+    #[test]
+    fn square_roots_are_correctly_rounded() {
+        assert_eq!(LongDouble::from(2.0).sqrt().to_f64(), 2f64.sqrt());
+        assert_eq!(LongDouble::from(0.25).sqrt().to_f64(), 0.5);
+        assert_eq!(LongDouble::from(1e-300).sqrt().to_f64(), 1e-150);
+        assert!(LongDouble::from(-1.0).sqrt().to_f64().is_nan());
+    }
+
+    #[test]
+    fn overflow_is_only_seen_on_conversion() {
+        let total = LongDouble::from(f64::MAX) + LongDouble::from(f64::MAX);
+        assert_eq!(total.to_f64(), f64::INFINITY);
+        assert_eq!((total / 2).to_f64(), f64::MAX);
+    }
+}
