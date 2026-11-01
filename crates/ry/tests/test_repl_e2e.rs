@@ -248,6 +248,8 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
     .expect("write");
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded replpkg");
+    // Input typed before the editor draws its first prompt is lost under load.
+    session.expect("ry R console");
     session.send("greet()\r");
     session.expect("first version");
     // Distinct sizes, so the change is visible even within one timestamp tick.
@@ -278,6 +280,8 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded promptpkg");
+    // Input typed before the editor draws its first prompt is lost under load.
+    session.expect("ry R console");
     session.send("options(prompt = \"R> \")\r");
     // The echoed command line never contains the joined text, so only the output matches.
     session.send("cat(\"prompt\", \"changed\\n\")\r");
