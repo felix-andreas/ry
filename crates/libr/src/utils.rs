@@ -3,13 +3,15 @@
 //! ...). Printing reproduces `print()`'s layout for a plain vector: common width, `[i]` line
 //! labels and wrapping at 80 columns, at R's default 7 significant digits.
 
-use crate::{
-    Global, Rboolean,
-    boundary::{ApiResult, enter, error, write_console},
-    strings::c_bytes,
+use {
+    crate::{
+        Global, Rboolean,
+        boundary::{ApiResult, enter, error, write_console},
+        strings::c_bytes,
+    },
+    heap::object::{NA_INTEGER, is_na_real},
+    std::ffi::{CStr, c_char, c_int, c_uint},
 };
-use heap::object::{NA_INTEGER, is_na_real};
-use std::ffi::{CStr, c_char, c_int, c_uint};
 
 const PRINT_WIDTH: usize = 80;
 const PRINT_DIGITS: usize = 7;

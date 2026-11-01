@@ -8,31 +8,33 @@ pub mod r;
 #[cfg(feature = "runtime")]
 pub mod ry_runtime;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::{Durability, Setter};
-use semantics::load_index::{
-    IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-    classify_constants, file_items, file_load_index, fnv1a, package_index,
+use {
+    rustc_hash::{FxHashMap, FxHashSet},
+    salsa::{Durability, Setter},
+    semantics::{
+        ANALYSIS_STACK_SIZE, Db, DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode,
+        file_conditional_writers, file_definitions, file_typing_mode,
+        load_index::{
+            IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
+            classify_constants, file_items, file_load_index, fnv1a, package_index,
+        },
+        metadata::{
+            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
+            parse_description_collate,
+        },
+        stubs::install_shipped_stubs,
+    },
+    serde::{Deserialize, Serialize},
+    std::{
+        collections::BTreeSet,
+        fmt, fs, io,
+        path::{Path, PathBuf},
+        sync::Arc,
+        thread,
+        time::SystemTime,
+    },
+    syntax::Parse,
 };
-use semantics::metadata::{
-    DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
-    parse_description_collate,
-};
-use semantics::stubs::install_shipped_stubs;
-use semantics::{
-    ANALYSIS_STACK_SIZE, Db, DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypingMode,
-    file_conditional_writers, file_definitions, file_typing_mode,
-};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::fmt;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
-use std::time::SystemTime;
-use syntax::Parse;
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
 /// reload re-derives only the items whose text changed.

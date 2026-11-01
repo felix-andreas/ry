@@ -4,20 +4,22 @@
 //! The stacks are persistent lists, as GNU R's are R pairlists: a calling handler runs with the
 //! stack below its own entry, and every closure frame restores the stack it started with.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    deparse, eval, interp,
-    unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
-    values::{
-        self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        deparse, eval, interp,
+        unwind::{Jump, R, RError, Unwind, error, jump, resolve_call},
+        values::{
+            self, char_str, global_env, length, list_vector, nil, scalar_string, string_at, symbols,
+        },
+        write_console,
     },
-    write_console,
+    heap::{
+        Marker,
+        object::{Sexp, SexpType},
+    },
+    std::rc::Rc,
 };
-use heap::{
-    Marker,
-    object::{Sexp, SexpType},
-};
-use std::rc::Rc;
 
 pub type HandlerStack = Option<Rc<Handler>>;
 pub type RestartStack = Option<Rc<RestartEntry>>;

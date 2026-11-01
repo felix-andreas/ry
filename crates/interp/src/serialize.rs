@@ -2,19 +2,21 @@
 //! databases installed packages keep their R objects in. Byte-compiled closures from GNU R are
 //! read back as their source expressions, which ry compiles itself.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal},
-    eval,
-    unwind::{R, error},
-    values::{self, alloc, length, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal},
+        eval,
+        unwind::{R, error},
+        values::{self, alloc, length, nil, symbols},
+    },
+    flate2::read::ZlibDecoder,
+    heap::{
+        object::{Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    rustc_hash::FxHashMap,
+    std::io::Read,
 };
-use flate2::read::ZlibDecoder;
-use heap::{
-    object::{Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use rustc_hash::FxHashMap;
-use std::io::Read;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin("lazyLoadDBfetch", 4, do_lazy_load_fetch),
@@ -400,8 +402,8 @@ impl Reader<'_> {
                 let data = values::ints_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 4)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(4)) {
-                        *slot = i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                        *slot = i32::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {
@@ -416,10 +418,8 @@ impl Reader<'_> {
                 let data = values::reals_mut(vector);
                 if self.format == Format::Xdr {
                     let bytes = self.take(count * 8)?;
-                    for (slot, chunk) in data.iter_mut().zip(bytes.chunks_exact(8)) {
-                        let mut array = [0u8; 8];
-                        array.copy_from_slice(chunk);
-                        *slot = f64::from_be_bytes(array);
+                    for (slot, chunk) in data.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                        *slot = f64::from_be_bytes(*chunk);
                     }
                 } else {
                     for slot in data.iter_mut() {

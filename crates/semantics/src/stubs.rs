@@ -1,12 +1,16 @@
 //! `.Rtypes` stubs: `name : <type>` lines whose type half goes through the `#:` annotation
 //! grammar. Stub text is a set-once input, so it never participates in per-edit invalidation.
 
-use crate::Db;
-use crate::annotations::{NamedDefinition, lower_annotation};
-use crate::metadata::namespace_active;
-use crate::types::{Name, Ty, TyKind, TypeScheme, for_each_child_type};
-use rustc_hash::{FxHashMap, FxHashSet};
-use syntax::{SyntaxKind, TextRange};
+use {
+    crate::{
+        Db,
+        annotations::{NamedDefinition, lower_annotation},
+        metadata::namespace_active,
+        types::{Name, Ty, TyKind, TypeScheme, for_each_child_type},
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    syntax::{SyntaxKind, TextRange},
+};
 
 /// Sources are in precedence order: a later source replaces a name's whole overload set.
 /// Manifest names resolve even without a typed declaration, as `Unknown`.
@@ -40,6 +44,9 @@ pub struct StubLibrary<'db> {
     /// Manifest-listed exports of the active namespaces; these always resolve, untyped ones as
     /// `Unknown`.
     pub known_exports: FxHashSet<String>,
+    /// The `#'` lines written directly above a declaration, joined as Markdown, which hover and
+    /// completion show beside its type.
+    pub documentation: FxHashMap<String, String>,
 }
 
 /// `source_index` indexes the `StubSources` order the host fed in.
@@ -250,10 +257,16 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         // replaces any earlier source's set.
         let mut seen_here: FxHashSet<&str> = FxHashSet::default();
         let mut line_start = 0usize;
+        let mut pending_documentation: Vec<&str> = Vec::new();
         for raw_segment in text.split_inclusive('\n') {
             let raw_line = raw_segment.trim_end_matches(['\n', '\r']);
             let this_line_start = line_start;
             line_start += raw_segment.len();
+            if let Some(line) = raw_line.trim_start().strip_prefix("#'") {
+                pending_documentation.push(line.strip_prefix(' ').unwrap_or(line));
+                continue;
+            }
+            let documentation = std::mem::take(&mut pending_documentation);
             let content = strip_comment(raw_line).trim();
             if content.is_empty() {
                 continue;
@@ -331,6 +344,13 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 library.pure.remove(name);
             }
             if seen_here.insert(name) {
+                if documentation.is_empty() {
+                    library.documentation.remove(name);
+                } else {
+                    library
+                        .documentation
+                        .insert(name.to_owned(), documentation.join("\n"));
+                }
                 library.schemes.insert(name.to_owned(), vec![scheme]);
                 if let Some(range) = name_range(name) {
                     library.declarations.insert(
@@ -711,16 +731,19 @@ pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::check::{ItemCheck, TypeErrorKind};
-    use crate::diagnostics::file_diagnostics;
-    use crate::metadata::{PackageMetadata, attached_union};
-    use crate::types::Atomic;
-    use crate::{
-        DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree,
-        package_scheme_exists,
+    use {
+        super::*,
+        crate::{
+            DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+            check::{ItemCheck, TypeErrorKind},
+            diagnostics::file_diagnostics,
+            item_check, item_tree,
+            metadata::{PackageMetadata, attached_union},
+            package_scheme_exists,
+            types::Atomic,
+        },
+        salsa::Setter,
     };
-    use salsa::Setter;
 
     #[test]
     fn shipped_corpus_loads() {

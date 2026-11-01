@@ -8,12 +8,14 @@
 //! a derivative, and parentheses are added in place where deparsing needs them, which is why a
 //! node can come out parenthesized in every place it appears.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    unwind::{R, Unwind},
-    values::{self, length, nil, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        unwind::{R, Unwind},
+        values::{self, length, nil, symbols},
+    },
+    heap::object::{NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_REAL, Sexp, SexpType};
 
 /// `doD(expr, name)`.
 pub unsafe fn do_d(call: &NativeCall<'_>) -> R<Sexp> {

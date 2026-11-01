@@ -3,27 +3,30 @@
 //! runtime's heap and registers the builtins that need this crate: `.Call`, `.External`, `.C`,
 //! `.Fortran` and the `dyn.load` family.
 
-use crate::{
-    Rboolean, Runtime,
-    boundary::{
-        ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report, with_native_scope,
+use {
+    crate::{
+        Rboolean, Runtime,
+        boundary::{
+            ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report,
+            with_native_scope,
+        },
+        dynload::{Dll, RoutineKind, find_routine},
+        globals::R_NamesSymbol,
+        runtime,
+        strings::utf8_text,
+        vectors::{format_real, xlength},
     },
-    dynload::{Dll, RoutineKind, find_routine},
-    globals::R_NamesSymbol,
-    runtime,
-    strings::utf8_text,
-    vectors::{format_real, xlength},
+    heap::{
+        object::{NA_INTEGER, Sexp, SexpType},
+        strings::Encoding,
+    },
+    interp::{
+        TaskCallbackRoutine, builtin_libraries,
+        builtins::{Arg, BuiltinDef, Call, builtin, internal},
+        native::Interface,
+    },
+    std::ffi::{c_char, c_int, c_void},
 };
-use heap::{
-    object::{NA_INTEGER, Sexp, SexpType},
-    strings::Encoding,
-};
-use interp::{
-    TaskCallbackRoutine, builtin_libraries,
-    builtins::{Arg, BuiltinDef, Call, builtin, internal},
-    native::Interface,
-};
-use std::ffi::{c_char, c_int, c_void};
 
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {

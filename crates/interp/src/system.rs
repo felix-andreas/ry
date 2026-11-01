@@ -1,22 +1,26 @@
 //! The operating system as R sees it: environment variables, files and directories, time and
 //! dates, the process, and the session constants (`.Machine`, `.Platform`, `R.version`).
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal, special},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
-        scalar_string, string_vector, symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal, special},
+        interp,
+        unwind::{R, error},
+        values::{
+            self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real,
+            scalar_string, string_vector, symbols,
+        },
+    },
+    heap::{
+        GcStress,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
+        strings::Encoding,
+    },
+    std::{
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
     },
 };
-use heap::{
-    GcStress,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, is_na_real},
-    strings::Encoding,
-};
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
@@ -1717,7 +1721,7 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             'u' | 'w' => {
                 number(input, 1)?;
             }
-            'U' | 'V' | 'W' => {
+            'U'..='W' => {
                 number(input, 2)?;
             }
             'z' => fields.offset = Some(parse_offset(input)?),

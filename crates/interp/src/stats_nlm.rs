@@ -8,16 +8,18 @@
 //! (A5.5.1, A5.5.2). GNU R's `nlm` uses the same algorithm, so the iterates, and with them the
 //! printed iteration counts and residual gradients, agree with it.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    coerce::coerce_vector,
-    eval,
-    print::{PrintOptions, print_vector},
-    stats::{real_matrix, real_values},
-    unwind::R,
-    values::{self, length},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        coerce::coerce_vector,
+        eval,
+        print::{PrintOptions, print_vector},
+        stats::{real_matrix, real_values},
+        unwind::R,
+        values::{self, length},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType};
 
 /// `nlm(f, p, hessian, typsize, fscale, msg, ndigit, gradtol, stepmax, steptol, iterlim)`,
 /// called through `.External2`. `msg` holds the print level as bits: 8 silences all output,

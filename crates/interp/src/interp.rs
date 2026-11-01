@@ -73,16 +73,17 @@ pub mod unwind;
 pub mod utils;
 pub mod values;
 
-use crate::{
-    builtins::{BuiltinDef, Kind},
-    conditions::{HandlerStack, RestartStack},
-    unwind::R,
-};
-use heap::{Heap, Marker, RootSource, object::Sexp};
-use rustc_hash::FxHashMap;
-use std::{cell::UnsafeCell, rc::Rc};
-
 pub use crate::unwind::{Jump, RError};
+use {
+    crate::{
+        builtins::{BuiltinDef, Kind},
+        conditions::{HandlerStack, RestartStack},
+        unwind::R,
+    },
+    heap::{Heap, Marker, RootSource, object::Sexp},
+    rustc_hash::FxHashMap,
+    std::{cell::UnsafeCell, rc::Rc},
+};
 
 /// One closure call: GNU R's function context.
 pub struct Frame {

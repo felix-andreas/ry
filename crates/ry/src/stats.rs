@@ -1,27 +1,35 @@
 //! `ry debug analysis-stats`: where time and memory go across a workspace,
 //! measured through the same queries the language server uses.
 
-use crate::cli::{self, CommandError};
-use crate::config::Config;
-use crate::diagnostics::document_diagnostics;
-use salsa::{Durability, Setter};
-use semantics::check::CHECK_EXECUTIONS;
-use semantics::diagnostics::file_diagnostics;
-use semantics::infer::resolve_calls;
-use semantics::lints::lint_file;
-use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_namespace,
+use {
+    crate::{
+        cli::{self, CommandError},
+        config::Config,
+        diagnostics::document_diagnostics,
+    },
+    salsa::{Durability, Setter},
+    semantics::{
+        AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        check::CHECK_EXECUTIONS,
+        diagnostics::file_diagnostics,
+        infer::resolve_calls,
+        lints::lint_file,
+        metadata::{
+            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_namespace,
+        },
+        stubs::{StubSources, shipped_export_manifests, shipped_stub_sources},
+    },
+    std::{
+        cmp::Reverse,
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    },
+    syntax::TextSize,
 };
-use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
-use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::cmp::Reverse;
-use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-use syntax::TextSize;
 
 const SLOWEST_FILES: usize = 10;
 const TYPING_BURST: usize = 10;
@@ -263,7 +271,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         );
     }
 
-    print_memo_census(&db);
+    print_memo_census(&mut db);
 
     println!();
     println!("slowest files (typecheck):");
@@ -464,7 +472,7 @@ fn identifier_offsets(source: &str) -> Vec<TextSize> {
 /// Salsa's own census: how many memos each query holds and their inline size plus
 /// bookkeeping (dependency edges are the bulk of the metadata). Heap behind a value is
 /// not counted, so read it beside the phase growth above.
-fn print_memo_census(db: &RootDatabase) {
+fn print_memo_census(db: &mut RootDatabase) {
     let info = <dyn salsa::Database>::memory_usage(db);
     let mut queries: Vec<_> = info.queries.iter().collect();
     queries.sort_by_key(|(_, query)| Reverse(query.size_of_metadata() + query.size_of_fields()));

@@ -1,16 +1,22 @@
-use clap::Parser;
-use ry::cli::{self, CommandError, Outcome};
-use ry::command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime};
-use ry::config::Config;
-use ry::load;
-use ry::preflight::{self, ConsoleFilter, Erase, Preflight, Verdict};
-use ry::repl_completer::AnalysisCompleter;
-use ry::server;
-use ry::stats::analysis_stats;
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::{env, fs};
-use tracing_subscriber::prelude::*;
+use {
+    clap::Parser,
+    ry::{
+        cli::{self, CommandError, Outcome},
+        command_line::{Cli, Command, Debug, Keybindings, Mode, Runtime, resolve_runtime},
+        config::Config,
+        load,
+        preflight::{self, ConsoleFilter, Erase, Preflight, Verdict},
+        repl_completer::AnalysisCompleter,
+        server,
+        stats::analysis_stats,
+    },
+    std::{
+        env, fs,
+        path::{Path, PathBuf},
+        process::ExitCode,
+    },
+    tracing_subscriber::prelude::*,
+};
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]

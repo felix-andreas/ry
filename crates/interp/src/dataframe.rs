@@ -8,20 +8,22 @@
 //! of computing anything. A verb on a `DataFrame` runs at once as a one-step [`Plan`]; the same verb
 //! on a `LazyFrame` appends the step, and `LazyFrame.collect` optimizes and runs the whole plan.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin},
-    conditions,
-    frame::{self, is_frame, literal, table_of},
-    unwind::{R, error_in},
-    values::{self, install, is_nil, length, nil, scalar_string, set_attr, symbols},
-};
-use heap::object::{Sexp, SexpType};
-use std::{cell::Cell, ffi::c_void};
-use table::{
-    Error as TableError, Schema,
-    lazy::{self, How, Plan, Source, Step},
-    polars::prelude::PlSmallStr,
-    query::{Aggregate, BinaryOp, Expr, SortKey, UnaryOp, Warning},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin},
+        conditions,
+        frame::{self, is_frame, literal, table_of},
+        unwind::{R, error_in},
+        values::{self, install, is_nil, length, nil, scalar_string, set_attr, symbols},
+    },
+    heap::object::{Sexp, SexpType},
+    std::{cell::Cell, ffi::c_void},
+    table::{
+        Error as TableError, Schema,
+        lazy::{self, How, Plan, Source, Step, Strategy},
+        polars::prelude::PlSmallStr,
+        query::{Aggregate, BinaryOp, Expr, SortKey, UnaryOp, Warning},
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -33,6 +35,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_alias", 2, do_alias),
     builtin(".expr_if_else", 3, do_if_else),
     builtin(".expr_cor", 2, do_cor),
+    builtin(".expr_head", 3, do_head_expr),
     builtin(".expr_format", 1, do_format),
     builtin(".df_select", 3, do_select),
     builtin(".df_with_columns", 3, do_with_columns),
@@ -42,7 +45,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".df_sort", 4, do_sort),
     builtin(".df_head", 3, do_head),
     builtin(".df_tail", 3, do_tail),
-    builtin(".df_join", 7, do_join),
+    builtin(".df_join", 8, do_join),
     builtin(".df_lazy", 1, do_lazy),
     builtin(".df_collect", 2, do_collect),
     builtin(".df_explain", 2, do_explain),
@@ -67,6 +70,7 @@ Expr.median <- function(expr) .expr_aggregate(expr, "median")
 Expr.std <- function(expr) .expr_aggregate(expr, "std")
 Expr.var <- function(expr) .expr_aggregate(expr, "var")
 Expr.count <- function(expr) .expr_aggregate(expr, "count")
+Expr.head <- function(expr, n = 10L) .expr_head(expr, n, sys.call())
 Expr.is_null <- function(expr) .expr_operator("is_null", expr, NULL, TRUE)
 Expr.len <- function() .expr_len()
 Expr.if_else <- function(test, yes, no) .expr_if_else(test, yes, no)
@@ -82,7 +86,10 @@ DataFrame.sort <- function(df, ..., descending = FALSE) .df_sort(df, list(...), 
 DataFrame.head <- function(df, n = 5L) .df_head(df, n, sys.call())
 DataFrame.tail <- function(df, n = 5L) .df_tail(df, n, sys.call())
 DataFrame.join <- function(df, other, on = NULL, how = "inner", left_on = on, right_on = on, suffix = "_right") {
-  .df_join(df, other, left_on, right_on, how, suffix, sys.call())
+  .df_join(df, other, left_on, right_on, how, suffix, NULL, sys.call())
+}
+DataFrame.join_asof <- function(df, other, on, by = NULL, strategy = "backward", suffix = "_right") {
+  .df_join(df, other, c(by, on), c(by, on), "asof", suffix, strategy, sys.call())
 }
 DataFrame.lazy <- function(df) .df_lazy(df)
 GroupBy.agg <- function(group, ...) .df_agg(group, list(...), sys.call())
@@ -96,6 +103,7 @@ LazyFrame.sort <- DataFrame.sort
 LazyFrame.head <- DataFrame.head
 LazyFrame.tail <- DataFrame.tail
 LazyFrame.join <- DataFrame.join
+LazyFrame.join_asof <- DataFrame.join_asof
 LazyFrame.collect <- function(lf) .df_collect(lf, sys.call())
 LazyFrame.explain <- function(lf) {
   plan <- .df_explain(lf, sys.call())
@@ -383,6 +391,15 @@ unsafe fn do_cor(call: &Call<'_>) -> R<Sexp> {
     expr(Expr::Correlation(Box::new(first), Box::new(second)))
 }
 
+unsafe fn do_head_expr(call: &Call<'_>) -> R<Sexp> {
+    let named = expression(call.arg(0), call.arg(2))?;
+    let count = row_count(call.arg(1), call.arg(2))?;
+    wrap(Object::Expr(Named {
+        alias: named.alias,
+        expr: Expr::Head(Box::new(named.expr), count),
+    }))
+}
+
 unsafe fn do_format(call: &Call<'_>) -> R<Sexp> {
     let named = expression(call.arg(0), call.call)?;
     let text = match &named.alias {
@@ -611,9 +628,10 @@ unsafe fn do_tail(call: &Call<'_>) -> R<Sexp> {
     finish(plan.with(Step::Tail(count)), lazy, caller)
 }
 
-/// `.df_join(df, other, left_on, right_on, how, suffix, call)`.
+/// `.df_join(df, other, left_on, right_on, how, suffix, strategy, call)`, where `strategy` is
+/// `NULL` except for an as-of join.
 unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
-    let caller = call.arg(6);
+    let caller = call.arg(7);
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
     let (other, _) = plan_of(call.arg(1), caller)?;
     let keys = |value: Sexp, side: &str| -> R<Vec<PlSmallStr>> {
@@ -632,9 +650,19 @@ unsafe fn do_join(call: &Call<'_>) -> R<Sexp> {
     let left_on = keys(call.arg(2), "left_on")?;
     let right_on = keys(call.arg(3), "right_on")?;
     let how = values::require_string(call.arg(4), "how")?;
-    let how = How::parse(&how).ok_or_else(|| {
-        error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\" and \"anti\", not \"{how}\""))
-    })?;
+    let how = if how == "asof" {
+        let strategy = values::require_string(call.arg(6), "strategy")?;
+        How::Asof(Strategy::parse(&strategy).ok_or_else(|| {
+            error_in(
+                caller,
+                format!("`strategy` is one of \"backward\", \"forward\" and \"nearest\", not \"{strategy}\""),
+            )
+        })?)
+    } else {
+        How::parse(&how).ok_or_else(|| {
+            error_in(caller, format!("`how` is one of \"inner\", \"left\", \"full\", \"semi\" and \"anti\", not \"{how}\""))
+        })?
+    };
     let suffix = values::require_string(call.arg(5), "suffix")?;
     let step = Step::Join {
         other: Box::new(other),

@@ -3,8 +3,10 @@
 //! renders the pages into its file format: PDF and SVG as vector graphics, PNG, BMP and TIFF
 //! as rasterized pixels.
 
-use crate::graphics::{Colour, text_width_ems};
-use std::{collections::BTreeMap, io::Write, sync::OnceLock};
+use {
+    crate::graphics::{Colour, text_width_ems},
+    std::{collections::BTreeMap, io::Write, sync::OnceLock},
+};
 
 /// One page of a device: its background and the shapes drawn on it, in drawing order.
 pub struct Page {

@@ -13,30 +13,32 @@
 //! rebinds the variable the call named, so an alias taken earlier keeps the old columns. `setkey`
 //! always forks and rebinds.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin, special},
-    conditions, eval,
-    format::{Settings, display_width, format_real_common, format_real_with},
-    heap, interp, scope,
-    unwind::{R, Unwind, error, error_in},
-    values::{
-        self, char_str, install, is_nil, length, list_vector, missing_arg, na_string, nil,
-        scalar_integer, scalar_string, set_attr, string_vector, symbol_name, symbols,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, builtin, special},
+        conditions, eval,
+        format::{Settings, display_width, format_real_common, format_real_with},
+        heap, interp, scope,
+        unwind::{R, Unwind, error, error_in},
+        values::{
+            self, char_str, install, is_nil, length, list_vector, missing_arg, na_string, nil,
+            scalar_integer, scalar_string, set_attr, string_vector, symbol_name, symbols,
+        },
+        write_console,
     },
-    write_console,
-};
-use heap::object::{NA_INTEGER, Sexp, SexpType};
-use rustc_hash::FxHashSet;
-use std::{cell::Cell, ffi::c_void};
-use table::{
-    ColumnType, Table,
-    convert::{self, RVector, is_na_real},
-    polars::prelude::{
-        Column, DataFrame, DataType, IntoColumn, IntoLazy, ParquetWriter, PlSmallStr, col,
-    },
-    query::{
-        self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
-        Select, SortKey, UnaryOp,
+    heap::object::{NA_INTEGER, Sexp, SexpType},
+    rustc_hash::FxHashSet,
+    std::{cell::Cell, ffi::c_void},
+    table::{
+        ColumnType, Table,
+        convert::{self, RVector, is_na_real},
+        polars::prelude::{
+            Column, DataFrame, DataType, IntoColumn, IntoLazy, ParquetWriter, PlSmallStr, col,
+        },
+        query::{
+            self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
+            Select, SortKey, UnaryOp,
+        },
     },
 };
 

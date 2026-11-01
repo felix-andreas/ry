@@ -1,38 +1,45 @@
-use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind, lower_annotation,
-    lower_inline_annotation, statement_inline_site,
+use {
+    crate::{
+        AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
+        annotations::{
+            Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind,
+            lower_annotation, lower_inline_annotation, statement_inline_site,
+        },
+        check::{
+            ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError,
+            TypeErrorKind, column_element,
+        },
+        exhaustiveness::{MatchFinding, MatchFindingKind},
+        file_syntax_sites, file_type_definitions,
+        hir::{ExprId, ExpressionKind, Symbol},
+        infer::{FunctionMismatch, RecordMismatch, apply_definition},
+        inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
+        item_tree,
+        lints::LintConfig,
+        metadata::{
+            declared_dependency, imported_by_name, imports_every_name, is_own_package,
+            native_symbol,
+        },
+        naming::{BindingKind, ItemNaming, NamespaceRead},
+        parse, project_type_definitions, statement_annotations,
+        stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
+        top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, map_child_types, substitute_rigid,
+            union_of,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        mem,
+    },
+    syntax::{
+        SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
+        paired_comment_definition,
+    },
 };
-use crate::check::{
-    ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
-    column_element,
-};
-use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
-use crate::hir::{ExprId, ExpressionKind, Symbol};
-use crate::infer::apply_definition;
-use crate::infer::{FunctionMismatch, RecordMismatch};
-use crate::lints::LintConfig;
-use crate::metadata::{
-    declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
-};
-use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
-use crate::top_level::{CalleeOrigin, Effect, TopLevel, item_top_level};
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty,
-    TyKind, TypeScheme, map_child_types, substitute_rigid, union_of,
-};
-use crate::{
-    AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
-    file_syntax_sites, file_type_definitions, inline_annotations_enabled, item_check, item_hir,
-    item_name_range, item_naming, item_spans, item_tree, parse, project_type_definitions,
-    statement_annotations,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
-use syntax::SyntaxNode;
-use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -566,7 +573,7 @@ fn classify_non_local_read(
     });
     if crate::package_scheme_exists(db, name)
         || test_files.is_some_and(|_| {
-            let binding = crate::test_name(db, Name::new(db, name));
+            let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
         || super_globals(db, file).contains(name)
@@ -595,7 +602,8 @@ fn classify_non_local_read(
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
-        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name))),
+        suggestion: project_typo
+            .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
 }
 
@@ -1840,10 +1848,10 @@ fn project_typo_suggestion<'db>(
 
 /// Memoized per name: the scan over the whole stub corpus is the expensive part.
 #[salsa::tracked(returns(clone))]
-fn typo_suggestion<'db>(db: &'db dyn Db, name: Name<'db>) -> Option<String> {
+fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String> {
     let library = stubs(db)?;
     nearest_name(
-        name.text(db),
+        name.name(db).text(db),
         library
             .schemes
             .keys()
@@ -2547,6 +2555,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::NotAnAggregation { column } => format!(
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),
+        TypeErrorKind::HeadInsideExpression { column } => format!(
+            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
+        ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",
             if *columns == 1 { "column" } else { "columns" },
@@ -2961,8 +2972,7 @@ fn atomic_name(atomic: Atomic) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
+    use {super::*, crate::RootDatabase};
 
     fn render_all(db: &RootDatabase, file: SourceFile) -> Vec<String> {
         file_diagnostics(db, file)
@@ -3072,8 +3082,8 @@ mod tests {
     fn renderer_shares_names_across_both_sides() {
         let db = RootDatabase::default();
         let mut renderer = TypeRenderer::default();
-        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A".to_owned())));
-        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B".to_owned())));
+        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A")));
+        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B")));
         assert_eq!(renderer.render(&db, t), "T");
         assert_eq!(renderer.render(&db, u), "U");
         assert_eq!(renderer.render(&db, t), "T");

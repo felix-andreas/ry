@@ -9,25 +9,27 @@
 //! because the dialects disagree on bracket expressions, on what `\w` and `[[:alpha:]]` match,
 //! and on which characters are special.
 
-use crate::{
-    builtins::{BuiltinDef, Call, builtin, internal, require},
-    coerce::coerce_vector,
-    conditions::warning,
-    eval,
-    format::{display_width, scientific_text},
-    unwind::{R, error},
-    values::{
-        self, alloc, get_attr, length, na_string, nil, scalar_integer, scalar_string, set_attr,
-        set_elt, string_at, string_vector, string_vector_na, strings, symbols,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, builtin, internal, require},
+        coerce::coerce_vector,
+        conditions::warning,
+        eval,
+        format::{display_width, scientific_text},
+        unwind::{R, error},
+        values::{
+            self, alloc, get_attr, length, na_string, nil, scalar_integer, scalar_string, set_attr,
+            set_elt, string_at, string_vector, string_vector_na, strings, symbols,
+        },
     },
+    fancy_regex::{Regex, RegexBuilder},
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
+        strings::Encoding,
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::borrow::Cow,
 };
-use fancy_regex::{Regex, RegexBuilder};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
-    strings::Encoding,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("paste", 4, do_paste),

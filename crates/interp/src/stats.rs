@@ -7,15 +7,17 @@
 //! the papers each routine cites), in the operation order GNU R uses, so that results agree with
 //! GNU R to the last printed digit.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn, c_result},
-    coerce::coerce_vector,
-    linalg, stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize,
-    stats_port, stats_tests,
-    unwind::R,
-    values::{self, length, symbols},
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn, c_result},
+        coerce::coerce_vector,
+        linalg, stats_arima, stats_cluster, stats_deriv, stats_models, stats_nlm, stats_optimize,
+        stats_port, stats_tests,
+        unwind::R,
+        values::{self, length, symbols},
+    },
+    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("termsform", stats_models::termsform),

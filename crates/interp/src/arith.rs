@@ -1,16 +1,18 @@
 //! Arithmetic, comparison and logic operators, the `Math` and `Summary` groups, NA tests,
 //! sequences and repetition.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
-    coerce::{self, coerce_vector},
-    conditions, rmath,
-    unwind::{R, error},
-    values::{
-        self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        coerce::{self, coerce_vector},
+        conditions, rmath,
+        unwind::{R, error},
+        values::{
+            self, alloc, get_attr, length, nil, scalar_bool, scalar_integer, scalar_real, symbols,
+        },
     },
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real};
 
 unsafe extern "C" {
     fn expm1(x: f64) -> f64;
@@ -2200,6 +2202,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                 op: call.op,
                 args: &args,
                 env: call.env,
+                reusable: None,
             };
             return cumulative(&inner, kind);
         }
@@ -2269,13 +2272,13 @@ impl CompensatedSum {
     /// dependency chain a single accumulator has and keeps the compensation per lane.
     pub fn add_all(&mut self, values: &[f64]) {
         let mut lanes: [CompensatedSum; 4] = Default::default();
-        let mut chunks = values.chunks_exact(4);
-        for chunk in &mut chunks {
+        let (chunks, rest) = values.as_chunks::<4>();
+        for chunk in chunks {
             for (lane, &value) in lanes.iter_mut().zip(chunk) {
                 lane.add(value);
             }
         }
-        for &value in chunks.remainder() {
+        for &value in rest {
             self.add(value);
         }
         for lane in lanes {
@@ -2545,6 +2548,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
         op: call.op,
         args: &args,
         env: call.env,
+        reusable: None,
     };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
@@ -2638,7 +2642,7 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             let mut correction = CompensatedSum::default();
             for chunk in data.chunks(128) {
                 let mut deviations = [0.0; 256];
-                for (pair, &value) in deviations.chunks_exact_mut(2).zip(chunk) {
+                for (pair, &value) in deviations.as_chunks_mut::<2>().0.iter_mut().zip(chunk) {
                     // Knuth's two-sum of `value` and `-mean`.
                     let deviation = value - mean;
                     let negated_part = deviation - value;
@@ -2964,6 +2968,7 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             op: call.op,
             args: &[Arg { tag: nil(), value }],
             env: call.env,
+            reusable: None,
         });
     }
     let from_value = one(from, "from")?;

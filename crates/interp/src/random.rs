@@ -8,22 +8,25 @@
 //! restores `.Random.seed` replays a stream. Native code reaches the same generator through the
 //! functions below, which the C API's `unif_rand`, `norm_rand`, `exp_rand` and `R_unif_index` wrap.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    coerce::{coerce_vector, type_name},
-    conditions::warning,
-    eval::{define, eval, find_var_in_frame},
-    interp,
-    rmath::qnorm,
-    unwind::{R, error},
-    values::{
-        alloc, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env, integer_vector,
-        ints, is_nil, length, missing_arg, nil, real_vector, reals, string_at, symbols, unbound,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        coerce::{coerce_vector, type_name},
+        conditions::warning,
+        eval::{define, eval, find_var_in_frame},
+        interp,
+        rmath::qnorm,
+        unwind::{R, error},
+        values::{
+            alloc, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env,
+            integer_vector, ints, is_nil, length, missing_arg, nil, real_vector, reals, string_at,
+            symbols, unbound,
+        },
     },
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::time::{SystemTime, UNIX_EPOCH},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("set.seed", 4, do_set_seed).invisible(),

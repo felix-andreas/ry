@@ -17,19 +17,20 @@
 //! Syntax errors are warnings, as in GNU R: the parser reports them and keeps whatever tree it
 //! can still build.
 
-use std::collections::HashMap;
-
-use crate::{
-    builtin_libraries::NativeCall,
-    conditions, connections,
-    eval::{define, find_var},
-    unwind::{R, current_call, error, error_in},
-    values::{
-        self, alloc, install, integer_vector, list_vector, nil, scalar_integer, scalar_string,
-        string_vector, unbound,
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        conditions, connections,
+        eval::{define, find_var},
+        unwind::{R, current_call, error, error_in},
+        values::{
+            self, alloc, install, integer_vector, list_vector, nil, scalar_integer, scalar_string,
+            string_vector, unbound,
+        },
     },
+    heap::object::{Sexp, SexpType},
+    std::collections::HashMap,
 };
-use heap::object::{Sexp, SexpType};
 
 /// `parseRd(con, srcfile, encoding, verbose, basename, fragment, warningCalls, macros,
 /// warndups)`: the Rd tree of the text on `con`.

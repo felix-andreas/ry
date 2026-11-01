@@ -17,27 +17,29 @@
 //!
 //! [`Hooks::connection_method`]: crate::Hooks
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    interp,
-    unwind::{R, Unwind, error},
-    values::{self, nil, scalar_bool, scalar_integer, symbols},
-    write_terminal,
-};
-use bzip2::{read::MultiBzDecoder, write::BzEncoder};
-use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
-use heap::{
-    object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
-    strings::Encoding,
-};
-use lzma_rust2::{XzOptions, XzReader, XzWriter};
-use std::{
-    borrow::Cow,
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    fs::{File, OpenOptions},
-    io::{BufReader, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
-    ptr::null_mut,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        interp,
+        unwind::{R, Unwind, error},
+        values::{self, nil, scalar_bool, scalar_integer, symbols},
+        write_terminal,
+    },
+    bzip2::{read::MultiBzDecoder, write::BzEncoder},
+    flate2::{Compression, read::MultiGzDecoder, write::GzEncoder},
+    heap::{
+        object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
+    },
+    lzma_rust2::{XzOptions, XzReader, XzWriter},
+    std::{
+        borrow::Cow,
+        ffi::{CStr, CString, c_char, c_int, c_void},
+        fs::{File, OpenOptions},
+        io::{BufReader, Read, Seek, SeekFrom, Write},
+        path::PathBuf,
+        ptr::null_mut,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -3513,8 +3515,10 @@ unsafe fn device_flush(con: Rconnection) -> R<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::mem::{offset_of, size_of};
+    use {
+        super::*,
+        std::mem::{offset_of, size_of},
+    };
 
     /// The Rust mirror of `struct Rconn` must have GNU R's layout, which the ryconn test
     /// package's `layout.expected` records from GNU R's own header.

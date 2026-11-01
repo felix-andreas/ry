@@ -1,16 +1,18 @@
 //! Printing values the way GNU R's `print.default` does, and auto-printing at top level.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    deparse,
-    eval::{self, value_of},
-    format::{self, Settings, display_width, encode_string, pad},
-    interp,
-    unwind::R,
-    values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
-    write_console,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        deparse,
+        eval::{self, value_of},
+        format::{self, Settings, display_width, encode_string, pad},
+        interp,
+        unwind::R,
+        values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
+        write_console,
+    },
+    heap::object::{Sexp, SexpType, gp},
 };
-use heap::object::{Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),

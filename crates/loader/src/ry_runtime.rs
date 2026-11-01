@@ -9,22 +9,30 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::r::{RUNTIME_RY, RValue, error_value, plan_value};
-use crate::{Code, Loader};
-use heap::object::{Sexp, SexpType};
-use interp::builtins::{BuiltinDef, Call, internal, internal_function};
-use interp::eval::{define, eval, make_promise};
-use interp::lower::{lower_node, parse_text};
-use interp::scope;
-use interp::unwind::{R, error};
-use interp::values::{self, install, length, nil};
-use rustc_hash::FxHashMap;
-use semantics::ANALYSIS_STACK_SIZE;
-use std::ffi::c_void;
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, PoisonError};
-use std::thread;
-use syntax::{Parse, SyntaxNode, TextRange, TextSize};
+use {
+    crate::{
+        Code, Loader,
+        r::{RUNTIME_RY, RValue, error_value, plan_value},
+    },
+    heap::object::{Sexp, SexpType},
+    interp::{
+        builtins::{BuiltinDef, Call, internal, internal_function},
+        eval::{define, eval, make_promise},
+        lower::{lower_node, parse_text},
+        scope,
+        unwind::{R, error},
+        values::{self, install, length, nil},
+    },
+    rustc_hash::FxHashMap,
+    semantics::ANALYSIS_STACK_SIZE,
+    std::{
+        ffi::c_void,
+        path::{Path, PathBuf},
+        sync::{LazyLock, Mutex, PoisonError},
+        thread,
+    },
+    syntax::{Parse, SyntaxNode, TextRange, TextSize},
+};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderPlan", 2, do_plan),

@@ -6,12 +6,16 @@
 //! constant as soon as its binding lands, so a constant that should have been bound afresh
 //! keeps a stale forced value. `FUZZ_ITERS` scales the budget.
 
-use loader::{Loader, PackageInputs, Plan};
-use rustc_hash::{FxHashMap, FxHashSet};
-use semantics::load_index::{IndexedItem, PackageIndex, Registration};
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    loader::{Loader, PackageInputs, Plan},
+    rustc_hash::{FxHashMap, FxHashSet},
+    semantics::load_index::{IndexedItem, PackageIndex, Registration},
+    std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 #[test]
 fn a_reload_matches_a_fresh_load() {

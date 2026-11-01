@@ -4,12 +4,14 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::{CString, c_char, c_int, c_void},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::{CString, c_char, c_int, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 #[test]
@@ -191,7 +193,9 @@ fn errors_unwind_through_native_frames() {
 
     // A call whose argument cells are LANGSXP (`LCONS(fun, LCONS(arg, R_NilValue))`) still
     // passes its argument.
-    let identity = r.eval_expression(r.symbol("identity")).expect("identity is bound");
+    let identity = r
+        .eval_expression(r.symbol("identity"))
+        .expect("identity is bound");
     let three = r.integer(3);
     let value = r
         .call("rytest_lcons_call", &[identity, three])

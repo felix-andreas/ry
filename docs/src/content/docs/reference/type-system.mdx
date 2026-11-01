@@ -13,6 +13,12 @@ is why inference is Hindley–Milner, why your own functions cannot be overloade
 subtyping between nominal types. The [overview](/type-checking/overview) introduces the same ideas
 through examples.
 
+`ry check` reports the type errors on this page only when typing is on, through `[check] typing = true`
+in `ry.toml` or a `# typing: on` comment at the top of the file (see
+[configuration](/reference/configuration)). Every output block here was produced that way. With
+typing off, the checker still reports unresolved names, such as a misspelled column in a data.table
+query's `i`, but no type errors.
+
 ## Typing comment syntax
 
 Annotations are written in two ways that share one type grammar: in `#:` comments, described here,
@@ -750,6 +756,25 @@ way. Every union, written or inferred, is normalized:
 - A union whose members collapse to one type is that type, so `integer | integer` is `integer`.
 - A union with an `Any` member is `Any`, because every value already satisfies `Any`.
 - Otherwise, a union with an `Unknown` member is `Unknown`.
+
+A call's result drops a union member that is a type parameter of the called function when the
+callee's parameters mention it only as what a callback returns and the call left it unconstrained,
+because the callback then never produces such a value. `Result.and_then` returns
+`Result<B, E | F>`, where `F` is the error type of the step, so a step that never fails leaves `F`
+unconstrained and the result keeps the error `E` alone:
+
+```r
+a <- Result.and_then(Str.to_integer("1"), function(n) :Ok(n))
+# :Ok(integer) | :Err(:InvalidNumStr)
+b <- Result.and_then(Str.to_integer("1"), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+# :Ok(integer) | :Err(:InvalidNumStr | :NotPositive)
+```
+
+A union made only of such parameters stays as it is. A type parameter that an argument fills
+directly, or that appears only in the result (`<T> fn(name: character) -> T | NULL`), is kept,
+because there an open `T` means any value. So is one that code outside the call still reaches,
+such as an unannotated parameter passed as the callback:
+`function(r, step) Result.and_then(r, step)` returns `:Ok(V) | :Err(U | W)`.
 
 ### Union compatibility
 
@@ -2712,6 +2737,7 @@ expression built from `col("x")`:
 | `DataFrame.group_by(df, ...)` | `GroupBy{keys; rest}`: the key columns, then `df`'s other columns |
 | `GroupBy.agg(groups, ...)` | `DataFrame{keys, aggregates}` |
 | `DataFrame.join(df, other, on, how)` | `df`'s columns, then `other`'s non-key columns, with `suffix` added to a name `df` already has; `"semi"` and `"anti"` keep `df`'s columns only |
+| `DataFrame.join_asof(df, other, on, by)` | as a left join on the `by` columns and then `on` |
 | `DataFrame.lazy(df)`, `LazyFrame.collect(plan)` | the same columns, as a `LazyFrame` or a `DataFrame` |
 | `DataFrame.read_csv(path)`, `LazyFrame.scan_csv(path)` | the columns of the file, sniffed as for `fread` (see [Reading files](#reading-files-and-datatables-functions)) |
 
@@ -2727,14 +2753,16 @@ first column it reads, as Polars names it. Its type follows R's rules for the op
 | `a / b`, `a ^ b`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | `double` |
 | comparisons, `&`, `\|`, `!`, `Expr.is_null` | `logical` |
 | `Expr.sum` | `integer` for an `integer` or `logical` column, otherwise `double` |
-| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last` | the type of the column |
+| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column |
 | `Expr.len()`, `Expr.count` | `integer` |
 | `Expr.if_else(test, yes, no)` | the type `yes` and `no` share |
 | `lit(value)`, a plain R value | the value's type |
 
 A string or `col("x")` naming a column the subject does not have is a type error on that string,
 and so is a join key missing on either side. Inside `GroupBy.agg`, an expression that reads a
-column must aggregate it, since `agg` needs one value per group:
+column must aggregate it, since `agg` needs one value per group. The exception is an item that is
+exactly `Expr.head(n)`, whose up to `n` values per group become rows; `Expr.head` inside a larger
+expression is the same error:
 
 ```text
 type-mismatch

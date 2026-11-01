@@ -7,18 +7,19 @@
 //! loader bind it lazily. Purity is declared (`@pure`), never inferred, and each declaration is
 //! a per-item `bool`, so editing a function's body never reaches the code that calls it.
 
-use crate::hir::{
-    AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol, UnaryOperator,
+use {
+    crate::{
+        Db, Item,
+        hir::{
+            AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol, UnaryOperator,
+        },
+        inline_annotations_enabled, item_annotation_syntax, item_hir, item_syntax, package_name,
+        stubs::stubs,
+        types::{Name, QueryName},
+    },
+    rustc_hash::FxHashSet,
+    syntax::{SyntaxKind, TextRange, native_values::object_system_function},
 };
-use crate::stubs::stubs;
-use crate::types::Name;
-use crate::{
-    Db, Item, inline_annotations_enabled, item_annotation_syntax, item_hir, item_syntax,
-    package_name,
-};
-use rustc_hash::FxHashSet;
-use syntax::native_values::object_system_function;
-use syntax::{SyntaxKind, TextRange};
 
 /// How one top-level statement of a package file behaves when the package loads.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -109,7 +110,7 @@ pub fn item_declared_pure<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
 /// where the declaration would live. A project definition shadows a stub's.
 pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, CalleeOrigin) {
     if package.is_none() {
-        let definitions = package_name(db, Name::new(db, name.to_owned()));
+        let definitions = package_name(db, QueryName::new(db, Name::new(db, name.to_owned())));
         if !definitions.conditional_writers.is_empty() {
             return (false, CalleeOrigin::Conditional);
         }

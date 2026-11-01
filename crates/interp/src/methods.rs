@@ -6,16 +6,18 @@
 //! methods, and run the method in place of the generic. That path, and the small helpers the
 //! package's R code reaches through `.Call`, are here.
 
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    conditions::{self, Handler},
-    dispatch::{self, MethodsState},
-    eval, interp,
-    unwind::{Jump, R, Unwind, error, error_in},
-    values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        conditions::{self, Handler},
+        dispatch::{self, MethodsState},
+        eval, interp,
+        unwind::{Jump, R, Unwind, error, error_in},
+        values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+    },
+    heap::object::{Sexp, SexpType, gp},
+    std::rc::Rc,
 };
-use heap::object::{Sexp, SexpType, gp};
-use std::rc::Rc;
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("R_M_setPrimitiveMethods", set_primitive_methods_routine),

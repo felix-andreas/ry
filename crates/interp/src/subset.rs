@@ -1,20 +1,22 @@
 //! Subsetting and subassignment (`[`, `[[`, `$`, `@` and their replacement forms), `c` and
 //! `unlist`, lengths, names, dims, and attributes.
 
-use crate::{
-    builtins::{
-        Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
+use {
+    crate::{
+        builtins::{
+            Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
+        },
+        coerce::{self, coerce_vector},
+        conditions,
+        eval::{self, value_of},
+        unwind::{R, error},
+        values::{
+            self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
+            string_vector, symbol_name, symbols, unbound,
+        },
     },
-    coerce::{self, coerce_vector},
-    conditions,
-    eval::{self, value_of},
-    unwind::{R, error},
-    values::{
-        self, alloc, char_str, get_attr, length, missing_arg, na_string, nil, scalar_integer,
-        string_vector, symbol_name, symbols, unbound,
-    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     special("[", -1, do_subset).dispatch_or_eval(),
@@ -2341,6 +2343,7 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
             op: function,
             args: &args,
             env: values::global_env(),
+            reusable: None,
         };
         let result = do_set_dim(&context)?;
         if result != object {

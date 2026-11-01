@@ -1,12 +1,16 @@
 //! Shared by the language server and `ry check` so their gating cannot drift.
 
-use crate::config::Config;
-use crate::position::LineIndex;
-use semantics::diagnostics::{
-    Diagnostic, Severity, file_diagnostics, parse_stage_diagnostics, strict_diagnostics,
+use {
+    crate::{config::Config, position::LineIndex},
+    semantics::{
+        Db, SourceFile, TypingMode,
+        diagnostics::{
+            Diagnostic, Severity, file_diagnostics, parse_stage_diagnostics, strict_diagnostics,
+        },
+        file_typing_mode,
+        lints::lint_file,
+    },
 };
-use semantics::lints::lint_file;
-use semantics::{Db, SourceFile, TypingMode, file_typing_mode};
 
 /// A file's `# typing:` directive wins over `[check] strict`.
 pub fn file_is_strict(db: &dyn Db, file: SourceFile, config: &Config) -> bool {
@@ -119,9 +123,11 @@ pub fn apply_suppressions(diagnostics: Vec<Diagnostic>, source: &str) -> Vec<Dia
 
 #[cfg(test)]
 mod tests {
-    use super::apply_suppressions;
-    use semantics::diagnostics::{Diagnostic, Severity};
-    use syntax::{TextRange, TextSize};
+    use {
+        super::apply_suppressions,
+        semantics::diagnostics::{Diagnostic, Severity},
+        syntax::{TextRange, TextSize},
+    };
 
     fn diagnostic(offset: u32, code: &'static str) -> Diagnostic {
         Diagnostic::new(

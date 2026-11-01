@@ -7,16 +7,18 @@
 //! lists, `:` forms interactions, `*` crosses, `/` and `%in%` nest, `^` crosses a list with
 //! itself and `-` removes terms.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    deparse::{deparse_lines, options},
-    eval, linalg,
-    sort::{IdenticalFlags, identical},
-    stats::{as_reals, matrix_shape},
-    unwind::R,
-    values::{self, length, nil, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        deparse::{deparse_lines, options},
+        eval, linalg,
+        sort::{IdenticalFlags, identical},
+        stats::{as_reals, matrix_shape},
+        unwind::R,
+        values::{self, length, nil, symbols},
+    },
+    heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType};
 
 /// `termsform(x, specials, data, keep.order, allowDotAsName)`: the `terms` object of a formula.
 pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {

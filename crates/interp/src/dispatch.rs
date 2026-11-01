@@ -3,18 +3,20 @@
 //! reads (`class`, `oldClass`, `inherits`), and the hook `standardGeneric` calls once the methods
 //! package installs S4 dispatch.
 
-use crate::{
-    Frame,
-    builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
-    eval::{self, apply_closure, call_builtin, forced_promise, value_of},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
-        symbol_name, symbols, unbound,
+use {
+    crate::{
+        Frame,
+        builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
+        eval::{self, apply_closure, call_builtin, forced_promise, value_of},
+        interp,
+        unwind::{R, error},
+        values::{
+            self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
+            symbol_name, symbols, unbound,
+        },
     },
+    heap::object::{Sexp, SexpType, gp},
 };
-use heap::object::{Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     special("UseMethod", -1, do_usemethod).keep_visibility(),

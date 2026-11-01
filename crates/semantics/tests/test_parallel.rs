@@ -1,11 +1,18 @@
 //! Threads racing the package-interface fixpoint from different heads must not deadlock or
 //! panic, and must answer byte-equal to a single thread.
 
-use semantics::diagnostics::{file_diagnostics, strict_diagnostics};
-use semantics::stubs::install_shipped_stubs;
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree};
-use std::time::{Duration, Instant};
-use std::{slice, thread};
+use {
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{file_diagnostics, strict_diagnostics},
+        item_check, item_tree,
+        stubs::install_shipped_stubs,
+    },
+    std::{
+        slice, thread,
+        time::{Duration, Instant},
+    },
+};
 
 fn project(sources: &[String]) -> (RootDatabase, Vec<SourceFile>) {
     let db = RootDatabase::default();

@@ -1,5 +1,7 @@
-use crate::kind::SyntaxKind::{self, *};
-use crate::{SyntaxNode, SyntaxToken};
+use crate::{
+    SyntaxNode, SyntaxToken,
+    kind::SyntaxKind::{self, *},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Name(SyntaxNode);

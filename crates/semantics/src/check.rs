@@ -1,35 +1,43 @@
 //! Expression inference walk: Hindley–Milner over one item's HIR. Branches roll
 //! back through an undo log instead of cloning the environment.
 
-use crate::annotations::{Annotation, NamedDefinition};
-use crate::diagnostics::nearest_name;
-use crate::exhaustiveness::{MatchFinding, match_findings};
-use crate::hir::{
-    Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, MatchArm,
-    Module, NaAtom, Parameter as Formal, PatId, PatternKind, Symbol, UnaryOperator,
-    destructure_leaves, integer_literal_position, is_whole_number_double,
+use {
+    crate::{
+        DataPath, Db,
+        annotations::{Annotation, NamedDefinition},
+        data_file_layout,
+        diagnostics::nearest_name,
+        exhaustiveness::{MatchFinding, match_findings},
+        hir::{
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
+            MatchArm, Module, NaAtom, Parameter as Formal, PatId, PatternKind, Symbol,
+            UnaryOperator, destructure_leaves, integer_literal_position, is_whole_number_double,
+        },
+        infer::{
+            Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
+        },
+        metadata::{imported_by_name, imports_every_name, is_own_package},
+        naming::{
+            BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
+            is_column_update, query_index_arguments,
+        },
+        stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs},
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
+            Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any,
+            column_type, conflicting_tags, contains_inference_var, erase_vars, for_each_child_type,
+            map_child_types, native_record, null, scalar, substitute_rigid, type_size, union_of,
+            unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        mem,
+        ops::Range,
+        sync::atomic::{AtomicUsize, Ordering},
+    },
+    syntax::{TextRange, TextSize, native_values::accepts_native},
 };
-use crate::infer::{
-    Entry, FunctionMismatch, InferenceTable, RecordMismatch, UnifyError, apply_definition,
-};
-use crate::metadata::{imported_by_name, imports_every_name, is_own_package};
-use crate::naming::{
-    BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable, is_column_update,
-    query_index_arguments,
-};
-use crate::stubs::{STANDARD_LIBRARY, is_ry_type, namespace_exports, namespace_known, stubs};
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, Parameter,
-    RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any, column_type,
-    conflicting_tags, contains_inference_var, erase_vars, for_each_child_type, map_child_types,
-    native_record, null, scalar, substitute_rigid, type_size, union_of, unknown,
-};
-use crate::{DataPath, Db, data_file_layout};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use syntax::native_values::accepts_native;
-use syntax::{TextRange, TextSize};
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct TypeError<'db> {
@@ -145,6 +153,11 @@ pub enum TypeErrorKind<'db> {
     },
     /// A column in `GroupBy.agg` that gives one value per row instead of one per group.
     NotAnAggregation {
+        column: String,
+    },
+    /// `Expr.head(n)` inside a larger expression in `GroupBy.agg`, which accepts it only as a
+    /// whole item.
+    HeadInsideExpression {
         column: String,
     },
     /// `setnames(f, new)` with as many names as the frame has columns, which data.table
@@ -308,6 +321,7 @@ enum DataFrameVerb {
     Agg,
     Join {
         lazy: bool,
+        asof: bool,
     },
     /// `lazy` and `collect`, which keep the columns and change the kind.
     Convert(FrameKind),
@@ -315,12 +329,40 @@ enum DataFrameVerb {
 }
 
 /// The column a DataFrame expression computes. `reads_column` tells an expression from a
-/// constant, and `aggregated` whether it gives one value per group.
+/// constant, and `shape` how many values it gives per group.
 struct ComputedColumn<'db> {
     name: String,
     ty: Ty<'db>,
     reads_column: bool,
-    aggregated: bool,
+    shape: Shape,
+}
+
+/// How many values a DataFrame expression gives inside `GroupBy.agg`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// One per row, which `agg` rejects.
+    PerRow,
+    /// One per group.
+    PerGroup,
+    /// `Expr.head(n)`: up to `n` per group, which `agg` accepts only as a whole item, exploding
+    /// them into rows.
+    Head,
+    /// An expression that combines `Expr.head(n)` with something else, which `agg` rejects.
+    NestedHead,
+}
+
+impl Shape {
+    /// The shape of an expression combining two others: one value per group only when both give
+    /// one. A head inside wins, so that `agg` can say what is wrong.
+    fn combine(self, other: Shape) -> Shape {
+        match (self, other) {
+            (Shape::Head | Shape::NestedHead, _) | (_, Shape::Head | Shape::NestedHead) => {
+                Shape::NestedHead
+            }
+            (Shape::PerGroup, Shape::PerGroup) => Shape::PerGroup,
+            _ => Shape::PerRow,
+        }
+    }
 }
 
 /// The binding a call head reaches after skipping non-function bindings.
@@ -5964,6 +6006,8 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         arguments: &[Argument],
     ) -> Ty<'db> {
+        // The variables typing a named callee creates are its scheme's instantiated parameters.
+        let first_var = self.table.next_var().0;
         let looked_up = match self.function_lookup(callee) {
             FunctionLookup::Ordinary => None,
             FunctionLookup::Found(ty) => Some(ty),
@@ -6002,6 +6046,15 @@ impl<'db> Checker<'db, '_> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        let named_callee = matches!(
+            self.module.expression(callee).kind,
+            ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
+        );
+        let callback_outputs = if named_callee {
+            self.callback_outputs(callee_ty, first_var..self.table.next_var().0)
+        } else {
+            Vec::new()
+        };
         if self.is_null_placeholder(self.table.resolve(self.db, callee_ty)) {
             self.infer_call_arguments(range, arguments);
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -6022,7 +6075,126 @@ impl<'db> Checker<'db, '_> {
         }
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        if callback_outputs.is_empty() {
+            return result;
+        }
+        self.drop_unconstrained_members(result, &callback_outputs, first_var)
+    }
+
+    /// The callee's freshly instantiated type parameters (`instantiated`) that its parameter
+    /// types mention only as what a callback returns, such as `F` in `Result.and_then`'s
+    /// `f: fn(A) -> Result<B, F>`. Only those can stand for no value after the call: a
+    /// parameter an argument fills directly, or one that appears only in the result, means
+    /// "any value" when it stays open.
+    fn callback_outputs(&self, callee_ty: Ty<'db>, instantiated: Range<u32>) -> Vec<InferenceVar> {
+        let db = self.db;
+        if instantiated.is_empty() {
+            return Vec::new();
+        }
+        let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
+            return Vec::new();
+        };
+        let mut direct = FxHashSet::default();
+        let mut outputs = FxHashSet::default();
+        let parameter_types = function
+            .positional
+            .iter()
+            .copied()
+            .chain(function.named.iter().map(|parameter| parameter.ty))
+            .chain(function.variadic.iter().map(|rest| rest.element));
+        for ty in parameter_types {
+            match ty.kind(db) {
+                TyKind::Function(callback) => {
+                    collect_vars(db, callback.ret, &mut outputs);
+                    let inputs = callback
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(callback.named.iter().map(|parameter| parameter.ty))
+                        .chain(callback.variadic.iter().map(|rest| rest.element));
+                    for input in inputs {
+                        collect_vars(db, input, &mut direct);
+                    }
+                }
+                _ => collect_vars(db, ty, &mut direct),
+            }
+        }
+        outputs
+            .into_iter()
+            .filter(|var| instantiated.contains(&var.0) && !direct.contains(var))
+            .collect()
+    }
+
+    /// A callback output that no argument constrained stands for no value, so as a member of a
+    /// union in the result it adds nothing: `Result.and_then`'s `Result<B, E | F>` is `:Err(E)`
+    /// when the step never fails. A union of nothing but such parameters stays as it is, and a
+    /// parameter that a variable from before the call reaches (an unannotated outer parameter
+    /// passed as the callback) stays too, because its value is decided by that outer code.
+    fn drop_unconstrained_members(
+        &mut self,
+        result: Ty<'db>,
+        callback_outputs: &[InferenceVar],
+        first_var: u32,
+    ) -> Ty<'db> {
+        let db = self.db;
+        let mut open: FxHashSet<InferenceVar> = callback_outputs
+            .iter()
+            .map(|&var| self.table.find(var))
+            .filter(|&root| matches!(self.table.entry(root), Entry::Unbound { .. }))
+            .collect();
+        if open.is_empty() {
+            return result;
+        }
+        let resolved = self.table.resolve(db, result);
+        let mut in_result = FxHashSet::default();
+        collect_vars(db, resolved, &mut in_result);
+        open.retain(|var| in_result.contains(var));
+        if open.is_empty() {
+            return resolved;
+        }
+        for outer in 0..first_var {
+            let outer = InferenceVar(outer);
+            let mut reached = FxHashSet::default();
+            match self.table.entry(outer) {
+                Entry::Unbound { .. } => {
+                    reached.insert(self.table.find(outer));
+                }
+                Entry::Bound { ty, .. } => {
+                    let ty = self.table.resolve(db, *ty);
+                    collect_vars(db, ty, &mut reached);
+                }
+                Entry::Redirect(_) => {}
+            }
+            open.retain(|var| !reached.contains(var));
+            if open.is_empty() {
+                return resolved;
+            }
+        }
+        let unconstrained = |member: Ty<'db>| match member.kind(db) {
+            TyKind::Var(var) => open.contains(var),
+            _ => false,
+        };
+        fn walk<'db>(
+            db: &'db dyn Db,
+            ty: Ty<'db>,
+            unconstrained: &dyn Fn(Ty<'db>) -> bool,
+        ) -> Ty<'db> {
+            let ty = map_child_types(db, ty, &mut |child| walk(db, child, unconstrained));
+            match ty.kind(db) {
+                TyKind::Union(members) if members.iter().any(|&member| !unconstrained(member)) => {
+                    union_of(
+                        db,
+                        members
+                            .iter()
+                            .copied()
+                            .filter(|&member| !unconstrained(member)),
+                    )
+                }
+                _ => ty,
+            }
+        }
+        walk(db, resolved, &unconstrained)
     }
 
     /// R looks a called name up as a function: a binding that holds no function is skipped,
@@ -6306,7 +6478,8 @@ impl<'db> Checker<'db, '_> {
             "with_columns" => DataFrameVerb::WithColumns { lazy },
             "filter" | "sort" | "head" | "tail" => DataFrameVerb::KeepColumns { lazy },
             "group_by" => DataFrameVerb::GroupBy { lazy },
-            "join" => DataFrameVerb::Join { lazy },
+            "join" => DataFrameVerb::Join { lazy, asof: false },
+            "join_asof" => DataFrameVerb::Join { lazy, asof: true },
             "lazy" => DataFrameVerb::Convert(FrameKind::LazyFrame),
             "collect" => DataFrameVerb::Convert(FrameKind::DataFrame),
             "read_csv" if !lazy => DataFrameVerb::ReadCsv(FrameKind::DataFrame),
@@ -6434,20 +6607,25 @@ impl<'db> Checker<'db, '_> {
                     .filter_map(|argument| argument.value)
                     .zip(&computed)
                 {
-                    if !column.aggregated {
-                        self.errors.push(TypeError {
-                            range: self.blame_range(argument),
-                            kind: TypeErrorKind::NotAnAggregation {
-                                column: column.name.clone(),
-                            },
-                        });
-                    }
+                    let kind = match column.shape {
+                        Shape::PerRow => TypeErrorKind::NotAnAggregation {
+                            column: column.name.clone(),
+                        },
+                        Shape::NestedHead => TypeErrorKind::HeadInsideExpression {
+                            column: column.name.clone(),
+                        },
+                        Shape::PerGroup | Shape::Head => continue,
+                    };
+                    self.errors.push(TypeError {
+                        range: self.blame_range(argument),
+                        kind,
+                    });
                 }
                 let mut result = existing(columns.get(..usize::try_from(keys).ok()?)?);
                 result.extend(fields(computed));
                 Some(frame_of(db, frame_kind(lazy), result))
             }
-            DataFrameVerb::Join { lazy } => self.join_type(lazy, &columns, frame, rest),
+            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, &columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
@@ -6456,20 +6634,24 @@ impl<'db> Checker<'db, '_> {
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
     /// other than its keys, with `suffix` added to a name the left already has. A semi or anti
-    /// join keeps only the left's columns.
+    /// join keeps only the left's columns. `DataFrame.join_asof(left, right, on, by)` joins on
+    /// `by` and then `on`, with a left join's columns.
     fn join_type(
         &mut self,
         lazy: bool,
+        asof: bool,
         left: &[RecordField<'db>],
         frame: Option<Symbol>,
         arguments: &[Argument],
     ) -> Option<Ty<'db>> {
         let db = self.db;
         let module = self.module;
-        let matched = match_formals(
-            arguments,
-            &["other", "on", "how", "left_on", "right_on", "suffix"],
-        );
+        let formals: &[&str] = if asof {
+            &["other", "on", "by", "strategy", "suffix"]
+        } else {
+            &["other", "on", "how", "left_on", "right_on", "suffix"]
+        };
+        let matched = match_formals(arguments, formals);
         let other = matched[0]?;
         let other_ty = *self.recorded.get(&other)?;
         let right = match self.structural(other_ty).kind(db).clone() {
@@ -6487,13 +6669,36 @@ impl<'db> Checker<'db, '_> {
                 },
             }
         };
-        let how = string(2)?.unwrap_or_else(|| "inner".to_owned());
-        let suffix = string(5)?.unwrap_or_else(|| "_right".to_owned());
         let keys = |position: usize| matched[position].map(|value| literal_strings(module, value));
-        let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
-            (Some(on), None, None) => (on.clone()?, on?),
-            (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
-            _ => return None,
+        let (how, suffix, left_keys, right_keys) = if asof {
+            let by_null = matched[2].is_some_and(|value| {
+                matches!(
+                    module.expression(value).kind,
+                    ExpressionKind::Literal(LiteralKind::Null)
+                )
+            });
+            let mut keys_of_both = if by_null {
+                Vec::new()
+            } else {
+                keys(2).unwrap_or(Some(Vec::new()))?
+            };
+            keys_of_both.extend(keys(1)??);
+            let suffix = string(4)?.unwrap_or_else(|| "_right".to_owned());
+            (
+                "left".to_owned(),
+                suffix,
+                keys_of_both.clone(),
+                keys_of_both,
+            )
+        } else {
+            let how = string(2)?.unwrap_or_else(|| "inner".to_owned());
+            let suffix = string(5)?.unwrap_or_else(|| "_right".to_owned());
+            let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
+                (Some(on), None, None) => (on.clone()?, on?),
+                (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
+                _ => return None,
+            };
+            (how, suffix, left_keys, right_keys)
         };
         let other_name = variable_name(module, other);
         // `on` names each key once for both frames, so a key missing from both is reported once,
@@ -6582,7 +6787,7 @@ impl<'db> Checker<'db, '_> {
             name: name.to_owned(),
             ty,
             reads_column: true,
-            aggregated: false,
+            shape: Shape::PerRow,
         }
     }
 
@@ -6610,7 +6815,7 @@ impl<'db> Checker<'db, '_> {
                     |checker: &mut Self| checker.frame_expression(first?, columns, frame);
                 let aggregate = |column: ComputedColumn<'db>, ty: Ty<'db>| ComputedColumn {
                     ty,
-                    aggregated: true,
+                    shape: Shape::PerGroup,
                     ..column
                 };
                 match name.as_str() {
@@ -6627,14 +6832,14 @@ impl<'db> Checker<'db, '_> {
                             name: "literal".to_owned(),
                             ty,
                             reads_column: false,
-                            aggregated: false,
+                            shape: Shape::PerRow,
                         })
                     }
                     "Expr.len" => Some(ComputedColumn {
                         name: "len".to_owned(),
                         ty: vector(Atomic::Integer),
                         reads_column: false,
-                        aggregated: true,
+                        shape: Shape::PerGroup,
                     }),
                     "Expr.alias" => {
                         let column = argument(self)?;
@@ -6670,6 +6875,13 @@ impl<'db> Checker<'db, '_> {
                         let column = argument(self)?;
                         Some(aggregate(column, vector(Atomic::Integer)))
                     }
+                    "Expr.head" => {
+                        let column = argument(self)?;
+                        Some(ComputedColumn {
+                            shape: Shape::Head,
+                            ..column
+                        })
+                    }
                     "Expr.is_null" => {
                         let column = argument(self)?;
                         Some(ComputedColumn {
@@ -6700,7 +6912,7 @@ impl<'db> Checker<'db, '_> {
                             name,
                             ty,
                             reads_column: yes.reads_column || no.reads_column,
-                            aggregated: yes.aggregated && no.aggregated,
+                            shape: yes.shape.combine(no.shape),
                         })
                     }
                     _ => None,
@@ -6766,7 +6978,7 @@ impl<'db> Checker<'db, '_> {
                     name,
                     ty,
                     reads_column: left.reads_column || right.reads_column,
-                    aggregated: left.aggregated && right.aggregated,
+                    shape: left.shape.combine(right.shape),
                 })
             }
             _ => None,
@@ -6792,7 +7004,7 @@ impl<'db> Checker<'db, '_> {
             name: "literal".to_owned(),
             ty: column_type(self.db, self.table.resolve(self.db, ty)),
             reads_column: false,
-            aggregated: true,
+            shape: Shape::PerGroup,
         })
     }
 
@@ -11459,10 +11671,7 @@ fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 }
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
-    Ty::new(
-        db,
-        TyKind::Named(Name::new(db, "factor".to_owned()), Vec::new()),
-    )
+    Ty::new(db, TyKind::Named(Name::new(db, "factor"), Vec::new()))
 }
 
 /// The column type data.table gives values of several column types stacked together: the
@@ -11893,13 +12102,13 @@ fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
-    use crate::annotations::lower_annotation;
-    use crate::hir::lower_item;
-    use crate::naming::resolve_item;
-    use syntax::SyntaxKind;
-    use syntax::ast::is_expression_kind;
+    use {
+        super::*,
+        crate::{
+            RootDatabase, annotations::lower_annotation, hir::lower_item, naming::resolve_item,
+        },
+        syntax::{SyntaxKind, ast::is_expression_kind},
+    };
 
     fn check_source<'db>(db: &'db RootDatabase, source: &str) -> ItemCheck<'db> {
         let parse = syntax::parse(source);
@@ -12591,4 +12800,12 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
     }
+}
+
+/// The inference variables `ty` mentions, as the table resolved them when `ty` was read.
+fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<InferenceVar>) {
+    if let TyKind::Var(var) = ty.kind(db) {
+        into.insert(*var);
+    }
+    for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
 }

@@ -1,18 +1,20 @@
 //! Environments, the call stack as R code sees it (`sys.call`, `parent.frame`, ...), the search
 //! path, namespaces and options.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
-    eval::{self, define, find_var, find_var_in_frame, value_of},
-    interp,
-    unwind::{R, error},
-    values::{
-        self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env, length,
-        missing_arg, new_env, nil, scalar_bool, scalar_integer, scalar_string, string_at,
-        string_vector, symbol_name, symbols, unbound,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal, present},
+        eval::{self, define, find_var, find_var_in_frame, value_of},
+        interp,
+        unwind::{R, error},
+        values::{
+            self, alloc, base_env, base_namespace, char_str, empty_env, get_attr, global_env,
+            length, missing_arg, new_env, nil, scalar_bool, scalar_integer, scalar_string,
+            string_at, string_vector, symbol_name, symbols, unbound,
+        },
     },
+    heap::object::{NA_INTEGER, Sexp, SexpType, gp},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("environment", 1, do_environment),

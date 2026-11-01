@@ -5,11 +5,12 @@
 //!
 //! The interpreter runs here without base R, so the setup defines the few functions base R would.
 
-use std::{cell::RefCell, collections::BTreeSet, fs, path::Path};
-
-use heap::{Heap, object::Sexp};
-use interp::{eval, frame, lower, print, standard_library, unwind::Unwind, values};
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    heap::{Heap, object::Sexp},
+    interp::{dataframe, eval, frame, lower, print, standard_library, unwind::Unwind, values},
+    std::{cell::RefCell, collections::BTreeSet, fs, path::Path},
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 const SETUP: &str = r#"
 print <- function(x, ...) UseMethod("print")
@@ -418,6 +419,262 @@ const PRINTS: &[(&str, &str)] = &[
         "all.equal.ry_set(Set.single(1L), Set.single(2L))",
         "[1] \"target and current hold different keys\"\n",
     ),
+    // An update reuses its first argument only when nothing else can observe it.
+    (
+        "{ a <- Dict.from_list(list((\"x\", 1))); b <- a; a <- Dict.insert(a, \"y\", 2); c(Dict.len(a), Dict.len(b)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ p <- list(1L); q <- p; for (i in 1:3) p <- List.append(p, i); c(List.len(p), List.len(q)) }",
+        "[1] 4 1\n",
+    ),
+    (
+        "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); c(List.len(p), List.len(holder[[1]])) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ p <- list(1L, 2L); q <- p; p <- List.set(p, 1L, 9L); c(p[[1]], q[[1]]) }",
+        "[1] 9 1\n",
+    ),
+    (
+        "{ p <- list(1L); for (i in 1:3) p <- List.concat(p, list(i, i)); List.to_vector(p) }",
+        "[1] 1 1 1 2 2 3 3\n",
+    ),
+    (
+        "{ grow <- function(n) { s <- Set.empty(); keep <- NULL; for (i in 1:n) { s <- Set.insert(s, i); if (i == 3L) keep <- s }; c(Set.len(s), Set.len(keep)) }; grow(10L); grow(10L) }",
+        "[1] 10  3\n",
+    ),
+    (
+        "{ g <- function(p) { p <- List.append(p, 0L); List.len(p) }; z <- list(1L); c(g(z), g(z), List.len(z)) }",
+        "[1] 2 2 1\n",
+    ),
+    (
+        "{ u <- Set.single(1L); v <- u; u <- Set.union(u, Set.single(2L)); c(Set.len(u), Set.len(v)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ a <- Dict.single(\"k\", 1); a <- Dict.insert(a, \"self\", a); c(Dict.len(a), Dict.len(Result.with_default(Dict.get(a, \"self\"), NULL))) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ e <- Dict.single(1L, \"a\"); e <- Dict.insert(e, 2L, \"b\"); e <- Dict.insert(e, 2.5, \"c\"); List.to_vector(Dict.keys(e)) }",
+        "[1] 1.0 2.0 2.5\n",
+    ),
+    (
+        "{ m <- Dict.empty(); for (i in 1:100) m <- Dict.insert(m, i %% 10L, i); List.to_vector(Dict.values(m)) }",
+        " [1]  91  92  93  94  95  96  97  98  99 100\n",
+    ), // Breadth: Result.
+    (
+        "Result.map2(:Ok(2L), :Ok(3L), function(a, b) a * b)",
+        ":Ok(6L)\n",
+    ),
+    (
+        "Result.map2(:Ok(2L), :Err(:Second), function(a, b) a * b)",
+        ":Err(:Second)\n",
+    ),
+    (
+        "Result.map2(:Err(:First), :Err(:Second), function(a, b) a * b)",
+        ":Err(:First)\n",
+    ),
+    // Breadth: List walks.
+    (
+        "List.walk_backwards_until(xs, 0L, function(s, x) if (x == 3L) :Break(s) else :Continue(s + x))",
+        "[1] 3\n",
+    ),
+    (
+        "List.walk_with_index(words, \"\", function(s, w, i) Str.concat(s, Str.concat(Num.to_str(i), w)))",
+        "[1] \"1pear2fig3apple\"\n",
+    ),
+    (
+        "List.walk_with_index_until(xs, 0L, function(s, x, i) if (i == 3L) :Break(s) else :Continue(s + x))",
+        "[1] 4\n",
+    ),
+    (
+        "List.walk_from(xs, 2L, 0L, function(s, x) s + x)",
+        "[1] 3\n",
+    ),
+    (
+        "List.walk_from(xs, 9L, 0L, function(s, x) s + x)",
+        "[1] 0\n",
+    ),
+    (
+        "List.walk_from_until(xs, 2L, 0L, function(s, x) :Break(x))",
+        "[1] 1\n",
+    ),
+    (
+        "List.walk_try(xs, 0L, function(s, x) :Ok(s + x))",
+        ":Ok(6L)\n",
+    ),
+    (
+        "List.walk_try(xs, 0L, function(s, x) if (x == 1L) :Err(:One) else :Ok(s + x))",
+        ":Err(:One)\n",
+    ),
+    ("List.for_each(xs, function(x) x)", ""),
+    (
+        "List.for_each_try(xs, function(x) if (x < 3L) :Err(x) else :Ok(NULL))",
+        ":Err(1L)\n",
+    ),
+    ("List.for_each_try(xs, function(x) :Ok(x))", ":Ok(NULL)\n"),
+    // Breadth: List mapping, sorting and reshaping.
+    (
+        "List.to_vector(List.map3(xs, xs, list(1L, 1L), function(a, b, c) a + b + c))",
+        "[1] 7 3\n",
+    ),
+    (
+        "List.to_vector(List.map4(xs, xs, xs, xs, function(a, b, c, d) a + b + c + d))",
+        "[1] 12  4  8\n",
+    ),
+    ("List.to_vector(List.sort_asc(xs))", "[1] 1 2 3\n"),
+    (
+        "List.to_vector(List.sort_desc(list(2, 10L, 1.5)))",
+        "[1] 10.0  2.0  1.5\n",
+    ),
+    ("List.to_vector(List.swap(xs, 1L, 3L))", "[1] 2 1 3\n"),
+    ("List.to_vector(List.swap(xs, 1L, 4L))", "[1] 3 1 2\n"),
+    (
+        "{ r <- List.replace(xs, 2L, 9L); c(List.to_vector(r$list), r$value) }",
+        "[1] 3 9 2 1\n",
+    ),
+    ("List.replace(xs, 5L, 9L)$value", "[1] 9\n"),
+    (
+        "List.split_first(list(1L, 0L, 2L, 0L, 3L), 0L)",
+        ":Ok((after = list(2L, 0L, 3L), before = list(1L)))\n",
+    ),
+    (
+        "List.split_last(list(1L, 0L, 2L, 0L, 3L), 0L)",
+        ":Ok((after = list(3L), before = list(1L, 0L, 2L)))\n",
+    ),
+    ("List.split_first(xs, 9L)", ":Err(:NotFound)\n"),
+    ("length(List.split_on(list(1L, 0L, 2L, 0L), 0L))", "[1] 3\n"),
+    (
+        "List.to_vector(List.split_on(list(1L, 0L, 2L, 3L), 0L)[[2]])",
+        "[1] 2 3\n",
+    ),
+    ("length(List.split_on(list(), 0L))", "[1] 1\n"),
+    (
+        "List.to_vector(List.split_on_list(list(1L, 0L, 0L, 2L, 0L, 3L), list(0L, 0L))[[2]])",
+        "[1] 2 0 3\n",
+    ),
+    ("length(List.split_on_list(xs, list()))", "[1] 1\n"),
+    (
+        "List.to_vector(List.append_if_ok(xs, :Ok(4L)))",
+        "[1] 3 1 2 4\n",
+    ),
+    (
+        "List.to_vector(List.append_if_ok(xs, :Err(:No)))",
+        "[1] 3 1 2\n",
+    ),
+    (
+        "List.to_vector(List.prepend_if_ok(xs, :Ok(0L)))",
+        "[1] 0 3 1 2\n",
+    ),
+    (
+        "List.to_vector(List.concat_utf8(list(104L), \"i!\"))",
+        "[1] 104 105  33\n",
+    ),
+    ("List.len(List.with_capacity(10L))", "[1] 0\n"),
+    (
+        "{ p <- List.with_capacity(4L); for (i in 1:6) p <- List.append(p, i); List.to_vector(p) }",
+        "[1] 1 2 3 4 5 6\n",
+    ),
+    ("List.to_vector(List.reserve(xs, 100L))", "[1] 3 1 2\n"),
+    (
+        "{ p <- list(1L, 2L); q <- p; p <- List.swap(p, 1L, 2L); c(List.to_vector(p), List.to_vector(q)) }",
+        "[1] 2 1 1 2\n",
+    ),
+    // Breadth: Str.
+    (
+        "Str.caseless_ascii_equals(\"Hello\", \"hELLO\")",
+        "[1] TRUE\n",
+    ),
+    (
+        "Str.caseless_ascii_equals(\"Hello\", \"Help\")",
+        "[1] FALSE\n",
+    ),
+    (
+        "Str.walk_utf8(\"abc\", 0L, function(s, b) s + b)",
+        "[1] 294\n",
+    ),
+    (
+        "Str.walk_utf8_with_index(\"ab\", 0L, function(s, b, i) s + b * i)",
+        "[1] 293\n",
+    ),
+    (
+        "Str.from_utf8_lossy(list(104L, 255L, 105L))",
+        "[1] \"h�i\"\n",
+    ),
+    ("Str.from_utf8_lossy(list(104L, 0L))", "[1] \"h�\"\n"),
+    // Breadth: Num.
+    (
+        "c(Num.is_lt(1L, 2L), Num.is_gt(1L, 2L), Num.is_lte(2, 2L), Num.is_gte(1, 2))",
+        "[1]  TRUE FALSE  TRUE FALSE\n",
+    ),
+    ("Num.is_approx_eq(1, 1 + 1e-9)", "[1] TRUE\n"),
+    ("Num.is_approx_eq(1, 1.1)", "[1] FALSE\n"),
+    ("Num.is_approx_eq(1, 1.1, rtol = 0.2)", "[1] TRUE\n"),
+    ("Num.is_approx_eq(0, 1e-3, atol = 1e-2)", "[1] TRUE\n"),
+    (
+        "c(Num.is_multiple_of(12L, 4L), Num.is_multiple_of(12L, 5L), Num.is_multiple_of(0L, 0L), Num.is_multiple_of(3L, 0L))",
+        "[1]  TRUE FALSE  TRUE FALSE\n",
+    ),
+    (
+        "c(Num.is_finite(1), Num.is_finite(Inf), Num.is_infinite(-Inf), Num.is_infinite(3L))",
+        "[1]  TRUE FALSE  TRUE FALSE\n",
+    ),
+    ("Num.abs(-3L)", "[1] 3\n"),
+    ("Num.abs(-2.5)", "[1] 2.5\n"),
+    ("Num.abs_diff(3L, 10L)", "[1] 7\n"),
+    ("Num.neg(4L)", "[1] -4\n"),
+    (
+        "c(Num.ceiling(1.2), Num.floor(-1.2), Num.round(2.5), Num.round(-2.5))",
+        "[1]  2 -2  3 -3\n",
+    ),
+    ("typeof(Num.floor(3L))", "[1] \"integer\"\n"),
+    ("Num.pow(2L, 10L)", "[1] 1024\n"),
+    (
+        "c(Num.sin(0), Num.cos(0), Num.tan(0), Num.atan(1) * 4)",
+        "[1] 0.000000 1.000000 0.000000 3.141593\n",
+    ),
+    ("Num.add_saturated(2147483647L, 1L)", "[1] 2147483647\n"),
+    ("Num.sub_saturated(-2147483647L, 1L)", "[1] -2147483647\n"),
+    ("Num.mul_saturated(100000L, 100000L)", "[1] 2147483647\n"),
+    ("Num.add_saturated(1.5, 1L)", "[1] 2.5\n"),
+    ("Num.div_ceil_checked(7L, 2L)", ":Ok(4L)\n"),
+    ("Num.div_ceil_checked(-7L, 2L)", ":Ok(-3L)\n"),
+    ("Num.div_ceil_checked(7, 2)", ":Ok(4)\n"),
+    ("Num.div_ceil_checked(7L, 0L)", ":Err(:DivByZero)\n"),
+    ("Num.to_double(3L)", "[1] 3\n"),
+    ("typeof(Num.to_double(3L))", "[1] \"double\"\n"),
+    ("Num.to_integer_checked(-3.7)", ":Ok(-3L)\n"),
+    ("Num.to_integer_checked(1e10)", ":Err(:OutOfBounds)\n"),
+    // Breadth: Dict and Set.
+    (
+        "Dict.walk_until(d, 0, function(s, k, v) if (k == \"b\") :Break(s) else :Continue(s + v))",
+        "[1] 1\n",
+    ),
+    (
+        "Dict.join_map(d, function(k, v) Dict.single(v, k))",
+        "Dict.from_list(list((1, \"a\"), (2, \"b\")))\n",
+    ),
+    ("Dict.len(Dict.reserve(d, 100L))", "[1] 2\n"),
+    (
+        "{ r <- Dict.reserve(d, 100L); r <- Dict.insert(r, \"c\", 3); c(Dict.len(r), Dict.len(d)) }",
+        "[1] 3 2\n",
+    ),
+    ("Dict.len(Dict.reserve(Dict.empty(), 10L))", "[1] 0\n"),
+    ("Dict.clear(d)", "Dict.empty()\n"),
+    (
+        "Set.walk_until(s, 0L, function(t, e) if (e == 3L) :Break(t) else :Continue(t + e))",
+        "[1] 3\n",
+    ),
+    (
+        "Set.join_map(s, function(e) Set.from_list(list(e, e * 10L)))",
+        "Set.from_list(list(1L, 10L, 2L, 20L, 3L, 30L))\n",
+    ),
+    (
+        "{ r <- Set.reserve(s, 50L); for (i in 4:60) r <- Set.insert(r, i); c(Set.len(r), Set.len(s)) }",
+        "[1] 60  3\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.
@@ -520,6 +777,26 @@ const ERRORS: &[(&str, &str)] = &[
         "`s` is a ry set, not an R object; convert it with `as.list()`",
     ),
     (
+        "Num.to_integer_checked(NaN)",
+        "`number` must be a single number, not `NaN`",
+    ),
+    (
+        "List.walk_from(xs, 0L, 0L, function(s, x) s)",
+        "`index` must be a position of 1 or more",
+    ),
+    (
+        "Num.abs_diff(2147483647L, -2147483647L)",
+        "the integer result overflows",
+    ),
+    (
+        "List.walk_try(xs, 0L, function(s, x) s)",
+        "`f` must return a result",
+    ),
+    (
+        "Dict.join_map(d, function(k, v) v)",
+        "`f` must return a dict, not a double value",
+    ),
+    (
         "List.sum(list(2147483647L, 1L))",
         "the integer result overflows; convert the elements to doubles first",
     ),
@@ -545,8 +822,9 @@ fn declarations() -> Vec<(String, Vec<String>)> {
     text.lines()
         .filter_map(|line| {
             let (name, signature) = line.split_once(" : ")?;
-            // The list conversions are base builtins, declared here only for the checker.
-            if name.starts_with("as.") {
+            // The list conversions are base builtins and `Ops.Expr` is an S3 method of a group
+            // generic, declared here only for the checker.
+            if name.starts_with("as.") || name.starts_with("Ops.") {
                 return None;
             }
             let parameters = &signature[signature.find("fn(")? + 3..];
@@ -591,7 +869,17 @@ fn declarations_and_runtime_bind_the_same_names() {
         })
         .map(str::to_owned)
         .collect();
-    let declared: BTreeSet<String> = declarations().into_iter().map(|(name, _)| name).collect();
+    // An S3 method such as `Ops.Expr` is declared for the checker but registered, not exported.
+    let registered: BTreeSet<&str> = dataframe::METHODS
+        .lines()
+        .filter_map(|line| line.trim().split_once(" = function"))
+        .map(|(name, _)| name)
+        .collect();
+    let declared: BTreeSet<String> = declarations()
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| !registered.contains(name.as_str()))
+        .collect();
     let mut bound: BTreeSet<String> = standard_library::names().map(str::to_owned).collect();
     bound.extend(frame::package_functions().map(str::to_owned));
     let unexported: Vec<_> = declared.difference(&exported).collect();

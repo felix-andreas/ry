@@ -2,9 +2,11 @@
 //! legacy `ry repl` resolve to one [`Session`] shape, so `main` dispatches on what to run rather
 //! than on how it was spelled.
 
-use crate::cli::{MinSeverity, OutputFormat};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use {
+    crate::cli::{MinSeverity, OutputFormat},
+    clap::{Args, Parser, Subcommand, ValueEnum},
+    std::path::PathBuf,
+};
 
 #[derive(Debug, Parser)]
 // Clap defaults to the package name, `ry-lang`; the command is `ry`.

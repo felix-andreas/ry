@@ -6,13 +6,15 @@
 //! list algorithm with Lance and Williams' update formulae ("Multidimensional Clustering
 //! Algorithms", 1985).
 
-use crate::{
-    builtin_libraries::NativeCall,
-    stats::{c_arguments, c_return, integer_values, matrix_shape},
-    unwind::R,
-    values::{self, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        stats::{c_arguments, c_return, integer_values, matrix_shape},
+        unwind::R,
+        values::{self, symbols},
+    },
+    heap::object::{NA_INTEGER, Sexp},
 };
-use heap::object::{NA_INTEGER, Sexp};
 
 /// `.C(kmeans_Lloyd, x, n, p, centers, k, cl, maxiter, nc, wss)`.
 pub unsafe fn kmeans_lloyd(call: &NativeCall<'_>) -> R<Sexp> {

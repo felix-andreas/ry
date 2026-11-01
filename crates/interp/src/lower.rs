@@ -9,14 +9,18 @@
 //! references: a `srcref` list on the expression vector and on every `{` call, and a srcref as
 //! the fourth element of every `function` call. Without it, none of that work happens.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    unwind::{R, error},
-    values::{self, alloc, install, missing_arg, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        unwind::{R, error},
+        values::{self, alloc, install, missing_arg, nil, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
+        strings::Encoding,
+    },
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType};
-use heap::strings::Encoding;
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("parse", 6, do_parse),

@@ -1,21 +1,26 @@
 //! Package loading for R sessions: the `.Call` routines and file watcher behind `ry repl`, the
 //! plan emitter behind `ry load --emit-plan`, and the R code that installs `load_all()`.
 
-use crate::ANALYSIS_STACK_SIZE;
-use crate::config::Config;
-use loader::r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds};
-use loader::{LoadError, LoadState, Loader};
-use repl::ConsoleHooks;
-use repl::libr::{self, CallRoutine, Sexp};
-use std::collections::HashMap;
-use std::fmt;
-use std::fs;
-use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, PoisonError};
-use std::thread;
-use std::time::UNIX_EPOCH;
+use {
+    crate::{ANALYSIS_STACK_SIZE, config::Config},
+    loader::{
+        LoadError, LoadState, Loader,
+        r::{RUNTIME_GNUR, RValue, error_value, plan_value, rds},
+    },
+    repl::{
+        ConsoleHooks,
+        libr::{self, CallRoutine, Sexp},
+    },
+    std::{
+        collections::HashMap,
+        fmt, fs, io,
+        panic::{AssertUnwindSafe, catch_unwind},
+        path::{Path, PathBuf},
+        sync::{LazyLock, Mutex, PoisonError},
+        thread,
+        time::UNIX_EPOCH,
+    },
+};
 
 /// The loader of this process's embedded R session, shared by the `.Call` routines and the
 /// watcher. R calls the routines on its one thread, so the lock is never contended.

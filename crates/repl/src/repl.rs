@@ -6,11 +6,7 @@ pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
 pub use reedline;
-
-use std::error::Error;
-use std::fmt;
-use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::{error::Error, fmt, io::IsTerminal, path::PathBuf};
 
 #[derive(Debug)]
 pub struct ReplError(pub String);
@@ -223,7 +219,7 @@ fn ry_runtime_library() -> Result<PathBuf, ReplError> {
         }
     }
     Err(ReplError(format!(
-        "ry's runtime (libR.so) was not found beside {}; build it with `cargo build -p libr` or set RY_LIBR",
+        "ry's runtime (libR.so) was not found beside {}; build it with `just build` or `cargo build -p libr`, or set RY_LIBR to its path",
         executable.display()
     )))
 }

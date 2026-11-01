@@ -3,15 +3,17 @@
 //! precedence with the parentheses they need, a line break after a separator once a line is
 //! longer than the cutoff, and four spaces per level of indentation.
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    format, records, standard_library,
-    unwind::R,
-    values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
-};
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
-    records::NativeKind,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        format, records, standard_library,
+        unwind::R,
+        values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+    },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[

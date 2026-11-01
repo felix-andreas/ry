@@ -31,24 +31,26 @@
 //! memory, which is safe because every engine value built from it is dropped before [`query`]
 //! returns.
 
-use crate::{
-    eval,
-    frame::{self, Lowering, Piece, Plan},
-    interp, scope,
-    unwind::{R, Unwind, error},
-    values::{self, install, is_nil, length, nil, symbols},
-};
-use heap::object::{Sexp, SexpType};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::{cell::Cell, collections::HashSet};
-use table::{
-    ColumnType, Schema, Table,
-    convert::{self, RVector},
-    polars::prelude::{
-        ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries, NewChunkedArray,
-        PlSmallStr, Series, StringChunked,
+use {
+    crate::{
+        eval,
+        frame::{self, Lowering, Piece, Plan},
+        interp, scope,
+        unwind::{R, Unwind, error},
+        values::{self, install, is_nil, length, nil, symbols},
     },
-    query::{self, Output, Query, Rows, Select},
+    heap::object::{Sexp, SexpType},
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{cell::Cell, collections::HashSet},
+    table::{
+        ColumnType, Schema, Table,
+        convert::{self, RVector},
+        polars::prelude::{
+            ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries,
+            NewChunkedArray, PlSmallStr, Series, StringChunked,
+        },
+        query::{self, Output, Query, Rows, Select},
+    },
 };
 
 /// R helpers in the `ry` namespace. They call into data.table, which may not be installed, so

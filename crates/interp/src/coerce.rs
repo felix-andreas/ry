@@ -1,12 +1,16 @@
 //! Coercion between R's types, and the type predicates (`is.*`, `typeof`).
 
-use crate::{
-    builtins::{BuiltinDef, Call, Generic, builtin, internal},
-    conditions, deparse,
-    unwind::{R, error},
-    values::{self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, Generic, builtin, internal},
+        conditions, deparse,
+        unwind::{R, error},
+        values::{
+            self, alloc, char_str, length, na_string, nil, scalar_bool, scalar_string, symbols,
+        },
+    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real};
 
 /// Warnings a coercion raises, collected so each is reported once per call.
 #[derive(Default, Clone, Copy)]
@@ -803,7 +807,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     builtin("is.numeric", 1, do_is_numeric).generic(Generic::Internal),
     builtin("is.matrix", 1, |call| unsafe {
-        { scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2)) }
+        scalar_bool(values::dims(call.arg(0)).is_some_and(|dims| dims.len() == 2))
     })
     .generic(Generic::Internal),
     builtin("is.array", 1, |call| unsafe {

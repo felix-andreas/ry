@@ -10,15 +10,17 @@
 //! "QUADPACK" (1983). Every objective is an R function called back from here, each call in its
 //! own handle scope so that long runs do not accumulate handles.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    coerce::coerce_vector,
-    eval,
-    stats::{real_matrix, real_values},
-    unwind::R,
-    values::{self, length, nil, symbols},
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        coerce::coerce_vector,
+        eval,
+        stats::{real_matrix, real_values},
+        unwind::R,
+        values::{self, length, nil, symbols},
+    },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType};
 
 /// `do_fmin(f, lower, upper, tol)`: the minimum of `f` on `[lower, upper]` by Brent's method.
 pub unsafe fn do_fmin(call: &NativeCall<'_>) -> R<Sexp> {

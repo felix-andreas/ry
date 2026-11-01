@@ -2,20 +2,29 @@
 //! checks each top-level command. It prints the inline-annotation warnings and enforces strict
 //! mode; everything else stays `ry check`'s job, so plain R runs exactly as it always did.
 
-use crate::cli::{
-    CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
-    render_findings, report, warn_config,
+use {
+    crate::{
+        cli::{
+            CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
+            render_findings, report, warn_config,
+        },
+        config::Config,
+        diagnostics::{apply_suppressions, document_diagnostics, file_is_strict},
+    },
+    repl::{Filtered, InputFilter},
+    salsa::Setter,
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::{Diagnostic, RelatedLocation, Severity},
+        stubs::install_shipped_stubs,
+    },
+    std::{
+        fs,
+        path::{Path, PathBuf},
+        thread,
+    },
+    syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation},
 };
-use crate::config::Config;
-use crate::diagnostics::{apply_suppressions, document_diagnostics, file_is_strict};
-use repl::{Filtered, InputFilter};
-use salsa::Setter;
-use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity};
-use semantics::stubs::install_shipped_stubs;
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::path::{Path, PathBuf};
-use std::{fs, thread};
-use syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation};
 
 /// Analysis state for one run or one console session. A console session is checked as one
 /// growing script, so a command sees the definitions earlier commands made.

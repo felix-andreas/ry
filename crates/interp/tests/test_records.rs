@@ -7,10 +7,11 @@
 //! The interpreter runs here without base R, so the setup defines the few generics base R would
 //! (`print`, `format`, `as.list`, `all.equal`) and wrappers for the internals the cases call.
 
-use std::cell::RefCell;
-
-use heap::{Heap, object::Sexp};
-use interp::{eval, lower, print, unwind::Unwind, values};
+use {
+    heap::{Heap, object::Sexp},
+    interp::{eval, lower, print, unwind::Unwind, values},
+    std::cell::RefCell,
+};
 
 const SETUP: &str = r#"
 print <- function(x, ...) UseMethod("print")

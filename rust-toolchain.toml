@@ -1,0 +1,9 @@
+# A dated nightly, by user directive: std's allocator API (`allocator_api`) is the arena interface
+# (see .agents/memory/decisions.md, "Data-oriented design and explicit allocators"). Move the date
+# forward on purpose, and keep flake.nix reading this file so nix and rustup build the same compiler.
+[toolchain]
+channel = "nightly-2026-10-30"
+profile = "minimal"
+components = ["rustfmt", "clippy", "rust-src", "llvm-tools"]
+# Zed compiles the `zed_ry` extension (editors/zed) to WebAssembly.
+targets = ["wasm32-wasip2"]

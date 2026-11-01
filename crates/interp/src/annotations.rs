@@ -20,17 +20,19 @@
 //! that object and whose value is the signature, so an entry can never outlive its definition
 //! and be mistaken for another object at a reused address.
 
-use crate::{
-    RError, conditions, interp,
-    unwind::R,
-    values::{self, nil},
+use {
+    crate::{
+        RError, conditions, interp,
+        unwind::R,
+        values::{self, nil},
+    },
+    heap::{
+        Marker,
+        object::{Sexp, SexpType, gp},
+    },
+    rustc_hash::FxHashMap,
+    syntax::{SyntaxKind, SyntaxNode},
 };
-use heap::{
-    Marker,
-    object::{Sexp, SexpType, gp},
-};
-use rustc_hash::FxHashMap;
-use syntax::{SyntaxKind, SyntaxNode};
 
 /// The runtime's annotation state.
 pub struct State {

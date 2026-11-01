@@ -3,13 +3,15 @@
 //! number of decimals, decided by GNU R's rule (fixed unless it is wider than scientific by more
 //! than `scipen`).
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    unwind::{R, error},
-    values::{self, alloc, length, nil, symbols},
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        unwind::{R, error},
+        values::{self, alloc, length, nil, symbols},
+    },
+    heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, is_na_real},
+    unicode_width::UnicodeWidthChar,
 };
-use heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, is_na_real};
-use unicode_width::UnicodeWidthChar;
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("format", 9, do_format),

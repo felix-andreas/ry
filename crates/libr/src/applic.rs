@@ -17,15 +17,17 @@
 // published precision.
 #![allow(clippy::needless_range_loop, clippy::excessive_precision)]
 
-use crate::{
-    arith::{read_seed, write_seed},
-    boundary::{ApiResult, enter, error, take_pending, warn, write_console},
-    linpack::{Matrix, ddot, dnrm2, triangular_solve},
-    runtime,
-    utils::format_real_vector,
+use {
+    crate::{
+        arith::{read_seed, write_seed},
+        boundary::{ApiResult, enter, error, take_pending, warn, write_console},
+        linpack::{Matrix, ddot, dnrm2, triangular_solve},
+        runtime,
+        utils::format_real_vector,
+    },
+    heap::object::NA_INTEGER,
+    std::ffi::{c_char, c_int, c_void},
 };
-use heap::object::NA_INTEGER;
-use std::ffi::{c_char, c_int, c_void};
 
 pub type OptimFn = unsafe extern "C" fn(c_int, *mut f64, *mut c_void) -> f64;
 pub type OptimGr = unsafe extern "C" fn(c_int, *mut f64, *mut f64, *mut c_void);

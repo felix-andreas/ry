@@ -5,10 +5,14 @@
 
 #![cfg(unix)]
 
-use std::fs;
-use std::path::Path;
-use std::process::{Command, Output};
-use tempfile::TempDir;
+use {
+    std::{
+        fs,
+        path::Path,
+        process::{Command, Output},
+    },
+    tempfile::TempDir,
+};
 
 fn r_available() -> bool {
     let available = Command::new("R")

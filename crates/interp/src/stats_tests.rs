@@ -6,14 +6,16 @@
 //! Normal quantiles, normal tail areas and hypergeometric densities come from stats' own R
 //! functions, so they agree with every other use of them in a session.
 
-use crate::{
-    builtin_libraries::NativeCall,
-    eval, random,
-    stats::{integer_values, real_values},
-    unwind::R,
-    values,
+use {
+    crate::{
+        builtin_libraries::NativeCall,
+        eval, random,
+        stats::{integer_values, real_values},
+        unwind::R,
+        values,
+    },
+    heap::object::{NA_REAL, Sexp, SexpType},
 };
-use heap::object::{NA_REAL, Sexp, SexpType};
 
 /// Calls the stats function `name` (as the calling R code sees it) on numeric arguments and
 /// returns its value as doubles.

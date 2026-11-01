@@ -30,19 +30,21 @@
 //! deoptimization returns [`TierExit::Resume`], and the interpreter continues at any
 //! instruction.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, Generic, internal},
-    conditions, dispatch,
-    eval::{self, as_condition},
-    interp,
-    unwind::{Jump, R, Unwind, error, error_in},
-    values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, Generic, internal},
+        conditions, dispatch,
+        eval::{self, as_condition},
+        interp,
+        unwind::{Jump, R, Unwind, error, error_in},
+        values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
+    },
+    heap::{
+        Marker,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
 };
-use heap::{
-    Marker,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
-};
-use rustc_hash::{FxHashMap, FxHashSet};
 
 /// The internals behind GNU R's `compiler` package. Its code buffer is assembled in R, and
 /// `mkCode` turns it into byte code; ry keeps only the buffer's first constant, the source
@@ -550,6 +552,9 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         {
             return true;
         }
+        if reuses_first_argument(expression) {
+            return true;
+        }
         if matches!(
             &*name,
             "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call"
@@ -565,6 +570,28 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         cell = cell.cdr();
     }
     false
+}
+
+/// Whether `expression` is `x <- f(x, ...)` for a standard library function that updates its first
+/// argument in place. The AST evaluator decides at run time whether the binding owns the value
+/// (`eval::rebind`), so the compiler leaves the whole assignment to it, and an earlier argument
+/// of an enclosing call must not keep `x` in an uncounted register.
+unsafe fn reuses_first_argument(expression: Sexp) -> bool {
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol || !matches!(&*symbol_name(head), "<-" | "=") {
+        return false;
+    }
+    let target = expression.cdr().car();
+    let value = expression.cdr().cdr().car();
+    target.kind() == SexpType::Symbol
+        && value.kind() == SexpType::Language
+        && value.car().kind() == SexpType::Symbol
+        && value.cdr().kind() == SexpType::Pairlist
+        && value.cdr().car() == target
+        && value.cdr().tag() == nil()
+        && crate::standard_library::BUILTINS.iter().any(|definition| {
+            definition.reuses_first_argument && *symbol_name(value.car()) == *definition.name
+        })
 }
 
 /// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
@@ -1018,6 +1045,7 @@ impl Compiler {
                 }
                 self.emit(Op::Return, &[dst]);
             }
+            "<-" | "=" if reuses_first_argument(call) => self.fallback(call, dst)?,
             "<-" | "=" => {
                 self.expression(args[1].1, dst)?;
                 let symbol = self.constant(args[0].1);
@@ -1417,7 +1445,7 @@ unsafe fn continue_after(machine: &mut Machine<'_>, pc: usize, unwind: Unwind) -
 unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
     let table = values::ints(loops);
     let mut best: Option<(usize, usize)> = None;
-    for entry in table.chunks_exact(4) {
+    for entry in table.as_chunks::<4>().0 {
         let (start, end) = (entry[0] as usize, entry[1] as usize);
         if start <= pc && pc < end && best.is_none_or(|(best_start, _)| start >= best_start) {
             best = Some((start, if is_break { entry[2] } else { entry[3] } as usize));

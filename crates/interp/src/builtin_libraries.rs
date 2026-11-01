@@ -8,13 +8,15 @@
 //! `useDynLib` binds every `C_` symbol the package's R code refers to; a routine without a Rust
 //! implementation yet raises an error naming itself when called.
 
-use crate::{
-    builtins::Arg,
-    interp,
-    unwind::{R, error_in},
-    values::{self, length, nil, symbols},
+use {
+    crate::{
+        builtins::Arg,
+        interp,
+        unwind::{R, error_in},
+        values::{self, length, nil, symbols},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 /// A routine's implementation. It receives the arguments after `.NAME`, without `PACKAGE` and
 /// the other control arguments; a `.C` or `.Fortran` routine returns the list of its (modified)

@@ -1,17 +1,19 @@
 //! Constructing and reading R values. Every constructor here roots what it allocates in the
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
-use crate::{
-    interp, records, standard_library,
-    unwind::{R, error},
+use {
+    crate::{
+        interp, records, standard_library,
+        unwind::{R, error},
+    },
+    heap::{
+        Heap, Marker,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+        strings::Encoding,
+    },
+    std::borrow::Cow,
 };
-use heap::{
-    Heap, Marker,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    records::NativeKind,
-    strings::Encoding,
-};
-use std::borrow::Cow;
 
 /// Symbols the interpreter compares against, installed once.
 pub struct Symbols {

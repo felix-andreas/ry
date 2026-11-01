@@ -3,18 +3,22 @@
 //! the same type lowering into the same `Annotation`, so the checker sees one shape whichever
 //! way a type was written.
 
-use crate::Db;
-use crate::diagnostics::TypeRenderer;
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField,
-    RestParameter, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null,
-    scalar, substitute_rigid, union_of, unknown,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::mem::take;
-use syntax::{
-    GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
-    matching_nodes,
+use {
+    crate::{
+        Db,
+        diagnostics::TypeRenderer,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField,
+            RestParameter, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
+            native_record, null, scalar, substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::mem::take,
+    syntax::{
+        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
+        matching_nodes,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]

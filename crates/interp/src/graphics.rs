@@ -7,19 +7,21 @@
 //! does, so scripts that plot as a side effect run to completion and read back the same
 //! `par()` values.
 
-use crate::graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages};
-use crate::{
-    builtin_libraries::{NativeCall, NativeFn},
-    coerce::coerce_vector,
-    format::c_general,
-    unwind::{R, error},
-    values::{
-        self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
-        symbols,
+use {
+    crate::{
+        builtin_libraries::{NativeCall, NativeFn},
+        coerce::coerce_vector,
+        format::c_general,
+        graphics_render::{Format, Item, Page, Rect, Shape, Stroke, file_for_page, write_pages},
+        unwind::{R, error},
+        values::{
+            self, alloc, length, nil, scalar_bool, scalar_integer, scalar_string, string_vector,
+            symbols,
+        },
     },
+    heap::object::{NA_INTEGER, Sexp, SexpType},
+    std::cell::{Cell, RefCell},
 };
-use heap::object::{NA_INTEGER, Sexp, SexpType};
-use std::cell::{Cell, RefCell};
 
 pub const GRDEVICES_ROUTINES: &[(&str, NativeFn)] = &[
     ("rgb", do_rgb),

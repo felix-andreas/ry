@@ -8,14 +8,16 @@
 //! and `.Fortran` and the host's consult [`call_base_routine`] first, so `qr()` works with or
 //! without libR.
 
-use crate::{
-    TaskCallbackRoutine, builtin_libraries,
-    builtins::{Arg, BuiltinDef, Call, builtin, internal},
-    interp, linalg,
-    unwind::{R, error},
-    values::{self, nil, scalar_bool, string_vector, symbols},
+use {
+    crate::{
+        TaskCallbackRoutine, builtin_libraries,
+        builtins::{Arg, BuiltinDef, Call, builtin, internal},
+        interp, linalg,
+        unwind::{R, error},
+        values::{self, nil, scalar_bool, string_vector, symbols},
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {

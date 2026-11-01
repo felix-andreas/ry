@@ -153,10 +153,16 @@ wall time. Several of them are worth knowing:
   memo. So one item check resolves all its frame binders in one query (`item_frame_binders`) and
   caches the package names and schemes it looks up in `SalsaGlobals`. `package_name` and
   `test_name` take only the name and read `ProjectFiles` themselves.
-- Salsa's interning takes a shard lock, and the atomics that track an interned value's last use
-  bounce between cores. `Name` and `Ty` are interned with `revisions = usize::MAX`, so they are never
-  collected and skip that bookkeeping, and `Symbol::new` checks a thread-local table before the
-  shared one.
+- `Ty` and `Name` are not salsa structs. A `Ty` is a pointer to a hash-consed entry in a global,
+  64-way sharded table (`crates/semantics/src/types.rs`), so equality and hashing are a pointer
+  compare and reading the kind is a field load. The entry stores the type's size, which the
+  inference-size cap reads without a walk. A `Name` is a `Symbol`. Neither is ever freed: a
+  one-shot check loses nothing, and the server's table grows only with distinct types, which repeat
+  heavily because types are structural. A query keyed by one name takes a `QueryName`, the one
+  salsa-interned wrapper left. `Symbol::new` checks a thread-local table before the shared one.
+- A `NAMESPACE` over 64 KiB parses in chunks on all cores (`metadata::parse_namespace`). Chunks split
+  only before a line that opens a call and follows a line that is exactly one complete top-level
+  call, so no directive straddles a boundary.
 - The CLI creates every input at high durability except the attached namespaces, which it sets
   after the first pass. Memos that never read that set skip verification in the new revision.
 - mimalloc commits its arenas lazily (`crates/ry/src/main.rs`): eager commit made the kernel zero
@@ -238,7 +244,7 @@ binder that an immediate or script read sees. A structural edit re-runs each fir
 read, and an unchanged answer is backdated, so a new definition re-checks only the items that read
 its name. `crates/semantics/tests/test_incremental.rs` pins these contracts.
 
-Types are interned, so type equality is id equality and nothing is ever deep-cloned. Deep resolution
+Types are hash-consed, so type equality is pointer equality and nothing is ever deep-cloned. Deep resolution
 over the interned type graph is memoized per binding epoch and cuts any cycle to `Unknown`; the
 decision log records that design.
 
@@ -292,14 +298,23 @@ and all the documents, and the database handle deliberately never leaves it.
   authoritative answer never degrades: pull diagnostics return a retryable `SERVER_CANCELLED` with
   `retriggerRequest: true`, and rename returns `CONTENT_MODIFIED`.
 - **Diagnostics are pushed in two waves.** On every sync the server immediately publishes the
-  parse-stage classes and the lints, tagged with the document version. At idle time it publishes the
-  settled full set, without a version. The settled set is a faithful superset of the first, so the
+  parse-stage classes and the lints, tagged with the document version. Until the startup warm-up
+  (below) ends, the first wave holds only the parse-stage classes, because the lints read the
+  project-wide name maps. At idle time it publishes the settled full set, without a version. The settled set is a faithful superset of the first, so the
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
-- **Idle work has an order.** The worker first serves any settled publish it owes for the most
-  recently edited file. Next it lowers the durability of documents opened since (see below). With
-  nothing else to do, it warms up the rest of the workspace one file at a time and never publishes
+- **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
+  scans every file's `library()` and `require()` calls and applies the attached set once, then
+  derives every item's naming and the per-file folds behind the project-wide maps. Every semantic
+  wave reads those maps, and one thread would take seconds to derive them, so settled publishes
+  wait for it. After the warm-up the worker serves any settled publish it owes, most recently
+  edited file first. Next it lowers the durability of documents opened since (see below). With
+  nothing else to do, it checks the rest of the workspace in parallel batches and never publishes
   that work. Idle work that gets cancelled is requeued.
+- **Parallel idle work stops between files.** It runs on one cloned database handle per core, and
+  each thread checks before every file whether a job is queued. Cancelling the threads' salsa
+  tokens is not enough on its own, because salsa clears a handle's cancellation flag whenever a
+  top-level query returns, so a flip that lands at the end of a query is lost.
 - **A request preempts idle work.** A request is queued first and then cancels the idle unit in
   flight, if any, so a hover never waits for a background file to finish. A request never cancels
   another request or a sync.

@@ -7,10 +7,12 @@
 //!
 //! `FUZZ_ITERS` raises the budget.
 
-use heap::{Heap, object::Sexp};
-use interp::{deparse, eval, lower, unwind::Unwind, values};
-use std::sync::Once;
-use syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes};
+use {
+    heap::{Heap, object::Sexp},
+    interp::{deparse, eval, lower, unwind::Unwind, values},
+    std::sync::Once,
+    syntax::testing::{SplitMix64, fuzz_iterations, mutate_bytes},
+};
 
 static INSTALL: Once = Once::new();
 
