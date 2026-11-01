@@ -366,6 +366,163 @@ impl Div<usize> for LongDouble {
     }
 }
 
+/// `total` plus every value in order, rounding after each addition, as a C loop of
+/// `total += values[i]` on a `long double` does.
+pub fn add_all(total: LongDouble, values: &[f64]) -> LongDouble {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(start) = to_x87(total) {
+        return from_x87(x87::add_all(start, values));
+    }
+    values
+        .iter()
+        .fold(total, |total, &value| total + LongDouble::from(value))
+}
+
+/// `total` plus every `value - offset` in order, rounding after each subtraction and addition,
+/// as GNU R's second pass over the deviations from a mean does.
+pub fn add_differences(total: LongDouble, values: &[f64], offset: LongDouble) -> LongDouble {
+    #[cfg(target_arch = "x86_64")]
+    if let (Some(start), Some(offset)) = (to_x87(total), to_x87(offset)) {
+        return from_x87(x87::add_differences(start, values, offset));
+    }
+    values.iter().fold(total, |total, &value| {
+        total + (LongDouble::from(value) - offset)
+    })
+}
+
+/// The x87 extended format's bytes: the 64-bit significand with its explicit integer bit, then
+/// the sign and a 15-bit exponent biased by 16383. `None` when the exponent leaves its range,
+/// which only products and quotients of extreme values reach.
+#[cfg(target_arch = "x86_64")]
+fn to_x87(value: LongDouble) -> Option<[u8; 10]> {
+    let (negative, significand, biased) = match value.0 {
+        Repr::Special(special) => {
+            let bits = special.to_bits();
+            let negative = bits >> 63 == 1;
+            // An infinity has only the integer bit; a NaN keeps its payload below it.
+            let payload = (bits & ((1 << 52) - 1)) << 11;
+            (negative, (1 << 63) | payload, 0x7fff)
+        }
+        Repr::Finite {
+            negative,
+            significand: 0,
+            ..
+        } => (negative, 0, 0),
+        Repr::Finite {
+            negative,
+            significand,
+            exponent,
+        } => {
+            let biased = exponent + 63 + 16383;
+            if !(1..0x7fff).contains(&biased) {
+                return None;
+            }
+            (negative, significand, biased as u16)
+        }
+    };
+    let mut bytes = [0u8; 10];
+    bytes[..8].copy_from_slice(&significand.to_le_bytes());
+    let top = biased | if negative { 0x8000 } else { 0 };
+    bytes[8..].copy_from_slice(&top.to_le_bytes());
+    Some(bytes)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn from_x87(bytes: [u8; 10]) -> LongDouble {
+    let mut low = [0u8; 8];
+    low.copy_from_slice(&bytes[..8]);
+    let significand = u64::from_le_bytes(low);
+    let top = u16::from_le_bytes([bytes[8], bytes[9]]);
+    let negative = top & 0x8000 != 0;
+    let biased = i32::from(top & 0x7fff);
+    if biased == 0x7fff {
+        let fraction = (significand << 1) >> 12;
+        let magnitude = if fraction == 0 {
+            f64::INFINITY
+        } else {
+            f64::from_bits((0x7ff << 52) | fraction | (1 << 51))
+        };
+        return LongDouble(Repr::Special(if negative { -magnitude } else { magnitude }));
+    }
+    if significand == 0 {
+        return LongDouble(Repr::Finite {
+            negative,
+            significand: 0,
+            exponent: 0,
+        });
+    }
+    // A denormal's exponent field is 0 but means the same scale as 1.
+    let shift = significand.leading_zeros();
+    LongDouble(Repr::Finite {
+        negative,
+        significand: significand << shift,
+        exponent: biased.max(1) - 16383 - 63 - shift as i32,
+    })
+}
+
+/// The loops that need speed run on the x87 unit itself, which rounds exactly like the model:
+/// System V leaves its precision control at the full 64-bit significand.
+#[cfg(target_arch = "x86_64")]
+mod x87 {
+    use std::arch::asm;
+
+    pub fn add_all(mut total: [u8; 10], values: &[f64]) -> [u8; 10] {
+        // SAFETY: the loop reads `values.len()` doubles from the slice and writes `total` back;
+        // the x87 stack starts empty under the ABI and is left empty.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fadd qword ptr [{data}]",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                total = in(reg) total.as_mut_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+
+    pub fn add_differences(mut total: [u8; 10], values: &[f64], offset: [u8; 10]) -> [u8; 10] {
+        // SAFETY: as in `add_all`; `offset` is only read.
+        unsafe {
+            asm!(
+                "fld tbyte ptr [{offset}]",
+                "fld tbyte ptr [{total}]",
+                "test {count}, {count}",
+                "jz 3f",
+                "2:",
+                "fld qword ptr [{data}]",
+                "fsub st(0), st(2)",
+                "faddp st(1), st(0)",
+                "add {data}, 8",
+                "dec {count}",
+                "jnz 2b",
+                "3:",
+                "fstp tbyte ptr [{total}]",
+                "fstp st(0)",
+                total = in(reg) total.as_mut_ptr(),
+                offset = in(reg) offset.as_ptr(),
+                data = inout(reg) values.as_ptr() => _,
+                count = inout(reg) values.len() => _,
+                out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
+                out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
+                options(nostack),
+            );
+        }
+        total
+    }
+}
+
 /// Rounds `wide * 2^exponent` to a 64-bit significand, ties to even.
 fn round_wide(negative: bool, wide: u128, exponent: i32) -> LongDouble {
     let width = 128 - wide.leading_zeros();
@@ -496,6 +653,41 @@ mod tests {
         assert_eq!(LongDouble::from(0.25).sqrt().to_f64(), 0.5);
         assert_eq!(LongDouble::from(1e-300).sqrt().to_f64(), 1e-150);
         assert!(LongDouble::from(-1.0).sqrt().to_f64().is_nan());
+    }
+
+    #[test]
+    fn slice_sums_match_the_model() {
+        let cases: [&[f64]; 6] = [
+            &[],
+            &[1.0, 2.0, 3.0],
+            &[1e300, 1e300, -1e300, 0.1, 5e-324],
+            &[f64::MAX, f64::MAX, -f64::MAX],
+            &[1.0, f64::INFINITY, -f64::INFINITY],
+            &[-0.0, -0.0],
+        ];
+        for values in cases {
+            let model = values.iter().fold(LongDouble::ZERO, |total, &value| {
+                total + LongDouble::from(value)
+            });
+            let fast = add_all(LongDouble::ZERO, values);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+            let third = LongDouble::from(1.0) / 3;
+            let model = values.iter().fold(third, |total, &value| {
+                total + (LongDouble::from(value) - third)
+            });
+            let fast = add_differences(third, values, third);
+            assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
+        }
+        let pseudo: Vec<f64> = (1..2000u32)
+            .map(|index| f64::from(index.wrapping_mul(2654435761) % 10007) * 1.37e-3 - 6.0)
+            .collect();
+        let model = pseudo.iter().fold(LongDouble::ZERO, |total, &value| {
+            total + LongDouble::from(value)
+        });
+        assert_eq!(
+            format!("{:?}", add_all(LongDouble::ZERO, &pseudo)),
+            format!("{model:?}")
+        );
     }
 
     #[test]
