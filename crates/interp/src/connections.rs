@@ -1339,7 +1339,7 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
         line_index += 1;
     };
     start_line(&mut output, &mut line_width);
-    let mut piece_index = 0usize;
+    let mut separator_index = 0usize;
     for item_index in 0..values::length(items) {
         let item = items.element(item_index);
         let texts: Vec<String> = match item.kind() {
@@ -1375,17 +1375,24 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 )));
             }
         };
-        for text in texts {
+        // Every object after the first, even an empty one, is preceded by a separator, but a
+        // NULL object is skipped without one.
+        if item_index > 0 && texts.is_empty() {
+            output.push_str(&separator_at(separator_index));
+            separator_index += 1;
+        }
+        for (position, text) in texts.into_iter().enumerate() {
             // The separator goes before the line break, and a piece only fits on the line if
             // the separator after it does too.
-            if piece_index > 0 {
-                let separator = separator_at(piece_index - 1);
+            if position > 0 || item_index > 0 {
+                let separator = separator_at(separator_index);
+                separator_index += 1;
                 output.push_str(&separator);
                 line_width += separator.len();
                 if let Some(position) = separator.rfind('\n') {
                     line_width = separator.len() - position - 1;
                 }
-                let next_separator = separator_at(piece_index).len();
+                let next_separator = separator_at(separator_index).len();
                 if fill_width > 0
                     && line_width > 0
                     && line_width + text.len() + next_separator > fill_width
@@ -1400,7 +1407,6 @@ unsafe fn do_cat(call: &Call<'_>) -> R<Sexp> {
                 line_width = text.len() - position - 1;
             }
             output.push_str(&text);
-            piece_index += 1;
         }
     }
     // A separator holding a newline makes the separators terminators, so the output always

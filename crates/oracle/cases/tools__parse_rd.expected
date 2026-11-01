@@ -1,0 +1,374 @@
+[stdout]
+| ==== "plain {group} text\nsecond line \\% \\\\ \\{ done"
+| LIST <none> @0,0,3,1,0,1
+|   TEXT "plain " @1,1,1,6,1,6
+|   LIST LIST @1,7,1,13,7,13
+|     TEXT "group" @1,8,1,12,8,12
+|   TEXT " text\n" @1,14,1,19,14,19
+|   TEXT "second line % \\ { done\n" @2,1,2,26,1,26
+| macros:  
+| ==== "\\emph{a} \\bold{b}{extra} \\link[pkg:topic]{t} \\sQuote{\\R}\\dots{}x"
+| LIST <none> @0,0,2,1,0,1
+|   LIST \emph @1,1,1,8,1,8
+|     TEXT "a" @1,7,1,7,7,7
+|   TEXT " " @1,9,1,9,9,9
+|   LIST \bold @1,10,1,17,10,17
+|     TEXT "b" @1,16,1,16,16,16
+|   LIST LIST @1,18,1,24,18,24
+|     TEXT "extra" @1,19,1,23,19,23
+|   TEXT " " @1,25,1,25,25,25
+|   LIST \link @1,26,1,44,26,44
+|     option: TEXT "pkg:topic" @1,32,1,40,32,40
+|     TEXT "t" @1,43,1,43,43,43
+|   TEXT " " @1,45,1,45,45,45
+|   LIST \sQuote @1,46,1,56,46,56
+|     LIST \R @1,54,1,55,54,55
+|   LIST \dots @1,57,1,61,57,61
+|   LIST LIST @1,62,1,63,62,63
+|   TEXT "x\n" @1,64,1,65,64,65
+| macros:  
+| ==== "\\code{x <- \"a}b\"; f('{') # c \\% d % comment\ny \\link{z}}"
+| LIST <none> @0,0,3,1,0,1
+|   LIST \code @1,1,2,11,1,11
+|     RCODE "x <- \"a}b\"; f('{') # c % d % comment\n" @1,7,1,44,7,44
+|     RCODE "y " @2,1,2,2,1,2
+|     LIST \link @2,3,2,10,3,10
+|       TEXT "z" @2,9,2,9,9,9
+|   TEXT "\n" @2,12,2,12,12,12
+| macros:  
+| ==== "\\verb{a \\{ \\} \\\\ \\% \\q {b} % c\n} \\samp{a{b}c} \\url{http://x.y/}"
+| LIST <none> @0,0,3,1,0,1
+|   LIST \verb @1,1,2,1,1,1
+|     VERB "a { } \\ % \\q {b} " @1,7,1,27,7,27
+|     COMMENT "% c" @1,28,1,30,28,30
+|     VERB "\n" @1,31,1,31,31,31
+|   TEXT " " @2,2,2,2,2,2
+|   LIST \samp @2,3,2,14,3,14
+|     VERB "a{b}c" @2,9,2,13,9,13
+|   TEXT " " @2,15,2,15,15,15
+|   LIST \url @2,16,2,32,16,32
+|     VERB "http://x.y/" @2,21,2,31,21,31
+|   TEXT "\n" @2,33,2,33,33,33
+| macros:  
+| ==== "\\eqn{a % b \\{}{a} \\deqn{x} \\figure{f.png}{width=1}"
+| LIST <none> @0,0,2,1,0,1
+|   LIST \eqn @1,1,1,17,1,17
+|     LIST <none>
+|       VERB "a % b \\{" @1,6,1,13,6,13
+|     LIST <none>
+|       VERB "a" @1,16,1,16,16,16
+|   TEXT " " @1,18,1,18,18,18
+|   LIST \deqn @1,19,1,26,19,26
+|     LIST <none>
+|       VERB "x" @1,25,1,25,25,25
+|   TEXT " " @1,27,1,27,27,27
+|   LIST \figure @1,28,1,50,28,50
+|     LIST <none>
+|       VERB "f.png" @1,36,1,40,36,40
+|     LIST <none>
+|       VERB "width=1" @1,43,1,49,43,49
+|   TEXT "\n" @1,51,1,51,51,51
+| macros:  
+| ==== "\\itemize{\\item one\n\\item two} \\describe{\\item{a}{b}}"
+| LIST <none> @0,0,3,1,0,1
+|   LIST \itemize @1,1,2,10,1,10
+|     LIST \item @1,10,1,14,10,14
+|     TEXT " one\n" @1,15,1,19,15,19
+|     LIST \item @2,1,2,5,1,5
+|     TEXT " two" @2,6,2,9,6,9
+|   TEXT " " @2,11,2,11,11,11
+|   LIST \describe @2,12,2,33,12,33
+|     LIST \item @2,22,2,32,22,32
+|       LIST <none>
+|         TEXT "a" @2,28,2,28,28,28
+|       LIST <none>
+|         TEXT "b" @2,31,2,31,31,31
+|   TEXT "\n" @2,34,2,34,34,34
+| macros:  
+| ==== "\\tabular{ll}{a \\tab b\\cr c \\tab d}"
+| LIST <none> @0,0,2,1,0,1
+|   LIST \tabular @1,1,1,34,1,34
+|     LIST <none>
+|       TEXT "ll" @1,10,1,11,10,11
+|     LIST <none>
+|       TEXT "a " @1,14,1,15,14,15
+|       LIST \tab @1,16,1,19,16,19
+|       TEXT " b" @1,20,1,21,20,21
+|       LIST \cr @1,22,1,24,22,24
+|       TEXT " c " @1,25,1,27,25,27
+|       LIST \tab @1,28,1,31,28,31
+|       TEXT " d" @1,32,1,33,32,33
+|   TEXT "\n" @1,35,1,35,35,35
+| macros:  
+| ==== "\\if{html}{\\out{<hr>}}\\ifelse{a}{b}{c}\\href{https://r-project.org}{site}"
+| LIST <none> @0,0,2,1,0,1
+|   LIST \if @1,1,1,21,1,21
+|     LIST <none>
+|       TEXT "html" @1,5,1,8,5,8
+|     LIST <none>
+|       LIST \out @1,11,1,20,11,20
+|         VERB "<hr>" @1,16,1,19,16,19
+|   LIST \ifelse @1,22,1,37,22,37
+|     LIST <none>
+|       TEXT "a" @1,30,1,30,30,30
+|     LIST <none>
+|       TEXT "b" @1,33,1,33,33,33
+|     LIST <none>
+|       TEXT "c" @1,36,1,36,36,36
+|   LIST \href @1,38,1,71,38,71
+|     LIST <none>
+|       VERB "https://r-project.org" @1,44,1,64,44,64
+|     LIST <none>
+|       TEXT "site" @1,67,1,70,67,70
+|   TEXT "\n" @1,72,1,72,72,72
+| macros:  
+| ==== "\\method{print}{foo}(x) \\S4method{show}{bar}(object) \\enc{Jöreskog}{Joreskog}"
+| LIST <none> @0,0,2,1,0,1
+|   LIST \method @1,1,1,19,1,19
+|     LIST <none>
+|       TEXT "print" @1,9,1,13,9,13
+|     LIST <none>
+|       TEXT "foo" @1,16,1,18,16,18
+|   TEXT "(x) " @1,20,1,23,20,23
+|   LIST \S4method @1,24,1,43,24,43
+|     LIST <none>
+|       TEXT "show" @1,34,1,37,34,37
+|     LIST <none>
+|       TEXT "bar" @1,40,1,42,40,42
+|   TEXT "(object) " @1,44,1,52,44,52
+|   LIST \enc @1,53,1,77,53,76
+|     LIST <none>
+|       TEXT "Jöreskog" @1,58,1,66,58,65
+|     LIST <none>
+|       TEXT "Joreskog" @1,69,1,76,68,75
+|   TEXT "\n" @1,78,1,78,77,77
+| macros:  
+| ==== "\\Sexpr[results=rd]{x <- \"}\"; 1} \\donttest{a\nb} \\dontrun{c \\% {d}}"
+| LIST <none> @0,0,3,1,0,1 [dynamicFlag=10]
+|   LIST \Sexpr @1,1,1,31,1,31 [dynamicFlag=10]
+|     option: TEXT "results=rd" @1,8,1,17,8,17
+|     RCODE "x <- \"}\"; 1" @1,20,1,30,20,30
+|   TEXT " " @1,32,1,32,32,32
+|   LIST \donttest @1,33,2,2,33,2
+|     RCODE "a\n" @1,43,1,44,43,44
+|     RCODE "b" @2,1,2,1,1,1
+|   TEXT " " @2,3,2,3,3,3
+|   LIST \dontrun @2,4,2,21,4,21
+|     VERB "c % {d}" @2,13,2,20,13,20
+|   TEXT "\n" @2,22,2,22,22,22
+| macros:  
+| ==== "x\n#ifdef unix\n\\code{a}\n#endif\n#ifndef windows\nb\n#endif\ny"
+| LIST <none> @0,0,9,1,0,1 [dynamicFlag=1]
+|   TEXT "x\n" @1,1,1,2,1,2
+|   LIST #ifdef @2,1,4,7,1,7 [dynamicFlag=1]
+|     LIST <none>
+|       TEXT " unix\n" @2,6,2,12,6,12
+|     LIST <none>
+|       LIST \code @3,1,3,8,1,8
+|         RCODE "a" @3,7,3,7,7,7
+|       TEXT "\n" @3,9,3,9,9,9
+|   LIST #ifndef @5,1,7,7,1,7 [dynamicFlag=1]
+|     LIST <none>
+|       TEXT " windows\n" @5,7,5,16,7,16
+|     LIST <none>
+|       TEXT "b\n" @6,1,6,2,1,2
+|   TEXT "y\n" @8,1,8,2,1,2
+| macros:  
+| ==== "\\newcommand{\\pair}{[#1|#2]}\\pair{a{b}c}{d % e\n} \\pair{}{z}"
+| LIST <none> @0,0,3,1,0,1
+|   \newcommand 282L @1,1,1,27,1,27 [definition=[#1|#2]]
+|   USERMACRO c("[#1|#2]", "a{b}c", "d \n") @1,28,2,1,28,1 [macro=\pair]
+|   TEXT "[a" @2,2,2,1,2,1
+|   LIST LIST @2,2,2,1,2,1
+|     TEXT "b" @2,2,2,1,2,1
+|   TEXT "c|d \n" @2,2,2,1,2,1
+|   TEXT "] " @2,2,2,2,2,2
+|   USERMACRO c("[#1|#2]", "", "z") @2,3,2,12,3,12 [macro=\pair]
+|   TEXT "[|z]\n" @2,13,2,13,13,13
+| macros: \pair 
+| ==== "\\newcommand{\\one}{X}\\renewcommand{\\one}{Y}\\newcommand{\\two}{\\one\\one}\\two \\code{\\two}"
+| LIST <none> @0,0,2,1,0,1
+|   \newcommand 280L @1,1,1,20,1,20 [definition=X]
+|   \renewcommand 280L @1,21,1,42,21,42 [definition=Y]
+|   \newcommand 280L @1,43,1,69,43,69 [definition=\one\one]
+|   USERMACRO "\\one\\one" @1,70,1,73,70,73 [macro=\two]
+|   USERMACRO "Y" @1,74,1,73,74,73 [macro=\one]
+|   TEXT "Y" @1,74,1,73,74,73
+|   USERMACRO "Y" @1,74,1,73,74,73 [macro=\one]
+|   TEXT "Y " @1,74,1,74,74,74
+|   LIST \code @1,75,1,85,75,85
+|     USERMACRO "\\one\\one" @1,81,1,84,81,84 [macro=\two]
+|     USERMACRO "Y" @1,85,1,84,85,84 [macro=\one]
+|     RCODE "Y" @1,85,1,84,85,84
+|     USERMACRO "Y" @1,85,1,84,85,84 [macro=\one]
+|     RCODE "Y" @1,85,1,84,85,84
+|   TEXT "\n" @1,86,1,86,86,86
+| macros: \one \two 
+| ==== "\\CRANpkg{foo} and \\doi{10.1/x}"
+| LIST <none> @0,0,2,1,0,1 [dynamicFlag=10]
+|   USERMACRO c("\\href{https://CRAN.R-project.org/package=#1}{\\pkg{#1}}", "foo") @1,1,1,13,1,13 [macro=\CRANpkg]
+|   LIST \href @1,14,1,13,14,13
+|     LIST <none>
+|       VERB "https://CRAN.R-project.org/package=foo" @1,14,1,13,14,13
+|     LIST <none>
+|       LIST \pkg @1,14,1,13,14,13
+|         TEXT "foo" @1,14,1,13,14,13
+|   TEXT " and " @1,14,1,18,14,18
+|   USERMACRO c("\\Sexpr[results=rd]{tools:::Rd_expr_doi(\"#1\")}", "10.1/x") @1,19,1,30,19,30 [macro=\doi]
+|   LIST \Sexpr @1,31,1,30,31,30 [dynamicFlag=10]
+|     option: TEXT "results=rd" @1,31,1,30,31,30
+|     RCODE "tools:::Rd_expr_doi(\"10.1/x\")" @1,31,1,30,31,30
+|   TEXT "\n" @1,31,1,31,31,31
+| macros:  
+| ==== "% a comment\ntext % another\n"
+| LIST <none> @0,0,4,1,0,1
+|   COMMENT "% a comment" @1,1,1,11,1,11
+|   TEXT "\n" @1,12,1,12,12,12
+|   TEXT "text " @2,1,2,5,1,5
+|   COMMENT "% another" @2,6,2,14,6,14
+|   TEXT "\n" @2,15,2,15,15,15
+|   TEXT "\n" @3,1,3,1,1,1
+| macros:  
+| ==== "\\unknownthing{x} and \\title{t}"
+| warning: <connection>:1: unknown macro '\unknownthing' 
+| warning: <connection>:1: unexpected section header '\title' 
+| LIST <none> @0,0,2,1,0,1
+|   UNKNOWN "\\unknownthing" @1,1,1,13,1,13
+|   LIST LIST @1,14,1,16,14,16
+|     TEXT "x" @1,15,1,15,15,15
+|   TEXT " and " @1,17,1,21,17,21
+|   LIST LIST @1,28,1,30,28,30
+|     TEXT "t" @1,29,1,29,29,29
+|   TEXT "\n" @1,31,1,31,31,31
+| macros:  
+| ==== "\\name{fn}\n\\alias{fn}\n\\title{The \\emph{fn} function}\n\\description{\nDoes things.\n\nTwo paragraphs.\n}\n\\usage{\nfn(fmt = \"\\%s\")\n\\method{print}{fn}(x, \\dots)\n}\n\\arguments{\n  \\item{fmt}{a format, see \\code{\\link{sprintf}}}\n}\n\\value{A list \\item{a}{first}}\n\\section{Note}{See \\url{https://example.org}.}\n\\examples{\nfn(1) # hi\n\\dontrun{\nfn(2)}\n}\n\\keyword{misc}\n"
+| LIST <none> @0,0,25,1,0,1
+|   LIST \name @1,1,1,9,1,9
+|     VERB "fn" @1,7,1,8,7,8
+|   TEXT "\n" @1,10,1,10,10,10
+|   LIST \alias @2,1,2,10,1,10
+|     VERB "fn" @2,8,2,9,8,9
+|   TEXT "\n" @2,11,2,11,11,11
+|   LIST \title @3,1,3,30,1,30
+|     TEXT "The " @3,8,3,11,8,11
+|     LIST \emph @3,12,3,20,12,20
+|       TEXT "fn" @3,18,3,19,18,19
+|     TEXT " function" @3,21,3,29,21,29
+|   TEXT "\n" @3,31,3,31,31,31
+|   LIST \description @4,1,8,1,1,1
+|     TEXT "\n" @4,14,4,14,14,14
+|     TEXT "Does things.\n" @5,1,5,13,1,13
+|     TEXT "\n" @6,1,6,1,1,1
+|     TEXT "Two paragraphs.\n" @7,1,7,16,1,16
+|   TEXT "\n" @8,2,8,2,2,2
+|   LIST \usage @9,1,12,1,1,1
+|     RCODE "\n" @9,8,9,8,8,8
+|     RCODE "fn(fmt = \"%s\")\n" @10,1,10,16,1,16
+|     LIST \method @11,1,11,18,1,18
+|       LIST <none>
+|         TEXT "print" @11,9,11,13,9,13
+|       LIST <none>
+|         TEXT "fn" @11,16,11,17,16,17
+|     RCODE "(x, " @11,19,11,22,19,22
+|     LIST \dots @11,23,11,27,23,27
+|     RCODE ")\n" @11,28,11,29,28,29
+|   TEXT "\n" @12,2,12,2,2,2
+|   LIST \arguments @13,1,15,1,1,1
+|     TEXT "\n" @13,12,13,12,12,12
+|     TEXT "  " @14,1,14,2,1,2
+|     LIST \item @14,3,14,49,3,49
+|       LIST <none>
+|         TEXT "fmt" @14,9,14,11,9,11
+|       LIST <none>
+|         TEXT "a format, see " @14,14,14,27,14,27
+|         LIST \code @14,28,14,48,28,48
+|           LIST \link @14,34,14,47,34,47
+|             TEXT "sprintf" @14,40,14,46,40,46
+|     TEXT "\n" @14,50,14,50,50,50
+|   TEXT "\n" @15,2,15,2,2,2
+|   LIST \value @16,1,16,30,1,30
+|     TEXT "A list " @16,8,16,14,8,14
+|     LIST \item @16,15,16,29,15,29
+|       LIST <none>
+|         TEXT "a" @16,21,16,21,21,21
+|       LIST <none>
+|         TEXT "first" @16,24,16,28,24,28
+|   TEXT "\n" @16,31,16,31,31,31
+|   LIST \section @17,1,17,46,1,46
+|     LIST <none>
+|       TEXT "Note" @17,10,17,13,10,13
+|     LIST <none>
+|       TEXT "See " @17,16,17,19,16,19
+|       LIST \url @17,20,17,44,20,44
+|         VERB "https://example.org" @17,25,17,43,25,43
+|       TEXT "." @17,45,17,45,45,45
+|   TEXT "\n" @17,47,17,47,47,47
+|   LIST \examples @18,1,22,1,1,1
+|     RCODE "\n" @18,11,18,11,11,11
+|     RCODE "fn(1) # hi\n" @19,1,19,11,1,11
+|     LIST \dontrun @20,1,21,6,1,6
+|       VERB "\n" @20,10,20,10,10,10
+|       VERB "fn(2)" @21,1,21,5,1,5
+|     RCODE "\n" @21,7,21,7,7,7
+|   TEXT "\n" @22,2,22,2,2,2
+|   LIST \keyword @23,1,23,14,1,14
+|     TEXT "misc" @23,10,23,13,10,13
+|   TEXT "\n" @23,15,23,15,15,15
+|   TEXT "\n" @24,1,24,1,1,1
+| macros:  
+| \name{fn}
+| \alias{fn}
+| \title{The \emph{fn} function}
+| \description{
+| Does things.
+| 
+| Two paragraphs.
+| }
+| \usage{
+| fn(fmt = "%s")
+| \method{print}{fn}(x, \dots)
+| }
+| \arguments{
+|   \item{fmt}{a format, see \code{\link{sprintf}}}
+| }
+| \value{A list \item{a}{first}}
+| \section{Note}{See \url{https://example.org}.}
+| \examples{
+| fn(1) # hi
+| \dontrun{
+| fn(2)}
+| }
+| \keyword{misc}
+| 
+| \name{fn}
+| \alias{fn}
+| \title{The \emph{fn} function}
+| \description{
+| Does things.
+| 
+| Two paragraphs.
+| }
+| \usage{
+| fn(fmt = "\%s")
+| \method{print}{fn}(x, \dots)
+| }
+| \arguments{
+|   \item{fmt}{a format, see \code{\link{sprintf}}}
+| }
+| \value{A list \item{a}{first}}
+| \section{Note}{See \url{https://example.org}.}
+| \examples{
+| fn(1) # hi
+| \dontrun{
+| fn(2)}
+| }
+| \keyword{misc}
+| 
+| [1] "\\link[=Paren]{\\{}\n"
+| [1] "a {b} c\n"
+[messages]
+[warnings]
+- newline within quoted string at <connection>:1 (in tools::parse_Rd(textConnection(text), fragment = TRUE))
+[errors]
+- Unexpected end of input (in " quoted string opened at <connection>:1:8) (in tools::parse_Rd(textConnection(text), fragment = TRUE))
+[value]

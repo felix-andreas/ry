@@ -43,6 +43,7 @@ pub mod methods;
 pub mod native;
 pub mod print;
 pub mod random;
+pub mod rd;
 pub mod rmath;
 pub mod records;
 pub mod serialize;
