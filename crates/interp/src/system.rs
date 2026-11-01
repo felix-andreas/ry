@@ -723,10 +723,22 @@ fn format_broken_down(time: &BrokenDown, format: &str, zone: &str, offset: i32) 
             characters.next();
             width = Some(width.unwrap_or(0) * 10 + digit as usize);
         }
-        let Some(spec) = characters.next() else {
+        let Some(mut spec) = characters.next() else {
             output.push('%');
             break;
         };
+        // The POSIX `E` and `O` modifiers ask for a locale's alternative forms, which the C
+        // locale does not have, so they print the plain field; only `%OS` means something else.
+        if spec == 'E' || (spec == 'O' && characters.peek() != Some(&'S')) {
+            match characters.next() {
+                Some(base) => spec = base,
+                None => {
+                    output.push('%');
+                    output.push(spec);
+                    break;
+                }
+            }
+        }
         let start = output.len();
         match spec {
             'Y' => output.push_str(&time.year.to_string()),
@@ -884,6 +896,8 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
         })
         .collect::<R<_>>()?;
     let zone = resolve_zone(tz);
+    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
+    let utc = name == "UTC" || name == "GMT";
     for (index, &value) in seconds.iter().enumerate() {
         if !value.is_finite() {
             // GNU R keeps a non-finite time, including NA versus NaN, in `sec`.
@@ -892,8 +906,10 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
                 values::ints_mut(fields[field])[index] = NA_INTEGER;
             }
             values::ints_mut(fields[8])[index] = -1;
-            values::set_elt(fields[9], index, values::mkchar("")?);
-            values::ints_mut(fields[10])[index] = NA_INTEGER;
+            // UTC and GMT name themselves and have a known offset even for a missing time.
+            let (zone_name, offset) = if utc { (name.as_str(), 0) } else { ("", NA_INTEGER) };
+            values::set_elt(fields[9], index, values::mkchar(zone_name)?);
+            values::ints_mut(fields[10])[index] = offset;
             continue;
         }
         let (offset, dst, abbreviation) = zone.offset_at(value);
@@ -918,8 +934,7 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     // UTC and GMT keep their bare name; every other zone, the session's included, adds its
     // standard and daylight-saving abbreviations.
     let tzone = values::install("tzone")?;
-    let name = if tz.is_empty() { session_zone_name() } else { tz.to_owned() };
-    let names = if name == "UTC" || name == "GMT" {
+    let names = if utc {
         scalar_string(&name)?
     } else {
         let (standard, daylight) = zone.abbreviations();
@@ -1202,87 +1217,42 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-/// The parsed time as whole seconds since the epoch and the fraction of a second apart, so
-/// that the fraction keeps every digit the text gave it.
-fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f64, f64)> {
-    let mut year = 1970i64;
-    let mut month = 1i64;
-    let mut day = 1i64;
-    let mut hour = 0i64;
-    let mut minute = 0i64;
-    let mut second = 0f64;
-    let mut yearday = None;
-    let mut input = text.trim_start();
-    let mut format_characters = format.chars();
-    let number = |input: &mut &str, max_digits: usize| -> Option<i64> {
-        let trimmed = input.trim_start();
-        let (sign, rest) = match trimmed.strip_prefix('-') {
-            Some(rest) => (-1, rest),
-            None => (1, trimmed),
-        };
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).take(max_digits).collect();
-        if digits.is_empty() {
-            return None;
-        }
-        *input = &rest[digits.len()..];
-        digits.parse::<i64>().ok().map(|value| sign * value)
-    };
-    while let Some(character) = format_characters.next() {
-        if character != '%' {
-            if character.is_whitespace() {
-                input = input.trim_start();
-                continue;
-            }
-            input = input.strip_prefix(character)?;
-            continue;
-        }
-        match format_characters.next()? {
-            'Y' => year = number(&mut input, 4)?,
-            'y' => {
-                let value = number(&mut input, 2)?;
-                year = if value < 69 { 2000 + value } else { 1900 + value };
-            }
-            'm' => month = number(&mut input, 2)?,
-            'd' | 'e' => day = number(&mut input, 2)?,
-            'H' => hour = number(&mut input, 2)?,
-            'M' => minute = number(&mut input, 2)?,
-            'S' => second = number(&mut input, 2)? as f64,
-            'O' => {
-                if format_characters.next()? == 'S' {
-                    let trimmed = input.trim_start();
-                    let length = trimmed.chars().take_while(|c| c.is_ascii_digit() || *c == '.').count();
-                    second = trimmed[..length].parse().ok()?;
-                    input = &trimmed[length..];
-                }
-            }
-            'j' => yearday = Some(number(&mut input, 3)?),
-            'B' | 'b' | 'h' => {
-                let lower = input.to_lowercase();
-                let found = MONTHS.iter().position(|name| lower.starts_with(&name.to_lowercase()))
-                    .map(|position| (position, MONTHS[position].len()))
-                    .or_else(|| MONTHS.iter().position(|name| lower.starts_with(&name[..3].to_lowercase())).map(|position| (position, 3)))?;
-                month = found.0 as i64 + 1;
-                input = &input[found.1..];
-            }
-            'F' => {
-                year = number(&mut input, 4)?;
-                input = input.strip_prefix('-')?;
-                month = number(&mut input, 2)?;
-                input = input.strip_prefix('-')?;
-                day = number(&mut input, 2)?;
-            }
-            'T' => {
-                hour = number(&mut input, 2)?;
-                input = input.strip_prefix(':')?;
-                minute = number(&mut input, 2)?;
-                input = input.strip_prefix(':')?;
-                second = number(&mut input, 2)? as f64;
-            }
-            '%' => input = input.strip_prefix('%')?,
-            _ => {}
-        }
+/// A parsed time: whole wall-clock seconds since the epoch read as UTC, the fraction of a second
+/// apart so that it keeps every digit the text gave, and the UTC offset a `%z` gave.
+struct ParsedTime {
+    whole: f64,
+    fraction: f64,
+    offset: Option<i64>,
+}
+
+/// Parses `text` with a `strptime` format.
+fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<ParsedTime> {
+    let mut fields = Parsed::default();
+    let mut input = text;
+    parse_with(&mut fields, &mut input, format)?;
+    // GNU R fills an unspecified year, month or day from today's date, except that a month
+    // without a day is invalid, since today's day need not exist in that month.
+    if fields.month.is_some() && fields.day.is_none() && fields.yearday.is_none() {
+        return None;
     }
-    if let Some(yearday) = yearday {
+    let (this_year, this_month, this_day) =
+        if fields.year.is_some() && fields.month.is_some() && fields.day.is_some() {
+            (0, 0, 0)
+        } else {
+            let now = now_seconds().floor();
+            let (offset, _, _) = resolve_zone("").offset_at(now);
+            civil_from_days((now as i64 + offset as i64).div_euclid(86400))
+        };
+    let mut year = fields.year.unwrap_or(this_year);
+    if let Some(century) = fields.century {
+        year = century * 100 + year.rem_euclid(100);
+    }
+    let mut hour = fields.hour;
+    if let Some(afternoon) = fields.afternoon {
+        hour = hour % 12 + if afternoon { 12 } else { 0 };
+    }
+    let (mut month, mut day) = (fields.month.unwrap_or(this_month), fields.day.unwrap_or(this_day));
+    if let Some(yearday) = fields.yearday {
         if !(1..=if is_leap(year) { 366 } else { 365 }).contains(&yearday) {
             if yearday == 366 {
                 warnings.push(format!("day-of-year 366 in year {year} is invalid"));
@@ -1291,17 +1261,217 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f
         }
         month = 1;
         day = yearday;
+    } else {
+        if !(1..=12).contains(&month) {
+            return None;
+        }
+        let month_days = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if day < 1 || day > month_days[(month - 1) as usize] {
+            return None;
+        }
     }
-    if !(1..=12).contains(&month) {
-        return None;
-    }
-    let month_days = [31, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    if day < 1 || day > month_days[(month - 1) as usize] && format.contains("%d") {
+    if hour > 24 || fields.minute > 59 || fields.second > 61.0 {
         return None;
     }
     let days = days_from_civil(year, month, 1) + day - 1;
-    let whole = second.floor();
-    Some((days as f64 * 86400.0 + hour as f64 * 3600.0 + minute as f64 * 60.0 + whole, second - whole))
+    let whole = fields.second.floor();
+    Some(ParsedTime {
+        whole: days as f64 * 86400.0 + hour as f64 * 3600.0 + fields.minute as f64 * 60.0 + whole,
+        fraction: fields.second - whole,
+        offset: fields.offset,
+    })
+}
+
+#[derive(Default)]
+struct Parsed {
+    year: Option<i64>,
+    century: Option<i64>,
+    month: Option<i64>,
+    day: Option<i64>,
+    hour: i64,
+    minute: i64,
+    second: f64,
+    yearday: Option<i64>,
+    afternoon: Option<bool>,
+    offset: Option<i64>,
+}
+
+/// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
+/// format matches any run of whitespace, including none, and numeric fields skip leading blanks,
+/// as in glibc's `strptime`.
+fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()> {
+    let mut characters = format.chars();
+    while let Some(character) = characters.next() {
+        if character.is_whitespace() {
+            *input = input.trim_start();
+            continue;
+        }
+        if character != '%' {
+            *input = input.strip_prefix(character)?;
+            continue;
+        }
+        let mut spec = characters.next()?;
+        if spec == 'E' || spec == 'O' {
+            let base = characters.next()?;
+            if spec == 'O' && base == 'S' {
+                // `%OS` reads seconds with an optional fraction, and `%OSn` reads the same.
+                if characters
+                    .as_str()
+                    .starts_with(|digit: char| digit.is_ascii_digit())
+                {
+                    characters.next();
+                }
+                let trimmed = input.trim_start();
+                let integer = trimmed
+                    .chars()
+                    .take(2)
+                    .take_while(char::is_ascii_digit)
+                    .count();
+                if integer == 0 {
+                    return None;
+                }
+                let fraction = match trimmed[integer..].strip_prefix(['.', ',']) {
+                    Some(rest) => 1 + rest.chars().take_while(char::is_ascii_digit).count(),
+                    None => 0,
+                };
+                fields.second = trimmed[..integer + fraction]
+                    .replace(',', ".")
+                    .parse()
+                    .ok()?;
+                *input = &trimmed[integer + fraction..];
+                continue;
+            }
+            spec = base;
+        }
+        match spec {
+            'Y' => {
+                fields.year = Some(signed_number(input, 4)?);
+                fields.century = None;
+            }
+            'y' => {
+                let value = number(input, 2)?;
+                fields.year = Some(if value < 69 {
+                    2000 + value
+                } else {
+                    1900 + value
+                });
+            }
+            'C' => fields.century = Some(number(input, 2)?),
+            'm' => fields.month = Some(number(input, 2)?),
+            'd' | 'e' => fields.day = Some(number(input, 2)?),
+            'H' | 'k' => fields.hour = number(input, 2)?,
+            'I' | 'l' => {
+                fields.hour = number(input, 2)?;
+                if !(1..=12).contains(&fields.hour) {
+                    return None;
+                }
+            }
+            'M' => fields.minute = number(input, 2)?,
+            'S' => fields.second = number(input, 2)? as f64,
+            'j' => fields.yearday = Some(number(input, 3)?),
+            'p' | 'P' => {
+                let lower = input.trim_start().to_ascii_lowercase();
+                fields.afternoon = Some(match lower.get(..2) {
+                    Some("am") => false,
+                    Some("pm") => true,
+                    _ => return None,
+                });
+                *input = &input.trim_start()[2..];
+            }
+            'B' | 'b' | 'h' => {
+                let found = match_name(input, &MONTHS)?;
+                fields.month = Some(found as i64 + 1);
+            }
+            'A' | 'a' => {
+                match_name(input, &WEEKDAYS)?;
+            }
+            'u' | 'w' => {
+                number(input, 1)?;
+            }
+            'U' | 'V' | 'W' => {
+                number(input, 2)?;
+            }
+            'z' => fields.offset = Some(parse_offset(input)?),
+            'Z' => return None,
+            'n' | 't' => *input = input.trim_start(),
+            '%' => *input = input.trim_start().strip_prefix('%')?,
+            'F' => parse_with(fields, input, "%Y-%m-%d")?,
+            'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
+            'D' | 'x' => parse_with(fields, input, "%m/%d/%y")?,
+            'R' => parse_with(fields, input, "%H:%M")?,
+            'r' => parse_with(fields, input, "%I:%M:%S %p")?,
+            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// A month or weekday name, in full or abbreviated to three letters, ignoring case. Returns its
+/// position in `names`.
+fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
+    let trimmed = input.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let full = names
+        .iter()
+        .position(|name| lower.starts_with(&name.to_ascii_lowercase()));
+    let (position, consumed) = match full {
+        Some(position) => (position, names[position].len()),
+        None => (
+            names
+                .iter()
+                .position(|name| lower.starts_with(&name[..3].to_ascii_lowercase()))?,
+            3,
+        ),
+    };
+    *input = &trimmed[consumed..];
+    Some(position)
+}
+
+/// A field of at most `max_digits` digits, after leading blanks.
+fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
+    let trimmed = input.trim_start();
+    let digits = trimmed
+        .chars()
+        .take(max_digits)
+        .take_while(char::is_ascii_digit)
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    *input = &trimmed[digits..];
+    trimmed[..digits].parse().ok()
+}
+
+fn signed_number(input: &mut &str, max_digits: usize) -> Option<i64> {
+    let trimmed = input.trim_start();
+    match trimmed.strip_prefix('-') {
+        Some(mut rest) => {
+            let value = number(&mut rest, max_digits)?;
+            *input = rest;
+            Some(-value)
+        }
+        None => number(input, max_digits),
+    }
+}
+
+fn parse_offset(input: &mut &str) -> Option<i64> {
+    let trimmed = input.trim_start();
+    let sign = match trimmed.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let digits = trimmed
+        .get(1..5)
+        .filter(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()))?;
+    let value = digits.parse::<i64>().ok()?;
+    let (hours, minutes) = (value / 100, value % 100);
+    if value > 1400 || minutes > 59 {
+        return None;
+    }
+    *input = &trimmed[5..];
+    Some(sign * (hours * 3600 + minutes * 60))
 }
 
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
@@ -1309,30 +1479,62 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let formats = call.arg(1);
     let tz = values::first_string(call.arg(2)).map(|text| text.into_owned()).unwrap_or_default();
     let count = length(texts);
-    let mut seconds = Vec::with_capacity(count);
-    let mut fractions = Vec::with_capacity(count);
     let zone = resolve_zone(&tz);
+    let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
+    let utc = name == "UTC" || name == "GMT";
+    let mut parsed = Vec::with_capacity(count);
     let mut warnings = Vec::new();
     for index in 0..count {
         let format = values::string_at(formats, index % length(formats).max(1))
             .map(|text| text.into_owned())
             .unwrap_or_default();
-        let (whole, fraction) = values::string_at(texts, index)
-            .and_then(|text| parse_time(&text, &format, &mut warnings))
-            .unwrap_or((NA_REAL, 0.0));
-        seconds.push(zone.local_to_utc(whole, -1));
-        fractions.push(fraction);
+        parsed.push(values::string_at(texts, index).and_then(|text| parse_time(&text, &format, &mut warnings)));
     }
+    let seconds: Vec<f64> = parsed
+        .iter()
+        .map(|time| match time {
+            None => NA_REAL,
+            Some(time) => match time.offset {
+                Some(offset) => time.whole - offset as f64,
+                None => zone.local_to_utc(time.whole, -1),
+            },
+        })
+        .collect();
     let result = posixlt_from_seconds(&seconds, &tz)?;
-    let second_field = values::list_elt(result, 0);
-    for (second, fraction) in values::reals_mut(second_field).iter_mut().zip(&fractions) {
-        *second += fraction;
+    let fields: Vec<Sexp> = (0..11).map(|field| values::list_elt(result, field)).collect();
+    for (index, time) in parsed.iter().enumerate() {
+        let Some(time) = time else { continue };
+        values::reals_mut(fields[0])[index] += time.fraction;
+        if utc {
+            continue;
+        }
+        // GNU R's strptime fills the fields from the text rather than from an instant, so the
+        // UTC offset stays unknown outside UTC, and a time with an explicit offset carries no
+        // abbreviation either.
+        values::ints_mut(fields[10])[index] = NA_INTEGER;
+        if time.offset.is_some() {
+            values::set_elt(fields[9], index, values::mkchar("")?);
+            continue;
+        }
+        let (offset, _, _) = zone.offset_at(seconds[index]);
+        if seconds[index] + offset as f64 != time.whole {
+            // A time in a spring-forward gap keeps its wall-clock fields and reports the zone
+            // in force after the gap, where the wall clock read with the earlier offset lands.
+            let (_, dst, abbreviation) = zone.offset_at(time.whole - offset as f64);
+            let wall = broken_down(time.whole);
+            values::ints_mut(fields[1])[index] = wall.minute as i32;
+            values::ints_mut(fields[2])[index] = wall.hour as i32;
+            values::ints_mut(fields[3])[index] = wall.day as i32;
+            values::ints_mut(fields[4])[index] = wall.month as i32 - 1;
+            values::ints_mut(fields[5])[index] = wall.year as i32 - 1900;
+            values::ints_mut(fields[6])[index] = wall.weekday as i32;
+            values::ints_mut(fields[7])[index] = wall.yearday as i32;
+            values::ints_mut(fields[8])[index] = dst as i32;
+            values::set_elt(fields[9], index, values::mkchar(&abbreviation)?);
+        }
     }
-    // GNU R's strptime leaves the UTC offset unknown outside UTC, because it fills the fields
-    // from the text rather than from an instant.
-    let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
-    if name != "UTC" && name != "GMT" {
-        values::ints_mut(values::list_elt(result, 10)).fill(NA_INTEGER);
+    if !utc {
+        values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
     set_year_names(result, values::names(texts))?;
     for message in warnings {

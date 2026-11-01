@@ -532,7 +532,10 @@ unsafe fn do_file(call: &Call<'_>) -> R<Sexp> {
     } else {
         (PathBuf::from(expand_path(&description)), false, open)
     };
-    let compression = if !raw && parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary) {
+    // GNU R sniffs the magic bytes only when `file()` is created unopened or for text reading,
+    // and the connection then becomes a `gzfile` for good.
+    let sniffs = open.is_empty() || parse_mode(open.as_bytes()).is_some_and(|mode| mode.read && !mode.write && !mode.binary);
+    let compression = if !raw && sniffs {
         file_compression(&path).ok().flatten()
     } else {
         None
