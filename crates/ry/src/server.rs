@@ -40,6 +40,7 @@ use {
             parse_description_collate, parse_description_dependencies, parse_description_package,
             parse_namespace,
         },
+        project_global_names,
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
             shipped_stub_sources, stub_source_problems,
@@ -387,6 +388,8 @@ struct Worker {
     unwarmed: Vec<PathBuf>,
     /// Results are never published.
     prime_queue: Vec<PathBuf>,
+    /// Set when [`project_global_names`] must re-run before the next editor request.
+    editor_folds_stale: bool,
     /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
     /// whose durability drops, so the first LOW write to a file re-derives everything that
     /// depends on it. Idle time pays that once, so the first keystroke does not.
@@ -501,6 +504,7 @@ impl Worker {
             unscanned: Vec::new(),
             unwarmed: Vec::new(),
             prime_queue: Vec::new(),
+            editor_folds_stale: false,
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
         };
@@ -751,6 +755,7 @@ impl Worker {
             || !self.pending_semantic_publishes.is_empty()
             || !self.pending_lowering.is_empty()
             || !self.prime_queue.is_empty()
+            || self.editor_folds_stale
     }
 
     fn run_idle_unit(&mut self) {
@@ -774,6 +779,21 @@ impl Worker {
             }
             return;
         }
+        if self.editor_folds_stale {
+            // Goto and references consult this fold for every library call. Lowering an open
+            // file drops its durability, and salsa never backdates across that drop, so the
+            // fold re-runs once (about 20 ms at 300,000 lines) and the first request would
+            // otherwise pay for it.
+            self.editor_folds_stale = false;
+            if let Some(files) = ProjectFiles::try_get(&self.db)
+                && self
+                    .cancellable(|worker| project_global_names(&worker.db, files).len())
+                    .is_err()
+            {
+                self.editor_folds_stale = true;
+            }
+            return;
+        }
         if let Some(path) = self.pending_lowering.pop() {
             if self.open_documents.contains(&path)
                 && let Some(&file) = self.files.get(&path)
@@ -783,6 +803,7 @@ impl Worker {
                     .with_durability(Durability::LOW)
                     .to(text);
                 self.defer_semantic_publish(&path);
+                self.editor_folds_stale = true;
             }
             return;
         }
@@ -841,6 +862,7 @@ impl Worker {
         );
         self.unwarmed = rest;
         if self.unwarmed.is_empty() {
+            self.editor_folds_stale = true;
             // Open files so far published only their parse diagnostics.
             self.refresh_all_diagnostics();
         }

@@ -9,12 +9,12 @@ use {
         check::{CalleeTarget, ItemCheck},
         diagnostics::TypeRenderer,
         file_type_definitions, global_scheme,
-        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind, Symbol},
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
         naming::{BindingId, BindingKind, dot_dot_variable},
-        package_definitions, project_type_definitions,
+        package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
         types::{
             Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
@@ -4100,20 +4100,7 @@ fn target_at<'db>(
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a
 /// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
-    files.files(db).iter().any(|file| {
-        item_tree(db, *file).iter().copied().any(|item| {
-            // A named definition declares its name even without a slot: `setGeneric("name", …)`
-            // binds through a string.
-            (matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                && item.name(db).as_deref() == Some(name))
-                || item_naming(db, item).as_ref().is_some_and(|naming| {
-                    naming
-                        .bindings
-                        .values()
-                        .any(|info| info.kind == BindingKind::TopLevel && info.name == name)
-                })
-        })
-    })
+    project_global_names(db, files).contains(&Symbol::new(name))
 }
 
 fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occurrence> {
