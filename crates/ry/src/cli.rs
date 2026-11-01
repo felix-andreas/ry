@@ -471,7 +471,6 @@ fn in_batches<T: Send>(
 ) -> Vec<(usize, T)> {
     let mut results = Vec::with_capacity(order.len());
     for (number, batch) in order.chunks(batch_len.max(1)).enumerate() {
-        // The next pass's first barrier evicts what the last batch left resident.
         if number > 0 {
             db.trigger_lru_eviction();
         }

@@ -111,38 +111,6 @@ impl fmt::Debug for Name<'_> {
 unsafe impl salsa::SalsaValue for Ty<'_> {}
 unsafe impl salsa::SalsaValue for Name<'_> {}
 
-/// The top six bits of a hash pick the shard.
-const TYPE_SHARDS: usize = 64;
-
-/// Every type ever built, sharded by hash so parallel checkers rarely contend. Entries are
-/// leaked, so a `&'static` to one is the type's identity.
-static TYPES: LazyLock<[Mutex<HashTable<&'static TypeEntry>>; TYPE_SHARDS]> =
-    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(HashTable::new())));
-
-fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
-    let hash = FxBuildHasher.hash_one(&kind);
-    let rehash = |entry: &&'static TypeEntry| FxBuildHasher.hash_one(&entry.kind);
-    // The table picks buckets from the low bits, so the shard comes from the high ones.
-    let shard = &TYPES[(hash >> 58) as usize];
-    // A poisoned shard means another thread died mid-insert; the table still holds only
-    // complete, leaked types, so keep serving it.
-    let mut shard = shard
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match shard.find(hash, |entry| entry.kind == kind) {
-        Some(&interned) => interned,
-        None => {
-            let mut size: u64 = 1;
-            for_each_child(&kind, &mut |child| {
-                size = size.saturating_add(child.entry.size).min(TYPE_SIZE_CEILING);
-            });
-            let interned: &'static TypeEntry = Box::leak(Box::new(TypeEntry { kind, size }));
-            shard.insert_unique(hash, interned, rehash);
-            interned
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum TyKind<'db> {
     /// Compatible with everything, silently.
@@ -529,9 +497,8 @@ fn merge_tags<'db>(db: &'db dyn Db, first: Ty<'db>, second: Ty<'db>) -> Ty<'db> 
 }
 
 /// Node count of `ty` as a tree (each path counted separately), saturating at
-/// [`TYPE_SIZE_CEILING`]. Interning makes types DAGs, so a self-referential
-/// record's tree grows exponentially while its distinct nodes stay few.
-/// Nodes in the type tree, capped at [`TYPE_SIZE_CEILING`]; stored when the type is built.
+/// [`TYPE_SIZE_CEILING`] and stored when the type is built. Hash-consing makes types DAGs, so a
+/// self-referential record's tree grows exponentially while its distinct nodes stay few.
 pub fn type_size<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> u64 {
     ty.entry.size
 }
@@ -735,6 +702,38 @@ pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
         return unknown(db);
     }
     map_child_types(db, ty, &mut |child| erase_vars(db, child))
+}
+
+/// The top six bits of a hash pick the shard.
+const TYPE_SHARDS: usize = 64;
+
+/// Every type ever built, sharded by hash so parallel checkers rarely contend. Entries are
+/// leaked, so a `&'static` to one is the type's identity.
+static TYPES: LazyLock<[Mutex<HashTable<&'static TypeEntry>>; TYPE_SHARDS]> =
+    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(HashTable::new())));
+
+fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
+    let hash = FxBuildHasher.hash_one(&kind);
+    let rehash = |entry: &&'static TypeEntry| FxBuildHasher.hash_one(&entry.kind);
+    // The table picks buckets from the low bits, so the shard comes from the high ones.
+    let shard = &TYPES[(hash >> 58) as usize];
+    // A poisoned shard means another thread died mid-insert; the table still holds only
+    // complete, leaked types, so keep serving it.
+    let mut shard = shard
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match shard.find(hash, |entry| entry.kind == kind) {
+        Some(&interned) => interned,
+        None => {
+            let mut size: u64 = 1;
+            for_each_child(&kind, &mut |child| {
+                size = size.saturating_add(child.entry.size).min(TYPE_SIZE_CEILING);
+            });
+            let interned: &'static TypeEntry = Box::leak(Box::new(TypeEntry { kind, size }));
+            shard.insert_unique(hash, interned, rehash);
+            interned
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1650,10 +1650,6 @@ impl<'db> SalsaGlobals<'db> {
         }
     }
 
-    fn intern(&self, name: &str) -> types::Name<'db> {
-        types::Name::new(self.db, name)
-    }
-
     fn frame_definition(&self, name: types::Name<'db>, deferred: bool) -> Option<Item<'db>> {
         if deferred && *self.file.kind(self.db) == DocumentKind::Package {
             return None;
@@ -1770,7 +1766,7 @@ impl<'db> SalsaGlobals<'db> {
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if let Some(scheme) = self.schemes.borrow().get(&(interned, deferred)) {
             return scheme.clone();
         }
@@ -1782,7 +1778,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
             || self
                 .layers(interned)
@@ -1790,7 +1786,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
@@ -1801,7 +1797,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return self.scheme(name, false);
         }
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if let Some(layer) = self
             .files
             .map(|_| package_name(self.db, types::QueryName::new(self.db, interned)))
@@ -1820,7 +1816,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         if *self.file.kind(self.db) == DocumentKind::Package {
             return None;
         }
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         self.layers(interned).find_map(|layer| {
             layer
                 .winner
@@ -1843,7 +1839,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
             return None;
         }
         // A project definition shadows the stub set, disabling per-call overload selection.
-        let interned = self.intern(name);
+        let interned = types::Name::new(self.db, name);
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }

@@ -142,14 +142,14 @@ fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
     let target = source.len() / parts;
     let mut boundaries = vec![0];
     // `simple` holds while the current line is exactly one call: a name, then a parenthesis
-    // that `depth` follows back to zero.
-    let mut depth = 0i64;
+    // that `open` follows back to empty.
+    let mut open: Vec<SyntaxKind> = Vec::new();
     let mut simple = true;
     let mut closed = false;
     for (index, &(kind, _)) in significant.iter().enumerate() {
         let at_line_start = index == 0 || significant[index - 1].0 == NEWLINE;
         match kind {
-            NEWLINE if depth == 0 => {
+            NEWLINE if open.is_empty() => {
                 let next = significant.get(index + 1..index + 3);
                 if let (true, Some([(IDENT, start), (L_PAREN, _)])) = (simple && closed, next) {
                     let due = boundaries.len() * target;
@@ -162,11 +162,23 @@ fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
                 continue;
             }
             NEWLINE => continue,
-            L_PAREN | L_BRACE | L_BRACKET => depth += 1,
-            L_BRACKET2 => depth += 2,
-            R_PAREN | R_BRACE | R_BRACKET => depth -= 1,
+            L_PAREN | L_BRACE | L_BRACKET => open.push(kind),
+            L_BRACKET2 => open.extend([L_BRACKET, L_BRACKET]),
+            R_PAREN | R_BRACE | R_BRACKET => {
+                let opener = match kind {
+                    R_PAREN => L_PAREN,
+                    R_BRACE => L_BRACE,
+                    _ => L_BRACKET,
+                };
+                // A stray or mismatched closer leaves the parser's recovery, not bracket
+                // matching, to decide where a call ends, so only one parse is exact.
+                if open.pop() != Some(opener) {
+                    return vec![0];
+                }
+            }
             _ => {}
         }
+        let depth = open.len();
         let call_start = at_line_start && kind == IDENT;
         let call_open = index > 0
             && kind == L_PAREN
@@ -876,6 +888,17 @@ mod tests {
                 namespace_facts(&parse_namespace_in_chunks(&source, &chunks)),
                 whole
             );
+        }
+    }
+
+    #[test]
+    fn unbalanced_namespace_parses_in_one_chunk() {
+        for prefix in ["}\nf(\n", "f(]\n", "g(a))\nf(\n"] {
+            let mut source = String::from(prefix);
+            for index in 0..200 {
+                source.push_str(&format!("export(f{index})\n"));
+            }
+            assert_eq!(call_boundaries(&source, 4), [0], "{prefix:?}");
         }
     }
 
