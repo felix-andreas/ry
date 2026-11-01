@@ -3530,6 +3530,50 @@ explicit allocators".
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
 
+## In-place updates through nested targets
+
+- **Before.** Only `x <- f(x, ...)` with a builtin flagged `reusing_first_argument` updated in
+  place, so `state$seen <- Dict.insert(state$seen, k, v)` copied every step: the list element was
+  a second holder. Compiled code had a hole as well: registers hold values without counting as
+  references, so an update from outside the body (`eval.parent()`, a forced promise) could change
+  a value a register was about to use, and `r <- list(x, h())` with `h` running
+  `eval.parent(quote(x[[1]] <- 99))` gave `r[[1]][[1]] == 99`.
+- **Nested targets.** `rebind` accepts a target that is a chain of `$` or `[[` with a constant
+  name, string or number (`same_expression` compares both sides). `solely_held` walks the chain
+  requiring one reference at each plain list, and no other argument may be the value or a list
+  on the chain, because argument values are not counted (`holds_on_chain`).
+- **Bytecode.** `CallRebinding` carries the target so compiled code takes the same path. It is
+  appended last because `OPS` is indexed by discriminant. The JIT treats it as a generic call and
+  inlines it only when the target's slot type is plain.
+- **Register rule.** `gp::COMPILED_FRAME` marks an environment while a compiled body runs on it.
+  `reuse_permitted(env, value)` allows an update when the flag is clear, when the innermost frame
+  is that environment's own compiled closure (whose updates the compiler orders with
+  `may_modify_in_place`), or when no live register holds the value. A stale register only costs a
+  copy. Applies to `complex_assign` too, so it fixes plain R as well as the library.
+- **Rejected: moving a value into a helper's parameter.** `d <- helper(d, k)` handing the caller's
+  sole reference to the callee was implemented and removed. After an in-place update the caller's
+  variable no longer holds the old value, yet a second argument naming it, a nested closure,
+  `get(..., parent.frame())`, and an error unwinding through the assignment all read it. Making
+  it sound needs escape analysis of the callee plus an undo path, so helpers copy as in GNU R.
+- **Collection storage stays as it is.** A dictionary or set is already struct-of-arrays: a key
+  vector, a value vector and an open-addressing index in an integer vector, all in the collector's
+  heap, which a `SEXP`-holding value must be (`decisions.md`, "Data-oriented design and explicit
+  allocators"). Measured on a release build with 1,000,000 calls each: `Dict.len` (no hashing)
+  costs 0.62 us a call, `Dict.get` on a 1M-entry dictionary 0.67 us, and on a one-entry
+  dictionary 0.56 us. Hashing and probing are at most about 15% of a call; the rest is
+  interpreter dispatch, so a new layout cannot pay and the win is in call overhead.
+- **Impact.** Value semantics are unchanged (pinned in
+  `crates/interp/tests/test_standard_library.rs`, including the cases that broke the move), nested
+  accumulator loops become linear, and incremental analysis is unaffected.
+
+## A key of the wrong type is an error, not a missing key
+
+- A dictionary or set holds keys of one kind. A lookup with a key of another kind used to return
+  `:Err(:KeyNotFound)`, which hid a bug the checker reports statically. It now stops with "the
+  dict's keys are character, and this one is integer; a collection holds one type", through the
+  same `joined_key_kind` check that insertion uses. Integer and double keys still join as numbers,
+  and an empty collection has no kind yet, so any key misses.
+
 ## A function literal in a call argument is typed in context
 
 - **Before.** Every argument inferred before the callee was consulted, so a literal's formals were

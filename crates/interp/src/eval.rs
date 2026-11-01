@@ -2371,7 +2371,10 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
             Ok(value)
         }
         SexpType::Language => {
-            let value = eval(call.arg(1), call.env)?;
+            let value = match superassign {
+                false => rebind(target, call.arg(1), call.env)?,
+                true => eval(call.arg(1), call.env)?,
+            };
             complex_assign(call.call, target, value, call.env, superassign)?;
             Ok(value)
         }
@@ -2379,31 +2382,28 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// Evaluates `value`, the right-hand side of `target <- value`. When it calls a builtin that
-/// reuses its first argument with `target` itself, as in `d <- Dict.insert(d, k, v)`, and the
-/// local binding holds the only reference to that value, the builtin may update it in place:
-/// the old value becomes unreachable the moment the assignment completes, so nobody can observe
-/// the change. This is how `Dict.insert`, `Set.insert` and `List.append` grow in amortized
-/// constant time.
+/// Evaluates `value`, the right-hand side of `target <- value`. When it calls a function with
+/// `target` itself as the first argument, as in `d <- Dict.insert(d, k, v)` or
+/// `state$seen <- Set.insert(state$seen, k)`, the call may update the value in place (see
+/// [`rebind_call`]).
 unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
-    if value.kind() != SexpType::Language
-        || value.car().kind() != SexpType::Symbol
-        || value.cdr().kind() != SexpType::Pairlist
-        || value.cdr().car() != target
-        || value.cdr().tag() != nil()
-    {
+    let first_argument_is_target = value.kind() == SexpType::Language
+        && value.car().kind() == SexpType::Symbol
+        && value.cdr().kind() == SexpType::Pairlist
+        && value.cdr().tag() == nil()
+        && match target.kind() {
+            SexpType::Symbol => value.cdr().car() == target,
+            _ => same_expression(value.cdr().car(), target),
+        };
+    if !first_argument_is_target {
         return eval(value, env);
     }
-    // The rest is `eval_call`, split so a reusing builtin learns what it may reuse.
     let result = (|| {
         crate::unwind::poll_interrupt()?;
         interp().visible = true;
         let function = find_called_fun(value.car(), env, value)?;
         crate::heap().root(function);
-        if function.kind() != SexpType::Builtin || !builtin_def(function)?.reuses_first_argument {
-            return apply_call(value, function, value.cdr(), env);
-        }
-        reuse_first_argument(target, value, function, env)
+        rebind_call(value, function, target, env)
     })();
     match result {
         Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
@@ -2411,17 +2411,187 @@ unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
     }
 }
 
-unsafe fn reuse_first_argument(target: Sexp, value: Sexp, function: Sexp, env: Sexp) -> R<Sexp> {
+/// Calls `function` for `call`, the right-hand side of `target <- call` whose first argument is
+/// `target`. The assignment overwrites `target`, so the value it held becomes unreachable the
+/// moment the assignment completes, and when nothing else references that value the call may
+/// update it in place instead of copying it. This is how `Dict.insert`, `Set.insert` and
+/// `List.append` grow in amortized constant time.
+///
+/// Only a builtin that reuses its first argument is offered the value. A closure always gets
+/// the value shared, as in GNU R: once a callee updated it in place, the caller's variable, which
+/// a second argument, a nested function or `get()` can read while the callee runs and which an
+/// error leaves in place, would no longer hold the old value.
+pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
+    match function.kind() {
+        SexpType::Builtin if builtin_def(function)?.reuses_first_argument => {
+            reuse_first_argument(target, call, function, env)
+        }
+        _ => apply_call(call, function, call.cdr(), env),
+    }
+}
+
+unsafe fn reuse_first_argument(target: Sexp, call: Sexp, function: Sexp, env: Sexp) -> R<Sexp> {
     let definition = builtin_def(function)?;
-    let args = evaluate_args(value.cdr(), env, definition.keep_missing, value)?;
+    let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
+    // Argument values are not counted, so another argument that is the subject, or one of the
+    // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
         subject.refcount() == 1
-            && !args[1..].iter().any(|arg| arg.value == subject)
-            && crate::heap().frame_cell(env, target).is_some_and(|cell| {
-                !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) && cell.cdr() == subject
-            })
+            && solely_held(target, subject, env)
+            && !args[1..]
+                .iter()
+                .any(|arg| arg.value == subject || holds_on_chain(target, env, arg.value))
     });
-    call_builtin_reusing(definition, value, function, &args, env, reusable)
+    call_builtin_reusing(definition, call, function, &args, env, reusable)
+}
+
+/// Whether `subject`, the value of `target`, is referenced only through `target`'s local binding
+/// in `env`, so updating it in place changes nothing but what `target` reads. For a symbol the
+/// binding holds the value itself. For `a$b`, `a[["b"]]` or `a[[2]]`, and chains of them, each container is a plain list that the
+/// one before it holds alone, down to the binding. Every value on the way must be invisible to
+/// compiled code (see [`reuse_permitted`]).
+unsafe fn solely_held(target: Sexp, subject: Sexp, env: Sexp) -> bool {
+    match target.kind() {
+        SexpType::Symbol => {
+            let Some(cell) = crate::heap().frame_cell(env, target) else {
+                return false;
+            };
+            if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
+                return false;
+            }
+            cell.cdr() == subject && reuse_permitted(env, subject)
+        }
+        SexpType::Language => {
+            let Some(container) = held_container(target, env) else {
+                return false;
+            };
+            container.0.element(container.1) == subject && reuse_permitted(env, subject)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `value` is one of the lists on the `a$b` or `a[[i]]` chain `target` updates.
+unsafe fn holds_on_chain(target: Sexp, env: Sexp, value: Sexp) -> bool {
+    let mut link = target;
+    while link.kind() == SexpType::Language {
+        match held_container(link, env) {
+            Some((container, _)) if container == value => return true,
+            Some(_) => link = link.cdr().car(),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The list and position `target`, an `a$b` or `a[[i]]` chain, names, when the list is held
+/// only by the binding or container before it.
+unsafe fn held_container(target: Sexp, env: Sexp) -> Option<(Sexp, usize)> {
+    let symbols = symbols();
+    let head = target.car();
+    let arguments = target.cdr();
+    if (head != symbols.dollar && head != symbols.bracket2)
+        || arguments.kind() != SexpType::Pairlist
+        || arguments.tag() != nil()
+        || arguments.cdr().kind() != SexpType::Pairlist
+        || arguments.cdr().tag() != nil()
+        || arguments.cdr().cdr() != nil()
+    {
+        return None;
+    }
+    let inner = arguments.car();
+    let container = match inner.kind() {
+        SexpType::Symbol => {
+            let cell = crate::heap().frame_cell(env, inner)?;
+            if cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) {
+                return None;
+            }
+            cell.cdr()
+        }
+        SexpType::Language => {
+            let (outer, position) = held_container(inner, env)?;
+            outer.element(position)
+        }
+        _ => return None,
+    };
+    if container.kind() != SexpType::List
+        || container.is_object()
+        || container.is_altrep()
+        || container.refcount() != 1
+        || !reuse_permitted(env, container)
+    {
+        return None;
+    }
+    let index = arguments.cdr().car();
+    let position = match index.kind() {
+        SexpType::Symbol if head == symbols.dollar => {
+            named_position(container, &symbol_name(index))?
+        }
+        SexpType::String if length(index) == 1 && index.element(0) != values::na_string() => {
+            named_position(
+                container,
+                &String::from_utf8_lossy(index.element(0).bytes()),
+            )?
+        }
+        SexpType::Real | SexpType::Integer if head == symbols.bracket2 && length(index) == 1 => {
+            let position = values::as_real_scalar(index);
+            if !(position >= 1.0 && position <= length(container) as f64) {
+                return None;
+            }
+            position as usize - 1
+        }
+        _ => return None,
+    };
+    let element = container.element(position);
+    (element.refcount() == 1).then_some((container, position))
+}
+
+/// The position of the element named exactly `name`, the one `$<-` and `[[<-` replace.
+unsafe fn named_position(list: Sexp, name: &str) -> Option<usize> {
+    let names = values::get_attr(list, symbols().names);
+    if names.kind() != SexpType::String {
+        return None;
+    }
+    (0..length(names)).find(|&position| names.element(position).bytes() == name.as_bytes())
+}
+
+/// Whether two expressions are the same code, as the two sides of `a$b <- f(a$b)` are.
+unsafe fn same_expression(left: Sexp, right: Sexp) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.kind(), right.kind()) {
+        (SexpType::Language, SexpType::Language) | (SexpType::Pairlist, SexpType::Pairlist) => {
+            left.tag() == right.tag()
+                && same_expression(left.car(), right.car())
+                && same_expression(left.cdr(), right.cdr())
+        }
+        (SexpType::String | SexpType::Real | SexpType::Integer, _) => {
+            left.attrib() == nil()
+                && right.attrib() == nil()
+                && crate::sort::identical(left, right, &crate::sort::IdenticalFlags::default())
+        }
+        _ => false,
+    }
+}
+
+/// Whether the value bound in `env` may change in place without compiled code noticing. The
+/// bytecode keeps values in registers that do not count as references, and the compiler keeps a
+/// body's own in-place updates from overlapping such registers (`bytecode::may_modify_in_place`).
+/// A compiled body suspended on `env` while other code runs there, as `eval.parent()` or a
+/// forced promise does, has no such guard, so the update must wait for a value no register
+/// holds.
+pub unsafe fn reuse_permitted(env: Sexp, value: Sexp) -> bool {
+    if !env.has_gp(gp::COMPILED_FRAME) {
+        return true;
+    }
+    let innermost = interp().frames.last();
+    // `eval()` pushes a frame on the env it evaluates in whose function is the builtin.
+    innermost.is_some_and(|frame| {
+        frame.env == env
+            && frame.function.kind() == SexpType::Closure
+            && bytecode::is_compiled(frame.function)
+    }) || !bytecode::registers_hold(value)
 }
 
 pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: bool) -> R<()> {
@@ -2484,8 +2654,16 @@ pub unsafe fn complex_assign(
     if base.kind() == SexpType::Promise {
         base = force_promise(base)?;
     }
-    let local_binding = crate::heap().frame_cell(env, inner).is_some();
-    if values::maybe_shared(base) || (!superassign && !local_binding) {
+    let heap = crate::heap();
+    let local_binding = heap.frame_cell(env, inner).is_some();
+    let mut binding_env = lookup_env;
+    while binding_env != heap.known().empty_env && heap.frame_cell(binding_env, inner).is_none() {
+        binding_env = binding_env.enclosure();
+    }
+    if values::maybe_shared(base)
+        || (!superassign && !local_binding)
+        || !reuse_permitted(binding_env, base)
+    {
         // A copy-on-write copy is the same value, so an Array stays an Array; the
         // replacement function decides whether the write keeps it one.
         let was_array = base.is_array();
@@ -2526,7 +2704,10 @@ pub unsafe fn complex_assign(
         // the replacement function would always see its target as shared and copy it.
         let object_promise = forced_promise(object_code, object)?;
         crate::heap().untrack_references(object_promise);
+        // GNU R's value promise does not count either, so a replacement that updated its target
+        // in place stays uniquely referenced for the next update.
         let value_promise = forced_promise(replacement, replacement)?;
+        crate::heap().untrack_references(value_promise);
         let mut items = vec![(nil(), setter), (nil(), object_promise)];
         for (tag, argument) in values::pairlist_items(getter.cdr().cdr()) {
             items.push((tag, argument));
