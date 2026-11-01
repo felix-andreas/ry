@@ -2358,8 +2358,24 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
     let must_work = values::as_logical_scalar(call.arg(2));
     // Only Windows has a second separator to choose; elsewhere `winslash` is ignored, as in GNU R.
-    let separator =
-        values::first_string(call.arg(1)).map_or_else(|| "\\".to_owned(), |text| text.into_owned());
+    let separator = if cfg!(windows) {
+        let slash = call.arg(1);
+        if slash.kind() != SexpType::String || length(slash) != 1 {
+            return Err(call.error("'winslash' must be a character string"));
+        }
+        match values::string_at(slash, 0).as_deref() {
+            Some(text @ ("/" | "\\")) => text.to_owned(),
+            _ => return Err(call.error("'winslash' must be '/' or '\\\\'")),
+        }
+    } else {
+        String::new()
+    };
+    // GNU R reports the Windows system message for a path that does not exist.
+    let missing = if cfg!(windows) {
+        "The system cannot find the file specified"
+    } else {
+        "No such file or directory"
+    };
     let count = length(paths);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
@@ -2385,18 +2401,22 @@ unsafe fn do_normalize_path(call: &Call<'_>) -> R<Sexp> {
             Ok(canonical) => crate::platform::path_text(&canonical),
             Err(_) => {
                 if must_work == 1 {
-                    return Err(call.error(format!(
-                        "path[{}]=\"{path}\": No such file or directory",
-                        index + 1
-                    )));
+                    return Err(call.error(format!("path[{}]=\"{path}\": {missing}", index + 1)));
                 }
                 if must_work == NA_INTEGER {
                     crate::conditions::warning_call(
                         call.call,
-                        format!("path[{}]=\"{path}\": No such file or directory", index + 1),
+                        format!("path[{}]=\"{path}\": {missing}", index + 1),
                     )?;
                 }
-                expanded
+                // Windows makes a path that does not exist absolute, as GetFullPathName does;
+                // elsewhere it comes back as given, after tilde expansion.
+                match std::path::absolute(&expanded) {
+                    Ok(absolute) if cfg!(windows) => {
+                        crate::platform::path_text(&absolute).replace('\\', &separator)
+                    }
+                    _ => expanded,
+                }
             }
         };
         values::set_elt(result, index, values::mkchar(&normalized)?);
@@ -3187,7 +3207,7 @@ pub fn convert_to_utf8_prefix(from: &str, bytes: &[u8]) -> Option<(Vec<u8>, bool
         let (written, stop) = converter.0.convert(&mut rest, &mut buffer);
         output.extend_from_slice(&buffer[..written]);
         match stop {
-            Ok(()) => return Some((output, true)),
+            Ok(_) => return Some((output, true)),
             Err(IconvStop::OutputFull) => {}
             Err(_) => return Some((output, false)),
         }

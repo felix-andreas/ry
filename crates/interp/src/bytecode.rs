@@ -446,21 +446,36 @@ pub const ARITHS: [(Arith, &str); 11] = [
 
 /// Type feedback: the kinds of value an instruction produced, one bit per kind. A scalar is a
 /// length-one vector and a plain vector is any other; both have no attributes and are not
-/// ALTREP.
+/// ALTREP. An Array of logical, integer or double items is its own kind at every length, because
+/// it promises what a plain vector does not (no NA, no attributes) and its operators differ.
 pub mod feedback {
-    pub const INTEGER_SCALAR: u8 = 1 << 0;
-    pub const DOUBLE_SCALAR: u8 = 1 << 1;
-    pub const LOGICAL_SCALAR: u8 = 1 << 2;
-    pub const INTEGER_VECTOR: u8 = 1 << 3;
-    pub const DOUBLE_VECTOR: u8 = 1 << 4;
-    pub const LOGICAL_VECTOR: u8 = 1 << 5;
-    pub const LIST: u8 = 1 << 6;
-    pub const OTHER: u8 = 1 << 7;
+    pub const INTEGER_SCALAR: u16 = 1 << 0;
+    pub const DOUBLE_SCALAR: u16 = 1 << 1;
+    pub const LOGICAL_SCALAR: u16 = 1 << 2;
+    pub const INTEGER_VECTOR: u16 = 1 << 3;
+    pub const DOUBLE_VECTOR: u16 = 1 << 4;
+    pub const LOGICAL_VECTOR: u16 = 1 << 5;
+    pub const LIST: u16 = 1 << 6;
+    pub const OTHER: u16 = 1 << 7;
+    pub const INTEGER_ARRAY: u16 = 1 << 8;
+    pub const DOUBLE_ARRAY: u16 = 1 << 9;
+    pub const LOGICAL_ARRAY: u16 = 1 << 10;
 }
 
 /// The [`feedback`] bit for `value`.
-pub unsafe fn value_kind(value: Sexp) -> u8 {
-    if values::has_attributes(value) || value.is_altrep() || value.is_array() {
+pub unsafe fn value_kind(value: Sexp) -> u16 {
+    if value.is_altrep() {
+        return feedback::OTHER;
+    }
+    if value.is_array() {
+        return match value.kind() {
+            SexpType::Integer => feedback::INTEGER_ARRAY,
+            SexpType::Real => feedback::DOUBLE_ARRAY,
+            SexpType::Logical => feedback::LOGICAL_ARRAY,
+            _ => feedback::OTHER,
+        };
+    }
+    if values::has_attributes(value) {
         return feedback::OTHER;
     }
     let scalar = value.length() == 1;
@@ -551,8 +566,8 @@ unsafe fn compile(body: Sexp, function: Sexp) -> R<Option<Sexp>> {
     let epochs = values::alloc(SexpType::Real, compiler.caches as usize)?;
     values::reals_mut(epochs).fill(-1.0);
     heap.set_element(constants, EPOCHS, epochs);
-    let feedback = values::alloc(SexpType::Raw, compiler.code.len())?;
-    values::raws_mut(feedback).fill(0);
+    let feedback = values::alloc(SexpType::Integer, compiler.code.len())?;
+    values::ints_mut(feedback).fill(0);
     heap.set_element(constants, FEEDBACK, feedback);
     let profile = values::alloc(SexpType::Integer, profile::LENGTH)?;
     values::ints_mut(profile).fill(0);
@@ -2196,7 +2211,7 @@ unsafe fn call_builtin(
 
 unsafe fn record_feedback(constants: Sexp, pc: usize, value: Sexp) {
     let feedback = constants.element(FEEDBACK);
-    values::raws_mut(feedback)[pc] |= value_kind(value);
+    values::ints_mut(feedback)[pc] |= i32::from(value_kind(value));
 }
 
 /// Arithmetic and comparison on two attribute-free scalar doubles or integers. `None` sends the

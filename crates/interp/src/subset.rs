@@ -441,9 +441,15 @@ unsafe fn scalar_position(call: &Call<'_>) -> Option<(Sexp, usize)> {
         SexpType::Real => index.slice::<f64>()[0],
         _ => return None,
     };
-    // NaN fails both comparisons, and `x[2.7]` truncates to the second element.
-    (position >= 1.0 && position < length(object) as f64 + 1.0)
-        .then(|| (object, position as usize - 1))
+    // NaN fails both comparisons, and `x[2.7]` truncates to the second element. An Array
+    // rejects a position past its last item before truncating, which its own path reports.
+    let count = length(object) as f64;
+    let within = if object.is_array() {
+        position <= count
+    } else {
+        position < count + 1.0
+    };
+    (position >= 1.0 && within).then(|| (object, position as usize - 1))
 }
 
 /// Splits a builtin's arguments into the object, the subscripts, and `drop`/`exact`.
@@ -475,8 +481,10 @@ unsafe fn subset_args(call: &Call<'_>) -> (Sexp, Vec<Sexp>, Option<Sexp>, Option
 // `[`.
 
 unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
+    // `[` on an Array makes an Array, which `subset` builds.
     if let Some((object, position)) = scalar_position(call)
         && !values::has_attributes(object)
+        && !object.is_array()
         && object.kind().is_atomic()
     {
         return vector_element(object, position);

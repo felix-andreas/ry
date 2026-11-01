@@ -1960,11 +1960,13 @@ dependencies = [
 name = "jit"
 version = "0.4.0-beta"
 dependencies = [
+ "bumpalo",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "hashbrown 0.17.1",
  "heap",
  "interp",
  "rustc-hash 2.1.3",

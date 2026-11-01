@@ -10,6 +10,11 @@
 //! generation and deoptimization need: the typed plan is the JIT's intermediate representation,
 //! and Cranelift's frontend turns it into SSA.
 //!
+//! The plan is data-oriented and lives in one bump arena per compilation, dropped once code
+//! generation is done: the abstract states are rows of one flat matrix addressed by
+//! [`StateId`], liveness is a bitset per instruction, and instructions borrow their operands from
+//! the bytecode words instead of copying them.
+//!
 //! Variables live in *slots*, one per symbol the body reads or assigns, instead of in the
 //! environment. A slot's runtime status says where its value is: not loaded yet (the environment
 //! is the truth), loaded from the activation's own frame, loaded from an enclosing environment,
@@ -18,13 +23,39 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 use {
+    bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
+        annotations::{self, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
         values,
     },
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::{FxBuildHasher, FxHashSet},
+    smallvec::SmallVec,
+    std::{
+        alloc::{AllocError, Allocator, Layout},
+        ptr::NonNull,
+    },
 };
+
+/// A growable array in the compilation's arena.
+pub type List<'a, T> = Vec<T, Arena<'a>>;
+type Map<'a, K, V> = hashbrown::HashMap<K, V, FxBuildHasher, Arena<'a>>;
+
+/// A compilation's bump arena as a std allocator. Freeing is a no-op, because the whole arena
+/// is reset once the compilation is done. (bumpalo's own `allocator_api` feature would replace
+/// the `allocator-api2` implementation Cranelift's register allocator relies on.)
+#[derive(Clone, Copy)]
+pub struct Arena<'a>(pub &'a Bump);
+
+unsafe impl Allocator for Arena<'_> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let pointer = self.0.try_alloc_layout(layout).map_err(|_| AllocError)?;
+        Ok(NonNull::slice_from_raw_parts(pointer, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, _pointer: NonNull<u8>, _layout: Layout) {}
+}
 
 /// What compiled code knows about a value, which decides its machine representation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +74,11 @@ pub enum Ty {
     LglVec,
     /// A boxed, attribute-free list.
     List,
+    /// A boxed `Array<integer>`, `Array<double>` or `Array<logical>` of any length: a vector with
+    /// the Array bit, which promises no attributes and no NA.
+    IntArr,
+    DblArr,
+    LglArr,
     /// A boxed function known to be exactly this object.
     Fun(Sexp),
     /// A closure made by a `function` expression of this body, in this activation's
@@ -70,13 +106,27 @@ impl Ty {
         matches!(self, Ty::IntVec | Ty::DblVec | Ty::LglVec)
     }
 
+    pub fn is_array(self) -> bool {
+        matches!(self, Ty::IntArr | Ty::DblArr | Ty::LglArr)
+    }
+
     /// The scalar type of one element.
     pub fn element(self) -> Ty {
         match self {
-            Ty::IntVec | Ty::Int => Ty::Int,
-            Ty::DblVec | Ty::Dbl => Ty::Dbl,
-            Ty::LglVec | Ty::Lgl => Ty::Lgl,
+            Ty::IntVec | Ty::IntArr | Ty::Int => Ty::Int,
+            Ty::DblVec | Ty::DblArr | Ty::Dbl => Ty::Dbl,
+            Ty::LglVec | Ty::LglArr | Ty::Lgl => Ty::Lgl,
             _ => Ty::Boxed,
+        }
+    }
+
+    /// The storage type of an unboxed scalar of this type.
+    pub fn storage(self) -> Option<SexpType> {
+        match self {
+            Ty::Dbl => Some(SexpType::Real),
+            Ty::Int => Some(SexpType::Integer),
+            Ty::Lgl => Some(SexpType::Logical),
+            _ => None,
         }
     }
 
@@ -102,8 +152,8 @@ impl Ty {
 }
 
 /// The type tier 0's feedback bits speculate on.
-pub fn from_feedback(bits: u8) -> Ty {
-    let within = |mask: u8| bits & !mask == 0;
+pub fn from_feedback(bits: u16) -> Ty {
+    let within = |mask: u16| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
         feedback::INTEGER_SCALAR => Ty::Int,
@@ -113,6 +163,9 @@ pub fn from_feedback(bits: u8) -> Ty {
         _ if within(feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR) => Ty::DblVec,
         _ if within(feedback::LOGICAL_SCALAR | feedback::LOGICAL_VECTOR) => Ty::LglVec,
         feedback::LIST => Ty::List,
+        feedback::INTEGER_ARRAY => Ty::IntArr,
+        feedback::DOUBLE_ARRAY => Ty::DblArr,
+        feedback::LOGICAL_ARRAY => Ty::LglArr,
         _ => Ty::Boxed,
     }
 }
@@ -145,7 +198,10 @@ impl Slot {
     };
 
     fn join(self, other: Slot) -> Slot {
-        let ty = if self.status & status::LOADED == 0 {
+        let ty = if self.status & status::LOADED == 0 && other.status & status::LOADED == 0 {
+            // Both forgotten: the types are what a reload speculates on.
+            self.ty.join(other.ty)
+        } else if self.status & status::LOADED == 0 {
             other.ty
         } else if other.status & status::LOADED == 0 {
             self.ty
@@ -173,42 +229,34 @@ impl Slot {
     }
 }
 
-/// The abstract state before an instruction.
+/// The abstract state the analysis works on: one mutable row, copied into [`States`] wherever
+/// the plan keeps it.
 #[derive(Clone, PartialEq, Debug)]
-pub struct State {
-    pub registers: Vec<Ty>,
-    pub slots: Vec<Slot>,
+pub struct State<'a> {
+    pub registers: List<'a, Ty>,
+    pub slots: List<'a, Slot>,
     /// What `R_Visible` holds, when known, so redundant stores can be skipped.
     pub visible: Option<bool>,
 }
 
-impl State {
-    fn join(&self, other: &State) -> State {
-        State {
-            registers: self
-                .registers
-                .iter()
-                .zip(&other.registers)
-                .map(|(a, b)| a.join(*b))
-                .collect(),
-            slots: self
-                .slots
-                .iter()
-                .zip(&other.slots)
-                .map(|(a, b)| a.join(*b))
-                .collect(),
-            visible: if self.visible == other.visible {
-                self.visible
-            } else {
-                None
-            },
-        }
+impl<'a> State<'a> {
+    fn bottom(arena: Arena<'a>, registers: usize, slots: usize) -> State<'a> {
+        let mut state = State {
+            registers: List::with_capacity_in(registers, arena),
+            slots: List::with_capacity_in(slots, arena),
+            visible: None,
+        };
+        state.registers.resize(registers, Ty::Bottom);
+        state.slots.resize(slots, Slot::UNLOADED);
+        state
     }
 
-    /// Forgets every variable, after code that may have rebound any of them ran.
+    /// Forgets every variable's value, after code that may have rebound any of them ran, but
+    /// keeps its type, which a reload whose instruction has no feedback yet speculates on (and
+    /// checks).
     fn forget_slots(&mut self) {
         for slot in &mut self.slots {
-            *slot = Slot::UNLOADED;
+            slot.status = status::NOT_LOADED;
         }
     }
 
@@ -220,14 +268,196 @@ impl State {
             }
         }
     }
+
+    fn join(&mut self, other: &State) {
+        for (mine, theirs) in self.registers.iter_mut().zip(&other.registers) {
+            *mine = mine.join(*theirs);
+        }
+        for (mine, theirs) in self.slots.iter_mut().zip(&other.slots) {
+            *mine = mine.join(*theirs);
+        }
+        if self.visible != other.visible {
+            self.visible = None;
+        }
+    }
 }
 
-/// One decoded instruction.
-#[derive(Clone, Debug)]
-pub struct Inst {
+/// A row of [`States`].
+pub type StateId = u32;
+
+/// Every abstract state a plan keeps, as rows of one matrix: a row's registers, slots and
+/// visibility sit at `id * width` in three parallel arrays.
+pub struct States<'a> {
+    registers: usize,
+    slots: usize,
+    types: List<'a, Ty>,
+    slot_rows: List<'a, Slot>,
+    visible: List<'a, Option<bool>>,
+}
+
+/// One row of [`States`].
+#[derive(Clone, Copy, Debug)]
+pub struct StateRef<'p> {
+    pub id: StateId,
+    pub registers: &'p [Ty],
+    pub slots: &'p [Slot],
+    pub visible: Option<bool>,
+}
+
+impl<'a> States<'a> {
+    fn new_in(arena: Arena<'a>, registers: usize, slots: usize) -> States<'a> {
+        States {
+            registers,
+            slots,
+            types: List::new_in(arena),
+            slot_rows: List::new_in(arena),
+            visible: List::new_in(arena),
+        }
+    }
+
+    fn rows(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Makes room for `rows` more rows. Growing a list in the arena copies it and abandons the
+    /// old buffer, so a pass that knows roughly how many rows it adds reserves them first.
+    fn reserve(&mut self, rows: usize) {
+        self.types.reserve(rows * self.registers);
+        self.slot_rows.reserve(rows * self.slots);
+        self.visible.reserve(rows);
+    }
+
+    fn push(&mut self, state: &State) -> StateId {
+        let id = self.rows() as StateId;
+        self.types.extend_from_slice(&state.registers);
+        self.slot_rows.extend_from_slice(&state.slots);
+        self.visible.push(state.visible);
+        id
+    }
+
+    fn truncate(&mut self, rows: usize) {
+        self.types.truncate(rows * self.registers);
+        self.slot_rows.truncate(rows * self.slots);
+        self.visible.truncate(rows);
+    }
+
+    pub fn get(&self, id: StateId) -> StateRef<'_> {
+        let row = id as usize;
+        StateRef {
+            id,
+            registers: &self.types[row * self.registers..(row + 1) * self.registers],
+            slots: &self.slot_rows[row * self.slots..(row + 1) * self.slots],
+            visible: self.visible[row],
+        }
+    }
+
+    fn load(&self, id: StateId, into: &mut State) {
+        let row = self.get(id);
+        into.registers.copy_from_slice(row.registers);
+        into.slots.copy_from_slice(row.slots);
+        into.visible = row.visible;
+    }
+
+    fn store(&mut self, id: StateId, state: &State) {
+        let row = id as usize;
+        self.types[row * self.registers..(row + 1) * self.registers]
+            .copy_from_slice(&state.registers);
+        self.slot_rows[row * self.slots..(row + 1) * self.slots].copy_from_slice(&state.slots);
+        self.visible[row] = state.visible;
+    }
+
+    /// Joins row `from` into row `into`, returning whether `into` changed.
+    fn join_into(&mut self, into: StateId, from: StateId) -> bool {
+        let (into, from) = (into as usize, from as usize);
+        let mut changed = false;
+        for register in 0..self.registers {
+            let (target, source) = (
+                into * self.registers + register,
+                from * self.registers + register,
+            );
+            let joined = self.types[target].join(self.types[source]);
+            changed |= joined != self.types[target];
+            self.types[target] = joined;
+        }
+        for slot in 0..self.slots {
+            let (target, source) = (into * self.slots + slot, from * self.slots + slot);
+            let joined = self.slot_rows[target].join(self.slot_rows[source]);
+            changed |= joined != self.slot_rows[target];
+            self.slot_rows[target] = joined;
+        }
+        if self.visible[into] != self.visible[from] && self.visible[into].is_some() {
+            self.visible[into] = None;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Prepares an edge's state for joining into the block it enters: registers dead there are
+    /// dropped, and at a loop header every variable may also be unloaded, since on-stack
+    /// replacement enters there with the environment as the truth.
+    fn adapt_edge(&mut self, id: StateId, live: &[u64], loop_header: bool) {
+        let row = id as usize;
+        for register in 0..self.registers {
+            if !bit(live, register) {
+                self.types[row * self.registers + register] = Ty::Bottom;
+            }
+        }
+        if loop_header {
+            for slot in &mut self.slot_rows[row * self.slots..(row + 1) * self.slots] {
+                *slot = slot.join(Slot::UNLOADED);
+            }
+        }
+    }
+}
+
+/// Live registers before each instruction, one bitset row per instruction.
+pub struct Live<'a> {
+    words: usize,
+    bits: List<'a, u64>,
+}
+
+impl Live<'_> {
+    fn row(&self, position: usize) -> &[u64] {
+        self.bits
+            .get(position * self.words..(position + 1) * self.words)
+            .unwrap_or(&[])
+    }
+
+    /// Whether `register` is live before the instruction at `position`; nothing is live past the
+    /// last instruction.
+    pub fn get(&self, position: usize, register: usize) -> bool {
+        bit(self.row(position), register)
+    }
+}
+
+fn bit(words: &[u64], index: usize) -> bool {
+    words
+        .get(index / 64)
+        .is_some_and(|word| word & (1 << (index % 64)) != 0)
+}
+
+fn set_bit(words: &mut [u64], index: usize, value: bool) {
+    if let Some(word) = words.get_mut(index / 64) {
+        if value {
+            *word |= 1 << (index % 64);
+        } else {
+            *word &= !(1 << (index % 64));
+        }
+    }
+}
+
+/// One decoded instruction, whose operands are the bytecode's own words.
+#[derive(Clone, Copy, Debug)]
+pub struct Inst<'a> {
     pub pc: usize,
     pub op: Op,
-    pub operands: Vec<usize>,
+    operands: &'a [i32],
+}
+
+impl Inst<'_> {
+    pub fn operand(&self, index: usize) -> usize {
+        self.operands[index] as usize
+    }
 }
 
 /// How an instruction the JIT does not specialize affects the compiled activation.
@@ -294,13 +524,15 @@ pub enum Argument {
 }
 
 /// What compiled code does at one instruction.
-#[derive(Clone, Debug)]
-pub enum Action {
+#[derive(Clone, Copy, Debug)]
+pub enum Action<'a> {
     /// Nothing: the instruction is unreachable or folds away.
     Skip,
     /// Stores `NULL` into registers whose values are dead, so the collector can reclaim them.
+    /// `register` and the registers in `range`.
     Clear {
-        registers: Vec<usize>,
+        register: usize,
+        range: (usize, usize),
     },
     Constant {
         dst: usize,
@@ -334,7 +566,7 @@ pub enum Action {
     /// registers past tier 0's own. The steps have no effect but loading slots, so every check
     /// that fails in them hands the call itself back to tier 0.
     Inline {
-        steps: Vec<(Action, State)>,
+        steps: &'a [(Action<'a>, StateId)],
     },
     /// Loads a slot without forcing a promise, handing the instruction to tier 0 when the
     /// variable is not a plain value. Only inlined calls use it.
@@ -351,16 +583,18 @@ pub enum Action {
     /// Calls a closure known at compile time with arguments evaluated by `steps`, binding each
     /// to a promise that already holds its value, then refines the result to `dst`'s type.
     Call {
-        steps: Vec<(Action, State)>,
+        steps: &'a [(Action<'a>, StateId)],
         function: Sexp,
         call: Sexp,
-        args: Vec<Argument>,
+        args: &'a [Argument],
+        /// The callee's annotation checks, decided from the arguments' compile-time types.
+        entry: Entry,
         dst: (usize, Ty),
     },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
         effect: Effect,
-        objects: Vec<usize>,
+        objects: &'a [usize],
         dst: Option<(usize, Ty)>,
     },
     /// The instruction's check always passes, so control falls through.
@@ -398,7 +632,7 @@ pub enum Action {
     Intrinsic {
         intrinsic: Intrinsic,
         dst: usize,
-        args: Vec<usize>,
+        args: &'a [usize],
         result: Ty,
     },
     Return {
@@ -456,36 +690,66 @@ pub struct Block {
     pub start: usize,
     /// One past the last instruction.
     pub end: usize,
-    pub entry: Option<State>,
+    pub entry: Option<StateId>,
 }
 
-pub struct Plan {
-    pub insts: Vec<Inst>,
+/// No block starts at this pc.
+const NO_BLOCK: u32 = u32::MAX;
+
+pub struct Plan<'a> {
+    pub insts: List<'a, Inst<'a>>,
     /// Registers past tier 0's that hold the unboxed values of inlined calls. They never live
     /// across an instruction and never reach tier 0.
     pub temporaries: usize,
-    pub blocks: Vec<Block>,
-    /// The block each leader pc starts.
-    pub block_at: FxHashMap<usize, usize>,
-    pub actions: Vec<Action>,
+    pub blocks: List<'a, Block>,
+    /// The block each pc starts, by pc, or [`NO_BLOCK`].
+    block_at: List<'a, u32>,
+    pub actions: List<'a, Action<'a>>,
     /// The state before each instruction, `None` when it is unreachable.
-    pub before: Vec<Option<State>>,
-    /// Live registers before each instruction.
-    pub live: Vec<Vec<bool>>,
-    pub slots: Vec<Sexp>,
+    before: List<'a, Option<StateId>>,
+    pub live: Live<'a>,
+    pub slots: List<'a, Sexp>,
     pub registers: usize,
     pub loops: usize,
-    pub speculations: Vec<Speculation>,
-    /// The state along each edge leaving each instruction, by target pc, the fallthrough edge
-    /// included.
-    pub edges: Vec<Vec<(usize, State)>>,
+    pub speculations: List<'a, Speculation>,
+    /// The edges leaving instruction `position` are `edges[edge_ranges[position]..edge_ranges[position + 1]]`:
+    /// the state along each, by target pc, the fallthrough edge included.
+    edge_ranges: List<'a, u32>,
+    edges: List<'a, (usize, StateId)>,
+    pub states: States<'a>,
     /// Blocks a backward jump targets, where on-stack replacement may enter.
-    pub loop_headers: Vec<usize>,
+    pub loop_headers: List<'a, usize>,
+}
+
+impl Plan<'_> {
+    pub fn block_at(&self, pc: usize) -> Option<usize> {
+        self.block_at
+            .get(pc)
+            .copied()
+            .filter(|&block| block != NO_BLOCK)
+            .map(|block| block as usize)
+    }
+
+    pub fn before(&self, position: usize) -> Option<StateRef<'_>> {
+        self.before[position].map(|id| self.states.get(id))
+    }
+
+    pub fn edges(&self, position: usize) -> &[(usize, StateId)] {
+        let (start, end) = (
+            self.edge_ranges[position] as usize,
+            self.edge_ranges[position + 1] as usize,
+        );
+        &self.edges[start..end]
+    }
+
+    pub fn state(&self, id: StateId) -> StateRef<'_> {
+        self.states.get(id)
+    }
 }
 
 /// The formals whose default is an expression rather than a constant or nothing.
-unsafe fn defaulted_formals(formals: Sexp) -> FxHashSet<Sexp> {
-    let mut defaulted = FxHashSet::default();
+unsafe fn defaulted_formals(formals: Sexp, arena: Arena<'_>) -> Map<'_, Sexp, ()> {
+    let mut defaulted = Map::with_hasher_in(FxBuildHasher, arena);
     let mut formal = formals;
     while formal.kind() == SexpType::Pairlist {
         let default = formal.car();
@@ -494,7 +758,7 @@ unsafe fn defaulted_formals(formals: Sexp) -> FxHashSet<Sexp> {
             SexpType::Language | SexpType::Symbol | SexpType::Promise
         ) && default != values::missing_arg()
         {
-            defaulted.insert(formal.tag());
+            defaulted.insert(formal.tag(), ());
         }
         formal = formal.cdr();
     }
@@ -508,24 +772,20 @@ const TEMPORARIES: usize = 32;
 const MAX_INLINE_DEPTH: usize = 3;
 
 /// An inlined call being lowered.
-struct Lowering {
+struct Lowering<'a> {
     /// The state as of the next step.
-    state: State,
-    steps: Vec<(Action, State)>,
+    state: State<'a>,
+    steps: List<'a, (Action<'a>, StateId)>,
     /// The next free temporary register.
     next: usize,
     /// The formals of the closure being inlined and the registers holding their arguments.
-    scope: Vec<(Sexp, usize)>,
+    scope: SmallVec<[(Sexp, usize); 4]>,
     /// The environment of the closure being inlined when it is not this activation's, in
     /// which case its body sees only its formals and the functions of that environment.
     closed: Option<Sexp>,
 }
 
-impl Lowering {
-    fn push(&mut self, action: Action) {
-        self.steps.push((action, self.state.clone()));
-    }
-
+impl Lowering<'_> {
     fn temporary(&mut self) -> Option<usize> {
         (self.next < self.state.registers.len()).then(|| {
             self.next += 1;
@@ -542,52 +802,105 @@ pub struct Refusal(pub &'static str);
 /// which a later attempt may well get past.
 pub const COLD: &str = "the body has no type feedback yet";
 
-/// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`.
-pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, Refusal> {
+/// The refusal for a body without a loop whose compiled code would hand every instruction that
+/// does real work back to tier 0, such as a wrapper around one `.Internal` call. Such code saves
+/// tier 0 only its dispatch, which repays the compilation after far more calls than most such
+/// bodies ever get.
+pub const NOTHING_NATIVE: &str = "compiled code would run nothing natively";
+
+impl Plan<'_> {
+    /// Whether compiled code would do some of the body's work itself: a loop, or arithmetic,
+    /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
+    /// makes directly.
+    pub fn runs_natively(&self) -> bool {
+        !self.loop_headers.is_empty()
+            || self.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    Action::Inline { .. }
+                        | Action::Call { .. }
+                        | Action::Arithmetic { .. }
+                        | Action::Comparison { .. }
+                        | Action::Intrinsic { .. }
+                        | Action::SubAssign { .. }
+                        | Action::LogicLeft { .. }
+                        | Action::LogicRight { .. }
+                )
+            })
+    }
+}
+
+/// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
+/// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
+/// has never run, because code compiled without that type runs the instruction in tier 0 for
+/// as long as it lives.
+pub unsafe fn plan<'a>(
+    arena: Arena<'a>,
+    code: Sexp,
+    formals: Sexp,
+    enclosure: Sexp,
+    patient: bool,
+) -> Result<Plan<'a>, Refusal> {
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
     // A body that reflects on its frame can bind any symbol, which slots cannot model.
     let Some(locals) = bytecode::local_symbols(source, formals) else {
         return Err(Refusal("the body reflects on its frame"));
     };
-    let insts = decode(code)?;
+    let insts = decode(arena, code)?;
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
     let loops = bytecode::loop_count(code);
     let mut builder = Builder {
+        arena,
         code,
         enclosure,
-        feedback: values::raws(constants.element(FEEDBACK)),
+        feedback: values::ints(constants.element(FEEDBACK)),
         insts,
-        slot_of: FxHashMap::default(),
-        slots: Vec::new(),
-        locals,
-        speculated: FxHashMap::default(),
-        speculations: Vec::new(),
+        slot_of: Map::with_hasher_in(FxBuildHasher, arena),
+        slots: List::new_in(arena),
+        speculated: Map::with_hasher_in(FxBuildHasher, arena),
+        speculations: List::new_in(arena),
         registers,
-        defaulted: defaulted_formals(formals),
-        hints: Vec::new(),
-        frame_safe: FxHashMap::default(),
+        defaulted: defaulted_formals(formals, arena),
+        locals,
+        hints: List::new_in(arena),
+        frame_safe: Map::with_hasher_in(FxBuildHasher, arena),
+        states: States::new_in(arena, registers + TEMPORARIES, 0),
+        edges: List::new_in(arena),
+        patient,
     };
     builder.collect_slots();
+    builder.states = States::new_in(arena, registers + TEMPORARIES, builder.slots.len());
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
     let live = builder.liveness(&blocks, &successors);
     builder.fixpoint(&mut blocks, &block_at, &live, &loop_headers)?;
-    let mut actions = Vec::with_capacity(builder.insts.len());
-    let mut before = vec![None; builder.insts.len()];
-    let mut edges = vec![Vec::new(); builder.insts.len()];
+    let count = builder.insts.len();
+    let mut actions = List::with_capacity_in(count, arena);
+    let mut before = List::with_capacity_in(count, arena);
+    before.resize(count, None);
+    let mut edge_ranges = List::with_capacity_in(count + 1, arena);
+    let mut edges = List::new_in(arena);
+    let mut state = State::bottom(arena, registers + TEMPORARIES, builder.slots.len());
+    // Each instruction adds the row before it and usually a fallthrough edge.
+    builder.states.reserve(2 * count + blocks.len());
     for block in &blocks {
-        let Some(entry) = &block.entry else {
-            actions.extend((block.start..block.end).map(|_| Action::Skip));
+        let Some(entry) = block.entry else {
+            for _ in block.start..block.end {
+                actions.push(Action::Skip);
+                edge_ranges.push(edges.len() as u32);
+            }
             continue;
         };
-        let mut state = entry.clone();
+        builder.states.load(entry, &mut state);
         for position in block.start..block.end {
-            before[position] = Some(state.clone());
-            let (action, out) = builder.transfer(position, &mut state)?;
-            actions.push(action);
-            edges[position] = out;
+            before[position] = Some(builder.states.push(&state));
+            builder.edges.clear();
+            actions.push(builder.transfer(position, &mut state)?);
+            edge_ranges.push(edges.len() as u32);
+            edges.extend_from_slice(&builder.edges);
         }
     }
+    edge_ranges.push(edges.len() as u32);
     Ok(Plan {
         temporaries: TEMPORARIES,
         insts: builder.insts,
@@ -600,15 +913,17 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         registers,
         loops,
         speculations: builder.speculations,
+        edge_ranges,
         edges,
+        states: builder.states,
         loop_headers,
     })
 }
 
 /// Decodes the instruction words.
-pub unsafe fn decode(code: Sexp) -> Result<Vec<Inst>, Refusal> {
+pub unsafe fn decode(arena: Arena<'_>, code: Sexp) -> Result<List<'_, Inst<'_>>, Refusal> {
     let words = values::ints(code.car());
-    let mut insts = Vec::new();
+    let mut insts = List::new_in(arena);
     let mut pc = 0;
     while pc < words.len() {
         let op = *OPS
@@ -618,11 +933,7 @@ pub unsafe fn decode(code: Sexp) -> Result<Vec<Inst>, Refusal> {
         let operands = words
             .get(pc + 1..pc + 1 + count)
             .ok_or(Refusal("a truncated instruction"))?;
-        insts.push(Inst {
-            pc,
-            op,
-            operands: operands.iter().map(|&word| word as usize).collect(),
-        });
+        insts.push(Inst { pc, op, operands });
         pc += 1 + count;
     }
     Ok(insts)
@@ -729,30 +1040,36 @@ const PURE_BUILTINS: &[&str] = &[
 ];
 
 struct Builder<'a> {
+    arena: Arena<'a>,
     code: Sexp,
     enclosure: Sexp,
-    feedback: &'a [u8],
-    insts: Vec<Inst>,
-    slot_of: FxHashMap<Sexp, usize>,
-    slots: Vec<Sexp>,
-    /// The symbols the frame can bind, formals included. A function lookup of one of them may
-    /// find the frame's own binding, so it cannot be speculated from the enclosure.
-    locals: FxHashSet<Sexp>,
+    feedback: &'a [i32],
+    insts: List<'a, Inst<'a>>,
+    slot_of: Map<'a, Sexp, usize>,
+    slots: List<'a, Sexp>,
     /// Speculation results by symbol, so each lookup resolves once.
-    speculated: FxHashMap<Sexp, Option<Sexp>>,
-    speculations: Vec<Speculation>,
+    speculated: Map<'a, Sexp, Option<Sexp>>,
+    speculations: List<'a, Speculation>,
     registers: usize,
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
-    defaulted: FxHashSet<Sexp>,
+    defaulted: Map<'a, Sexp, ()>,
+    /// The formals and every symbol the body binds. A call through one of them may find a local
+    /// function first, so its head cannot be speculated from the enclosure.
+    locals: FxHashSet<Sexp>,
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
-    hints: Vec<Ty>,
+    hints: List<'a, Ty>,
     /// Whether each closure called directly is frame-safe, so each body is walked once.
-    frame_safe: FxHashMap<Sexp, bool>,
+    frame_safe: Map<'a, Sexp, bool>,
+    patient: bool,
+    /// Every state the plan keeps, and the scratch rows of the fixpoint.
+    states: States<'a>,
+    /// The edges leaving the instruction [`Builder::transfer`] last ran, by target pc.
+    edges: List<'a, (usize, StateId)>,
 }
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     unsafe fn constant(&self, index: usize) -> Sexp {
         self.code.cdr().element(index)
     }
@@ -761,10 +1078,10 @@ impl Builder<'_> {
         for position in 0..self.insts.len() {
             let inst = &self.insts[position];
             let symbol_operand = match inst.op {
-                Op::GetVar => Some(inst.operands[1]),
-                Op::SetVar => Some(inst.operands[0]),
-                Op::ForStep => Some(inst.operands[2]),
-                Op::SubAssign => Some(inst.operands[1]),
+                Op::GetVar => Some(inst.operand(1)),
+                Op::SetVar => Some(inst.operand(0)),
+                Op::ForStep => Some(inst.operand(2)),
+                Op::SubAssign => Some(inst.operand(1)),
                 _ => None,
             };
             if let Some(operand) = symbol_operand {
@@ -774,7 +1091,7 @@ impl Builder<'_> {
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
                 }
-                let bits = self.feedback.get(inst.pc).copied().unwrap_or(0);
+                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
                 if inst.op == Op::GetVar && bits != 0 {
                     let slot = self.slot_of[&symbol];
                     self.hints[slot] = self.hints[slot].join(from_feedback(bits));
@@ -788,7 +1105,26 @@ impl Builder<'_> {
     }
 
     fn feedback_at(&self, pc: usize) -> Ty {
-        from_feedback(self.feedback.get(pc).copied().unwrap_or(0))
+        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u16))
+    }
+
+    /// Whether the instruction at `pc` has never recorded a value.
+    fn never_ran(&self, pc: usize) -> bool {
+        self.feedback.get(pc).copied().unwrap_or(0) == 0
+    }
+
+    /// The type a call of `function` at `pc` is expected to return: what the call site has
+    /// returned so far, or before it has ever returned, the type the callee declares.
+    unsafe fn call_result_at(&self, pc: usize, function: Sexp) -> Ty {
+        if !self.never_ran(pc) {
+            return self.feedback_at(pc);
+        }
+        match annotations::declared_return_type(function) {
+            Some(SexpType::Real) => Ty::Dbl,
+            Some(SexpType::Integer) => Ty::Int,
+            Some(SexpType::Logical) => Ty::Lgl,
+            _ => Ty::Boxed,
+        }
     }
 
     /// Splits the instructions into blocks and finds each block's successors and the loop
@@ -797,32 +1133,37 @@ impl Builder<'_> {
     fn blocks(
         &self,
     ) -> (
-        Vec<Block>,
-        FxHashMap<usize, usize>,
-        Vec<Vec<usize>>,
-        Vec<usize>,
+        List<'a, Block>,
+        List<'a, u32>,
+        List<'a, [Option<usize>; 2]>,
+        List<'a, usize>,
     ) {
-        let mut leaders = FxHashSet::default();
-        leaders.insert(0);
+        let words = self
+            .insts
+            .last()
+            .map_or(0, |last| last.pc + 1 + last.operands.len());
+        let mut leaders = List::new_in(self.arena);
+        leaders.resize(words.div_ceil(64).max(1), 0u64);
+        set_bit(&mut leaders, 0, true);
         for (position, inst) in self.insts.iter().enumerate() {
             if let Some(target) = jump_target(inst) {
-                leaders.insert(target);
+                set_bit(&mut leaders, target, true);
             }
             if ends_block(inst.op)
                 && let Some(next) = self.insts.get(position + 1)
             {
-                leaders.insert(next.pc);
+                set_bit(&mut leaders, next.pc, true);
             }
         }
-        let mut blocks = Vec::new();
-        let mut block_at = FxHashMap::default();
+        let mut blocks: List<'a, Block> = List::new_in(self.arena);
+        let mut block_at = List::with_capacity_in(words, self.arena);
+        block_at.resize(words, NO_BLOCK);
         for (position, inst) in self.insts.iter().enumerate() {
-            if leaders.contains(&inst.pc) {
+            if bit(&leaders, inst.pc) {
                 if let Some(last) = blocks.last_mut() {
-                    let last: &mut Block = last;
                     last.end = position;
                 }
-                block_at.insert(inst.pc, blocks.len());
+                block_at[inst.pc] = blocks.len() as u32;
                 blocks.push(Block {
                     start: position,
                     end: position + 1,
@@ -833,28 +1174,33 @@ impl Builder<'_> {
         if let Some(last) = blocks.last_mut() {
             last.end = self.insts.len();
         }
-        let successors = blocks
-            .iter()
-            .map(|block| {
-                let last = &self.insts[block.end - 1];
-                let mut next = Vec::new();
-                if falls_through(last.op) && block.end < self.insts.len() {
-                    next.push(block_at[&self.insts[block.end].pc]);
-                }
-                if let Some(target) = jump_target(last)
-                    && let Some(&target) = block_at.get(&target)
-                {
-                    next.push(target);
-                }
-                next
-            })
-            .collect();
-        let mut loop_headers: Vec<usize> = self
+        let lookup = |pc: usize| {
+            block_at
+                .get(pc)
+                .copied()
+                .filter(|&block| block != NO_BLOCK)
+                .map(|block| block as usize)
+        };
+        let mut successors = List::with_capacity_in(blocks.len(), self.arena);
+        for block in &blocks {
+            let last = &self.insts[block.end - 1];
+            let fallthrough = if falls_through(last.op) && block.end < self.insts.len() {
+                lookup(self.insts[block.end].pc)
+            } else {
+                None
+            };
+            successors.push([fallthrough, jump_target(last).and_then(lookup)]);
+        }
+        let mut loop_headers = List::new_in(self.arena);
+        for inst in self
             .insts
             .iter()
-            .filter(|inst| inst.op == Op::Jump && inst.operands[0] <= inst.pc)
-            .filter_map(|inst| block_at.get(&inst.operands[0]).copied())
-            .collect();
+            .filter(|inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc)
+        {
+            if let Some(header) = lookup(inst.operand(0)) {
+                loop_headers.push(header);
+            }
+        }
         loop_headers.sort_unstable();
         loop_headers.dedup();
         (blocks, block_at, successors, loop_headers)
@@ -862,119 +1208,136 @@ impl Builder<'_> {
 
     /// Registers live before each instruction, as tier 0 sees them (every path, including the
     /// fallback paths compiled code never takes, since deoptimization can reach them).
-    fn liveness(&self, blocks: &[Block], successors: &[Vec<usize>]) -> Vec<Vec<bool>> {
-        let count = self.registers;
-        let mut live_in: Vec<Vec<bool>> = vec![vec![false; count]; blocks.len()];
+    fn liveness(&self, blocks: &[Block], successors: &[[Option<usize>; 2]]) -> Live<'a> {
+        let words = self.registers.div_ceil(64).max(1);
+        let mut live_in = List::new_in(self.arena);
+        live_in.resize(blocks.len() * words, 0u64);
+        let mut live = List::new_in(self.arena);
+        live.resize(words, 0u64);
+        let live_out = |live: &mut [u64], live_in: &[u64], index: usize| {
+            live.fill(0);
+            for &successor in successors[index].iter().flatten() {
+                for (word, incoming) in live
+                    .iter_mut()
+                    .zip(&live_in[successor * words..(successor + 1) * words])
+                {
+                    *word |= incoming;
+                }
+            }
+        };
         let mut changed = true;
         while changed {
             changed = false;
             for index in (0..blocks.len()).rev() {
-                let mut live = vec![false; count];
-                for &successor in &successors[index] {
-                    for (register, flag) in live_in[successor].iter().enumerate() {
-                        live[register] |= flag;
-                    }
-                }
+                live_out(&mut live, &live_in, index);
                 for position in (blocks[index].start..blocks[index].end).rev() {
                     apply_liveness(&self.insts[position], &mut live);
                 }
-                if live != live_in[index] {
-                    live_in[index] = live;
+                let row = &mut live_in[index * words..(index + 1) * words];
+                if *row != *live {
+                    row.copy_from_slice(&live);
                     changed = true;
                 }
             }
         }
-        let mut per_inst = vec![Vec::new(); self.insts.len()];
+        let mut bits = List::new_in(self.arena);
+        bits.resize(self.insts.len() * words, 0u64);
         for (index, block) in blocks.iter().enumerate() {
-            let mut live = vec![false; count];
-            for &successor in &successors[index] {
-                for (register, flag) in live_in[successor].iter().enumerate() {
-                    live[register] |= flag;
-                }
-            }
+            live_out(&mut live, &live_in, index);
             for position in (block.start..block.end).rev() {
                 apply_liveness(&self.insts[position], &mut live);
-                per_inst[position] = live.clone();
+                bits[position * words..(position + 1) * words].copy_from_slice(&live);
             }
         }
-        per_inst
+        Live { words, bits }
     }
 
     /// Computes every reachable block's entry state. A loop header is also where on-stack
     /// replacement enters with every variable still in the environment, so its entry state
     /// allows every slot to be unloaded.
+    ///
+    /// Each block's entry is a row reserved up front; the rows a block's transfer adds (its
+    /// edges and inlined steps) are dropped once they are joined into the targets' entries.
     unsafe fn fixpoint(
         &mut self,
         blocks: &mut [Block],
-        block_at: &FxHashMap<usize, usize>,
-        live: &[Vec<bool>],
+        block_at: &[u32],
+        live: &Live,
         loop_headers: &[usize],
     ) -> Result<(), Refusal> {
-        let initial = State {
-            registers: vec![Ty::Bottom; self.registers + TEMPORARIES],
-            slots: vec![Slot::UNLOADED; self.slots.len()],
-            visible: None,
-        };
-        blocks[0].entry = Some(initial);
-        let mut work = vec![0usize];
+        let mut state = State::bottom(self.arena, self.registers + TEMPORARIES, self.slots.len());
+        // One entry row per block, then the edge rows of whichever block is being visited.
+        let longest = blocks
+            .iter()
+            .map(|block| block.end - block.start)
+            .max()
+            .unwrap_or(0);
+        self.states.reserve(blocks.len() + 2 * longest);
+        for _ in 0..blocks.len() {
+            self.states.push(&state);
+        }
+        let reserved = self.states.rows();
+        let mut reached = state.clone();
+        blocks[0].entry = Some(0);
+        let mut work = List::new_in(self.arena);
+        work.push(0usize);
         let mut rounds = 0usize;
         while let Some(index) = work.pop() {
             rounds += 1;
             if rounds > 100_000 {
                 return Err(Refusal("the type analysis did not converge"));
             }
-            let Some(mut state) = blocks[index].entry.clone() else {
+            let Some(entry) = blocks[index].entry else {
                 continue;
             };
-            let (start, end) = (blocks[index].start, blocks[index].end);
-            let mut edges = Vec::new();
-            for position in start..end {
-                let (_, out) = self.transfer(position, &mut state)?;
-                if position + 1 == end {
-                    edges = out;
-                }
+            self.states.load(entry, &mut state);
+            for position in blocks[index].start..blocks[index].end {
+                self.edges.clear();
+                self.transfer(position, &mut state)?;
             }
-            for (target_pc, mut out) in edges {
-                let Some(&target) = block_at.get(&target_pc) else {
+            for edge in 0..self.edges.len() {
+                let (target_pc, out) = self.edges[edge];
+                let Some(target) = block_at
+                    .get(target_pc)
+                    .copied()
+                    .filter(|&block| block != NO_BLOCK)
+                else {
                     continue;
                 };
-                let target_live = &live[blocks[target].start];
-                for (register, ty) in out.registers.iter_mut().enumerate() {
-                    if !target_live.get(register).copied().unwrap_or(false) {
-                        *ty = Ty::Bottom;
+                let target = target as usize;
+                self.states.adapt_edge(
+                    out,
+                    live.row(blocks[target].start),
+                    loop_headers.contains(&target),
+                );
+                let changed = match blocks[target].entry {
+                    Some(existing) => self.states.join_into(existing, out),
+                    None => {
+                        self.states.load(out, &mut reached);
+                        self.states.store(target as StateId, &reached);
+                        blocks[target].entry = Some(target as StateId);
+                        true
                     }
-                }
-                if loop_headers.contains(&target) {
-                    for slot in &mut out.slots {
-                        *slot = slot.join(Slot::UNLOADED);
-                    }
-                }
-                let joined = match &blocks[target].entry {
-                    Some(existing) => existing.join(&out),
-                    None => out,
                 };
-                if blocks[target].entry.as_ref() != Some(&joined) {
-                    blocks[target].entry = Some(joined);
-                    if !work.contains(&target) {
-                        work.push(target);
-                    }
+                if changed && !work.contains(&target) {
+                    work.push(target);
                 }
             }
+            self.states.truncate(reserved);
         }
         Ok(())
     }
 
-    /// The action for the instruction at `position` and its effect on `state`. For the last
-    /// instruction of a block it also returns the state along each outgoing edge, by target pc.
+    /// The action for the instruction at `position` and its effect on `state`. It also adds
+    /// the state along each outgoing edge to [`Builder::edges`].
     unsafe fn transfer(
         &mut self,
         position: usize,
-        state: &mut State,
-    ) -> Result<(Action, Vec<(usize, State)>), Refusal> {
-        let inst = self.insts[position].clone();
-        let operand = |index: usize| inst.operands[index];
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
+        let inst = self.insts[position];
+        let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
-        let mut edges = Vec::new();
         let action = match inst.op {
             Op::Constant => {
                 let value = self.constant(operand(1));
@@ -993,6 +1356,12 @@ impl Builder<'_> {
                 let load = if current.may_be(status::NOT_LOADED) {
                     let ty = if current.may_be(status::LOADED) {
                         current.ty
+                    } else if self.never_ran(inst.pc) && current.ty != Ty::Bottom {
+                        // A variable forgotten across an opaque call, read where tier 0 has not
+                        // read it yet (a branch not taken so far): the type it had before the call
+                        // is a better guess than a boxed unknown, which leaves its arithmetic to
+                        // tier 0 for good.
+                        current.ty
                     } else {
                         self.feedback_at(inst.pc)
                     };
@@ -1000,7 +1369,7 @@ impl Builder<'_> {
                 } else {
                     None
                 };
-                let forcing = load.is_some() && self.defaulted.contains(&self.slots[slot]);
+                let forcing = load.is_some() && self.defaulted.contains_key(&self.slots[slot]);
                 if let Some(ty) = load {
                     let mut status_bits = current.status & status::LOADED;
                     status_bits |= status::LOCAL | status::ENCLOSING;
@@ -1016,11 +1385,11 @@ impl Builder<'_> {
                     forced.slots[slot] = loaded;
                     state.slots[slot] = loaded;
                     if forcing {
-                        *state = if current.may_be(status::LOADED) {
-                            state.join(&forced)
+                        if current.may_be(status::LOADED) {
+                            state.join(&forced);
                         } else {
-                            forced
-                        };
+                            *state = forced;
+                        }
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
@@ -1054,7 +1423,7 @@ impl Builder<'_> {
                 let symbol = self.constant(operand(1));
                 if let Some(&slot) = self.slot_of.get(&symbol)
                     && let Ty::Closure(..) = state.slots[slot].ty
-                    && !self.defaulted.contains(&symbol)
+                    && !self.defaulted.contains_key(&symbol)
                 {
                     let current = state.slots[slot];
                     let load = current.may_be(status::NOT_LOADED).then_some(current.ty);
@@ -1067,7 +1436,7 @@ impl Builder<'_> {
                         };
                     }
                     state.registers[operand(0)] = current.ty;
-                    return self.finish(
+                    return Ok(self.finish(
                         Action::GetFunSlot {
                             dst: operand(0),
                             slot,
@@ -1076,8 +1445,7 @@ impl Builder<'_> {
                         inst.op,
                         next_pc,
                         state,
-                        edges,
-                    );
+                    ));
                 }
                 match self.speculate(symbol) {
                     Some(function) if !self.bound_locally(symbol) => {
@@ -1087,22 +1455,19 @@ impl Builder<'_> {
                             function,
                         }
                     }
-                    _ => self.opaque_step(
-                        state,
-                        Some((operand(0), Ty::Boxed)),
-                        Vec::new(),
-                        Effect::Opaque,
-                    ),
+                    _ => {
+                        self.opaque_step(state, Some((operand(0), Ty::Boxed)), &[], Effect::Opaque)
+                    }
                 }
             }
             Op::BranchUnlessBuiltin => match state.registers[operand(0)] {
                 Ty::Fun(function) if function.kind() == SexpType::Builtin => Action::FallThrough,
                 Ty::Fun(_) | Ty::Closure(..) => {
-                    edges.push((operand(1), state.clone()));
-                    return Ok((Action::Branch, edges));
+                    self.push_edge(operand(1), state);
+                    return Ok(Action::Branch);
                 }
                 _ => {
-                    edges.push((operand(1), state.clone()));
+                    self.push_edge(operand(1), state);
                     Action::BranchUnlessBuiltin {
                         function: operand(0),
                     }
@@ -1113,11 +1478,11 @@ impl Builder<'_> {
                 match state.registers[operand(0)] {
                     Ty::Fun(function) if function == expected => Action::FallThrough,
                     Ty::Fun(_) | Ty::Closure(..) => {
-                        edges.push((operand(2), state.clone()));
-                        return Ok((Action::Branch, edges));
+                        self.push_edge(operand(2), state);
+                        return Ok(Action::Branch);
                     }
                     _ => {
-                        edges.push((operand(2), state.clone()));
+                        self.push_edge(operand(2), state);
                         Action::BranchUnlessPrimitive {
                             function: operand(0),
                             expected,
@@ -1129,20 +1494,20 @@ impl Builder<'_> {
                 if state.registers[operand(0)].is_plain() {
                     Action::FallThrough
                 } else {
-                    edges.push((operand(1), state.clone()));
+                    self.push_edge(operand(1), state);
                     Action::BranchIfObject { src: operand(0) }
                 }
             }
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
-                Vec::new(),
+                &[],
                 Effect::Opaque,
             ),
             Op::DispatchSubject => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
-                Vec::new(),
+                &[],
                 Effect::Opaque,
             ),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
@@ -1175,7 +1540,7 @@ impl Builder<'_> {
                                 state,
                                 call,
                                 function,
-                                (operand(0), self.feedback_at(inst.pc)),
+                                (operand(0), self.call_result_at(inst.pc, function)),
                             )
                         }),
                     _ => None,
@@ -1185,7 +1550,7 @@ impl Builder<'_> {
                     None => self.opaque_step(
                         state,
                         Some((operand(0), self.feedback_at(inst.pc))),
-                        Vec::new(),
+                        &[],
                         Effect::Opaque,
                     ),
                 }
@@ -1193,7 +1558,7 @@ impl Builder<'_> {
             Op::Ast => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
-                Vec::new(),
+                &[],
                 Effect::Opaque,
             ),
             Op::Guard => {
@@ -1208,14 +1573,14 @@ impl Builder<'_> {
                 Action::FallThrough
             }
             Op::Jump => {
-                edges.push((operand(0), state.clone()));
-                return Ok((Action::Jump, edges));
+                self.push_edge(operand(0), state);
+                return Ok(Action::Jump);
             }
             Op::JumpUnless => {
-                edges.push((operand(2), state.clone()));
+                self.push_edge(operand(2), state);
                 Action::JumpUnless { src: operand(0) }
             }
-            Op::Arithmetic => self.arithmetic(&inst, state),
+            Op::Arithmetic => self.arithmetic(&inst, state)?,
             Op::Return => Action::Return { src: operand(0) },
             Op::ForInit => {
                 let src = operand(1);
@@ -1230,10 +1595,17 @@ impl Builder<'_> {
                     | Ty::Dbl
                     | Ty::Lgl => None,
                     _ => {
-                        if self.feedback.get(inst.pc).copied().unwrap_or(0) == 0 {
+                        let speculated = if !self.never_ran(inst.pc) {
+                            self.feedback_at(inst.pc)
+                        } else if self.patient {
                             return Err(Refusal(COLD));
-                        }
-                        let speculated = self.feedback_at(inst.pc);
+                        } else {
+                            // A loop that has not run yet, in a body compiled for another hot
+                            // loop or after waiting long enough: refusing would give up on the
+                            // whole body, so the loop guesses the most common sequence, `1:n`,
+                            // and a wrong guess deoptimizes and recompiles with real feedback.
+                            Ty::IntVec
+                        };
                         if !matches!(
                             speculated,
                             Ty::IntVec
@@ -1260,7 +1632,7 @@ impl Builder<'_> {
             }
             Op::ForStep => {
                 let slot = self.slot(self.constant(operand(2)));
-                edges.push((operand(3), state.clone()));
+                self.push_edge(operand(3), state);
                 let element = state.registers[operand(1)].element();
                 state.slots[slot] = Slot {
                     status: status::DIRTY,
@@ -1285,7 +1657,7 @@ impl Builder<'_> {
                 let mut decided = state.clone();
                 decided.registers[operand(0)] = Ty::Lgl;
                 decided.visible = Some(true);
-                edges.push((operand(4), decided));
+                self.push_edge(operand(4), &decided);
                 state.registers[operand(1)] = Ty::Lgl;
                 Action::LogicLeft {
                     dst: operand(0),
@@ -1306,30 +1678,38 @@ impl Builder<'_> {
             // The interpreter's own step sets the current srcref; it touches no register.
             Op::SetSrcref => Action::Step {
                 effect: Effect::Pure,
-                objects: Vec::new(),
+                objects: &[],
                 dst: None,
             },
             // Compiled code keeps boxed values in the same register window as tier 0, so it
             // clears the finished statement's registers too, or they would keep its temporaries
             // alive until the function returns.
             Op::EndStatement => {
-                let registers: Vec<usize> = std::iter::once(operand(0))
-                    .chain(operand(1)..operand(2))
-                    .collect();
-                for &register in &registers {
+                for register in std::iter::once(operand(0)).chain(operand(1)..operand(2)) {
                     if let Some(ty) = state.registers.get_mut(register) {
                         *ty = Ty::Boxed;
                     }
                 }
-                Action::Clear { registers }
+                Action::Clear {
+                    register: operand(0),
+                    range: (operand(1), operand(2)),
+                }
             }
             Op::Closure => {
                 state.visible = Some(true);
-                let ty = Ty::Closure(self.constant(operand(1)), self.constant(operand(2)));
+                // The site's body constant becomes the shared compiled code once the site has run,
+                // while a closure's type names its source body, which is what inlining reads and
+                // what the runtime check compares.
+                let body = self.constant(operand(2));
+                let body = match body.kind() {
+                    SexpType::Bytecode => body.cdr().element(bytecode::SOURCE),
+                    _ => body,
+                };
+                let ty = Ty::Closure(self.constant(operand(1)), body);
                 state.registers[operand(0)] = ty;
                 Action::Step {
                     effect: Effect::Pure,
-                    objects: Vec::new(),
+                    objects: &[],
                     dst: Some((operand(0), ty)),
                 }
             }
@@ -1341,12 +1721,15 @@ impl Builder<'_> {
                     Ty::DblVec => value.is_numeric_scalar(),
                     Ty::IntVec => matches!(value, Ty::Int | Ty::Lgl),
                     Ty::LglVec => value == Ty::Lgl,
+                    // An Array takes only items of its own type; anything else turns it into
+                    // an R vector, which tier 0 does.
+                    Ty::IntArr | Ty::DblArr | Ty::LglArr => value == target.element(),
                     _ => false,
                 };
                 if fits
                     && matches!(index, Ty::Int | Ty::Dbl)
                     && state.slots[slot].may_be(status::LOADED)
-                    && !(self.defaulted.contains(&self.slots[slot])
+                    && !(self.defaulted.contains_key(&self.slots[slot])
                         && state.slots[slot].may_be(status::NOT_LOADED))
                 {
                     // The generic path writes the variable back, runs the assignment in tier 0
@@ -1370,38 +1753,50 @@ impl Builder<'_> {
                         Ty::Bottom => Ty::Boxed,
                         ty => ty,
                     };
-                    let action = self.opaque_step(
-                        state,
-                        Some((operand(0), refine)),
-                        Vec::new(),
-                        Effect::Opaque,
-                    );
+                    let action =
+                        self.opaque_step(state, Some((operand(0), refine)), &[], Effect::Opaque);
                     state.visible = Some(false);
                     action
                 }
             }
         };
-        self.finish(action, inst.op, next_pc, state, edges)
+        Ok(self.finish(action, inst.op, next_pc, state))
+    }
+
+    fn push_edge(&mut self, target: usize, state: &State) {
+        let id = self.states.push(state);
+        self.edges.push((target, id));
     }
 
     /// Adds the fallthrough edge. Every instruction reports it: the fixpoint reads the edges of a
     /// block's last instruction, and code generation reads the state after any instruction.
-    #[allow(clippy::type_complexity)]
     fn finish(
-        &self,
-        action: Action,
+        &mut self,
+        action: Action<'a>,
         op: Op,
         next_pc: Option<usize>,
         state: &State,
-        mut edges: Vec<(usize, State)>,
-    ) -> Result<(Action, Vec<(usize, State)>), Refusal> {
+    ) -> Action<'a> {
         if falls_through(op)
             && let Some(next) = next_pc
             && !matches!(action, Action::Branch)
         {
-            edges.push((next, state.clone()));
+            self.push_edge(next, state);
         }
-        Ok((action, edges))
+        action
+    }
+
+    /// Adds a step to an inlined call, with the state before it.
+    fn push_step(&mut self, lowering: &mut Lowering<'a>, action: Action<'a>) {
+        let id = self.states.push(&lowering.state);
+        lowering.steps.push((action, id));
+    }
+
+    /// Copies `items` into the arena.
+    fn slice<T: Copy>(&self, items: impl IntoIterator<Item = T>) -> &'a [T] {
+        let mut list = List::new_in(self.arena);
+        list.extend(items);
+        list.leak()
     }
 
     /// Inlines a call of the closure `formals`/`body` made in this activation, when the call and
@@ -1412,27 +1807,30 @@ impl Builder<'_> {
     /// back to tier 0, which then evaluates it lazily.
     unsafe fn inline(
         &mut self,
-        state: &mut State,
+        state: &mut State<'a>,
         call: Sexp,
         formals: Sexp,
         body: Sexp,
         closed: Option<Sexp>,
         dst: usize,
-    ) -> Option<Action> {
+    ) -> Option<Action<'a>> {
         let mut lowering = Lowering {
             state: state.clone(),
-            steps: Vec::new(),
+            steps: List::new_in(self.arena),
             next: self.registers,
-            scope: Vec::new(),
+            scope: SmallVec::new(),
             closed: None,
         };
         let result = self.lower_call(&mut lowering, call, formals, body, closed, 0)?;
         let ty = lowering.state.registers[result];
-        lowering.push(Action::Move {
-            dst,
-            src: result,
-            ty,
-        });
+        self.push_step(
+            &mut lowering,
+            Action::Move {
+                dst,
+                src: result,
+                ty,
+            },
+        );
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
@@ -1441,7 +1839,7 @@ impl Builder<'_> {
         after.visible = Some(true);
         *state = after;
         Some(Action::Inline {
-            steps: lowering.steps,
+            steps: lowering.steps.leak(),
         })
     }
 
@@ -1453,22 +1851,22 @@ impl Builder<'_> {
     /// reads before the callee forces it, so the callee must be frame-safe.
     unsafe fn direct_call(
         &mut self,
-        state: &mut State,
+        state: &mut State<'a>,
         call: Sexp,
         function: Sexp,
         dst: (usize, Ty),
-    ) -> Option<Action> {
+    ) -> Option<Action<'a>> {
         if !self.frame_safe(function) {
             return None;
         }
         let mut lowering = Lowering {
             state: state.clone(),
-            steps: Vec::new(),
+            steps: List::new_in(self.arena),
             next: self.registers,
-            scope: Vec::new(),
+            scope: SmallVec::new(),
             closed: None,
         };
-        let mut args = Vec::new();
+        let mut args = List::new_in(self.arena);
         for (tag, expression) in values::pairlist_items(call.cdr()) {
             if tag != values::nil()
                 || expression == values::missing_arg()
@@ -1500,11 +1898,20 @@ impl Builder<'_> {
         after.visible = None;
         after.registers[dst.0] = dst.1;
         *state = after;
+        let kinds: SmallVec<[Option<SexpType>; 4]> = args
+            .iter()
+            .map(|argument| match *argument {
+                Argument::Unboxed { ty, .. } => ty.storage(),
+                _ => None,
+            })
+            .collect();
+        let entry = annotations::entry_for(function, &kinds);
         Some(Action::Call {
-            steps: lowering.steps,
+            steps: lowering.steps.leak(),
             function,
             call,
-            args,
+            args: args.leak(),
+            entry,
             dst,
         })
     }
@@ -1512,7 +1919,7 @@ impl Builder<'_> {
     #[allow(clippy::too_many_arguments)]
     unsafe fn lower_call(
         &mut self,
-        lowering: &mut Lowering,
+        lowering: &mut Lowering<'a>,
         call: Sexp,
         formals: Sexp,
         body: Sexp,
@@ -1523,7 +1930,7 @@ impl Builder<'_> {
             return None;
         }
         let args = values::pairlist_items(call.cdr());
-        let formals = values::pairlist_items(formals);
+        let parameters = values::pairlist_items(formals);
         let positional = args.iter().all(|(tag, value)| {
             *tag == values::nil()
                 && *value != values::missing_arg()
@@ -1532,15 +1939,15 @@ impl Builder<'_> {
         // Every formal needs its argument: a default is evaluated in the callee's frame, which
         // the inlined body does not have.
         if !positional
-            || args.len() != formals.len()
-            || formals
+            || args.len() != parameters.len()
+            || parameters
                 .iter()
                 .any(|(symbol, _)| *symbol == values::symbols().dots)
         {
             return None;
         }
         let outer = std::mem::take(&mut lowering.scope);
-        let mut scope = Vec::with_capacity(args.len());
+        let mut scope: SmallVec<[usize; 4]> = SmallVec::with_capacity(args.len());
         for (_, expression) in &args {
             let register = self.lower_expression(lowering, *expression, depth);
             match register {
@@ -1551,16 +1958,25 @@ impl Builder<'_> {
                 }
             }
         }
-        lowering.scope = formals
+        lowering.scope = parameters
             .iter()
             .map(|(symbol, _)| *symbol)
             .zip(scope)
             .collect();
         let outer_closed = std::mem::replace(&mut lowering.closed, closed);
         let result = self.lower_expression(lowering, body, depth);
+        let arguments: SmallVec<[Option<SexpType>; 4]> = lowering
+            .scope
+            .iter()
+            .map(|&(_, register)| lowering.state.registers[register].storage())
+            .collect();
         lowering.scope = outer;
         lowering.closed = outer_closed;
-        result
+        let result = result?;
+        // Inlined code has no frame to check annotations in, so a typed closure is inlined only
+        // when its checks are known to pass; tier 0 runs any other call and reports the failure.
+        let returned = lowering.state.registers[result].storage();
+        annotations::admits_inline(formals, body, &arguments, returned).then_some(result)
     }
 
     /// Lowers an expression of an inlined call into steps, returning the register that holds
@@ -1569,7 +1985,7 @@ impl Builder<'_> {
     /// and the free variables of a closure made in this activation are found.
     unsafe fn lower_expression(
         &mut self,
-        lowering: &mut Lowering,
+        lowering: &mut Lowering<'a>,
         expression: Sexp,
         depth: usize,
     ) -> Option<usize> {
@@ -1580,11 +1996,14 @@ impl Builder<'_> {
                     return None;
                 }
                 let dst = lowering.temporary()?;
-                lowering.push(Action::Constant {
-                    dst,
-                    value: expression,
-                    ty,
-                });
+                self.push_step(
+                    lowering,
+                    Action::Constant {
+                        dst,
+                        value: expression,
+                        ty,
+                    },
+                );
                 lowering.state.registers[dst] = ty;
                 Some(dst)
             }
@@ -1605,12 +2024,15 @@ impl Builder<'_> {
                     return None;
                 }
                 let dst = lowering.temporary()?;
-                lowering.push(Action::GetVar {
-                    dst,
-                    slot,
-                    load: None,
-                    forcing: false,
-                });
+                self.push_step(
+                    lowering,
+                    Action::GetVar {
+                        dst,
+                        slot,
+                        load: None,
+                        forcing: false,
+                    },
+                );
                 lowering.state.registers[dst] = ty;
                 Some(dst)
             }
@@ -1619,7 +2041,7 @@ impl Builder<'_> {
                 if head.kind() != SexpType::Symbol {
                     return None;
                 }
-                let args: Vec<Sexp> = values::pairlist_items(expression.cdr())
+                let args: SmallVec<[Sexp; 4]> = values::pairlist_items(expression.cdr())
                     .iter()
                     .map(|(tag, value)| {
                         if *tag == values::nil() {
@@ -1661,8 +2083,8 @@ impl Builder<'_> {
                 let registers = args
                     .iter()
                     .map(|&arg| self.lower_expression(lowering, arg, depth))
-                    .collect::<Option<Vec<usize>>>()?;
-                let types: Vec<Ty> = registers
+                    .collect::<Option<SmallVec<[usize; 4]>>>()?;
+                let types: SmallVec<[Ty; 4]> = registers
                     .iter()
                     .map(|&register| lowering.state.registers[register])
                     .collect();
@@ -1719,7 +2141,7 @@ impl Builder<'_> {
                                 ty,
                             )
                         };
-                        lowering.push(action);
+                        self.push_step(lowering, action);
                         lowering.state.registers[dst] = ty;
                         Some(dst)
                     }
@@ -1729,12 +2151,16 @@ impl Builder<'_> {
                             return None;
                         }
                         let dst = lowering.temporary()?;
-                        lowering.push(Action::Intrinsic {
-                            intrinsic,
-                            dst,
-                            args: registers,
-                            result,
-                        });
+                        let args = self.slice(registers);
+                        self.push_step(
+                            lowering,
+                            Action::Intrinsic {
+                                intrinsic,
+                                dst,
+                                args,
+                                result,
+                            },
+                        );
                         lowering.state.registers[dst] = result;
                         Some(dst)
                     }
@@ -1750,12 +2176,12 @@ impl Builder<'_> {
     /// loads, which the peek checks. Only a `boxed` peek may find a boxed value.
     unsafe fn peek_slot(
         &mut self,
-        lowering: &mut Lowering,
+        lowering: &mut Lowering<'a>,
         symbol: Sexp,
         boxed: bool,
     ) -> Option<usize> {
         let slot = *self.slot_of.get(&symbol)?;
-        if self.defaulted.contains(&symbol) {
+        if self.defaulted.contains_key(&symbol) {
             return None;
         }
         let current = lowering.state.slots[slot];
@@ -1768,7 +2194,7 @@ impl Builder<'_> {
             if ty == Ty::Bottom || (ty == Ty::Boxed && !boxed) {
                 return None;
             }
-            lowering.push(Action::Peek { slot, ty });
+            self.push_step(lowering, Action::Peek { slot, ty });
             lowering.state.slots[slot] = Slot {
                 status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING,
                 ty,
@@ -1779,7 +2205,7 @@ impl Builder<'_> {
 
     /// The function `symbol` calls from inlined code that is not a formal of the closure being
     /// inlined, found from that closure's environment and recorded as a speculation.
-    unsafe fn resolve_head(&mut self, lowering: &Lowering, symbol: Sexp) -> Option<Sexp> {
+    unsafe fn resolve_head(&mut self, lowering: &Lowering<'a>, symbol: Sexp) -> Option<Sexp> {
         match lowering.closed {
             None if self.bound_locally(symbol) => None,
             None => self.speculate(symbol),
@@ -1796,11 +2222,11 @@ impl Builder<'_> {
     /// A tier-0 step whose destination is refined to `dst`'s type afterwards.
     fn opaque_step(
         &mut self,
-        state: &mut State,
+        state: &mut State<'a>,
         dst: Option<(usize, Ty)>,
-        objects: Vec<usize>,
+        objects: &'a [usize],
         effect: Effect,
-    ) -> Action {
+    ) -> Action<'a> {
         match effect {
             Effect::Pure => {}
             // Only a call that dispatches or warns into a handler writes the variables back and
@@ -1826,8 +2252,12 @@ impl Builder<'_> {
         }
     }
 
-    unsafe fn arithmetic(&mut self, inst: &Inst, state: &mut State) -> Action {
-        let operand = |index: usize| inst.operands[index];
+    unsafe fn arithmetic(
+        &mut self,
+        inst: &Inst<'a>,
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
+        let operand = |index: usize| inst.operand(index);
         let arith = ARITHS[operand(0)].0;
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
@@ -1846,13 +2276,13 @@ impl Builder<'_> {
             if comparison {
                 state.registers[dst] = Ty::Lgl;
                 let numeric = if integers { Numeric::Int } else { Numeric::Dbl };
-                return Action::Comparison {
+                return Ok(Action::Comparison {
                     arith,
                     numeric,
                     dst,
                     left,
                     right,
-                };
+                });
             }
             let numeric = match arith {
                 Arith::Add | Arith::Subtract | Arith::Multiply if integers => Numeric::Int,
@@ -1863,13 +2293,18 @@ impl Builder<'_> {
             } else {
                 Ty::Dbl
             };
-            return Action::Arithmetic {
+            return Ok(Action::Arithmetic {
                 arith,
                 numeric,
                 dst,
                 left,
                 right,
-            };
+            });
+        }
+        // An operand of unknown type is typically the result of a call that has not returned
+        // yet, as in a recursive function compiled on its way down.
+        if self.patient && (a == Ty::Boxed || b == Ty::Boxed) && self.never_ran(inst.pc) {
+            return Err(Refusal(COLD));
         }
         let effect = if a.is_plain() && b.is_plain() {
             Effect::PureUnlessObserved
@@ -1877,20 +2312,24 @@ impl Builder<'_> {
             Effect::Opaque
         };
         let ty = self.feedback_at(inst.pc);
-        let action = self.opaque_step(state, Some((dst, ty)), Vec::new(), effect);
+        let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
         state.visible = Some(true);
-        action
+        Ok(action)
     }
 
-    unsafe fn call_builtin(&mut self, inst: &Inst, state: &mut State) -> Result<Action, Refusal> {
-        let operand = |index: usize| inst.operands[index];
+    unsafe fn call_builtin(
+        &mut self,
+        inst: &Inst<'a>,
+        state: &mut State<'a>,
+    ) -> Result<Action<'a>, Refusal> {
+        let operand = |index: usize| inst.operand(index);
         let dst = operand(0);
         let call = self.constant(operand(2));
         let (first, count) = (operand(3), operand(4));
-        let args: Vec<usize> = (first..first + count).collect();
+        let args = self.slice(first..first + count);
         let feedback = self.feedback_at(inst.pc);
         let Ty::Fun(function) = state.registers[operand(1)] else {
-            return Ok(self.opaque_step(state, Some((dst, feedback)), Vec::new(), Effect::Opaque));
+            return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
         };
         let definition = interp::eval::builtin_def(function)
             .map_err(|_| Refusal("a builtin without a definition"))?;
@@ -1898,7 +2337,7 @@ impl Builder<'_> {
         let untagged = values::pairlist_items(call.cdr())
             .iter()
             .all(|(tag, _)| *tag == values::nil());
-        let types: Vec<Ty> = args
+        let types: SmallVec<[Ty; 4]> = args
             .iter()
             .map(|&register| state.registers[register])
             .collect();
@@ -1917,16 +2356,16 @@ impl Builder<'_> {
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                Vec::new(),
+                &[],
                 Effect::PureUnlessObserved,
             ));
         }
         if PURE_BUILTINS.contains(&name) {
-            let objects: Vec<usize> = args
-                .iter()
-                .copied()
-                .filter(|&register| !state.registers[register].is_plain())
-                .collect();
+            let objects = self.slice(
+                args.iter()
+                    .copied()
+                    .filter(|&register| !state.registers[register].is_plain()),
+            );
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
@@ -1934,7 +2373,7 @@ impl Builder<'_> {
                 Effect::PureUnlessObserved,
             ));
         }
-        Ok(self.opaque_step(state, Some((dst, feedback)), Vec::new(), Effect::Opaque))
+        Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque))
     }
 
     /// Whether `function` can never assign a variable in its caller's frame or anywhere else:
@@ -1950,7 +2389,7 @@ impl Builder<'_> {
         // A recursive call is safe exactly when the rest of the body is, so it is assumed safe
         // while the body is walked.
         self.frame_safe.insert(function, true);
-        let mut found = Vec::new();
+        let mut found = List::new_in(self.arena);
         let defaults = values::pairlist_items(function.car());
         let safe = defaults
             .iter()
@@ -2075,7 +2514,7 @@ const FRAME_SAFE_BUILTINS: &[&str] = &[
 
 /// Whether `expression`, in the body of `function`, keeps `function` frame-safe (see
 /// `Builder::frame_safe`), collecting the speculation for every function it calls.
-unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut Vec<Speculation>) -> bool {
+unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Speculation>) -> bool {
     if expression.kind() != SexpType::Language {
         return true;
     }
@@ -2171,6 +2610,9 @@ unsafe fn constant_type(value: Sexp) -> Ty {
         feedback::DOUBLE_VECTOR => Ty::DblVec,
         feedback::LOGICAL_VECTOR => Ty::LglVec,
         feedback::LIST => Ty::List,
+        feedback::INTEGER_ARRAY => Ty::IntArr,
+        feedback::DOUBLE_ARRAY => Ty::DblArr,
+        feedback::LOGICAL_ARRAY => Ty::LglArr,
         _ if values::is_function(value) => Ty::Fun(value),
         _ => Ty::Boxed,
     }
@@ -2221,12 +2663,20 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         {
             (Intrinsic::Element, vector.element())
         }
+        // `[` on an Array makes an Array, so only `[[` reads an element.
+        ("[[", [array, index]) if array.is_array() && matches!(index, Ty::Int | Ty::Dbl) => {
+            (Intrinsic::Element, array.element())
+        }
         ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => {
             (Intrinsic::Element, Ty::Boxed)
         }
-        ("length", [ty]) if ty.is_vector() || ty.is_numeric_scalar() || *ty == Ty::List => {
+        ("length", [ty])
+            if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
+        {
             (Intrinsic::Length, Ty::Int)
         }
+        // An opaque call would make the compiled code forget every variable's type.
+        ("List.len", [ty]) if ty.is_array() || *ty == Ty::List => (Intrinsic::Length, Ty::Int),
         ("-", [ty]) if ty.is_numeric_scalar() => (
             Intrinsic::Negate(numeric(*ty)),
             if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },
@@ -2278,13 +2728,13 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
 
 pub fn jump_target(inst: &Inst) -> Option<usize> {
     match inst.op {
-        Op::Jump => Some(inst.operands[0]),
-        Op::JumpUnless => Some(inst.operands[2]),
-        Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operands[1]),
-        Op::BranchUnlessPrimitive => Some(inst.operands[2]),
-        Op::ForStep => Some(inst.operands[3]),
-        Op::LogicLeft => Some(inst.operands[4]),
-        Op::Guard => Some(inst.operands[4]),
+        Op::Jump => Some(inst.operand(0)),
+        Op::JumpUnless => Some(inst.operand(2)),
+        Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operand(1)),
+        Op::BranchUnlessPrimitive => Some(inst.operand(2)),
+        Op::ForStep => Some(inst.operand(3)),
+        Op::LogicLeft => Some(inst.operand(4)),
+        Op::Guard => Some(inst.operand(4)),
         _ => None,
     }
 }
@@ -2309,18 +2759,10 @@ fn falls_through(op: Op) -> bool {
 }
 
 /// Updates `live` from after `inst` to before it.
-fn apply_liveness(inst: &Inst, live: &mut [bool]) {
-    let operand = |index: usize| inst.operands[index];
-    let kill = |register: usize, live: &mut [bool]| {
-        if let Some(flag) = live.get_mut(register) {
-            *flag = false;
-        }
-    };
-    let gen_ = |register: usize, live: &mut [bool]| {
-        if let Some(flag) = live.get_mut(register) {
-            *flag = true;
-        }
-    };
+fn apply_liveness(inst: &Inst, live: &mut [u64]) {
+    let operand = |index: usize| inst.operand(index);
+    let kill = |register: usize, live: &mut [u64]| set_bit(live, register, false);
+    let gen_ = |register: usize, live: &mut [u64]| set_bit(live, register, true);
     match inst.op {
         Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
         Op::SetVar => gen_(operand(1), live),

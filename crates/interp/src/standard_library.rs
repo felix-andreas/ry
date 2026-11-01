@@ -795,8 +795,11 @@ unsafe fn list_to_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_len(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    let items = list_elements(call, "list", list)?;
-    scalar_integer(items.len() as i32)
+    // Counting needs no items, and making one per position of a long Array is the slow part.
+    if !list.is_array() && list.kind() != SexpType::List {
+        return Err(wrong(call, "list", "a list", list));
+    }
+    scalar_integer(length(list) as i32)
 }
 
 unsafe fn list_is_empty(call: &Call<'_>) -> R<Sexp> {
@@ -1540,6 +1543,24 @@ unsafe fn number_value(number: Number) -> R<Sexp> {
 /// The numbers of a list, all integers or (if any is a double) all doubles.
 unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     let [list] = arguments(call, ["list"])?;
+    // A numeric Array's storage already holds the numbers, so it is read without boxing them.
+    if list.is_array() {
+        match list.kind() {
+            SexpType::Real => {
+                return Ok(values::reals(list)
+                    .iter()
+                    .map(|&number| Number::Double(number))
+                    .collect());
+            }
+            SexpType::Integer => {
+                return Ok(values::ints(list)
+                    .iter()
+                    .map(|&number| Number::Integer(number))
+                    .collect());
+            }
+            _ => {}
+        }
+    }
     let items = list_elements(call, "list", list)?;
     let mut numbers = Vec::with_capacity(items.len());
     for item in items {
@@ -1563,6 +1584,15 @@ unsafe fn fold_numbers(
     integer: fn(i32, i32) -> Option<i32>,
     double: fn(f64, f64) -> f64,
 ) -> R<Sexp> {
+    // A double Array folds straight over its storage, which skips building a million boxed
+    // numbers for a million-item Array.
+    let [list] = arguments(call, ["list"])?;
+    if list.is_array() && list.kind() == SexpType::Real {
+        let total = values::reals(list)
+            .iter()
+            .fold(f64::from(start), |total, &item| double(total, item));
+        return scalar_real(total);
+    }
     let numbers = list_numbers(call)?;
     let mut total = Number::Integer(start);
     for number in numbers {
