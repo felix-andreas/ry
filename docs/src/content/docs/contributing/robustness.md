@@ -81,7 +81,8 @@ queued whenever a query is cancelled.
 
 - edits, including several ranged changes in one notification, typing bursts, full-text
   replacements, emoji and CJK text, and UTF-8 or UTF-16 position encodings;
-- opening, closing and saving files, and untitled buffers;
+- opening, closing and saving files, untitled buffers, and an R Markdown document whose positions
+  count on the document's own text, not on the R script its chunks make;
 - disk changes behind the editor's back to R files, `DESCRIPTION`, `NAMESPACE`, `ry.toml`, data files
   and test files, with watcher events delayed, duplicated, and delivered in shuffled batches;
 - requests of every kind at valid and invalid positions, abandoned requests, and requests that race

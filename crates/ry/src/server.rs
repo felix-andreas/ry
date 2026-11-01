@@ -74,7 +74,10 @@ use {
         thread,
         time::{Duration, Instant},
     },
-    syntax::{SyntaxElement, TextRange, TextSize, is_syntactic_name},
+    syntax::{
+        SyntaxElement, TextRange, TextSize, is_syntactic_name,
+        literate::{is_literate_extension, r_regions, r_source_of_literate},
+    },
     tokio::{runtime::Handle, sync::oneshot},
     tower::ServiceBuilder,
 };
@@ -458,6 +461,12 @@ struct Worker {
     /// were computed for. Editors ask for code actions on every cursor move, and the fixes they
     /// offer must be the ones on screen, so a request reuses this instead of re-deriving the file.
     published_fixes: HashMap<SourceFile, PublishedFixes>,
+    /// The text the editor holds for each open literate document (`.Rmd`, `.qmd`, `.Rnw`).
+    /// Analysis reads the document as one R script with its prose blanked
+    /// (`syntax::literate`), which has the same bytes offsets and line breaks, so ranges need
+    /// no translation; positions are counted on this text, because a blanked character can
+    /// have a different UTF-16 width.
+    literate_documents: HashMap<SourceFile, String>,
 }
 
 struct PublishedFixes {
@@ -575,6 +584,7 @@ impl Worker {
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
             published_fixes: HashMap::new(),
+            literate_documents: HashMap::new(),
         };
         // Every input starts at MEDIUM durability, like the workspace files: a memo is only as
         // durable as its least durable input, and nearly every memo reads the stubs or the
@@ -1088,7 +1098,10 @@ impl Worker {
     }
 
     fn text(&self, file: SourceFile) -> String {
-        file.text(&self.db).to_owned()
+        match self.literate_documents.get(&file) {
+            Some(document) => document.clone(),
+            None => file.text(&self.db).to_owned(),
+        }
     }
 
     fn to_offset(&self, text: &str, position: lsp_types::Position) -> TextSize {
@@ -1295,6 +1308,15 @@ impl Worker {
         }
 
         let kind = document_kind(&path, &self.workspace_root);
+        let literate = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(is_literate_extension);
+        let document = literate.then(|| params.text_document.text.clone());
+        let mut params = params;
+        if literate {
+            params.text_document.text = r_source_of_literate(&params.text_document.text);
+        }
         match self.files.get(&path) {
             // Opening usually shows the text already on disk, so lowering its durability
             // waits for idle time: the drop defeats backdating, and everything derived from
@@ -1314,6 +1336,9 @@ impl Worker {
                 self.files.insert(path.clone(), file);
                 self.rebuild_project_files();
             }
+        }
+        if let (Some(document), Some(&file)) = (document, self.files.get(&path)) {
+            self.literate_documents.insert(file, document);
         }
         self.open_documents.insert(path.clone());
         self.refresh_attached(&path);
@@ -1352,7 +1377,12 @@ impl Worker {
             .get(&path)
             .expect("open documents are always tracked");
         let text = self.text(file);
-        let updated = self.apply_content_changes(text, &params.content_changes);
+        let mut updated = self.apply_content_changes(text, &params.content_changes);
+        if self.literate_documents.contains_key(&file) {
+            let analysed = r_source_of_literate(&updated);
+            self.literate_documents.insert(file, updated);
+            updated = analysed;
+        }
         self.pending_lowering.retain(|owed| owed != &path);
         file.set_text(&mut self.db)
             .with_durability(Durability::LOW)
@@ -1433,6 +1463,7 @@ impl Worker {
         self.open_documents.remove(&path);
         if let Some(file) = self.files.get(&path) {
             self.published_fixes.remove(file);
+            self.literate_documents.remove(file);
         }
         self.pending_semantic_publishes.retain(|owed| owed != &path);
         self.pending_lowering.retain(|owed| owed != &path);
@@ -2417,9 +2448,19 @@ impl LanguageServer for ServerState {
         params: lsp_types::CompletionParams,
     ) -> BoxFuture<'static, Result<Option<lsp_types::CompletionResponse>, Self::Error>> {
         self.read(move |worker| {
-            let Some((file, _, offset)) = worker.document_at(&params.text_document_position) else {
+            let Some((file, text, offset)) = worker.document_at(&params.text_document_position)
+            else {
                 return Ok(None);
             };
+            // Prose is blank to analysis, where every name would complete.
+            if worker.literate_documents.contains_key(&file)
+                && !r_regions(&text).iter().any(|region| {
+                    region.range.start <= usize::from(offset)
+                        && usize::from(offset) <= region.range.end
+                })
+            {
+                return Ok(None);
+            }
             let files = ProjectFiles::get(&worker.db);
             let result = worker
                 .cancellable(|worker| ide::completion(&worker.db, files, file, offset))
@@ -2598,9 +2639,32 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some((_, text)) = worker.document(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
+            if worker.literate_documents.contains_key(&file) {
+                return match format::format_chunks(&text, worker.config.format) {
+                    Ok(edits) => Ok(Some(
+                        edits
+                            .into_iter()
+                            .map(|(range, new_text)| lsp_types::TextEdit {
+                                range: worker.to_range(
+                                    &text,
+                                    TextRange::new(
+                                        TextSize::try_from(range.start).unwrap_or_default(),
+                                        TextSize::try_from(range.end).unwrap_or_default(),
+                                    ),
+                                ),
+                                new_text,
+                            })
+                            .collect(),
+                    )),
+                    Err(error) => {
+                        tracing::error!("formatting failed: {error:?}");
+                        Ok(None)
+                    }
+                };
+            }
             match format::format(&text, worker.config.format) {
                 Ok(formatted) => {
                     // The negotiated encoding counts the last line's columns, so a final line
@@ -2631,9 +2695,13 @@ impl LanguageServer for ServerState {
         params: lsp_types::DocumentRangeFormattingParams,
     ) -> BoxFuture<'static, Result<Option<Vec<lsp_types::TextEdit>>, Self::Error>> {
         self.read(move |worker| {
-            let Some((_, text)) = worker.document(&params.text_document.uri) else {
+            let Some((file, text)) = worker.document(&params.text_document.uri) else {
                 return Ok(None);
             };
+            // A selection in a literate document can span prose; formatting it is whole chunks.
+            if worker.literate_documents.contains_key(&file) {
+                return Ok(None);
+            }
             let selection = worker.to_text_range(&text, params.range);
 
             let root = syntax::parse(&text).syntax_node();
@@ -2753,9 +2821,14 @@ impl LanguageServer for ServerState {
             let Some((file, text)) = worker.document(&uri) else {
                 return Ok(None);
             };
-            let lenses = worker
+            let literate = worker.literate_documents.contains_key(&file);
+            // A literate document is rendered, not run, so it only gets reference counts.
+            let lenses: Vec<_> = worker
                 .cancellable(|worker| ide::code_lenses(&worker.db, file))
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|lens| !literate || lens.kind == ide::CodeLensKind::References)
+                .collect();
             let uri_argument = serde_json::Value::String(uri.to_string());
             let mut result = Vec::new();
             for lens in lenses {

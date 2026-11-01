@@ -187,7 +187,12 @@ function createClient(): LanguageClient {
   }
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "r" }],
+    // Literate documents are matched by name because their language id depends on which
+    // extension (vscode-R, Quarto, or none) the user has installed.
+    documentSelector: [
+      { scheme: "file", language: "r" },
+      { scheme: "file", pattern: "**/*.{Rmd,rmd,qmd,Rnw,rnw,Snw,snw}" },
+    ],
     outputChannel,
   }
 

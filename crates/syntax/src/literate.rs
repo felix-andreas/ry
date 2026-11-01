@@ -11,46 +11,100 @@ pub fn is_literate_extension(extension: &str) -> bool {
     )
 }
 
-pub fn r_source_of_literate(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_chunk = false;
+/// A stretch of a literate document that is R code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
+    pub range: Range<usize>,
+    pub kind: RegionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionKind {
+    /// The lines of a chunk between its fences, with their line terminators. `indented` is set
+    /// when the opening fence is indented (a chunk inside a list item), where every code line
+    /// carries the fence's indentation too.
+    Chunk { indented: bool },
+    /// The expression of an inline `` `r expr` ``, without the backticks.
+    Inline,
+}
+
+/// The R regions of a literate document, in order.
+pub fn r_regions(text: &str) -> Vec<Region> {
+    let mut regions = Vec::new();
+    let mut chunk: Option<(usize, bool)> = None;
+    let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
-        let terminator = &line[body.len()..];
         let trimmed = body.trim_start();
-        let keep = in_chunk && !is_chunk_end(trimmed);
-        in_chunk = if in_chunk {
-            keep
-        } else {
-            is_chunk_start(trimmed)
-        };
-        if keep {
-            out.push_str(body);
-        } else {
-            blank_prose(body, &mut out);
+        match chunk {
+            Some((start, indented)) if is_chunk_end(trimmed) => {
+                regions.push(Region {
+                    range: start..offset,
+                    kind: RegionKind::Chunk { indented },
+                });
+                chunk = None;
+            }
+            Some(_) => {}
+            None if is_chunk_start(trimmed) => {
+                chunk = Some((offset + line.len(), trimmed.len() != body.len()));
+            }
+            None => {
+                let mut index = 0;
+                while index < body.len() {
+                    match inline_expression(body, index) {
+                        Some((expression, end)) => {
+                            regions.push(Region {
+                                range: offset + expression.start..offset + expression.end,
+                                kind: RegionKind::Inline,
+                            });
+                            index = end;
+                        }
+                        None => {
+                            index += body[index..].chars().next().map_or(1, char::len_utf8);
+                        }
+                    }
+                }
+            }
         }
-        out.push_str(terminator);
+        offset += line.len();
     }
+    if let Some((start, indented)) = chunk {
+        regions.push(Region {
+            range: start..text.len(),
+            kind: RegionKind::Chunk { indented },
+        });
+    }
+    regions
+}
+
+/// The document as one R script, as knitting runs it: everything outside the R regions is
+/// blanked, and each inline expression's closing backtick becomes `;`, so two inline
+/// expressions on one line parse as two statements. The script has the document's exact byte
+/// length and line breaks, so every offset in it is an offset in the document.
+pub fn r_source_of_literate(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for region in r_regions(text) {
+        blank(&text[cursor..region.range.start], &mut out);
+        out.push_str(&text[region.range.clone()]);
+        cursor = region.range.end;
+        if region.kind == RegionKind::Inline {
+            out.push(';');
+            cursor += 1;
+        }
+    }
+    blank(&text[cursor..], &mut out);
     out
 }
 
-/// A character becomes one space per UTF-8 byte. Exotic whitespace is blanked
-/// too: R's lexer rejects a non-breaking space.
-fn blank_prose(body: &str, out: &mut String) {
-    let mut index = 0;
-    while index < body.len() {
-        if let Some((expression, end)) = inline_expression(body, index) {
-            // The closing backtick becomes `;` so two inline expressions on one
-            // line parse as two statements.
-            out.push_str(&" ".repeat(expression.start - index));
-            out.push_str(&body[expression.clone()]);
-            out.push(';');
-            index = end;
-            continue;
+/// A character becomes one space per UTF-8 byte, so offsets stay aligned. Exotic whitespace is
+/// blanked too: R's lexer rejects a non-breaking space.
+fn blank(prose: &str, out: &mut String) {
+    for character in prose.chars() {
+        match character {
+            '\n' | '\r' => out.push(character),
+            other => out.extend(std::iter::repeat_n(' ', other.len_utf8())),
         }
-        let width = body[index..].chars().next().map_or(1, char::len_utf8);
-        out.push_str(&" ".repeat(width));
-        index += width;
     }
 }
 
@@ -191,6 +245,23 @@ mod tests {
             converted.trim(),
             "",
             "nothing on this line is inline R: {converted:?}"
+        );
+    }
+
+    #[test]
+    fn regions_name_chunk_bodies_and_inline_expressions() {
+        let document = "Intro `r 1 + 1`.\n```{r}\nx <- 1\n```\n  ```{r}\n  y\n  ```\n";
+        let regions: Vec<(&str, RegionKind)> = r_regions(document)
+            .into_iter()
+            .map(|region| (&document[region.range], region.kind))
+            .collect();
+        assert_eq!(
+            regions,
+            [
+                ("1 + 1", RegionKind::Inline),
+                ("x <- 1\n", RegionKind::Chunk { indented: false }),
+                ("  y\n", RegionKind::Chunk { indented: true }),
+            ]
         );
     }
 

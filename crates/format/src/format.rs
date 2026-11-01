@@ -148,6 +148,44 @@ pub fn format(source: &str, config: Config) -> Result<String, FormatError> {
 }
 
 /// Shared with the coverage-guided `fuzz/` targets so the contract has one home.
+/// The edits that format each R chunk of a literate document (`.Rmd`, `.qmd`, `.Rnw`): the
+/// byte range of a chunk's code and its formatted text, for the chunks that change. Prose and
+/// fences are never touched. A chunk whose fence is indented (inside a list item) is left alone,
+/// because its lines carry the fence's indentation, which the formatter would remove. An error
+/// names its line in the document.
+pub fn format_chunks(
+    document: &str,
+    config: Config,
+) -> Result<Vec<(std::ops::Range<usize>, String)>, FormatError> {
+    let mut edits = Vec::new();
+    for region in syntax::literate::r_regions(document) {
+        if region.kind != (syntax::literate::RegionKind::Chunk { indented: false }) {
+            continue;
+        }
+        let code = &document[region.range.clone()];
+        if code.trim().is_empty() {
+            continue;
+        }
+        let formatted = format(code, config).map_err(|error| FormatError {
+            line: error.line + document[..region.range.start].matches('\n').count(),
+            ..error
+        })?;
+        if formatted != code {
+            edits.push((region.range, formatted));
+        }
+    }
+    Ok(edits)
+}
+
+/// A literate document with every R chunk formatted, as [`format_chunks`] describes.
+pub fn format_literate(document: &str, config: Config) -> Result<String, FormatError> {
+    let mut formatted = document.to_owned();
+    for (range, text) in format_chunks(document, config)?.into_iter().rev() {
+        formatted.replace_range(range, &text);
+    }
+    Ok(formatted)
+}
+
 pub fn check_format_invariants(input: &str) {
     let first = format(input, Config::default());
     let again = format(input, Config::default());

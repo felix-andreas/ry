@@ -46,8 +46,9 @@ Files directly under `tests/testthat/` see the package's definitions and the `he
 changes what a name means under `R/`. Each test file's own bindings stay in that file, as they do
 when testthat runs it.
 
-`ry check` reads the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents, but the language server does
-not analyze them and `ry fmt` skips them.
+A `.Rmd`, `.qmd`, or `.Rnw` document is read as one script made of its R chunks in order, so a chunk
+sees what earlier chunks define, and an inline `` `r expr` `` sees everything defined above it.
+Chunks in other languages are treated as prose.
 
 One gap matters from the start: after `library()` of a package ry knows nothing about, any bare name
 might be one of its exports, so ry stops reporting unresolved names in the whole project.

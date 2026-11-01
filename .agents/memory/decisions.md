@@ -4615,3 +4615,12 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
   `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
 
+
+## Literate documents keep their offsets, and the server keeps their original text
+
+- **Previous shape.** `check` read `.Rmd`/`.qmd`/`.Rnw` through `syntax::literate`, which blanks prose to spaces byte for byte, but the server and `ry fmt` skipped them.
+- **Analysis.** The engine still sees only the blanked text, so every byte offset is the document's own and no range table exists to drift. The chunks of one document form one script.
+- **Positions.** The server keeps the original text per literate file (`Worker::literate_documents`) and converts LSP positions against it, because a blanked multibyte character has a different UTF-16 width. Each `did_change` applies the edits to the original and converts the whole buffer again; conversion is a linear scan, so per-edit conversion would add a second source of truth for no measurable gain.
+- **Formatting** is per chunk (`format::format_chunks`), returning one edit per changed chunk, so prose, fences and inline code are never rewritten. An indented chunk (inside a list item) is skipped, because re-indenting it would need the list's indentation. Range formatting is off for literate files.
+- **Completion** answers only inside an R region (`syntax::literate::r_regions`), so typing prose shows nothing. Code lenses other than reference counts are dropped, because "Run file" and "Run test" mean nothing for a report.
+- **VS Code** matches literate files by glob, because their language id depends on which extension is installed.

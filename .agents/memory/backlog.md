@@ -1633,17 +1633,6 @@ because it does not know the type. So only the stub spelling is unreachable.
 Decide whether a stub source should see a project's `@type` declarations at all, or whether the
 R-side declaration is simply the answer and the docs should say so.
 
-### Literate documents are analysed by `check` but not by the editor
-
-An `.Rmd`, `.qmd` or `.Rnw` chunk is converted to an R program by blanking every non-R character, in
-`syntax::literate`, so ranges need no translation and `check` reports at the original line and
-column.
-
-The LSP path still ignores them. `did_change` hands the engine incremental edits against the
-document the editor holds, and the converted text is a different buffer, so wiring it up needs the
-original text kept alongside the analysed one, or the conversion applied per edit. The formatter
-deliberately stays out, because most of an `.Rmd` is prose.
-
 ### The stronger suppression form
 
 A type error inside `expect_error(...)` stays reported, and `# ry: allow(type-mismatch)` is the
@@ -2652,7 +2641,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 - **`fmt` on a target with no R in it reports that it formatted no files and exits 0**, as `check`
   already did. A stage with nothing to do must not fail a pipeline, and a pre-commit hook handing the
-  formatter a literate document it deliberately skips must not fail the commit.
+  formatter a file with no R in it must not fail the commit.
 
 - **`setkey`, `setorder` and `unique(DT, by=)` work.** `setkey` and `setorder` name columns rather
   than values, so they are `@masked` like the other non-standard-evaluation verbs, while the

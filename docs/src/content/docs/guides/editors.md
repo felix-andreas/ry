@@ -43,6 +43,15 @@ word "total" in a string are three different things.
 ry's own syntax, from [records and tags](/type-checking/records-and-tags#in-the-editor) to
 [DataFrame](/type-checking/dataframes) columns, gets the same features as plain R.
 
+## R Markdown and Quarto
+
+In `.Rmd`, `.qmd`, and `.Rnw` documents, the R chunks get diagnostics, hover, completion,
+go-to-definition, references, rename, and formatting. The chunks are analyzed together as one
+script, so a name defined in a setup chunk resolves in every later chunk and in inline
+`` `r expr` `` code. Formatting rewrites only the R chunks and never touches the prose, and
+completion stays quiet in the prose. VS Code sends these documents to ry whichever extension
+(vscode-R, Quarto, or none) gives them their language.
+
 ## Running and debugging
 
 The VS Code extension runs your code on ry's runtime.

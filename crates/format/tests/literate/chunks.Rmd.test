@@ -1,0 +1,71 @@
+#==== chunks
+#---- prose_and_fences_stay_and_chunks_format
+# Report
+
+Some *prose* with  two spaces, and `r 1+1` inline.
+
+```{r setup, echo=FALSE}
+x<-c(1,2)
+```
+
+More prose.
+
+```{r}
+f<-function(a){a+1}
+```
+#++++
+# Report
+
+Some *prose* with  two spaces, and `r 1+1` inline.
+
+```{r setup, echo=FALSE}
+x <- c(1, 2)
+```
+
+More prose.
+
+```{r}
+f <- function(a) { a + 1 }
+```
+
+#---- an_indented_chunk_is_left_alone
+1. A list item:
+
+   ```{r}
+   y<-1
+   ```
+#++++
+1. A list item:
+
+   ```{r}
+   y<-1
+   ```
+
+#---- other_languages_are_prose
+```{python}
+x=1
+```
+#++++
+```{python}
+x=1
+```
+
+#---- a_syntax_error_names_its_document_line
+Intro.
+
+```{r}
+x <- (
+```
+#++++
+ERROR: Syntax error: unclosed `(`; expected a matching `)` at line 4, column 6
+
+#---- sweave_chunks_format
+\section{One}
+<<setup>>=
+z<-3
+@
+#++++
+\section{One}
+<<setup>>=
+z <- 3
+@

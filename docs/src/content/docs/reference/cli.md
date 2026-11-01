@@ -63,8 +63,9 @@ ry fmt --check   # name the files that would change, and exit 1 if any would
 ry fmt --diff    # show the changes without writing them, and exit 1 if any
 ```
 
-`ry fmt` skips `.Rmd`, `.qmd`, and `.Rnw` files, because it rewrites a whole file's layout and must not
-touch prose. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
+In `.Rmd`, `.qmd`, and `.Rnw` files, `ry fmt` formats each R chunk on its own and leaves the prose,
+the fences, inline `` `r expr` `` code, and indented chunks (such as one inside a list item) exactly
+as written. `exclude` does not apply to it. All of its output goes to stderr. The rules it applies
 are in [Formatting rules](/reference/formatting-rules).
 
 ## run and R

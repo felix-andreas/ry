@@ -1412,17 +1412,8 @@ pub fn fmt(
                 CommandError
             })?;
             warn_config(&config);
-            // `[check] exclude` scopes analysis, not formatting. Literate documents are never
-            // formatted: most of an `.Rmd` is prose.
-            let paths: Vec<PathBuf> = collect_r_files(file, None)?
-                .into_iter()
-                .filter(|path| {
-                    !path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(is_literate_extension)
-                })
-                .collect();
+            // `[check] exclude` scopes analysis, not formatting.
+            let paths: Vec<PathBuf> = collect_r_files(file, None)?;
             Ok((paths, config))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1447,7 +1438,16 @@ pub fn fmt(
             };
 
             let start = Instant::now();
-            let new = match format::format(&initial, config.format) {
+            // A literate document formats chunk by chunk, so its prose is never touched.
+            let literate = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(is_literate_extension);
+            let formatted = match literate {
+                true => format::format_literate(&initial, config.format),
+                false => format::format(&initial, config.format),
+            };
+            let new = match formatted {
                 Ok(new) => new,
                 Err(err) => {
                     n_errors += 1;
@@ -1476,8 +1476,7 @@ pub fn fmt(
         }
     }
 
-    // Not a usage error: a pre-commit hook may pass only a literate document, which
-    // fmt deliberately skips.
+    // Not a usage error: a pre-commit hook may pass only files of other kinds.
     if n_files == 0 {
         info("0 files formatted");
         return Ok(Outcome::Clean);

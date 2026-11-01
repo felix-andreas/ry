@@ -1509,7 +1509,7 @@ fn write_file(root: &Path, relative: &str, text: &str) {
 
 /// Files an editor would open as text documents.
 fn is_text_document(path: &str) -> bool {
-    path.ends_with(".R") || path == "NAMESPACE"
+    path.ends_with(".R") || path.ends_with(".Rmd") || path.ends_with(".qmd") || path == "NAMESPACE"
 }
 
 /// The largest char boundary at or before `offset`, clamped to the text.
@@ -1619,7 +1619,8 @@ fn line_diff(expected: &str, actual: &str) -> String {
 }
 
 /// Every range in `value` that refers to `text` lies inside it, with its start before its
-/// end. A subtree that names another document (a `uri` or a `targetUri`) is not checked.
+/// end. A subtree that names another document (a `uri`, a `targetUri`, or an incoming call's
+/// `from`) is not checked.
 fn check_ranges(value: &serde_json::Value, text: &str, utf8: bool) -> Result<(), String> {
     match value {
         serde_json::Value::Array(items) => {
@@ -1629,7 +1630,11 @@ fn check_ranges(value: &serde_json::Value, text: &str, utf8: bool) -> Result<(),
             Ok(())
         }
         serde_json::Value::Object(fields) => {
-            if fields.contains_key("uri") || fields.contains_key("targetUri") {
+            // An incoming call's `fromRanges` lie in its caller's document, which `from` names.
+            if fields.contains_key("uri")
+                || fields.contains_key("targetUri")
+                || fields.contains_key("from")
+            {
                 return Ok(());
             }
             if let (Some(start), Some(end)) = (fields.get("start"), fields.get("end"))
@@ -1707,6 +1712,10 @@ const INITIAL_WORKSPACE: &[(&str, &str)] = &[
     (
         "scripts/analysis.R",
         "library(stats)\nmeasurements <- read.csv(\"data.csv\")\nsummary(measurements$height)\narea(1, \"wide\")\n",
+    ),
+    (
+        "reports/summary.Rmd",
+        "# Summary — ünïcode\n\n```{r}\nsides <- c(2, 3)\nshapes <- square(sides)\n```\n\nThe first is `r shapes[1]`.\n\n```{r}\ngreet(shapes)\n```\n",
     ),
     ("data.csv", "height,weight\n1.5,60\n1.8,80\n"),
     ("ry.toml", "[check]\n"),

@@ -1011,10 +1011,10 @@ fn check_analyses_r_chunks_in_a_literate_document() {
         "the chunk error is located in the original document: {rendered}"
     );
     let formatted = ry(directory.path(), &["fmt", "--check", "."]);
-    assert!(
-        !formatted.stdout.contains("1 file"),
-        "fmt must not pick up literate documents: {}",
-        formatted.stdout
+    assert_eq!(
+        formatted.code, 0,
+        "the chunks are already formatted: {}",
+        formatted.stderr
     );
 }
 
@@ -1151,25 +1151,23 @@ fn fmt_rewrites_in_place_and_exits_zero() {
 }
 
 #[test]
-fn fmt_on_a_deliberately_skipped_file_exits_clean() {
-    let directory = project(&[("report.Rmd", "# Title\n\n```{r}\nx<-1\n```\n")]);
+fn fmt_formats_only_the_r_chunks_of_a_literate_document() {
+    let document = "# Title\n\nProse  with  spaces.\n\n```{r}\nx<-1\n```\n";
+    let directory = project(&[("report.Rmd", document)]);
     for arguments in [
         vec!["fmt", "--diff", "report.Rmd"],
         vec!["fmt", "--check", "report.Rmd"],
-        vec!["fmt", "report.Rmd"],
     ] {
         let output = ry(directory.path(), &arguments);
-        assert_eq!(
-            output.code, 0,
-            "{arguments:?} should be clean: {}",
-            output.stderr
-        );
+        assert_eq!(output.code, 1, "{arguments:?}: {}", output.stderr);
     }
+    let output = ry(directory.path(), &["fmt", "report.Rmd"]);
+    assert_eq!(output.code, 0, "{}", output.stderr);
     let text = fs::read_to_string(directory.path().join("report.Rmd"))
         .expect("failed to read the document back");
-    assert!(
-        text.contains("x<-1"),
-        "the document must not be rewritten: {text}"
+    assert_eq!(
+        text,
+        "# Title\n\nProse  with  spaces.\n\n```{r}\nx <- 1\n```\n"
     );
 }
 

@@ -1,5 +1,5 @@
 use {
-    format::{Config, format},
+    format::{Config, format, format_literate},
     std::path::Path,
     syntax::testing::run_fixture_suite,
 };
@@ -21,4 +21,17 @@ fn render(source: &str) -> String {
 fn format_fixtures() {
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/format");
     run_fixture_suite(&suite, &render);
+}
+
+/// Literate documents: each R chunk is formatted on its own, and prose and fences are kept.
+#[test]
+fn literate_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/literate");
+    run_fixture_suite(
+        &suite,
+        &|source| match format_literate(source, Config::default()) {
+            Ok(output) => output,
+            Err(error) => format!("ERROR: {error}"),
+        },
+    );
 }
