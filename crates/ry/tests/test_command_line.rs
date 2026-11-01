@@ -140,6 +140,15 @@ fn options_before_the_script_resolve_as_documented() {
                 arguments.push("script.R".to_owned());
             }
         }
+        // A console option beside a script would be ignored, so it is a usage error.
+        let script = options.file && command != "repl" && !options.interactive;
+        if script && (options.keybindings.is_some() || options.no_load) {
+            assert!(
+                session(&arguments).is_err(),
+                "{arguments:?} must be refused"
+            );
+            continue;
+        }
         let parsed = session(&arguments)
             .unwrap_or_else(|error| panic!("{arguments:?} must parse: {error}"))
             .expect("a session command");
@@ -214,12 +223,16 @@ fn arbitrary_argument_vectors_never_panic_and_keep_the_session_invariants() {
                 arguments: trailing,
             } => {
                 assert_ne!(command.as_deref(), Some("repl"), "{arguments:?}");
-                let position = 1 + arguments[1..]
-                    .iter()
-                    .position(|argument| file.as_os_str() == argument.as_str())
-                    .expect("the script is one of the arguments");
-                let after: Vec<String> = arguments[position + 1..].to_vec();
-                assert_eq!(trailing, after, "{arguments:?}");
+                // An option's value can repeat the script's text, so the script is found from
+                // the end: it is the argument just before the ones it receives.
+                assert!(arguments.ends_with(&trailing), "{arguments:?}");
+                let position = arguments.len() - trailing.len() - 1;
+                assert!(position >= 1, "{arguments:?}");
+                assert_eq!(
+                    file.as_os_str(),
+                    arguments[position].as_str(),
+                    "{arguments:?}"
+                );
             }
             Mode::Console { .. } => {}
         }

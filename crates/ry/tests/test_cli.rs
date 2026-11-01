@@ -1567,5 +1567,6 @@ fn a_strict_mode_refusal_exits_one_before_any_r_starts() {
             "{}",
             output.stderr
         );
+        assert_eq!(output.stdout, "", "{command}: nothing ran");
     }
 }

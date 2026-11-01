@@ -178,12 +178,16 @@ fn run_console(
     keybindings: Keybindings,
     load_package: bool,
 ) -> ExitCode {
-    if let Some(file) = &file
-        && let Err(error) = fs::metadata(file)
-    {
-        cli::error(&format!("cannot read {}: {error}", file.display()));
-        return ExitCode::from(2);
-    }
+    let script = match &file {
+        Some(file) => match fs::read_to_string(file) {
+            Ok(source) => Some(source),
+            Err(error) => {
+                cli::error(&format!("cannot read {}: {error}", file.display()));
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
     let working_directory = match env::current_dir() {
         Ok(directory) => directory,
         Err(error) => {
@@ -191,9 +195,26 @@ fn run_console(
             return ExitCode::from(2);
         }
     };
-    let Some(preflight) = Preflight::discover(&working_directory, PathBuf::from("<console>"))
+    let console = PathBuf::from("<console>");
+    let Some(mut preflight) =
+        Preflight::discover(&working_directory, file.clone().unwrap_or(console.clone()))
     else {
         return ExitCode::from(2);
+    };
+    // The script is checked under its own name and then fed as console input, so the console's
+    // filter does not check it a second time, and later commands see its definitions.
+    let input = match script {
+        Some(script) => {
+            if preflight.check(&script) == Verdict::Refuse {
+                return ExitCode::from(1);
+            }
+            preflight.rename(console);
+            match runtime {
+                Runtime::GnuR => preflight::erase(&script),
+                Runtime::Ry => script,
+            }
+        }
+        None => String::new(),
     };
     let flags = runtime_flags(preflight.config());
     let keybindings = match keybindings {
@@ -208,7 +229,7 @@ fn run_console(
         Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
             repl::RunOptions {
                 keybindings,
-                file,
+                input,
                 filter: Some(filter),
                 completer,
                 ..repl::RunOptions::default()
@@ -224,7 +245,7 @@ fn run_console(
                 keybindings,
                 routines: load::call_routines(),
                 startup,
-                file,
+                input,
                 completer,
                 hooks: Some(Box::new(load::ReloadWatcher)),
                 filter: Some(filter),

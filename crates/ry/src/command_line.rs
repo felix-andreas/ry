@@ -68,7 +68,7 @@ pub enum Command {
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
         /// With `--runtime gnu-r`, do not load the package the working directory belongs to
-        #[arg(long, hide = true)]
+        #[arg(long, hide = true, conflicts_with = "script")]
         no_load: bool,
     },
     /// Run an R script on GNU R, or open a GNU R console without one
@@ -80,7 +80,7 @@ pub enum Command {
         #[command(flatten)]
         session: SessionArguments,
         /// Do not load the package the working directory belongs to into the console
-        #[arg(long)]
+        #[arg(long, conflicts_with = "script")]
         no_load: bool,
     },
     /// The console's earlier name: `ry R`, or with `--runtime ry`, `ry run`
@@ -161,7 +161,7 @@ pub struct SessionArguments {
     #[arg(short, long, value_name = "FILE", conflicts_with = "script")]
     pub interactive: Option<PathBuf>,
     /// Editing keybindings for the console
-    #[arg(long, value_enum, default_value_t)]
+    #[arg(long, value_enum, default_value_t, conflicts_with = "script")]
     pub keybindings: Keybindings,
 }
 

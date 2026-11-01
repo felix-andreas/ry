@@ -59,8 +59,7 @@ ry R script.R         # run on GNU R
 ry R                  # a GNU R console with ry's highlighting and completion
 ```
 
-`ry run` and `ry R` take the same options, and they go before the file, because everything after
-the file is the script's: `ry run script.R --help` hands `--help` to the script. A top-level error
+Options go before the file, because everything after the file is the script's: `ry run script.R --help` hands `--help` to the script. A top-level error
 stops a script with exit status 1, as with `Rscript`, and so does `q(status = 1)`. The output is
 only what the script prints, with no startup banner.
 
@@ -81,7 +80,9 @@ sees `TRUE`.
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
 guide](/guides/console) describes what its completion knows. Started inside an R package, `ry R`
 [loads it](/guides/loading-packages) and reloads what changed before each command, and `--no-load`
-turns that off. ry's console does not load the package yet.
+turns that off. ry's console does not load the package yet. `--keybindings` and `--no-load` apply
+only to a console, so passing either with a script is a usage error. With `-i FILE`, the file is
+checked under its own name before the console opens, and a strict-mode refusal exits 1.
 
 With standard input piped (`echo '1 + 1' | ry run`), the console skips the editor, the prompt and
 the banner, evaluates each line, prints the result, and exits 0 at the end of input. It behaves

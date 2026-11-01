@@ -704,6 +704,23 @@ pub unsafe fn prompt_text(prompt: *const c_char) -> String {
         .into_owned()
 }
 
+/// `--args` and then `arguments`, which R hands to `commandArgs(trailingOnly = TRUE)` without
+/// reading them as options. R copies the command line while it initializes, so the strings
+/// need to outlive only that call.
+fn trailing_arguments(arguments: &[String]) -> Result<Vec<CString>, ReplError> {
+    if arguments.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::iter::once(Ok(c"--args".to_owned()))
+        .chain(
+            arguments
+                .iter()
+                .map(|argument| CString::new(argument.as_bytes())),
+        )
+        .collect::<Result<Vec<CString>, _>>()
+        .map_err(|_| ReplError("an argument contains a NUL byte".to_owned()))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -749,21 +766,4 @@ mod tests {
         assert!(error.0.contains("--enable-R-shlib"), "{}", error.0);
         fs::remove_dir_all(&directory).ok();
     }
-}
-
-/// `--args` and then `arguments`, which R hands to `commandArgs(trailingOnly = TRUE)` without
-/// reading them as options. R keeps the pointers for the whole process, so the strings leak.
-fn trailing_arguments(arguments: &[String]) -> Result<&'static [CString], ReplError> {
-    if arguments.is_empty() {
-        return Ok(&[]);
-    }
-    let strings = std::iter::once(Ok(c"--args".to_owned()))
-        .chain(
-            arguments
-                .iter()
-                .map(|argument| CString::new(argument.as_bytes())),
-        )
-        .collect::<Result<Vec<CString>, _>>()
-        .map_err(|_| ReplError("an argument contains a NUL byte".to_owned()))?;
-    Ok(Box::leak(strings.into_boxed_slice()))
 }
