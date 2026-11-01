@@ -12,3 +12,6 @@ path = "src/rcmd.rs"
 [[bin]]
 name = "ry-rcmd"
 path = "src/main.rs"
+
+[dependencies]
+libloading = "0.8"

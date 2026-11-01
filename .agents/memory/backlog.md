@@ -35,10 +35,11 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **Compiled code builds with GNU R's toolchain**: on ry's runtime `R.home()` is GNU R's, so
-  `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links GNU R's `libR.so`. It loads
-  because ry's `libR.so` already holds that soname. Pointing `R.home()` at `crates/rcmd`'s R home
-  would make the build ry's own.
+- **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run --runtime ry`,
+  `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
+  GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
+  loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
+  on ry, would make the build ry's own.
 - **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
@@ -2034,10 +2035,11 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
-- **The R-level half of `R CMD INSTALL`**: lazy-load databases, `Meta/`, help and the byte
-  compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
-  exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
-  GNU R until then, because configure scripts run R code through them.
+- **`R -f` and `R CMD BATCH` do not echo input.** `ry_run` runs a file like `Rscript`, so
+  `R -f` without `--no-echo` and `BATCH` output omit the `> ` echoed code GNU R prints.
+- **`exists(name, registry)` on the namespace registry segfaults** (its enclosure is NULL, as in
+  GNU R, where the lookup errors "use of NULL environment is defunct" instead).
+- **`lazyLoad()` returns visibly** (prints `NULL` at top level); GNU R's result is invisible.
 - **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
   negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the

@@ -1969,14 +1969,25 @@ primitives, and nothing built or installed packages.
 - **Header export coverage is checked by the compiler** (`-aux-info` and `-E` in
   `tests/test_headers.rs`), not by scanning header text, because rename macros and struct fields
   defeat a text scan.
-- **Package installation is the `rcmd` crate.** ry's R home has ry's headers and `libR.so`, an
-  `etc/Makeconf` written for ry, `share/make/shlib.mk`, and a `bin/R` that runs `ry-rcmd`, so
-  `configure` scripts asking `R CMD config` get ry's toolchain. A source install compiles `src/`
-  as `R CMD INSTALL` does and records `RyBuilt:`; the R-level half (lazy-load database, help,
-  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript`, and `bin/R`
-  for anything but `R CMD` and `R RHOME`, run GNU R for the R code configure scripts and
-  `Makevars` evaluate (`R -f tools/examples.R`): an explicit build-time delegation that the
-  interpreter replaces, not a fallback on failure.
+- **Package installation is the `rcmd` crate, and it runs on ry.** ry's R home has ry's
+  headers and `libR.so`, an `etc/Makeconf` written for ry and `share/make/shlib.mk`. It links
+  everything else from GNU R's home: the `library/` packages (base R's R code), `share/`,
+  `etc/` and the `R CMD` scripts in `bin/` (build, check, Rdconv, ...). Its own `bin/R`,
+  `bin/Rscript` and `bin/Rcmd` exec `ry-rcmd`, which answers `R CMD INSTALL|SHLIB|config` and
+  `R RHOME` in Rust and runs every other command line (`-e`, `-f`, a script, stdin) on ry's
+  interpreter by dlopening the home's `libR.so` and calling `ry_run`. GNU R's `R CMD` scripts
+  call back into `bin/R`, so they run on ry too; no GNU R process runs at install time.
+  - Install: Rust configures and compiles `src/`, then an embedded R driver
+    (`crates/rcmd/src/install.R`) runs the R-level half on ry with GNU R's own `tools`
+    functions, in `tools:::.install_packages`' order (DESCRIPTION and `Meta/`, collated code,
+    `sysdata`, lazy data, demos, `inst/`, the lazy-load database, Rd objects and help indices,
+    vignette index, `nsInfo`), then test-loads in a fresh ry process. Reusing `tools` keeps the
+    installed layout GNU R's byte for byte in structure, so GNU R can read what ry installs.
+  - **Nothing is byte-compiled.** ry compiles closures itself when they run, and GNU R
+    bytecode in a lazy-load database is read back as its source expression anyway, so a GNU R
+    compile step would only cost install time. `ByteCompile: yes` is ignored.
+  - The previous shape delegated `bin/R` and `bin/Rscript` to GNU R and kept `R/` as sources;
+    both are gone.
 - **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
   algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
   which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random
