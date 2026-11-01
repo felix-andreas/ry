@@ -604,67 +604,6 @@ fn hashed(codes: &[u64], aggregations: &[Aggregation], top: Option<&Ranking>) ->
             (hash(code) >> (64 - bits)) as usize
         }
     };
-    let (rows, row_codes, bounds) = scatter(codes, partitions, partition_of, threads);
-
-    let parts: Vec<(Vec<u32>, Vec<u64>, Vec<State>)> = THREAD_POOL.install(|| {
-        (0..partitions)
-            .into_par_iter()
-            .map(|partition| {
-                let span = bounds[partition]..bounds[partition + 1];
-                let rows = &rows[span.clone()];
-                let codes = &row_codes[span];
-                let (slots, first_rows, slot_codes) = number_groups(codes, rows);
-                let mut states: Vec<State> = aggregations
-                    .iter()
-                    .map(|aggregation| State::new(aggregation, first_rows.len(), top))
-                    .collect();
-                for (aggregation, state) in aggregations.iter().zip(&mut states) {
-                    update(
-                        state,
-                        aggregation,
-                        top,
-                        rows.len(),
-                        |index| rows[index] as usize,
-                        |index| slots[index] as usize,
-                    );
-                }
-                (first_rows, slot_codes, states)
-            })
-            .collect()
-    });
-    let groups: usize = parts
-        .iter()
-        .map(|(first_rows, _, _)| first_rows.len())
-        .sum();
-    let mut first_rows = Vec::with_capacity(groups);
-    let mut slot_codes = Vec::with_capacity(groups);
-    let mut states: Vec<State> = aggregations
-        .iter()
-        .map(|aggregation| State::new(aggregation, 0, top))
-        .collect();
-    for (part_rows, part_codes, part_states) in parts {
-        first_rows.extend(part_rows);
-        slot_codes.extend(part_codes);
-        for (state, part) in states.iter_mut().zip(part_states) {
-            state.append(part);
-        }
-    }
-    Grouping {
-        first_rows,
-        codes: slot_codes,
-        states,
-    }
-}
-
-/// Lays the rows out partition after partition, each partition listing its rows in ascending
-/// order, and returns the rows, their codes, and where each partition starts (with the total last).
-fn scatter(
-    codes: &[u64],
-    partitions: usize,
-    partition_of: impl Fn(u64) -> usize + Sync,
-    threads: usize,
-) -> (Vec<u32>, Vec<u64>, Vec<usize>) {
-    let height = codes.len();
     let chunks = if height < PARALLEL_ROWS {
         1
     } else {
@@ -673,7 +612,8 @@ fn scatter(
     let step = height.div_ceil(chunks);
     let range = |chunk: usize| (chunk * step).min(height)..((chunk + 1) * step).min(height);
 
-    // Each chunk counts its rows per partition, and each partition holds its chunks in order.
+    // Count each chunk's rows per partition, then lay partitions out one after another, each
+    // holding its chunks in order, so a partition lists its rows in ascending order.
     let counts: Vec<Vec<u32>> = THREAD_POOL.install(|| {
         (0..chunks)
             .into_par_iter()
@@ -726,7 +666,55 @@ fn scatter(
         rows.set_len(height);
         row_codes.set_len(height);
     }
-    (rows, row_codes, bounds)
+
+    let parts: Vec<(Vec<u32>, Vec<u64>, Vec<State>)> = THREAD_POOL.install(|| {
+        (0..partitions)
+            .into_par_iter()
+            .map(|partition| {
+                let span = bounds[partition]..bounds[partition + 1];
+                let rows = &rows[span.clone()];
+                let codes = &row_codes[span];
+                let (slots, first_rows, slot_codes) = number_groups(codes, rows);
+                let mut states: Vec<State> = aggregations
+                    .iter()
+                    .map(|aggregation| State::new(aggregation, first_rows.len(), top))
+                    .collect();
+                for (aggregation, state) in aggregations.iter().zip(&mut states) {
+                    update(
+                        state,
+                        aggregation,
+                        top,
+                        rows.len(),
+                        |index| rows[index] as usize,
+                        |index| slots[index] as usize,
+                    );
+                }
+                (first_rows, slot_codes, states)
+            })
+            .collect()
+    });
+    let groups: usize = parts
+        .iter()
+        .map(|(first_rows, _, _)| first_rows.len())
+        .sum();
+    let mut first_rows = Vec::with_capacity(groups);
+    let mut slot_codes = Vec::with_capacity(groups);
+    let mut states: Vec<State> = aggregations
+        .iter()
+        .map(|aggregation| State::new(aggregation, 0, top))
+        .collect();
+    for (part_rows, part_codes, part_states) in parts {
+        first_rows.extend(part_rows);
+        slot_codes.extend(part_codes);
+        for (state, part) in states.iter_mut().zip(part_states) {
+            state.append(part);
+        }
+    }
+    Grouping {
+        first_rows,
+        codes: slot_codes,
+        states,
+    }
 }
 
 /// Numbers the distinct codes of one partition in order of first appearance: each row's slot,
