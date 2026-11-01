@@ -283,6 +283,14 @@ impl<'a> GreenRef<'a> {
             .filter_map(|child| child.into_node().map(GreenRef))
     }
 
+    /// The kinds of the node's children, tokens included.
+    pub fn child_kinds(self) -> impl Iterator<Item = SyntaxKind> + 'a {
+        self.0.children().map(|child| match child {
+            NodeOrToken::Node(node) => RLanguage::kind_from_raw(node.kind()),
+            NodeOrToken::Token(token) => RLanguage::kind_from_raw(token.kind()),
+        })
+    }
+
     pub fn has_child(self, kind: SyntaxKind) -> bool {
         self.child_nodes().any(|child| child.kind() == kind)
     }
@@ -352,6 +360,85 @@ pub fn matching_nodes(
         }
     }
     matches
+}
+
+/// One step of [`walk_green`].
+#[derive(Clone, Copy)]
+pub enum GreenEvent<'a> {
+    /// A node, with its parent (`None` for the root) and its range.
+    Enter {
+        node: GreenRef<'a>,
+        parent: Option<GreenRef<'a>>,
+        range: TextRange,
+    },
+    /// The end of a node, after its last child.
+    Leave(GreenRef<'a>),
+    Token {
+        kind: SyntaxKind,
+        text: &'a str,
+        range: TextRange,
+    },
+}
+
+/// The tree under `root`, `root` included, in preorder, read from the green tree, so the
+/// walk builds no [`SyntaxNode`]s. Pair it with [`node_at`] to build red nodes only for the
+/// few sites a pass needs.
+pub fn walk_green(root: &SyntaxNode, mut visit: impl FnMut(GreenEvent<'_>)) {
+    let root_green = root.green();
+    visit(GreenEvent::Enter {
+        node: GreenRef(&root_green),
+        parent: None,
+        range: root.text_range(),
+    });
+    let mut stack = vec![(
+        &*root_green,
+        root_green.children(),
+        root.text_range().start(),
+    )];
+    while let Some((parent, children, next_start)) = stack.last_mut() {
+        let Some(child) = children.next() else {
+            visit(GreenEvent::Leave(GreenRef(parent)));
+            stack.pop();
+            continue;
+        };
+        let start = *next_start;
+        *next_start += child.text_len();
+        let range = TextRange::at(start, child.text_len());
+        match child {
+            NodeOrToken::Node(green) => {
+                visit(GreenEvent::Enter {
+                    node: GreenRef(green),
+                    parent: Some(GreenRef(parent)),
+                    range,
+                });
+                stack.push((green, green.children(), start));
+            }
+            NodeOrToken::Token(token) => visit(GreenEvent::Token {
+                kind: RLanguage::kind_from_raw(token.kind()),
+                text: token.text(),
+                range,
+            }),
+        }
+    }
+}
+
+/// The first node in preorder under `root` with this kind and exactly this range. The search
+/// only descends into children whose range contains `range`, so it touches one path of the
+/// tree, plus the neighbors of an empty range.
+pub fn node_at(root: &SyntaxNode, kind: SyntaxKind, range: TextRange) -> Option<SyntaxNode> {
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == kind && node.text_range() == range {
+            return Some(node);
+        }
+        let start = stack.len();
+        stack.extend(
+            node.children()
+                .filter(|child| child.text_range().contains_range(range)),
+        );
+        stack[start..].reverse();
+    }
+    None
 }
 
 /// Every token under `node` in source order, read from the green tree.

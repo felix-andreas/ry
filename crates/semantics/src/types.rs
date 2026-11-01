@@ -3,13 +3,13 @@ use std::iter;
 
 use crate::Db;
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, revisions = usize::MAX)]
 pub struct Name<'db> {
     #[returns(deref)]
     pub text: String,
 }
 
-#[salsa::interned(debug)]
+#[salsa::interned(debug, revisions = usize::MAX)]
 pub struct Ty<'db> {
     #[returns(ref)]
     pub kind: TyKind<'db>,
