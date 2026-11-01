@@ -588,10 +588,13 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
+        // R's arithmetic promotes `logical` to `integer` and `integer` to `double`.
         let rank = |ty: Ty<'db>| match ty.kind(db) {
+            TyKind::Scalar(Atomic::Logical) => Some((false, 0)),
             TyKind::Scalar(Atomic::Integer) => Some((false, 1)),
             TyKind::Scalar(Atomic::Double) => Some((false, 2)),
             TyKind::Vector(element) => match element.kind(db) {
+                TyKind::Scalar(Atomic::Logical) => Some((true, 0)),
                 TyKind::Scalar(Atomic::Integer) => Some((true, 1)),
                 TyKind::Scalar(Atomic::Double) => Some((true, 2)),
                 _ => None,
@@ -606,10 +609,10 @@ impl<'db> InferenceTable<'db> {
                 // A scalar meeting a vector widens to the vector: R recycles it.
                 let element = scalar(
                     db,
-                    if actual_rank.max(bound_rank) == 2 {
-                        Atomic::Double
-                    } else {
-                        Atomic::Integer
+                    match actual_rank.max(bound_rank) {
+                        2 => Atomic::Double,
+                        1 => Atomic::Integer,
+                        _ => Atomic::Logical,
                     },
                 );
                 let widened = if bound_vector || actual_vector {

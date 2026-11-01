@@ -346,3 +346,14 @@ first <- function() {
 #++++
 refspec: <T, U> fn(spec: T, [opts]: U) -> Unknown
 first: fn() -> Unknown
+
+#---- a_numeric_parameter_takes_a_logical_and_a_vector_partner_takes_a_vector
+cost <- function(price, rate) price * rate
+shifted <- function(x) x + c(1L, 2L)
+flagged <- function() cost(TRUE, 0.5)
+both <- function() shifted(c(1, 2))
+#++++
+cost: <T: numeric> fn(price: T, rate: T) -> T
+shifted: <T: numeric> fn(x: T) -> double[]
+flagged: fn() -> double
+both: fn() -> double[]

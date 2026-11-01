@@ -4803,11 +4803,10 @@ impl<'db> Checker<'db, '_> {
                 match result_shape {
                     // `x + 1L` stays polymorphic: integer promotes into whatever `x` resolves to.
                     OperandShape::Scalar => flexible,
-                    // A vector result cannot carry an unresolved atomic, so default to `double`.
-                    OperandShape::Vector => {
-                        self.unify_or_report(range, flexible, scalar(self.db, Atomic::Double));
-                        self.shaped(OperandShape::Vector, Atomic::Double)
-                    }
+                    // A vector result cannot carry an unresolved atomic, so it claims `double`,
+                    // R's widest numeric. The flexible operand stays open: it may itself be a
+                    // vector, which R recycles against its partner.
+                    OperandShape::Vector => self.shaped(OperandShape::Vector, Atomic::Double),
                 }
             }
         }
