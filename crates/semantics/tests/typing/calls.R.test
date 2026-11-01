@@ -446,12 +446,28 @@ pick <- function(kind) {
 pick: <T> fn(kind: T) -> character
 
 #==== higher_order
-#---- a_wrapper_over_disagreeing_overloads_leaves_its_parameter_unchecked
+#---- a_wrapper_over_shape_preserving_overloads_returns_its_argument
 keep_positive <- function(values) Filter(function(x) x > 0L, values)
 kept <- keep_positive(list(1L, -2L))
 #++++
-keep_positive: fn(values: Unknown) -> Unknown
-kept: Unknown
+keep_positive: <T> fn(values: T) -> T
+kept: list{integer, integer}
+
+#---- a_data_frame_passes_through_a_shape_preserving_wrapper
+first_rows <- function(rows) head(rows, 2L)
+numeric_columns <- function(frame) Filter(is.numeric, frame)
+#: fn(frame: data.frame) -> data.frame
+top <- function(frame) first_rows(numeric_columns(frame))
+#++++
+first_rows: <T> fn(rows: T) -> T
+numeric_columns: <T> fn(frame: T) -> T
+top: fn(frame: data.frame) -> data.frame
+
+#---- a_declared_parameter_passes_through_a_shape_preserving_call
+#: <T> fn(values: T) -> T
+keep_positive <- function(values) Filter(function(x) x > 0L, values)
+#++++
+keep_positive: <T> fn(values: T) -> T
 
 #---- a_lambda_argument_does_not_make_an_overload_a_guess
 named <- lapply(list(a = 1L), function(v) v + 1L)
@@ -697,7 +713,7 @@ f: <T> fn() -> T
 dedup <- function(func, x, ...) func(unique(x), ...)
 f <- function() dedup(basename, c("a/b", "a/b"))
 #++++
-dedup: <T, U> fn(func: fn(Any, ...: Any) -> T, x: U, ...: Any) -> T
+dedup: <T, U> fn(func: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
 f: fn() -> character
 
 #---- forwarded_dots_beside_a_named_argument_demand_no_callback_parameter

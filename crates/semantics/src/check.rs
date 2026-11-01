@@ -8585,6 +8585,97 @@ impl<'db> Checker<'db, '_> {
         matches!(ty.kind(self.db), TyKind::List(_) | TyKind::NamedList(_))
     }
 
+    /// The caller variable an overload set hands back unchanged. `Filter`, `head` and
+    /// `unique` declare one candidate per shape, each returning the shape it accepted, so
+    /// on an open argument the candidates narrow it differently and no single guess is
+    /// right. When every specific fit returns exactly what it narrowed the same variable
+    /// to, the call returns that variable itself and leaves it open: the caller gets back
+    /// whatever it passes, a `data.frame` included. An all-`Any` catch-all is ignored.
+    fn preserved_caller_variable(
+        &self,
+        caller_entries: &[(InferenceVar, Entry<'db>)],
+        fits: &[(usize, bool, Vec<Ty<'db>>)],
+        fit_results: &[Ty<'db>],
+    ) -> Option<InferenceVar> {
+        if fit_results.len() != fits.len() {
+            return None;
+        }
+        let specific: Vec<(&Vec<Ty<'db>>, Ty<'db>)> = fits
+            .iter()
+            .zip(fit_results)
+            .filter(|(_, result)| !self.all_any(&[**result]))
+            .map(|((_, _, narrowing), result)| (narrowing, *result))
+            .collect();
+        let (first, _) = specific.first()?;
+        if specific.len() < 2 || specific.iter().all(|(narrowing, _)| narrowing == first) {
+            return None;
+        }
+        caller_entries
+            .iter()
+            .enumerate()
+            .find(|(position, (var, _))| {
+                specific.iter().all(|(narrowing, result)| {
+                    narrowing.get(*position).is_some_and(|narrowed| {
+                        narrowed == result
+                            && !matches!(narrowed.kind(self.db), TyKind::Var(other) if other == var)
+                    })
+                })
+            })
+            .map(|(_, (var, _))| *var)
+    }
+
+    /// A declared `<T>` passed to a shape-preserving overload set (see
+    /// `preserved_caller_variable`) fits none of its candidates, because a rigid parameter
+    /// refuses to narrow. Written back as an annotation, `<T> fn(values: T) -> T` for a
+    /// `Filter` wrapper must check the way its inferred form did, so the argument is probed
+    /// as an open variable, and the call returns `T` when the candidates preserve it.
+    fn preserved_rigid_argument(
+        &mut self,
+        callee: ExprId,
+        schemes: &[TypeScheme<'db>],
+        call_arguments: &[CallArgument<'db>],
+    ) -> Option<Ty<'db>> {
+        let position = call_arguments.iter().position(|argument| {
+            argument.ty.is_some_and(|ty| {
+                matches!(
+                    self.table.shallow_resolve(self.db, ty).kind(self.db),
+                    TyKind::Rigid(_)
+                )
+            })
+        })?;
+        let rigid = call_arguments.get(position)?.ty?;
+        let snapshot = self.table.snapshot();
+        let open = self.fresh(Constraint::Unconstrained);
+        let TyKind::Var(var) = *open.kind(self.db) else {
+            self.table.rollback(snapshot);
+            return None;
+        };
+        let mut probed = call_arguments.to_vec();
+        if let Some(argument) = probed.get_mut(position) {
+            argument.ty = Some(open);
+        }
+        let caller_entries = vec![(var, self.table.entry(var).clone())];
+        let mut fits = Vec::new();
+        let mut fit_results = Vec::new();
+        for (index, scheme) in schemes.iter().enumerate() {
+            let probe = self.table.snapshot();
+            if let Ok((_, function)) = self.probe_overload_candidate(callee, scheme, &probed, false)
+            {
+                fit_results.push(self.table.resolve(self.db, function.ret));
+                let narrowed = self.table.resolve(self.db, open);
+                fits.push((
+                    index,
+                    self.caller_variables_untouched(&caller_entries),
+                    vec![narrowed],
+                ));
+            }
+            self.table.rollback(probe);
+        }
+        let preserved = self.preserved_caller_variable(&caller_entries, &fits, &fit_results);
+        self.table.rollback(snapshot);
+        preserved.map(|_| rigid)
+    }
+
     fn caller_variables_untouched(&self, entries: &[(InferenceVar, Entry<'db>)]) -> bool {
         entries
             .iter()
@@ -8753,6 +8844,8 @@ impl<'db> Checker<'db, '_> {
         let mut candidate_errors: Vec<TypeError<'db>> = Vec::new();
         // (candidate, left caller variables untouched, what it narrowed them to)
         let mut fits: Vec<(usize, bool, Vec<Ty<'db>>)> = Vec::new();
+        // Each fit's result, parallel to `fits` when the call narrows caller variables.
+        let mut fit_results: Vec<Ty<'db>> = Vec::new();
         let mut fitting_courtesy = false;
         for &courtesy in rounds {
             for (index, scheme) in schemes.iter().enumerate() {
@@ -8772,6 +8865,7 @@ impl<'db> Checker<'db, '_> {
                             return self.committed_overload_return(id, function.ret);
                         }
                         let free = self.caller_variables_untouched(&caller_entries);
+                        fit_results.push(self.table.resolve(self.db, function.ret));
                         let narrowing = caller_entries
                             .iter()
                             .map(|(var, _)| {
@@ -8797,6 +8891,11 @@ impl<'db> Checker<'db, '_> {
                 break;
             }
         }
+        if fits.is_empty()
+            && let Some(preserved) = self.preserved_rigid_argument(callee, schemes, call_arguments)
+        {
+            return preserved;
+        }
 
         // An overload set ends in a catch-all returning `Any` for calls it cannot describe, so
         // it fits every unchecked call too. A more specific fit refines it rather than
@@ -8820,6 +8919,11 @@ impl<'db> Checker<'db, '_> {
         {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
+        }
+        if !unchecked_argument
+            && let Some(var) = self.preserved_caller_variable(&caller_entries, &fits, &fit_results)
+        {
+            return Ty::new(self.db, TyKind::Var(var));
         }
         let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
             let (_, _, first) = fits.first()?;

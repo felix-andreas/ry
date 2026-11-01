@@ -8,12 +8,16 @@
 # the plain list one.
 head : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
 head : fn(x: Date, [n]: integer, ...: Any) -> Date
+head : fn(x: data.frame, [n]: integer, ...: Any) -> data.frame
+head : fn(x: matrix, [n]: integer, ...: Any) -> matrix
 head : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
 head : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
 head : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]
 head : fn(x: Any, [n]: Any, ...: Any) -> Any
 tail : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
 tail : fn(x: Date, [n]: integer, ...: Any) -> Date
+tail : fn(x: data.frame, [n]: integer, ...: Any) -> data.frame
+tail : fn(x: matrix, [n]: integer, ...: Any) -> matrix
 tail : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
 tail : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
 tail : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]

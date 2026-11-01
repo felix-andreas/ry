@@ -381,10 +381,10 @@ run <- function() {
   list(kept = kept, present = present, total = total)
 }
 #++++
-keep_positive: fn(values: Unknown) -> Unknown
+keep_positive: <T> fn(values: T) -> T
 is_present: Unknown
 sum_all: fn(values: list[integer] | integer[]) -> integer
-run: fn() -> list{kept: Unknown, present: Unknown, total: integer}
+run: fn() -> list{kept: list{integer, integer, integer}, present: Unknown, total: integer}
 
 #---- structural_access_on_unannotated_params_is_clean
 sum_tree <- function(node) {

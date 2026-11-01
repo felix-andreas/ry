@@ -542,6 +542,7 @@ lapply : <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
+Filter : fn(f: fn(Any) -> Any, x: data.frame) -> data.frame
 Filter : <T> fn(f: fn(T) -> Any, x: T[]) -> T[]
 Filter : <T> fn(f: fn(T) -> Any, x: list[named: T]) -> list[named: T]
 Filter : <T> fn(f: fn(T) -> Any, x: list[T]) -> list[T]
