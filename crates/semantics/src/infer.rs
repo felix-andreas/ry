@@ -282,6 +282,25 @@ impl<'db> InferenceTable<'db> {
         if let Some(error) = constraint_rejects(db, self, constraint, ty) {
             return Err(error);
         }
+        if constraint == Constraint::Numeric
+            && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
+            && let TyKind::Var(element) = self.shallow_resolve(db, *element).kind(db)
+        {
+            let element = self.find(*element);
+            if let Entry::Unbound {
+                level: element_level,
+                constraint: element_constraint,
+            } = *self.entry(element)
+            {
+                self.set(
+                    element,
+                    Entry::Unbound {
+                        level: element_level,
+                        constraint: element_constraint.join(Constraint::ScalarNumeric),
+                    },
+                );
+            }
+        }
         self.adjust_levels(db, level, ty);
         let numeric = matches!(constraint, Constraint::Numeric | Constraint::ScalarNumeric);
         self.set(representative, Entry::Bound { ty, numeric });
@@ -697,6 +716,22 @@ impl<'db> InferenceTable<'db> {
                 }
                 self.rollback(snapshot);
             }
+        }
+        // A constrained variable cannot bind to a union that has a member outside its
+        // constraint, so `lapply(n, f)` after `f(n)` made `n` numeric fits `X`'s `T[]` member.
+        if let (TyKind::Var(var), TyKind::Union(members)) = (actual.kind(db), expected.kind(db))
+            && !matches!(
+                self.entry(self.find(*var)),
+                Entry::Unbound {
+                    constraint: Constraint::Unconstrained,
+                    ..
+                }
+            )
+        {
+            let members = members.clone();
+            return members
+                .into_iter()
+                .any(|member| self.compatible_probe(db, actual, member, depth + 1));
         }
         if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
         {
@@ -1531,12 +1566,21 @@ fn constraint_rejects<'db>(
             )
             | TyKind::Any
             | TyKind::Unknown => true,
-            TyKind::Vector(element) | TyKind::NamedVector(element) => matches!(
-                element.kind(db),
+            TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(db) {
                 TyKind::Scalar(
-                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex
-                )
-            ),
+                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
+                ) => true,
+                // `bind` carries the bound to an open element, so `T[]` is a number vector.
+                TyKind::Var(var) => match table.entry(table.find(*var)) {
+                    Entry::Unbound { .. } => true,
+                    Entry::Bound { ty, .. } => {
+                        constraint_rejects(db, table, Constraint::ScalarNumeric, *ty).is_none()
+                    }
+                    Entry::Redirect(_) => false,
+                },
+                TyKind::Rigid(name) => binder_implies(name),
+                _ => false,
+            },
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,

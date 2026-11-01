@@ -1150,3 +1150,21 @@ labelled <- function() {
 #++++
 labelled: Unknown
 56..57 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character[]`
+
+#---- a_number_passed_to_a_helper_may_then_be_mapped_over
+# `half(n)` makes `n` a number, and a number vector still fits `lapply`'s `T[]` member.
+half <- function(n) if (n %% 2 == 1L) 0L else 1L
+halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
+#++++
+half: <T: numeric> fn(n: T) -> integer
+halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
+
+#---- a_mapped_number_still_rejects_text
+half <- function(n) if (n %% 2 == 1L) 0L else 1L
+halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
+wrong <- halves(c("a", "b"))
+#++++
+half: <T: numeric> fn(n: T) -> integer
+halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
+wrong: Unknown
+137..148 error[type-mismatch] expected `T[]`, found `character[]`
