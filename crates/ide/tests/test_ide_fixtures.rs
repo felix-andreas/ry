@@ -5,13 +5,14 @@
 
 use {
     ide::{
-        DefinitionTarget, DocumentSymbol, HoverDefinition, code_actions, completion, definition,
-        diagnostic_fixes, document_symbols, folding_ranges, hover, inlay_hints, references, rename,
-        selection_ranges, semantic_tokens, signature_help, type_definition, workspace_symbols,
+        CodeActionKind, DefinitionTarget, DocumentSymbol, HoverDefinition, code_actions,
+        completion, definition, diagnostic_fixes, document_symbols, folding_ranges, hover,
+        inlay_hints, references, rename, selection_ranges, semantic_tokens, signature_help,
+        type_definition, workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::file_diagnostics,
+        diagnostics::{Applicability, file_diagnostics},
         lints::{LintConfig, lint_file},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
@@ -503,9 +504,13 @@ fn render_structure(source: &str) -> String {
             diagnostics.extend(lint_file(db, file, &LintConfig::default()));
             let whole = TextRange::up_to(TextSize::of(text.as_str()));
             for fix in diagnostic_fixes(&diagnostics, whole) {
+                let unsafe_marker = match fix.kind {
+                    CodeActionKind::DiagnosticFix(Applicability::Unsafe) => " (unsafe)",
+                    _ => "",
+                };
                 for edit in &fix.edits {
                     output.push_str(&format!(
-                        "fix {}: {} -> {:?}\n",
+                        "fix {}{unsafe_marker}: {} -> {:?}\n",
                         fix.title,
                         covered(edit.range),
                         edit.replacement

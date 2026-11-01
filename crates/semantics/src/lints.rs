@@ -1,7 +1,7 @@
 use {
     crate::{
         Db, SourceFile,
-        diagnostics::{Diagnostic, Severity},
+        diagnostics::{Applicability, Diagnostic, Severity},
         is_s3_method_name, item_naming, item_spans,
         naming::BindingKind,
         parse, s3_generics,
@@ -534,9 +534,12 @@ fn push_lint(
     if let Some(severity) = lint_severity(level, Some(default_severity)) {
         let diagnostic = Diagnostic::new(range, severity, code, message.into());
         diagnostics.push(match fix {
-            Some((title, replacement)) => {
-                diagnostic.with_fix(title.to_owned(), range, replacement.to_owned())
-            }
+            Some((title, replacement)) => diagnostic.with_fix(
+                Applicability::Safe,
+                title.to_owned(),
+                range,
+                replacement.to_owned(),
+            ),
             None => diagnostic,
         });
     }

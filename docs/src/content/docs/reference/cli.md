@@ -25,6 +25,8 @@ ry check                       # the current directory
 ry check R/model.R             # report on one file
 ry check --output json         # one JSON object per finding, on stdout
 ry check --min-severity error  # ignore warnings, also for the exit code
+ry check --fix                 # apply the safe fixes, then report what remains
+ry check --fix --unsafe-fixes  # also apply fixes that guess, such as a spelling suggestion
 ```
 
 Naming a file limits what is reported, not what is analyzed: ry always reads the whole
@@ -36,6 +38,21 @@ which is analyzed only when you name it.
 stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
 turns off only the color, and a pipe gets plain ASCII. [Diagnostic
 codes](/reference/diagnostic-codes) shows how to read a finding.
+
+A finding with a mechanical fix says so under its snippet, and the summary counts them:
+
+```text
+  help: Change to `TRUE` (`ry check --fix` applies it)
+...
+3 problems in 1 file
+2 fixable with `ry check --fix` (1 more with `--unsafe-fixes`)
+```
+
+`--fix` rewrites the files in place and then reports what is left. It applies only safe fixes, which
+keep what the code means: `T` to `TRUE`, `=` to `<-`, and removing a trailing comma. A fix that
+guesses what you meant, such as changing a misspelled `totl` to `total`, is unsafe and needs
+`--unsafe-fixes` as well. One fix can expose another, so ry repeats the pass until nothing changes.
+The editor offers the same fixes as quick fixes.
 
 ## fmt
 
@@ -129,11 +146,13 @@ a `2`.
 summary, so the stream can be read line by line:
 
 ```json
-{"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
+{"code":"type-mismatch","column":21,"endColumn":27,"endLine":4,"fix":null,"line":4,"message":"expected `integer`, found `character`","path":"/home/you/demo/main.R","related":[],"severity":"error"}
 ```
 
 `path` is absolute. Lines and columns start at 1 and count characters, as your editor does, and
 `endColumn` is one past the end. `severity` is `"warning"` or `"error"`, and `code` is what a
 `# ry: allow(...)` comment names. `related` lists companion locations with the same position fields
-and a `message`, such as the other definition of a `duplicate`. These field names are a contract,
+and a `message`, such as the other definition of a `duplicate`. `fix` is `null` or an object with
+the `title`, an `applicability` of `"safe"` or `"unsafe"`, the position fields of the range it
+replaces, and the `replacement` text. These field names are a contract,
 so tools built on them keep working across releases.

@@ -7,7 +7,7 @@ use {
         Db, Item, ItemKind, ProjectFiles, SourceFile,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
         check::{CalleeTarget, ItemCheck},
-        diagnostics::{Diagnostic, TypeRenderer},
+        diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
         hir::{
             Argument, ExprId, ExpressionKind, LiteralKind, Module, NameSite, PatId, PatternKind,
@@ -29,6 +29,7 @@ use {
         cmp::Reverse,
         collections::{BTreeSet, HashMap, HashSet},
         iter::once,
+        mem,
     },
     syntax::{
         SyntaxElement,
@@ -817,6 +818,10 @@ pub enum SemanticClass {
     Tag,
     /// A called name, or a name assigned a function literal.
     Function,
+    /// A called function that comes from a package or base R rather than the project: the
+    /// function half of `pkg::name`, or a call head that resolves only to a stub. Editors render
+    /// it as a function with the `defaultLibrary` modifier.
+    LibraryFunction,
     /// The package of `pkg::name`.
     Namespace,
 }
@@ -824,8 +829,11 @@ pub enum SemanticClass {
 pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, SemanticClass)> {
     let root = semantics::parse(db, file).syntax_node();
     let mut spans = Vec::new();
-    // A read is a parameter only by resolution, which the syntax alone cannot tell.
+    // A read is a parameter, or a library function, only by resolution, which the syntax alone
+    // cannot tell.
     let mut parameter_reads: HashSet<TextSize> = HashSet::new();
+    let mut library_reads: HashSet<TextSize> = HashSet::new();
+    let files = ProjectFiles::try_get(db);
     for &item in item_tree(db, file) {
         let (Some(node), Some(hir), Some(naming)) = (
             item_node(db, item),
@@ -842,6 +850,13 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 .is_some_and(|info| info.kind == BindingKind::Parameter)
             {
                 parameter_reads.insert(hir.range(*expression).start() + offset);
+            }
+        }
+        for (expression, name) in naming.non_locals.iter() {
+            let project_defines =
+                files.is_some_and(|files| global_declaration_exists(db, files, name));
+            if !project_defines && stub_declaration(db, name).is_some() {
+                library_reads.insert(hir.range(*expression).start() + offset);
             }
         }
     }
@@ -886,10 +901,16 @@ pub fn semantic_tokens(db: &dyn Db, file: SourceFile) -> Vec<(TextRange, Semanti
                 }
             }
             None => classify_ry_token(&token).or_else(|| {
-                if token.kind() == IDENT && parameter_reads.contains(&token.text_range().start()) {
+                let start = token.text_range().start();
+                if token.kind() == IDENT && parameter_reads.contains(&start) {
                     Some(SemanticClass::Parameter)
                 } else {
-                    classify_r_name(&token)
+                    classify_r_name(&token).map(|class| match class {
+                        SemanticClass::Function if library_reads.contains(&start) => {
+                            SemanticClass::LibraryFunction
+                        }
+                        class => class,
+                    })
                 }
             }),
         };
@@ -917,7 +938,9 @@ pub fn classify_type_token(token: &SyntaxToken) -> Option<SemanticClass> {
     match token.kind() {
         IDENT => match owner_kind {
             Some(TYPE_BINDER) => Some(SemanticClass::TypeParameter),
-            Some(TYPE_FIELD | TYPE_FUNCTION) => Some(SemanticClass::Parameter),
+            // The only name a function type owns directly is its `fn`.
+            Some(TYPE_FUNCTION) => Some(SemanticClass::Keyword),
+            Some(TYPE_FIELD | TYPE_PARAMETER) => Some(SemanticClass::Parameter),
             Some(ANNOTATION_DIRECTIVE) => Some(SemanticClass::Decorator),
             _ => Some(SemanticClass::Type),
         },
@@ -964,7 +987,7 @@ fn classify_r_name(token: &SyntaxToken) -> Option<SemanticClass> {
         NAMESPACE_EXPR => holder
             .parent()
             .filter(|call| call.kind() == CALL_EXPR && call.first_child().as_ref() == Some(&holder))
-            .map(|_| SemanticClass::Function),
+            .map(|_| SemanticClass::LibraryFunction),
         CALL_EXPR if is_first_child => Some(SemanticClass::Function),
         BINARY_EXPR if is_first_child => {
             let binary = BinaryExpr::cast(holder)?;
@@ -1445,8 +1468,11 @@ pub enum CodeActionKind {
     InsertInferredAnnotation,
     /// The whole-file source action covering every eligible binding.
     AddMissingAnnotations,
-    /// The mechanical fix a diagnostic carries, such as a suggested spelling.
-    DiagnosticFix,
+    /// The mechanical fix a diagnostic carries, such as a suggested spelling. Only a safe fix
+    /// is what an editor's "fix" shortcut may apply without a look.
+    DiagnosticFix(Applicability),
+    /// Every safe fix in the file at once, as `ry check --fix` applies them in one pass.
+    FixAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1611,7 +1637,7 @@ pub fn diagnostic_fixes(diagnostics: &[Diagnostic], viewport: TextRange) -> Vec<
             let fix = diagnostic.fix.as_ref()?;
             Some(CodeAction {
                 title: fix.title.clone(),
-                kind: CodeActionKind::DiagnosticFix,
+                kind: CodeActionKind::DiagnosticFix(fix.applicability),
                 edits: vec![TextEdit {
                     range: fix.range,
                     replacement: fix.replacement.clone(),
@@ -1619,6 +1645,26 @@ pub fn diagnostic_fixes(diagnostics: &[Diagnostic], viewport: TextRange) -> Vec<
             })
         })
         .collect()
+}
+
+/// `None` when the file has no safe fix. Overlapping fixes keep the first, so a fix this pass
+/// leaves out shows up again once the edit lands.
+pub fn fix_all(diagnostics: &[Diagnostic]) -> Option<CodeAction> {
+    let fixes = applicable_fixes(diagnostics, false);
+    if fixes.is_empty() {
+        return None;
+    }
+    Some(CodeAction {
+        title: "Apply all safe fixes".to_owned(),
+        kind: CodeActionKind::FixAll,
+        edits: fixes
+            .into_iter()
+            .map(|fix| TextEdit {
+                range: fix.range,
+                replacement: fix.replacement.clone(),
+            })
+            .collect(),
+    })
 }
 
 fn ranges_overlap(left: TextRange, right: TextRange) -> bool {
@@ -1812,41 +1858,73 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     }
     let text = file.text(db);
     let lines = Lines::new(text);
+    let mut scoped = Vec::new();
     for header in section_headers(&root, text, &lines) {
         // A bare `# ----` separator still ends the section above it, but a symbol needs a name.
-        if header.scope.is_some() || header.title.is_empty() {
+        if header.title.is_empty() {
             continue;
         }
-        symbols.push(DocumentSymbol {
+        let section = DocumentSymbol {
             name: header.title,
             kind: DocumentSymbolKind::Section,
             detail: None,
             range: TextRange::new(header.range.start(), lines.end_of(text, header.end_line)),
             selection: header.range,
             children: Vec::new(),
-        });
+        };
+        match header.scope {
+            None => symbols.push(section),
+            Some(_) => scoped.push(section),
+        }
     }
-    // Sections nest by containment: a section's range ends where the next header of the same or
-    // a higher level begins, so every symbol it contains sorts after it and before that header.
+    // A section inside a function body belongs to the innermost listed symbol around it. One in
+    // a block the outline does not list, such as a `test_that` body, has nowhere to go.
+    for section in scoped {
+        insert_scoped_section(&mut symbols, section);
+    }
+    nest_sections(symbols, TextSize::of(text) + TextSize::from(1))
+}
+
+fn insert_scoped_section(symbols: &mut [DocumentSymbol], section: DocumentSymbol) {
+    let Some(owner) = symbols.iter_mut().find(|symbol| {
+        symbol.kind != DocumentSymbolKind::Section && symbol.range.contains_range(section.range)
+    }) else {
+        return;
+    };
+    let inner = owner.children.iter().any(|child| {
+        child.kind != DocumentSymbolKind::Section && child.range.contains_range(section.range)
+    });
+    if inner {
+        insert_scoped_section(&mut owner.children, section);
+    } else {
+        owner.children.push(section);
+    }
+}
+
+/// Sections nest by containment: a section's range ends where the next header of the same or a
+/// higher level in its scope begins, so every symbol it contains sorts after it and before that
+/// header. Each symbol's own children nest the same way, which places the sections of a function
+/// body under that function.
+fn nest_sections(mut symbols: Vec<DocumentSymbol>, end: TextSize) -> Vec<DocumentSymbol> {
     symbols.sort_by_key(|symbol| (symbol.range.start(), Reverse(symbol.range.end())));
     let mut nested: Vec<DocumentSymbol> = Vec::new();
     let mut open: Vec<DocumentSymbol> = Vec::new();
-    for symbol in symbols {
+    for mut symbol in symbols {
         close_sections(&mut open, &mut nested, symbol.range.start());
         if symbol.kind == DocumentSymbolKind::Section {
             open.push(symbol);
         } else {
+            if !symbol.children.is_empty() {
+                let children = mem::take(&mut symbol.children);
+                symbol.children = nest_sections(children, symbol.range.end());
+            }
             match open.last_mut() {
                 Some(section) => section.children.push(symbol),
                 None => nested.push(symbol),
             }
         }
     }
-    close_sections(
-        &mut open,
-        &mut nested,
-        TextSize::of(text) + TextSize::from(1),
-    );
+    close_sections(&mut open, &mut nested, end);
     nested
 }
 

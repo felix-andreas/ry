@@ -34,6 +34,7 @@ use {
     std::{
         collections::{BTreeMap, BTreeSet},
         mem,
+        ops::Range,
     },
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
@@ -71,11 +72,18 @@ impl Diagnostic {
         }
     }
 
-    pub fn with_fix(mut self, title: String, range: TextRange, replacement: String) -> Self {
+    pub fn with_fix(
+        mut self,
+        applicability: Applicability,
+        title: String,
+        range: TextRange,
+        replacement: String,
+    ) -> Self {
         self.fix = Some(Fix {
             title,
             range,
             replacement,
+            applicability,
         });
         self
     }
@@ -86,6 +94,60 @@ pub struct Fix {
     pub title: String,
     pub range: TextRange,
     pub replacement: String,
+    pub applicability: Applicability,
+}
+
+/// Whether `ry check --fix` may apply a fix without a person looking at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+pub enum Applicability {
+    /// The edit keeps what the code means, such as `T` to `TRUE`.
+    Safe,
+    /// The edit guesses what the author meant, such as the nearest spelling of a name that does
+    /// not exist, so it runs only with `--unsafe-fixes`.
+    Unsafe,
+}
+
+/// The fixes of `diagnostics` that one pass can apply together, in source order. A fix that
+/// overlaps an earlier one waits for the next pass, when the finding is computed again on the
+/// edited text.
+pub fn applicable_fixes(diagnostics: &[Diagnostic], include_unsafe: bool) -> Vec<&Fix> {
+    let mut fixes: Vec<&Fix> = diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.fix.as_ref())
+        .filter(|fix| include_unsafe || fix.applicability == Applicability::Safe)
+        .collect();
+    fixes.sort_by_key(|fix| (fix.range.start(), fix.range.end()));
+    let mut chosen: Vec<&Fix> = Vec::with_capacity(fixes.len());
+    for fix in fixes {
+        // Two insertions at one point would apply in an order nobody chose.
+        let overlaps = chosen.last().is_some_and(|previous| {
+            previous.range.end() > fix.range.start()
+                || (previous.range.end() == fix.range.start()
+                    && (previous.range.is_empty() || fix.range.is_empty()))
+        });
+        if !overlaps {
+            chosen.push(fix);
+        }
+    }
+    chosen
+}
+
+/// `text` with `fixes` applied; the fixes must be in source order and disjoint, as
+/// [`applicable_fixes`] returns them.
+pub fn apply_fixes(text: &str, fixes: &[&Fix]) -> String {
+    let mut edited = String::with_capacity(text.len());
+    let mut copied = 0;
+    for fix in fixes {
+        let (start, end) = (usize::from(fix.range.start()), usize::from(fix.range.end()));
+        let (Some(before), true) = (text.get(copied..start), text.is_char_boundary(end)) else {
+            continue;
+        };
+        edited.push_str(before);
+        edited.push_str(&fix.replacement);
+        copied = end;
+    }
+    edited.push_str(text.get(copied..).unwrap_or_default());
+    edited
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -393,7 +455,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 render_type_error_message(db, error),
             );
             diagnostics.push(match misspelling_fix(file.text(db), range, &error.kind) {
-                Some((title, at, replacement)) => diagnostic.with_fix(title, at, replacement),
+                Some((title, at, replacement)) => {
+                    diagnostic.with_fix(Applicability::Unsafe, title, at, replacement)
+                }
                 None => diagnostic,
             });
         }
@@ -401,7 +465,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // and their coverage is not counted.
         if !check.match_findings.is_empty() && inline_annotations_enabled(db) {
             for finding in &check.match_findings {
-                diagnostics.push(match_finding_diagnostic(finding, offset));
+                diagnostics.push(match_finding_diagnostic(file.text(db), finding, offset));
             }
         }
         let Some(module) = item_hir(db, item) else {
@@ -697,7 +761,12 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 ));
             match suggestion {
                 Some(nearest) => {
-                    diagnostic.with_fix(format!("Change to `{nearest}`"), range, nearest)
+                    diagnostic.with_fix(
+                        Applicability::Unsafe,
+                        format!("Change to `{nearest}`"),
+                        range,
+                        nearest,
+                    )
                 }
                 None => diagnostic,
             }
@@ -924,7 +993,7 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
                             TypeRenderer::default().render(db, pair.inline),
                             TypeRenderer::default().render(db, pair.comment)
                         ),
-                        fix: None,
+                        fix: comment_agreement_fix(db, file, pair.range, pair.comment_range),
                         related: vec![RelatedLocation {
                             file,
                             range: pair.comment_range,
@@ -971,7 +1040,13 @@ fn annotation_agreement_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagno
             severity: Severity::Warning,
             code: "annotation-mismatch",
             message: format!("{disagreement}. {winner}; make the two agree, or delete one"),
-            fix: None,
+            // Rewriting the comment keeps the program's meaning only while the inline type is
+            // the one ry applies.
+            fix: pair
+                .governing
+                .is_none()
+                .then(|| comment_agreement_fix(db, file, pair.range, pair.comment_range))
+                .flatten(),
             related: vec![RelatedLocation {
                 file,
                 range: pair.comment_range,
@@ -993,6 +1068,27 @@ enum AgreementCandidate<'db> {
     Slot(SlotPair<'db>),
     /// So do the bodies of a type defined both ways.
     Definition(DefinitionPair<'db>),
+}
+
+/// Copies the inline type's spelling into the `#:` comment, which keeps what the code means
+/// because ry types the statement by the inline annotation.
+fn comment_agreement_fix(
+    db: &dyn Db,
+    file: SourceFile,
+    inline: TextRange,
+    comment: TextRange,
+) -> Option<Fix> {
+    let spelling = file.text(db).get(Range::<usize>::from(inline))?;
+    // A comment is one line, so a type spread over several lines does not fit in it.
+    if spelling.contains('\n') {
+        return None;
+    }
+    Some(Fix {
+        title: format!("Change the `#:` comment to `{spelling}`"),
+        range: comment,
+        replacement: spelling.to_owned(),
+        applicability: Applicability::Safe,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -1989,7 +2085,12 @@ fn with_name_fix(diagnostic: Diagnostic, suggestion: Option<&str>) -> Diagnostic
         format!("`{nearest}`")
     };
     let range = diagnostic.range;
-    diagnostic.with_fix(format!("Change to `{nearest}`"), range, replacement)
+    diagnostic.with_fix(
+        Applicability::Unsafe,
+        format!("Change to `{nearest}`"),
+        range,
+        replacement,
+    )
 }
 
 /// Ties break lexicographically for determinism. The budget is deliberately
@@ -2919,20 +3020,38 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     }
 }
 
-fn match_finding_diagnostic(finding: &MatchFinding, offset: TextSize) -> Diagnostic {
+fn match_finding_diagnostic(text: &str, finding: &MatchFinding, offset: TextSize) -> Diagnostic {
     let range = finding.range + offset;
     match &finding.kind {
-        MatchFindingKind::Unreachable => Diagnostic::new(
-            range,
-            Severity::Warning,
-            "unreachable-pattern",
-            "this arm is unreachable: the arms above it already match every value its pattern matches".to_owned(),
-        ),
-        MatchFindingKind::NonExhaustive { missing, more } => {
+        MatchFindingKind::Unreachable { arm } => {
+            let diagnostic = Diagnostic::new(
+                range,
+                Severity::Warning,
+                "unreachable-pattern",
+                "this arm is unreachable: the arms above it already match every value its pattern matches".to_owned(),
+            );
+            // An arm that never runs can go without changing what the program does.
+            match whole_lines(text, *arm + offset) {
+                Some(lines) => diagnostic.with_fix(
+                    Applicability::Safe,
+                    "Remove the unreachable arm".to_owned(),
+                    lines,
+                    String::new(),
+                ),
+                None => diagnostic,
+            }
+        }
+        MatchFindingKind::NonExhaustive {
+            missing,
+            more,
+            expression,
+        } => {
             let message = if missing.iter().all(|case| case == "_") {
-                "this `match` does not handle every value: add a catch-all `_ => ...` arm".to_owned()
+                "this `match` does not handle every value: add a catch-all `_ => ...` arm"
+                    .to_owned()
             } else {
-                let mut cases: Vec<String> = missing.iter().map(|case| format!("`{case}`")).collect();
+                let mut cases: Vec<String> =
+                    missing.iter().map(|case| format!("`{case}`")).collect();
                 if *more {
                     cases.push("more".to_owned());
                 }
@@ -2950,9 +3069,76 @@ fn match_finding_diagnostic(finding: &MatchFinding, offset: TextSize) -> Diagnos
                     "this `match` does not handle {listed}: add {arm} for {pronoun}, or a catch-all `_ => ...` arm"
                 )
             };
-            Diagnostic::new(range, Severity::Error, "non-exhaustive-match", message)
+            let diagnostic =
+                Diagnostic::new(range, Severity::Error, "non-exhaustive-match", message);
+            match missing_arms_fix(text, missing, *expression + offset) {
+                Some((title, at, arms)) => {
+                    diagnostic.with_fix(Applicability::Unsafe, title, at, arms)
+                }
+                None => diagnostic,
+            }
         }
     }
+}
+
+/// `range` widened to the whole lines it covers, newline included, when nothing else shares
+/// those lines; otherwise `None`, because removing part of a line could join two statements.
+fn whole_lines(text: &str, range: TextRange) -> Option<TextRange> {
+    let start = usize::from(range.start());
+    let end = usize::from(range.end());
+    let before = text.get(..start)?;
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    if !before[line_start..].trim().is_empty() {
+        return None;
+    }
+    let after = text.get(end..)?;
+    let line_end = after
+        .find('\n')
+        .map_or(text.len(), |newline| end + newline + 1);
+    if !text.get(end..line_end)?.trim().is_empty() {
+        return None;
+    }
+    Some(TextRange::new(
+        TextSize::try_from(line_start).ok()?,
+        TextSize::try_from(line_end).ok()?,
+    ))
+}
+
+/// One arm per missing case, each stopping with an error, inserted on their own lines before
+/// the `match`'s closing brace and indented like the arm above. A `match` written on one line
+/// gets no fix, since there is no line to put the arms on. Unsafe: the arms silence the finding
+/// without handling anything.
+fn missing_arms_fix(
+    text: &str,
+    missing: &[String],
+    expression: TextRange,
+) -> Option<(String, TextRange, String)> {
+    let end = usize::from(expression.end());
+    let brace = end.checked_sub(1)?;
+    if text.get(brace..end)? != "}" {
+        return None;
+    }
+    let before = text.get(..brace)?;
+    let line_start = before.rfind('\n')? + 1;
+    if !before[line_start..].trim().is_empty() || line_start <= usize::from(expression.start()) {
+        return None;
+    }
+    let previous = before[..line_start - 1]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let previous_line = &before[previous..line_start - 1];
+    let indent = &previous_line[..previous_line.len() - previous_line.trim_start().len()];
+    let arms: String = missing
+        .iter()
+        .map(|case| format!("{indent}{case} => stop(\"not handled yet\")\n"))
+        .collect();
+    let title = if missing.len() == 1 {
+        format!("Add an arm for `{}`", missing[0])
+    } else {
+        "Add arms for the missing cases".to_owned()
+    };
+    let at = TextSize::try_from(line_start).ok()?;
+    Some((title, TextRange::empty(at), arms))
 }
 
 /// Names variables `T`/`U`/`V` in first-occurrence order. Share one renderer

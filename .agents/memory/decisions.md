@@ -4074,3 +4074,19 @@ explicit allocators".
   be reinstalled when the linked base version changes.
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
+
+## A fix says whether it may be applied unseen
+
+- `Fix.applicability` (`diagnostics.rs`) is `Safe` when the edit keeps what the code means (the lint
+  rewrites, syncing a `#:` comment to the inline type that governs, removing an unreachable arm) and
+  `Unsafe` when it guesses intent or silences a finding without handling it (spelling suggestions,
+  `stop()` arms for missing cases). It follows ruff's model. `ry check --fix`, the editor's preferred
+  quick fix and the `source.fixAll` action apply only safe fixes, because nobody reviews those edits;
+  `--unsafe-fixes` and a click opt into the rest. The fix lives on the diagnostic, so the CLI and the
+  server share one source of truth (`applicable_fixes`, `apply_fixes`).
+- `ry check --fix` re-analyzes and repeats until no fix applies (at most `MAX_FIX_PASSES`), because
+  overlapping fixes are skipped within a pass and one fix can expose another. It refuses to write a
+  file whose length on disk no longer matches the analyzed text.
+- The server keeps each open document's settled fix-bearing findings with the text they were computed
+  for (`published_fixes` in `server.rs`). `codeAction` reuses them while the text matches, so a
+  request per cursor move costs no analysis, and the offered fixes are the findings on screen.

@@ -3011,14 +3011,10 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 
 ## Open: editor parity
 
-- `ry check --fix` that applies `Diagnostic.fix` from the command line.
-- More quick fixes: an unused binding (remove or prefix), a missing `library()` for a namespaced name,
-  and an annotation that disagrees with the inline one.
+- More quick fixes: a missing `library()` for a namespaced name.
 - Semantic tokens: a `defaultLibrary` modifier for stub-declared functions, and coloring of
   `$` fields and frame columns.
 - The outline does not show sections inside function bodies (folding does).
-- `code_action` recomputes the file's diagnostics and suppressions on every request, and editors send
-  one per cursor move. Reuse the last published set for the document instead.
 
 ## Open: editor latency at 300,000 lines
 
