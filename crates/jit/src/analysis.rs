@@ -768,6 +768,34 @@ pub struct Refusal(pub &'static str);
 /// which a later attempt may well get past.
 pub const COLD: &str = "the body has no type feedback yet";
 
+/// The refusal for a body without a loop whose compiled code would hand every instruction that
+/// does real work back to tier 0, such as a wrapper around one `.Internal` call. Such code saves
+/// tier 0 only its dispatch, which repays the compilation after far more calls than most such
+/// bodies ever get.
+pub const NOTHING_NATIVE: &str = "compiled code would run nothing natively";
+
+impl Plan<'_> {
+    /// Whether compiled code would do some of the body's work itself: a loop, or arithmetic,
+    /// a comparison, an intrinsic, an element assignment, `&&` or `||`, or a call it inlines or
+    /// makes directly.
+    pub fn runs_natively(&self) -> bool {
+        !self.loop_headers.is_empty()
+            || self.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    Action::Inline { .. }
+                        | Action::Call { .. }
+                        | Action::Arithmetic { .. }
+                        | Action::Comparison { .. }
+                        | Action::Intrinsic { .. }
+                        | Action::SubAssign { .. }
+                        | Action::LogicLeft { .. }
+                        | Action::LogicRight { .. }
+                )
+            })
+    }
+}
+
 /// Builds the plan for `code`, a closure body whose environment's enclosure is `enclosure`, in
 /// `arena`. A `patient` plan refuses as [`COLD`] when an instruction whose result type matters
 /// has never run, because code compiled without that type runs the instruction in tier 0 for

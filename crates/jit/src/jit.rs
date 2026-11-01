@@ -61,6 +61,7 @@ const BACK_EDGE_THRESHOLD: i32 = 500;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
+    static MODE: Cell<Mode> = const { Cell::new(Mode::On) };
     /// The arena every compilation's plan lives in. It is reset after each compilation, which
     /// keeps its largest chunk, so a compilation usually allocates nothing from the system.
     static ARENA: RefCell<Bump> = RefCell::new(Bump::new());
@@ -83,6 +84,7 @@ pub fn install_mode(mode: Mode) {
         Mode::Force => (2, 1),
     };
     ENTRY_LIMIT.with(|limit| limit.set(entries));
+    MODE.with(|current| current.set(mode));
     bytecode::set_tier(Some(Tier {
         enter,
         back_edge,
@@ -195,6 +197,11 @@ unsafe fn compile_in<'a>(
             patient,
         )?;
         let planned = started.elapsed();
+        // Forced compilation keeps such bodies, so the differential tests cover the code that
+        // glues tier 0's steps together.
+        if !plan.runs_natively() && MODE.with(Cell::get) != Mode::Force {
+            return Err(Refusal(analysis::NOTHING_NATIVE));
+        }
         let entry = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
         if std::env::var_os("RY_JIT_LOG").is_some() {
