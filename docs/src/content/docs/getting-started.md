@@ -28,12 +28,12 @@ unresolved
 1 problem in 1 file
 ```
 
-When you work on a package, `ry repl` started inside it reloads what you changed before each
+When you work on a package, `ry R` started inside it reloads what you changed before each
 command, so you never call `load_all()` or restart R:
 
 ```text
-$ ry repl
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+$ ry R
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
 > count_words("the  quick fox")
 [1] 4
 > count_words("the  quick fox")     # after editing R/count.R
@@ -63,9 +63,10 @@ shares a namespace, as R loads them, and every other `.R` file is a script read 
 `ry check` exits with status 1 when it finds anything, so the same command works in CI.
 [Checking code](/guides/checking) shows everything it finds without configuration.
 
-The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry repl`
+The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry R`
 anywhere inside it, as in the transcript above. The console runs the GNU R
-installed on your machine, so it needs R; checking does not. In RStudio, put
+installed on your machine, so it needs R; checking does not. `ry R script.R` runs a script the same
+way, and `ry run script.R` runs it on ry's own, still incomplete runtime ([Console](/guides/console)). In RStudio, put
 `source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as you do today.
 [Loading packages](/guides/loading-packages) has the details.
 
@@ -106,5 +107,6 @@ inferred type ([Editors](/guides/editors)).
 
 - [Type checking](/type-checking/overview): how inference and `#:` annotations work
 - [Inline annotations](/type-checking/inline-annotations): step 3, types written in the code itself
+- [DataFrames](/guides/dataframes): ry's typed table, which also runs existing data.table code
 - [Records and tags](/type-checking/records-and-tags) and [strict mode](/type-checking/strict-mode):
   step 4, ry's own types and code that is typed throughout

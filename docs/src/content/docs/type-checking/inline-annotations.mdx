@@ -97,9 +97,9 @@ annotation-mismatch
 
 ## Running annotated code
 
-`ry run` and `ry repl` run annotated code. On GNU R they run the plain program it means, and on
-ry's own runtime (`--runtime ry`) the annotations also become checks: an argument of the wrong kind
-fails where the function was called.
+`ry run` runs annotated code on ry's own runtime, where the annotations also become checks: an
+argument of the wrong kind fails where the function was called. `ry R` runs it on GNU R as the plain
+program it means, with the annotations erased.
 
 ```r
 scale <- function(values: double, by: double) -> double values * by
@@ -107,7 +107,7 @@ scale("a", 1)
 ```
 
 ```text
-$ ry run --runtime ry scale.R
+$ ry run scale.R
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`
 Execution halted

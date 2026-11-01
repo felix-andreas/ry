@@ -13,7 +13,7 @@ most of its queries run on the same engine
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
-so run scripts that use them with `ry run --runtime ry script.R`:
+so run scripts that use them with `ry run script.R`:
 
 ```r
 sales <- DataFrame(
@@ -33,7 +33,7 @@ sales |>
 ```
 
 ```text
-$ ry run --runtime ry sales.R
+$ ry run sales.R
    region revenue orders
    <char>   <num>  <int>
 1:     eu    10.5      2
@@ -47,7 +47,7 @@ method dispatch: `DataFrame.filter` always means the same function.
 
 ## Existing data.table code
 
-Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
+Code written for data.table runs unchanged under `ry run`, and most queries on a
 `data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
 behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
 when it can produce exactly what data.table would, meaning the same values, attributes, printing

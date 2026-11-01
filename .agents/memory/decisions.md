@@ -1733,9 +1733,10 @@ ry is UPL-1.0, so no GPL code from GNU R is copied into the repository. The runt
 implementation are written independently.
 
 Base R's R-level sources (the open question in `contributing/design/r-runtime.md`, section 11) are
-GPL-2-or-later. The default is to load them at runtime from the user's own GNU R installation
-rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
-project is the owner's call and is not assumed.
+GPL-2-or-later. The owner confirmed the default: load them at runtime from the user's own GNU R
+installation rather than vendor them, the way the `repl` crate already loads R at runtime. ry
+therefore stays license-independent of GNU R and needs GNU R installed (`installation.md` says so).
+Relicensing the project is not assumed.
 
 # Decision record: the runtime's object model, collector and native boundary
 
@@ -3184,6 +3185,16 @@ first lines R had already read, leaving R mid-command.
 - **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
   right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
   finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
+
+## ry run and ry R: the command chooses the runtime
+
+- **Previous shape.** Two commands each carried a `--runtime` flag with its own default: `ry run script.R` and the `ry repl` console defaulted to GNU R, `ry load` to ry's runtime, and `RY_RUNTIME` overrode all three. Which runtime ran a file depended on the command, a flag and an environment variable, and the docs showed `ry run --runtime ry` everywhere. `ry run` also took FILE as its own positional, so clap still parsed `--help` or `--no-load` written after it.
+- **Target shape.** The command names the runtime (`crates/ry/src/command_line.rs`). `ry run [FILE] [ARGS]` runs on ry's runtime, `ry R [FILE] [ARGS]` on GNU R, and without FILE each opens the console. `-i FILE` runs FILE and then opens the console, which is the home of `ry repl -f`. `ry R` alone has `--no-load`, because only GNU R's console loads the package yet (it is hidden on `ry run` for `--runtime gnu-r`). `Command::session` resolves every spelling to one `Session { runtime, mode }`, so `main` dispatches on what to run.
+- **Compatibility.** `ry repl` stays as a hidden alias with its GNU R default and its `-f`; `--runtime` on `run`, `repl` and `load` and `RY_RUNTIME` stay honoured but undocumented. The flag wins over the variable; `ry R` ignores the variable, because a command named after GNU R must run GNU R. Like every option, `--runtime` must come before FILE now: `ry run script.R --runtime gnu-r` hands `--runtime gnu-r` to the script on ry's runtime. That follows `Rscript` and was accepted deliberately.
+- **One trailing positional.** FILE and its arguments are one `trailing_var_arg` vector: clap stops reading options only once a trailing positional has its first value, so everything after FILE reaches the script verbatim, as with `Rscript`. On GNU R the arguments follow `--args` in the embedded argv, so `commandArgs(trailingOnly = TRUE)` reads them on both runtimes. `crates/ry/tests/test_command_line.rs` fuzzes the parser against this property. `--keybindings` and `--no-load` conflict with a script, because they would be silently ignored there.
+- **Exit codes.** 0 for success, 1 for a top-level error or a strict-mode refusal, 2 for a usage error, an unreadable script (read up front, before any R starts) or a runtime that cannot start; `q(status = n)` exits n. A batch run on GNU R starts R non-interactive with `--no-echo`, as `Rscript` does: a script sees `interactive()` as FALSE, a top-level error prints "Execution halted" and exits 1 through R's own path, and R prints no trailing newline when the session ends.
+- **`-i FILE`** is checked under its own name with the same `Preflight` the console then continues (`Preflight::rename`), so a refusal exits 1 before the console opens, later commands see the file's definitions, and the file is fed as already-checked console input.
+- **Impact.** One rule for users (the command is the runtime) and one resolution function, `resolve_runtime`, which `Command::session` and `ry load` both call; the property tests pin it. No analysis state changes.
 
 # Decision record: data-oriented design and explicit allocators
 

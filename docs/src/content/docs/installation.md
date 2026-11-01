@@ -4,7 +4,7 @@ description: Every way to install ry
 ---
 
 Most people install ry through their editor, and the VS Code extension needs nothing else. Install
-the command-line binary as well if you want `ry check`, `ry fmt` and `ry repl` in a terminal or in
+the command-line binary as well if you want `ry check`, `ry fmt` and `ry R` in a terminal or in
 CI.
 
 ## VS Code
@@ -53,6 +53,14 @@ The crate is `ry-lang`, and the command it installs is `ry`.
 ```bash
 nix profile install github:felix-andreas/ry
 ```
+
+## R
+
+`ry check`, `ry fmt` and `ry server` need no R. Everything that runs code does: `ry R`, `ry run`
+and `ry load` need a GNU R installation built as a shared library (see the
+[CLI reference](/reference/cli)). That includes ry's own runtime (`ry run`), which reads base
+R's R sources and the default packages from your GNU R installation instead of shipping them, so
+ry stays independent of R's license.
 
 ## Zed
 

@@ -74,6 +74,12 @@ impl Preflight {
         &self.config
     }
 
+    /// Names the source in the findings of later checks, as when a console continues the
+    /// session a script began.
+    pub fn rename(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
     /// Checks `input` as the next part of the session. Accepted input joins the session;
     /// refused input does not, so the next command is checked as if it was never typed.
     pub fn check(&mut self, input: &str) -> Verdict {

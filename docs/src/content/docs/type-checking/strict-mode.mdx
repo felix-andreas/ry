@@ -8,7 +8,8 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 By default, ry checks what it can and lets the rest through as `Unknown`, so a clean `ry check`
 does not tell you how much was actually checked. Strict mode turns that around: every value ry
 cannot type, and every parameter nothing constrains, is an error. A clean run then means every value
-in the code has a known type, which is what you want before you let an agent change it.
+in the code has a known type, which is what you want before you let an agent change it. Strict mode is a check, so it needs
+nothing from ry's runtime: it works on plain R with `#:` comments, run on GNU R.
 
 ```toml
 [check]
@@ -19,9 +20,9 @@ strict = true
 Keep `typing = true` beside it: `strict = true` alone reports values with no type, but not type
 errors. A `# typing: strict` comment turns it on for a single file instead.
 
-Strict mode also guards running code. `ry run` prints the errors and exits with status 1 instead
-of running a script that has one, `ry load` does the same for a package whose `R/` files have one,
-and `ry repl` refuses each command that has one:
+Strict mode also guards running code. `ry run` and `ry R` print the errors and exit with status 1 instead of
+running a script that has one, `ry load` does the same for a package whose `R/` files have one,
+and the console refuses each command that has one:
 
 ```text
   x strict mode found 1 error, so this code does not run

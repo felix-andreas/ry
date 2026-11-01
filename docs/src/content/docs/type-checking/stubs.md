@@ -3,7 +3,7 @@ title: Package stubs
 description: How ry knows about packages without running R, and how to describe one it does not know
 ---
 
-ry never loads R, so it cannot ask a package what it exports. It reads *stubs* instead: declaration
+The checker never runs R, so it cannot ask a package what it exports. It reads *stubs* instead: declaration
 files that list a package's names and their types, the way TypeScript reads `.d.ts` files.
 
 ## What ships

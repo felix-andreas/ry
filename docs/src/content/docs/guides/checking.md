@@ -117,7 +117,9 @@ trailing-comma
 
 `T` is an ordinary variable that any code can overwrite. The trailing comma passes an empty
 argument, which breaks `c(1, 2, )` when it runs but is harmless to a function that never evaluates
-it, so it is a warning. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
+it, so it is a warning. A fourth lint on by default, `object-system`, warns on each S4, R6 or
+Reference Class definition, because [records and tags](/type-checking/records-and-tags) model data
+with every field checked. [Diagnostic codes](/reference/diagnostic-codes) lists every code with its
 reason, and [configuration](/reference/configuration) shows how to turn each one on or off.
 
 ## Silencing one finding

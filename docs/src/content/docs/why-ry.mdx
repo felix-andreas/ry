@@ -39,16 +39,8 @@ results:
 Code dominated by small function calls (`fib`) is still about 10% slower, and `vasicek` is at
 parity. Types do not make code faster yet: a static `double` still admits an integer or a logical
 through promotion, so the compiled code keeps its runtime checks, and the differences between the
-two ry columns are measurement noise. The runtime is still incomplete (see [Status](#status)).
-
-ry's runtime (`ry run --runtime ry`) interprets R and compiles hot code to machine code. Each
-program exists twice in `tools/bench/why/`: as plain R, and with inline annotations checked in
-[strict mode](/type-checking/strict-mode). Each time is the best of three runs after one warm-up
-run, measured inside the script, so it leaves out startup and, for the typed column, the static
-check. The best run is reported rather than the median because other load on a machine only ever
-slows a run down. Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R
-4.3.3 with its bytecode compiler on. `just bench-why` builds ry and regenerates the table on your
-machine.
+two ry columns are measurement noise. The runtime is still incomplete (see [Status](#status)), and
+[How it was measured](#how-it-was-measured) describes the benchmark.
 
 ## From plain R to fully typed code in four steps
 
@@ -82,7 +74,7 @@ unresolved
 ```
 
 The same analysis drives [your editor](/guides/editors). `ry fmt` formats the project, and
-`ry repl`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
+`ry R`, started inside a package, [reloads what you edit](/guides/loading-packages) before each
 command, so you never call `load_all()` again.
 
 ### 2. Type your code
@@ -130,15 +122,15 @@ net_price(100, rate)
 On ry's runtime, the call fails at the boundary and names the argument:
 
 ```text
-$ ry run --runtime ry pricing.R
+$ ry run pricing.R
 Error in net_price(100, rate) :
   argument `rate` must be `double`, not `character`
 Execution halted
 ```
 
-GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to binary operator`.
-`ry run` without `--runtime ry` runs the file on GNU R with the annotations erased, but plain
-`Rscript` cannot parse them, so a file with inline types needs ry.
+`ry R pricing.R` runs the file on GNU R with the annotations erased, and there it fails later, inside
+the body: `Error in 1 - rate : non-numeric argument to binary operator`. Plain `Rscript` cannot
+parse the annotations, so a file with inline types needs ry.
 
 ### 4. Go fully typed
 
@@ -210,4 +202,16 @@ is why CI should pin the version.
 
 ry's own runtime is under construction. It still reads base R from your GNU R installation, and a
 script that uses something it lacks stops with an error that names it. Records, tagged unions, `DataFrame` and
-the standard library run only on it, so for production work today, run plain R and typed R on GNU R.
+the standard library run only on it, so for production work today, run plain R and typed R on GNU R
+with `ry R`.
+
+## How it was measured
+
+ry's runtime (`ry run`) interprets R and compiles hot code to machine code. Each
+program exists twice in `tools/bench/why/`: as plain R, and with inline annotations checked in
+[strict mode](/type-checking/strict-mode). Each time is the best of three runs after one warm-up
+run, measured inside the script, so it leaves out startup and, for the typed column, the static
+check. The best run is reported rather than the median because other load on a machine only ever
+slows a run down. Measured on an Intel Xeon at 2.10GHz with 4 cores, Linux 6.18, against GNU R
+4.3.3 with its bytecode compiler on. `just bench-why` builds ry and regenerates the table on your
+machine.

@@ -4,12 +4,12 @@ description: Edit your package, run the next command, and see the change, withou
 ---
 
 When you work on an R package, most of your time goes into one loop: edit a function, run it, look at
-the result, edit again. Start `ry repl` anywhere inside the package and that loop needs no extra
+the result, edit again. Start `ry R` anywhere inside the package and that loop needs no extra
 step, because ry reloads what you changed before each command:
 
 ```text
-$ ry repl
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+$ ry R
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
 > count_words("the  quick fox")
 [1] 4
 ```
@@ -31,9 +31,8 @@ takes 6.6 s (see [Speed](#speed)).
 ## Running one command or a script
 
 `ry load` loads the package, runs something, and exits, which suits a quick check from the shell or
-a script in CI. Unlike `ry repl`, it runs the package on ry's own runtime by default, which is still
-incomplete, so pass `--runtime gnu-r` for code you rely on, as
-[Which R runs your package](#which-r-runs-your-package) explains:
+a script in CI. Unlike `ry R`, it runs the package on ry's own runtime, which is still incomplete
+([Which R runs your package](#which-r-runs-your-package)):
 
 ```text
 $ ry load -e 'count_words("the quick fox")'
@@ -41,7 +40,8 @@ Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
 [1] 3
 ```
 
-`ry load -f run.R` runs a script instead of an expression.
+`ry load -f run.R` runs a script instead of an expression. To run a script against the package on
+GNU R, start it with `load_all()` and run it with `ry R run.R`.
 
 ## From RStudio or plain R
 
@@ -58,8 +58,8 @@ call it, as devtools' does.
 
 ## Controlling reloads
 
-In `ry repl`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
-scratch when you want a clean slate, and `ry repl --no-load` starts the console without loading the
+In `ry R`, `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from
+scratch when you want a clean slate, and `ry R --no-load` starts the console without loading the
 package at all.
 
 ## Differences from devtools
@@ -70,8 +70,9 @@ package's `inst/`, and datasets in `data/` are not loaded.
 
 ## Which R runs your package
 
-`ry repl` and `load_all()` in an R session run your package on GNU R. `ry load` runs it on ry's own
-runtime by default; pass `--runtime gnu-r`, or set `RY_RUNTIME=gnu-r`, to run it on GNU R instead.
+`ry R` and `load_all()` in an R session run your package on GNU R. `ry load` and `ry run` scripts
+run it on ry's own runtime, and `load_all()` loads on whichever runtime calls it. The console of
+`ry run` does not load the package yet.
 
 A package written in plain R, with or without [inline annotations](/type-checking/inline-annotations),
 loads on both. A package that uses ry's own syntax (records, tags, `match`, `DataFrame`) loads only
