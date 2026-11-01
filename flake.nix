@@ -131,8 +131,10 @@
             }
           );
 
-          # ry's runtime reads base R from a GNU R installation (`R RHOME`). The user's own R on
-          # PATH wins; nixpkgs' R, built as a shared library, is the fallback.
+          # `ry R` loads GNU R's libR, and ry's runtime reads base R from it. A Nix-built binary
+          # cannot load a libR built against another distribution's libraries, so R_HOME defaults
+          # to nixpkgs' R (shared) even where another R comes first on PATH; setting R_HOME still
+          # overrides it.
           packageNative =
             pkgs.runCommand "ry-${packageUnwrapped.version}"
               {
@@ -142,7 +144,8 @@
               ''
                 mkdir -p "$out/bin" "$out/lib"
                 ln -s ${packageUnwrapped}/lib/ry "$out/lib/ry"
-                makeWrapper ${packageUnwrapped}/bin/ry "$out/bin/ry" --suffix PATH : ${pkgs.R}/bin
+                makeWrapper ${packageUnwrapped}/bin/ry "$out/bin/ry" \
+                  --set-default R_HOME ${pkgs.R}/lib/R --prefix PATH : ${pkgs.R}/bin
               '';
 
           # Release binaries are cross-linked by zig and cannot run in the sandbox, so they skip
