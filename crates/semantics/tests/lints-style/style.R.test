@@ -134,3 +134,32 @@ myCount: integer <- 1L
 f <- function(myValue: integer) myValue
 #++++
 14..21 warning[naming-style] Parameter `myValue` should have snake_case name, e.g. my_value
+
+#==== data-table
+#---- constructors_warn
+library(data.table)
+prices <- fread("prices.csv")
+sales <- data.table(region = c("eu", "us"), units = c(1L, 2L))
+converted <- as.data.table(prices)
+setDT(df)
+other <- data.table::fread("other.csv")
+#++++
+30..35 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+59..69 warning[data-table] `data.table` creates a data.table. Its typed equivalent is `DataFrame()`, see https://ry-lang.org/guides/from-data-table/
+126..139 warning[data-table] `as.data.table` creates a data.table. Its typed equivalent is `as.DataFrame()`, see https://ry-lang.org/guides/from-data-table/
+148..153 warning[data-table] `setDT` creates a data.table. Its typed equivalent is `as.DataFrame()`, see https://ry-lang.org/guides/from-data-table/
+179..184 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+
+#---- other_functions_and_packages_are_clean
+setkey(prices, id)
+prices[, .N, by = region]
+sales <- mypkg::fread("sales.csv")
+#++++
+clean
+
+#---- a_file_defining_its_own_fread_is_clean
+fread <- function(path) read.csv(path)
+prices <- fread("prices.csv")
+other <- data.table::fread("other.csv")
+#++++
+90..95 warning[data-table] `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/

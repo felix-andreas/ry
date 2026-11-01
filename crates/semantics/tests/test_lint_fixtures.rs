@@ -55,6 +55,7 @@ fn lint_style_fixtures() {
         unused_parameter: LintLevel::Warn,
         shadows_builtin: LintLevel::Warn,
         shadows_namespace: LintLevel::Warn,
+        data_table: LintLevel::Warn,
         ..LintConfig::default()
     };
     let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lints-style");

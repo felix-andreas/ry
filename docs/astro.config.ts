@@ -100,6 +100,7 @@ export default defineConfig({
 						{ slug: 'type-checking/records-and-tags' },
 						{ slug: 'type-checking/arrays' },
 						{ slug: 'guides/dataframes' },
+						{ slug: 'guides/from-data-table' },
 						{ slug: 'type-checking/dataframes' },
 						{ slug: 'reference/standard-library' },
 						{ slug: 'type-checking/strict-mode' },

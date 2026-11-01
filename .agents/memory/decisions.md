@@ -4610,3 +4610,15 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   column. Text against `logical` stays allowed, so `col("x") == NA` is not flagged.
 - **Impact.** No new state: the checks run inside the existing refinement of a verb call, which is
   per item, so incremental analysis is unchanged.
+
+## The data-table lint is opt-in and marks only constructors
+
+- **Shape.** `[lint] data-table` (off by default, `data_table_lint` in `lints.rs`) flags
+  `data.table()`, `fread()`, `as.data.table()` and `setDT()`, bare or `data.table::`, and names the
+  DataFrame equivalent with a link to `guides/from-data-table.md`. A bare call is dropped when the
+  file defines that name, exactly as `object-system` does.
+- **Why constructors.** Like the object-system lint, which flags definitions rather than every
+  `new()`, every data.table operation needs a table first, so the constructors mark where
+  data.table enters the code without flagging each query.
+- **Why off.** S4/R6 warn by default by user mandate; data.table has no such mandate, the
+  benchmark code bases import it everywhere, and the guide says migrating is optional.

@@ -194,5 +194,15 @@ mentions. Only `ry check` reports it.
 function from `base`, or from another package, such as defining your own `filter` while
 `stats::filter` exists.
 
-These four take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
+**`data-table`** (off by default): a call that creates a data.table, which is `data.table()`,
+`fread()`, `as.data.table()` or `setDT()`, bare or as `data.table::`. data.table code runs
+unchanged, so this only helps you find the code to move to the typed
+[DataFrame](/guides/from-data-table/) when you choose to. A file that defines its own function of
+that name is not flagged.
+
+```text
+! `fread` creates a data.table. Its typed equivalent is `DataFrame.read_csv()`, see https://ry-lang.org/guides/from-data-table/
+```
+
+These five take a level in `[lint]`, such as `"warn"` or `"error"`. An older `missing-comma` key is
 still accepted and does nothing, because `f(1 2)` is now a syntax error, as it is in R.
