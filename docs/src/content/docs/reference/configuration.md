@@ -19,7 +19,7 @@ exclude = []             # gitignore-style patterns that ry check skips
 [lint]                   # each takes "off", "warn", "error", or "default"
 assignment-operator = "warn"  # `=` used for assignment
 boolean-shorthand = "warn"    # T or F instead of TRUE or FALSE
-trailing-comma = "error"      # a comma after a call's last argument
+trailing-comma = "warn"       # a comma after a call's last argument
 unused-parameter = "off"      # a parameter the body never reads
 unused-import = "off"         # a NAMESPACE importFrom nothing uses
 shadows-builtin = "off"       # a top-level name that hides a base function

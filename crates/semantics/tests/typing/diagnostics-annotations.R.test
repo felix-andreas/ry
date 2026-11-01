@@ -238,10 +238,10 @@ value: Person
 #: @param count {integer}
 #: @param [label] {character}
 #: @return {integer}
-render <- function(count, label) count
+render <- function(count, label) count + nchar(label)
 #++++
 render: fn(count: integer, label: character) -> integer
-87..115 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
+87..130 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
 
 #==== annotations
 #---- trust_same_known_type

@@ -1206,7 +1206,19 @@ impl Module {
                             .any(|token| token.kind() == SyntaxKind::EQ)
                     });
                 let name_range = tag.as_ref().map(|tag| tag.text_range());
-                let name = tag.as_ref().and_then(field_name_text);
+                // R's grammar also takes `NULL` as an argument tag: `switch(x, NULL = 1)`
+                // labels the case for the string "NULL".
+                let name = tag.as_ref().and_then(|tag| {
+                    let null_tag = tag.kind() == SyntaxKind::LITERAL
+                        && tag
+                            .first_token()
+                            .is_some_and(|token| token.kind() == SyntaxKind::NULL_KW);
+                    if null_tag {
+                        Some(Symbol::new("NULL"))
+                    } else {
+                        field_name_text(tag)
+                    }
+                });
                 if let Some((placeholder, piped)) = substitute
                     && placeholder == index
                 {

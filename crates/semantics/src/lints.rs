@@ -355,7 +355,10 @@ fn trailing_comma_lint(
         push_lint(
             diagnostics,
             config.trailing_comma,
-            Severity::Error,
+            // R reads the comma as an empty argument, which only fails when the callee
+            // evaluates it (`c(1, )`); a closure that leaves it unforced runs fine, so the
+            // comma is a style finding, not a certain run-time error.
+            Severity::Warning,
             "trailing-comma",
             range,
             "Unexpected comma after last argument",

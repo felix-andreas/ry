@@ -21,7 +21,7 @@ pair: <T, U> fn(x: T, y: U) -> U
 mirror <- function(x, y) x
 #++++
 == R/main.R
-mirror: <T, U> fn(x: T, y: U) -> T
+mirror: <T, U> fn(x: T, [y]: U) -> T
 
 #---- parameter_referenced_after_local_statement
 #~~~~ R/main.R
@@ -50,7 +50,7 @@ f <- function(y) x
 #++++
 == R/main.R
 x: integer
-f: <T> fn(y: T) -> integer
+f: <T> fn([y]: T) -> integer
 
 #---- parameter_beats_final_package_global_winner
 #~~~~ R/a.R

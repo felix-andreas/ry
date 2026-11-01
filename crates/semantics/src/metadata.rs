@@ -5,7 +5,7 @@ use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
 use crate::{Db, SourceFile, parse};
 use std::collections::BTreeSet;
 use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, matching_nodes};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
 #[salsa::input(singleton, debug)]
@@ -24,6 +24,53 @@ pub struct PackageMetadata {
     /// definitions already in view.
     #[returns(ref)]
     pub package: Option<String>,
+    #[returns(ref)]
+    pub native_symbols: NativeSymbols,
+}
+
+/// The bindings `NAMESPACE`'s `useDynLib` directives create in the package namespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct NativeSymbols {
+    /// Each listed symbol's binding, its `.fixes` prefix included: `useDynLib(pkg, foo,
+    /// .fixes = "C_")` binds `C_foo`.
+    pub names: BTreeSet<String>,
+    /// The non-empty `.fixes` prefixes of registering directives. The routines a package
+    /// registers live in its compiled code, so any name with one of these prefixes may be one.
+    pub registered_prefixes: BTreeSet<String>,
+    /// Whether any directive has `.registration = TRUE`, which binds every registered routine.
+    pub registers: bool,
+}
+
+pub fn parse_native_symbols(namespace_source: &str) -> NativeSymbols {
+    let mut symbols = NativeSymbols::default();
+    for library in parse_namespace_spec(namespace_source).dynamic_libraries {
+        for (binding, _) in &library.symbols {
+            symbols.names.insert(format!("{}{binding}", library.fixes));
+        }
+        if library.registration {
+            symbols.registers = true;
+            if !library.fixes.is_empty() {
+                symbols.registered_prefixes.insert(library.fixes);
+            }
+        }
+    }
+    symbols
+}
+
+/// Whether a `useDynLib` directive may bind `name`. A registering directive binds names that
+/// only the compiled code knows, so a bare name read as a native interface's routine resolves
+/// (`native_routine`), and so does any name with a registered `.fixes` prefix.
+pub fn native_symbol(db: &dyn Db, name: &str, native_routine: bool) -> bool {
+    let Some(metadata) = PackageMetadata::try_get(db) else {
+        return false;
+    };
+    let symbols = metadata.native_symbols(db);
+    symbols.names.contains(name)
+        || (native_routine && symbols.registers)
+        || symbols
+            .registered_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
 }
 
 /// Knowledge about `name` itself, unlike the blanket tolerance of [`imports_every_name`].
@@ -109,10 +156,20 @@ pub fn attached_union(
 #[salsa::tracked(returns(clone))]
 pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     let mut attached = BTreeSet::new();
-    for node in parse(db, file).syntax_node().descendants() {
-        if node.kind() != SyntaxKind::CALL_EXPR {
-            continue;
-        }
+    let calls = matching_nodes(&parse(db, file).syntax_node(), |node, _| {
+        node.kind() == SyntaxKind::CALL_EXPR
+            && node
+                .child_nodes()
+                .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
+                .is_some_and(|callee| {
+                    callee.kind() == SyntaxKind::NAME
+                        && matches!(
+                            callee.single_token_text(),
+                            Some("library" | "require" | "requireNamespace" | "loadNamespace")
+                        )
+                })
+    });
+    for node in calls {
         let Some(callee) = node
             .children()
             .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
