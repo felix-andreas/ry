@@ -1896,8 +1896,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
   stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
   (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
-  (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
-  (`RDX3`, where GNU R writes `RDA3`); `load()` reads it back the same, but the file differs.
+  (reg-tests-1c, reg-tests-3, reg-examples1).
 - **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
   `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
