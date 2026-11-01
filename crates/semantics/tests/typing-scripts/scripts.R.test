@@ -499,7 +499,6 @@ print(themed())
 #++++
 themed: fn(...: Any) -> Unknown
 T
-190..211 warning[unresolved] unknown package namespace `ggplot2`.
 
 #---- masked_read_is_a_use
 x <- 1L

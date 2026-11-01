@@ -15,7 +15,7 @@ use crate::metadata::{
     declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
 };
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::{namespace_exports, namespace_known, stubs};
+use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
     TypeScheme, map_child_types, substitute_rigid, union_of,
@@ -1690,8 +1690,15 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed.
-        false if declared_dependency(db, &read.package) => None,
+        // A declared dependency without stubs is real, just undescribed. A shipped package
+        // the project neither declares nor attaches is real too: `pkg::name` loads it
+        // without attaching it, so a script may use it that way alone.
+        false
+            if declared_dependency(db, &read.package)
+                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
+        {
+            None
+        }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
             let name = read.name.as_ref()?;
