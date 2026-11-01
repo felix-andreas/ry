@@ -2868,3 +2868,124 @@ first lines R had already read, leaving R mid-command.
   query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
   tables never shrink.
 
+
+## The checker presumes R code is correct where R's semantics leave the question open
+
+- **Previous shape.** Inference treated every use as a demand. A formal read on any path was required at every call, a field a list literal lacks read as `NULL` (so `opts$force` on `list(spec = ...)` was a finding), `list()` was a closed empty tuple whose reads were errors, a vector partner in arithmetic pinned its operand to a scalar, a callback called only with forwarded `...` got the arity of its first use, and a `pkg::name` read of a shipped package was "unknown" until something attached it. Run over the GNU R corpus with typing on, this gave 3,112 errors on code that CRAN checks, essentially all false.
+- **Target shape.** Each rule now asks what R does at run time and refuses only what R itself would fail on, or what is a near-certain typo:
+  - A formal is required only when every path forces it (`collect_branch_uses` returns the forced set, `join_forced` intersects branches), and a same-name argument to a project function (`inner(finally = finally)`) leaves the decision to the callee.
+  - A name a record-like list lacks reads `Unknown` with a strict origin, because R lists are open and code adds fields later; a near miss of a field is still an error. An empty `list()` reads `Unknown`, or contributes `NULL` inside a union, which is what the field-by-field accumulator idiom needs.
+  - Logical widens under the numeric constraint (`widen_numeric_binding`), and a vector partner leaves the flexible operand open with a `double[]` result.
+  - A callback called with nothing but forwarded `...` is `fn(...: Any) -> T`.
+  - `pkg::name` on a shipped namespace is accepted without attaching it, since R's `::` loads without attaching.
+- **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
+- **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
+
+# Decision record: editor features for ry's own syntax
+
+- **The checker records pattern types.** `ItemCheck::pattern_types` maps each `match` pattern to
+  the type of the value it is matched against, filled while the arms are checked. Before this the
+  IDE had no type for a pattern, so hover and completion there had nothing to read. It is a
+  per-item query result, so it adds no project-wide dependency.
+- **A tag is a project-wide structural symbol.** Tags have no single declaration: `:Ok` in one type
+  and `:Ok` in another are the same tag. References and rename therefore cover every spelling of the
+  name in the project, and go-to-definition goes to its listing in a named type definition, or in
+  the standard library stubs. A tag the standard library
+  spells (in `types/ry.Rtypes`) refuses to rename, because the stub would no longer match.
+- **Type parameters navigate to their binder**, scoped to the definition or function that binds
+  them, so `T` in two functions is two symbols.
+- **Semantic tokens are an `ide` query** (`semantic_tokens`, `classify_type_token`), and the server
+  only maps `SemanticClass` to its legend. Before this the classification lived in the server and
+  covered annotations only, which left `match`, `=>` and tags uncolored.
+- **An inlay hint states what the code does not.** A payload-free tag or an `@Name(...)` constructor
+  already spells its type, so it gets no hint and no "add annotation" action, and a vector of
+  records, tuples or tags (`Position[]`) is dropped from a hinted union because no such value exists.
+- **A type error on a native literal blames the one differing component** (`native_component_mismatch`
+  in `crates/semantics/src/check.rs`), recursing into nested literals and tag payloads, and keeps the
+  whole literal when more than one component differs, because then no single spot is the cause.
+- **Impact:** every feature reads per-item query results, so incremental analysis is unchanged; the
+  fixtures in `crates/ide/tests/ide/records-and-tags.R.test`, `frames.R.test` and the typing suite's
+  `mismatch_blame` group pin the behavior.
+
+
+# Decision record: positioning
+
+- **Audience.** Teams with large, old R code bases that now want agents to write and change that
+  code. Code an agent writes needs verification that does not depend on a human reading every line,
+  and a type checker gives it on every edit. The pitch leads with this, because "a language server
+  for R" undersells why the project exists.
+- **The shape of the pitch: one toolchain, R plus types, then R++ and R--.** ry is one toolchain for
+  R (checker, language server, formatter, loader, console, runtime). Its type system sits on top of
+  R and checks the code a project already has. ry's runtime adds features plain R does not have
+  (records, tags and `match`, frames, the standard library, inline annotations), which the pitch
+  calls R++ together with plain R (everything ry runs). Strict mode keeps only typed code, which
+  the pitch calls R--. A two-circle Venn
+  diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
+  in the overlap, the union is R++ and the right circle is strict mode. The diagram has one
+  source, `docs/src/components/Venn.astro`, used by the landing page and `why-ry.mdx`.
+- **The migration is sold as moving your code into the future, not as switching to ry.** The
+  destination is the future of the code base (typed, checked on every edit, safe for agents to
+  change, fast), and ry is the tool that takes it there, usable today on the code it already has.
+  The pitch avoids "migrate to ry" and "switch to ry", and step 4 is called "Go fully typed" rather
+  than "Move to ry's types". The blue-to-purple Venn story stays and reads as the code moving
+  forward.
+- **The landing page sells features first and the migration last.** Below the hero come three
+  tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
+  the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
+  then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
+  purple one") above the four steps as tabs. A reader has to want the features before a path to
+  them matters, which is why the migration is the last part of the sell and not the opening.
+- **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
+  and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
+  people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
+- **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
+  tab when the JIT benchmark table lands, and a table tab when the `DataFrame` API lands (data.table
+  syntax is compatibility only, so it is not shown as ry's table API). No placeholder tabs.
+- **The migration has four steps, each with a real snippet and real output:** check the code you
+  have, add types as `#:` comments, switch to inline types, then move data to ry's records, tags
+  and tables under strict mode. Each step is optional and reversible, which is what makes adopting
+  ry safe for an existing code base. `why-ry.mdx` tells it in full.
+- **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
+  GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
+- **The benchmark is honest about typing.** Its three columns are GNU R, ry on the same untyped
+  code, and ry on typed strict code. Typed code is not faster yet (`backlog.md`), and the pitch
+  says so instead of implying that types buy speed. When typed runtime features do get faster, the
+  third column shows it without a rewrite of the copy.
+- **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Check the code you
+  have" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Go fully
+  typed" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.mdx` and the
+  sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
+  not moved, so every URL and cross-link keeps working.
+- **Rejected:** opening the landing page with the Venn diagram and the migration (it explains a
+  path before the reader wants the destination), and leading with "a reimplementation of R" (true, but a reader cannot use the
+  incomplete runtime for real work today, so it is the destination, not the pitch).
+- **Rationale for the user's framing being kept:** the user proposed this structure. It was kept
+  because each step maps to a real, shipped feature with real output, and because R++/R-- is a
+  compact way to say "a superset you can opt into, and a safe subset you can enforce".
+
+## Nominal and structural types cover both product and sum types
+
+- **Shape:** every record, tuple or tag union is structural by default (`alias` only names it), and
+  `type Name = ...` (or `#: @type`) wraps it in a nominal type. That gives a 2x2 grid, structural or
+  nominal for product and for sum types, with one mechanism instead of a separate "declared record"
+  or "declared union" concept. The user guide teaches it as a table in
+  `type-checking/records-and-tags.mdx`; the contract is the reference section "Nominal records,
+  tuples and tags".
+- **Construction:** `@Name(...)` is the only constructor, and its parentheses are the value's own,
+  so `@Point(x = 1, y = 2)` is a record and `@UserId(id = 1L,)` a one-field record. A bare value of
+  the right shape is refused, which keeps construction in one checked place, like Roc's opaque
+  `@Name`. A separate constructor syntax (`Point(x = 1)`) was rejected because it collides with R
+  calls. `@Point((x = 1, y = 2))` still works, because the inner parentheses are only R grouping, but the docs never write it.
+- **Previous weakness:** the checker handled the nominal wrapper only at assignment. `match`
+  exhaustiveness, pattern checks, field writes, `$` completion and the native-value-to-R check all
+  looked at the nominal head and saw no shape, so a nominal union was never checked for coverage,
+  bindings lost their nominal type, and field writes went unchecked.
+- **Target:** each of those reads projects the nominal value to its representation through the
+  visible type definitions (`exhaustiveness::structural`, `Checker::structural`, `ide::representation`),
+  so the definition stays the single source of truth for the shape. Binding patterns keep the
+  nominal type. Exhaustiveness splits on constructors only while a row has a constructor head, which
+  is what lets a recursive `type Tree<T>` terminate.
+- **Impact:** no new stored state, and the projection reads per-name definitions that each item
+  already depends on, so incremental analysis is unchanged. The `nominal_grid` typing group, the
+  nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
+  pin the behavior.

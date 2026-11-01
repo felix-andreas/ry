@@ -46,7 +46,6 @@ f <- function(x) {
 #++++
 f: fn(x: integer | NULL) -> integer
 36..37 warning[unused] `f` is assigned but never used.
-57..58 error[type-mismatch] expected a numeric value (`integer` or `double`), found `integer | NULL`
 
 #==== early_exit_guards
 #---- early_return_persists_the_false_edge
@@ -185,7 +184,7 @@ or_else <- function(value, fallback) {
   }
 }
 #++++
-or_else: <T> fn(value: T | NULL, fallback: T) -> T
+or_else: <T> fn(value: T | NULL, [fallback]: T) -> T
 0..7 warning[unused] `or_else` is assigned but never used.
 
 #---- coalesce_accepts_null_and_binds_from_the_fallback
@@ -195,7 +194,7 @@ or_else <- function(value, fallback) {
 picked <- or_else(NULL, "anonymous")
 picked
 #++++
-or_else: <T> fn(value: T | NULL, fallback: T) -> T
+or_else: <T> fn(value: T | NULL, [fallback]: T) -> T
 picked: character
 character
 
@@ -218,12 +217,11 @@ f <- function(x) {
 f: fn(x: integer | NULL) -> integer
 0..1 warning[unused] `f` is assigned but never used.
 
-#---- testing_null_makes_unguarded_use_a_real_finding
+#---- arithmetic_on_a_null_tested_value_follows_r
 f <- function(x) {
   if (is.null(x)) 0L else 1L
   x + 1L
 }
 #++++
-f: Unknown
+f: <T: numeric> fn(x: T | NULL) -> T
 0..1 warning[unused] `f` is assigned but never used.
-50..51 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T | NULL`

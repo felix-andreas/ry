@@ -37,13 +37,17 @@ pub fn namespace_import_problems(
 /// `R CMD check`'s "undefined exports". `defines` is the package's whole
 /// top-level name set, so a name bound by any file counts. An imported name is in the
 /// namespace too, so a package may re-export it: an `importFrom(pkg, name)`, or an
-/// `import(pkg)` whose namespace exports the name or has no known export set.
+/// `import(pkg)` whose namespace exports the name or has no known export set. A package that
+/// creates bindings at run time (`assign(name, ...)`, `makeActiveBinding("name", ...)`, a loop
+/// over a list of styles) can export a name it never writes as a definition, so a name the
+/// sources mention while they call such a definer is not reported either.
 pub fn namespace_export_problems(
     exports: &[(String, TextRange)],
     imports: &[NamespaceImport],
     defines: &dyn Fn(&str) -> bool,
     knows_namespace: &dyn Fn(&str) -> bool,
     namespace_exports: &dyn Fn(&str, &str) -> bool,
+    used_tokens: &BTreeSet<String>,
 ) -> Vec<Diagnostic> {
     let imported = |name: &str| {
         imports.iter().any(|import| match &import.name {
@@ -53,9 +57,16 @@ pub fn namespace_export_problems(
             }
         })
     };
+    let defines_at_run_time = RUNTIME_DEFINERS
+        .iter()
+        .any(|definer| used_tokens.contains(*definer));
     exports
         .iter()
-        .filter(|(name, _)| !defines(name) && !imported(name))
+        .filter(|(name, _)| {
+            !defines(name)
+                && !imported(name)
+                && !(defines_at_run_time && used_tokens.contains(name))
+        })
         .map(|(name, range)| {
             Diagnostic::new(
                 *range,
@@ -66,6 +77,17 @@ pub fn namespace_export_problems(
         })
         .collect()
 }
+
+const RUNTIME_DEFINERS: &[&str] = &[
+    "assign",
+    "makeActiveBinding",
+    "delayedAssign",
+    "list2env",
+    "setGeneric",
+    "setClass",
+    "setRefClass",
+    "sys.source",
+];
 
 /// `used_tokens` holds the imported names that appear as a token anywhere in the
 /// package's sources: a conservative scan that under-reports rather than risk a false

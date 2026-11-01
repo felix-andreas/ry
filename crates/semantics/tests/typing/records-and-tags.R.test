@@ -190,7 +190,7 @@ a <- f(:Some("a"))
 #++++
 f: fn(o: :Some(integer) | :None) -> logical
 a: Unknown
-73..83 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(character)`
+79..82 error[type-mismatch] expected `integer`, found `character`
 
 #---- tag_outside_a_closed_union
 #: fn(o: :Some(integer) | :None) -> logical
@@ -237,7 +237,7 @@ b <- f(:Some("a"))
 f: fn(o: Option<integer>) -> logical
 a: logical
 b: Unknown
-124..134 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(character)`
+130..133 error[type-mismatch] expected `integer`, found `character`
 
 #==== open_unions
 #---- unlisted_tag_fits_an_open_union
@@ -257,7 +257,7 @@ a <- f(:Ok("x"))
 #++++
 f: fn(r: :Ok(integer) | ..) -> logical
 a: Unknown
-68..76 error[type-mismatch] expected `:Ok(integer) | ..`, found `:Ok(character)`
+72..75 error[type-mismatch] expected `integer`, found `character`
 
 #---- closed_union_fits_an_open_one
 #: fn(r: :Ok(integer) | ..) -> logical
@@ -454,7 +454,7 @@ f <- function(r) {
 #++++
 f: fn(r: :Ok(value: integer) | :Err(message: character)) -> character
 91..100 error[non-exhaustive-match] this `match` does not handle `:Err(message = _)`: add an arm for it, or a catch-all `_ => ...` arm
-145..161 error[type-mismatch] this pattern can never match: the value is `:Ok(value: integer) | :Err(message: character)`. `:Err` has no field `mesage`. Did you mean `message`?
+150..156 error[type-mismatch] this pattern can never match: the value is `:Ok(value: integer) | :Err(message: character)`. `:Err` has no field `mesage`. Did you mean `message`?
 
 #---- misspelled_tag_suggests_the_nearest
 #: fn(o: :Some(integer) | :None) -> integer
@@ -466,7 +466,7 @@ f <- function(o) {
 }
 #++++
 f: fn(o: :Some(integer) | :None) -> integer
-81..90 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. The value has no tag `:Somee`. Did you mean `:Some`?
+81..87 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. The value has no tag `:Somee`. Did you mean `:Some`?
 
 #---- payload_of_the_wrong_length
 #: fn(o: :Some(integer) | :None) -> integer
@@ -665,3 +665,226 @@ f <- function(o) {
 #++++
 f: fn(o: :Some(integer) | :None) -> integer
 81..94 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. `:None` carries no payload.
+
+#==== mismatch_blame
+#---- record_field_mismatch_blames_the_field_value
+#: record{x: double, y: double}
+p <- (x = 1, y = "a")
+#++++
+p: record{x: double, y: double}
+49..52 error[type-mismatch] expected `double`, found `character`
+
+#---- tuple_item_mismatch_blames_the_item
+#: tuple{integer, integer}
+t <- (1L, "x")
+#++++
+t: tuple{integer, integer}
+37..40 error[type-mismatch] expected `integer`, found `character`
+
+#---- nested_record_mismatch_blames_the_innermost_value
+#: record{inner: record{x: double}}
+p <- (inner = (x = "a",),)
+#++++
+p: record{inner: record{x: double}}
+55..58 error[type-mismatch] expected `double`, found `character`
+
+#---- argument_record_mismatch_blames_the_field_value
+#: fn(p: record{x: double, y: double}) -> double
+f <- function(p) p$x
+v <- f((x = 1, y = "b"))
+#++++
+f: fn(p: record{x: double, y: double}) -> double
+v: Unknown
+89..92 error[type-mismatch] expected `double`, found `character`
+
+#---- inline_ascription_blames_the_field_value
+w: record{x: double} <- (x = "s",)
+#++++
+w: record{x: double}
+29..32 error[type-mismatch] expected `double`, found `character`
+
+#---- nominal_constructor_blames_the_field_value
+type Money = record{amount: double}
+m <- @Money((amount = "x",))
+#++++
+m: Unknown
+58..61 error[type-mismatch] expected `double`, found `character`
+
+#---- two_mismatched_fields_blame_the_whole_record
+#: record{x: double, y: double}
+p <- (x = "a", y = "b")
+#++++
+p: record{x: double, y: double}
+37..55 error[type-mismatch] expected `record{x: double, y: double}`, found `record{x: character, y: character}`
+
+#==== nominal_grid
+#---- nominal_record_is_made_by_its_constructor
+type Point = record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+x <- p$x
+#++++
+p: Point
+x: double
+
+#---- nominal_record_refuses_a_bare_record
+type Point = record{x: double, y: double}
+norm <- function(p: Point) -> double sqrt(p$x^2 + p$y^2)
+n <- norm((x = 3, y = 4))
+#++++
+norm: fn(p: Point) -> double
+n: Unknown
+109..123 error[type-mismatch] expected `Point`, found `record{x: double, y: double}`. The value has the right shape, but `Point` is a nominal type, so only `@Point(...)` or `#: @new Point` creates one
+
+#---- nominal_record_one_field_needs_the_comma
+type UserId = record{id: integer}
+u <- @UserId(id = 1L)
+v <- @UserId(id = 1L,)
+#++++
+u: Unknown
+v: UserId
+47..54 error[type-mismatch] expected `record{id: integer}`, but `(id = ...)` assigns to `id`, as it does in R. Write `(id = ...,)` with a trailing comma to make a one-field record
+
+#---- same_shape_nominals_stay_apart
+type UserId = record{id: integer}
+type OrderId = record{id: integer}
+u <- @UserId(id = 1L,)
+o: OrderId <- u
+#++++
+u: UserId
+o: OrderId
+106..107 error[type-mismatch] expected `OrderId`, found `UserId`
+
+#---- nominal_record_field_write_is_checked
+type Point = record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+p$x <- "far"
+#++++
+p: Point
+character
+75..80 error[type-mismatch] expected `double`, found `character`
+
+#---- nominal_record_field_cannot_be_added
+type Point = record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+p$z <- 3
+#++++
+p: Point
+double
+70..71 error[type-mismatch] field `z` does not exist in `record{x: double, y: double}`, and assigning to it cannot add it, because a record's fields are fixed
+
+#---- nominal_record_destructures_in_match
+type Point = record{x: double, y: double}
+total <- function(p: Point) -> double {
+  match (p) {
+    (x = a, y = b) => a + b
+  }
+}
+#++++
+total: fn(p: Point) -> double
+
+#---- nominal_tuple
+type Pair = tuple{integer, character}
+first <- function(p: Pair) -> integer {
+  match (p) {
+    (n, _) => n
+  }
+}
+n <- first(@Pair(1L, "a"))
+#++++
+first: fn(p: Pair) -> integer
+n: integer
+
+#---- nominal_tag_union_match_is_exhaustive
+type Shape = :Circle(radius: double) | :Empty
+area <- function(s: Shape) -> double {
+  match (s) {
+    :Circle(radius = r) => pi * r^2
+  }
+}
+#++++
+area: fn(s: Shape) -> double
+87..96 error[non-exhaustive-match] this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- nominal_tag_union_refuses_a_bare_tag
+type Shape = :Circle(radius: double) | :Empty
+area <- function(s: Shape) -> double 0
+a <- area(:Empty)
+b <- area(@Shape(:Empty))
+#++++
+area: fn(s: Shape) -> double
+a: Unknown
+b: double
+95..101 error[type-mismatch] expected `Shape`, found `:Empty`. The value has the right shape, but `Shape` is a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
+
+#---- nominal_tag_union_comment_spelling
+#: @type Shape {:Circle(radius: double) | :Empty}
+
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => r
+  }
+}
+#++++
+area: fn(s: Shape) -> double
+101..110 error[non-exhaustive-match] this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- generic_recursive_nominal
+type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)
+size <- function(t: Tree<integer>) -> integer {
+  match (t) {
+    :Leaf => 0L
+    :Node(left = l, value = v, right = r) => size(l) + 1L + size(r)
+  }
+}
+leaf <- @Tree<integer>(:Leaf)
+n <- size(@Tree(:Node(left = leaf, value = 1L, right = leaf)))
+#++++
+size: fn(t: Tree<integer>) -> integer
+leaf: Tree<integer>
+n: integer
+
+#---- generic_recursive_nominal_missing_case
+type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)
+depth <- function(t: Tree<integer>) -> integer {
+  match (t) {
+    :Node(left = l, value = _, right = r) => 1L
+  }
+}
+#++++
+depth: fn(t: Tree<integer>) -> integer
+121..130 error[non-exhaustive-match] this `match` does not handle `:Leaf`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- nominal_inside_a_payload_is_covered
+type Shape = :Circle(radius: double) | :Empty
+alias Drawn = :Drawn(Shape) | :Hidden
+show <- function(d: Drawn) -> character {
+  match (d) {
+    :Drawn(:Circle(radius = _)) => "circle"
+    :Hidden => "hidden"
+  }
+}
+#++++
+show: fn(d: Drawn) -> character
+128..137 error[non-exhaustive-match] this `match` does not handle `:Drawn(:Empty)`: add an arm for it, or a catch-all `_ => ...` arm
+
+#---- nominal_binding_keeps_its_name
+type Shape = :Circle(radius: double) | :Empty
+keep <- function(s: Shape) -> Shape {
+  match (s) {
+    other => other
+  }
+}
+#++++
+keep: fn(s: Shape) -> Shape
+
+#---- nominal_record_meets_r
+type Point = record{x: double, y: double}
+p <- @Point(x = 1, y = 2)
+s <- sum(p)
+l <- as.list(p)
+#++++
+p: Point
+s: Unknown
+l: list[Any]
+77..78 error[type-mismatch] `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first

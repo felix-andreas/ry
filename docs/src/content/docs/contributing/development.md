@@ -75,6 +75,16 @@ with a built `ry` (set `RY` if it is not at `target/debug/ry`): it checks both t
 fails when their diagnostics differ. Every annotation form has both spellings, type definitions
 included, so the Inline tab carries no `#:` line except to show the two spellings together.
 
+Agents read the site as Markdown. Every page is also served at its URL plus `.md` (for example
+`/type-checking/overview.md`), with the frontmatter, imports and components removed and each tab
+group turned into consecutive `Inline` and `Comments` subheadings. `/llms.txt` lists the pages with
+their descriptions in sidebar order, and `/llms-full.txt` concatenates them all. Each page's head
+links its Markdown version with `<link rel="alternate" type="text/markdown">`, and the breadcrumb row
+has a "View as Markdown" link. The code is `docs/src/lib/markdown.ts`, the three endpoints in
+`docs/src/pages/`, and `docs/src/routeData.ts`. A new MDX component must be handled in
+`bodyToMarkdown`, or it leaks into the Markdown as raw tags. A `description` containing ` #` must be
+quoted, because YAML reads the rest of the line as a comment.
+
 Run `just docs` for a live preview, and `cd docs && bun run build` for a full build, which needs
 Node 22.23.4 or newer.
 

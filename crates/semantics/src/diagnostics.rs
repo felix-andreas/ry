@@ -15,7 +15,7 @@ use crate::metadata::{
     declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
 };
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::{namespace_exports, namespace_known, stubs};
+use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
 use crate::types::{
     Atomic, Constraint, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
     TypeScheme, map_child_types, substitute_rigid, union_of,
@@ -1659,8 +1659,15 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         return None;
     }
     match namespace_known(db, &read.package)? {
-        // A declared dependency without stubs is real, just undescribed.
-        false if declared_dependency(db, &read.package) => None,
+        // A declared dependency without stubs is real, just undescribed. A shipped package
+        // the project neither declares nor attaches is real too: `pkg::name` loads it
+        // without attaching it, so a script may use it that way alone.
+        false
+            if declared_dependency(db, &read.package)
+                || CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) =>
+        {
+            None
+        }
         false => Some(format!("unknown package namespace `{}`.", read.package)),
         true => {
             let name = read.name.as_ref()?;
@@ -1673,8 +1680,8 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     }
 }
 
-/// Names written by `<<-` with no enclosing binding anywhere in the file: R
-/// creates them in the global environment, so reads of them resolve.
+/// Names the file's items create in the global environment as a side effect (see
+/// `ItemNaming::super_globals`), so reads of them resolve.
 #[salsa::tracked(returns(ref))]
 fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
     let mut names = BTreeSet::new();
@@ -2193,6 +2200,21 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *expected),
             renderer.render(db, *found)
         ),
+        TypeErrorKind::AssignmentForRecord { field, expected } => format!(
+            "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
+            renderer.render(db, *expected)
+        ),
+        TypeErrorKind::UnwrappedNominal { nominal, found } => {
+            let name = match nominal.kind(db) {
+                TyKind::Named(name, _) => name.text(db).to_owned(),
+                _ => renderer.render(db, *nominal),
+            };
+            format!(
+                "expected `{}`, found `{}`. The value has the right shape, but `{name}` is a nominal type, so only `@{name}(...)` or `#: @new {name}` creates one",
+                renderer.render(db, *nominal),
+                renderer.render(db, *found)
+            )
+        }
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
         ),
@@ -2372,13 +2394,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "a vector cannot be indexed by `{}`. Expected a numeric, logical, or character index",
             renderer.render(db, *index)
         ),
-        TypeErrorKind::UnsupportedIndexShape { index_count } => match index_count {
-            0 => "indexing with an empty index (`x[]`) is not supported yet".to_owned(),
-            1 => "indexing with a named index argument is not supported yet".to_owned(),
-            count => format!(
-                "indexing with {count} indexes is not supported yet. ry does not model matrix and data.frame subsetting"
-            ),
-        },
         TypeErrorKind::PositionDoesNotExist {
             position,
             container,
