@@ -1365,3 +1365,10 @@ wider: DataFrame{region: character[], units: integer[], price: double[], y: inte
 doubled <- function(frame) frame |> DataFrame.with_columns(y = col("region") * 2)
 #++++
 doubled: fn(frame: DataFrame) -> DataFrame
+
+#---- min_and_max_of_a_logical_column_are_integers
+flags <- DataFrame(g = c("a", "b"), ok = c(TRUE, FALSE))
+totals <- flags |> DataFrame.group_by("g") |> GroupBy.agg(lo = col("ok") |> Expr.min(), first = col("ok") |> Expr.first())
+#++++
+flags: DataFrame{g: character[], ok: logical[]}
+totals: DataFrame{g: character[], lo: integer[], first: logical[]}

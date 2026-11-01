@@ -8019,7 +8019,15 @@ impl<'db> Checker<'db, '_> {
                     }
                     "Expr.min" | "Expr.max" | "Expr.first" | "Expr.last" => {
                         let column = argument(self)?;
-                        let ty = column.ty;
+                        // R's `min` and `max` of logicals are integers, and the engine agrees.
+                        let ty = match element_atomic(db, column.ty) {
+                            Some(Atomic::Logical)
+                                if matches!(name.as_str(), "Expr.min" | "Expr.max") =>
+                            {
+                                vector(Atomic::Integer)
+                            }
+                            _ => column.ty,
+                        };
                         Some(aggregate(column, ty))
                     }
                     "Expr.count" => {

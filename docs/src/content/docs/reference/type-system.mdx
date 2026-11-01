@@ -3041,7 +3041,7 @@ first column it reads, as Polars names it. Its type follows R's rules for the op
 | `a / b`, `a ^ b`, `Expr.mean`, `Expr.median`, `Expr.std`, `Expr.var`, `Expr.cor` | `double` |
 | comparisons, `&`, `\|`, `!`, `Expr.is_null` | `logical` |
 | `Expr.sum` | `integer` for an `integer` or `logical` column, otherwise `double` |
-| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column |
+| `Expr.min`, `Expr.max`, `Expr.first`, `Expr.last`, `Expr.head` | the type of the column, except that `Expr.min` and `Expr.max` of a `logical` column are `integer`, as in R |
 | `Expr.len()`, `Expr.count` | `integer` |
 | `Expr.if_else(test, yes, no)` | the type `yes` and `no` share |
 | `lit(value)`, a plain R value | the value's type |
