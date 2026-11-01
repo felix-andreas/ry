@@ -208,7 +208,7 @@ call_it: fn() -> Unknown
 sd <- function(x) "not the real one"
 call_it <- function() stats::sd(1L)
 #++++
-sd: <T> fn(x: T) -> character
+sd: <T> fn([x]: T) -> character
 call_it: fn() -> character
 
 #---- a_different_package_is_still_validated

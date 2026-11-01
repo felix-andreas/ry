@@ -27,7 +27,7 @@ snake_name(
   value_name,
 )
 #++++
-24..25 error[trailing-comma] Unexpected comma after last argument
+24..25 warning[trailing-comma] Unexpected comma after last argument
 
 #==== naming_style
 #---- snake_case_required_in_function

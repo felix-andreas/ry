@@ -79,7 +79,7 @@ f: <T> fn(p: T) -> T
 g: <T> fn(p: T) -> T
 h: Unknown
 26..27 warning[unused] `h` is assigned but never used.
-42..43 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
+42..43 error[type-mismatch] this call leaves out `p`, which has no default and which the function uses
 
 #---- unused_marks_the_name_not_the_multiline_value
 helper <- function(count) {
@@ -114,7 +114,7 @@ steps_for <- function(spec) "not an integer"
 count <- steps_for(42L)
 print(count)
 #++++
-steps_for: fn(spec: character) -> integer
+steps_for: fn([spec]: character) -> integer
 count: Unknown
 T
 62..78 error[type-mismatch] expected `integer`, found `character`
@@ -269,7 +269,7 @@ h: Unknown
 g: <T> fn(x: T) -> T
 T
 integer
-16..17 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
+16..17 error[type-mismatch] this call leaves out `x`, which has no default and which the function uses
 
 #---- an_immediate_read_picks_the_nearest_earlier_binding_of_several
 # Not the first and not the last: with several bindings of one name, a read at
@@ -431,9 +431,9 @@ speak.dog <- function(x, ...) "woof"
 speak.default <- function(x, ...) "..."
 print(speak(structure(list(), class = "dog")))
 #++++
-speak: <T> fn(x: T, ...: Any) -> Any
-speak.dog: <T> fn(x: T, ...: Any) -> character
-speak.default: <T> fn(x: T, ...: Any) -> character
+speak: <T> fn([x]: T, ...: Any) -> Any
+speak.dog: <T> fn([x]: T, ...: Any) -> character
+speak.default: <T> fn([x]: T, ...: Any) -> character
 T
 
 #---- a_dotted_name_that_dispatches_nowhere_is_still_dead
@@ -457,7 +457,7 @@ T
 `%unused%` <- function(a, b) a
 print(1L)
 #++++
-%unused%: <T, U> fn(a: T, b: U) -> T
+%unused%: <T, U> fn(a: T, [b]: U) -> T
 integer
 0..10 warning[unused] `%unused%` is assigned but never used.
 
@@ -710,7 +710,7 @@ quoted: Any
 direct: Unknown
 267..273 warning[unused] `quoted` is assigned but never used.
 301..307 warning[unused] `direct` is assigned but never used.
-311..320 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
+311..320 error[type-mismatch] this call leaves out `b`, which has no default and which the function uses
 
 #---- a_quoted_read_still_keeps_a_write_alive
 # `eval` may run the quotation later, so a name it mentions is read — dropping

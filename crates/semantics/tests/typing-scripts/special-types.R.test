@@ -155,7 +155,7 @@ accepts <- function(value) TRUE
 
 accepts(1L)
 #++++
-accepts: fn(value: integer | character | NULL) -> logical
+accepts: fn([value]: integer | character | NULL) -> logical
 logical
 
 #---- null_accepted_where_union_contains_null
@@ -164,7 +164,7 @@ accepts <- function(value) TRUE
 
 accepts(NULL)
 #++++
-accepts: fn(value: integer | character | NULL) -> logical
+accepts: fn([value]: integer | character | NULL) -> logical
 logical
 
 #---- union_rejected_where_plain_member_expected

@@ -2,7 +2,7 @@
 #---- a_parameter_nothing_constrains_is_untyped
 describe <- function(x) cat("value\n")
 #++++
-describe: <T> fn(x: T) -> NULL
+describe: <T> fn([x]: T) -> NULL
 21..22 error[strict] strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
 
 #---- an_annotated_parameter_is_typed
@@ -10,8 +10,8 @@ describe <- function(x: Any) cat("value\n")
 #: fn(y: Any) -> NULL
 describe_too <- function(y) cat("value\n")
 #++++
-describe: fn(x: Any) -> NULL
-describe_too: fn(y: Any) -> NULL
+describe: fn([x]: Any) -> NULL
+describe_too: fn([y]: Any) -> NULL
 
 #---- a_type_variable_shared_with_the_return_is_generic
 identity2 <- function(x) x
@@ -31,7 +31,7 @@ increment: <T: numeric> fn(x: T) -> T
 #---- partial_annotation_reports_the_rest
 add <- function(x: integer, unused) x
 #++++
-add: fn(x: integer, unused: Unknown) -> integer
+add: fn(x: integer, [unused]: Unknown) -> integer
 28..34 error[strict] strict mode: parameter `unused` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `unused: TYPE`
 
 #---- rest_parameters_are_not_reported

@@ -8,7 +8,7 @@ mirror: <T> fn(x: T) -> T
 #---- two_parameter_function_returns_first_argument_type
 first <- function(x, y) x
 #++++
-first: <T, U> fn(x: T, y: U) -> T
+first: <T, U> fn(x: T, [y]: U) -> T
 0..5 warning[unused] `first` is assigned but never used.
 
 #==== annotated_functions
@@ -25,8 +25,8 @@ fn(count: integer) -> integer
 log_count <- function(count) { }
 log_count
 #++++
-log_count: fn(count: integer) -> NULL
-fn(count: integer) -> NULL
+log_count: fn([count]: integer) -> NULL
+fn([count]: integer) -> NULL
 
 #---- expanded_annotation_with_optional_parameter
 #: @param count {integer}
@@ -51,7 +51,7 @@ render_count <- function(count) "ok"
 apply_renderer(render_count, 1L)
 #++++
 apply_renderer: fn(render_count: fn(integer) -> character, count: integer) -> character
-render_count: fn(count: integer) -> character
+render_count: fn([count]: integer) -> character
 character
 
 #==== calls
@@ -85,7 +85,7 @@ mirror()
 #++++
 mirror: <T> fn(x: T) -> T
 T
-24..30 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
+24..30 error[type-mismatch] this call leaves out `x`, which has no default and which the function uses
 
 #---- extra_argument
 mirror <- function(x) x
@@ -134,7 +134,7 @@ integer
 describe <- function(count, label) label
 describe(label = "items", count = 2L)
 #++++
-describe: fn(count: integer, label: character) -> character
+describe: fn([count]: integer, label: character) -> character
 character
 
 #---- unknown_named_argument_is_rejected
@@ -181,11 +181,11 @@ integer
 
 #---- expected_optional_requires_actual_default
 #: fn(count: integer, [label]: character) -> integer
-double_count <- function(count, label) count + count
+double_count <- function(count, label) count + nchar(label)
 #++++
 double_count: fn(count: integer, label: character) -> integer
 53..65 warning[unused] `double_count` is assigned but never used.
-69..105 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
+69..112 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
 
 #==== argument_coercions
 #---- scalar_argument_coerces_to_array_parameter
@@ -209,7 +209,7 @@ integer[]
 log_label <- function(label) NULL
 log_label(NULL)
 #++++
-log_label: fn(label: character | NULL) -> NULL
+log_label: fn([label]: character | NULL) -> NULL
 NULL
 
 #---- value_argument_accepted_for_nullable_parameter
@@ -217,7 +217,7 @@ NULL
 log_label <- function(label) NULL
 log_label("items")
 #++++
-log_label: fn(label: character | NULL) -> NULL
+log_label: fn([label]: character | NULL) -> NULL
 NULL
 
 #---- tuple_argument_coerces_to_array_like_list_parameter
@@ -225,7 +225,7 @@ NULL
 consume <- function(items) NULL
 consume(list(1L, 2L))
 #++++
-consume: fn(items: list[integer]) -> NULL
+consume: fn([items]: list[integer]) -> NULL
 NULL
 
 #---- record_argument_coerces_to_map_like_list_parameter
@@ -233,7 +233,7 @@ NULL
 consume <- function(items) NULL
 consume(list(foo = 1L, bar = 2L))
 #++++
-consume: fn(items: list[named: integer]) -> NULL
+consume: fn([items]: list[named: integer]) -> NULL
 NULL
 
 #---- nullable_parameter_rejects_wrong_base_type
@@ -241,7 +241,7 @@ NULL
 log_label <- function(label) NULL
 log_label(1L)
 #++++
-log_label: fn(label: character | NULL) -> NULL
+log_label: fn([label]: character | NULL) -> NULL
 NULL
 83..85 error[type-mismatch] expected `character | NULL`, found `integer`
 
@@ -264,7 +264,7 @@ render <- function(value) "ok"
 apply_transform(render, 1L)
 #++++
 apply_transform: fn(transform: fn(integer) -> character, count: integer) -> character
-render: fn(value: integer) -> character
+render: fn([value]: integer) -> character
 character
 
 #---- function_argument_with_wrong_return_is_rejected
@@ -322,7 +322,7 @@ double
 h <- function(x) 1.0
 h(c(1L, 2L))
 #++++
-h: fn(x: double[]) -> double
+h: fn([x]: double[]) -> double
 double
 
 #---- double_rejected_at_integer_annotation
@@ -338,7 +338,7 @@ value: integer
 add2 <- function(n, m) n
 add2(3, m = 4)
 #++++
-add2: fn(n: integer, m: integer) -> integer
+add2: fn(n: integer, [m]: integer) -> integer
 integer
 
 #==== annotation_name_matching
@@ -346,7 +346,7 @@ integer
 #: fn(a: integer, b: character) -> integer
 swapped <- function(b, a) b + 1L
 #++++
-swapped: fn(b: character, a: integer) -> integer
+swapped: fn(b: character, [a]: integer) -> integer
 43..50 warning[unused] `swapped` is assigned but never used.
 69..70 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -355,7 +355,7 @@ swapped: fn(b: character, a: integer) -> integer
 swapped <- function(b, a) b
 swapped(a = 1L, b = "x")
 #++++
-swapped: fn(b: character, a: integer) -> character
+swapped: fn(b: character, [a]: integer) -> character
 character
 
 #---- annotation_renaming_a_parameter_is_rejected
@@ -477,7 +477,7 @@ f("a", 1L)
 #++++
 f: <T> fn(...: Any, sep: T) -> T
 T
-28..29 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+28..29 error[type-mismatch] this call leaves out `sep`, which has no default and which the function uses
 
 #---- unmatched_keyword_is_absorbed_by_the_rest
 f <- function(...) NULL

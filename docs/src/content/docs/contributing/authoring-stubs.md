@@ -49,7 +49,7 @@ pi : double
 length : fn(x: Any) -> integer
 
 # a parametric higher-order function, a real generic scheme rather than Any
-lapply : <T, U> fn(x: list[named: T], f: fn(T) -> U, ...: Any) -> list[named: U]
+lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 ```
 
 ### Opaque types

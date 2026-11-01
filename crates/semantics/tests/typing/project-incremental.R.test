@@ -20,8 +20,8 @@ double_count <- count_letters
 result <- double_count(2L)
 #++++
 == R/a.R
-count_letters: fn(count: character) -> integer
-double_count: fn(count: character) -> integer
+count_letters: fn([count]: character) -> integer
+double_count: fn([count]: character) -> integer
 == R/b.R
 result: Unknown
 23..25 error[type-mismatch] expected `character`, found `integer`

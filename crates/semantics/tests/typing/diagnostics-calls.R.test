@@ -44,9 +44,9 @@ T
 describe <- function(count, label) label
 describe(1L)
 #++++
-describe: fn(count: integer, label: character) -> character
+describe: fn([count]: integer, label: character) -> character
 character
-94..102 error[type-mismatch] this call supplies 1 argument, but the function requires 2, so a required argument is missing
+94..102 error[type-mismatch] this call leaves out `label`, which has no default and which the function uses
 
 #---- argument_type_mismatch_points_at_argument
 #: fn(count: integer) -> integer
@@ -65,7 +65,7 @@ wider <- function(value) 1L
 run(wider)
 #++++
 run: fn(callback: fn(integer) -> integer) -> integer
-wider: fn(value: integer | NULL) -> integer
+wider: fn([value]: integer | NULL) -> integer
 integer
 
 #---- function_argument_contravariant_parameter_rejected
@@ -75,7 +75,7 @@ run <- function(callback) 1L
 narrower <- function(value) value
 run(narrower)
 #++++
-run: fn(callback: fn(integer | NULL) -> integer) -> integer
+run: fn([callback]: fn(integer | NULL) -> integer) -> integer
 narrower: fn(value: integer) -> integer
 integer
 158..166 error[type-mismatch] this function is passed `integer | NULL`, but its parameter `value` accepts `integer`

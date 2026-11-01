@@ -997,8 +997,9 @@ annotation. The possible disagreements are:
 - a declared parameter name that is not one of the formals (an annotation may not rename a
   parameter, so `fn(count: integer) -> integer` over `function(n) n` is an error);
 - more declared parameter types than there are formals left to receive them;
-- a declared optional `[name]` over a formal with no default, because declaring a parameter optional
-  tells callers they may omit it;
+- a declared optional `[name]` over a formal that callers may not omit (one with no default that
+  the body [may force](#lazy-arguments-and-required-formals)), because declaring a parameter
+  optional tells callers they may omit it;
 - a parameter declared as required over a formal that has a default, because R lets callers omit it,
   so the annotation must say `[name]`;
 - a rest parameter at a different position in the annotation than in the formals, or present on only
@@ -1034,8 +1035,8 @@ An unannotated `function(...)` expression gets its type from the definition itse
 
 - Every parameter appears as a named parameter under its name in the definition, because R matches
   parameters both by name and by position.
-- A parameter with a default is optional at call sites, and so is one the body tests with
-  [`missing()`](#missing-on-a-defaultless-formal).
+- A parameter with a default is optional at call sites, and so is one the body never forces, as
+  [lazy arguments](#lazy-arguments-and-required-formals) describes.
 - A `...` formal becomes a rest parameter with element type `Any`, at the position it holds among the
   formals, so `function(x, ...) …` is `fn(x: T, ...: Any) -> …`. The values that reach `...` are not
   tracked into the body, so forwarding `...` to another call gives `Unknown`.
@@ -1110,10 +1111,21 @@ with the expected one.
   in a checked annotation, because `label` has no default. At an argument position this is not yet
   checked, which is a known gap.
 
-Variadic compatibility is conservative. A variadic function type is compatible only with another
-variadic function type, never with a fixed-arity one in either direction. Their rest element types
-are contravariant like any parameter, and both sides must declare the same number of parameters
-before `...`. This rejects some safe pairings, but never admits an unsound one.
+A variadic function serves a fixed-arity interface, because its rest parameter requires no
+arguments: `mean`, declared as `fn(x: Any, ...: Any)`, is accepted where `fn(integer[]) -> double`
+is expected. The other direction is rejected, because a variadic interface may send any number of
+arguments and a fixed-arity function cannot receive them. Between two variadic types, the rest
+element types are contravariant like any parameter, and both sides must declare the same number of
+parameters before `...`. This rejects some safe pairings, but never admits an unsound one.
+
+The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
+`sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,
+`apply`, `tapply`, `sweep`, `rapply`, `eapply`, `Vectorize`, `Negate`, `aggregate`, and `match.fun`
+itself) also accept the function's name as a string. A string literal that names a known function
+checks as that function, so `vapply(words, "toupper", numeric(1))` is an error because `toupper`
+returns `character`. Any other string, such as `"[["` or a computed name, is `Unknown` and
+unchecked. A string reaches a function-typed parameter only at these callees: a project function
+that calls its `callback` parameter does not accept `"toupper"`.
 
 When a function value is rejected at a parameter, the finding names the one position that failed
 rather than printing both whole signatures: either the parameter to which the interface passes a
@@ -1140,6 +1152,11 @@ interface check is therefore checked again, as that forwarded call:
 `gsub(word, pattern = "a", replacement = "o")` and is `list[character]`, and `lapply(words, nchar)`
 accepts `nchar`'s optional formals. A forwarded argument of the wrong type fails the check, and the
 call is an error.
+
+Inside a wrapper, a call that forwards its own `...` to a function parameter, as in
+`function(func, x, ...) func(unique(x), ...)`, demands only the parameters its other arguments fill,
+because the forwarded `...` may be empty. So `dedup(basename, paths)` is accepted even though
+`basename` takes a single argument.
 
 ### Higher-order function types
 
@@ -1623,21 +1640,29 @@ Calling a function looked up in a list, as in `handlers[[name]](...)`, has this 
 
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
-[named and positional parameter rules](#named-and-positional-parameters) apply throughout.
+[named and positional parameter rules](#named-and-positional-parameters) apply throughout. A missing
+named argument is reported by name, as in "this call leaves out `y`, which has no default and which
+the function uses", and too many arguments are counted as the positional arguments against the
+positional slots that named arguments left open.
 
 #### Matching arguments to parameters
 
-Arguments are matched in R's order:
+Arguments are matched in R's order, and names compare case-sensitively:
 
-1. Every argument given by name claims the parameter of that name, before any positional argument is
-   placed.
-2. The positional arguments then fill what is left: first the fixed positional parameters, then the
+1. Every argument given by name claims the parameter of exactly that name, before any positional
+   argument is placed.
+2. A remaining named argument claims a parameter declared before the rest parameter whose name it
+   is a prefix of, when exactly one unclaimed parameter has that prefix. So
+   `list.files(".", full = TRUE)` sets `full.names`. Parameters after the rest parameter match only
+   exactly, as in R.
+3. The positional arguments then fill what is left: first the fixed positional parameters, then the
    unclaimed named parameters declared before the rest parameter, in declaration order. When the
    function is not variadic, they fill all the unclaimed named parameters.
-3. The rest parameter absorbs whatever remains, positional or named.
+4. The rest parameter absorbs whatever remains, positional or named.
 
 So in `vapply(xs, character(1), FUN = f)`, the named `FUN` is claimed first, and `character(1)`
-reaches `FUN.VALUE`, exactly as R matches it.
+reaches `FUN.VALUE`, exactly as R matches it. In `lapply(1:2, fmt, x = data)` the lowercase `x`
+does not match `lapply`'s `X`, so it goes to the rest parameter and is forwarded to `fmt`.
 
 A rest parameter follows R's rules for the formals around the dots:
 
@@ -1852,6 +1877,23 @@ The details:
   proves nothing about the value it will see then.
 - A condition combined with `&&` or `||` does not narrow.
 - `is.na(x)` is not a type guard, because being `NA` is a property of a value, not of a type.
+
+#### Lazy arguments and required formals
+
+R evaluates an argument only when the body forces it, and omitting an argument is an error only at
+that moment. A formal without a default is therefore required at call sites only when the body may
+force it, so `function(x, unused) x` may be called as `f(1)`. A read forces the formal, with these
+exceptions and additions:
+
+- A read guarded by `missing(name)` does not make the formal required; see below.
+- An argument of `substitute()` or `quote()` is not evaluated, so a formal named only there is not
+  forced.
+- A formal assigned before any read, as in `function(x) { x <- 1; x }`, is never forced. The order
+  is evaluation order, so `n <- n / 2` forces `n`, and a `for` variable is assigned by the loop.
+- A read inside a nested function forces the formal, because the closure may run, unless the
+  nested function has its own parameter or assignment of that name.
+- When a forced formal has a default, the formals its default reads are forced too, so in
+  `function(x, y = x) y`, `x` is required.
 
 #### `missing()` on a defaultless formal
 

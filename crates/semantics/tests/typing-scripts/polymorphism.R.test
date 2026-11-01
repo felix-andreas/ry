@@ -55,7 +55,7 @@ const_integer <- function(x) 1L
 const_integer(1L)
 const_integer("hello")
 #++++
-const_integer: <T> fn(x: T) -> integer
+const_integer: <T> fn([x]: T) -> integer
 integer
 integer
 
@@ -68,7 +68,7 @@ invoke(mirror, 1L)
 invoke(mirror, "hello")
 #++++
 invoke: <T, U> fn(f: fn(T) -> U, value: T) -> U
-const_integer: <T> fn(x: T) -> integer
+const_integer: <T> fn([x]: T) -> integer
 mirror: <T> fn(x: T) -> T
 integer
 integer
@@ -112,7 +112,7 @@ keep_left <- function(left, right) left
 keep_left(1L, "x")
 keep_left("x", 1L)
 #++++
-keep_left: <T, U> fn(left: T, right: U) -> T
+keep_left: <T, U> fn(left: T, [right]: U) -> T
 integer
 character
 
@@ -137,7 +137,7 @@ render <- function(count) "ok"
 apply_once(render, 1L)
 #++++
 apply_once: <T, U> fn(transform: fn(T) -> U, value: T) -> U
-render: fn(count: integer) -> character
+render: fn([count]: integer) -> character
 character
 
 #==== generic_vector_elements
@@ -190,7 +190,7 @@ character
 #: fn(x: Person[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn(x: Person[]) -> NULL
+f: fn([x]: Person[]) -> NULL
 51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
 69..70 warning[unused] `f` is assigned but never used.
 
