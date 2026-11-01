@@ -2143,9 +2143,18 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
   - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
     Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
-    asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
+    asymptotic test, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's error message for `hashfile(NA)`, the `parallel`
     package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
     alternative in mvtnorm, and `NextMethod` in xts.
+  - No graphics devices: Matrix's `Simple.R`, gtable, and every vignette that plots (rcmdcheck's
+    `R CMD build` of its `bad3` fixture) stop at "graphics devices are not supported by ry yet".
+  - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
+    (and magick) must be installed from source on ry, which `oracle install` does. magick's
+    configure needs Magick++ (`libmagick++-dev`), which the container lacks.
+  - pak fails to install in a parallel `oracle install --jobs 4` (its `install.libs.R` finds no
+    `DONE`) and installs alone; the cause is not known.
+  - pkgbuild's "warnings can be turned into errors": GNU R's `R CMD build` script on ry does not
+    turn a build warning into an error.
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).
