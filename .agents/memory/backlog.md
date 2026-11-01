@@ -304,6 +304,11 @@ protects construction but nothing after it.
   against the binding epoch, or a direct cell for namespace and import lookups, would make that
   one load. `bytecode::step` dispatch is 6.6% self. Reproduce with `tools/bench/generate.py` and
   `just bench-compare`.
+  Microbenchmarks against GNU R 4.3 (JIT on) show the per-call gap: 200k closure calls take
+  190 ms against 83 ms, 50k S3 dispatches 100 against 59, 20k `tryCatch` 415 against 102, and a
+  two-expectation `test_that` block about 60 ms against 28. The likely wins, in order: no binding
+  cell or promise per argument for a closure whose frame cannot escape, a cached global function
+  lookup, and less `Heap::root` and handle traffic per call.
 - **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
   reads the checker's per-function summaries yet, and strict typing does not remove guards
   (`decisions.md`, "Static types do not remove guards"). Typed code currently runs at the speed of
