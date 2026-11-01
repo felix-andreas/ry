@@ -3402,7 +3402,11 @@ formulas, and the built-in operators have none. A call has none when its functio
 and its arguments have none; the arguments of `quote`, `expression`, `alist` and `substitute` are not
 evaluated, so they are not inspected. Inside `local()`, assignments and loops touch only the local
 environment and are allowed, but a call to a function bound inside that `local()` is an effect,
-because nothing declares it pure.
+because nothing declares it pure. A replacement inside `local()` of a name bound outside it, such as
+`local({ defaults$a <- 2; defaults })`, is allowed when the project binds that name once, at the top
+level, to a literal or to `c()` or `list()` of literals. R then replaces in a local copy, which leaves
+the outer value alone. Any other outer value might be an environment, which the replacement would
+change, so it is an effect.
 
 Anything else is an effect, which is a `strict` error reported on the expression that causes it.
 Only the first effect of a statement is reported. The effects are:
@@ -3428,7 +3432,9 @@ standard library's stubs mark base R's pure functions, such as `paste0`, `seq_le
 `c`, `list`, `switch`, `expression` and `alist` are pure without a stub.
 
 A project definition of a name shadows the stub's declaration, so a package's own `paste0` is pure
-only if it is marked. A function defined inside a condition, such as `if (cond) f <- function() 1`,
+only if it is marked. A bare call to a stub-declared function takes its purity from the declaration
+the name resolves to, the same one its type comes from: when two packages declare the same name, the
+later one wins, and its marker alone decides. `pkg::name` asks the named package's declaration. A function defined inside a condition, such as `if (cond) f <- function() 1`,
 is never pure, because which definition exists depends on the condition.
 
 Purity belongs to each definition alone. Adding `cat()` to the body of a function marked `@pure`
@@ -3439,7 +3445,10 @@ re-checks only that function, and removing the marker re-checks only the stateme
 `ry load` binds a library file's functions lazily, and under strict mode its constants too: a constant
 whose name has exactly one top-level writer becomes a promise that evaluates its initializer on first
 use. Every package name the initializer mentions must also be written exactly once, by a statement
-earlier in collation order, and otherwise the constant runs eagerly in order. Because the initializer
+earlier in collation order, and otherwise the constant runs eagerly in order. A `<<-` anywhere in a
+package function counts as a writer of its target that comes after every top-level statement,
+because the namespace locks once loading finishes and such a write can only land while `.onLoad`, or
+something it calls, runs. Because the initializer
 has no effect and what it reads cannot change after it, evaluating it later gives the value a load
 would have computed. A reload binds the constant again whenever anything its initializer reaches changed, such
 as the body of a pure function it calls.

@@ -357,9 +357,6 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 - **Calls to functions bound inside `local()`** are effects today, even when the local function is pure. Accept them when the local binding is a function literal whose body has no effect.
 - **`@pure` on a non-binding** (`#: @pure` above `cat(1)`) is ignored silently; warn instead.
 - **Evaluate pure constants once and cache them** with the bytecode, as Roc evaluates top-level constants at compile time.
-- **Bare-name stub purity is one flat set** (`StubLibrary::pure`): `callee_purity` consults it for any bare call whether or not the declaring package is attached, and a later stub that redeclares a name without `@pure` clears it for every package. Resolve a bare callee through the attached namespaces first.
-- **A replacement inside `local()` of an outer name** (`local({ cfg$a <- 2; cfg })`) is reported as changing `cfg`. That holds when `cfg` is an environment, but for an ordinary value R makes a local copy; with the outer value's type known, accept it.
-- **`.onLoad` writes** (`z <<- 5`) are invisible to the lazy-constant rule, so a lazy constant mentioning `z` that is forced after `.onLoad` sees the new value where an eager one saw the old. Count `<<-` targets of `.onLoad` as writers.
 
 ## Open: the JIT
 

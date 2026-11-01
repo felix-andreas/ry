@@ -32,9 +32,8 @@ pub struct StubLibrary<'db> {
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
     pub masked: FxHashMap<String, Vec<String>>,
-    /// Names whose winning declaration is marked `@pure`: calling them never has an effect.
-    pub pure: FxHashSet<String>,
-    /// `@pure` names per declaring namespace, for `pkg::name` calls.
+    /// `@pure` names per declaring namespace. A bare call takes its purity from the namespace
+    /// of the name's winning declaration (`declarations`), the same one its type comes from.
     pub pure_by_namespace: FxHashMap<String, FxHashSet<String>>,
     /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
@@ -330,18 +329,13 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 library.masked.insert(name.to_owned(), leading);
             }
             namespace_exports.insert(name.to_owned());
-            let first_here = !seen_here.contains(name);
-            // Purity belongs to the name: any candidate's marker marks it, and a later
-            // source's first declaration decides afresh.
+            // Purity belongs to the name within its namespace: any candidate's marker marks it.
             if markers.pure {
-                library.pure.insert(name.to_owned());
                 library
                     .pure_by_namespace
                     .entry(namespace.clone())
                     .or_default()
                     .insert(name.to_owned());
-            } else if first_here {
-                library.pure.remove(name);
             }
             if seen_here.insert(name) {
                 if documentation.is_empty() {
