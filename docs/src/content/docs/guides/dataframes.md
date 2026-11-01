@@ -5,7 +5,7 @@ description: ry's built-in table, queried with a Polars-style API and run on the
 
 A `DataFrame` is ry's built-in table, for code where data.table is too slow or too hard to read.
 Each query runs inside the [Polars](https://pola.rs) engine instead of as R code, which on
-db-benchmark's questions at ten million rows takes about a fifth of the time data.table does
+db-benchmark's questions at ten million rows takes about a quarter of the time data.table does
 ([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
 column is reported before the query runs. Code you already wrote for data.table keeps working, and
 most of its queries run on the same engine
@@ -311,8 +311,9 @@ and costs only the new column.
 ## Speed
 
 db-benchmark's ten group-by and five join questions, three `:=` update loops and a keyed rolling
-join, at ten million rows (db-benchmark's 0.5 GB size) on 4 cores, take 5.2 s on DataFrames and
-26.2 s on data.table using every thread, best of two runs each, with the same checksums, and
-DataFrames are faster on every question. data.table's own functions (`fread`, `setkey`, `rbindlist`,
+join, at ten million rows (db-benchmark's 0.5 GB size) on 4 cores, take 6.3 s on DataFrames and
+25.9 s on data.table using every thread, best of two runs each, with the same checksums, and
+DataFrames are faster on every question. At fifty million rows the ten group-by questions take
+11.8 s against 29.8 s. data.table's own functions (`fread`, `setkey`, `rbindlist`,
 `melt` and the rest) run data.table's C code, at the speed they have under GNU R. The
 [design notes](/contributing/design/r-runtime/#7-the-table-type) describe the benchmark.

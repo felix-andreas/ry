@@ -779,26 +779,26 @@ driven from Rust, without R.
 <!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.160 | 0.019 | 0.036 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.185 | 0.017 | 0.035 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.276 | 0.104 | 0.114 |
-| groupby q4: three means by `id4` | 0.327 | 0.170 | 0.202 |
-| groupby q5: three sums by `id6` | 0.286 | 0.123 | 0.125 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.683 | 0.131 | 0.179 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.731 | 0.053 | 0.069 |
-| groupby q8: the two largest `v3` by `id6` | 0.701 | 0.191 | 0.253 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.860 | 0.050 | 0.103 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.845 | 0.715 | 0.813 |
-| `:=` on a whole column, 100 times | 4.925 | 0.373 | 2.122 |
-| `:=` on 1% of rows, 100 times | 3.772 | 0.833 | 0.813 |
-| `:=` adding a column, 100 times | 5.432 | 0.712 | 1.399 |
-| join q1: small, on `id1` | 0.365 | 0.113 | 0.141 |
-| join q2: medium, on `id2` | 0.480 | 0.182 | 0.255 |
-| join q3: medium, left, on `id2` | 0.628 | 0.245 | 0.185 |
-| join q4: medium, on factor `id5` | 0.498 | 0.185 | 0.264 |
-| join q5: big, on `id3` | 3.755 | 0.995 | 1.012 |
-| keyed rolling join | 0.127 | 0.113 | 0.098 |
-| total | 26.04 | 5.32 | 8.22 |
+| groupby q1: `sum(v1)` by `id1` | 0.131 | 0.062 | 0.152 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.186 | 0.063 | 0.151 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.289 | 0.148 | 0.289 |
+| groupby q4: three means by `id4` | 0.319 | 0.181 | 0.281 |
+| groupby q5: three sums by `id6` | 0.319 | 0.171 | 0.247 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.668 | 0.186 | 0.291 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.749 | 0.090 | 0.158 |
+| groupby q8: the two largest `v3` by `id6` | 0.666 | 0.253 | 0.322 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.932 | 0.105 | 0.199 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.909 | 0.856 | 0.902 |
+| `:=` on a whole column, 100 times | 5.204 | 0.310 | 2.005 |
+| `:=` on 1% of rows, 100 times | 3.857 | 0.809 | 0.906 |
+| `:=` adding a column, 100 times | 4.997 | 0.773 | 1.428 |
+| join q1: small, on `id1` | 0.372 | 0.219 | 0.133 |
+| join q2: medium, on `id2` | 0.486 | 0.250 | 0.238 |
+| join q3: medium, left, on `id2` | 0.622 | 0.266 | 0.188 |
+| join q4: medium, on factor `id5` | 0.489 | 0.221 | 0.241 |
+| join q5: big, on `id3` | 3.588 | 1.193 | 0.947 |
+| keyed rolling join | 0.127 | 0.115 | 0.083 |
+| total | 25.91 | 6.27 | 9.16 |
 <!-- /bench-table:1e7 -->
 
 At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
@@ -809,17 +809,17 @@ at 6.4 GB, and both grow with the row count.
 <!-- bench-table:5e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.743 | 0.281 | 0.680 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.897 | 0.342 | 0.684 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.207 | 1.119 | 1.422 |
-| groupby q4: three means by `id4` | 1.614 | 1.292 | 1.710 |
-| groupby q5: three sums by `id6` | 1.259 | 1.155 | 1.503 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.813 | 0.923 | 1.372 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 4.912 | 0.637 | 0.963 |
-| groupby q8: the two largest `v3` by `id6` | 3.232 | 1.492 | 1.812 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.108 | 0.516 | 0.909 |
-| groupby q10: `sum(v3)`, count by all six ids | 9.814 | 5.242 | 6.237 |
-| total | 29.60 | 13.00 | 17.29 |
+| groupby q1: `sum(v1)` by `id1` | 0.737 | 0.285 | 0.656 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.898 | 0.306 | 0.629 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.182 | 0.869 | 1.083 |
+| groupby q4: three means by `id4` | 1.525 | 0.854 | 1.170 |
+| groupby q5: three sums by `id6` | 1.265 | 0.919 | 1.136 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.816 | 0.883 | 1.285 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 5.071 | 0.665 | 1.065 |
+| groupby q8: the two largest `v3` by `id6` | 3.424 | 1.500 | 1.994 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.247 | 0.476 | 0.901 |
+| groupby q10: `sum(v3)`, count by all six ids | 9.675 | 5.070 | 6.053 |
+| total | 29.84 | 11.83 | 15.97 |
 <!-- /bench-table:5e7 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure

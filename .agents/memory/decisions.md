@@ -3757,8 +3757,11 @@ explicit allocators".
   6.4 GB.
 - **Shape.** `table::on_every_worker` runs a closure on every thread of both pools;
   `interp::frame::release_worker_memory` runs `mi_collect(true)` there and on the R thread. It runs
-  when a frame of at least 2^20 cells is wrapped or finalized, and in `gc()`. The size floor keeps
-  loops over small frames from paying for a broadcast per iteration.
+  when a frame of at least 2^22 cells is wrapped or finalized, and in `gc()`. The size floor keeps
+  loops over smaller frames from paying for a broadcast per iteration.
+- **Trap.** A broadcast waits for every pool thread, and a forked child has none of its parent's
+  threads, so a child that drops a large frame or calls `gc()` would hang. Whoever implements
+  `fork` (`mcparallel`, `mclapply`) must skip the broadcast in the child.
 - **Rejected.** `MIMALLOC_PURGE_DELAY=0` only purges pages already freed, so it left 5.9 GB; a
   per-query arena would also fix it but needs every kernel to allocate through it.
 

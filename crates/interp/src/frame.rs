@@ -249,10 +249,10 @@ pub fn release_worker_memory() {
     collect();
 }
 
-/// A table at least this many cells large releases the workers' memory when it is made or dropped.
-/// Below it a release would cost more than the memory it returns, and a loop that makes many
-/// small frames would pay for it on every iteration.
-const RELEASE_CELLS: usize = 1 << 20;
+/// A table at least this many cells large (32 MB of doubles) releases the workers' memory when it
+/// is made or dropped. Each release walks every worker's heap, so below this a loop that derives
+/// one frame from another would pay for two releases per iteration and get little back.
+const RELEASE_CELLS: usize = 1 << 22;
 
 fn is_large(table: &Table) -> bool {
     let frame = table.frame();

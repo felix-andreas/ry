@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         .skip(1)
         .find(|argument| !argument.starts_with("--"))
     else {
-        eprintln!("usage: db_benchmark <data-dir>");
+        eprintln!("usage: db_benchmark <data-dir> [--groupby-only]");
         return ExitCode::FAILURE;
     };
     let groupby_only = env::args()

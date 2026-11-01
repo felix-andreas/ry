@@ -268,7 +268,10 @@ pub fn string_to_factor(series: &Series) -> Result<Series> {
                 return (0, u8::MAX);
             }
             let hash = state.hash_one(array.value(row));
-            (hash, ((hash >> 56) as usize % partitions) as u8)
+            // hashbrown tags an entry with the hash's top seven bits and finds its bucket with the
+            // low bits, so the partition comes from bits that neither uses: taken from the top,
+            // every string in a partition would share most of its tag.
+            (hash, ((hash >> 40) as usize & (partitions - 1)) as u8)
         })
         .unzip();
     // Each partition owns the rows whose strings hash into it, so the code of a row is written by
