@@ -1,5 +1,5 @@
 ---
-title: DataFrames
+title: Working with DataFrames
 description: ry's built-in table, queried with a Polars-style API and run on the Polars engine
 ---
 
