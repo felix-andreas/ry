@@ -2248,6 +2248,7 @@ unsafe fn read_char_strings(
         }
         if let Some(end) = text.iter().position(|&byte| byte == 0) {
             text.truncate(end);
+            crate::conditions::warning("truncating string with embedded nuls")?;
         }
         strings.push(text);
     }

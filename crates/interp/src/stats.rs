@@ -2198,6 +2198,19 @@ unsafe fn isoreg(call: &NativeCall<'_>) -> R<Sexp> {
     for i in 0..n {
         cumulative[i + 1] = cumulative[i] + y[i];
     }
+    let total = cumulative[n];
+    if !total.is_finite() {
+        let shown = if total.is_nan() {
+            "nan"
+        } else if total > 0.0 {
+            "inf"
+        } else {
+            "-inf"
+        };
+        return Err(error(format!(
+            "non-finite sum(y) == {shown} is not allowed"
+        )));
+    }
     let mut fitted = vec![0.0; n];
     let mut knots: Vec<i32> = Vec::new();
     let mut known = 0usize;
