@@ -943,11 +943,16 @@ fn mersenne_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) -> f64
         if *position == TWISTER_WORDS as i32 + 1 {
             seed_twister(words, 4357);
         }
-        for index in 0..TWISTER_WORDS {
-            let next = words[(index + 1) % TWISTER_WORDS];
-            let shifted = words[(index + TWISTER_SHIFT) % TWISTER_WORDS];
-            words[index] = twist(words[index], next, shifted);
+        // The three ranges are the wrap-around of `index + 1` and `index + TWISTER_SHIFT`
+        // spelled out, which keeps the modulo out of the refill.
+        let last = TWISTER_WORDS - 1;
+        for index in 0..TWISTER_WORDS - TWISTER_SHIFT {
+            words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT]);
         }
+        for index in TWISTER_WORDS - TWISTER_SHIFT..last {
+            words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT - TWISTER_WORDS]);
+        }
+        words[last] = twist(words[last], words[0], words[TWISTER_SHIFT - 1]);
         *position = 0;
     }
     let mut value = words[*position as usize];

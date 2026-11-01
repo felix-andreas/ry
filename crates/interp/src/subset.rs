@@ -628,14 +628,19 @@ fn flat_offsets(selections: &[Vec<usize>], dims: &[usize]) -> Vec<usize> {
     let mut flat = vec![0usize];
     let mut stride = 1usize;
     for (selection, &extent) in selections.iter().zip(dims) {
+        let offset = |base: usize, position: usize| {
+            if base == NA_POSITION || position == NA_POSITION { NA_POSITION } else { base + position * stride }
+        };
+        // A single offset so far (the first dimension, or a scalar index before this one) maps
+        // straight over the selection, which is the shape of a row or column subscript.
+        if let [base] = flat[..] {
+            flat = selection.iter().map(|&position| offset(base, position)).collect();
+            stride *= extent;
+            continue;
+        }
         let mut next = Vec::with_capacity(flat.len() * selection.len());
         for &position in selection {
-            if position == NA_POSITION {
-                next.resize(next.len() + flat.len(), NA_POSITION);
-            } else {
-                let step = position * stride;
-                next.extend(flat.iter().map(|&base| if base == NA_POSITION { NA_POSITION } else { base + step }));
-            }
+            next.extend(flat.iter().map(|&base| offset(base, position)));
         }
         flat = next;
         stride *= extent;
