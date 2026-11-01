@@ -579,6 +579,7 @@ pub fn check_item_with_annotation<'db>(
         string_values: FxHashMap::default(),
         value_read_slots: None,
         computed_slots: FxHashSet::default(),
+        lookup_slots: FxHashSet::default(),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -1037,6 +1038,9 @@ struct Checker<'db, 'a> {
     /// `NULL` is a placeholder default (NlcOptim's `solqp(H = NULL, ...)`) or the shape an
     /// `is.null()` test gave them (Rsolnp's `if (is.null(eqfun)) ...`).
     computed_slots: FxHashSet<BindingId>,
+    /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
+    /// so a call through them must suit every member the collection holds.
+    lookup_slots: FxHashSet<BindingId>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -1175,6 +1179,26 @@ enum ReplacementStep {
     Element,
     /// `x[i]`, `x@a`, or a replacement call such as `names(x)`: not modeled.
     Other,
+    /// `formals(f) <- v` or `body(f) <- v` rewrites the function itself, so its prior
+    /// signature no longer describes it.
+    Rewrite,
+}
+
+/// Where a callee came from. A lookup in a collection (`handlers[[name]]`, `handlers$add`)
+/// may yield any member, so a call must suit them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalleeSource {
+    Lookup,
+    Value,
+}
+
+/// Which control-flow edge a join merges. A branch that writes an untyped value leaves the
+/// variable untyped, but a loop's back edge keeps the other side: a pass that recovered from
+/// an error with `Unknown` must not erase the type the error was reported against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinEdge {
+    Branch,
+    LoopBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1401,11 +1425,30 @@ struct FormalUses {
     /// Names read on every path where no write of them dominates the read.
     forced: FxHashSet<Symbol>,
     assigned: FxHashSet<Symbol>,
+    /// The names forced on every path that leaves through `return()`, or `None` when none
+    /// does. A formal read only after `if (fo == "A1") return("")` is not forced on the
+    /// path that returns.
+    returned: Option<FxHashSet<Symbol>>,
 }
 
 impl FormalUses {
     fn makes_optional(&self, name: Symbol) -> bool {
-        self.missing_tested.contains(&name) || !self.forced.contains(&name)
+        self.missing_tested.contains(&name) || !self.forces_on_every_path(name)
+    }
+
+    fn forces_on_every_path(&self, name: Symbol) -> bool {
+        self.forced.contains(&name)
+            && self
+                .returned
+                .as_ref()
+                .is_none_or(|returned| returned.contains(&name))
+    }
+
+    fn record_return(&mut self) {
+        self.returned = Some(match self.returned.take() {
+            None => self.forced.clone(),
+            Some(returned) => returned.intersection(&self.forced).copied().collect(),
+        });
     }
 }
 
@@ -1960,6 +2003,10 @@ impl<'db> Checker<'db, '_> {
                     match computed {
                         true => self.computed_slots.insert(slot),
                         false => self.computed_slots.remove(&slot),
+                    };
+                    match self.is_lookup(value) {
+                        true => self.lookup_slots.insert(slot),
+                        false => self.lookup_slots.remove(&slot),
                     };
                 }
                 self.write_target(spelling, target, value, value_ty);
@@ -3095,10 +3142,25 @@ impl<'db> Checker<'db, '_> {
             ExpressionKind::Field { target, .. } | ExpressionKind::Index { target, .. } => {
                 Some((*target, ReplacementStep::Other))
             }
-            ExpressionKind::Call { arguments, .. } => self.module[arguments]
-                .first()
-                .and_then(|argument| argument.value)
-                .map(|value| (value, ReplacementStep::Other)),
+            ExpressionKind::Call { callee, arguments } => {
+                let rewrites = match self.module.kind(*callee) {
+                    ExpressionKind::NameRef(name) => {
+                        matches!(name.as_str(), "formals" | "body")
+                    }
+                    _ => false,
+                };
+                self.module[arguments]
+                    .first()
+                    .and_then(|argument| argument.value)
+                    .map(|value| {
+                        let step = if rewrites {
+                            ReplacementStep::Rewrite
+                        } else {
+                            ReplacementStep::Other
+                        };
+                        (value, step)
+                    })
+            }
             _ => None,
         }
     }
@@ -3137,6 +3199,9 @@ impl<'db> Checker<'db, '_> {
         prior: Ty<'db>,
         value: Ty<'db>,
     ) -> Ty<'db> {
+        if matches!(step, ReplacementStep::Rewrite) {
+            return unknown(self.db);
+        }
         let module = self.module;
         let kind = module.kind(lhs);
         let field_name = match &step {
@@ -3359,7 +3424,7 @@ impl<'db> Checker<'db, '_> {
             // A value nobody reads must not relate its branches: unifying them would tie
             // `nm(x, value)` to `attr(x, name) <- value` and so `x` to `value`.
             (false, false) if discarded => {
-                self.join_writes(&then_writes);
+                self.join_writes(&then_writes, JoinEdge::Branch);
                 let then_ty = self.table.resolve(self.db, then_ty);
                 let else_ty = self.table.resolve(self.db, else_ty);
                 union_of(self.db, [then_ty, else_ty])
@@ -3389,7 +3454,7 @@ impl<'db> Checker<'db, '_> {
                     }
                     !normalizes
                 });
-                self.join_writes(&then_writes);
+                self.join_writes(&then_writes, JoinEdge::Branch);
                 let joined = self.join_branch_values(then_ty, else_ty);
                 let mut range = self.module.range(then_branch);
                 if let Some(else_branch) = else_branch {
@@ -3470,7 +3535,7 @@ impl<'db> Checker<'db, '_> {
                     }
                 }
             } else {
-                self.join_writes(&complete);
+                self.join_writes(&complete, JoinEdge::Branch);
             }
         }
         let joined_values = if values.is_empty() {
@@ -4076,7 +4141,7 @@ impl<'db> Checker<'db, '_> {
                     self.environment.set(slot, EnvEntry::Mono(ty));
                 }
             }
-            let changed = self.join_writes(&writes);
+            let changed = self.join_writes(&writes, JoinEdge::LoopBack);
             if changed.is_empty() {
                 if runs_at_least_once {
                     for (slot, entry) in writes {
@@ -4146,8 +4211,8 @@ impl<'db> Checker<'db, '_> {
                     ..FormalUses::default()
                 };
                 self.collect_formal_uses(*body, &mut nested);
-                for name in nested.forced {
-                    if !uses.assigned.contains(&name) {
+                for &name in &nested.forced {
+                    if nested.forces_on_every_path(name) && !uses.assigned.contains(&name) {
                         uses.forced.insert(name);
                     }
                 }
@@ -4209,8 +4274,13 @@ impl<'db> Checker<'db, '_> {
             } => {
                 self.collect_formal_uses(*condition, uses);
                 let before = uses.assigned.clone();
+                // The true edge of `a && b` has evaluated `b`, so the then branch has forced
+                // what `b` reads, as `if (allow_null && is.null(x)) return(NULL)` reads `x`.
+                let outer_forced = uses.forced.clone();
+                self.collect_true_edge_reads(*condition, uses);
                 let (then_assigned, then_forced) =
                     self.collect_branch_uses(*then_branch, uses, &before);
+                uses.forced = outer_forced;
                 let (else_assigned, else_forced) = match else_branch {
                     Some(else_branch) => self.collect_branch_uses(*else_branch, uses, &before),
                     None => (Some(before.clone()), FxHashSet::default()),
@@ -4219,12 +4289,15 @@ impl<'db> Checker<'db, '_> {
                 uses.forced.extend(join_forced([then_forced, else_forced]));
                 return;
             }
+            // `%||%` evaluates its right operand only when the left one is `NULL`.
             ExpressionKind::Binary {
-                operator: BinaryOperator::And2 | BinaryOperator::Or2,
+                operator,
+                special_name,
                 lhs,
                 rhs,
-                ..
-            } => {
+            } if matches!(operator, BinaryOperator::And2 | BinaryOperator::Or2)
+                || special_name.is_some_and(|name| name == "%||%") =>
+            {
                 self.collect_formal_uses(*lhs, uses);
                 let before = uses.assigned.clone();
                 self.collect_branch_uses(*rhs, uses, &before);
@@ -4284,6 +4357,26 @@ impl<'db> Checker<'db, '_> {
                 return;
             }
             ExpressionKind::Call { callee, arguments } => {
+                // rlang's `is_missing()` tests a formal the way `missing()` does.
+                let tester = match self.module.kind(*callee) {
+                    ExpressionKind::NameRef(name) => Some(name.as_str()),
+                    ExpressionKind::Namespace {
+                        package: Some(package),
+                        name: Some(name),
+                        ..
+                    } if package == "base" || package == "rlang" => Some(name.as_str()),
+                    _ => None,
+                };
+                if matches!(tester, Some("missing" | "is_missing")) {
+                    if let [argument] = &self.module[arguments][..]
+                        && argument.name.is_none()
+                        && let Some(value) = argument.value
+                        && let ExpressionKind::NameRef(name) = self.module.kind(value)
+                    {
+                        uses.missing_tested.insert(*name);
+                    }
+                    return;
+                }
                 if let ExpressionKind::NameRef(callee_name) = self.module.kind(*callee) {
                     // Only the first argument always runs; one arm at most runs after it, and
                     // none when no arm matches and there is no unnamed default.
@@ -4307,14 +4400,14 @@ impl<'db> Checker<'db, '_> {
                         uses.forced.extend(join_forced(arm_forced));
                         return;
                     }
-                    if callee_name == "missing" {
-                        if let [argument] = &self.module[arguments][..]
-                            && argument.name.is_none()
-                            && let Some(value) = argument.value
-                            && let ExpressionKind::NameRef(name) = self.module.kind(value)
+                    if callee_name == "return" {
+                        for value in self.module[arguments]
+                            .iter()
+                            .filter_map(|argument| argument.value)
                         {
-                            uses.missing_tested.insert(*name);
+                            self.collect_formal_uses(value, uses);
                         }
+                        uses.record_return();
                         return;
                     }
                     // These read their argument's expression, never its value, so a missing
@@ -4450,11 +4543,38 @@ impl<'db> Checker<'db, '_> {
         before: &FxHashSet<Symbol>,
     ) -> (Option<FxHashSet<Symbol>>, FxHashSet<Symbol>) {
         uses.assigned = before.clone();
-        let outer_forced = mem::take(&mut uses.forced);
+        // The branch starts from the names already forced, so a `return()` inside it
+        // records every name its path has forced.
+        let outer_forced = uses.forced.clone();
         self.collect_formal_uses(id, uses);
         let forced = mem::replace(&mut uses.forced, outer_forced);
         let after = mem::take(&mut uses.assigned);
         ((!self.diverges(id)).then_some(after), forced)
+    }
+
+    /// Adds to `uses.forced` what the right operands of a condition's `&&` chain read, which
+    /// only the true edge has evaluated.
+    fn collect_true_edge_reads(&self, condition: ExprId, uses: &mut FormalUses) {
+        let mut condition = condition;
+        while let ExpressionKind::Paren(inner) = self.module.kind(condition) {
+            condition = *inner;
+        }
+        if let ExpressionKind::Binary {
+            operator: BinaryOperator::And2,
+            lhs,
+            rhs,
+            ..
+        } = self.module.kind(condition)
+        {
+            self.collect_true_edge_reads(*lhs, uses);
+            let mut right = FormalUses {
+                assigned: uses.assigned.clone(),
+                ..FormalUses::default()
+            };
+            self.collect_formal_uses(*rhs, &mut right);
+            self.collect_true_edge_reads(*rhs, &mut right);
+            uses.forced.extend(right.forced);
+        }
     }
 
     /// A forced formal that the call omits evaluates its default, so the default's reads
@@ -5248,7 +5368,7 @@ impl<'db> Checker<'db, '_> {
                     })
                     .collect();
                 self.environment.rollback(mark);
-                self.join_writes(&writes);
+                self.join_writes(&writes, JoinEdge::Branch);
                 scalar(self.db, Atomic::Logical)
             }
             // Opaque constructs: operands still infer for the IDE, but their diagnostics are
@@ -6660,7 +6780,11 @@ impl<'db> Checker<'db, '_> {
         };
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &[callee_ty]);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        let source = match self.is_lookup(callee) {
+            true => CalleeSource::Lookup,
+            false => CalleeSource::Value,
+        };
+        let result = self.dispatch_call(range, callee_range, callee_ty, source, &call_arguments);
         if callback_outputs.is_empty() {
             return result;
         }
@@ -8537,7 +8661,7 @@ impl<'db> Checker<'db, '_> {
                 }
             }
             for writes in joined {
-                self.join_writes(writes);
+                self.join_writes(writes, JoinEdge::Branch);
             }
         }
         if !has_default {
@@ -9343,6 +9467,7 @@ impl<'db> Checker<'db, '_> {
         range: TextRange,
         callee_range: TextRange,
         callee: Ty<'db>,
+        source: CalleeSource,
         arguments: &[CallArgument<'db>],
     ) -> Ty<'db> {
         let resolved = self.table.shallow_resolve(self.db, callee);
@@ -9422,7 +9547,7 @@ impl<'db> Checker<'db, '_> {
                     .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
                     .collect();
                 let without_null = union_of(self.db, callable);
-                self.dispatch_call(range, callee_range, without_null, arguments)
+                self.dispatch_call(range, callee_range, without_null, source, arguments)
             }
             // A function joined with an unbound variable or a generic parameter (`f <- function(source = NULL) {
             // if (is.null(source)) source <- function(x) x; source(1) }`): the variable is
@@ -9457,7 +9582,7 @@ impl<'db> Checker<'db, '_> {
                     })
                     .collect();
                 let functions = union_of(self.db, functions);
-                self.dispatch_call(range, callee_range, functions, arguments);
+                self.dispatch_call(range, callee_range, functions, source, arguments);
                 unknown(self.db)
             }
             // A union of functions (`handlers[[name]](...)`) must accept the call for every
@@ -9471,14 +9596,59 @@ impl<'db> Checker<'db, '_> {
                 }) =>
             {
                 let members = members.clone();
+                let functions: Vec<FunctionType<'db>> = members
+                    .iter()
+                    .filter_map(|&member| {
+                        match self.table.shallow_resolve(self.db, member).kind(self.db) {
+                            TyKind::Function(function) => Some(function.clone()),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                let shape = |function: &FunctionType<'db>| {
+                    (
+                        function.positional.len(),
+                        function
+                            .named
+                            .iter()
+                            .map(|parameter| (parameter.name, parameter.optional))
+                            .collect::<Vec<_>>(),
+                        function.variadic.is_some(),
+                    )
+                };
+                // A value (not a lookup in a collection) whose members take different
+                // parameters comes from code that picks a function by an argument value the
+                // checker does not follow, as rlang's `compat("warn")` returns either a one-message
+                // shim or `interactive`. Such a call presumes a member that accepts it.
+                let selected_by_value = source == CalleeSource::Value
+                    && functions.split_first().is_some_and(|(first, rest)| {
+                        rest.iter().any(|function| shape(function) != shape(first))
+                    });
+                if selected_by_value {
+                    let mut accepted = 0;
+                    let mut first_findings = Vec::new();
+                    for function in &functions {
+                        let snapshot = self.table.snapshot();
+                        let findings = self.match_arguments(callee_range, function, arguments);
+                        self.table.rollback(snapshot);
+                        if findings.is_empty() {
+                            accepted += 1;
+                        } else if first_findings.is_empty() {
+                            first_findings = findings;
+                        }
+                    }
+                    if accepted == 0 {
+                        self.errors.extend(first_findings);
+                        return unknown(self.db);
+                    }
+                    if accepted < functions.len() {
+                        return unknown(self.db);
+                    }
+                }
                 let caller_entries = self.caller_open_variables(arguments);
                 let mut narrowed = false;
-                let mut returns = Vec::with_capacity(members.len());
-                for member in members {
-                    let member = self.table.shallow_resolve(self.db, member);
-                    let TyKind::Function(function) = member.kind(self.db) else {
-                        continue;
-                    };
+                let mut returns = Vec::with_capacity(functions.len());
+                for function in &functions {
                     let snapshot = self.table.snapshot();
                     let findings = self.match_arguments(callee_range, function, arguments);
                     if findings.is_empty() {
@@ -9529,7 +9699,7 @@ impl<'db> Checker<'db, '_> {
                     })
                     .collect();
                 let functions = union_of(self.db, functions);
-                self.dispatch_call(range, callee_range, functions, arguments);
+                self.dispatch_call(range, callee_range, functions, source, arguments);
                 unknown(self.db)
             }
             _ => {
@@ -9759,6 +9929,19 @@ impl<'db> Checker<'db, '_> {
                 .resolutions
                 .get(&value)
                 .is_some_and(|slot| !self.computed_slots.contains(slot)))
+    }
+
+    /// An element read from a collection, directly or through a variable it was stored in.
+    fn is_lookup(&self, expression: ExprId) -> bool {
+        match self.module.kind(expression) {
+            ExpressionKind::Index { .. } | ExpressionKind::Field { .. } => true,
+            ExpressionKind::NameRef(_) => self
+                .naming
+                .resolutions
+                .get(&expression)
+                .is_some_and(|slot| self.lookup_slots.contains(slot)),
+            _ => false,
+        }
     }
 
     fn names_computed_value(&self, value: ExprId) -> bool {
@@ -12353,7 +12536,11 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// Returns the slots whose entries changed: the loop fixed point's stability signal.
-    fn join_writes(&mut self, writes: &[(BindingId, Option<EnvEntry<'db>>)]) -> Vec<BindingId> {
+    fn join_writes(
+        &mut self,
+        writes: &[(BindingId, Option<EnvEntry<'db>>)],
+        edge: JoinEdge,
+    ) -> Vec<BindingId> {
         let mut changed = Vec::new();
         for &(slot, branch_entry) in writes {
             // The missing-formal marker is branch-local: once joined it is the supplied type.
@@ -12369,7 +12556,19 @@ impl<'db> Checker<'db, '_> {
             }
             let joined = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
-                    Some(EnvEntry::Mono(self.join_written_values(a, b)))
+                    let unknown_side = [a, b].into_iter().any(|ty| {
+                        matches!(
+                            self.table.resolve(self.db, ty).kind(self.db),
+                            TyKind::Unknown
+                        )
+                    });
+                    Some(EnvEntry::Mono(
+                        if unknown_side && matches!(edge, JoinEdge::Branch) {
+                            unknown(self.db)
+                        } else {
+                            self.join_written_values(a, b)
+                        },
+                    ))
                 }
                 (None, Some(entry)) => Some(entry),
                 // Keeping identical entries as-is preserves a function slot's polymorphism.

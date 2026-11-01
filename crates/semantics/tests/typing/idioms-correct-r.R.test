@@ -656,7 +656,7 @@ reduce <- function(X, firstEig = NULL, lastEig = NULL) {
 }
 #++++
 first_rows: <T, U: scalar numeric, V: scalar numeric> fn(vectors: T, [firstEig]: U, [lastEig]: V) -> Unknown
-reduce: <T, U, V: scalar numeric> fn(X: T, [firstEig]: U | NULL, [lastEig]: V | NULL) -> Unknown
+reduce: <T, U, V> fn(X: T, [firstEig]: U | NULL, [lastEig]: V | NULL) -> Unknown
 
 #---- a_formal_shaped_by_an_is_null_test_passes_to_a_callback_parameter
 evaluate <- function(pars, fun, eqfun = NULL) c(fun(pars), eqfun(pars))
@@ -795,3 +795,166 @@ as_function: fn(x: Unknown) -> Any
 map: <T> fn(.x: Unknown, .f: T, ...: Any) -> Unknown
 g: <T> fn(xs: T) -> Unknown
 h: <T> fn(xs: T) -> Unknown
+
+#---- a_formal_read_only_after_an_early_return_is_optional
+rel <- function(is_abs, rc_ref, fo = "A1") {
+  if (fo == "A1") return("")
+  rc_ref
+}
+h <- function() rel(TRUE, fo = "A1")
+#++++
+rel: <T, U, V> fn([is_abs]: T, [rc_ref]: U, [fo]: V) -> character | U
+h: <T> fn() -> character | T
+
+#---- a_formal_read_before_an_early_return_is_required
+rel <- function(is_abs, rc_ref, fo = "A1") {
+  label <- paste(rc_ref)
+  if (fo == "A1") return(label)
+  rc_ref
+}
+h <- function() rel(TRUE, fo = "A1")
+#++++
+rel: <T, U, V> fn([is_abs]: T, rc_ref: U, [fo]: V) -> character | U
+h: Unknown
+129..132 error[type-mismatch] this call leaves out `rc_ref`, which the function requires
+
+#---- a_formal_read_after_a_stop_is_required
+pick <- function(flag, value) {
+  if (!flag) stop("no value")
+  value
+}
+h <- function() pick(TRUE)
+#++++
+pick: <T> fn(flag: logical, value: T) -> T
+h: Unknown
+88..92 error[type-mismatch] this call leaves out `value`, which the function requires
+
+#---- a_formal_read_on_the_right_of_a_null_coalesce_is_optional
+read_dcf <- function(file, text = NULL) {
+  contents <- text %||% readLines(file)
+  contents
+}
+h <- function() read_dcf(text = "a: 1")
+#++++
+read_dcf: <T, U> fn([file]: T, [text]: U) -> Unknown
+h: fn() -> Unknown
+
+#---- a_formal_tested_with_rlang_is_missing_is_optional
+container <- function(x, gap = NULL) {
+  if (rlang::is_missing(x)) return(gap)
+  x
+}
+h <- function() container()
+#++++
+container: <T, U> fn([x]: T, [gap]: U) -> U | T
+h: <T> fn() -> T | NULL
+
+#---- a_function_whose_formals_are_rewritten_takes_any_call
+make <- function(args) {
+  new_fun <- function() TRUE
+  formals(new_fun) <- args
+  new_fun
+}
+assert_x <- make(alist(x = , y = 1))
+h <- function() assert_x(1, 2)
+#++++
+make: <T> fn(args: T) -> Unknown
+assert_x: Unknown
+h: fn() -> Unknown
+
+#---- an_attribute_write_keeps_a_functions_signature
+make <- function() {
+  new_fun <- function() TRUE
+  attr(new_fun, "kind") <- "check"
+  new_fun
+}
+check <- make()
+h <- function() check(1)
+#++++
+make: fn() -> fn() -> logical
+check: fn() -> logical
+h: Unknown
+135..136 error[type-mismatch] this call passes 1 positional argument, but the function only takes 0
+
+#---- a_branch_that_writes_an_untyped_value_leaves_the_variable_untyped
+cache <- new.env()
+lookup <- function(in_memory, dir, id) {
+  if (in_memory) db <- cache else db <- list.files(dir)
+  entry <- db[[id]]
+  entry$hashes
+}
+#++++
+cache: Unknown
+lookup: <T, U> fn(in_memory: logical, [dir]: T, id: U) -> Unknown
+
+#---- a_branch_join_of_typed_values_still_checks_the_union
+pick <- function(flag) {
+  if (flag) x <- 1L else x <- "a"
+  x + 1L
+}
+#++++
+pick: Unknown
+61..62 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | integer`
+
+#---- a_factor_compares_with_a_number_by_its_labels
+groups <- as.factor(c(1L, 2L, 3L))
+first <- groups == 1
+#++++
+groups: factor
+first: logical
+
+#---- a_factor_still_rejects_an_ordering_comparison
+groups <- as.factor(c(1L, 2L, 3L))
+low <- groups < 2
+#++++
+groups: factor
+low: Unknown
+42..48 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `factor`
+
+#---- sort_with_index_return_is_not_a_vector
+order_of <- function(values) {
+  sorted <- sort(as.numeric(values), index.return = TRUE)
+  sorted$ix
+}
+#++++
+order_of: <T> fn(values: T) -> Any
+
+#---- sort_without_index_return_keeps_its_element_type
+sorted <- sort(c(3, 1, 2))
+#++++
+sorted: double[]
+
+#---- a_function_picked_by_an_argument_value_takes_any_members_call
+compat <- function(fn) {
+  switch(
+    fn,
+    is_interactive = return(function() interactive()),
+    warn = return(function(msg) warning(msg, call. = FALSE))
+  )
+  stop("unknown shim")
+}
+warn_header <- function(header) {
+  warn <- compat("warn")
+  warn(header)
+}
+#++++
+compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
+warn_header: <T> fn(header: T) -> Unknown
+
+#---- a_function_picked_by_an_argument_value_still_needs_one_member_to_fit
+compat <- function(fn) {
+  switch(
+    fn,
+    is_interactive = return(function() interactive()),
+    warn = return(function(msg) warning(msg, call. = FALSE))
+  )
+  stop("unknown shim")
+}
+warn_twice <- function(header) {
+  warn <- compat("warn")
+  warn(header, header, header)
+}
+#++++
+compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
+warn_twice: Unknown
+253..259 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 0

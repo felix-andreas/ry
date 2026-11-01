@@ -1942,7 +1942,14 @@ A call evaluates to its callee's return type. When the callee expression or its 
 `Unknown`, the call is `Unknown`. When the callee is a union whose members are all function types,
 the call must be valid against every member, since the value could be any of them, and it evaluates
 to the union of the members' return types. No member's argument bindings leak into another's.
-Calling a function looked up in a list, as in `handlers[[name]](...)`, has this shape.
+Calling a function looked up in a list, as in `handlers[[name]](...)`, has this shape, and so does
+a variable that holds such a lookup, as `handler <- handlers[[name]]` does.
+
+A union of functions that take different parameters but is not a lookup usually comes from code
+that picks a function by an argument value, as rlang's `compat("warn")` returns a one-message shim
+while `compat("is_interactive")` returns a function of no arguments. A call through such a value
+presumes a member that accepts it, so it is reported only when no member does. When some members
+accept the call and others do not, the call is `Unknown`.
 
 A callee whose union joins functions with plain values, such as `(fn(id: T) -> character) | character`,
 comes from a function whose result kind depends on an argument, as `prefixer(namespace)` below
@@ -2272,8 +2279,12 @@ exceptions and additions:
 
 - A read on only some paths does not force the formal. The branches of `if`, `switch()`, and `match`
   force only what all of them force, and an `if` without `else` or a `switch()` without an unnamed
-  default forces nothing. The right operand of `&&` or `||` and the body of a loop may not run, so
-  they force nothing either.
+  default forces nothing. The right operand of `&&`, `||`, or `%||%` and the body of a loop may not
+  run, so they force nothing either, except that the branch an `if (a && b)` takes has run `b`.
+- A path that leaves through `return()` forces only what it read before returning, so in
+  `function(flag, value) { if (flag) return(NULL); value }`, `value` is optional. `stop()` is not a
+  return: a path that stops never completes the call, so it does not relax what the other paths
+  force.
 - Passing the formal on under its own name to a project function, as in `inner(x, finally = finally)`,
   does not force it, because the callee decides whether it is needed. A call to a library function
   still forces it, except for a base R parameter that has no default and that the function tests
@@ -2301,7 +2312,7 @@ exceptions and additions:
 
 #### `missing()` on a defaultless formal
 
-A formal that the body tests with `missing(name)` is optional at call sites, which is how R writes an
+A formal that the body tests with `missing(name)` (or rlang's `is_missing(name)`) is optional at call sites, which is how R writes an
 optional argument without a default: `function(name, punct) if (missing(punct)) … else …punct…` may
 be called without `punct`. The test also narrows whether the formal was supplied, like a type guard:
 
@@ -2641,6 +2652,9 @@ slot, so the slot's type reflects the update:
   `old <- list(list(private = NULL)); old[[1]]$private <- list(deep_clone = 1)`, reading
   `old[[1]]$private$deep_clone` is a `double`. Writing a field of a `NULL` grows it into a one-field
   record, as R does, so `x <- NULL; x$a <- 1` makes `x` a `list{a: double}`.
+- `formals(f) <- v` and `body(f) <- v` rewrite the function itself, so `f` is `Unknown` afterwards
+  and calls to it are not checked. Other replacement calls, such as `names(x) <- v` or
+  `attr(f, "kind") <- v`, leave the base's type as it was.
 - The accessor chain and the index or key expressions are ordinary reads, so their own errors surface.
   A replacement whose accessor chain has no variable at its root, such as `f(x)$a <- v`, is an
   unsupported construct: it types as `Unknown` and is a strict-mode origin.
@@ -2661,9 +2675,12 @@ variable's possible states are joined:
 - A loop body may run zero or more times, so reads inside the body and after the loop join the state
   from before the loop with the state flowing around the back edge.
 - `repeat` runs at least once, so after the loop the variable has the state the body left it in.
-- Joining equal types keeps the type, and joining different types gives their union. Joining with
-  `Unknown` keeps the other side, so that a recursive definition, which starts from `Unknown`, can
-  still reach a precise type.
+- Joining equal types keeps the type, and joining different types gives their union.
+- After an `if`, a variable that one path left `Unknown` is `Unknown`, because the value may be
+  anything. So after `if (in_memory) db <- cache else db <- list.files(dir)`, where `cache` is
+  untyped, `db[[id]]$hashes` is not checked.
+- Around a loop's back edge, joining with `Unknown` keeps the other side, so a pass that recovered
+  from an error with `Unknown` does not erase the type the error was reported against.
 
 So `f <- function(flag) { x <- 1L; if (flag) x <- "two"; x + 1L }` is a type error, because `x`
 reads as `integer | character`, and `+` rejects the `character` member.

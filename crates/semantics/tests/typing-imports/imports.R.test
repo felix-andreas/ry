@@ -15,7 +15,7 @@ f: <T> fn(x: T) -> Unknown
 #namespace importFrom(rlang, "%||%")
 f <- function(a, b) a %||% b
 #++++
-f: <T, U> fn(a: T, b: U) -> Unknown
+f: <T, U> fn(a: T, [b]: U) -> Unknown
 
 #---- whole_import_without_stubs_tolerates_any_read
 #namespace import(jsonlite)

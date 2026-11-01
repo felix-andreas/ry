@@ -148,7 +148,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 233 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 173 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -185,11 +185,15 @@ classes, largest first:
   the `NULL` there constrains the parameter's variable to numeric, and the rendered scheme
   `fn([b]: U)` then no longer admits its `NULL` default, which fails the annotation round trip.
   A fix needs the scheme to keep `U | NULL` for a numeric-constrained defaulted parameter.
-- **Stubs cannot select an overload by a literal argument value.** `sort(x, index.return = TRUE)`
-  returns `list{x, ix}`, so `sorted$ix` reports `$` on an atomic vector (rmgarch, mgcv: 5 corpus
-  reports). An overload that merely requires `index.return` also matches `index.return = FALSE`,
-  which returns a vector, so it was dropped. Literal `TRUE`/`FALSE` parameter types in stubs
-  would express it.
+- **A parameter used as a condition is pinned to `logical`.** `if (!line.id)` or `if (pagesize)`
+  infers `logical`, so a caller passing `0L` or a double is reported (diffobj `trim_hunk`, ff
+  `getalignedpagesize`, rmgarch, renv: about 12 corpus reports), though R coerces numbers in a
+  condition. Binding the condition's open variable to a logical-or-numeric bound instead of
+  `logical` needs a new constraint and changes many rendered signatures.
+- **A computed-key write into a record leaves the record unchanged** (highs `globals[[key]] <<-
+  value` on `list(threads = NA_integer_)`), so a later computed read claims only the declared
+  fields' types. Combined with a `missing(key)` path that returns the whole record, the result is
+  `list{threads: integer} | integer | T` and arithmetic on it is reported (4 corpus reports).
 - **A `NULL` placeholder that a reflective write replaces is reported** (renv `cond <- NULL` then
   `do.call(delayedAssign, list("cond", ...))`, brew's package-level `.extendedError = NULL` set by
   `assign()` into the namespace). The checker does not see `assign()` or `delayedAssign()` as a
