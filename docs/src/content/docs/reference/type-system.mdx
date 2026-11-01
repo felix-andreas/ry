@@ -2022,10 +2022,9 @@ upper_names <- function(x) {
   tuple, a tag or a frame) is skipped. The lookup tries the enclosing frames' slots of the same name,
   then the package's top-level binding, then the library. A top-level `l10n_info <- NULL` therefore
   leaves `l10n_info()` calling base's function.
-- A binding typed as a function, `Unknown`, `Any`, a type parameter or a nominal type is used, as
-  before.
-- A binding with no type information yet, such as an unannotated parameter nothing has constrained,
-  may hold anything. When an outer binding of the same name is a function, the call could reach
+- A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
+- A binding with no type information yet, such as an unannotated parameter nothing has constrained
+  or a parameter annotated with a type parameter `T`, may hold anything. When an outer binding of the same name is a function, the call could reach
   either one, so it types as `Unknown` and constrains neither: `function(x, names) names(x)` does not
   make `names` a function parameter. With no function of that name further out, the call checks
   against the binding as usual, so `function(x, callback) callback(x)` still infers `callback` as a
@@ -2093,6 +2092,13 @@ the whole package. Without them, analysis behaves as though both were empty.
 - A `pkg::name` read of a namespace the stubs do not know does not warn when `pkg` belongs to the
   package's *declared universe*: a `DESCRIPTION` dependency field (`Depends`, `Imports`, `Suggests`,
   or `Enhances`), or the source namespace of any `NAMESPACE` import. Such a read types as `Unknown`.
+- `useDynLib(lib, ...)` binds native symbols, which read as `Unknown`. Each listed symbol binds its
+  name with the `.fixes` prefix in front, so `useDynLib(lib, hash, .fixes = "c_")` binds `c_hash`.
+  With `.registration = TRUE`, R binds every routine the compiled code registers, and those names
+  are known only to the compiled code, so two reads resolve: any name that starts with a non-empty
+  `.fixes` prefix, such as `C_endpoints` under `.fixes = "C_"`, and any bare name that is the routine
+  argument (the first positional one, or `.NAME`) of `.Call`, `.External`, `.External2`, `.C`, or
+  `.Fortran`.
 
 ### Standard-library exports
 

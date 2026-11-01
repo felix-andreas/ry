@@ -5,7 +5,7 @@ use semantics::annotations::lower_annotation;
 use semantics::diagnostics::{Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics};
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
-    parse_description_package, parse_namespace_imports,
+    parse_description_package, parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems};
 use semantics::testing::with_fixture_project;
@@ -79,6 +79,7 @@ fn render_with_metadata(source: &str) -> String {
         parse_description_dependencies(&description_source),
         Default::default(),
         parse_description_package(&description_source),
+        parse_native_symbols(&namespace_source),
     );
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);

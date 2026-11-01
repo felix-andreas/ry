@@ -11,7 +11,9 @@ use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::lints::LintConfig;
-use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
+use crate::metadata::{
+    declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
+};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
@@ -567,6 +569,9 @@ fn classify_non_local_read(
         return NonLocalRead::Resolvable;
     }
     if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+        return NonLocalRead::Resolvable;
+    }
+    if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
         return NonLocalRead::Resolvable;
     }
     let files = ProjectFiles::try_get(db);

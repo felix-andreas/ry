@@ -327,3 +327,38 @@ f <- function(df) mutate(df, x = 1)
 #++++
 f: <T> fn(df: T) -> Unknown
 18..24 warning[unresolved] I could not resolve `mutate` in this package, its imports, or builtins.
+
+#==== native_symbols
+#---- registered_routines_with_a_prefix_resolve
+#namespace useDynLib(xts, .registration = TRUE, .fixes = "C_")
+endpoints <- function(x, k) .Call(C_endpoints, x, k)
+routine <- function() C_lag
+#++++
+endpoints: <T, U> fn(x: T, k: U) -> Unknown
+routine: fn() -> Unknown
+
+#---- registered_routines_without_a_prefix_resolve_as_routines
+#namespace useDynLib(cachem, .registration = TRUE)
+size <- function(x) .Call(C_size, x)
+other <- function() C_size
+#++++
+size: <T> fn(x: T) -> Unknown
+other: fn() -> Unknown
+108..114 warning[unresolved] I could not resolve `C_size` in this package, its imports, or builtins.
+
+#---- listed_symbols_resolve_with_their_prefix
+#namespace useDynLib(memo, hash, alias = digest_impl, .fixes = "c_")
+h <- function(x) .Call(c_hash, x)
+a <- function(x) .Call(c_alias, x)
+plain <- function(x) .Call(hash, x)
+#++++
+h: <T> fn(x: T) -> Unknown
+a: <T> fn(x: T) -> Unknown
+plain: <T> fn(x: T) -> Unknown
+165..169 warning[unresolved] I could not resolve `hash` in this package, its imports, or builtins.
+
+#---- without_use_dyn_lib_a_routine_is_unresolved
+f <- function(x) .Call(C_endpoints, x)
+#++++
+f: <T> fn(x: T) -> Unknown
+23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins.

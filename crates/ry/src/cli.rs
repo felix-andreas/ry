@@ -13,7 +13,7 @@ use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
     parse_description_dependencies, parse_description_package, parse_namespace_exports,
-    parse_namespace_imports,
+    parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -286,6 +286,10 @@ pub(crate) fn analyze_project(
         description_source
             .as_deref()
             .and_then(parse_description_package),
+        namespace_source
+            .as_deref()
+            .map(parse_native_symbols)
+            .unwrap_or_default(),
     );
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
