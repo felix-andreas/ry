@@ -215,10 +215,13 @@ net_price(100, "0.2")`,
     },
     {
         key: "step-inline",
-        caption: "Use what ry adds, and run it on ry",
+        caption: "Use what ry adds, no longer runs on GNU R",
         label: "3. Switch to inline types",
         file: "R/pricing.R",
-        code: `net_price <- function(price: double, rate: double) {
+        code: `net_price <- function(
+  price: double,
+  rate: double
+) {
   price * (1 - rate)
 }
 
@@ -3549,8 +3552,8 @@ ry check .</code></pre>
                 position: relative;
                 display: grid;
                 grid-template-rows: 1fr;
-                /* Tall enough for the completion popup under line 6, and no taller. */
-                min-height: 244px;
+                /* Tall enough for the completion popup under line 6, and level with the other toolchain tabs. */
+                min-height: 249px;
             }
             .ide-body [data-for] {
                 display: none;
@@ -4053,7 +4056,7 @@ ry check .</code></pre>
                     --code-size: 12px;
                 }
                 .ide-body {
-                    min-height: 236px;
+                    min-height: 240px;
                 }
             }
             @media (max-width: 640px) {
@@ -4073,7 +4076,7 @@ ry check .</code></pre>
                     left: 14px;
                 }
                 .ide-body {
-                    min-height: 222px;
+                    min-height: 214px;
                 }
                 .stage-head,
                 .stage-foot {
