@@ -9,10 +9,10 @@ use table::{
     ffi,
     polars::prelude::{IntoColumn, PlSmallStr},
     query::{
-        Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, ResultType, Roll, Rows, Select,
-        SortKey, UnaryOp,
+        Aggregate, BinaryOp, Comparison, Executed, Expr, Join, Mult, On, Output, Query, ResultType,
+        Roll, Rows, Select, SortKey, UnaryOp,
         build::{aggregate, binary, column},
-        execute, plan, result_type,
+        execute, execute_with_plans_only, plan, result_type,
     },
 };
 
@@ -74,7 +74,9 @@ fn read(table: &mut Table, name: &str) -> Read {
 }
 
 fn run(table: &mut Table, query: Query) -> Output {
-    execute(table, query).unwrap_or_else(|error| panic!("query failed: {error}"))
+    execute(table, query)
+        .unwrap_or_else(|error| panic!("query failed: {error}"))
+        .output
 }
 
 fn run_table(table: &mut Table, query: Query) -> Table {
@@ -598,13 +600,11 @@ fn join_i() -> Table {
 fn join(i: &mut Table, on: &[(&str, &str)], drop_unmatched: bool, roll: Roll) -> Rows {
     Rows::Join(Join {
         other: i.clone(),
-        on: on
-            .iter()
-            .map(|(x, i)| (PlSmallStr::from(*x), PlSmallStr::from(*i)))
-            .collect(),
+        on: on.iter().map(|(x, i)| On::equal(*x, *i)).collect(),
         drop_unmatched,
         roll,
         mult: Mult::All,
+        each_i: false,
     })
 }
 
@@ -1265,7 +1265,6 @@ fn an_integer_sum_that_overflows_becomes_double() {
 /// never overflows, and only the groups that really overflow make the result a double.
 #[test]
 fn an_na_group_sum_neither_overflows_nor_loses_its_na() {
-    use table::query::execute_with_plans_only;
     let plus_one = || Query {
         select: Select::Columns(vec![named(
             "s",
@@ -1294,7 +1293,9 @@ fn an_na_group_sum_neither_overflows_nor_loses_its_na() {
         let x = frame(vec![("g", ints(&g)), ("v", ints(&v))]);
         let mut kernel = run_table(&mut x.fork(), plus_one());
         assert_eq!(read(&mut kernel, "s"), expected.clone(), "kernel");
-        let mut planned = match execute_with_plans_only(&mut x.fork(), plus_one()) {
+        let mut planned = match execute_with_plans_only(&mut x.fork(), plus_one())
+            .map(|executed| executed.output)
+        {
             Ok(Output::Table(result)) => result,
             other => panic!("expected a table, got {other:?}"),
         };
@@ -1708,12 +1709,15 @@ fn random_row_wise(rng: &mut SplitMix64, depth: usize) -> Expr {
 /// Two results agree when they have the same columns and values, doubles up to rounding, since
 /// the kernels may add a group's values in a different order.
 fn assert_same_output(
-    kernel: Result<Output, table::Error>,
-    plan: Result<Output, table::Error>,
+    kernel: Result<Executed, table::Error>,
+    plan: Result<Executed, table::Error>,
     what: &str,
 ) {
     let (kernel, plan) = match (kernel, plan) {
-        (Ok(kernel), Ok(plan)) => (kernel, plan),
+        (Ok(kernel), Ok(plan)) => {
+            assert_eq!(kernel.warnings, plan.warnings, "{what}: warnings");
+            (kernel.output, plan.output)
+        }
         (Err(_), Err(_)) => return,
         (kernel, plan) => panic!("{what}: one path failed: kernel {kernel:?}, plan {plan:?}"),
     };
@@ -1760,7 +1764,6 @@ fn assert_same_vector(kernel: RVector, plan: RVector, what: &str) {
 /// updates, at sizes that exercise the serial, parallel, dense and hashed paths.
 #[test]
 fn fuzz_kernels_agree_with_the_polars_plans() {
-    use table::query::execute_with_plans_only;
     let mut rng = SplitMix64(0x6e4e1);
     for iteration in 0..fuzz_iterations(60) {
         let rows = if iteration % 10 == 9 {
@@ -1855,11 +1858,11 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
         let mut on = Vec::new();
         for key in ["g1", "g2", "g3"] {
             if rng.chance(1, 2) {
-                on.push((PlSmallStr::from(key), PlSmallStr::from(key)));
+                on.push(On::equal(key, key));
             }
         }
         if on.is_empty() {
-            on.push(("g2".into(), "g2".into()));
+            on.push(On::equal("g2", "g2"));
         }
         let (subject, other) = if rng.chance(1, 4) {
             (other, table.fork())
@@ -1873,6 +1876,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
                 drop_unmatched: rng.chance(1, 2),
                 roll: Roll::None,
                 mult: [Mult::All, Mult::First, Mult::Last][rng.below(3)],
+                each_i: false,
             }),
             ..Query::default()
         };
@@ -1887,7 +1891,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
         let rolled = Query {
             rows: Rows::Join(Join {
                 other: trades,
-                on: vec![("g".into(), "g".into()), ("t".into(), "t".into())],
+                on: vec![On::equal("g", "g"), On::equal("t", "t")],
                 drop_unmatched: rng.chance(1, 3),
                 roll: match rng.below(4) {
                     0 => Roll::Forward(None),
@@ -1896,6 +1900,7 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
                     _ => Roll::Backward(None),
                 },
                 mult: Mult::All,
+                each_i: false,
             }),
             ..Query::default()
         };
@@ -1930,7 +1935,6 @@ fn fuzz_kernels_agree_with_the_polars_plans() {
 
 #[test]
 fn mult_keeps_the_first_or_last_match_as_data_table_does() {
-    use table::query::execute_with_plans_only;
     let x = frame(vec![
         ("k", ints(&[1, 1, 2, 1])),
         ("v", ints(&[10, 20, 30, 40])),
@@ -1948,18 +1952,20 @@ fn mult_keeps_the_first_or_last_match_as_data_table_does() {
         let query = || Query {
             rows: Rows::Join(Join {
                 other: i.clone(),
-                on: vec![(PlSmallStr::from("k"), PlSmallStr::from("k"))],
+                on: vec![On::equal("k", "k")],
                 drop_unmatched,
                 roll: Roll::None,
                 mult,
+                each_i: false,
             }),
             ..Query::default()
         };
         let kernel = run_table(&mut x.fork(), query());
-        let planned = match execute_with_plans_only(&mut x.fork(), query()) {
-            Ok(Output::Table(result)) => result,
-            other => panic!("expected a table, got {other:?}"),
-        };
+        let planned =
+            match execute_with_plans_only(&mut x.fork(), query()).map(|executed| executed.output) {
+                Ok(Output::Table(result)) => result,
+                other => panic!("expected a table, got {other:?}"),
+            };
         for mut result in [kernel, planned] {
             assert_eq!(names(&result), ["k", "v", "w"]);
             assert_eq!(read(&mut result, "k"), ints(&keys), "{mult:?}");
@@ -1972,7 +1978,6 @@ fn mult_keeps_the_first_or_last_match_as_data_table_does() {
 /// kernels to split their rows across threads; the Polars plan is the reference.
 #[test]
 fn large_grouped_medians_and_moments_match_the_plan() {
-    use table::query::execute_with_plans_only;
     let mut rng = SplitMix64(7);
     let rows = 300_000;
     let groups: Vec<i32> = (0..rows).map(|_| rng.below(500) as i32).collect();
@@ -2016,10 +2021,11 @@ fn large_grouped_medians_and_moments_match_the_plan() {
         ..Query::default()
     };
     let mut kernel = run_table(&mut table.fork(), query());
-    let mut planned = match execute_with_plans_only(&mut table.fork(), query()) {
-        Ok(Output::Table(result)) => result,
-        other => panic!("expected a table, got {other:?}"),
-    };
+    let mut planned =
+        match execute_with_plans_only(&mut table.fork(), query()).map(|executed| executed.output) {
+            Ok(Output::Table(result)) => result,
+            other => panic!("expected a table, got {other:?}"),
+        };
     assert_eq!(read(&mut kernel, "g"), get(&mut planned, "g"));
     for name in ["md", "md_na"] {
         assert_eq!(read(&mut kernel, name), get(&mut planned, name), "{name}");
@@ -2124,7 +2130,6 @@ fn a_new_column_comparing_an_overflowing_sum_stays_logical() {
 /// rows, so `sum(v) + 1L` is a double when a total overflows, as after the join kernel.
 #[test]
 fn a_nested_sum_after_a_planned_join_widens_on_overflow() {
-    use table::query::execute_with_plans_only;
     let x = frame(vec![
         ("k", doubles(&[1.0, 1.0, 2.0])),
         ("v", ints(&[2_000_000_000, 2_000_000_000, 1])),
@@ -2133,10 +2138,11 @@ fn a_nested_sum_after_a_planned_join_widens_on_overflow() {
     let query = || Query {
         rows: Rows::Join(Join {
             other: i.clone(),
-            on: vec![(PlSmallStr::from("k"), PlSmallStr::from("k"))],
+            on: vec![On::equal("k", "k")],
             drop_unmatched: false,
             roll: Roll::None,
             mult: Mult::All,
+            each_i: false,
         }),
         select: Select::Columns(vec![named(
             "s",
@@ -2150,11 +2156,588 @@ fn a_nested_sum_after_a_planned_join_widens_on_overflow() {
         ..Query::default()
     };
     let kernel = run_table(&mut x.fork(), query());
-    let planned = match execute_with_plans_only(&mut x.fork(), query()) {
-        Ok(Output::Table(result)) => result,
-        other => panic!("expected a table, got {other:?}"),
-    };
+    let planned =
+        match execute_with_plans_only(&mut x.fork(), query()).map(|executed| executed.output) {
+            Ok(Output::Table(result)) => result,
+            other => panic!("expected a table, got {other:?}"),
+        };
     for mut result in [kernel, planned] {
         assert_eq!(read(&mut result, "s"), doubles(&[4_000_000_001.0, 2.0]));
     }
+}
+
+fn non_equi_x() -> Table {
+    frame(vec![
+        ("id", ints(&[1, 1, 2, NA_INTEGER, 1])),
+        ("t", doubles(&[5.0, NA_REAL, 3.0, 4.0, f64::NAN])),
+        ("v", ints(&[1, 2, 3, 4, 5])),
+    ])
+}
+
+fn non_equi_i() -> Table {
+    frame(vec![
+        ("id", ints(&[1, NA_INTEGER, 2, 1])),
+        ("lo", doubles(&[1.0, 1.0, NA_REAL, f64::NAN])),
+        ("hi", doubles(&[10.0, 10.0, 10.0, 10.0])),
+    ])
+}
+
+fn on(conditions: &[(&str, Comparison, &str)]) -> Vec<On> {
+    conditions
+        .iter()
+        .map(|(x, op, i)| On::new(*x, *op, *i))
+        .collect()
+}
+
+fn non_equi(i: &Table, conditions: &[(&str, Comparison, &str)], mult: Mult) -> Join {
+    Join {
+        mult,
+        ..Join::new(i.clone(), on(conditions))
+    }
+}
+
+/// Runs a query through the kernels and through the plans, checks that both agree, and gives the
+/// kernels' table.
+fn run_both(table: &mut Table, query: Query) -> Table {
+    let what = format!("{query:?}");
+    assert_same_output(
+        execute(&mut table.fork(), query.clone()),
+        execute_with_plans_only(&mut table.fork(), query.clone()),
+        &what,
+    );
+    run_table(table, query)
+}
+
+#[test]
+fn a_non_equi_join_follows_data_tables_layout_and_missing_values() {
+    use Comparison::{GreaterEqual, Less};
+    let (mut x, i) = (non_equi_x(), non_equi_i());
+    let join = non_equi(
+        &i,
+        &[
+            ("id", Comparison::Equal, "id"),
+            ("t", GreaterEqual, "lo"),
+            ("t", Less, "hi"),
+        ],
+        Mult::All,
+    );
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: Rows::Join(join),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["id", "t", "v", "t.1"]);
+    assert_eq!(read(&mut result, "id"), ints(&[1, NA_INTEGER, 2, 1]));
+    assert_eq!(
+        read(&mut result, "t"),
+        doubles(&[1.0, 1.0, NA_REAL, f64::NAN])
+    );
+    assert_eq!(
+        read(&mut result, "v"),
+        ints(&[1, 4, NA_INTEGER, NA_INTEGER])
+    );
+    assert_eq!(read(&mut result, "t.1"), doubles(&[10.0; 4]));
+
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: Rows::Join(non_equi(&i, &[("t", Comparison::Greater, "lo")], Mult::All)),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["id", "t", "v", "i.id", "hi"]);
+    assert_eq!(
+        read(&mut result, "v"),
+        ints(&[1, 3, 4, 1, 3, 4, NA_INTEGER, NA_INTEGER])
+    );
+    assert_eq!(
+        read(&mut result, "i.id"),
+        ints(&[1, 1, 1, NA_INTEGER, NA_INTEGER, NA_INTEGER, 2, 1])
+    );
+    assert_eq!(
+        read(&mut result, "id"),
+        ints(&[1, 2, NA_INTEGER, 1, 2, NA_INTEGER, NA_INTEGER, NA_INTEGER])
+    );
+
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: Rows::Join(non_equi(
+                &i,
+                &[("id", Comparison::Equal, "id"), ("t", GreaterEqual, "lo")],
+                Mult::Last,
+            )),
+            ..Query::default()
+        },
+    );
+    assert_eq!(read(&mut result, "v"), ints(&[1, 4, NA_INTEGER, 5]));
+}
+
+#[test]
+fn an_ordering_condition_matches_a_missing_value_only_inclusively() {
+    let mut x = frame(vec![
+        (
+            "t",
+            doubles(&[NA_REAL, f64::NAN, 1.0, f64::NEG_INFINITY, f64::INFINITY]),
+        ),
+        ("v", ints(&[1, 2, 3, 4, 5])),
+    ]);
+    let i = frame(vec![
+        (
+            "lo",
+            doubles(&[NA_REAL, f64::NAN, 1.0, f64::NEG_INFINITY, f64::INFINITY]),
+        ),
+        ("k", ints(&[1, 2, 3, 4, 5])),
+    ]);
+    let n = NA_INTEGER;
+    let cases = [
+        (
+            Comparison::GreaterEqual,
+            vec![1, 2, 3, 3, 4, 4, 4, 5],
+            vec![1, 2, 3, 5, 3, 4, 5, 5],
+        ),
+        (
+            Comparison::Greater,
+            vec![1, 2, 3, 4, 4, 5],
+            vec![n, n, 5, 3, 5, n],
+        ),
+        (
+            Comparison::LessEqual,
+            vec![1, 2, 3, 3, 4, 5, 5, 5],
+            vec![1, 2, 3, 4, 4, 3, 4, 5],
+        ),
+        (
+            Comparison::Less,
+            vec![1, 2, 3, 4, 5, 5],
+            vec![n, n, 4, n, 3, 4],
+        ),
+    ];
+    for (op, keys, values) in cases {
+        let mut result = run_both(
+            &mut x,
+            Query {
+                rows: Rows::Join(non_equi(&i, &[("t", op, "lo")], Mult::All)),
+                ..Query::default()
+            },
+        );
+        assert_eq!(read(&mut result, "k"), ints(&keys), "{op:?}");
+        assert_eq!(read(&mut result, "v"), ints(&values), "{op:?}");
+    }
+}
+
+#[test]
+fn a_non_equi_join_compares_numbers_only() {
+    let mut x = frame(vec![("s", strings(&["b", "a"])), ("t", ints(&[1, 2]))]);
+    let i = frame(vec![("lo", strings(&["a"])), ("n", ints(&[0]))]);
+    let error = execute(
+        &mut x,
+        Query {
+            rows: Rows::Join(non_equi(&i, &[("s", Comparison::Greater, "lo")], Mult::All)),
+            ..Query::default()
+        },
+    )
+    .err()
+    .map(|error| error.to_string());
+    assert_eq!(
+        error.as_deref(),
+        Some("invalid query: the join condition `s > lo` compares numbers, but `s` is character[]")
+    );
+    let rolled = Join {
+        roll: Roll::Backward(None),
+        ..non_equi(&i, &[("t", Comparison::Greater, "n")], Mult::All)
+    };
+    let error = execute(
+        &mut x,
+        Query {
+            rows: Rows::Join(rolled),
+            ..Query::default()
+        },
+    )
+    .err()
+    .map(|error| error.to_string());
+    assert_eq!(
+        error.as_deref(),
+        Some("invalid query: a rolling join needs every join condition to be `==`")
+    );
+}
+
+fn each_i(join: Join) -> Rows {
+    Rows::Join(Join {
+        each_i: true,
+        ..join
+    })
+}
+
+#[test]
+fn each_i_runs_j_once_per_row_of_i() {
+    use Comparison::{Equal, GreaterEqual, LessEqual};
+    let (mut x, i) = (non_equi_x(), non_equi_i());
+    let count_and_sum = || {
+        Select::Columns(vec![
+            named("n", Expr::Count),
+            named("s", aggregate(Aggregate::Sum, column("v"))),
+        ])
+    };
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(
+                &i,
+                &[("id", Equal, "id"), ("t", GreaterEqual, "lo")],
+                Mult::All,
+            )),
+            select: count_and_sum(),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["id", "t", "n", "s"]);
+    assert_eq!(read(&mut result, "id"), ints(&[1, NA_INTEGER, 2, 1]));
+    assert_eq!(
+        read(&mut result, "t"),
+        doubles(&[1.0, 1.0, NA_REAL, f64::NAN])
+    );
+    assert_eq!(read(&mut result, "n"), ints(&[1, 1, 0, 1]));
+    assert_eq!(read(&mut result, "s"), ints(&[1, 4, NA_INTEGER, 5]));
+
+    let mut select = match count_and_sum() {
+        Select::Columns(columns) => columns,
+        _ => Vec::new(),
+    };
+    select.push(named("i.id", column("i.id")));
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(&i, &[("t", GreaterEqual, "lo")], Mult::All)),
+            select: Select::Columns(select),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["t", "n", "s", "i.id"]);
+    assert_eq!(read(&mut result, "n"), ints(&[3, 3, 1, 1]));
+    assert_eq!(read(&mut result, "s"), ints(&[8, 8, 2, 5]));
+    assert_eq!(read(&mut result, "i.id"), ints(&[1, NA_INTEGER, 2, 1]));
+
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(non_equi(
+                &i,
+                &[("t", LessEqual, "hi"), ("t", GreaterEqual, "lo")],
+                Mult::All,
+            )),
+            select: Select::Columns(vec![named("n", Expr::Count)]),
+            ..Query::default()
+        },
+    );
+    // data.table names both join columns `t`; a frame's names are unique, so the second is `t.1`,
+    // as in the join's own layout.
+    assert_eq!(names(&result), ["t", "t.1", "n"]);
+    assert_eq!(read(&mut result, "t"), doubles(&[10.0; 4]));
+    assert_eq!(
+        read(&mut result, "t.1"),
+        doubles(&[1.0, 1.0, NA_REAL, f64::NAN])
+    );
+    assert_eq!(read(&mut result, "n"), ints(&[3, 3, 0, 0]));
+}
+
+#[test]
+fn each_i_on_an_equi_join_keeps_duplicate_rows_of_i_apart() {
+    let (mut x, i) = (non_equi_x(), non_equi_i());
+    let equal = || non_equi(&i, &[("id", Comparison::Equal, "id")], Mult::All);
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(equal()),
+            select: Select::Value(aggregate(Aggregate::Sum, column("v"))),
+            ..Query::default()
+        },
+    );
+    assert_eq!(names(&result), ["id", "V1"]);
+    assert_eq!(read(&mut result, "id"), ints(&[1, NA_INTEGER, 2, 1]));
+    assert_eq!(read(&mut result, "V1"), ints(&[8, 4, 3, 8]));
+
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(equal()),
+            select: Select::Columns(vec![named("v", column("v"))]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(
+        read(&mut result, "id"),
+        ints(&[1, 1, 1, NA_INTEGER, 2, 1, 1, 1])
+    );
+    assert_eq!(read(&mut result, "v"), ints(&[1, 2, 5, 4, 3, 1, 2, 5]));
+
+    let dropped = Join {
+        drop_unmatched: true,
+        ..non_equi(&i, &[("t", Comparison::Greater, "lo")], Mult::All)
+    };
+    let mut result = run_both(
+        &mut x,
+        Query {
+            rows: each_i(dropped),
+            select: Select::Columns(vec![named("n", Expr::Count)]),
+            ..Query::default()
+        },
+    );
+    assert_eq!(read(&mut result, "n"), ints(&[3, 3]));
+}
+
+#[test]
+fn each_i_widens_an_overflowing_sum() {
+    let mut x = frame(vec![
+        ("t", ints(&[1, 5, 3])),
+        ("v", ints(&[i32::MAX, 1, 5])),
+    ]);
+    let i = frame(vec![("lo", ints(&[0]))]);
+    let query = Query {
+        rows: each_i(non_equi(
+            &i,
+            &[("t", Comparison::GreaterEqual, "lo")],
+            Mult::All,
+        )),
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        ..Query::default()
+    };
+    assert_eq!(
+        result_type(&x.schema(), &[], &query).ok(),
+        Some(ResultType::Table(Schema::new([
+            ("t", ColumnType::Integer),
+            ("s", ColumnType::Integer),
+        ])))
+    );
+    let mut result = run_both(&mut x, query);
+    assert_eq!(read(&mut result, "t"), ints(&[0]));
+    assert_eq!(read(&mut result, "s"), doubles(&[2_147_483_653.0]));
+}
+
+#[test]
+fn non_equi_joins_match_the_plan_on_random_tables() {
+    let mut rng = SplitMix64(0x006e_6f6e_6571_7569);
+    let value = |rng: &mut SplitMix64| match rng.below(12) {
+        0 => NA_REAL,
+        1 => f64::NAN,
+        _ => rng.below(9) as f64 - 2.0,
+    };
+    let int_value = |rng: &mut SplitMix64| {
+        if rng.chance(1, 10) {
+            NA_INTEGER
+        } else {
+            rng.below(5) as i32
+        }
+    };
+    for iteration in 0..fuzz_iterations(200) {
+        let (x_rows, i_rows) = (rng.below(40), 1 + rng.below(12));
+        let x = frame(vec![
+            (
+                "g",
+                ints(&(0..x_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>()),
+            ),
+            (
+                "a",
+                doubles(&(0..x_rows).map(|_| value(&mut rng)).collect::<Vec<_>>()),
+            ),
+            (
+                "b",
+                ints(&(0..x_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>()),
+            ),
+            ("v", ints(&(0..x_rows as i32).collect::<Vec<_>>())),
+        ]);
+        let i = frame(vec![
+            (
+                "g",
+                ints(&(0..i_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>()),
+            ),
+            (
+                "lo",
+                doubles(&(0..i_rows).map(|_| value(&mut rng)).collect::<Vec<_>>()),
+            ),
+            (
+                "hi",
+                ints(&(0..i_rows).map(|_| int_value(&mut rng)).collect::<Vec<_>>()),
+            ),
+            ("k", ints(&(0..i_rows as i32).collect::<Vec<_>>())),
+        ]);
+        let ops = [
+            Comparison::Less,
+            Comparison::LessEqual,
+            Comparison::Greater,
+            Comparison::GreaterEqual,
+        ];
+        let mut conditions = Vec::new();
+        if rng.chance(1, 2) {
+            conditions.push(On::equal("g", "g"));
+        }
+        let x_columns = ["a", "b"];
+        let i_columns = ["lo", "hi"];
+        for _ in 0..1 + rng.below(3) {
+            conditions.push(On::new(
+                x_columns[rng.below(2)],
+                ops[rng.below(4)],
+                i_columns[rng.below(2)],
+            ));
+        }
+        let join = Join {
+            drop_unmatched: rng.chance(1, 3),
+            mult: [Mult::All, Mult::First, Mult::Last][rng.below(3)],
+            ..Join::new(i, conditions)
+        };
+        let joined = Query {
+            rows: Rows::Join(join.clone()),
+            ..Query::default()
+        };
+        let what = format!("iteration {iteration}: {joined:?}");
+        assert_same_output(
+            execute(&mut x.fork(), joined.clone()),
+            execute_with_plans_only(&mut x.fork(), joined),
+            &what,
+        );
+        let grouped = Query {
+            rows: each_i(join),
+            select: Select::Columns(vec![
+                named("n", Expr::Count),
+                named("s", aggregate(Aggregate::Sum, column("v"))),
+                named("k", column("k")),
+            ]),
+            ..Query::default()
+        };
+        let what = format!("iteration {iteration}: {grouped:?}");
+        assert_same_output(
+            execute(&mut x.fork(), grouped.clone()),
+            execute_with_plans_only(&mut x.fork(), grouped),
+            &what,
+        );
+    }
+}
+
+/// The warnings `query` raises, after checking that the kernels and the plans raise the same ones.
+fn warnings(table: &Table, query: Query) -> Vec<String> {
+    let what = format!("{query:?}");
+    assert_same_output(
+        execute(&mut table.fork(), query.clone()),
+        execute_with_plans_only(&mut table.fork(), query.clone()),
+        &what,
+    );
+    execute(&mut table.fork(), query)
+        .unwrap_or_else(|error| panic!("query failed: {error}"))
+        .warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[test]
+fn a_grouped_sum_that_overflows_warns_once_per_column() {
+    let x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[i32::MAX, 1, 5])),
+        ("w", ints(&[i32::MAX, 2, 1])),
+    ]);
+    let sums = || {
+        vec![
+            named("v", aggregate(Aggregate::Sum, column("v"))),
+            named("w", aggregate(Aggregate::Sum, column("w"))),
+        ]
+    };
+    let expected = [
+        "a group's sum in `v` is too large for an integer, so `v` holds doubles",
+        "a group's sum in `w` is too large for an integer, so `w` holds doubles",
+    ];
+    for keyby in [false, true] {
+        let query = Query {
+            select: Select::Columns(sums()),
+            by: vec![named("g", column("g"))],
+            keyed: keyby,
+            ..Query::default()
+        };
+        assert_eq!(warnings(&x, query), expected, "keyby {keyby}");
+    }
+    let assigned = Query {
+        select: Select::Assign(vec![set("s", aggregate(Aggregate::Sum, column("v")))]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    assert_eq!(
+        warnings(&x, assigned),
+        ["a group's sum in `s` is too large for an integer, so `s` holds doubles"]
+    );
+}
+
+#[test]
+fn a_sum_warns_only_as_a_plain_grouped_column() {
+    let x = frame(vec![
+        ("g", ints(&[1, 1, 2])),
+        ("v", ints(&[i32::MAX, 1, 5])),
+    ]);
+    let ungrouped = Query {
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        ..Query::default()
+    };
+    assert_eq!(warnings(&x, ungrouped), Vec::<String>::new());
+    let nested = Query {
+        select: Select::Columns(vec![named(
+            "s",
+            binary(
+                BinaryOp::Subtract,
+                aggregate(Aggregate::Sum, column("v")),
+                Expr::Integer(1),
+            ),
+        )]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    assert_eq!(warnings(&x, nested), Vec::<String>::new());
+    let fits = Query {
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("g")))]),
+        by: vec![named("g", column("g"))],
+        ..Query::default()
+    };
+    assert_eq!(warnings(&x, fits), Vec::<String>::new());
+    let i = frame(vec![("lo", ints(&[0]))]);
+    let each = Query {
+        rows: each_i(non_equi(
+            &i,
+            &[("g", Comparison::GreaterEqual, "lo")],
+            Mult::All,
+        )),
+        select: Select::Columns(vec![named("s", aggregate(Aggregate::Sum, column("v")))]),
+        ..Query::default()
+    };
+    assert_eq!(warnings(&x, each), Vec::<String>::new());
+}
+
+#[test]
+fn assigning_a_narrower_value_warns_about_the_conversion() {
+    let x = frame(vec![
+        ("w", ints(&[1, 2, 3])),
+        ("b", RVector::Logical(vec![1, 0, 1])),
+    ]);
+    let assign = |name: &str, value: Expr| Query {
+        rows: Rows::Filter(binary(BinaryOp::Greater, column("w"), Expr::Integer(1))),
+        select: Select::Assign(vec![set(name, value)]),
+        ..Query::default()
+    };
+    assert_eq!(
+        warnings(&x, assign("w", Expr::Double(3.5))),
+        ["column `w` holds integers, so the assigned value 3.5 became 3"]
+    );
+    let mut updated = x.fork();
+    run(&mut updated, assign("w", Expr::Double(1e10)));
+    assert_eq!(read(&mut updated, "w"), ints(&[1, NA_INTEGER, NA_INTEGER]));
+    assert_eq!(
+        warnings(&x, assign("w", Expr::Double(1e10))),
+        ["column `w` holds integers, so the assigned value 1e+10 became NA"]
+    );
+    assert_eq!(
+        warnings(&x, assign("w", Expr::Double(4.0))),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        warnings(&x, assign("b", Expr::Integer(5))),
+        ["column `b` holds logicals, so the assigned value 5 became TRUE"]
+    );
 }

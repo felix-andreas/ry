@@ -1779,12 +1779,17 @@ The end-to-end guard rests on the corpus suites.
 
 - **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
   `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
-- **Query features:** `.EACHI` and non-equi joins are not supported.
-- **No warning channel.** data.table warns when a value is truncated into an integer column and when
-  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Query gaps.** `j` cannot read `x.`-prefixed columns in a join. Under `.EACHI`, a column of `i`
+  inside an aggregate is the matched rows' values, where data.table gives the row's one value.
+  A non-equi join's extra condition columns are named `t.1` where data.table repeats `t`.
+- **Warnings:** a `:=` that coerces a string into a number column does not warn, where data.table
+  does; only number narrowing does.
+- **Checker:** a non-equi `on =` and `by = .EACHI` give `Unknown`; the engine's `result_type`
+  already knows both results.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
-- **Naming:** at runtime `frame()` clashes with `graphics::frame`.
+- **Naming:** the interpreter must bind `frame` as the delegating closure `decisions.md` describes
+  ("the built-in frame"), ahead of `package:graphics`.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.

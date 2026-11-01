@@ -2088,6 +2088,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   `c("frame", "data.frame")` use a name base R does not give a meaning to in a type position.
   `graphics::frame()` exists, so the checker treats `frame()` as the built-in only with at least one
   argument and when the project defines no `frame` of its own.
+- **At run time `frame` is one closure that delegates a call without arguments to
+  `graphics::frame`**, and it is bound in an environment attached ahead of `package:graphics` on
+  the search path. `graphics::frame` is `plot.new`, which takes no arguments, so every call that
+  worked before still runs graphics' code, and every call with arguments, which was an error, now
+  builds a frame. R's own lookup then gives the checker's rule for free: a `frame` defined in
+  `.GlobalEnv` or a package namespace is found first, and a package that imports `graphics::frame`
+  keeps it. The rejected options: binding it in base (top-level code finds `package:graphics` before
+  `package:base`, so `frame(a = 1)` would hit `plot.new`), and renaming the type (the name was
+  chosen to stay clear of base's `table`). The cost is that `identical(frame, graphics::frame)` is
+  `FALSE`, which no known code tests. The interpreter wiring that binds it is still open.
 - **`:=` has value semantics in the checker.** `f[, y := e]` rebinds `f` to the extended type, and
   aliases keep the old type. Column sets are exact. At runtime the update is copy-on-write: the
   interpreter passes an unshared `&mut Table` (reference count one) and the update happens in place,
@@ -2179,6 +2189,27 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   stays logical), and hidden probe sums pick the version
   (`assign` in `query.rs`). Where data.table's grouped `:=` takes the column type from the first
   group, the engine makes the column a double if any group overflows.
+- **Non-equi joins and `.EACHI` follow data.table, with one naming exception.** A join condition is
+  an `On { x, op, i }`; an ordering compares numbers only (data.table refuses characters too), and
+  a rolling join must be all `==`. `join_layout` is the single description of the output columns,
+  read by the plan, the kernel and `join_schema`: `x`'s columns with a join column taking `i`'s
+  values from its first condition, then one column per further condition on the same `x` column
+  (`t.1`, `t.2`), then `i`'s unused columns. data.table names those extra columns `t, t`, a
+  duplicate that ry does not reproduce. NA and NaN match only the same missing value, and only
+  under `<=`, `>=` or `==`, as data.table does. The kernel (`non_equi` in `join.rs`) groups the
+  equality conditions, sorts each group's rows of `x` by the first ordering column and narrows
+  every row of `i` by binary search, checking any other condition per candidate. `.EACHI` reruns the
+  query as a join with hidden row numbers and groups by the row of `i`, so `j` sees an unmatched row
+  as one NA row with `.N` zero, and a column of `i` outside an aggregate is that row's value.
+- **Warnings are data in `Executed`, not side effects.** `execute` returns the output with a list
+  of `Warning`s, which the interpreter raises as R warnings after the query succeeds, so a failed
+  query raises none and the kernels and plans can be compared on them. Two exist, raised where
+  data.table raises its own: an integer `sum` that a grouped query (`by` or `keyby`) selects plainly
+  or assigns with `:=` and that overflows (one warning per column, none for an ungrouped, nested or
+  `.EACHI` sum), and a `:=` into an existing column whose type loses part of the value (a double
+  truncated or out of range in an integer column, a number other than 0 or 1 in a logical one).
+  The wording is ry's. A narrowing `:=` skips the kernel, because detecting the loss needs the
+  value before the conversion; it is not a db-benchmark shape.
 
 ## Records, tuples and tags are ry values, not R lists
 
