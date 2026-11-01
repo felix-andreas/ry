@@ -4,13 +4,16 @@
 //! The fuzz helpers live here too, so every crate's harness draws from one
 //! generator and one set of mutation operators.
 
-use rowan::NodeOrToken;
-use std::collections::HashSet;
-use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::{env, fs};
-
-use crate::SyntaxNode;
+use {
+    crate::SyntaxNode,
+    rowan::NodeOrToken,
+    std::{
+        collections::HashSet,
+        env, fs,
+        ops::Range,
+        path::{Path, PathBuf},
+    },
+};
 
 pub fn run_fixture_suite(suite_dir: &Path, render: &dyn Fn(&str) -> String) {
     let files = parse_fixture_files(suite_dir);

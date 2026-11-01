@@ -1,6 +1,4 @@
-use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::{fs, path::Path, process::Command};
 
 /// One finished `ry` invocation, its streams decoded.
 struct Run {

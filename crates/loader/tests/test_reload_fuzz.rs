@@ -4,12 +4,13 @@
 //! stores its text plus the values it read, so a statement that should have rerun shows up as
 //! a stale value. `FUZZ_ITERS` scales the budget.
 
-use loader::{Loader, PackageInputs, Plan};
-use rustc_hash::{FxHashMap, FxHashSet};
-use semantics::load_index::{IndexedItem, PackageIndex, Registration};
-use std::collections::BTreeSet;
-use std::path::Path;
-use syntax::testing::{SplitMix64, fuzz_iterations};
+use {
+    loader::{Loader, PackageInputs, Plan},
+    rustc_hash::{FxHashMap, FxHashSet},
+    semantics::load_index::{IndexedItem, PackageIndex, Registration},
+    std::{collections::BTreeSet, path::Path},
+    syntax::testing::{SplitMix64, fuzz_iterations},
+};
 
 #[test]
 fn a_reload_matches_a_fresh_load() {
@@ -409,10 +410,16 @@ fn changed_roots_reports_each_disk_edit_once() {
     let mut loader = Loader::default();
     loader.plan(root, false).expect("plans");
     std::fs::write(root.join("R/a.R"), "f <- function() 22\n").expect("write");
-    assert!(loader.changed_roots().is_empty(), "an uncommitted plan is not watched");
+    assert!(
+        loader.changed_roots().is_empty(),
+        "an uncommitted plan is not watched"
+    );
     loader.plan(root, false).expect("plans");
     loader.commit(root);
-    assert!(loader.changed_roots().is_empty(), "nothing changed since the load");
+    assert!(
+        loader.changed_roots().is_empty(),
+        "nothing changed since the load"
+    );
     // Each edit changes the size, so it shows even within one timestamp tick.
     let mut rng = SplitMix64(7);
     let mut text = String::from("f <- function() 22\n");
@@ -425,6 +432,9 @@ fn changed_roots_reports_each_disk_edit_once() {
         }
         let changed = loader.changed_roots();
         assert_eq!(changed.len(), usize::from(edited), "step {step}");
-        assert!(loader.changed_roots().is_empty(), "step {step}: reported twice");
+        assert!(
+            loader.changed_roots().is_empty(),
+            "step {step}: reported twice"
+        );
     }
 }

@@ -2951,9 +2951,10 @@ first lines R had already read, leaving R mid-command.
     lint can fire.
   - The duplicate-type map is read once per file. `item_frame_binders` resolves an item's frame
     binders in one query, cached in `SalsaGlobals`.
-  - `Name` and `Ty` are interned with `revisions = usize::MAX`. They are never garbage-collected.
-    That costs nothing in a one-shot check. In the server the tables grow with the distinct types
-    and names ever seen, which repeat heavily because types are structural.
+  - `Name` and `Ty` are never garbage-collected. That costs nothing in a one-shot check. In the
+    server the tables grow with the distinct types and names ever seen, which repeat heavily
+    because types are structural. They later left salsa entirely ("Types and names are
+    hash-consed outside salsa").
   - The CLI creates every input at `Durability::HIGH` except `PackageMetadata.attached`, the one
     input it sets after analysis starts.
 - **Impact.** About 26% less CPU, 30% less wall time and 70 MiB less peak memory on the
@@ -2961,6 +2962,35 @@ first lines R had already read, leaving R mid-command.
   query is per file or per item; the one server-visible difference is that the `Name` and `Ty`
   tables never shrink.
 
+
+## Types and names are hash-consed outside salsa
+
+- **Previous shape.** `Ty` and `Name` were `#[salsa::interned]` structs. Every type construction went
+  through salsa's interner (a shard lock plus an id-to-slot lookup), every `ty.kind(db)` resolved an
+  id back to its slot, and `type_size` was a tracked query keyed by the type.
+- **Weakness.** Types are built and read per expression, so this salsa bookkeeping was the largest
+  constant cost in item checking (`Ty::intern_id` alone was 4% of samples). It bought nothing: types
+  carry no revision-dependent state, and the immortal-interning decision above already gave up
+  collecting them. The `SalsaGlobals` name cache existed only to dodge the interner.
+- **Target shape.** `Ty` is a `&'static` pointer to a leaked `TypeEntry { kind, size }` in a global,
+  64-way sharded `hashbrown` table, with pointer equality and hashing. `Name` wraps a `Symbol`.
+  Both keep the `Ty::new(db, kind)` and `ty.kind(db)` API, so no inference rule changed. The size is
+  computed once at construction. A tracked function keyed by one name takes `QueryName`, a
+  salsa-interned wrapper, because salsa requires a salsa struct as a single key. The name cache is
+  gone.
+- **Impact.** On the benchmark code bases, about 12% less CPU and 15-18% less wall time on the cold
+  check (with the parallel `NAMESPACE` parse and borrowed token scan of the same change), and
+  17-21 MiB less peak memory, with byte-identical findings. Invalidation is unchanged: a type has no
+  inputs, so memos that hold one compare it by pointer exactly as they compared ids. The table is
+  process-global, so two databases in one process share it, which is harmless because entries are
+  immutable and structural.
+- **Why the table is never swept.** The type universe saturates under real editing. `TyKind` has
+  no literal variant, so changing a literal's value builds no new type. In 5,000 `ry server` body
+  edits on the finance benchmark, RSS levels off at about 373 MB whether the edits change
+  literals or add one new record field name each time. Only edits that keep inventing names grow
+  memory, by about 240 B per new name (main's salsa-interned types took about 380 B), which is
+  about 25 MB over 100,000 such edits. Add revision-scoped sweeping only if a workload shows growth
+  past that.
 
 ## The checker presumes R code is correct where R's semantics leave the question open
 
@@ -3089,9 +3119,21 @@ first lines R had already read, leaving R mid-command.
   a leading `|`, and use the fewest annotations that make the point. If a snippet needs a sentence
   to be understood, simplify the snippet instead.
 - **The checker tab opens untyped.** Plain R with a real `ry check` finding comes first, and an
-  Untyped/Typed toggle in the frame header adds one `#:` line that finds a second bug, with a
-  one-line caption saying R reads it as a comment. Each toolchain view ends with one quiet docs
-  link. Leading with annotations assumed the reader already knew what they were.
+  Untyped/Typed toggle in the frame header shows the same file with that bug fixed and one `#:`
+  line that finds the next, with a one-line caption saying R reads it as a comment. Each mode shows
+  exactly one diagnostic, so the two outputs are the same height. Each toolchain view ends with one
+  quiet docs link. Leading with annotations assumed the reader already knew what they were.
+- **Tabs in one frame share the tallest tab's height, so the content is balanced to make that
+  height small.** On wide screens a switch must not move the page, so a showcase's panels share one
+  grid cell. A short tab then leaves a visibly empty frame, so the snippets are sized to land near
+  the same height (toolchain tabs about 320px at 1440, typing steps within about 100px of each
+  other), and the language server's feature tabs sit in the frame's header row like the checker
+  toggle. At 900px and below, code and output stack and the heights differ by hundreds of pixels, so
+  there each frame fits its own panel and a switch may move the page.
+- **The landing Venn has a step indicator and a caption; why-ry's static copy does not.** Four
+  clickable bars repeat the step tabs for pointer users, and one plain caption per step says what
+  the highlighted region means, which also defines R++ and R-- in context. The Venn is centred
+  against the steps column.
 - **A tab appears only once its feature has a real snippet.** The runtime's Speed tab charts the
   why-ry Speed table as speedup over GNU R on one linear axis from zero with a 1x line, sorted so
   the strongest wins lead, and keeps every program, including the slowdown (drawn in grey), because
@@ -3234,24 +3276,31 @@ explicit allocators".
 - **Where it applies first.** The checker's per-item inference (types built mid-check), HIR
   lowering, the JIT's analysis plan, and the heap's mark and sweep. The table engine already keeps
   columns in Arrow buffers and accumulators as struct-of-arrays, so it changes only at the edges.
-- **Allocator API status (checked against the Rust docs, the tracking issue and releases.rs).**
-  `std::alloc::Allocator` was nightly-only (`allocator_api`, rust-lang/rust#32838) until
-  rust-lang/rust#156882 stabilized a subset for Rust 1.100.0: the `Allocator` trait, `Global`,
+- **The toolchain is a pinned nightly (user directive), and std's allocator API is the interface.**
+  `rust-toolchain.toml` pins a dated nightly. Rust 1.100.0 (stable on 12 November 2026)
+  stabilizes a subset of `allocator_api` (rust-lang/rust#156882): the `Allocator` trait, `Global`,
   `System`, and the allocator parameter of `Box<T, A>` and `Vec<T, A>` with their `new_in` and
-  `with_capacity_in` families. 1.100.0 is scheduled for stable on 12 November 2026. The
-  `Store` API, `StaticAllocator`, and `Box::into_pin` with a custom allocator stay unstable, and
-  std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter. CI builds with
-  `dtolnay/rust-toolchain@stable`, the dev container has rustc 1.97.0 (which rejects
-  `Vec::new_in`), and the nix flake uses the latest nightly. The workspace has no
-  `rust-toolchain` file and no `rust-version`.
-- **The route that works on every toolchain.** `allocator-api2` is the stable polyfill of the
-  trait and of `Vec`/`Box`, and `hashbrown` (already a `heap` dependency) accepts it for its maps.
-  `bumpalo` with its `allocator-api2` feature gives a bump arena those collections can allocate
-  in, so `hashbrown::HashMap::new_in(&bump)` and `allocator_api2::vec::Vec::new_in(&bump)` build and
-  run on stable rustc 1.97.0 (bumpalo 3.20, hashbrown 0.16, allocator-api2 0.2). Move to std's `Vec<T, A>` and
-  `Box<T, A>` once every toolchain the project builds with is 1.100 or newer; maps stay on
-  `hashbrown`. Whether `bumpalo` implements the stabilized std trait without its nightly
-  `allocator_api` feature is unverified.
+  `with_capacity_in` families. The pinned nightly already has that subset with no feature gate;
+  `#![feature(allocator_api)]` now only warns that it was partially stabilized, and the unstable
+  remainder lives under `allocator_ext`. Verified on the pinned nightly: `Vec::new_in(&bump)` and
+  `Box::new_in(x, &bump)` build against `bumpalo` 3.20 with its `allocator_api` feature, and
+  `hashbrown::HashMap::new_in(&bump)` builds with hashbrown 0.16's `nightly` feature, which makes
+  it take std's trait. So arenas are `bumpalo` through std's `Vec` and `Box`, maps stay on
+  `hashbrown` (std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter), and the
+  earlier `allocator-api2` polyfill route is dropped: nothing needs it.
+- **The pin moves forward deliberately.** Bump the date in one commit that also fixes what the new
+  nightly breaks (new lints, rustfmt changes), never by floating `nightly`, so a build is
+  reproducible. `flake.nix` reads the channel from `rust-toolchain.toml`, so a bump also needs
+  `nix flake update rust-overlay` when the locked overlay predates the new date. `cargo install
+  --git` does not read the file, so the installation page tells users to pass `+nightly`.
+- **A nightly feature is enabled only for a clear performance or design payoff,** with a
+  `#![feature(...)]` at the crate root and a one-line reason beside it. Likely candidates:
+  `allocator_ext` (the unstable rest of the allocator API, if an arena needs it), `portable_simd`
+  (table kernels), `likely_unlikely` (branch hints on interpreter and heap fast paths),
+  `never_type`, `try_blocks` and `trait_alias`. Features marked incomplete (`specialization`,
+  `generic_const_exprs`) stay out. Nightly rustfmt also applies the unstable `group_imports` and
+  `imports_granularity` settings in `rustfmt.toml`, the style the original code used, so each file
+  has one `use { ... }` tree.
 - **The global allocator stays mimalloc.** The `ry` binary sets it as `#[global_allocator]`
   (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
   own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
@@ -3275,3 +3324,13 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+## `just ry` builds ry's runtime; ry-lang does not depend on libr
+
+- `ry run` loads ry's runtime (`libR.so`) beside the executable at run time, and libr is a separate
+  cdylib, so `cargo run -p ry-lang` never builds it. `just ry` builds `-p ry-lang -p libr` first,
+  and `just build` builds the whole workspace; the not-found error names both.
+- A nightly artifact dependency (`artifact = "cdylib"`) was rejected: every `ry-lang` build,
+  including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
+  still lose the library, because the artifact path points into the build directory. Embedding
+  the library in the binary would double its size for users who never run code.

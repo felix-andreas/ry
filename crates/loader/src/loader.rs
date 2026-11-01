@@ -8,27 +8,31 @@ pub mod r;
 #[cfg(feature = "runtime")]
 pub mod ry_runtime;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use salsa::{Durability, Setter};
-use semantics::load_index::{
-    IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration, file_items,
-    file_load_index, fnv1a, package_index,
+use {
+    rustc_hash::{FxHashMap, FxHashSet},
+    salsa::{Durability, Setter},
+    semantics::{
+        ANALYSIS_STACK_SIZE, DocumentKind, RootDatabase, SourceFile,
+        load_index::{
+            IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
+            file_items, file_load_index, fnv1a, package_index,
+        },
+        metadata::{
+            DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
+            parse_description_collate,
+        },
+    },
+    serde::{Deserialize, Serialize},
+    std::{
+        collections::BTreeSet,
+        fmt, fs, io,
+        path::{Path, PathBuf},
+        sync::Arc,
+        thread,
+        time::{SystemTime, UNIX_EPOCH},
+    },
+    syntax::Parse,
 };
-use semantics::metadata::{
-    DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, S3MethodDirective,
-    parse_description_collate,
-};
-use semantics::{ANALYSIS_STACK_SIZE, DocumentKind, RootDatabase, SourceFile};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
-use std::fmt;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
-use syntax::Parse;
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
 /// reload re-derives only the items whose text changed.
@@ -227,7 +231,11 @@ impl Loader {
         let fingerprint = source_fingerprint(&root);
         let inputs = self.read(&root)?;
         let plan = self.plan_inputs(&root, inputs, full)?;
-        if let Some(package) = self.packages.iter_mut().find(|package| package.root == root) {
+        if let Some(package) = self
+            .packages
+            .iter_mut()
+            .find(|package| package.root == root)
+        {
             package.pending_fingerprint = fingerprint;
         }
         Ok(plan)

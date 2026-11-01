@@ -25,8 +25,8 @@ Reloaded tally: 1 function rebound, in 3 ms.
 
 There is no `load_all()` to remember and no session to restart. A reload replaces exactly the
 definitions you changed and reruns only the top-level code that depends on them, so it stays fast on
-a large package: about 50 ms after an edit on a 326,000-line package, where `devtools::load_all()`
-takes 6.6 s (see [Speed](#speed)).
+a large package: about 80 ms after an edit on a 326,000-line package, where `load_all()`
+takes 8.6 s (see [Speed](#speed)).
 
 ## Running one command or a script
 
@@ -85,10 +85,16 @@ A load parses a function only when something first calls it, and a reload touche
 definitions you changed. On a generated package of 500 files, against `devtools::load_all()` and
 [loadfast](https://github.com/finccam/loadfast):
 
-| 326,000 lines | `load_all()` | `load_fast()` | ry |
-| --- | --- | --- | --- |
-| cold load | about 7 s | about 3 s | about 1 s |
-| reload after a body edit | 6.6 s | 81 ms | about 50 ms |
+| 326,000 lines | `load_all()` | `load_fast()` | `ry R` | `ry load` |
+| --- | --- | --- | --- | --- |
+| cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
+| reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |
+
+These are medians of five runs of `tools/loader-bench` (`load_all()` is `pkgload::load_all()`, which
+`devtools::load_all()` calls). The machine was shared and ry was built without link-time
+optimization, so trust the ratios more than the milliseconds. On the 14,000-line package the bench
+also generates, a cold load takes 1.2 s with `load_all()`, 0.37 s with `load_fast()`, 0.15 s with
+`ry R` and 0.54 s with `ry load`.
 
 [Package loading](/reference/package-loading) lists exactly what a load and a reload do, and what
 devtools' `load_all()` does that ry does not yet.

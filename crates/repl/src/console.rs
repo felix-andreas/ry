@@ -2,30 +2,37 @@
 //! parses, evaluates, and autoprints the fed input. The same editor drives ry's own runtime,
 //! whose console loop calls the callback the same way.
 
-use crate::libr::{self, RApi};
-use crate::{
-    ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
+use {
+    crate::{
+        ConsoleHooks, Filtered, InputFilter, Keybindings, ReplError, RunOptions, SessionCompleter,
+        libr::{self, RApi},
+    },
+    crossterm::terminal,
+    nu_ansi_term::{Color, Style},
+    reedline::{
+        ColumnarMenu, Completer, DefaultHinter, EditMode, Emacs, FileBackedHistory, Highlighter,
+        KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
+        PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
+        Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
+        default_vi_insert_keybindings, default_vi_normal_keybindings,
+    },
+    std::{
+        borrow::Cow,
+        cell::RefCell,
+        collections::VecDeque,
+        ffi::{c_char, c_int, c_uchar},
+        fs,
+        io::{BufRead, IsTerminal, Write, stderr, stdin, stdout},
+        panic::catch_unwind,
+        path::PathBuf,
+        slice,
+        sync::{Arc, Mutex, PoisonError},
+    },
+    syntax::{
+        SyntaxKind::{self, *},
+        TextSize, lex,
+    },
 };
-use crossterm::terminal;
-use nu_ansi_term::{Color, Style};
-use reedline::{
-    ColumnarMenu, Completer, DefaultHinter, EditMode, Emacs, FileBackedHistory, Highlighter,
-    KeyCode, KeyModifiers, MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch,
-    PromptHistorySearchStatus, Reedline, ReedlineEvent, ReedlineMenu, Signal, StyledText,
-    Suggestion, ValidationResult, Validator, Vi, default_emacs_keybindings,
-    default_vi_insert_keybindings, default_vi_normal_keybindings,
-};
-use std::borrow::Cow;
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::ffi::{c_char, c_int, c_uchar};
-use std::io::{BufRead, IsTerminal, Write, stderr, stdin, stdout};
-use std::panic::catch_unwind;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::{fs, slice};
-use syntax::SyntaxKind::{self, *};
-use syntax::{TextSize, lex};
 
 pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let batch = options.batch;

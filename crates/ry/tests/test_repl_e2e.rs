@@ -4,11 +4,16 @@
 
 #![cfg(any(unix, windows))]
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{Read, Write};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-use std::{fs, thread};
+use {
+    portable_pty::{CommandBuilder, PtySize, native_pty_system},
+    std::{
+        fs,
+        io::{Read, Write},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    },
+};
 
 fn r_available() -> bool {
     let available = std::process::Command::new("R")
@@ -274,8 +279,11 @@ fn without_loading_the_console_starts_bare_and_load_all_loads_on_both_runtimes()
         let package = tempfile::tempdir().expect("temp dir");
         let package = package.path();
         fs::create_dir_all(package.join("R")).expect("create package");
-        fs::write(package.join("DESCRIPTION"), "Package: barepkg\nVersion: 1.0\n")
-            .expect("write");
+        fs::write(
+            package.join("DESCRIPTION"),
+            "Package: barepkg\nVersion: 1.0\n",
+        )
+        .expect("write");
         fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
         let (status, stdout, stderr) = ry_with_input(
             package,

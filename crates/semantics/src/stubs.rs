@@ -1,12 +1,16 @@
 //! `.Rtypes` stubs: `name : <type>` lines whose type half goes through the `#:` annotation
 //! grammar. Stub text is a set-once input, so it never participates in per-edit invalidation.
 
-use crate::Db;
-use crate::annotations::{NamedDefinition, lower_annotation};
-use crate::metadata::namespace_active;
-use crate::types::{Name, Ty, TyKind, TypeScheme, for_each_child_type};
-use rustc_hash::{FxHashMap, FxHashSet};
-use syntax::{SyntaxKind, TextRange};
+use {
+    crate::{
+        Db,
+        annotations::{NamedDefinition, lower_annotation},
+        metadata::namespace_active,
+        types::{Name, Ty, TyKind, TypeScheme, for_each_child_type},
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    syntax::{SyntaxKind, TextRange},
+};
 
 /// Sources are in precedence order: a later source replaces a name's whole overload set.
 /// Manifest names resolve even without a typed declaration, as `Unknown`.
@@ -665,16 +669,19 @@ pub fn install_shipped_stubs(db: &dyn Db) -> StubSources {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::check::{ItemCheck, TypeErrorKind};
-    use crate::diagnostics::file_diagnostics;
-    use crate::metadata::{PackageMetadata, attached_union};
-    use crate::types::Atomic;
-    use crate::{
-        DocumentKind, ProjectFiles, RootDatabase, SourceFile, item_check, item_tree,
-        package_scheme_exists,
+    use {
+        super::*,
+        crate::{
+            DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+            check::{ItemCheck, TypeErrorKind},
+            diagnostics::file_diagnostics,
+            item_check, item_tree,
+            metadata::{PackageMetadata, attached_union},
+            package_scheme_exists,
+            types::Atomic,
+        },
+        salsa::Setter,
     };
-    use salsa::Setter;
 
     #[test]
     fn shipped_corpus_loads() {

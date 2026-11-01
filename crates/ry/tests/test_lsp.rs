@@ -1,42 +1,44 @@
-use async_lsp::concurrency::ConcurrencyLayer;
-use async_lsp::lsp_types::notification::{PublishDiagnostics, ShowMessage};
-use async_lsp::lsp_types::request::{RegisterCapability, WorkspaceDiagnosticRefresh};
-use async_lsp::lsp_types::{
-    ClientCapabilities, CompletionClientCapabilities, CompletionItemCapability, CompletionParams,
-    CompletionResponse, DiagnosticClientCapabilities, DiagnosticSeverity,
-    DiagnosticWorkspaceClientCapabilities, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentRangeFormattingParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, FileChangeType, FileEvent,
-    FormattingOptions, GeneralClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
-    InlayHint, InlayHintParams, InsertTextFormat, Location, NumberOrString,
-    ParameterInformationSettings, ParameterLabel, PartialResultParams, Position,
-    PositionEncodingKind, PublishDiagnosticsParams, Range, ReferenceContext, ReferenceParams,
-    RenameParams, SemanticTokens, SemanticTokensParams, SemanticTokensResult, ShowMessageParams,
-    SignatureHelp, SignatureHelpClientCapabilities, SignatureHelpParams,
-    SignatureInformationSettings, SymbolKind, TextDocumentClientCapabilities,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Url, VersionedTextDocumentIdentifier,
-    WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceEdit, WorkspaceFolder,
+use {
+    async_lsp::{
+        ErrorCode, LanguageServer, MainLoop, ServerSocket,
+        concurrency::ConcurrencyLayer,
+        lsp_types::{
+            ClientCapabilities, CompletionClientCapabilities, CompletionItemCapability,
+            CompletionParams, CompletionResponse, DiagnosticClientCapabilities, DiagnosticSeverity,
+            DiagnosticWorkspaceClientCapabilities, DidChangeTextDocumentParams,
+            DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+            DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
+            DocumentDiagnosticReportResult, DocumentFormattingParams,
+            DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
+            DocumentSymbolResponse, FileChangeType, FileEvent, FormattingOptions,
+            GeneralClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+            HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
+            InlayHint, InlayHintParams, InsertTextFormat, Location, NumberOrString,
+            ParameterInformationSettings, ParameterLabel, PartialResultParams, Position,
+            PositionEncodingKind, PublishDiagnosticsParams, Range, ReferenceContext,
+            ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams,
+            SemanticTokensResult, ShowMessageParams, SignatureHelp,
+            SignatureHelpClientCapabilities, SignatureHelpParams, SignatureInformationSettings,
+            SymbolKind, TextDocumentClientCapabilities, TextDocumentContentChangeEvent,
+            TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Url,
+            VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceClientCapabilities,
+            WorkspaceEdit, WorkspaceFolder,
+            notification::{PublishDiagnostics, ShowMessage},
+            request::{RegisterCapability, WorkspaceDiagnosticRefresh},
+        },
+        panic::CatchUnwindLayer,
+        router::Router,
+    },
+    std::{fs, future::ready, ops::ControlFlow, path::PathBuf, process::Stdio, time::Duration},
+    tempfile::TempDir,
+    tokio::{
+        sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+        task::JoinHandle,
+        time::{self, Instant, timeout},
+    },
+    tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt},
+    tower::ServiceBuilder,
 };
-use async_lsp::panic::CatchUnwindLayer;
-use async_lsp::router::Router;
-use async_lsp::{ErrorCode, LanguageServer, MainLoop, ServerSocket};
-use std::fs;
-use std::future::ready;
-use std::ops::ControlFlow;
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::Duration;
-use tempfile::TempDir;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::task::JoinHandle;
-use tokio::time;
-use tokio::time::{Instant, timeout};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tower::ServiceBuilder;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 

@@ -8,18 +8,21 @@
 //! planner then sees the whole query, so every aggregation, data.table's GForce set included,
 //! runs as a grouped Polars kernel rather than as R code once per group.
 
-use crate::convert::{enum_dtype, factor_levels};
-use crate::kernel::{Evaluator, Vector, scatter, selected_rows};
-use crate::{ColumnType, Error, Result, Schema, Table};
-use crate::{group, join};
-use polars::prelude::{
-    AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
-    Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
-    LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series, SortMultipleOptions,
-    by_name, col, len, lit, pearson_corr, when,
+use {
+    crate::{
+        ColumnType, Error, Result, Schema, Table,
+        convert::{enum_dtype, factor_levels},
+        group, join,
+        kernel::{Evaluator, Vector, scatter, selected_rows},
+    },
+    polars::prelude::{
+        AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
+        Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
+        LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
+        SortMultipleOptions, by_name, col, len, lit, pearson_corr, when,
+    },
+    std::{collections::HashSet, fmt},
 };
-use std::collections::HashSet;
-use std::fmt;
 
 /// One `tbl[i, j, by]` call.
 #[derive(Clone, Debug, Default)]
@@ -377,12 +380,16 @@ pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
     match &query.rows {
         Rows::All | Rows::Positions(_) => {}
         Rows::Filter(condition) => expression_columns(condition, &mut columns),
-        Rows::Order(keys) => keys.iter().for_each(|key| expression_columns(&key.expr, &mut columns)),
+        Rows::Order(keys) => keys
+            .iter()
+            .for_each(|key| expression_columns(&key.expr, &mut columns)),
         Rows::Join(_) => return None,
     }
     match &query.select {
         Select::All => return None,
-        Select::Columns(items) => items.iter().for_each(|(_, expr)| expression_columns(expr, &mut columns)),
+        Select::Columns(items) => items
+            .iter()
+            .for_each(|(_, expr)| expression_columns(expr, &mut columns)),
         Select::Value(expr) => expression_columns(expr, &mut columns),
         Select::Assign(items) => {
             for (name, expr) in items {
@@ -393,7 +400,10 @@ pub fn referenced_columns(query: &Query) -> Option<HashSet<PlSmallStr>> {
             }
         }
     }
-    query.by.iter().for_each(|(_, expr)| expression_columns(expr, &mut columns));
+    query
+        .by
+        .iter()
+        .for_each(|(_, expr)| expression_columns(expr, &mut columns));
     Some(columns)
 }
 
@@ -402,7 +412,12 @@ fn expression_columns(expr: &Expr, columns: &mut HashSet<PlSmallStr>) {
         Expr::Column(name) => {
             columns.insert(name.clone());
         }
-        Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Character(_) | Expr::Na(_) | Expr::Count => {}
+        Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Na(_)
+        | Expr::Count => {}
         Expr::Unary(_, inner) | Expr::Head(inner, _) | Expr::Aggregate { arg: inner, .. } => {
             expression_columns(inner, columns)
         }
