@@ -2346,7 +2346,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::ArityMismatch { expected, found } => {
             if found < expected {
                 format!(
-                    "this call supplies {found} {}, but the function requires {expected}, so a required argument is missing",
+                    "this call supplies {found} positional {}, but the function requires {expected}, so a required argument is missing",
                     plural(*found, "argument", "arguments"),
                 )
             } else {

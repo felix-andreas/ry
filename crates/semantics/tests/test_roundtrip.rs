@@ -17,11 +17,13 @@ use {
 /// `NULL` once declared is checked at the call, and an inferred scalar parameter takes a vector
 /// or a number that the same scalar once declared rejects. A callback shape inferred from a call
 /// lets a later call name its slots, while the same shape once declared has no names to match.
-const KNOWN_UNWRITABLE: [&str; 4] = [
+const KNOWN_UNWRITABLE: [&str; 6] = [
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
     "semantics/tests/typing::correct_r__a_condition_parameter_takes_a_number :: skip",
     "semantics/tests/typing::correct_r__a_callback_called_positionally_may_later_be_called_by_name :: step",
+    "semantics/tests/typing::correct_r__a_callback_forwarding_dots_may_later_be_called_by_name :: hessian",
+    "semantics/tests/typing::correct_r__a_callback_forwarding_dots_may_later_be_called_by_name :: fit",
 ];
 
 #[test]

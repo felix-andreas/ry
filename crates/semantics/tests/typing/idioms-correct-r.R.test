@@ -1185,3 +1185,25 @@ scaled <- function(n) {
 #++++
 scaled: Unknown
 69..75 error[type-mismatch] expected a numeric value (`integer` or `double`), found `fn(x: Any) -> integer`
+
+#---- a_callback_forwarding_dots_may_later_be_called_by_name
+# `.hessian(f, x, ...)` calls `f(x, ...)`, which declares one unnamed slot and `...`.
+hessian <- function(f, x, ...) f(x, ...)
+fit <- function(f, arglist) {
+  hessian(f, 1, arglist = arglist)
+  f(pars = 2, arglist = arglist)
+}
+#++++
+hessian: <T, U> fn(f: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
+fit: <T, U> fn(f: fn(double, ...: Any) -> T, [arglist]: U) -> T
+
+#---- a_callback_forwarding_dots_still_checks_its_positional_argument
+hessian <- function(f, x, ...) f(x, ...)
+fit <- function(f, arglist) {
+  hessian(f, 1, arglist = arglist)
+  f("a", arglist = arglist)
+}
+#++++
+hessian: <T, U> fn(f: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
+fit: Unknown
+110..113 error[type-mismatch] expected `double`, found `character`

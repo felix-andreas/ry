@@ -886,3 +886,11 @@ f: <T, U> fn(x: T, g: U) -> Unknown
 f <- function(x) x |> paste(_, "a")
 #++++
 f: <T> fn(x: T) -> Unknown
+
+#---- a_declared_callback_called_only_by_name_misses_its_positional_slot
+# A declared shape names no parameters, so `arglist = 1` goes to `...` and fills no slot.
+#: fn(f: fn(double, ...: Any) -> double) -> double
+evaluate <- function(f) f(arglist = 1)
+#++++
+evaluate: fn(f: fn(double, ...: Any) -> double) -> double
+165..166 error[type-mismatch] this call supplies 0 positional arguments, but the function requires 1, so a required argument is missing

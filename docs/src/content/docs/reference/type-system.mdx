@@ -2544,7 +2544,9 @@ upper_names <- function(x) {
   function, even though base has a `format`. A call declares no parameter names, so a later call
   may name an argument the first call passed by position: after `f(pars, arglist)`, the call
   `f(pars = pars + 1, arglist)` fills the first free slot without checking it, while an argument
-  beyond the slots the first call used is still an error. When the body also reads it as a value and an outer
+  beyond the slots the first call used is still an error. When the first call forwarded `...`, as
+  `f(x, ...)` does, a later name may also go to `...`, so it takes only a slot that the call's
+  positional arguments leave free. When the body also reads it as a value and an outer
   binding of the same name is a function, the call could reach either one, so it types as `Unknown`
   and constrains neither. So `function(x, names) x[names(x) %in% names]` does not make `names` a
   function parameter, and `dir <- path; dir(dir)` calls base's `dir` unchecked. A function that a

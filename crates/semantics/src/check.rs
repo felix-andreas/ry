@@ -9865,12 +9865,6 @@ impl<'db> Checker<'db, '_> {
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
         let total = function.positional.len() + function.named.len();
-        let required = function.positional.len()
-            + function
-                .named
-                .iter()
-                .filter(|field| !field.optional)
-                .count();
         let variadic_element = function.variadic.as_ref().map(|rest| rest.element);
         let targets = self.argument_targets(function, arguments);
 
@@ -10018,12 +10012,14 @@ impl<'db> Checker<'db, '_> {
         if forwards_dots || unknown_name {
             return findings;
         }
+        // Overflow is reported above, so a mismatch here leaves a positional slot empty. A
+        // named argument that went to `...` fills none, so only the filled slots count.
         if positional_filled != function.positional.len() {
             return vec![TypeError {
                 range: callee_range,
                 kind: TypeErrorKind::ArityMismatch {
-                    expected: required,
-                    found: arguments.len(),
+                    expected: function.positional.len(),
+                    found: positional_filled,
                 },
             }];
         }
@@ -10280,14 +10276,29 @@ impl<'db> Checker<'db, '_> {
         // A shape inferred from an earlier call (`f(pars, arglist)` on a parameter `f`) has
         // positional slots whose names nobody declared, so a later `f(pars = x, arglist)`
         // names one of them. R matches names before positions, so such a name reserves the
-        // first free slot, unchecked because which slot it names is unknown.
+        // first free slot, unchecked because which slot it names is unknown. On a variadic
+        // shape (`f(x, ...)`) a name may also go to `...`, so it takes only the slots the
+        // positional arguments leave free, which keeps those arguments checked.
         let mut next_positional = 0usize;
-        if function.inferred && function.variadic.is_none() {
+        if function.inferred {
+            let open_slots = match function.variadic {
+                None => function.positional.len(),
+                Some(_) => {
+                    let positional_arguments = arguments
+                        .iter()
+                        .filter(|argument| !argument.forwards_dots && argument.name.is_none())
+                        .count();
+                    function
+                        .positional
+                        .len()
+                        .saturating_sub(positional_arguments)
+                }
+            };
             for (index, argument) in arguments.iter().enumerate() {
                 if argument.forwards_dots
                     || targets[index].is_some()
                     || argument.name.is_none()
-                    || next_positional >= function.positional.len()
+                    || next_positional >= open_slots
                 {
                     continue;
                 }
