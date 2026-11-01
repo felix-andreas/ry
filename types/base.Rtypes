@@ -144,13 +144,17 @@ R.version.string : character
 .Machine : Any
 
 # Length and sequence helpers: the result type is fixed by the function. `seq_len`'s count is Any-param
-# (`seq_len(10)` passes a whole-number double literal). `seq`/`rep` return shapes vary by which
-# arguments are supplied (value-dependent), so they stay `Any`.
+# (`seq_len(10)` passes a whole-number double literal). `seq` dispatches on `from`, so a date or a
+# time gives a sequence of that class; numeric bounds give numbers. `rep`'s shape varies by which
+# arguments are supplied (value-dependent).
 length : @pure fn(x: Any) -> integer
 lengths : @pure fn(x: Any, [use.names]: logical) -> integer[]
 seq_len : @pure fn(length.out: Any) -> integer[]
 seq_along : @pure fn(along.with: Any) -> integer[]
-seq : @pure Any
+seq : @pure fn(from: Date, [to]: Date, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> Date
+seq : @pure fn(from: POSIXct, [to]: POSIXct, [by]: Any, [length.out]: Any, [along.with]: Any, ...: Any) -> POSIXct
+seq : @pure fn([from]: integer, [to]: integer, [by]: integer, [length.out]: Any, [along.with]: Any, ...: Any) -> integer[]
+seq : @pure fn([from]: double, [to]: double, [by]: double, [length.out]: Any, [along.with]: Any, ...: Any) -> double[]
 seq.int : @pure Any
 rep : @pure <T> fn(x: T[], [times]: Any, [length.out]: Any, [each]: Any) -> T[]
 rep : fn(x: Any, [times]: Any, [length.out]: Any, [each]: Any) -> Any
@@ -594,14 +598,14 @@ return : Any
 # Reflective environment access (deliberately shallow — see the scope discipline in the stubs doc).
 # The environment-returning and NSE forms are `Any` values; the string-keyed lookups have stable
 # signatures worth declaring.
-environment : @pure Any
-globalenv : Any
-emptyenv : @pure Any
-baseenv : @pure Any
-topenv : @pure Any
-new.env : @pure Any
-parent.frame : Any
-parent.env : Any
+environment : @pure fn([fun]: Any) -> environment
+globalenv : fn() -> environment
+emptyenv : @pure fn() -> environment
+baseenv : @pure fn() -> environment
+topenv : @pure fn([envir]: environment, [matchThisEnv]: environment) -> environment
+new.env : @pure fn([hash]: logical, [parent]: environment, [size]: integer) -> environment
+parent.frame : fn([n]: integer) -> environment
+parent.env : fn(env: environment) -> environment
 sys.call : Any
 sys.function : Any
 match.call : Any
@@ -636,7 +640,7 @@ requireNamespace : fn(package: Any, [quietly]: logical) -> logical
 source : fn([file]: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [exprs]: Any, [spaced]: logical, [verbose]: logical, [prompt.echo]: character, [max.deparse.length]: Any, [width.cutoff]: Any, [deparseCtrl]: Any, [chdir]: logical, [catch.aborts]: logical, [encoding]: Any, [continue.echo]: character, [skip.echo]: Any, [keep.source]: logical) -> Any
 getOption : fn(x: character, [default]: Any) -> Any
 # `options(warn = 1, digits = 7)`: arbitrary option names as named arguments.
-options : Any
+options : fn(...: Any) -> list[named: Any]
 getRversion : @pure fn() -> Any
 .libPaths : fn([new]: Any, [include.site]: logical) -> character[]
 commandArgs : fn([trailingOnly]: logical) -> character[]

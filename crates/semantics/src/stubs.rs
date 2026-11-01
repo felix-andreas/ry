@@ -642,7 +642,7 @@ fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefi
 }
 
 /// Routes through the annotation pipeline, the single type grammar.
-fn lower_type_text<'db>(db: &'db dyn Db, type_text: &str) -> Option<TypeScheme<'db>> {
+pub(crate) fn lower_type_text<'db>(db: &'db dyn Db, type_text: &str) -> Option<TypeScheme<'db>> {
     let parse = syntax::parse(&format!("#: {type_text}"));
     if !parse.errors().is_empty() {
         return None;

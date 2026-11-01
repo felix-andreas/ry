@@ -594,6 +594,26 @@ pub fn item_annotations<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemAnnotation
 }
 
 fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations::Annotation<'db>> {
+    let written = written_root_annotation(db, item);
+    if written
+        .as_ref()
+        .is_some_and(|annotation| annotation.declared.is_some() || !annotation.errors.is_empty())
+    {
+        return written;
+    }
+    let Some(declared) = package_hook_signature(db, item) else {
+        return written;
+    };
+    Some(annotations::Annotation {
+        declared: Some(declared),
+        ..written.unwrap_or_default()
+    })
+}
+
+fn written_root_annotation<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> Option<annotations::Annotation<'db>> {
     let comment = item_annotation_syntax(db, item)
         .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
     let root = item_syntax(db, item)?.syntax_node();
@@ -605,6 +625,23 @@ fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations:
     }
     let inline = annotations::lower_inline_annotation(db, &site);
     annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+}
+
+/// R calls a package file's `.onLoad(libname, pkgname)` and its siblings itself, always with
+/// the same arguments, so an unannotated hook is typed as if it declared that signature.
+fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types::TypeScheme<'db>> {
+    if *item.kind(db) != ItemKind::Function
+        || item.parent(db).is_some()
+        || *item.file(db).kind(db) != DocumentKind::Package
+    {
+        return None;
+    }
+    let signature = match item.name(db).as_deref()? {
+        ".onLoad" | ".onAttach" => "fn(libname: character, pkgname: character) -> Any",
+        ".onUnload" | ".onDetach" | ".Last.lib" => "fn(libpath: character) -> Any",
+        _ => return None,
+    };
+    stubs::lower_type_text(db, signature)
 }
 
 fn expression_annotations<'db>(
