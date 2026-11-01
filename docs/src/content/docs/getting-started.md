@@ -28,12 +28,13 @@ unresolved
 1 problem in 1 file
 ```
 
-When you work on a package, `ry R` started inside it reloads what you changed before each
+When you work on a package, `ry run` started inside it reloads what you changed before each
 command, so you never call `load_all()` or restart R:
 
 ```text
-$ ry R
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+$ ry run
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 > count_words("the  quick fox")     # after editing R/count.R
@@ -63,10 +64,11 @@ shares a namespace, as R loads them, and every other `.R` file is a script read 
 `ry check` exits with status 1 when it finds anything, so the same command works in CI.
 [Checking code](/guides/checking) shows everything it finds without configuration.
 
-The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry R`
-anywhere inside it, as in the transcript above. The console runs the GNU R
-installed on your machine, so it needs R; checking does not. `ry R script.R` runs a script on GNU R
-(call `load_all()` in it to load the package), and `ry run script.R` runs it on ry's own, still incomplete runtime ([Console](/guides/console)). In RStudio, put
+The rest of step 1 is the everyday tooling. To reload your package as you edit, start `ry run`
+anywhere inside it, as in the transcript above. It runs on ry's own runtime, which is still
+incomplete, so for a package it cannot run yet, `ry R` opens the same console on the GNU R installed
+on your machine. Both need R installed; checking does not. `ry run script.R` and `ry R script.R`
+run a script, and `load_all()` in it loads the package ([Console](/guides/console)). In RStudio, put
 `source(pipe("ry load --r-entry"))` in your `~/.Rprofile` and call `load_all()` as you do today.
 [Loading packages](/guides/loading-packages) has the details.
 

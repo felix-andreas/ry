@@ -149,6 +149,29 @@ impl ReplSession {
         }
     }
 
+    /// Waits for the editor's first prompt. The banner prints before the editor takes the
+    /// terminal, so a line typed after the banner but before the prompt is echoed and lost.
+    fn expect_prompt(&mut self) {
+        const BANNER_END: &str = "Ctrl-D to quit.";
+        self.expect(BANNER_END);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let banner = self
+                .seen
+                .find(BANNER_END)
+                .map_or(0, |at| at + BANNER_END.len());
+            if self.seen[banner..].contains("> ") {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the first prompt; output so far:\n{}",
+                self.seen
+            );
+            self.drain(Duration::from_millis(100));
+        }
+    }
+
     fn quit(mut self) {
         self.send("q()\r");
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -208,7 +231,7 @@ fn start_session() -> Option<ReplSession> {
         return None;
     }
     let mut session = ReplSession::start();
-    session.expect("ry R console");
+    session.expect_prompt();
     Some(session)
 }
 
@@ -231,38 +254,72 @@ fn run_script(body: &str) -> Option<(std::process::Output, String)> {
 
 #[test]
 fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_command() {
-    if !r_available() {
-        return;
+    for runtime in runtimes() {
+        let package = tempfile::tempdir().expect("temp dir");
+        let package = package.path();
+        fs::create_dir_all(package.join("R")).expect("create package");
+        fs::write(
+            package.join("DESCRIPTION"),
+            "Package: replpkg\nVersion: 1.0\n",
+        )
+        .expect("write");
+        fs::write(
+            package.join("R/a.R"),
+            "greet <- function() \"first version\"\n",
+        )
+        .expect("write");
+        let mut session = ReplSession::start_with(Some(package), &[runtime_command(runtime)]);
+        session.expect("Loaded replpkg");
+        session.expect_prompt();
+        session.send("greet()\r");
+        session.expect("first version");
+        // Distinct sizes, so the change is visible even within one timestamp tick.
+        fs::write(
+            package.join("R/a.R"),
+            "greet <- function() \"second, edited version\"\n",
+        )
+        .expect("write");
+        // A command that does not parse still gets the reload in front of it.
+        session.send("1 +* 2\r");
+        session.expect("Reloaded replpkg: 1 function rebound");
+        session.send("greet()\r");
+        session.expect("second, edited version");
+        // Nothing changed since, so the next command runs without a reload.
+        session.send("cat(\"no\", \"reload\\n\")\r");
+        session.expect("no reload");
+        assert_eq!(
+            session.seen.matches("Reloaded replpkg").count(),
+            1,
+            "{runtime}: {}",
+            session.seen
+        );
+        session.quit();
     }
-    let package = std::env::temp_dir().join(format!("ry-repl-load-{}", std::process::id()));
-    fs::create_dir_all(package.join("R")).expect("create package");
-    fs::write(
-        package.join("DESCRIPTION"),
-        "Package: replpkg\nVersion: 1.0\n",
-    )
-    .expect("write");
-    fs::write(
-        package.join("R/a.R"),
-        "greet <- function() \"first version\"\n",
-    )
-    .expect("write");
-    let mut session = ReplSession::start_in(Some(&package));
-    session.expect("Loaded replpkg");
-    // Input typed before the editor draws its first prompt is lost under load.
-    session.expect("ry R console");
-    session.send("greet()\r");
-    session.expect("first version");
-    // Distinct sizes, so the change is visible even within one timestamp tick.
-    fs::write(
-        package.join("R/a.R"),
-        "greet <- function() \"second, edited version\"\n",
-    )
-    .expect("write");
-    session.send("greet()\r");
-    session.expect("Reloaded replpkg: 1 function rebound");
-    session.expect("second, edited version");
-    session.quit();
-    fs::remove_dir_all(&package).ok();
+}
+
+#[test]
+fn without_loading_the_console_starts_bare_and_load_all_loads_on_both_runtimes() {
+    for runtime in runtimes() {
+        let package = tempfile::tempdir().expect("temp dir");
+        let package = package.path();
+        fs::create_dir_all(package.join("R")).expect("create package");
+        fs::write(
+            package.join("DESCRIPTION"),
+            "Package: barepkg\nVersion: 1.0\n",
+        )
+        .expect("write");
+        fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
+        let (status, stdout, stderr) = ry_with_input(
+            package,
+            &[runtime_command(runtime), "--no-load"],
+            &[],
+            "exists(\"level\")\nload_all()\nlevel()\n",
+        );
+        assert_eq!(status, Some(0), "{runtime}: {stderr}");
+        assert!(stdout.starts_with("[1] FALSE\n"), "{runtime}: {stdout}");
+        assert!(stdout.contains("[1] \"one\""), "{runtime}: {stdout}");
+        assert!(stderr.contains("Loaded barepkg"), "{runtime}: {stderr}");
+    }
 }
 
 #[test]
@@ -280,8 +337,7 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded promptpkg");
-    // Input typed before the editor draws its first prompt is lost under load.
-    session.expect("ry R console");
+    session.expect_prompt();
     session.send("options(prompt = \"R> \")\r");
     // The echoed command line never contains the joined text, so only the output matches.
     session.send("cat(\"prompt\", \"changed\\n\")\r");
@@ -656,8 +712,7 @@ fn the_ry_console_refuses_class_definitions_when_object_systems_are_off() {
     )
     .expect("write config");
     let mut session = ReplSession::start_with(Some(directory.path()), &["run"]);
-    session.expect("console");
-    session.settle(Duration::from_millis(400));
+    session.expect_prompt();
     session.send("setRefClass(\"A\")\r");
     session.expect("`setRefClass` cannot define a Reference Class");
     session.send("1 + 1\r");
@@ -740,8 +795,7 @@ fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
     for runtime in runtimes() {
         let mut session =
             ReplSession::start_with(Some(directory.path()), &[runtime_command(runtime)]);
-        session.expect("console");
-        // Input typed before the editor takes the terminal would arrive as one paste.
+        session.expect_prompt();
         for line in [
             "f <- function(x: integer) {\r",
             "x * 2L\r",
@@ -1042,4 +1096,77 @@ fn a_console_without_input_exits_zero_on_both_runtimes() {
         assert_eq!(status, Some(0), "{runtime}: {stderr}");
         assert_eq!(stdout, "", "{runtime}: {stderr}");
     }
+}
+
+#[test]
+fn an_unusable_r_home_stops_ry_s_runtime_with_one_actionable_message() {
+    if !ry_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("script.R"), "cat(1)\n").expect("write script");
+    let missing = directory.path().join("no-r-here");
+    let missing = missing.to_string_lossy();
+    for arguments in [&["run", "script.R"][..], &["run"][..]] {
+        let (status, stdout, stderr) =
+            ry_with_input(directory.path(), arguments, &[("R_HOME", &missing)], "");
+        assert_eq!(status, Some(2), "{arguments:?}: {stderr}");
+        assert_eq!(stdout, "", "{arguments:?}");
+        assert_eq!(
+            stderr,
+            format!(
+                "ry: ry's runtime loads base R from a GNU R installation, but R_HOME is {missing}, \
+                 which holds none (no library/base/R/base)\n  fix: install GNU R, or set R_HOME to \
+                 the directory `R RHOME` prints; see https://ry-lang.org/installation/\n"
+            ),
+            "{arguments:?}"
+        );
+    }
+}
+
+/// A runtime library built from other sources than `ry` is refused with a message that names the
+/// fix, and exits 2. A stub library that exports a different identity stands in for the stale
+/// `libR.so`, so no runtime build is needed.
+#[cfg(unix)]
+#[test]
+fn a_runtime_with_another_build_identity_is_refused() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let source = directory.path().join("stub.c");
+    fs::write(
+        &source,
+        "const char *ry_runtime_id(void) { return \"0000000000000000\"; }\n",
+    )
+    .expect("write stub");
+    let library = directory.path().join("libR.so");
+    let compiled = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .status();
+    if !compiled.is_ok_and(|status| status.success()) {
+        eprintln!("skipped: no C compiler to build a stub runtime");
+        return;
+    }
+    let script = directory.path().join("script.R");
+    fs::write(&script, "cat(\"unreached\\n\")\n").expect("write script");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ry"))
+        .arg("run")
+        .arg(&script)
+        .env("RY_LIBR", &library)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run the binary");
+    let stderr = String::from_utf8_lossy(&output.stderr).replace("\n  | ", " ");
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    for expected in [
+        "is out of date",
+        "it has build 0000000000000000",
+        "cargo build -p libr",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in: {stderr}"
+        );
+    }
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("unreached"));
 }

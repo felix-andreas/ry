@@ -122,6 +122,11 @@ unsafe fn print_dispatch(value: Sexp, options: &PrintOptions, tag: &mut String) 
 /// `PrintValueRec`: prints any value, with `tag` the prefix of the list element being printed.
 pub unsafe fn print_value(value: Sexp, options: &PrintOptions, tag: &mut String) -> R<()> {
     match value.kind() {
+        _ if value.is_array() => {
+            for line in deparse::deparse_lines(value, 60, deparse::options::SIMPLE) {
+                out(&format!("{line}\n"));
+            }
+        }
         SexpType::Nil => out("NULL\n"),
         SexpType::Symbol if value == values::missing_arg() => out("\n"),
         SexpType::Symbol => {

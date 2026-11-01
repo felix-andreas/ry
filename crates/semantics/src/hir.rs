@@ -466,6 +466,8 @@ pub enum ExpressionKind {
     Tuple(Box<[ExprId]>),
     /// `(x = 1, y = 2)`: a native record, fields in source order.
     Record(Box<[RecordField]>),
+    /// `[a, b]`: an Array literal.
+    Array(Box<[ExprId]>),
     /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
     /// parenthesized list, so a payload types exactly like the matching literal.
     Tag {
@@ -584,7 +586,7 @@ impl ExpressionKind {
             ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => vec![*body],
             ExpressionKind::Block { statements, .. } => statements.to_vec(),
             ExpressionKind::Paren(inner) => vec![*inner],
-            ExpressionKind::Tuple(items) => items.to_vec(),
+            ExpressionKind::Tuple(items) | ExpressionKind::Array(items) => items.to_vec(),
             ExpressionKind::Record(fields) => fields.iter().map(|field| field.value).collect(),
             ExpressionKind::Tag { payload, .. } => payload.iter().copied().collect(),
             ExpressionKind::Match { scrutinee, arms } => {
@@ -840,6 +842,20 @@ impl Module {
                 Some(list) => self.lower_items(&list, range),
                 None => self.missing(range),
             },
+            SyntaxKind::ARRAY_EXPR => {
+                let items = match node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+                {
+                    Some(list) => self
+                        .lower_arguments_of(&list, None)
+                        .into_iter()
+                        .filter_map(|argument| argument.value)
+                        .collect(),
+                    None => Box::default(),
+                };
+                self.allocate(ExpressionKind::Array(items), range)
+            }
             SyntaxKind::TAG_EXPR => {
                 let Some(name_node) = node
                     .children()
