@@ -3780,6 +3780,9 @@ explicit allocators".
 
 # Decision record: every host keeps every tree
 
+The server still keeps every tree; `ry check` now releases them once (see "Decision record: `ry
+check` releases its trees once, and memoized records are compact" below).
+
 - **Previous source.** `limit_resident_trees` gave `parse`, `file_item_annotations`,
   `item_syntax` and `item_annotation_syntax` salsa LRU capacities in `RootDatabase::one_shot`,
   and `ry check` ran its passes in batches with `trigger_lru_eviction` between them. The server
@@ -3804,6 +3807,47 @@ explicit allocators".
 - **Incremental.** Unchanged: the server never evicted. The remaining waits in the cold check are
   salsa claims on project-wide queries (`duplicate_binding_map`, `project_arithmetic_classes`,
   `project_type_definitions`) that one thread computes while others need them.
+
+# Decision record: `ry check` releases its trees once, and memoized records are compact
+
+- **Previous source.** `ry check` kept every tree to the end, because salsa's LRU records each
+  read under one mutex per query. The checker recorded strict-mode origins for every item, and
+  the host decided strictness on its own (`file_is_strict` in `crates/ry/src/diagnostics.rs`).
+  Memoized records held `BTreeMap`s, `Vec`s and boxed slices, one `Ty` per expression, and
+  `item_top_level_names` was a `BTreeSet`.
+- **Weakness.** Peak RSS was 536-544 MiB on the benchmark code bases. The trees were dead after
+  the syntax pass. Strict origins (about 14 MiB) were built for projects that never read them,
+  and the strict setting had two deciders. Most per-item lists are empty, yet an empty `Vec` is
+  24 bytes and a boxed slice 16, so `ItemNaming` was 320 bytes and `ItemCheck` 248, times 56,000
+  items, and the HIR module's twelve side arrays were 24 bytes each.
+- **Target shape.**
+  - The tree queries declare `lru = 0`, which records nothing per read. `semantics::release_trees`
+    raises the capacity to one, touches every tree on one thread, calls
+    `trigger_lru_eviction`, and lowers it again. The CLI calls it after the syntax pass and hands
+    each file tree to the naming worker that names that file, which frees it.
+  - `AnalysisSettings` carries `[check] strict`, and `semantics::file_is_strict` decides a
+    file's mode for the check (the loader's `load_index::file_is_strict` reads the package
+    default). The checker records strict origins only when it is true.
+  - Frozen per-item tables are `SortedMap`/`SortedSet` (`crates/semantics/src/sorted.rs`) over a
+    `ThinVec`, which is one pointer wide and allocates nothing when empty. The same goes for the
+    check and naming lists and the HIR module's side arrays.
+  - `ExpressionTypes` is a palette of the item's distinct types plus one `u16` slot per expression
+    (`u32` past 65,535 distinct types).
+  - Interned types carry content flags (`HAS_VAR`, `HAS_RIGID`, `HAS_UNKNOWN`, `HAS_NAMED`),
+    computed once at intern time, so a walk skips a type with nothing to rewrite.
+  - `file_binders` is keyed by `Symbol`, and `item_interface_reads` looks names up by symbol
+    instead of interning a query name for each read.
+- **Correctness.** JSON findings are byte-identical on the three benchmark code bases and on a
+  full-size typed (strict) finance bench, and both `[check] strict` and a `# typing:` directive
+  give the same findings as before on a small project.
+- **Performance.** Interleaved runs against main (4 cores): peak RSS went from 536-544 MiB to
+  417-419 MiB, the median wall time from 1.41-1.52 s to 1.39-1.44 s, and the median CPU from
+  4.7-5.0 s to 4.6-4.8 s. mimalloc's v2 build (489 MiB), its purge, reclaim, retention and
+  huge-page options, and a forced `mi_collect` at worker exit measured no saving, or one inside
+  the noise.
+- **Incremental.** The server never releases trees. `item_interface_reads` reads `file_binders`
+  directly, like `item_frame_binders` already did, and still backdates when a file's binders are
+  unchanged.
 
 # Decision record: HIR as struct-of-arrays, lowered from the green tree
 

@@ -2,20 +2,27 @@
 //!
 //! A memoized analysis result is built once and then only read, so it does not need a
 //! B-tree's spare node capacity or its per-node allocations. These types hold their entries in
-//! one exactly sized, sorted boxed slice: a lookup is a binary search, iteration is in key
-//! order (the same order a `BTreeMap` gives), and an empty one allocates nothing.
+//! one exactly sized, sorted array: a lookup is a binary search, iteration is in key order (the
+//! same order a `BTreeMap` gives), and an empty one allocates nothing.
+//!
+//! The array is a `ThinVec`, which keeps its length beside the elements, so a map is one
+//! pointer wide. A per-item record holds a couple of dozen of these and most are empty, so the
+//! width of an empty one is most of the record's size.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    iter, slice,
+use {
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        iter, slice,
+    },
+    thin_vec::ThinVec,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SortedMap<K, V>(Box<[(K, V)]>);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct SortedMap<K, V>(ThinVec<(K, V)>);
 
 impl<K, V> Default for SortedMap<K, V> {
     fn default() -> SortedMap<K, V> {
-        SortedMap(Box::default())
+        SortedMap(ThinVec::new())
     }
 }
 
@@ -61,7 +68,14 @@ impl<K: Ord, V> From<BTreeMap<K, V>> for SortedMap<K, V> {
 /// Later entries win over earlier ones with the same key, as with `BTreeMap::insert`.
 impl<K: Ord, V> FromIterator<(K, V)> for SortedMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(entries: I) -> SortedMap<K, V> {
-        SortedMap::from(entries.into_iter().collect::<BTreeMap<K, V>>())
+        let mut entries: Vec<(K, V)> = entries.into_iter().collect();
+        // A stable sort keeps equal keys in arrival order, so after reversing, the first of
+        // each run is the latest entry.
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        entries.reverse();
+        entries.dedup_by(|(later, _), (kept, _)| later == kept);
+        entries.reverse();
+        SortedMap(ThinVec::from(entries))
     }
 }
 
@@ -74,12 +88,12 @@ impl<'a, K: Ord, V> IntoIterator for &'a SortedMap<K, V> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SortedSet<K>(Box<[K]>);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct SortedSet<K>(ThinVec<K>);
 
 impl<K> Default for SortedSet<K> {
     fn default() -> SortedSet<K> {
-        SortedSet(Box::default())
+        SortedSet(ThinVec::new())
     }
 }
 
@@ -109,7 +123,10 @@ impl<K: Ord> From<BTreeSet<K>> for SortedSet<K> {
 
 impl<K: Ord> FromIterator<K> for SortedSet<K> {
     fn from_iter<I: IntoIterator<Item = K>>(keys: I) -> SortedSet<K> {
-        SortedSet::from(keys.into_iter().collect::<BTreeSet<K>>())
+        let mut keys: Vec<K> = keys.into_iter().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        SortedSet(ThinVec::from(keys))
     }
 }
 
