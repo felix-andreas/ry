@@ -2279,6 +2279,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   grouped or literal write). The runtime result is almost always a bug (NA or a truncated value),
   and an explicit `as.*()` call states the intent. A number into a string column converts without
   loss and stays accepted, as R code relies on it.
+- **`lapply(.SD, f)` is typed once per column, not through `lapply`'s signature.** Typed through
+  `lapply`, `.SD` is a list of the union of its column types, so `f` is checked against that union
+  (a false error for any `f` that fits each column) and the result has one element type. Instead
+  `subset_apply` in `check.rs` types the call once per column with `.SD` read as a one-column list;
+  an overloaded `f` passed by name is called directly on each column through `overloaded_call`,
+  because an overload set has no single function type for `lapply` to use. A finding every column
+  causes is reported once; one only some columns cause names the column.
+- **A query result that repeats a column name has unknown columns.** data.table keeps both columns
+  (`.SDcols` naming a group column, or `.(g = x)` under `by = g`), but a `frame{...}` type cannot
+  hold two fields of one name, and annotations must round-trip.
 
 ## Records, tuples and tags are ry values, not R lists
 

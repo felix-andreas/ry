@@ -1811,8 +1811,13 @@ The end-to-end guard rests on the corpus suites.
 
 - **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
   `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
-- **Checker:** `lapply(.SD, f)` and `.SDcols` give a frame with unknown columns; typing them needs
-  `f` applied to each column type, overloads included.
+- **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
+  variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
+- **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
+  name has no single type, so `lapply` cannot pick its result. Queries call it per `.SD` column
+  instead (`subset_apply` in `check.rs`); the general fix is overload selection for callbacks.
+- **Stubs:** `sum` and `max` accept a character vector without a finding (`sum(c("a"))` is `Any`),
+  so `lapply(.SD, sum)` over a character column is silent.
 - **Checker:** a factor column is typed `Any`, so join conditions on it, and `:=` into it, are not
   checked. The engine refuses a factor joined to a number and a number written into a factor.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every

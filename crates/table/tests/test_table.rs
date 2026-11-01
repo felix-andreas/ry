@@ -2891,7 +2891,10 @@ fn prefixed_columns_read_either_side_of_a_join() {
     );
     assert_eq!(read(&mut result, "hi"), doubles(&[10.0; 4]));
     assert_eq!(read(&mut result, "iid"), ints(&[1, NA_INTEGER, 2, 1]));
-    assert_eq!(read(&mut result, "xid"), ints(&[1, NA_INTEGER, NA_INTEGER, 1]));
+    assert_eq!(
+        read(&mut result, "xid"),
+        ints(&[1, NA_INTEGER, NA_INTEGER, 1])
+    );
 
     let mut result = run_both(
         &mut x,
@@ -2978,7 +2981,11 @@ fn assigning_strings_into_a_number_column_parses_them_with_a_warning() {
         ("a", "7.9", ints(&[1, 7, 7])),
         ("b", "T", RVector::Logical(vec![1, 1, 1])),
         ("b", "false", RVector::Logical(vec![1, 0, 0])),
-        ("b", "yes", RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER])),
+        (
+            "b",
+            "yes",
+            RVector::Logical(vec![1, NA_INTEGER, NA_INTEGER]),
+        ),
     ];
     for (name, value, expected) in cases {
         let holds = match name {

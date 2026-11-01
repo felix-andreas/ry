@@ -27,8 +27,8 @@ use crate::types::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use syntax::{TextRange, TextSize};
 use syntax::native_values::accepts_native;
+use syntax::{TextRange, TextSize};
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct TypeError<'db> {
@@ -151,6 +151,11 @@ pub enum TypeErrorKind<'db> {
         column: String,
         column_ty: Ty<'db>,
         found: Ty<'db>,
+    },
+    /// A finding of `lapply(.SD, f)` that only one column of `.SD` causes.
+    InSubsetColumn {
+        column: String,
+        inner: Box<TypeErrorKind<'db>>,
     },
     /// A query's `i` that is neither a filter nor row positions.
     BadRowIndex {
@@ -4773,11 +4778,24 @@ impl<'db> Checker<'db, '_> {
         // Arguments infer once, before any probe: the probe snapshot does not reverse
         // environment or recorded-type writes.
         let call_arguments = self.infer_call_arguments(range, arguments);
+        Some(self.overloaded_call(id, range, callee, name, &schemes, &call_arguments))
+    }
 
+    /// The overload of `schemes` that `call_arguments` select, committed, or the finding
+    /// that none fits.
+    fn overloaded_call(
+        &mut self,
+        id: ExprId,
+        range: TextRange,
+        callee: ExprId,
+        name: String,
+        schemes: &[TypeScheme<'db>],
+        call_arguments: &[CallArgument<'db>],
+    ) -> Ty<'db> {
         // A fit leaving the caller's open variables untouched beats one that narrows them:
         // binding `function(x) sum(x)`'s `x` to the first-probed candidate would reject
         // calls R accepts. Ties go to declaration order.
-        let caller_entries = self.caller_open_variables(&call_arguments);
+        let caller_entries = self.caller_open_variables(call_arguments);
 
         // An `Unknown` argument fits every candidate, so declaration order alone would
         // pick one return type (`sum(x[[i]])` as `integer`). The call is only typed when
@@ -4809,7 +4827,7 @@ impl<'db> Checker<'db, '_> {
         for &courtesy in rounds {
             for (index, scheme) in schemes.iter().enumerate() {
                 let snapshot = self.table.snapshot();
-                match self.probe_overload_candidate(callee, scheme, &call_arguments, courtesy) {
+                match self.probe_overload_candidate(callee, scheme, call_arguments, courtesy) {
                     Ok((resolved, function)) => {
                         if unchecked_argument {
                             let result = self.table.resolve(self.db, function.ret);
@@ -4821,7 +4839,7 @@ impl<'db> Checker<'db, '_> {
                         if caller_entries.is_empty() {
                             self.recorded.insert(callee, resolved);
                             self.selected_overloads.insert(callee, index);
-                            return Some(self.committed_overload_return(id, function.ret));
+                            return self.committed_overload_return(id, function.ret);
                         }
                         let free = self.caller_variables_untouched(&caller_entries);
                         let narrowing = caller_entries
@@ -4860,7 +4878,7 @@ impl<'db> Checker<'db, '_> {
                 .any(|(_, _, results)| results.iter().any(|&result| self.is_numeric_result(result)))
         {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
-            return Some(unknown(self.db));
+            return unknown(self.db);
         }
         let winner = fits.iter().find(|(_, free, _)| *free).or_else(|| {
             let (_, _, first) = fits.first()?;
@@ -4880,12 +4898,12 @@ impl<'db> Checker<'db, '_> {
                     let var = Ty::new(self.db, TyKind::Var(*var));
                     let unknown = unknown(self.db);
                     if self.table.unify(self.db, var, unknown).is_err() {
-                        return Some(unknown);
+                        return unknown;
                     }
                 }
             }
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
-            return Some(unknown(self.db));
+            return unknown(self.db);
         }
         // Re-probe the winner to commit: probing rolled back, and matching is a pure
         // function of the table.
@@ -4893,11 +4911,11 @@ impl<'db> Checker<'db, '_> {
             && let Some(scheme) = schemes.get(index)
         {
             let snapshot = self.table.snapshot();
-            match self.probe_overload_candidate(callee, scheme, &call_arguments, fitting_courtesy) {
+            match self.probe_overload_candidate(callee, scheme, call_arguments, fitting_courtesy) {
                 Ok((resolved, function)) => {
                     self.recorded.insert(callee, resolved);
                     self.selected_overloads.insert(callee, index);
-                    return Some(self.committed_overload_return(id, function.ret));
+                    return self.committed_overload_return(id, function.ret);
                 }
                 Err(_) => self.table.rollback(snapshot),
             }
@@ -4950,7 +4968,7 @@ impl<'db> Checker<'db, '_> {
         self.recorded.insert(callee, unknown(self.db));
         // A capture-discovery re-pass must not keep a stale commitment from the first pass.
         self.selected_overloads.remove(&callee);
-        Some(unknown(self.db))
+        unknown(self.db)
     }
 
     /// An `Any` return is the corpus's fallback for calls it cannot describe and passes
@@ -5983,24 +6001,37 @@ impl<'db> Checker<'db, '_> {
                         .filter(|column| column.condition.is_some())
                         .collect();
                     compared.sort_by_key(|column| column.condition);
-                    compared.into_iter().map(|column| column.field.clone()).collect()
+                    compared
+                        .into_iter()
+                        .map(|column| column.field.clone())
+                        .collect()
                 })
             }
             Some(value) => self.query_groups(value),
             None => Some(Vec::new()),
         };
-        let subset_data = match (&source_columns, &groups) {
-            (Some(columns), Some(groups)) if named(".SDcols").is_none() => TyKind::Frame(Some(
+        // `.SDcols` names `.SD`'s columns exactly, so a grouping column it names stays in.
+        let subset_columns = match (
+            named(".SDcols").and_then(|argument| argument.value),
+            &source_columns,
+        ) {
+            (Some(selection), Some(columns)) => self.subset_columns(columns, selection),
+            (Some(selection), None) => {
+                self.infer(selection);
+                None
+            }
+            (None, Some(columns)) => groups.as_ref().map(|groups| {
                 columns
                     .iter()
                     .filter(|column| !groups.iter().any(|group| group.name == column.name))
                     .cloned()
-                    .collect(),
-            )),
-            _ => TyKind::Frame(None),
+                    .collect()
+            }),
+            (None, None) => None,
         };
+        let subset_data = Ty::new(db, TyKind::Frame(subset_columns));
         if let Some(scope) = self.column_scopes.last_mut() {
-            scope.subset_data = Ty::new(db, subset_data);
+            scope.subset_data = subset_data;
         }
         let j_value = j.and_then(|argument| argument.value);
         let update = j_value.and_then(|value| match &module.expression(value).kind {
@@ -6038,7 +6069,7 @@ impl<'db> Checker<'db, '_> {
             None => Ty::new(db, TyKind::Frame(source_columns)),
         };
         for argument in arguments {
-            let handled = [i, j, by, on]
+            let handled = [i, j, by, on, named(".SDcols")]
                 .into_iter()
                 .flatten()
                 .any(|handled| std::ptr::eq(handled, argument));
@@ -6094,14 +6125,18 @@ impl<'db> Checker<'db, '_> {
                 .map(|column| column.ty)
         };
         for key in keys {
-            let (Some(x_ty), Some(y_ty)) = (column_of(x_columns, &key.x), column_of(y_columns, &key.y))
+            let (Some(x_ty), Some(y_ty)) =
+                (column_of(x_columns, &key.x), column_of(y_columns, &key.y))
             else {
                 continue;
             };
             let (x_class, y_class) = (join_class(db, x_ty), join_class(db, y_ty));
-            let text_side = [(x_class, &key.x, key.x_range, x_ty), (y_class, &key.y, key.y_range, y_ty)]
-                .into_iter()
-                .find(|(class, ..)| *class == Some(JoinClass::Text));
+            let text_side = [
+                (x_class, &key.x, key.x_range, x_ty),
+                (y_class, &key.y, key.y_range, y_ty),
+            ]
+            .into_iter()
+            .find(|(class, ..)| *class == Some(JoinClass::Text));
             if key.operator != JoinOperator::Equal
                 && let Some((_, column, range, found)) = text_side
             {
@@ -6126,7 +6161,8 @@ impl<'db> Checker<'db, '_> {
                 });
             }
         }
-        let mut layout: Vec<JoinedColumn<'db>> = Vec::with_capacity(x_columns.len() + y_columns.len());
+        let mut layout: Vec<JoinedColumn<'db>> =
+            Vec::with_capacity(x_columns.len() + y_columns.len());
         for column in x_columns {
             let condition = keys.iter().position(|key| key.x == column.name.text(db));
             let joined = condition
@@ -6292,6 +6328,273 @@ impl<'db> Checker<'db, '_> {
         groups
     }
 
+    /// The columns `.SDcols` selects from the query's source, in the source's order:
+    /// `c("a", "b")`, a range `a:b`, a type predicate such as `is.numeric`, or any of them
+    /// negated with `!` or `-`. `None` when the selection is not one of these shapes or reads
+    /// a column whose type cannot answer the predicate.
+    fn subset_columns(
+        &mut self,
+        columns: &[RecordField<'db>],
+        value: ExprId,
+    ) -> Option<Vec<RecordField<'db>>> {
+        let module = self.module;
+        let db = self.db;
+        let unparenthesized = |mut id: ExprId| {
+            while let ExpressionKind::Paren(inner) = &module.expression(id).kind {
+                id = *inner;
+            }
+            id
+        };
+        let (negated, selection) = match &module.expression(unparenthesized(value)).kind {
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Not | UnaryOperator::Minus,
+                operand,
+            } => (true, unparenthesized(*operand)),
+            _ => (false, unparenthesized(value)),
+        };
+        let frame = self.column_scopes.last().and_then(|scope| scope.frame);
+        let position = |checker: &mut Self, item: ExprId| {
+            let expression = module.expression(item);
+            let name = match &expression.kind {
+                ExpressionKind::Literal(LiteralKind::String(text)) => text.to_string(),
+                ExpressionKind::NameRef(name) => name.to_string(),
+                _ => return Err(()),
+            };
+            let found = columns
+                .iter()
+                .position(|column| column.name.text(db) == name.as_str());
+            if found.is_none() {
+                checker.errors.push(TypeError {
+                    range: expression.range,
+                    kind: column_does_not_exist(db, &name, frame, columns),
+                });
+            }
+            Ok(found)
+        };
+        let selected: Vec<bool> = match &module.expression(selection).kind {
+            ExpressionKind::Literal(LiteralKind::String(_)) => {
+                let found = position(self, selection).ok()??;
+                (0..columns.len()).map(|index| index == found).collect()
+            }
+            ExpressionKind::Call { callee, arguments }
+                if variable_name(module, *callee).as_deref() == Some("c")
+                    && string_literals(module, arguments).is_some() =>
+            {
+                let mut chosen = vec![false; columns.len()];
+                let mut complete = true;
+                for item in arguments.iter().filter_map(|argument| argument.value) {
+                    match position(self, item) {
+                        Ok(Some(index)) => {
+                            if let Some(slot) = chosen.get_mut(index) {
+                                *slot = true;
+                            }
+                        }
+                        _ => complete = false,
+                    }
+                }
+                if !complete {
+                    return None;
+                }
+                chosen
+            }
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Sequence,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let (Ok(from), Ok(to)) = (position(self, *lhs), position(self, *rhs)) else {
+                    self.infer(value);
+                    return None;
+                };
+                let (from, to) = (from?, to?);
+                let (low, high) = (from.min(to), from.max(to));
+                (0..columns.len())
+                    .map(|index| (low..=high).contains(&index))
+                    .collect()
+            }
+            ExpressionKind::NameRef(name) => {
+                let wanted: &[Atomic] = match name.as_str() {
+                    "is.numeric" => &[Atomic::Integer, Atomic::Double],
+                    "is.double" => &[Atomic::Double],
+                    "is.integer" => &[Atomic::Integer],
+                    "is.character" => &[Atomic::Character],
+                    "is.logical" => &[Atomic::Logical],
+                    _ => {
+                        self.infer(value);
+                        return None;
+                    }
+                };
+                let mut chosen = Vec::with_capacity(columns.len());
+                for column in columns {
+                    match column_element(db, column.ty).kind(db) {
+                        TyKind::Scalar(atomic) => chosen.push(wanted.contains(atomic)),
+                        _ => return None,
+                    }
+                }
+                chosen
+            }
+            _ => {
+                self.infer(value);
+                return None;
+            }
+        };
+        Some(
+            columns
+                .iter()
+                .zip(selected)
+                .filter(|(_, chosen)| *chosen != negated)
+                .map(|(column, _)| column.clone())
+                .collect(),
+        )
+    }
+
+    /// `lapply(.SD, f, ...)` gives one column per column of `.SD`, each `f` applied to that
+    /// column. The call is typed once per column with `.SD` read as a one-column list, so `f`
+    /// is checked against every column's own type rather than their union. `None` when `j` is
+    /// not that call; `Some(None)` when `.SD`'s columns are not known.
+    fn subset_apply(&mut self, value: ExprId) -> Option<Option<Vec<RecordField<'db>>>> {
+        let module = self.module;
+        let db = self.db;
+        let ExpressionKind::Call { callee, arguments } = &module.expression(value).kind else {
+            return None;
+        };
+        let subset = arguments
+            .iter()
+            .find(|argument| argument.name.is_none() || argument.name.as_deref() == Some("X"))
+            .and_then(|argument| argument.value)?;
+        if variable_name(module, *callee).as_deref() != Some("lapply")
+            || self.naming.resolutions.contains_key(callee)
+            || !matches!(&module.expression(subset).kind, ExpressionKind::NameRef(name) if name == ".SD")
+        {
+            return None;
+        }
+        let subset_data = self.column_scopes.last()?.subset_data;
+        let columns = match subset_data.kind(db) {
+            TyKind::Frame(Some(columns)) if !columns.is_empty() => columns.clone(),
+            _ => {
+                self.infer(value);
+                return Some(None);
+            }
+        };
+        let mut findings: Vec<Vec<TypeError<'db>>> = Vec::with_capacity(columns.len());
+        let mut applied = Some(Vec::with_capacity(columns.len()));
+        // An overloaded `f` passed by name is a set of functions, not one function type, so
+        // `lapply` cannot pick its result per element; calling it on each column directly can.
+        let function = arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .nth(1)
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .find(|argument| argument.name.as_deref() == Some("FUN"))
+            })
+            .and_then(|argument| argument.value);
+        let overloads = function.and_then(|function| match &module.expression(function).kind {
+            ExpressionKind::NameRef(name) if !self.naming.resolutions.contains_key(&function) => {
+                let deferred = self.naming.deferred_non_locals.contains(&function);
+                let schemes = self.globals?.overloads(name, deferred)?;
+                (schemes.len() >= 2).then(|| (function, name.to_string(), schemes))
+            }
+            _ => None,
+        });
+        if let Some((function, name, schemes)) = overloads {
+            let range = module.expression(value).range;
+            let rest: Vec<Argument> = arguments
+                .iter()
+                .filter(|argument| {
+                    argument.value != Some(subset) && argument.value != Some(function)
+                })
+                .cloned()
+                .collect();
+            let mut call_arguments = vec![CallArgument {
+                name: None,
+                name_range: None,
+                ty: None,
+                range: module.expression(subset).range,
+                value: None,
+                whole_double: false,
+                forwards_dots: false,
+            }];
+            call_arguments.extend(self.infer_call_arguments(range, &rest));
+            for column in &columns {
+                if let Some(first) = call_arguments.first_mut() {
+                    first.ty = Some(column.ty);
+                }
+                let recorded_errors = self.errors.len();
+                let ty = self.overloaded_call(
+                    value,
+                    range,
+                    function,
+                    name.clone(),
+                    &schemes,
+                    &call_arguments,
+                );
+                findings.push(self.errors.split_off(recorded_errors));
+                if let Some(applied) = applied.as_mut() {
+                    let column_name = column.name.text(db).to_owned();
+                    applied.push(self.column_field(&column_name, ty));
+                }
+            }
+        } else {
+            for column in &columns {
+                if let Some(scope) = self.column_scopes.last_mut() {
+                    scope.subset_data = Ty::new(db, TyKind::Record(vec![column.clone()]));
+                }
+                let recorded_errors = self.errors.len();
+                let ty = self.infer(value);
+                findings.push(self.errors.split_off(recorded_errors));
+                let element = match self.table.resolve(db, ty).kind(db) {
+                    TyKind::List(element) | TyKind::NamedList(element) => Some(*element),
+                    _ => None,
+                };
+                match (element, applied.as_mut()) {
+                    (Some(element), Some(applied)) => {
+                        let column_name = column.name.text(db).to_owned();
+                        applied.push(self.column_field(&column_name, element));
+                    }
+                    _ => applied = None,
+                }
+            }
+            if let Some(scope) = self.column_scopes.last_mut() {
+                scope.subset_data = subset_data;
+            }
+        }
+        self.record(subset, subset_data);
+        if let Some(applied) = &applied {
+            self.record(value, Ty::new(db, TyKind::Record(applied.clone())));
+        }
+        // A finding every column causes is about `f` itself and is reported once; one that
+        // only some columns cause names each of them.
+        let shared: Vec<TypeError<'db>> = findings
+            .first()
+            .map(|first| {
+                first
+                    .iter()
+                    .filter(|finding| findings.iter().all(|column| column.contains(finding)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (column, column_findings) in columns.iter().zip(findings) {
+            for finding in column_findings {
+                if shared.contains(&finding) {
+                    continue;
+                }
+                self.errors.push(TypeError {
+                    range: finding.range,
+                    kind: TypeErrorKind::InSubsetColumn {
+                        column: column.name.text(db).to_owned(),
+                        inner: Box::new(finding.kind),
+                    },
+                });
+            }
+        }
+        self.errors.extend(shared);
+        Some(applied)
+    }
+
     fn query_result(
         &mut self,
         id: ExprId,
@@ -6302,7 +6605,25 @@ impl<'db> Checker<'db, '_> {
     ) -> Ty<'db> {
         let db = self.db;
         let module = self.module;
-        let frame_of = |columns: Option<Vec<RecordField<'db>>>| Ty::new(db, TyKind::Frame(columns));
+        // data.table keeps a computed column that repeats a group's name as a second column of
+        // that name, which a frame type cannot hold, so such a result has unknown columns.
+        let frame_of = |columns: Option<Vec<RecordField<'db>>>| {
+            let columns = columns.filter(|columns| {
+                columns.iter().enumerate().all(|(index, column)| {
+                    columns
+                        .iter()
+                        .skip(index + 1)
+                        .all(|other| other.name != column.name)
+                })
+            });
+            Ty::new(db, TyKind::Frame(columns))
+        };
+        if let Some(applied) = self.subset_apply(j) {
+            return frame_of(groups.zip(applied).map(|(mut groups, applied)| {
+                groups.extend(applied);
+                groups
+            }));
+        }
         if let ExpressionKind::Call { callee, arguments } = &module.expression(j).kind
             && matches!(
                 variable_name(module, *callee).as_deref(),
@@ -6358,7 +6679,8 @@ impl<'db> Checker<'db, '_> {
         let Some(mut columns) = groups else {
             return frame_of(None);
         };
-        let count = matches!(&module.expression(j).kind, ExpressionKind::NameRef(name) if name == ".N");
+        let count =
+            matches!(&module.expression(j).kind, ExpressionKind::NameRef(name) if name == ".N");
         match (bare_column, resolved.kind(db)) {
             (Some(name), _) => columns.push(self.column_field(&name, resolved)),
             (None, _) if count => columns.push(self.column_field("N", resolved)),
@@ -6395,9 +6717,24 @@ impl<'db> Checker<'db, '_> {
         let mut updates: Option<Vec<(String, Ty<'db>, Option<ExprId>)>> = Some(Vec::new());
         match arguments {
             [left, right] if left.name.is_none() && right.name.is_none() => {
-                // The left side names columns; it is never read.
+                // The left side names columns; it is never read. `(cols) := v` evaluates `cols`
+                // for the names, which is the same set when `cols` is a literal.
+                let left_value = left
+                    .value
+                    .map(|value| match &module.expression(value).kind {
+                        ExpressionKind::Paren(inner)
+                            if matches!(
+                                &module.expression(*inner).kind,
+                                ExpressionKind::Literal(LiteralKind::String(_))
+                                    | ExpressionKind::Call { .. }
+                            ) =>
+                        {
+                            *inner
+                        }
+                        _ => value,
+                    });
                 let names: Option<Vec<String>> =
-                    match left.value.map(|value| &module.expression(value).kind) {
+                    match left_value.map(|value| &module.expression(value).kind) {
                         Some(ExpressionKind::NameRef(name)) => Some(vec![name.to_string()]),
                         Some(ExpressionKind::Literal(LiteralKind::String(name))) => {
                             Some(vec![name.to_string()])
@@ -6433,8 +6770,18 @@ impl<'db> Checker<'db, '_> {
                             }
                             _ => None,
                         });
-                updates = match (names, items) {
-                    (Some(names), _) if names.len() == 1 => {
+                let applied = right.value.and_then(|value| self.subset_apply(value));
+                updates = match (names, items, applied) {
+                    // `c("a", "b") := lapply(.SD, f)` pairs the names with `.SD`'s columns.
+                    (Some(names), _, Some(Some(applied))) if names.len() == applied.len() => Some(
+                        names
+                            .into_iter()
+                            .zip(applied)
+                            .map(|(name, column)| (name, column.ty, None))
+                            .collect(),
+                    ),
+                    (_, _, Some(_)) => None,
+                    (Some(names), _, None) if names.len() == 1 => {
                         let ty = match right.value {
                             Some(value) => self.infer(value),
                             None => unknown(db),
@@ -6446,7 +6793,7 @@ impl<'db> Checker<'db, '_> {
                                 .collect(),
                         )
                     }
-                    (Some(names), Some(items)) if names.len() == items.len() => {
+                    (Some(names), Some(items), None) if names.len() == items.len() => {
                         let mut paired = Vec::with_capacity(names.len());
                         for (name, item) in names.into_iter().zip(items) {
                             paired.push((name, self.infer(item), Some(item)));
@@ -7372,10 +7719,7 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
                     (
                         "." | "list",
                         ExpressionKind::Binary {
-                            operator,
-                            lhs,
-                            rhs,
-                            ..
+                            operator, lhs, rhs, ..
                         },
                     ) if argument.name.is_none() => {
                         let operator = match operator {
@@ -7409,12 +7753,15 @@ fn join_keys(module: &Module, on: ExprId) -> Option<Vec<JoinKey>> {
 fn split_join_keys(text: &str, range: TextRange) -> Option<Vec<JoinKey>> {
     let verbatim = usize::from(range.len()) == text.len() + 2;
     let range_of = |start: usize, part: &str| {
-        let offset = u32::try_from(start).ok().filter(|_| verbatim && !part.is_empty());
+        let offset = u32::try_from(start)
+            .ok()
+            .filter(|_| verbatim && !part.is_empty());
         let length = u32::try_from(part.len()).ok();
         match (offset, length) {
-            (Some(offset), Some(length)) => {
-                TextRange::at(range.start() + TextSize::from(1 + offset), TextSize::from(length))
-            }
+            (Some(offset), Some(length)) => TextRange::at(
+                range.start() + TextSize::from(1 + offset),
+                TextSize::from(length),
+            ),
             _ => range,
         }
     };
@@ -7436,12 +7783,16 @@ fn split_join_keys(text: &str, range: TextRange) -> Option<Vec<JoinKey>> {
                 .into_iter()
                 .find(|(symbol, _)| rest.starts_with(symbol))
                 .map(|(symbol, operator)| (operator, symbol.len()))?;
-                (part.get(..at)?, operator, part.get(at + width..)?, at + width)
+                (
+                    part.get(..at)?,
+                    operator,
+                    part.get(at + width..)?,
+                    at + width,
+                )
             }
         };
         let (x, y) = (x_part.trim(), y_part.trim());
-        if x.is_empty() || y.is_empty() || !is_join_operator_free(x) || !is_join_operator_free(y)
-        {
+        if x.is_empty() || y.is_empty() || !is_join_operator_free(x) || !is_join_operator_free(y) {
             return None;
         }
         let x_start = part_start + (x_part.len() - x_part.trim_start().len());

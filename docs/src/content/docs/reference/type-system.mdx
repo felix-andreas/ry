@@ -2357,7 +2357,8 @@ unresolved
 
 This is an `unresolved` warning rather than a type error, because R looks a non-column up in the
 enclosing scope, so only a name nothing defines is certainly wrong. `.N`, `.GRP`, and `.NGRP` are
-`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns. A called
+`integer`, `.I` is `integer[]`, and `.SD` is the source frame without its group columns, or the
+columns `.SDcols` selects (see [Every column at once](#every-column-at-once)). A called
 name, such as `sum` in `sum(amount)`, is looked up as a function and never reads a column. A
 `..name` read is the variable `name` from the enclosing scope, never a column, and a bare `..name`
 as `j` selects the columns it names, which makes the result a `frame` with unknown columns.
@@ -2397,6 +2398,54 @@ chain, and each step sees the columns the step before it produced:
 sales[amount > 0][, .(total = sum(amount)), by = team][order(-total)]
 # frame{team: character[], total: double[]}
 ```
+
+#### Every column at once
+
+`f[, lapply(.SD, g)]` applies `g` to each column of `.SD`, so its result has one column per column
+of `.SD`, each typed as `g` applied to that column alone. Under `by`, the group columns come first:
+
+```r
+sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+sales[, lapply(.SD, sum), by = team]
+# frame{team: character[], units: integer[], price: double[]}
+sales[, lapply(.SD, round, digits = 1), .SDcols = "price"]
+# frame{price: double[]}
+```
+
+Because each column is checked on its own, a function that does not fit one column is reported
+with that column's name, not against the union of all column types:
+
+```text
+type-mismatch
+
+  x this function is passed `character[]`, but its parameter `v` is used as a numeric value (`integer` or `double`), for the column `team` of `.SD`
+   --[main.R:2:27]
+ 1 | sales <- frame(team = c("a", "b"), units = c(1L, 2L), price = c(1.5, 2.5))
+ 2 | print(sales[, lapply(.SD, function(v) v * 2)])
+   |                           ^^^^^^^^^^^^^^^^^
+```
+
+A finding that every column causes is about `g` itself, so it is reported once and without a
+column name.
+
+`.SDcols` selects `.SD`'s columns, in the frame's order, in any of these forms:
+
+| `.SDcols` | Columns of `.SD` |
+| --- | --- |
+| `"a"`, `c("a", "b")` | the named columns |
+| `a:b` | the columns from `a` to `b` |
+| `is.numeric`, `is.integer`, `is.double`, `is.character`, `is.logical` | the columns of that type |
+| any of the above after `!` or `-` | the other columns |
+
+A named column must exist, so a misspelled name in a string or a range is a type error on that
+name. `.SDcols` names `.SD`'s columns exactly, so a group column it names stays in `.SD`, and the
+result then repeats that column's name, as data.table repeats it. A frame type cannot hold two
+columns of one name, so such a result has unknown columns, as does any other `.SDcols` form, such
+as `patterns()` or column positions.
+
+`c("a", "b") := lapply(.SD, g)` assigns the applied columns to the named ones in order, and
+`(c("a", "b")) := ...` does the same. A left side that is a variable, such as `(cols) := ...`,
+names columns ry cannot see, so the updated frame has unknown columns.
 
 #### Column updates
 

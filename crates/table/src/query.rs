@@ -386,7 +386,9 @@ fn grouped_integer_sums(
         return Ok(Vec::new());
     }
     let rows_schema = match &query.rows {
-        Rows::Join(join) => join_rows_schema(schema, &join.other.schema(), &join_columns(join, key)?)?,
+        Rows::Join(join) => {
+            join_rows_schema(schema, &join.other.schema(), &join_columns(join, key)?)?
+        }
         _ => schema.clone(),
     };
     let typer = Typer {
@@ -727,7 +729,12 @@ fn each_i(
         keyed: false,
     };
     // The join returns each row of `i`'s matches together, so a change of row number starts one.
-    let rows_of_i = joined.frame().column(ROW_OF_I)?.as_materialized_series().i32()?.clone();
+    let rows_of_i = joined
+        .frame()
+        .column(ROW_OF_I)?
+        .as_materialized_series()
+        .i32()?
+        .clone();
     let mut previous = None;
     let first: Vec<bool> = rows_of_i
         .iter()
@@ -766,8 +773,7 @@ fn per_row_of_i(
     i_columns: &[&PlSmallStr],
     outside_aggregate: bool,
 ) -> Expr {
-    let rewrite =
-        |arg: &Expr| Box::new(per_row_of_i(arg, x_columns, i_columns, outside_aggregate));
+    let rewrite = |arg: &Expr| Box::new(per_row_of_i(arg, x_columns, i_columns, outside_aggregate));
     let reads_x = |arg: &Expr| {
         let mut names = HashSet::new();
         column_references(arg, &mut names);
@@ -840,15 +846,19 @@ fn single_value(function: Aggregate, arg: &Expr, na_rm: bool) -> Expr {
             )),
             na_rm: true,
         },
-        Aggregate::Sum => Expr::Binary(BinaryOp::Add, Box::new(first()), Box::new(Expr::Integer(0))),
+        Aggregate::Sum => {
+            Expr::Binary(BinaryOp::Add, Box::new(first()), Box::new(Expr::Integer(0)))
+        }
         Aggregate::Mean => Expr::Binary(
             BinaryOp::Multiply,
             Box::new(first()),
             Box::new(Expr::Double(1.0)),
         ),
-        Aggregate::Min | Aggregate::Max | Aggregate::First | Aggregate::Last | Aggregate::Median => {
-            first()
-        }
+        Aggregate::Min
+        | Aggregate::Max
+        | Aggregate::First
+        | Aggregate::Last
+        | Aggregate::Median => first(),
     }
 }
 
@@ -1176,7 +1186,9 @@ pub fn result_type(schema: &Schema, key: &[PlSmallStr], query: &Query) -> Result
     }
     match &query.select {
         Select::All => Ok(ResultType::Table(match &query.rows {
-            Rows::Join(join) => join_schema(schema, &join.other.schema(), &join_columns(join, key)?)?,
+            Rows::Join(join) => {
+                join_schema(schema, &join.other.schema(), &join_columns(join, key)?)?
+            }
             _ => rows_schema,
         })),
         Select::Value(expr) if query.by.is_empty() && !each_i => {

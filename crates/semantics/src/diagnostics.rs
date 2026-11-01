@@ -3,8 +3,8 @@ use crate::annotations::{
     lower_annotation, lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{
-    column_element,
     ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
+    column_element,
 };
 use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
 use crate::hir::{ExprId, ExpressionKind, Symbol};
@@ -2236,6 +2236,17 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings.",
             renderer.render(db, *found)
         ),
+        TypeErrorKind::InSubsetColumn { column, inner } => {
+            let inner = TypeError {
+                range: error.range,
+                kind: (**inner).clone(),
+            };
+            let message = render_type_error_message(db, &inner);
+            format!(
+                "{}, for the column `{column}` of `.SD`",
+                message.trim_end_matches('.')
+            )
+        }
         TypeErrorKind::RollingNonEquiJoin => {
             "a rolling join needs every join condition to be `==`".to_owned()
         }
