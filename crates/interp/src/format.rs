@@ -8,7 +8,7 @@ use crate::{
     unwind::{R, error},
     values::{self, alloc, length, nil, symbols},
 };
-use heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, is_na_real};
+use heap::object::{NA_INTEGER, Rcomplex, Sexp, SexpType, gp, is_na_real};
 use unicode_width::UnicodeWidthChar;
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -85,6 +85,24 @@ pub fn scientific(value: f64, digits: usize) -> (bool, i32, usize) {
 
 /// GNU R's `formatReal`: the shared format of `values`.
 pub fn format_real_common(values: &[f64], settings: Settings) -> RealFormat {
+    let candidates = real_format_candidates(values, settings);
+    let mut format = match candidates.notations {
+        Some((fixed, scientific)) if fixed.width as i64 <= scientific.width as i64 + settings.scipen as i64 => fixed,
+        Some((_, scientific)) => scientific,
+        None => RealFormat { width: 0, decimals: 0, exponent: 0 },
+    };
+    format.width = format.width.max(candidates.special_width);
+    format
+}
+
+/// The fixed and the scientific format `values` would share, `None` when no value is finite,
+/// and the width of the widest non-finite value.
+struct RealCandidates {
+    notations: Option<(RealFormat, RealFormat)>,
+    special_width: usize,
+}
+
+fn real_format_candidates(values: &[f64], settings: Settings) -> RealCandidates {
     let mut negative = false;
     let mut max_sleft = i32::MIN;
     let mut right_max = i32::MIN;
@@ -121,11 +139,7 @@ pub fn format_real_common(values: &[f64], settings: Settings) -> RealFormat {
         min_exponent = min_exponent.min(exponent);
     }
     if !any_finite {
-        return RealFormat {
-            width: special_width,
-            decimals: 0,
-            exponent: 0,
-        };
+        return RealCandidates { notations: None, special_width };
     }
     let exponent_digits = if max_exponent >= 100 || min_exponent <= -100 {
         3
@@ -143,21 +157,13 @@ pub fn format_real_common(values: &[f64], settings: Settings) -> RealFormat {
         right = settings.nsmall;
     }
     let fixed_width = max_sleft as usize + right + (right != 0) as usize;
-    let mut format = if (fixed_width as i64) <= scientific_width as i64 + settings.scipen as i64 {
-        RealFormat {
-            width: fixed_width,
-            decimals: right,
-            exponent: 0,
-        }
-    } else {
-        RealFormat {
-            width: scientific_width,
-            decimals: mantissa_decimals,
-            exponent: exponent_digits,
-        }
-    };
-    format.width = format.width.max(special_width);
-    format
+    RealCandidates {
+        notations: Some((
+            RealFormat { width: fixed_width, decimals: right, exponent: 0 },
+            RealFormat { width: scientific_width, decimals: mantissa_decimals, exponent: exponent_digits },
+        )),
+        special_width,
+    }
 }
 
 /// One double in a given format, without padding.
@@ -251,7 +257,12 @@ pub fn format_complex_with(value: Rcomplex, real: RealFormat, imaginary: RealFor
     let real_text = format_real_with(real_part, real, "NA");
     let sign = if imaginary_part < 0.0 { '-' } else { '+' };
     let imaginary_text = format_real_with(imaginary_part.abs(), imaginary, "NA");
-    format!("{real_text}{sign}{imaginary_text}i")
+    // Each part is right-justified to its own common width, as in GNU R's `1+ 1i 1+10i`.
+    format!(
+        "{}{sign}{}i",
+        pad(&real_text, real.width, true),
+        pad(&imaginary_text, imaginary.width, true)
+    )
 }
 
 pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFormat, RealFormat) {
@@ -264,10 +275,36 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
         .collect();
     let reals: Vec<f64> = rounded.iter().map(|value| value.r).collect();
     let imaginaries: Vec<f64> = rounded.iter().map(|value| value.i.abs()).collect();
-    (
-        format_real_common(&reals, settings),
-        format_real_common(&imaginaries, settings),
-    )
+    let real = format_real_common(&reals, settings);
+    let imaginary = format_real_common(&imaginaries, settings);
+    // The notation is chosen for both parts together: when either part alone would print in
+    // scientific notation, both print fixed only if that is narrower than both in scientific.
+    // A part that is exactly zero throughout keeps its own format, so `1e80+0i` prints its zero
+    // imaginary part plainly.
+    let finite = || values.iter().filter(|value| !is_na_real(value.r) && !is_na_real(value.i));
+    if (real.exponent == 0 && imaginary.exponent == 0)
+        || finite().all(|value| value.r == 0.0)
+        || finite().all(|value| value.i == 0.0)
+    {
+        return (real, imaginary);
+    }
+    let real_candidates = real_format_candidates(&reals, settings);
+    let imaginary_candidates = real_format_candidates(&imaginaries, settings);
+    let (Some((real_fixed, real_scientific)), Some((imaginary_fixed, imaginary_scientific))) =
+        (real_candidates.notations, imaginary_candidates.notations)
+    else {
+        return (real, imaginary);
+    };
+    let fixed = (real_fixed.width + imaginary_fixed.width) as i64;
+    let scientific = (real_scientific.width + imaginary_scientific.width) as i64;
+    let (mut real, mut imaginary) = if fixed < scientific + settings.scipen as i64 {
+        (real_fixed, imaginary_fixed)
+    } else {
+        (real_scientific, imaginary_scientific)
+    };
+    real.width = real.width.max(real_candidates.special_width);
+    imaginary.width = imaginary.width.max(imaginary_candidates.special_width);
+    (real, imaginary)
 }
 
 pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
@@ -322,6 +359,43 @@ pub fn encode_string(text: &str, quote: Option<char>) -> String {
     if let Some(quote) = quote {
         result.push(quote);
     }
+    encode_into(&mut result, text, quote);
+    if let Some(quote) = quote {
+        result.push(quote);
+    }
+    result
+}
+
+/// A string's bytes as `print` shows them. A byte that is not part of valid UTF-8 prints as
+/// `\xNN`, as GNU R prints it in a UTF-8 locale.
+pub fn encode_bytes(bytes: &[u8], quote: Option<char>) -> String {
+    let mut result = String::with_capacity(bytes.len() + 2);
+    if let Some(quote) = quote {
+        result.push(quote);
+    }
+    for chunk in bytes.utf8_chunks() {
+        encode_into(&mut result, chunk.valid(), quote);
+        for byte in chunk.invalid() {
+            result.push_str(&format!("\\x{byte:02x}"));
+        }
+    }
+    if let Some(quote) = quote {
+        result.push(quote);
+    }
+    result
+}
+
+/// An element of a character vector as `print` shows it, from its bytes unless it is marked
+/// as Latin-1.
+pub unsafe fn encode_element(charsxp: Sexp, quote: Option<char>) -> String {
+    if charsxp.has_gp(gp::LATIN1) {
+        encode_string(&values::char_str(charsxp), quote)
+    } else {
+        encode_bytes(charsxp.bytes(), quote)
+    }
+}
+
+fn encode_into(result: &mut String, text: &str, quote: Option<char>) {
     for character in text.chars() {
         match character {
             '\n' => result.push_str("\\n"),
@@ -346,10 +420,6 @@ pub fn encode_string(text: &str, quote: Option<char>) -> String {
             character => result.push(character),
         }
     }
-    if let Some(quote) = quote {
-        result.push(quote);
-    }
-    result
 }
 
 /// Pads `text` to `width` display columns, on the left (right-justified) or the right.
@@ -436,7 +506,7 @@ pub unsafe fn format_vector(
                 .map(|index| match values::string_at(vector, index) {
                     Some(text) => {
                         if quote {
-                            encode_string(&text, Some('"'))
+                            encode_element(vector.element(index), Some('"'))
                         } else {
                             text.into_owned()
                         }
@@ -695,7 +765,7 @@ unsafe fn do_encode_string(call: &Call<'_>) -> R<Sexp> {
     let count = length(vector);
     let encoded: Vec<Option<String>> = (0..count)
         .map(|index| match values::string_at(vector, index) {
-            Some(text) => Some(encode_string(&text, quote)),
+            Some(_) => Some(encode_element(vector.element(index), quote)),
             // GNU R marks an unquoted NA as `<NA>`, so that it cannot be mistaken for the string "NA".
             None => na_encode.then(|| if quote.is_some() { "NA" } else { "<NA>" }.to_owned()),
         })

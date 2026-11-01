@@ -217,7 +217,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("rep", -1, do_rep).generic(Generic::Internal),
     internal("rep.int", 2, do_rep_int),
     internal("rep_len", 2, do_rep_len),
-    internal("atan2", 2, |call| unsafe { math2(call, f64::atan2) }),
+    internal("atan2", 2, |call| unsafe { do_atan2(call) }),
     internal("choose", 2, |call| unsafe { math2(call, rmath::choose) }),
     internal("lchoose", 2, |call| unsafe { math2(call, rmath::lchoose) }),
     internal("beta", 2, |call| unsafe { math2(call, rmath::beta) }),
@@ -1764,6 +1764,17 @@ pub fn signif_digits(x: f64, digits: i32) -> f64 {
     text.parse().unwrap_or(x)
 }
 
+/// `signif` of a complex number counts the significant digits of its larger part, so the
+/// smaller part keeps only the decimals the larger one has.
+fn signif_complex(z: Rcomplex, digits: i32) -> Rcomplex {
+    let larger = z.r.abs().max(z.i.abs());
+    let decimals = digits.max(1) - 1 - larger.log10().floor() as i32;
+    if z.r == 0.0 || z.i == 0.0 || !larger.is_finite() || decimals > 308 {
+        return Rcomplex { r: signif_digits(z.r, digits), i: signif_digits(z.i, digits) };
+    }
+    Rcomplex { r: round_digits(z.r, decimals), i: round_digits(z.i, decimals) }
+}
+
 unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
     let (matched, _) = call.match_args(&["x", "digits"])?;
     let operand = present(matched[0])
@@ -1820,10 +1831,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
             for index in 0..count {
                 let z = values::complexes(operand)[index];
                 values::complexes_mut(result)[index] = if significant {
-                    Rcomplex {
-                        r: signif_digits(z.r, digits),
-                        i: signif_digits(z.i, digits),
-                    }
+                    signif_complex(z, digits)
                 } else {
                     Rcomplex {
                         r: round_digits(z.r, digits),
@@ -1831,6 +1839,7 @@ unsafe fn round_like(call: &Call<'_>, significant: bool) -> R<Sexp> {
                     }
                 };
             }
+            values::copy_most_attributes(operand, result, true)?;
             Ok(result)
         }
         _ => Err(call.error("non-numeric argument to mathematical function")),
@@ -2877,6 +2886,54 @@ unsafe fn do_rep_len(call: &Call<'_>) -> R<Sexp> {
 }
 
 // Two-argument math.
+
+unsafe fn do_atan2(call: &Call<'_>) -> R<Sexp> {
+    let left = values::materialize(call.arg(0))?;
+    let right = values::materialize(call.arg(1))?;
+    if left.kind() != SexpType::Complex && right.kind() != SexpType::Complex {
+        return math2(call, f64::atan2);
+    }
+    let numeric = |kind| {
+        matches!(kind, SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::Complex)
+    };
+    if !numeric(left.kind()) || !numeric(right.kind()) {
+        return Err(call.error("non-numeric argument to mathematical function"));
+    }
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = recycled_length(call.call, left_length, right_length)?;
+    let result = alloc(SexpType::Complex, count)?;
+    let mut undefined = false;
+    for index in 0..count {
+        let y = complex_at(left, index % left_length);
+        let x = complex_at(right, index % right_length);
+        values::complexes_mut(result)[index] = if x.r == 0.0 && x.i == 0.0 {
+            // On the imaginary axis of `x` only the sign of the real part of `y` picks the
+            // half-plane, and `atan2(0, 0)` has no value.
+            if y.r == 0.0 && y.i == 0.0 {
+                undefined = true;
+                Rcomplex { r: NA_REAL, i: NA_REAL }
+            } else {
+                let half = std::f64::consts::FRAC_PI_2;
+                Rcomplex { r: if y.r < 0.0 { -half } else { half }, i: 0.0 }
+            }
+        } else {
+            let mut angle = complex_atan(complex_divide(y, x));
+            if x.r < 0.0 {
+                angle.r += std::f64::consts::PI;
+            }
+            if angle.r > std::f64::consts::PI {
+                angle.r -= 2.0 * std::f64::consts::PI;
+            }
+            angle
+        };
+    }
+    binary_attributes(left, right, result, call.call)?;
+    if undefined {
+        conditions::warning_call(call.call, "NaNs produced in function \"atan2\"")?;
+    }
+    Ok(result)
+}
 
 unsafe fn math2(call: &Call<'_>, function: fn(f64, f64) -> f64) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;

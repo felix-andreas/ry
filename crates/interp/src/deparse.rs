@@ -310,7 +310,7 @@ impl Deparser {
             SexpType::ExternalPtr => self.print("<pointer: 0x0>"),
             SexpType::WeakRef => self.print("<weak reference>"),
             SexpType::Bytecode => self.print("<bytecode>"),
-            SexpType::Char => self.print(&format::encode_string(&char_str(object), Some('"'))),
+            SexpType::Char => self.print(&format::encode_element(object, Some('"'))),
             SexpType::Language => self.language(object),
             SexpType::Pairlist | SexpType::Dots => {
                 self.print("pairlist(");
@@ -1170,7 +1170,7 @@ impl Deparser {
                     if element == values::na_string() {
                         if keep_na && all_na { "NA_character_".to_owned() } else { "NA".to_owned() }
                     } else {
-                        format::encode_string(&char_str(element), Some('"'))
+                        format::encode_element(element, Some('"'))
                     }
                 }
                 _ => String::new(),

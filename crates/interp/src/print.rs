@@ -309,7 +309,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     };
     let items = escape_unquoted(format::format_vector(subset, options.settings, options.quote, na)?, vector, options);
     if names != nil() {
-        print_named_vector(&items, names, options);
+        print_named_vector(&items, names, vector.kind() == SexpType::Complex, options);
     } else {
         let right = vector.kind() != SexpType::String || options.right;
         let width = items.iter().map(|item| display_width(item)).max().unwrap_or(0);
@@ -341,7 +341,7 @@ pub unsafe fn print_vector(vector: Sexp, options: &PrintOptions) -> R<()> {
     Ok(())
 }
 
-unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptions) {
+unsafe fn print_named_vector(items: &[String], names: Sexp, complex: bool, options: &PrintOptions) {
     let name_texts: Vec<String> = (0..items.len())
         .map(|index| match values::string_at(names, index) {
             Some(text) => text.into_owned(),
@@ -363,9 +363,15 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, options: &PrintOptio
             text.push_str(&" ".repeat(options.gap));
         }
         text.push('\n');
-        for item in &items[chunk_start..chunk_end] {
-            text.push_str(&pad(item, width, true));
-            text.push_str(&" ".repeat(options.gap));
+        if complex {
+            // GNU R prints named complex values at their own width, unpadded to the names and
+            // without a trailing gap.
+            text.push_str(&items[chunk_start..chunk_end].join(&" ".repeat(options.gap)));
+        } else {
+            for item in &items[chunk_start..chunk_end] {
+                text.push_str(&pad(item, width, true));
+                text.push_str(&" ".repeat(options.gap));
+            }
         }
         text.push('\n');
     }

@@ -176,9 +176,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.drop_if", set_drop_if),
 ];
 
-/// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
-/// global environment's enclosure is the base environment, and `library()` attaches between the
-/// global environment and its enclosure, so `package:ry` stays the last entry before base.
 thread_local! {
     static BUILTINS_ENV: std::cell::Cell<Option<Sexp>> = const { std::cell::Cell::new(None) };
 }
@@ -190,6 +187,9 @@ pub(crate) fn builtins_env() -> Option<Sexp> {
     BUILTINS_ENV.with(std::cell::Cell::get)
 }
 
+/// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
+/// global environment's enclosure is the base environment, and `library()` attaches between the
+/// global environment and its enclosure, so `package:ry` stays the last entry before base.
 pub(crate) unsafe fn attach() -> Sexp {
     let heap = crate::heap();
     let base = heap.known().base_env;

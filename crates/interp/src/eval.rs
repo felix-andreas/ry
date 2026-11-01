@@ -349,16 +349,20 @@ pub unsafe fn call_builtin(
     env: Sexp,
 ) -> R<Sexp> {
     if definition.arity >= 0
-        && matches!(definition.kind, Kind::Internal | Kind::InternalSpecial)
+        && matches!(definition.kind, Kind::Internal | Kind::InternalSpecial | Kind::Builtin)
         && args.len() != definition.arity as usize
     {
+        let name = if matches!(definition.kind, Kind::Builtin) {
+            format!("'{}'", definition.name)
+        } else {
+            format!(".Internal({})", definition.name)
+        };
         return Err(error_in(
             call,
             format!(
-                "{} argument{} passed to .Internal({}) which requires {}",
+                "{} argument{} passed to {name} which requires {}",
                 args.len(),
                 if args.len() == 1 { "" } else { "s" },
-                definition.name,
                 definition.arity
             ),
         ));
@@ -416,6 +420,16 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
         let name = values::symbol_name(first.tag);
         return Err(error_in(call, format!("supplied argument name '{name}' does not match 'x'")));
     }
+    // GNU R's operators ignore argument names, and a wrong argument count is reported before a
+    // wrong name.
+    const OPERATORS: &[&str] = &[
+        "+", "-", "*", "/", "^", "%%", "%/%", "%*%", "==", "!=", "<", ">", "<=", ">=", "&", "|", "!",
+    ];
+    if OPERATORS.contains(&definition.name)
+        || (definition.arity >= 0 && args.len() != definition.arity as usize)
+    {
+        return Ok(());
+    }
     let state = interp();
     let formals = match state.primitive_formals.get(definition.name) {
         Some(formals) => formals,
@@ -429,6 +443,9 @@ unsafe fn check_argument_names(definition: &BuiltinDef, call: Sexp, args: &[Arg]
     let Some(formals) = formals else {
         return Ok(());
     };
+    if formals.iter().any(|formal| formal == "...") {
+        return Ok(());
+    }
     for arg in args.iter().filter(|arg| arg.tag != nil()) {
         let name = values::symbol_name(arg.tag);
         if formals.iter().any(|formal| formal.starts_with(name.as_ref())) {
