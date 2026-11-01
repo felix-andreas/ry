@@ -6083,8 +6083,9 @@ impl<'db> Checker<'db, '_> {
             Some(_) if nearest_callable == Callable::Untyped => FunctionLookup::Found(nearest),
             Some(candidates) => FunctionLookup::Library(name, candidates),
             // A package ry has no export list for may export the function R finds
-            // (`path(path, "R")` under `import(fs)`).
-            None if ambiguous
+            // (`path(path, "R")` under `import(fs)`), past a nearest binding that is plainly
+            // no function as much as past an ambiguous one.
+            None if (ambiguous || nearest_callable == Callable::No)
                 && (imported_by_name(self.db, &name) || imports_every_name(self.db)) =>
             {
                 FunctionLookup::Undetermined
