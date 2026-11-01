@@ -2060,12 +2060,13 @@ The end-to-end guard rests on the corpus suites.
   0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
   bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
   `setkey` is at parity (0.026 s on both).
-- **data.table's helpers that allocate many large vectors trail GNU R at 1e7 rows.** In
-  `tools/bench/table/ops.R`, `rbindlist` takes 1.26 s against 0.85 s, `fwrite` 1.21 s against
-  0.76 s and `melt` 1.38 s against 1.21 s; `setkey`, `dcast`, `unique` and the single-loop helpers
-  are at parity or faster. In `rbindlist` about 0.3 s is collection (minor collections tracing the
-  fresh 2e7-element character columns, and one major collection), and `SET_STRING_ELT`'s barrier
-  and reference counts touch each CHARSXP header. `fwrite` has not been profiled.
+- **A few data.table helpers still trail GNU R at 1e7 rows.** In `tools/bench/table/ops.R`
+  (best of runs, 4 threads) `fwrite` takes 0.89 s against 0.76 s, `rbindlist` 0.97 s against
+  0.85 s, `unique` 0.105 s against 0.073 s and `uniqueN` 0.148 s against 0.113 s; `dcast`,
+  `between` and `chin` are within 15%, and `fread`, `setkey`, `setorder`, `melt` and the
+  single-loop helpers are at parity or faster. In `rbindlist` part of the gap is collection
+  (minor collections tracing the fresh 2e7-element character columns) and `SET_STRING_ELT`'s
+  barrier touching each CHARSXP header. `unique` and `uniqueN` have not been profiled.
 - **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
   `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
   against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
