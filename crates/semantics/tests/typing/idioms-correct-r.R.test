@@ -679,3 +679,8 @@ strip_name <- function(spec, name) {
 #++++
 format_message: fn(fmt: character[], ...: Any) -> character[] | character
 strip_name: <T, U> fn(spec: T, name: U) -> character
+
+#---- negating_a_matrix_gives_a_matrix
+active_rows <- function(gradient, fixed) which(gradient > 0 & !as.matrix(fixed))
+#++++
+active_rows: <T, U> fn(gradient: T, fixed: U) -> integer[]

@@ -4777,6 +4777,11 @@ impl<'db> Checker<'db, '_> {
             }
             _ => {}
         }
+        // `!` belongs to the `Ops` group, so a class with arithmetic methods negates to itself:
+        // `!as.matrix(flags)` is a logical matrix.
+        if self.declares_arithmetic(resolved) {
+            return resolved;
+        }
         let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
             TyKind::Union(members) => members.clone(),
             _ => vec![resolved],

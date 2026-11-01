@@ -1682,6 +1682,8 @@ Logical negation coerces its operand exactly as a [scalar condition](#conditions
 - `!logical`, `!integer`, and `!double` are `logical`.
 - `!logical[]`, `!integer[]`, and `!double[]` are `logical[]`.
 - A map-like operand gives `logical[]`, because negation does not preserve map-likeness.
+- A class with arithmetic methods negates to itself, because `!` belongs to R's `Ops` group, so
+  `!as.matrix(flags)` is a `matrix`.
 - `!NULL` is `logical[]`, the empty vector R returns, so a value that may be `NULL` negates without
   error: `!x` on `logical | NULL` is `logical[]`.
 - An `Any` or `Unknown` operand gives `Unknown`.

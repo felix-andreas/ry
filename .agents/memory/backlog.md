@@ -143,7 +143,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 269 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 239 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -161,9 +161,14 @@ classes, largest first:
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics).
-- **`character | character[]` into an atomic bound.** renv wraps `sprintf`, so its `fmt` infers as
-  `character[]`, and a caller passing `if (...) "a" else c("b", "c")` is reported. The fix is an
-  "any length of one atomic type" constraint, which touches `types.rs` and `infer.rs`.
+- **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
+  on as a placeholder, but the same signature declared reports the call, so the round-trip test
+  lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
+  declared optional `NULL` default should read as a placeholder too, or the renderer should mark
+  it; settle which before the list grows.
+- **A declared vector into a scalar parameter is still reported** (`double[]` into ks
+  `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
+  variables pass by length (`without_inferred_length`).
 - **A generic's dispatch formal, forwarded, reads as optional.** `f <- function(fit) persistence(fit)`
   over `persistence <- function(object, ...) UseMethod("persistence")` gives `f` an optional `fit`,
   yet `f()` errors in R, because `UseMethod` reads a passed argument even though the generic may be
