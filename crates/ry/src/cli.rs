@@ -355,7 +355,7 @@ pub(crate) fn analyze_project(
 
     // Trees are evicted batch by batch, so everything later phases read from them is
     // derived while they are resident.
-    let imported = namespace::imported_names(&namespace_file.imports);
+    let imported = namespace::tracked_names(&namespace_file.imports, &namespace_file.exports);
     let want_tokens = namespace_source.is_some() && !imported.is_empty();
     let mut used_tokens = BTreeSet::new();
     let tree_batch = workers * FILES_PER_WORKER_BATCH;
