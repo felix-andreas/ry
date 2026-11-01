@@ -12,7 +12,10 @@ use crate::types::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem::take;
-use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_inline_annotation};
+use syntax::{
+    GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
+    matching_nodes,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct Annotation<'db> {
@@ -188,18 +191,19 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
 /// parameter's `: TYPE`, or `-> TYPE`, a type definition (`type Name = TYPE`), or a
 /// nominal constructor (`@Name(value)`).
 pub fn is_inline_site(node: &SyntaxNode) -> bool {
+    is_green_inline_site(GreenRef::new(&node.green()))
+}
+
+/// [`is_inline_site`] on the green tree, for searches that skip building red nodes.
+pub fn is_green_inline_site(node: GreenRef<'_>) -> bool {
     match node.kind() {
         SyntaxKind::TYPE_DEFINITION | SyntaxKind::NEW_EXPR => true,
-        SyntaxKind::BINARY_EXPR => node
-            .children()
-            .any(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION),
-        SyntaxKind::FUNCTION_DEF => node.children().any(|child| match child.kind() {
+        SyntaxKind::BINARY_EXPR => node.has_child(SyntaxKind::TYPE_ASCRIPTION),
+        SyntaxKind::FUNCTION_DEF => node.child_nodes().any(|child| match child.kind() {
             SyntaxKind::TYPE_BINDER_LIST | SyntaxKind::RETURN_TYPE => true,
-            SyntaxKind::PARAMETER_LIST => child.children().any(|parameter| {
-                parameter
-                    .children()
-                    .any(|part| part.kind() == SyntaxKind::TYPE_ASCRIPTION)
-            }),
+            SyntaxKind::PARAMETER_LIST => child
+                .child_nodes()
+                .any(|parameter| parameter.has_child(SyntaxKind::TYPE_ASCRIPTION)),
             _ => false,
         }),
         _ => false,
@@ -320,11 +324,12 @@ pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
 /// The written inline annotations of a site, from the first to the last, so a finding
 /// about the whole annotation never covers the value or the body.
 fn inline_range(site: &SyntaxNode) -> TextRange {
-    let mut parts = site
-        .descendants()
-        .filter(is_inline_annotation)
-        .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
-        .map(|node| node.text_range());
+    let mut parts = matching_nodes(site, |node, parent| {
+        is_green_inline_annotation(node.kind(), parent.map(GreenRef::kind))
+    })
+    .into_iter()
+    .filter(|node| node.ancestors().find(is_inline_site).as_ref() == Some(site))
+    .map(|node| node.text_range());
     let Some(first) = parts.next() else {
         return site.text_range();
     };
@@ -1470,7 +1475,7 @@ impl<'db> Lowering<'db> {
             "frame" => return Ty::new(self.db, TyKind::Frame(None)),
             _ => {}
         }
-        let name = Name::new(self.db, text.to_owned());
+        let name = Name::new(self.db, text);
         if self.binders.contains(&name) {
             return Ty::new(self.db, TyKind::Rigid(name));
         }

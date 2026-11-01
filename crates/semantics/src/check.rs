@@ -1510,7 +1510,7 @@ impl<'db> Checker<'db, '_> {
                 let fields = fields
                     .iter()
                     .map(|field| NativeField {
-                        name: Name::new(self.db, field.name.as_str().to_owned()),
+                        name: Name::new(self.db, field.name.as_str()),
                         ty: self.infer(field.value),
                     })
                     .collect();
@@ -1521,7 +1521,7 @@ impl<'db> Checker<'db, '_> {
                 let payload = payload.map(|payload| self.infer(payload));
                 Ty::new(
                     self.db,
-                    TyKind::Tag(Name::new(self.db, name.as_str().to_owned()), payload),
+                    TyKind::Tag(Name::new(self.db, name.as_str()), payload),
                 )
             }
             ExpressionKind::Match { scrutinee, arms } => {
@@ -2562,7 +2562,7 @@ impl<'db> Checker<'db, '_> {
                     };
                     members.push(Ty::new(
                         self.db,
-                        TyKind::Tag(Name::new(self.db, name.as_str().to_owned()), payload),
+                        TyKind::Tag(Name::new(self.db, name.as_str()), payload),
                     ));
                 }
                 let union = union_of(self.db, members);
@@ -2593,7 +2593,7 @@ impl<'db> Checker<'db, '_> {
                 let fields = fields
                     .iter()
                     .map(|field| NativeField {
-                        name: Name::new(self.db, field.name.as_str().to_owned()),
+                        name: Name::new(self.db, field.name.as_str()),
                         ty: self.fresh(Constraint::Unconstrained),
                     })
                     .collect();
@@ -2692,11 +2692,11 @@ impl<'db> Checker<'db, '_> {
             return Some(format!("`:{}` carries no payload.", name.as_str()));
         }
         let Some((_, Some(tag_payload))) = found else {
-            let nearest = nearest_name(
-                name.as_str(),
-                tags.iter().map(|(tag, _)| *tag),
-            )?;
-            return Some(format!("The value has no tag `:{}`. Did you mean `:{nearest}`?", name.as_str()));
+            let nearest = nearest_name(name.as_str(), tags.iter().map(|(tag, _)| *tag))?;
+            return Some(format!(
+                "The value has no tag `:{}`. Did you mean `:{nearest}`?",
+                name.as_str()
+            ));
         };
         let payload = (*payload)?;
         let PatternKind::Record { fields, .. } = &self.module.pattern(payload).kind else {
@@ -2705,8 +2705,13 @@ impl<'db> Checker<'db, '_> {
         let TyKind::NativeRecord(native) = tag_payload.kind(self.db) else {
             return None;
         };
-        let known: Vec<&str> = native.iter().map(|field| field.name.text(self.db)).collect();
-        let unknown = fields.iter().find(|field| !known.contains(&field.name.as_str()))?;
+        let known: Vec<&str> = native
+            .iter()
+            .map(|field| field.name.text(self.db))
+            .collect();
+        let unknown = fields
+            .iter()
+            .find(|field| !known.contains(&field.name.as_str()))?;
         let suggestion = nearest_name(unknown.name.as_str(), known.iter().copied())
             .map(|nearest| format!(" Did you mean `{nearest}`?"))
             .unwrap_or_default();
@@ -6971,7 +6976,7 @@ impl<'db> Checker<'db, '_> {
     fn column_field(&mut self, name: &str, ty: Ty<'db>) -> RecordField<'db> {
         let resolved = self.table.resolve(self.db, ty);
         RecordField {
-            name: Name::new(self.db, name.to_owned()),
+            name: Name::new(self.db, name),
             ty: column_type(self.db, resolved),
             optional: false,
         }

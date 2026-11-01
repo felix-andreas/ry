@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
 use semantics::check::CHECK_EXECUTIONS;
 use semantics::diagnostics::file_diagnostics;
-use semantics::infer::RESOLVE_CALLS;
+use semantics::infer::resolve_calls;
 use semantics::lints::lint_file;
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
@@ -342,7 +342,7 @@ fn typing_burst(
     let mut text = record.source.clone();
     text.push('\n');
     let checks_before = CHECK_EXECUTIONS.load(Ordering::Relaxed);
-    let resolves_before = RESOLVE_CALLS.load(Ordering::Relaxed);
+    let resolves_before = resolve_calls();
     let mut keystroke_times = Vec::with_capacity(TYPING_BURST);
     for _ in 0..TYPING_BURST {
         text.push('#');
@@ -352,7 +352,7 @@ fn typing_burst(
         keystroke_times.push(start.elapsed());
     }
     let checks_after_burst = CHECK_EXECUTIONS.load(Ordering::Relaxed);
-    let resolves_after_burst = RESOLVE_CALLS.load(Ordering::Relaxed);
+    let resolves_after_burst = resolve_calls();
     let sweep_start = Instant::now();
     for other in records {
         let _ = document_diagnostics(db, other.file, config);

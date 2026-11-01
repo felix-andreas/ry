@@ -5,7 +5,7 @@ use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
 use crate::{Db, SourceFile, parse};
 use std::collections::BTreeSet;
 use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, SyntaxNode, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, matching_nodes};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
 #[salsa::input(singleton, debug)]
@@ -109,10 +109,20 @@ pub fn attached_union(
 #[salsa::tracked(returns(clone))]
 pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     let mut attached = BTreeSet::new();
-    for node in parse(db, file).syntax_node().descendants() {
-        if node.kind() != SyntaxKind::CALL_EXPR {
-            continue;
-        }
+    let calls = matching_nodes(&parse(db, file).syntax_node(), |node, _| {
+        node.kind() == SyntaxKind::CALL_EXPR
+            && node
+                .child_nodes()
+                .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
+                .is_some_and(|callee| {
+                    callee.kind() == SyntaxKind::NAME
+                        && matches!(
+                            callee.single_token_text(),
+                            Some("library" | "require" | "requireNamespace" | "loadNamespace")
+                        )
+                })
+    });
+    for node in calls {
         let Some(callee) = node
             .children()
             .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)

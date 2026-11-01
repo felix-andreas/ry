@@ -13,7 +13,6 @@ use crate::types::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, RefCell};
 use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -62,8 +61,17 @@ pub struct InferenceTable<'db> {
     epoch: Cell<u64>,
 }
 
-/// Read by the perf witnesses: must stay near-linear in corpus size.
-pub static RESOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// Per thread, because a counter every checking thread bumps on each step costs more
+    /// than the step when the threads contend for it.
+    static RESOLVE_CALLS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Resolution steps this thread has taken, read by the perf witnesses: must stay
+/// near-linear in corpus size.
+pub fn resolve_calls() -> u64 {
+    RESOLVE_CALLS.get()
+}
 
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
@@ -176,7 +184,7 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
         visiting: &mut Vec<InferenceVar>,
     ) -> (Ty<'db>, bool) {
-        RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
+        RESOLVE_CALLS.set(RESOLVE_CALLS.get() + 1);
         if let TyKind::Var(var) = ty.kind(db) {
             let root = self.find(*var);
             let shallow = self.shallow_resolve(db, ty);
@@ -1391,7 +1399,9 @@ fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::Key => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character)
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
+            )
             | TyKind::Any
             | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),

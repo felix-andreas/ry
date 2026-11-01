@@ -15,11 +15,14 @@ pub mod types;
 
 use crate::hir::Symbol;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use syntax::ast::is_expression_kind;
 use syntax::ast::{self, BinaryExpr};
-use syntax::{Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, paired_comment_definition};
+use syntax::{
+    Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, matching_nodes, paired_comment_definition,
+};
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
 /// run on threads with this stack rather than `ulimit -s`'s.
@@ -465,10 +468,7 @@ fn expression_annotations<'db>(
     // Each annotated statement once, in source order, with its `#:` block if it has one.
     let mut targets: Vec<(SyntaxNode, Option<SyntaxNode>)> = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -482,10 +482,7 @@ fn expression_annotations<'db>(
             }
         }
     }
-    let inline_sites: Vec<SyntaxNode> = root
-        .descendants()
-        .filter(annotations::is_inline_site)
-        .collect();
+    let inline_sites = matching_nodes(&root, |node, _| annotations::is_green_inline_site(node));
     let inline_enabled = !inline_sites.is_empty() && inline_annotations_enabled(db);
     if inline_enabled {
         for site in inline_sites {
@@ -1227,6 +1224,10 @@ struct SalsaGlobals<'db> {
     item: Item<'db>,
     files: Option<ProjectFiles>,
     file: SourceFile,
+    // A body reads the same few globals many times, and each salsa read pays for interning
+    // its key and verifying the memo, so a check looks each one up once.
+    frame_binders: RefCell<FxHashMap<(types::Name<'db>, bool), Option<Item<'db>>>>,
+    package_names: RefCell<FxHashMap<types::Name<'db>, Option<&'db PackageName<'db>>>>,
 }
 
 /// A script's own declarations are visible to itself alone and shadow project names.
@@ -1322,6 +1323,8 @@ impl<'db> SalsaGlobals<'db> {
             item,
             files: ProjectFiles::try_get(db),
             file: *item.file(db),
+            frame_binders: RefCell::default(),
+            package_names: RefCell::default(),
         }
     }
 
@@ -1329,11 +1332,20 @@ impl<'db> SalsaGlobals<'db> {
         if deferred && *self.file.kind(self.db) != DocumentKind::Script {
             return None;
         }
-        frame_binder(self.db, self.item, name, deferred)
+        *self
+            .frame_binders
+            .borrow_mut()
+            .entry((name, deferred))
+            .or_insert_with(|| frame_binder(self.db, self.item, name, deferred))
     }
 
     fn package_name(&self, name: types::Name<'db>) -> Option<&'db PackageName<'db>> {
-        Some(package_name(self.db, self.files?, name))
+        let files = self.files?;
+        *self
+            .package_names
+            .borrow_mut()
+            .entry(name)
+            .or_insert_with(|| Some(package_name(self.db, files, name)))
     }
 
     fn conditional_slot_scheme(&self, name: types::Name<'db>) -> Option<types::TypeScheme<'db>> {
@@ -1376,7 +1388,7 @@ impl<'db> SalsaGlobals<'db> {
 
 impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     fn scheme(&self, name: &str, deferred: bool) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, deferred)
             && let Some(scheme) = self.binder_scheme(item, interned)
         {
@@ -1395,7 +1407,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn defined_in_project(&self, name: &str, deferred: bool) -> bool {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         self.frame_definition(interned, deferred).is_some()
             || self.package_name(interned).is_some_and(|binding| {
                 binding.winner.is_some() || !binding.conditional_writers.is_empty()
@@ -1403,7 +1415,7 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn earlier_binding(&self, name: &str) -> Option<types::TypeScheme<'db>> {
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if let Some(item) = self.frame_definition(interned, false) {
             return self.binder_scheme(item, interned);
         }
@@ -1411,13 +1423,16 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
     }
 
     fn overloads(&self, name: &str, deferred: bool) -> Option<Vec<types::TypeScheme<'db>>> {
+        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
+        if candidates.len() < 2 {
+            return None;
+        }
         // A project definition shadows the stub set, disabling per-call overload selection.
-        let interned = types::Name::new(self.db, name.to_owned());
+        let interned = types::Name::new(self.db, name);
         if self.frame_definition(interned, deferred).is_some() || self.winner(interned).is_some() {
             return None;
         }
-        let candidates = stubs::stubs(self.db)?.schemes.get(name)?;
-        (candidates.len() > 1).then(|| candidates.clone())
+        Some(candidates.clone())
     }
 
     fn type_definitions(

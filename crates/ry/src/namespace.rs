@@ -4,7 +4,7 @@ use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
 use semantics::metadata::NamespaceImport;
 use std::collections::BTreeSet;
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
 /// error, not a warning, because R refuses to load the package.
@@ -87,23 +87,26 @@ pub fn unused_import_diagnostics(
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
 /// string tokens contribute their unquoted content.
 pub fn collect_used_tokens(root: &SyntaxNode, out: &mut BTreeSet<String>) {
-    for element in root.descendants_with_tokens() {
-        if let SyntaxElement::Token(token) = element {
-            if token.kind().is_trivia() {
-                continue;
-            }
-            let text = token.text();
+    let mut insert = |text: &str| {
+        // Most tokens repeat, so look before allocating.
+        if !out.contains(text) {
             out.insert(text.to_owned());
-            if token.kind() == SyntaxKind::STRING {
-                let content = text
-                    .trim_start_matches(['"', '\''])
-                    .trim_end_matches(['"', '\'']);
-                if !content.is_empty() {
-                    out.insert(content.to_owned());
-                }
+        }
+    };
+    for_each_token(root, |kind, text| {
+        if kind.is_trivia() {
+            return;
+        }
+        insert(text);
+        if kind == SyntaxKind::STRING {
+            let content = text
+                .trim_start_matches(['"', '\''])
+                .trim_end_matches(['"', '\'']);
+            if !content.is_empty() {
+                insert(content);
             }
         }
-    }
+    });
 }
 
 #[cfg(test)]
