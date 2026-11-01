@@ -11,7 +11,7 @@
 
 use {
     crate::{
-        Code, Loader,
+        Code, Loader, Source,
         r::{RUNTIME_RY, RValue, error_value, plan_value},
     },
     heap::object::{Sexp, SexpType},
@@ -35,7 +35,7 @@ use {
         },
         thread,
     },
-    syntax::{Parse, SyntaxNode, TextRange, TextSize},
+    syntax::{SyntaxNode, TextRange, TextSize},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -99,7 +99,7 @@ struct Session {
 struct Deferred {
     /// Each statement with its position in the plan's `run`.
     code: Vec<(usize, Code)>,
-    trees: FxHashMap<String, Parse>,
+    sources: FxHashMap<String, Source>,
 }
 
 struct Pending {
@@ -107,8 +107,8 @@ struct Pending {
     root: PathBuf,
     bind: Vec<Code>,
     run: Vec<Code>,
-    /// The syntax tree of every file the plan's code comes from.
-    trees: FxHashMap<String, Parse>,
+    /// The code of every file the plan's code comes from.
+    sources: FxHashMap<String, Source>,
 }
 
 /// Kept outside the session, so setting it never waits for a [`prepare`] that holds the
@@ -170,12 +170,12 @@ fn plan(root: &str, full: bool) -> RValue {
         Ok(plan) => plan,
         Err(failure) => return error_value(&failure.to_string()),
     };
-    let mut trees = FxHashMap::default();
+    let mut sources = FxHashMap::default();
     for code in plan.bind.iter().chain(&plan.run) {
-        if !trees.contains_key(&code.path)
-            && let Some(tree) = session.loader.syntax(&plan.root, &code.path)
+        if !sources.contains_key(&code.path)
+            && let Some(source) = session.loader.source(&plan.root, &code.path)
         {
-            trees.insert(code.path.clone(), tree);
+            sources.insert(code.path.clone(), source);
         }
     }
     let value = plan_value(&plan, false);
@@ -185,7 +185,7 @@ fn plan(root: &str, full: bool) -> RValue {
             root: plan.root,
             bind: plan.bind,
             run: plan.run,
-            trees,
+            sources,
         },
     );
     value
@@ -201,17 +201,17 @@ unsafe fn do_commit(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `.Internal(ryLoaderBind(root, ns))`: binds every definition of the pending plan as a promise
-/// that calls `ryLoaderForce` on its file's tree.
+/// that calls `ryLoaderForce` on its file's code.
 unsafe fn do_bind(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let namespace = call.arg(1);
-    let (bind, trees) = {
+    let (bind, sources) = {
         let session = session();
         let pending = session
             .pending
             .get(&root)
             .ok_or_else(|| error(format!("no load of {root} is pending")))?;
-        (pending.bind.clone(), pending.trees.clone())
+        (pending.bind.clone(), pending.sources.clone())
     };
     let force = internal_function(install("ryLoaderForce")?)
         .ok_or_else(|| error("the loader's internals are not installed"))?;
@@ -221,10 +221,10 @@ unsafe fn do_bind(call: &Call<'_>) -> R<Sexp> {
             let handle = match handles.get(code.path.as_str()) {
                 Some(&handle) => handle,
                 None => {
-                    let tree = trees
+                    let source = sources
                         .get(&code.path)
                         .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-                    let handle = tree_handle(tree.clone())?;
+                    let handle = source_handle(source.clone())?;
                     handles.insert(&code.path, handle);
                     handle
                 }
@@ -246,7 +246,7 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let namespace = call.arg(1);
     let index = values::as_integer_scalar(call.arg(2));
-    let (code, tree) = {
+    let (code, source) = {
         let session = session();
         let pending = session
             .pending
@@ -256,13 +256,13 @@ unsafe fn do_run(call: &Call<'_>) -> R<Sexp> {
             .ok()
             .and_then(|index| pending.run.get(index))
             .ok_or_else(|| error(format!("the plan has no statement {index}")))?;
-        let tree = pending
-            .trees
+        let source = pending
+            .sources
             .get(&code.path)
             .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-        (code.clone(), tree.clone())
+        (code.clone(), source.clone())
     };
-    let expression = scope(|| lower_range(&tree, code.source_start, code.source_end))?;
+    let expression = scope(|| lower_range(&source, code.source_start, code.source_end))?;
     eval(expression, namespace)?;
     Ok(nil())
 }
@@ -300,13 +300,13 @@ unsafe fn do_defer(call: &Call<'_>) -> R<Sexp> {
             .ok_or_else(|| error(format!("the plan has no statement {position}")))?;
         code.push(found);
     }
-    let trees = code
+    let sources = code
         .iter()
-        .filter_map(|(_, code)| Some((code.path.clone(), pending.trees.get(&code.path)?.clone())))
+        .filter_map(|(_, code)| Some((code.path.clone(), pending.sources.get(&code.path)?.clone())))
         .collect();
     session
         .deferred
-        .insert(root.clone(), Deferred { code, trees });
+        .insert(root.clone(), Deferred { code, sources });
     defer_definitions(DeferredDefinitions {
         key: root,
         classes,
@@ -356,7 +356,7 @@ unsafe fn do_run_deferred(call: &Call<'_>) -> R<Sexp> {
     let root = values::require_string(call.arg(0), "root")?;
     let namespace = call.arg(1);
     let index = values::as_integer_scalar(call.arg(2));
-    let (code, tree) = {
+    let (code, source) = {
         let session = session();
         let deferred = session
             .deferred
@@ -366,13 +366,13 @@ unsafe fn do_run_deferred(call: &Call<'_>) -> R<Sexp> {
             .ok()
             .and_then(|index| deferred.code.get(index))
             .ok_or_else(|| error(format!("{root} holds back no statement {index}")))?;
-        let tree = deferred
-            .trees
+        let source = deferred
+            .sources
             .get(&code.path)
             .ok_or_else(|| error(format!("{} was not analyzed", code.path)))?;
-        (code.clone(), tree.clone())
+        (code.clone(), source.clone())
     };
-    let expression = scope(|| lower_range(&tree, code.source_start, code.source_end))?;
+    let expression = scope(|| lower_range(&source, code.source_start, code.source_end))?;
     eval(expression, namespace)?;
     Ok(nil())
 }
@@ -389,63 +389,82 @@ unsafe fn do_undefer(call: &Call<'_>) -> R<Sexp> {
 /// the promise was made in.
 unsafe fn do_force(call: &Call<'_>) -> R<Sexp> {
     let handle = call.arg(0);
-    if handle.kind() != SexpType::ExternalPtr || handle.external_tag() != tree_tag()? {
-        return Err(error("ryLoaderForce needs a syntax tree from ry's loader"));
+    if handle.kind() != SexpType::ExternalPtr || handle.external_tag() != source_tag()? {
+        return Err(error("ryLoaderForce needs a source file from ry's loader"));
     }
-    let address = handle.external_address() as *const Parse;
+    let address = handle.external_address() as *const Source;
     if address.is_null() {
-        return Err(error("the syntax tree of this definition was released"));
+        return Err(error("the source of this definition was released"));
     }
-    // SAFETY: the address is a `Box<Parse>` that `tree_handle` leaked, and its finalizer only
-    // runs once nothing references the handle, which this call does.
-    let tree = &*address;
+    // SAFETY: the address is a `Box<Source>` that `source_handle` leaked, and its finalizer
+    // only runs once nothing references the handle, which this call does.
+    let source = &*address;
     let offset = |argument: Sexp| u32::try_from(values::as_integer_scalar(argument)).ok();
     let (Some(start), Some(end)) = (offset(call.arg(1)), offset(call.arg(2))) else {
         return Err(error("ryLoaderForce needs two byte offsets"));
     };
-    let function = lower_range(tree, start, end)?;
+    let function = lower_range(source, start, end)?;
     eval(function, call.env)
 }
 
-/// Lowers the outermost node spanning exactly `start..end` of `tree`.
-unsafe fn lower_range(tree: &Parse, start: u32, end: u32) -> R<Sexp> {
-    let root = SyntaxNode::new_root(tree.green().clone());
-    if start > end
-        || !root
-            .text_range()
-            .contains_range(TextRange::new(start.into(), end.into()))
-    {
-        return Err(error("a definition's code is not in its syntax tree"));
+/// Lowers the code at `start..end` of `source`: the outermost node spanning exactly that range
+/// of a tree, or of text the code alone, parsed on its own. A top-level item parses the same
+/// either way, so a file whose text is all the loader holds is never parsed whole.
+unsafe fn lower_range(source: &Source, start: u32, end: u32) -> R<Sexp> {
+    let missing = || error("a definition's code is not in its source file");
+    match source {
+        Source::Tree(tree) => {
+            let root = SyntaxNode::new_root(tree.green().clone());
+            if start > end
+                || !root
+                    .text_range()
+                    .contains_range(TextRange::new(start.into(), end.into()))
+            {
+                return Err(missing());
+            }
+            let range = TextRange::new(TextSize::from(start), TextSize::from(end));
+            let element = root.covering_element(range);
+            let mut node = match element.as_node() {
+                Some(node) => node.clone(),
+                None => element.parent().ok_or_else(missing)?,
+            };
+            while let Some(parent) = node.parent()
+                && parent.text_range() == range
+                && parent != root
+            {
+                node = parent;
+            }
+            if node == root || node.text_range() != range {
+                return Err(missing());
+            }
+            lower_node(&node)
+        }
+        Source::Text(text) => {
+            let code = text.get(start as usize..end as usize).ok_or_else(missing)?;
+            let parse = syntax::parse(code);
+            if !parse.errors().is_empty() {
+                return Err(missing());
+            }
+            let root = SyntaxNode::new_root(parse.green().clone());
+            let whole = root.text_range();
+            let node = root
+                .children()
+                .find(|node| node.text_range() == whole)
+                .ok_or_else(missing)?;
+            lower_node(&node)
+        }
     }
-    let range = TextRange::new(TextSize::from(start), TextSize::from(end));
-    let element = root.covering_element(range);
-    let mut node = match element.as_node() {
-        Some(node) => node.clone(),
-        None => element
-            .parent()
-            .ok_or_else(|| error("a definition's code is not in its syntax tree"))?,
-    };
-    while let Some(parent) = node.parent()
-        && parent.text_range() == range
-        && parent != root
-    {
-        node = parent;
-    }
-    if node == root || node.text_range() != range {
-        return Err(error("a definition's code is not in its syntax tree"));
-    }
-    lower_node(&node)
 }
 
-/// An external pointer owning `tree`, freed by the collector once no promise references it.
-unsafe fn tree_handle(tree: Parse) -> R<Sexp> {
+/// An external pointer owning `source`, freed by the collector once no promise references it.
+unsafe fn source_handle(source: Source) -> R<Sexp> {
     let heap = interp::heap();
-    let address = Box::into_raw(Box::new(tree)) as *mut c_void;
-    let handle = heap.alloc_external_ptr(address, tree_tag()?, nil());
+    let address = Box::into_raw(Box::new(source)) as *mut c_void;
+    let handle = heap.alloc_external_ptr(address, source_tag()?, nil());
     let handle = match handle {
         Ok(handle) => handle,
         Err(failure) => {
-            drop(Box::from_raw(address as *mut Parse));
+            drop(Box::from_raw(address as *mut Source));
             return Err(failure.into());
         }
     };
@@ -454,17 +473,17 @@ unsafe fn tree_handle(tree: Parse) -> R<Sexp> {
         handle,
         nil(),
         nil(),
-        release_tree as *const () as usize,
+        release_source as *const () as usize,
         false,
     )?;
     Ok(handle)
 }
 
-extern "C" fn release_tree(handle: Sexp) {
-    // SAFETY: the collector calls this once, with the handle `tree_handle` made, after which
+extern "C" fn release_source(handle: Sexp) {
+    // SAFETY: the collector calls this once, with the handle `source_handle` made, after which
     // nothing can reach the handle's address.
     unsafe {
-        let address = handle.external_address() as *mut Parse;
+        let address = handle.external_address() as *mut Source;
         if !address.is_null() {
             handle.set_external_address(std::ptr::null_mut());
             drop(Box::from_raw(address));
@@ -472,8 +491,8 @@ extern "C" fn release_tree(handle: Sexp) {
     }
 }
 
-unsafe fn tree_tag() -> R<Sexp> {
-    install("ry_loader_syntax_tree")
+unsafe fn source_tag() -> R<Sexp> {
+    install("ry_loader_source")
 }
 
 unsafe fn r_value(value: &RValue) -> R<Sexp> {
