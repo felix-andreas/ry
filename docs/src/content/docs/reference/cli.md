@@ -78,9 +78,9 @@ yet. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscrip
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console
-guide](/guides/console) describes what its completion knows. Started inside an R package, `ry R`
-[loads it](/guides/loading-packages) and reloads what changed before each command, and `--no-load`
-turns that off. ry's console does not load the package yet. `--keybindings` and `--no-load` apply
+guide](/guides/console) describes what its completion knows. Started inside an R package, either
+console [loads it](/guides/loading-packages) and reloads what changed before each command, and
+`--no-load` turns that off. `--keybindings` and `--no-load` apply
 only to a console, so passing either with a script is a usage error. With `-i FILE`, the file is
 checked under its own name before the console opens, and a strict-mode refusal exits 1.
 
@@ -96,8 +96,8 @@ is `ry R -i FILE`.
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory) on ry's runtime, then runs each `-e EXPR` and the `-f FILE` script, and exits
 like `ry run`. `ry load --r-entry` prints the R code that gives a plain R session the same
-`load_all()`, for `source(pipe("ry load --r-entry"))`. `load_all()` is also available in `ry run`
-scripts and in `ry R` scripts and consoles, but not yet in ry's console.
+`load_all()`, for `source(pipe("ry load --r-entry"))`. `load_all()` is also available in the scripts
+and consoles of `ry run` and `ry R`.
 
 `ry server --debug` (or `RY_DEBUG=1`) adds internal analysis facts to hover, for working on ry itself.
 `--experimental-features range_formatting` lets the server format a selection instead of the whole

@@ -35,6 +35,11 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
+- **A console does not watch a package whose first load failed**: `Loader::changed_roots` skips
+  packages with no committed state, so after `ry run` starts on a package with a syntax error,
+  fixing the file reloads nothing until `load_all()`. Fix: record the fingerprint on a failed
+  plan too, and let `.ry_autoreload()` learn the root from the loader rather than `.ry_packages`.
+
 - **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run`,
   `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
   GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
@@ -2128,9 +2133,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   constant or a symbol is not checked. The `ry run` preflight analyzes the
   script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
   file defines, which `ry check` accepts.
-- **ry's console (`ry run` with no script) starts bare**: no `tools:ry` environment, no `.Call`
-  routines, no `load_all()` and no package autoload, because `repl::ry_repl` does not attach the
-  loader the way `ry run script.R` does. `--no-load` is therefore hidden on `ry run`.
 - **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
