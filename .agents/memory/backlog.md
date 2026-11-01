@@ -2055,13 +2055,16 @@ The end-to-end guard rests on the corpus suites.
   0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
   bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
   `setkey` is at parity (0.026 s on both).
-- **A few data.table helpers still trail GNU R at 1e7 rows.** In `tools/bench/table/ops.R`
-  (best of runs, 4 threads) `fwrite` takes 0.89 s against 0.76 s, `rbindlist` 0.97 s against
-  0.85 s, `unique` 0.105 s against 0.073 s and `uniqueN` 0.148 s against 0.113 s; `dcast`,
-  `between` and `chin` are within 15%, and `fread`, `setkey`, `setorder`, `melt` and the
-  single-loop helpers are at parity or faster. In `rbindlist` part of the gap is collection
-  (minor collections tracing the fresh 2e7-element character columns) and `SET_STRING_ELT`'s
-  barrier touching each CHARSXP header. `unique` and `uniqueN` have not been profiled.
+- **Uninitialized vector payloads are read through `&mut [T]`.** `alloc_vector_uninit` (and
+  `Rf_allocVector`, which uses it) hands out numeric payloads that callers such as
+  `crates/libr/src/frame_altrep.rs` and `crates/interp/src/values.rs` fill through `slice_mut`,
+  which forms a reference to uninitialized memory. Fill through raw pointers or `MaybeUninit`.
+- **`rbindlist` and `fwrite` trail GNU R by 10 to 25% inside `tools/bench/table/ops.R`.** At 1e7
+  rows the best of two ops.R runs has `rbindlist` at 1.07 s against 0.85 s and `fwrite` at 0.99 s
+  against 0.76 s, while run alone after `fread` (best of 8) ry is faster: 0.76 s against 0.87 s
+  and 0.76 s against 0.94 s. The difference is the heap the earlier questions leave behind, so
+  profile with them in place. `fwrite` varies by 2x between runs on both engines. `unique`,
+  `uniqueN`, `between` and `chin` are at parity within noise.
 - **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
   `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
   against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'

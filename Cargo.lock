@@ -2023,6 +2023,7 @@ dependencies = [
  "jit",
  "libc",
  "libloading",
+ "libmimalloc-sys",
  "loader",
  "mimalloc",
  "polars",
