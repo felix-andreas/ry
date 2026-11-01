@@ -17,7 +17,16 @@ You get:
 - completion, including the fields of a list such as `person$` and the argument names a call
   still accepts (`second = `), with your own names ranked ahead of keywords and the library
 - go-to-definition, find references, and rename
-- signature help, and inlay hints for assignments and loop variables
+- signature help with each parameter's type and default, and inlay hints for assignments and
+  loop variables
+- quick fixes for misspelled names, arguments, fields and columns, and for the lints that have one
+  obvious rewrite (`T` to `TRUE`, `=` to `<-`, a trailing comma)
+- an outline that nests functions under RStudio-style sections (`# Accounts ----`) and helper
+  functions under the function that defines them, plus workspace symbol search
+- folding for blocks, comment runs, sections and `# region` markers, and selection ranges that grow
+  from a name to its argument, call, statement and block
+- semantic highlighting of parameters, called functions and package namespaces, which an R grammar
+  cannot tell apart
 - formatting with the same rules as `ry fmt`
 
 Hover, completion and inlay hints use inferred types even when type errors are switched off, so you

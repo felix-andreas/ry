@@ -168,8 +168,8 @@ hover 56..58: se: Unknown
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(first: T, [second]: U) -> T
-parameters: first: T | [[second]: U]
+signature: <T, U> fn(first: T, second: U = 2L) -> T
+parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
 completion (80): second = , se.contrast, sealClass, search, searchpaths, Seatbelts, seek, seek.connection
@@ -211,8 +211,8 @@ hover 57..69: integer
 definition: none
 references: none
 rename: none
-signature: fn(first: integer, [second]: integer, [third]: integer) -> integer
-parameters: first: integer | [[second]: integer] | [third]: integer
+signature: fn(first: integer, second: integer = 2L, third: integer = 3L) -> integer
+parameters: first: integer | [second: integer = 2L] | third: integer = 3L
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
 completion (128+): second = , third = , helper, break, else, FALSE, for, function
@@ -226,8 +226,8 @@ hover 57..77: T
 definition: none
 references: none
 rename: none
-signature: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T
-parameters: [first: T] | [second]: U | [third]: V
+signature: <T, U, V> fn(first: T, second: U = 2L, third: V = 3L) -> T
+parameters: [first: T] | second: U = 2L | third: V = 3L
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U, V> fn(first: T, [second]: U, [third]: V) -> T\n"
 completion (128+): first = , second = , helper, break, else, FALSE, for, function
@@ -241,8 +241,8 @@ hover 45..62: T
 definition: none
 references: none
 rename: none
-signature: <T, U> fn(first: T, [second]: U) -> T
-parameters: first: T | [[second]: U]
+signature: <T, U> fn(first: T, second: U = 2L) -> T
+parameters: first: T | [second: U = 2L]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(first: T, [second]: U) -> T\n"
 completion (128+): helper, break, else, FALSE, for, function, if, in

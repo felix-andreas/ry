@@ -26,8 +26,8 @@ hover 113..117: logical
 definition: none
 references: none
 rename: none
-signature: fn([quiet]: logical, ...: character) -> character
-parameters: [[quiet]: logical] | ...: character
+signature: fn(quiet: logical = FALSE, ...: character) -> character
+parameters: [quiet: logical = FALSE] | ...: character
 action: Add inferred type annotation for `text`
   edit 100..100 -> "#: character\n"
 action: Add inferred type annotations for the whole file

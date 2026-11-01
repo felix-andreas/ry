@@ -1,13 +1,18 @@
-//! A case carries at most one `$0` cursor marker; the output renders each feature at it, then
-//! the inlay hints of the file holding it.
+//! Two suites. In `tests/ide`, a case carries at most one `$0` cursor marker; the output renders
+//! each point feature at it, then the inlay hints of the file holding it. In `tests/structure`, a
+//! case renders the file's outline, folds, semantic tokens and diagnostic fixes, and the selection
+//! ranges at its `$0` cursor when it has one.
 
 use {
     ide::{
-        DefinitionTarget, HoverDefinition, code_actions, completion, definition, document_symbols,
-        hover, inlay_hints, references, rename, signature_help, type_definition, workspace_symbols,
+        DefinitionTarget, DocumentSymbol, HoverDefinition, code_actions, completion, definition,
+        diagnostic_fixes, document_symbols, folding_ranges, hover, inlay_hints, references, rename,
+        selection_ranges, semantic_tokens, signature_help, type_definition, workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::file_diagnostics,
+        lints::{LintConfig, lint_file},
         stubs::{StubSources, install_shipped_stubs},
         test_document_kind,
         testing::{ProbeDatabase, with_fixture_project},
@@ -437,4 +442,82 @@ fn ide_fixtures() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ide"),
         &render,
     );
+}
+
+#[test]
+fn structure_fixtures() {
+    run_fixture_suite(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/structure"),
+        &render_structure,
+    );
+}
+
+/// Ranges render as the text they cover, so an expectation reads without counting bytes.
+fn render_structure(source: &str) -> String {
+    let cursor = source.find("$0");
+    let text = source.replacen("$0", "", 1);
+    let covered = |range: TextRange| {
+        let slice = text
+            .get(usize::from(range.start())..usize::from(range.end()))
+            .unwrap_or("<out of range>");
+        format!("{slice:?}")
+    };
+    with_fixture_project(
+        vec![(text.clone(), DocumentKind::Package)],
+        |db, sources| {
+            let file = sources[0];
+            let mut output = String::new();
+            fn outline(
+                symbols: &[DocumentSymbol],
+                depth: usize,
+                covered: &dyn Fn(TextRange) -> String,
+                output: &mut String,
+            ) {
+                for symbol in symbols {
+                    let detail = symbol
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" {detail}"))
+                        .unwrap_or_default();
+                    output.push_str(&format!(
+                        "symbol {}{} ({:?}{detail}) at {}\n",
+                        "  ".repeat(depth),
+                        symbol.name,
+                        symbol.kind,
+                        covered(symbol.selection),
+                    ));
+                    outline(&symbol.children, depth + 1, covered, output);
+                }
+            }
+            outline(&document_symbols(db, file), 0, &covered, &mut output);
+            for fold in folding_ranges(db, file) {
+                output.push_str(&format!(
+                    "fold {}..={} {:?}\n",
+                    fold.start_line, fold.end_line, fold.kind
+                ));
+            }
+            for (range, class) in semantic_tokens(db, file) {
+                output.push_str(&format!("token {} {class:?}\n", covered(range)));
+            }
+            let mut diagnostics = file_diagnostics(db, file);
+            diagnostics.extend(lint_file(db, file, &LintConfig::default()));
+            let whole = TextRange::up_to(TextSize::of(text.as_str()));
+            for fix in diagnostic_fixes(&diagnostics, whole) {
+                for edit in &fix.edits {
+                    output.push_str(&format!(
+                        "fix {}: {} -> {:?}\n",
+                        fix.title,
+                        covered(edit.range),
+                        edit.replacement
+                    ));
+                }
+            }
+            if let Some(at) = cursor {
+                for range in selection_ranges(db, file, TextSize::from(at as u32)) {
+                    output.push_str(&format!("select {}\n", covered(range)));
+                }
+            }
+            output
+        },
+    )
 }

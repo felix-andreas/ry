@@ -511,6 +511,110 @@ impl Journey {
                     ))
                 }
             }
+            ["expect", "signature", path, "after", anchor, needle] => {
+                let offset = self.find(path, anchor)? + anchor.len();
+                let help = self.request_offset(RequestKind::SignatureHelp, path, offset, "")?;
+                let active = help["activeSignature"].as_u64().unwrap_or_default() as usize;
+                let signature = &help["signatures"][active];
+                let label = signature["label"].as_str().unwrap_or_default();
+                // A parameter label is its text, or offsets into the signature's label when the
+                // client supports them.
+                let parameter = help["activeParameter"]
+                    .as_u64()
+                    .map(|index| &signature["parameters"][index as usize]["label"])
+                    .and_then(|parameter| match parameter {
+                        Value::String(text) => Some(text.as_str()),
+                        Value::Array(span) => {
+                            let start = span.first()?.as_u64()? as usize;
+                            let end = span.get(1)?.as_u64()? as usize;
+                            label.get(start..end)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                // The active parameter renders in brackets, as an editor highlights it.
+                let rendered = label.replacen(parameter, &format!("[{parameter}]"), 1);
+                if !parameter.is_empty() && rendered.contains(needle) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "the signature help reads `{rendered}`, not `{needle}`"
+                    ))
+                }
+            }
+            ["expect", "symbol", path, name] => {
+                let symbols = self.request_at(RequestKind::DocumentSymbol, path, "", "")?;
+                let mut outline = Vec::new();
+                flatten_symbols(&symbols, "", &mut outline);
+                if outline.iter().any(|entry| entry == name) {
+                    Ok(())
+                } else {
+                    Err(format!("the outline lacks `{name}`: {outline:?}"))
+                }
+            }
+            ["expect", "workspace-symbol", query, path, name] => {
+                let opened = self.uri(path).to_string();
+                let symbols = self.request_offset(RequestKind::WorkspaceSymbol, path, 0, query)?;
+                let found = symbols.as_array().into_iter().flatten().any(|symbol| {
+                    symbol["name"].as_str() == Some(name)
+                        && symbol["location"]["uri"].as_str() == Some(opened.as_str())
+                });
+                if found {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "searching `{query}` finds no `{name}` in {path}: {symbols}"
+                    ))
+                }
+            }
+            ["fix", path, anchor, title] => {
+                let response = self.request_at(RequestKind::CodeAction, path, anchor, "")?;
+                let action = response
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|action| action["title"].as_str() == Some(title))
+                    .ok_or(format!("no code action titled `{title}`: {response}"))?;
+                self.apply_workspace_edit(&action["edit"])
+            }
+            ["expect", "fold", path, from, to] => {
+                let folds = self.request_at(RequestKind::FoldingRange, path, "", "")?;
+                let text = self.text_of(path)?;
+                let line_of = |needle: &str| {
+                    text.find(needle)
+                        .map(|at| text[..at].matches('\n').count() as u64)
+                        .ok_or(format!("`{needle}` is not in {path}"))
+                };
+                let (start, end) = (line_of(from)?, line_of(to)?);
+                let found = folds.as_array().into_iter().flatten().any(|fold| {
+                    fold["startLine"].as_u64() == Some(start)
+                        && fold["endLine"].as_u64() == Some(end)
+                });
+                if found {
+                    Ok(())
+                } else {
+                    Err(format!("no fold from `{from}` to `{to}`: {folds}"))
+                }
+            }
+            ["expect", "selection", path, anchor, expected] => {
+                let response = self.request_at(RequestKind::SelectionRange, path, anchor, "")?;
+                let text = self.text_of(path)?;
+                let mut steps = Vec::new();
+                let mut selection = response.get(0);
+                while let Some(current) = selection {
+                    let range: lsp_types::Range = serde_json::from_value(current["range"].clone())
+                        .map_err(|error| error.to_string())?;
+                    let start = offset_of(&text, range.start, self.options.utf8);
+                    let end = offset_of(&text, range.end, self.options.utf8);
+                    steps.push(text.get(start..end).unwrap_or_default().to_owned());
+                    selection = current.get("parent");
+                }
+                if steps.iter().any(|step| step == expected) {
+                    Ok(())
+                } else {
+                    Err(format!("no selection step covers `{expected}`: {steps:?}"))
+                }
+            }
             ["expect", "buffer", path, "lacks", needle] => {
                 let buffer = self.buffer(path)?;
                 if buffer.contains(needle) {
@@ -714,11 +818,7 @@ impl Journey {
         let position = position_of(&text, offset, self.options.utf8);
         let uri = self.uri(path);
         let editor = self.editor();
-        let id = if kind == RequestKind::Rename {
-            editor.request_rename(&uri, position, new_name)
-        } else {
-            editor.request(kind, &uri, position)
-        };
+        let id = editor.request_with_name(kind, &uri, position, new_name);
         editor.settle();
         match editor.take_response(id) {
             Some(Ok(value)) => Ok(value),
@@ -769,7 +869,7 @@ impl Journey {
     fn apply_workspace_edit(&mut self, edit: &Value) -> Result<(), String> {
         let changes = edit["changes"].as_object().cloned().unwrap_or_default();
         if changes.is_empty() {
-            return Err(format!("the rename changed nothing: {edit}"));
+            return Err(format!("the edit changed nothing: {edit}"));
         }
         for (uri, edits) in changes {
             if !self.open.contains_key(&uri) {
@@ -825,6 +925,15 @@ impl Journey {
 }
 
 /// The byte offset of a protocol position, clamped to the text.
+/// Each document symbol as its path of names from the top, such as `Setup/limit`.
+fn flatten_symbols(symbols: &Value, prefix: &str, outline: &mut Vec<String>) {
+    for symbol in symbols.as_array().into_iter().flatten() {
+        let name = format!("{prefix}{}", symbol["name"].as_str().unwrap_or_default());
+        flatten_symbols(&symbol["children"], &format!("{name}/"), outline);
+        outline.push(name);
+    }
+}
+
 fn offset_of(text: &str, position: lsp_types::Position, utf8: bool) -> usize {
     let mut line_start = 0;
     for _ in 0..position.line {
