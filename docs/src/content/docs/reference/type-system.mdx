@@ -1846,6 +1846,10 @@ may be `double`, so `1:TRUE` is `integer[]` and `1:n` on `n` of type `integer | 
 counts as `integer` here, matching what R does at run time, so `1:10` is `integer[]` and `1.5:3L` is
 `double[]`.
 
+Base R's `seq(from, to)` without `by` or `length.out` returns `from:to`, so it follows the same
+rule: `seq(1, 10)` is `integer[]`, and so is `seq(n)` with one argument, while `seq(0.5, 3)` and
+`seq(1, 10, by = 2)` are `double[]`. A project that defines its own `seq` gets its own typing.
+
 An unannotated operand, as in `1:n`, is required to be a scalar `integer` or `double`. Passing a
 numeric vector through the enclosing function is therefore a type error at the call, because R's
 warning about truncating the endpoint marks a bug. The result is `double[]`, because the endpoint may
