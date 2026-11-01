@@ -1914,6 +1914,7 @@ dependencies = [
  "libloading",
  "loader",
  "lzma-rs",
+ "mimalloc",
  "polars",
  "polars-arrow",
  "rcmd",

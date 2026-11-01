@@ -25,6 +25,7 @@ jit = { path = "../jit" }
 loader = { path = "../loader", features = ["runtime"] }
 libc = "0.2"
 lzma-rs = "0.3.0"
+mimalloc = { version = "0.1", features = ["local_dynamic_tls"] }
 polars = { version = "0.55", default-features = false }
 polars-arrow = { version = "0.55", default-features = false }
 rustc-hash.workspace = true
