@@ -2200,7 +2200,8 @@ continues without a cascade of follow-on errors.
 ### Called names
 
 R looks up the name in a call `f(...)` as a function: a binding whose value is not a function is
-skipped, and the lookup continues outward. A called name therefore resolves to the nearest binding
+skipped, and the lookup continues outward. A string call head is the same lookup, so
+`"toupper"(x)` calls `toupper` exactly as `toupper(x)` does. A called name therefore resolves to the nearest binding
 whose type can be a function, so this is clean:
 
 ```r
@@ -2211,7 +2212,7 @@ upper_names <- function(x) {
 ```
 
 - A binding whose type is definitely not a function (`NULL`, an atomic vector, a list, a record, a
-  tuple, a tag or a frame) is skipped. The lookup tries the enclosing frames' slots of the same name,
+  tuple, a tag, a frame, or an opaque nominal such as `matrix` or `Date`) is skipped. The lookup tries the enclosing frames' slots of the same name,
   then the package's top-level binding, then the library. A top-level `l10n_info <- NULL` therefore
   leaves `l10n_info()` calling base's function. In a package file the top level is the namespace
   itself, so past it only the library remains. A test file's top level encloses in the helpers'

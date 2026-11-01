@@ -2840,7 +2840,7 @@ first lines R had already read, leaving R mid-command.
 
 ## The checker presumes R code is correct where R's semantics leave the question open
 
-- **Previous shape.** Inference treated every use as a demand. A formal read on any path was required at every call, a field a list literal lacks read as `NULL` (so `opts$force` on `list(spec = ...)` was a finding), `list()` was a closed empty tuple whose reads were errors, a vector partner in arithmetic pinned its operand to a scalar, a callback called only with forwarded `...` got the arity of its first use, and a `pkg::name` read of a shipped package was "unknown" until something attached it. Run over the GNU R corpus with typing on, this gave 8,038 errors on code that CRAN checks, essentially all false.
+- **Previous shape.** Inference treated every use as a demand. A formal read on any path was required at every call, a field a list literal lacks read as `NULL` (so `opts$force` on `list(spec = ...)` was a finding), `list()` was a closed empty tuple whose reads were errors, a vector partner in arithmetic pinned its operand to a scalar, a callback called only with forwarded `...` got the arity of its first use, and a `pkg::name` read of a shipped package was "unknown" until something attached it. Run over the GNU R corpus with typing on, this gave 3,112 errors on code that CRAN checks, essentially all false.
 - **Target shape.** Each rule now asks what R does at run time and refuses only what R itself would fail on, or what is a near-certain typo:
   - A formal is required only when every path forces it (`collect_branch_uses` returns the forced set, `join_forced` intersects branches), and a same-name argument to a project function (`inner(finally = finally)`) leaves the decision to the callee.
   - A name a record-like list lacks reads `Unknown` with a strict origin, because R lists are open and code adds fields later; a near miss of a field is still an error. An empty `list()` reads `Unknown`, or contributes `NULL` inside a union, which is what the field-by-field accumulator idiom needs.
@@ -2848,7 +2848,7 @@ first lines R had already read, leaving R mid-command.
   - A callback called with nothing but forwarded `...` is `fn(...: Any) -> T`.
   - `pkg::name` on a shipped namespace is accepted without attaching it, since R's `::` loads without attaching.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
-- **Impact.** The corpus count fell to 650 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
+- **Impact.** The corpus count fell to 624 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
 
 # Decision record: editor features for ry's own syntax
 

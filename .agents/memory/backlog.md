@@ -142,8 +142,8 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 8,038 errors to 650 after the false-report fixes listed in `limitations.md` and the
-reference. A random sample of the 650 is still almost entirely false reports on correct R. The
+went from 3,112 errors to 624 after the false-report fixes listed in `limitations.md` and the
+reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
@@ -163,7 +163,9 @@ classes, largest first:
   xtable's string `+` method, `*` between `double[]` and a matrix.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
-- Singletons: `lapply` over `as.data.frame(x)`, `"name"(args)` string calls, an infinite-type error
+- One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector
+  and no such function exists.
+- Singletons: `lapply` over `as.data.frame(x)`, an infinite-type error
   in pkgdown `news_search_index`, `Sys.getenv()` value passed to a `logical` helper (renv `not`).
 
 To reproduce, give each package a `ry.toml` with `[check]` `typing = true` (typing is off by
