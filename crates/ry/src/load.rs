@@ -74,8 +74,31 @@ pub fn process_runtime() -> String {
 /// Installs the runtime in `tools:ry`. Its functions are byte-compiled once per runtime and R
 /// version and cached, because R would otherwise compile each one the first time it runs,
 /// which costs more than a typical reload.
+///
+/// The runtime also binds each name of ry's standard library that GNU R lacks to a function that
+/// explains the library runs only on ry's runtime, which reads better than GNU R's "could not
+/// find function". A name the session already has, such as `col` or data.table's `copy`, keeps
+/// its meaning.
 fn runtime(transport: &str) -> String {
-    let source = format!("{transport}\n{RUNTIME_GNUR}");
+    let names: Vec<String> = include_str!("../../../types/ry.exports")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    let source = format!(
+        r#"{transport}
+{RUNTIME_GNUR}
+.ry_standard_library_name <- function(name) {{
+  force(name)
+  function(...) stop(
+    "`", name, "()` is part of ry's standard library, which only ry's runtime provides, ",
+    "and this session runs on GNU R; run the code with `ry run` or `ry load` instead",
+    call. = FALSE
+  )
+}}
+.ry_standard_library_names <- c({names})"#,
+        names = names.join(", ")
+    );
     let cache = dirs::cache_dir()
         .map(|directory| directory.join("ry").to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -97,6 +120,10 @@ fn runtime(transport: &str) -> String {
       saved <- tryCatch({{ saveRDS(runtime, partial); TRUE }}, error = function(error) FALSE)
       if (saved) file.rename(partial, cache) else unlink(partial)
     }}
+  }}
+  # Decided per session, not cached: a name an attached package exports keeps its meaning.
+  for (name in runtime$.ry_standard_library_names) {{
+    if (!exists(name)) runtime[[name]] <- runtime$.ry_standard_library_name(name)
   }}
   runtime$.ry_packages <- new.env(parent = emptyenv())
   runtime$.ry_timing <- new.env(parent = emptyenv())

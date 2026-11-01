@@ -270,7 +270,13 @@ unsafe fn do_substr(call: &Call<'_>) -> R<Sexp> {
     let result = alloc(SexpType::String, count)?;
     if count > 0 {
         let starts = integer_argument(call.arg(1))?;
-        let stops = integer_argument(call.arg(2))?;
+        // From R 4.5 on, `substr(x, start, NULL)` and `substring(x, first)` pass a NULL stop,
+        // which means the end of each string.
+        let stops = if call.arg(2) == nil() {
+            vec![i32::MAX]
+        } else {
+            integer_argument(call.arg(2))?
+        };
         if starts.is_empty() || stops.is_empty() {
             return Err(error("invalid substring arguments"));
         }

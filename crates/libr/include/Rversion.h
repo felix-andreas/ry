@@ -1,6 +1,8 @@
-/* ry's libR presents itself as R 4.6.2, so packages that guard on the version take the branches
-   written for current R. data.table also guards on the revision (`R_SVN_REVISION < 89194` keeps
-   its backport of R_mapAttrib), so the revision is at least that. */
+/* The version for code built directly against these headers. An R home that `rcmd::assemble`
+   creates replaces this file with one generated from the base package the interpreter runs, so
+   that R.version and the headers agree. The revision is at least 89194 either way, because ry
+   implements the API data.table guards on it (`R_SVN_REVISION < 89194` keeps its backport of
+   R_mapAttrib). */
 #ifndef R_VERSION_H
 #define R_VERSION_H
 

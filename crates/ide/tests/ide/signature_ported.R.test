@@ -14,7 +14,7 @@ action: Add inferred type annotation for `result`
   edit 92..92 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
   edit 92..92 -> "#: integer\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): describe, result, break, else, FALSE, for, function, if
 hint @98: integer
 
 #---- pre_rest_optional_fills_positionally
@@ -47,7 +47,7 @@ signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named
 parameters: [X: list[named: T]] | FUN: fn(T) -> U | ...: Any
 signature: <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
 parameters: [X: list[T] | T[] | NULL] | FUN: fn(T) -> U | ...: Any
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, break, else, FALSE, for, function, if, in
 
 #---- lapply_resolved_instantiation
 # The committed candidate reads instantiated; the alternatives keep their binders.
@@ -65,7 +65,7 @@ action: Add inferred type annotation for `result`
   edit 83..83 -> "#: list[integer]\n"
 action: Add inferred type annotations for the whole file
   edit 83..83 -> "#: list[integer]\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): result, break, else, FALSE, for, function, if, in
 hint @89: list[integer]
 
 #---- user_generic_open_call
@@ -80,5 +80,5 @@ signature: <T, U> fn(x: T, [y]: U) -> T
 parameters: [x: T] | [y]: U
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(x: T, [y]: U) -> T\n"
-completion (128+): break, else, FALSE, for, function, if, in, Inf
+completion (128+): x = , y = , pick, value, break, else, FALSE, for
 hint @4: <T, U> fn(x: T, [y]: U) -> T

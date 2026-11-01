@@ -22,8 +22,10 @@ use std::{
     process::Command,
 };
 
-/// The R version ry presents, as `R.version` and `Built:` report it.
-pub const R_VERSION: &str = "4.6.2";
+/// ry implements the API that data.table guards on its revision (`R_mapAttrib`, the resizable
+/// vectors) whatever base R it runs, so it reports at least this revision, as the interpreter
+/// does (`interp::system::MINIMUM_SVN_REVISION`).
+pub const MINIMUM_SVN_REVISION: u32 = 89194;
 
 /// The R-level half of an installation, run on ry's interpreter.
 const INSTALL_DRIVER: &str = include_str!("install.R");
@@ -55,6 +57,13 @@ fn io_error(path: &Path) -> impl FnOnce(io::Error) -> Error + '_ {
     move |error| Error::Io(path.to_path_buf(), error)
 }
 
+/// The file name of ry's libR in an R home's `lib/`: the name compiled packages link against.
+pub const LIBR_FILE: &str = if cfg!(target_os = "macos") {
+    "libR.dylib"
+} else {
+    "libR.so"
+};
+
 /// The toolchain an R home is configured with.
 #[derive(Clone, Debug)]
 pub struct Toolchain {
@@ -64,6 +73,11 @@ pub struct Toolchain {
     pub blas_libs: String,
     pub lapack_libs: String,
     pub flibs: String,
+    pub cppflags: String,
+    pub ldflags: String,
+    /// The compiler flag that enables OpenMP, or empty where the compiler has none (Apple's
+    /// clang), in which case packages build single-threaded as they do under CRAN's R.
+    pub openmp: String,
 }
 
 impl Default for Toolchain {
@@ -77,8 +91,178 @@ impl Default for Toolchain {
             blas_libs: "-lblas".into(),
             lapack_libs: "-llapack".into(),
             flibs: "-lgfortran -lm -lquadmath".into(),
+            cppflags: String::new(),
+            ldflags: String::new(),
+            openmp: "-fopenmp".into(),
         }
     }
+}
+
+impl Toolchain {
+    /// The toolchain for building packages on this platform next to the GNU R at `gnu_r_home`.
+    /// On Linux that is [`Toolchain::default`]. On macOS it is the one GNU R's own
+    /// `etc/Makeconf` names, because the compilers and libraries vary by installer: CRAN's R
+    /// uses Apple's clang, the gfortran in `/opt/gfortran` and its own `libRblas`, Homebrew's
+    /// uses Homebrew's gcc and OpenBLAS, and neither has a usable default.
+    pub fn for_gnu_r_home(gnu_r_home: &Path) -> Result<Toolchain> {
+        if !cfg!(target_os = "macos") {
+            return Ok(Toolchain::default());
+        }
+        let path = gnu_r_home.join("etc").join("Makeconf");
+        let text = fs::read_to_string(&path).map_err(io_error(&path))?;
+        Ok(Toolchain::from_makeconf(&text, gnu_r_home))
+    }
+
+    /// Reads a toolchain from the text of GNU R's `Makeconf`, expanding `$(VAR)` references
+    /// against the file's own assignments and `R_HOME` against `gnu_r_home`, since ry's home
+    /// does not hold GNU R's BLAS or LAPACK.
+    pub fn from_makeconf(text: &str, gnu_r_home: &Path) -> Toolchain {
+        let variables = make_assignments(text);
+        let home = gnu_r_home.display().to_string();
+        let get = |name: &str| {
+            expand_make(
+                variables.get(name).map_or("", String::as_str),
+                &variables,
+                &home,
+                0,
+            )
+        };
+        let defaults = Toolchain::default();
+        let or = |value: String, fallback: &str| match value.is_empty() {
+            true => fallback.to_owned(),
+            false => value,
+        };
+        // `CXX17` is the bare compiler; `CXX` may already carry a `-std` flag.
+        let cxx = match get("CXX17") {
+            value if value.is_empty() => get("CXX"),
+            value => value,
+        };
+        Toolchain {
+            cc: or(get("CC"), "clang"),
+            cxx: or(cxx, "clang++"),
+            fc: or(get("FC"), &defaults.fc),
+            blas_libs: or(get("BLAS_LIBS"), "-framework Accelerate"),
+            lapack_libs: or(get("LAPACK_LIBS"), "-framework Accelerate"),
+            flibs: get("FLIBS"),
+            cppflags: get("CPPFLAGS"),
+            ldflags: get("LDFLAGS"),
+            openmp: get("SHLIB_OPENMP_CFLAGS"),
+        }
+    }
+}
+
+/// The `NAME = value` assignments of a makefile, with backslash continuations joined. `+=`
+/// appends and `?=` assigns only once, as make does.
+fn make_assignments(text: &str) -> BTreeMap<String, String> {
+    let mut variables = BTreeMap::new();
+    let mut logical = String::new();
+    for line in text.lines() {
+        // make joins a continuation and the whitespace around it into one space.
+        let line = if logical.is_empty() {
+            line
+        } else {
+            line.trim_start()
+        };
+        if let Some(stripped) = line.strip_suffix('\\') {
+            logical.push_str(stripped.trim_end());
+            logical.push(' ');
+            continue;
+        }
+        logical.push_str(line);
+        let statement = std::mem::take(&mut logical);
+        if statement.starts_with(['\t', '#']) {
+            continue;
+        }
+        let Some((name, value)) = statement.split_once('=') else {
+            continue;
+        };
+        // A `#` starts a comment anywhere on an assignment line, as in make.
+        let value = value.split('#').next().unwrap_or("").trim().to_owned();
+        let (name, operator) = match name.trim_end().strip_suffix(['+', '?', ':']) {
+            Some(stripped) => (stripped.trim(), name.trim_end().chars().last()),
+            None => (name.trim(), None),
+        };
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        match operator {
+            Some('+') => {
+                let entry: &mut String = variables.entry(name.to_owned()).or_default();
+                if !entry.is_empty() {
+                    entry.push(' ');
+                }
+                entry.push_str(&value);
+            }
+            Some('?') => {
+                variables.entry(name.to_owned()).or_insert(value);
+            }
+            _ => {
+                variables.insert(name.to_owned(), value);
+            }
+        }
+    }
+    variables
+}
+
+/// Expands `$(NAME)` and `${NAME}` in `value`, including a name built by a nested reference
+/// (`$(CXX$(STD))`), and `$$` to `$`. An unknown name expands to nothing, as in make, and the
+/// depth bound stops a self-referencing assignment. Whitespace inside the value is kept, so a
+/// quoted path with a space survives.
+fn expand_make(
+    value: &str,
+    variables: &BTreeMap<String, String>,
+    home: &str,
+    depth: usize,
+) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('$') {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let (open, close) = match after.chars().next() {
+            Some('(') => ('(', ')'),
+            Some('{') => ('{', '}'),
+            Some('$') => {
+                expanded.push('$');
+                rest = &after[1..];
+                continue;
+            }
+            _ => {
+                expanded.push('$');
+                rest = after;
+                continue;
+            }
+        };
+        let mut level = 0usize;
+        let end = after.char_indices().find_map(|(index, character)| {
+            if character == open {
+                level += 1;
+            } else if character == close {
+                level -= 1;
+                if level == 0 {
+                    return Some(index);
+                }
+            }
+            None
+        });
+        let Some(end) = end else {
+            expanded.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let name = expand_make(&after[1..end], variables, home, depth + 1);
+        let name = name.as_str();
+        if name == "R_HOME" {
+            expanded.push_str(home);
+        } else if depth < 16
+            && let Some(inner) = variables.get(name)
+        {
+            expanded.push_str(&expand_make(inner, variables, home, depth + 1));
+        }
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    expanded.trim().to_owned()
 }
 
 /// Where the pieces of an R home come from.
@@ -99,7 +283,7 @@ pub struct HomeSources<'a> {
 /// `Rdconv`, `REMOVE` and the rest) is linked, and runs R code through ry's `bin/R`.
 const OWN_SCRIPTS: &[&str] = &["R", "Rscript", "Rcmd", "INSTALL", "SHLIB", "config", "exec"];
 
-/// Creates ry's R home at `root`: `include/`, `lib/libR.so`, `etc/Makeconf`,
+/// Creates ry's R home at `root`: `include/`, `lib/libR.so` (`libR.dylib`), `etc/Makeconf`,
 /// `share/make/shlib.mk` and the `bin/` front ends, with base R's packages in `library/` and
 /// the rest of `share/`, `etc/` and `bin/` linked from GNU R.
 pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
@@ -108,7 +292,12 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         fs::create_dir_all(&path).map_err(io_error(&path))?;
     }
     copy_tree(sources.include, &root.join("include"))?;
-    let libr = root.join("lib/libR.so");
+    let base_description = sources.gnu_r_home.join("library/base/DESCRIPTION");
+    let version = BaseVersion::read(&base_description)?;
+    // The headers present the version of the base R the interpreter runs, as `R.version` does,
+    // so a package's C code and its R code take the same version branches.
+    write(&root.join("include/Rversion.h"), &version.header())?;
+    let libr = root.join("lib").join(LIBR_FILE);
     // Replacing rather than overwriting keeps a running session's mapping of the old file valid.
     remove_file_if_present(&libr)?;
     fs::copy(sources.libr, &libr).map_err(io_error(&libr))?;
@@ -117,6 +306,16 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
         &makeconf(root, &sources.toolchain),
     )?;
     write(&root.join("share/make/shlib.mk"), SHLIB_MK)?;
+    // The interpreter registers an `ry` namespace with no path, so `packageDescription("ry")`
+    // searches the library, and `sessionInfo()` fails on a loaded namespace it cannot describe.
+    // The version is the one the namespace's `spec` gives (`crates/interp/src/frame.rs`).
+    let ry_package = root.join("library/ry");
+    fs::create_dir_all(&ry_package).map_err(io_error(&ry_package))?;
+    write(
+        &ry_package.join("DESCRIPTION"),
+        "Package: ry\nVersion: 0.0.0\nPriority: base\nTitle: The ry Runtime and Standard Library\n\
+         Description: Built into ry's interpreter.\nLicense: UPL-1.0\n",
+    )?;
 
     let gnu = sources.gnu_r_home;
     let gnu_share = wrapper_directory(gnu, "R_SHARE_DIR").unwrap_or_else(|| gnu.join("share"));
@@ -166,6 +365,7 @@ pub fn assemble(root: &Path, sources: &HomeSources<'_>) -> Result<()> {
 
     let home = root.display();
     let rcmd = sources.rcmd.display();
+    let r_version = &version.version;
     let gnu_doc = gnu_doc.display();
     // `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR` stay plain `NAME='value'` lines: the
     // interpreter reads them back from this script, as it does from GNU R's.
@@ -205,7 +405,7 @@ exec '{rcmd}' R "$@"
 # bin/, or a program on PATH, run with R's environment.
 test $# -eq 0 && exec "$R_HOME/bin/R" --help
 R_CMD="$R_HOME/bin/Rcmd"
-R_VERSION={R_VERSION}
+R_VERSION={r_version}
 R_OSTYPE=unix
 TEXINPUTS=".:${{TEXINPUTS:+$TEXINPUTS:}}$R_SHARE_DIR/texmf/tex/latex:"
 BIBINPUTS=".:${{BIBINPUTS:+$BIBINPUTS:}}$R_SHARE_DIR/texmf/bibtex/bib:"
@@ -237,6 +437,14 @@ exec "$cmd" $extra "$@"
 "#
         ),
     )?;
+    // `install.packages` refuses source packages unless `bin/INSTALL` exists, and scripts call
+    // `bin/SHLIB` and `bin/config` directly, so these forward to ry's `R CMD`.
+    for command in ["INSTALL", "SHLIB", "config"] {
+        write_script(
+            &root.join("bin").join(command),
+            &format!("#!/bin/sh\nexec '{home}/bin/R' CMD {command} \"$@\"\n"),
+        )?;
+    }
     write_script(
         &root.join("bin/Rscript"),
         &format!(
@@ -291,8 +499,10 @@ fn link(target: &Path, link_path: &Path) -> Result<()> {
 /// What an `R` or `Rscript` command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Session {
-    /// `--version` and `--help`: text to print, with no session.
+    /// `--help`: text to print, with no session.
     Print(String),
+    /// `--version`, which prints [`version_text`].
+    Version,
     /// A session that runs `file`, or `expressions` (`-e`), or else R code read from stdin.
     Run {
         file: Option<String>,
@@ -301,30 +511,143 @@ pub enum Session {
         arguments: Vec<String>,
         /// `Rscript --default-packages=`, which becomes `R_DEFAULT_PACKAGES`.
         default_packages: Option<String>,
+        /// Off with `--vanilla` or `--no-site-file`.
+        site_profile: bool,
+        /// Off with `--vanilla` or `--no-init-file`.
+        user_profile: bool,
     },
 }
 
-fn version_text() -> String {
-    format!(
-        "R version {R_VERSION} (ry {})\nry's runtime: R code runs on ry's interpreter.\n",
-        env!("CARGO_PKG_VERSION")
-    )
+/// Which startup profiles a command line turns off, from GNU R's options for them.
+struct Profiles {
+    site: bool,
+    user: bool,
 }
 
-/// Reads GNU R's `R [options] [< infile]` command line. Session options that change nothing in
-/// a non-interactive run on ry (`--vanilla`, `--no-save`, `--no-echo`, memory sizes) are
-/// accepted and ignored.
+impl Profiles {
+    /// Reads one option, returning whether it was a profile option.
+    fn read(&mut self, option: &str) -> bool {
+        match option {
+            "--vanilla" => {
+                self.site = false;
+                self.user = false;
+            }
+            "--no-site-file" => self.site = false,
+            "--no-init-file" => self.user = false,
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// What `R --version` prints for the R home at `home`.
+pub fn version_text(home: &Path) -> Result<String> {
+    let version = BaseVersion::read(&home.join("library/base/DESCRIPTION"))?;
+    Ok(format!(
+        "R version {} ({}-{}-{}) (ry {})\nry's runtime: R code runs on ry's interpreter.\n",
+        version.version,
+        version.year,
+        version.month,
+        version.day,
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// The version of a base package, from its `DESCRIPTION`: the R version ry presents.
+struct BaseVersion {
+    version: String,
+    year: String,
+    month: String,
+    day: String,
+    revision: u32,
+}
+
+impl BaseVersion {
+    fn read(description: &Path) -> Result<Self> {
+        let text = fs::read_to_string(description).map_err(io_error(description))?;
+        let field = |name: &str| {
+            text.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let version = field("Version").ok_or_else(|| {
+            Error::Package(format!("{} has no Version field", description.display()))
+        })?;
+        // The revision and release date live in `SVN-REVISION` of the GNU R home the base
+        // package really belongs to; ry's own home links `library/base` there.
+        let svn = description
+            .parent()
+            .and_then(|base| fs::canonicalize(base).ok())
+            .and_then(|base| Some(base.parent()?.parent()?.join("SVN-REVISION")))
+            .and_then(|path| fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        let svn_field = |name: &str| {
+            svn.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_owned())
+            })
+        };
+        let date = svn_field("Last Changed Date").unwrap_or_default();
+        let mut date = date.splitn(3, '-').map(str::to_owned);
+        let revision = svn_field("Revision")
+            .and_then(|revision| revision.parse().ok())
+            .unwrap_or(0);
+        Ok(BaseVersion {
+            version,
+            year: date.next().unwrap_or_default(),
+            month: date.next().unwrap_or_default(),
+            day: date.next().unwrap_or_default(),
+            revision: revision.max(MINIMUM_SVN_REVISION),
+        })
+    }
+
+    fn header(&self) -> String {
+        let parts: Vec<&str> = self.version.split('.').collect();
+        let part = |index: usize| parts.get(index).copied().unwrap_or("0");
+        let (major, minor, patch) = (part(0), part(1), part(2));
+        let revision = self.revision;
+        format!(
+            "/* Generated by ry's R home assembly from the base package it runs, as R.version reports it. */\n\
+             #ifndef R_VERSION_H\n#define R_VERSION_H\n\n\
+             #define R_Version(v, p, s) (((v) * 65536) + ((p) * 256) + (s))\n\
+             #define R_VERSION R_Version({major}, {minor}, {patch})\n\
+             #define R_NICK \"ry\"\n\
+             #define R_MAJOR \"{major}\"\n\
+             #define R_MINOR \"{minor}.{patch}\"\n\
+             #define R_STATUS \"\"\n\
+             #define R_YEAR \"{year}\"\n#define R_MONTH \"{month}\"\n#define R_DAY \"{day}\"\n\
+             #define R_SVN_REVISION {revision}\n\
+             #define R_FILEVERSION {major}, {minor}{patch}, {revision}, 0\n\n#endif\n",
+            year = self.year,
+            month = self.month,
+            day = self.day,
+        )
+    }
+}
+
+/// Reads GNU R's `R [options] [< infile]` command line. `--vanilla`, `--no-site-file` and
+/// `--no-init-file` turn the startup profiles off; other session options that change nothing in
+/// a non-interactive run on ry (`--no-save`, `--no-echo`, memory sizes) are accepted and
+/// ignored.
 pub fn r_command_line(arguments: &[String]) -> Result<Session> {
     let mut file = None;
     let mut expressions: Vec<String> = Vec::new();
     let mut rest = arguments.iter();
     let mut trailing = Vec::new();
+    let mut profiles = Profiles {
+        site: true,
+        user: true,
+    };
     while let Some(argument) = rest.next() {
+        if profiles.read(argument) {
+            continue;
+        }
         match argument.as_str() {
             "--args" => {
                 trailing.extend(rest.by_ref().cloned());
             }
-            "--version" => return Ok(Session::Print(version_text())),
+            "--version" => return Ok(Session::Version),
             "-h" | "--help" => {
                 return Ok(Session::Print(
                     "Usage: R [options] [< infile] [> outfile]\n   or: R CMD command [arguments]\n\n\
@@ -360,6 +683,8 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
         arguments: trailing,
         default_packages: None,
+        site_profile: profiles.site,
+        user_profile: profiles.user,
     })
 }
 
@@ -368,16 +693,22 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
 pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
     let mut expressions: Vec<String> = Vec::new();
     let mut default_packages = None;
+    let mut profiles = Profiles {
+        site: true,
+        user: true,
+    };
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
-        if argument == "-e" {
+        if profiles.read(argument) {
+            index += 1;
+        } else if argument == "-e" {
             let expression = arguments
                 .get(index + 1)
                 .ok_or_else(|| Error::Usage("-e not followed by an expression".into()))?;
             expressions.push(expression.clone());
             index += 2;
         } else if argument == "--version" {
-            return Ok(Session::Print(version_text()));
+            return Ok(Session::Version);
         } else if let Some(packages) = argument.strip_prefix("--default-packages=") {
             default_packages = Some(packages.to_owned());
             index += 1;
@@ -403,6 +734,8 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
         arguments: rest.to_vec(),
         default_packages,
+        site_profile: profiles.site,
+        user_profile: profiles.user,
     })
 }
 
@@ -445,7 +778,23 @@ fn makeconf(root: &Path, toolchain: &Toolchain) -> String {
         blas_libs,
         lapack_libs,
         flibs,
+        cppflags,
+        ldflags,
+        openmp,
     } = toolchain;
+    // On macOS a package records no libR at all and resolves R's API with a flat lookup when
+    // it loads, from the libR already in the process, so the same build loads under ry's
+    // runtime and under GNU R (`decisions.md`, "macOS packages bind to ry's libR"). On Linux the
+    // `libR.so` dependency is satisfied by soname from whichever libR is loaded.
+    let (dylib_ext, shlib_ldflags, libr) = if cfg!(target_os = "macos") {
+        (
+            ".dylib",
+            "-dynamiclib -Wl,-headerpad_max_install_names -undefined dynamic_lookup",
+            "",
+        )
+    } else {
+        (".so", "-shared", r#"-L"$(R_HOME)/lib" -lR"#)
+    };
     format!(
         r#"# ry's build configuration for packages, read by R CMD INSTALL and R CMD SHLIB.
 
@@ -499,24 +848,24 @@ OBJC = $(CC)
 OBJCFLAGS = -g -O2
 AR = ar
 RANLIB = ranlib
-LDFLAGS =
-CPPFLAGS =
-DYLIB_EXT = .so
+LDFLAGS = {ldflags}
+CPPFLAGS = {cppflags}
+DYLIB_EXT = {dylib_ext}
 SHLIB_EXT = .so
 SHLIB_LD = $(CC)
-SHLIB_LDFLAGS = -shared
+SHLIB_LDFLAGS = {shlib_ldflags}
 SHLIB_CXXLD = $(CXX)
-SHLIB_CXXLDFLAGS = -shared
+SHLIB_CXXLDFLAGS = {shlib_ldflags}
 SHLIB_FCLD = $(FC)
-SHLIB_FCLDFLAGS = -shared
-SHLIB_OPENMP_CFLAGS = -fopenmp
-SHLIB_OPENMP_CXXFLAGS = -fopenmp
-SHLIB_OPENMP_FFLAGS = -fopenmp
-SHLIB_OPENMP_FCFLAGS = -fopenmp
+SHLIB_FCLDFLAGS = {shlib_ldflags}
+SHLIB_OPENMP_CFLAGS = {openmp}
+SHLIB_OPENMP_CXXFLAGS = {openmp}
+SHLIB_OPENMP_FFLAGS = {openmp}
+SHLIB_OPENMP_FCFLAGS = {openmp}
 BLAS_LIBS = {blas_libs}
 LAPACK_LIBS = {lapack_libs}
 LIBM = -lm
-LIBR = -L"$(R_HOME)/lib" -lR
+LIBR = {libr}
 LIBINTL =
 TCLTK_CPPFLAGS =
 TCLTK_LIBS =
@@ -615,6 +964,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
             }
             "INSTALL" => {
                 let mut library = None;
+                let mut build = false;
                 let mut options = InstallOptions::default();
                 let mut packages = Vec::new();
                 let mut rest = rest.iter();
@@ -623,6 +973,7 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         "-l" | "--library" => library = rest.next().map(PathBuf::from),
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
+                        "--build" => build = true,
                         "--no-docs" | "--no-help" => options.driver_flags.push("--no-docs".into()),
                         "--no-data" | "--no-inst" | "--no-demo" | "--no-exec" | "--no-R" => {
                             options.driver_flags.push(argument.clone());
@@ -632,6 +983,8 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                                 library = Some(PathBuf::from(path));
                             } else if !other.starts_with('-') {
                                 packages.push(PathBuf::from(other));
+                            } else {
+                                eprintln!("Warning: unknown option '{other}'");
                             }
                         }
                     }
@@ -640,6 +993,14 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                 let mut output = String::new();
                 for package in packages {
                     let installed = install(home, &package, &library, &options)?;
+                    if build {
+                        let tarball = package_binary(&installed)?;
+                        output.push_str(&format!(
+                            "packaged installation of '{}' as {}\n",
+                            installed.name,
+                            tarball.display()
+                        ));
+                    }
                     output.push_str(&format!("* DONE ({})\n", installed.name));
                 }
                 Ok(output)
@@ -845,6 +1206,43 @@ fn tempdir(near: &Path) -> Result<PathBuf> {
         }
     }
     Err(Error::Package("cannot create a staging directory".into()))
+}
+
+/// `R CMD INSTALL --build`: packs the installed package into
+/// `<name>_<version>_R_<platform>.tar.gz` in the working directory, the binary package
+/// `install.packages` and `R CMD INSTALL` take back.
+fn package_binary(installed: &Installed) -> Result<PathBuf> {
+    let description_path = installed.directory.join("DESCRIPTION");
+    let description = Description::parse(
+        &fs::read_to_string(&description_path).map_err(io_error(&description_path))?,
+    );
+    let field = |name: &str| {
+        description.get(name).map(str::to_owned).ok_or_else(|| {
+            Error::Package(format!(
+                "{} has no {name} field",
+                description_path.display()
+            ))
+        })
+    };
+    let version = field("Version")?;
+    let built = field("Built")?;
+    let platform = built.split(';').nth(1).map(str::trim).unwrap_or_default();
+    let tarball = PathBuf::from(format!("{}_{version}_R_{platform}.tar.gz", installed.name));
+    let parent = installed.directory.parent().ok_or_else(|| {
+        Error::Package(format!("{} has no parent", installed.directory.display()))
+    })?;
+    let absolute = std::env::current_dir()
+        .map_err(io_error(Path::new(".")))?
+        .join(&tarball);
+    run_command(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&absolute)
+            .arg("-C")
+            .arg(parent)
+            .arg(&installed.name),
+    )?;
+    Ok(tarball)
 }
 
 /// Unpacks a tarball into `staging` and returns the package directory inside it.
@@ -1238,11 +1636,16 @@ pub fn shlib(
     if let Some(makevars) = &makevars {
         command.arg("-f").arg(makevars);
     }
-    command
-        .arg("-f")
-        .arg(home.join("etc/Makeconf"))
-        .arg("-f")
-        .arg(home.join("share/make/shlib.mk"));
+    command.arg("-f").arg(home.join("etc/Makeconf"));
+    if let Some(site) = site_makevars(home) {
+        command.arg("-f").arg(site);
+    }
+    command.arg("-f").arg(home.join("share/make/shlib.mk"));
+    // The user's Makevars comes last so it overrides the toolchain, as in GNU R; pkgbuild hides
+    // the compilers by pointing `R_MAKEVARS_USER` at one that sets `CC = test`.
+    if let Some(user) = user_makevars() {
+        command.arg("-f").arg(user);
+    }
     command.arg(format!("SHLIB={output}"));
     if !makevars_text.lines().any(|line| {
         line.split_once('=')
@@ -1288,6 +1691,31 @@ pub fn shlib(
     Ok(directory.join(output))
 }
 
+/// The site Makevars GNU R reads after `Makeconf`: `R_MAKEVARS_SITE`, else `etc/Makevars.site`.
+fn site_makevars(home: &Path) -> Option<PathBuf> {
+    match std::env::var_os("R_MAKEVARS_SITE") {
+        Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => Some(home.join("etc/Makevars.site")).filter(|path| path.exists()),
+    }
+}
+
+/// The user Makevars GNU R reads last: `R_MAKEVARS_USER`, else `~/.R/Makevars-<platform>`, else
+/// `~/.R/Makevars`.
+fn user_makevars() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("R_MAKEVARS_USER").filter(|path| !path.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    let directory = PathBuf::from(std::env::var_os("HOME")?).join(".R");
+    let platform = std::env::var("R_PLATFORM")
+        .ok()
+        .filter(|platform| !platform.is_empty());
+    platform
+        .map(|platform| directory.join(format!("Makevars-{platform}")))
+        .into_iter()
+        .chain([directory.join("Makevars")])
+        .find(|path| path.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1306,5 +1734,64 @@ mod tests {
     fn the_cxx_standard_comes_from_makevars() {
         assert_eq!(cxx_standard("CXX_STD = CXX17\n"), Some("CXX17".to_owned()));
         assert_eq!(cxx_standard("PKG_LIBS = -lz\n"), None);
+    }
+
+    /// An excerpt of the `etc/Makeconf` of CRAN's R 4.5 for Apple silicon.
+    const CRAN_MACOS_MAKECONF: &str = "\
+R_ARCH =
+CC = clang -arch arm64
+CXX = clang++ -arch arm64 -std=gnu++17
+CXX17 = clang++ -arch arm64
+CPPFLAGS = -I/opt/R/arm64/include
+LDFLAGS = -L/opt/R/arm64/lib
+FC = /opt/gfortran/bin/gfortran -mtune=native
+FLIBS =  -L/opt/gfortran/lib/gcc/aarch64-apple-darwin20.0/14.2.0 \\
+ -L/opt/gfortran/lib -lgfortran -lemutls_w -lheapt_w -lquadmath
+BLAS_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRblas
+LAPACK_LIBS = -L\"$(R_HOME)/lib$(R_ARCH)\" -lRlapack
+SHLIB_OPENMP_CFLAGS =
+\tthis line is a recipe = and is skipped
+";
+
+    #[test]
+    fn a_macos_toolchain_comes_from_gnu_r_makeconf() {
+        let home = Path::new("/Library/Frameworks/R.framework/Resources");
+        let toolchain = Toolchain::from_makeconf(CRAN_MACOS_MAKECONF, home);
+        assert_eq!(toolchain.cc, "clang -arch arm64");
+        assert_eq!(toolchain.cxx, "clang++ -arch arm64");
+        assert_eq!(toolchain.fc, "/opt/gfortran/bin/gfortran -mtune=native");
+        assert_eq!(
+            toolchain.flibs,
+            "-L/opt/gfortran/lib/gcc/aarch64-apple-darwin20.0/14.2.0 -L/opt/gfortran/lib \
+             -lgfortran -lemutls_w -lheapt_w -lquadmath"
+        );
+        assert_eq!(
+            toolchain.blas_libs,
+            "-L\"/Library/Frameworks/R.framework/Resources/lib\" -lRblas"
+        );
+        assert_eq!(toolchain.cppflags, "-I/opt/R/arm64/include");
+        assert_eq!(toolchain.ldflags, "-L/opt/R/arm64/lib");
+        assert_eq!(toolchain.openmp, "", "Apple's clang has no OpenMP");
+    }
+
+    #[test]
+    fn make_expansion_appends_and_stops_on_self_reference() {
+        let variables =
+            make_assignments("A = x\nA += y\nB ?= $(A) ${C}\nB ?= no\nLOOP = $(LOOP)\n");
+        assert_eq!(expand_make("$(B)", &variables, "/r", 0), "x y");
+        assert_eq!(
+            expand_make("$(LOOP) $$ $(R_HOME)", &variables, "/r", 0),
+            "$ /r"
+        );
+    }
+
+    #[test]
+    fn make_expansion_nests_drops_comments_and_keeps_quoted_spaces() {
+        let variables = make_assignments("STD = 17 # the default\nCXX17 = clang++\n");
+        assert_eq!(expand_make("$(CXX$(STD))", &variables, "/r", 0), "clang++");
+        assert_eq!(
+            expand_make("-L\"$(R_HOME)/lib\"", &variables, "/My R", 0),
+            "-L\"/My R/lib\""
+        );
     }
 }

@@ -1192,7 +1192,7 @@ impl<'db> InferenceTable<'db> {
 
     /// The one fact the rendered type cannot show: `fn(s: U) -> U` prints the same
     /// whether `U` accepts anything or only numbers.
-    fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
+    pub(crate) fn variable_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let TyKind::Var(var) = ty.kind(db) else {
             return None;
         };
@@ -1527,6 +1527,14 @@ fn constraint_rejects<'db>(
             .get(name)
             .is_some_and(|declared| declared.join(constraint) == *declared)
     };
+    // A union satisfies a bound when every member does: `double | integer` is a number either way.
+    if let TyKind::Union(members) = ty.kind(db) {
+        let every_member_admissible = members
+            .iter()
+            .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
+        return (!every_member_admissible)
+            .then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.

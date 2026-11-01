@@ -169,8 +169,8 @@ targets share exactly the same contracts: `syntax::testing::check_parse_invarian
 `format::check_format_invariants` for the formatter, and `semantics::testing::check_semantics_input`
 for the semantic pipeline. The last one folds every lint, under a configuration that turns them all
 on, into its rendering, so the lint layer inherits the same invariants. The `format` and `semantics`
-harnesses also carry a `fuzz_regressions_hold_invariants` battery that pins every input the
-coverage-guided targets have ever broken. `syntax` and `ide` have no such battery yet.
+harnesses, and those of `syntax` and `ide`, also carry a `fuzz_regressions_hold_invariants` battery
+that pins every input the coverage-guided targets have ever broken.
 
 ### The semantic pipeline
 
@@ -317,19 +317,34 @@ without comparing anything. The test interpreter has no base R closures (`numeri
 meant to fail. Behavior that needs base R, such as a warning handler watching a compiled loop,
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
-against values read from data.table, and `test_altrep.rs` there checks the columns as ALTREP
-vectors (feature `runtime`). `crates/heap/tests/test_gc.rs` builds random
+against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
+`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
 collection checks each object the model still reaches. It also re-interns every string ever made,
 so an intern-table entry that outlived its string shows up. A disabled write barrier, a frame whose
 cells are not traced, and a minor collection that keeps dead strings in the table each turn it red.
 
+Tests that load base R take it from the GNU R installation `R_HOME` names (the system R when it is
+unset), and the runtime then behaves as that version. Run them once per supported version, for
+example `R_HOME=/opt/R/4.6.1/lib/R cargo test -p interp`, and the oracle the same way with
+`ORACLE_R` ([Corpus and oracle](/contributing/corpus-and-oracle)).
+
 `crates/libr/tests/test_fuzz_native.rs` fuzzes the native boundary itself. It nests every
 non-local exit native code can set up (`Rf_eval`, `R_tryEval`, `R_ToplevelExec`, `R_tryCatchError`,
 `R_UnwindProtect`, `R_ExecWithCleanup` and a cpp11-style C++ unwind) around values and errors, and
 checks the outcome, which cleanups ran, and that every C context, protection and `R_alloc` block was
 released. A second battery drives random API sequences under collection stress against a model.
+
+`crates/oracle/tests/test_differential.rs` runs whole generated R programs (`oracle::fuzz::program`)
+under GNU R, ry's tier 0 and ry's JIT, and under collection stress against ry unstressed, and every
+engine must print the same output, warnings and errors. The generator covers loops shaped for the
+JIT, closures, S3 dispatch, conditions and `on.exit`, environments, attributes, `NA` and overflow,
+and about one program in eight ends on a deliberate error. `cargo run -p oracle -- fuzz --seed N
+--count K --engines ry-tier0,ry-jit,ry-gctorture` runs any range, prints each divergent program and
+its replay command, and `just fuzz-differential` and `just gc-torture` are the long runs.
+`RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
+allocation, which is too slow for a debug build today.
 
 ### The table engine
 
@@ -345,13 +360,34 @@ engine, each printing rows, columns and a checksum, so the answers compare line 
 
 ### Coverage-guided fuzzing
 
-`fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. It holds the
-libFuzzer targets `parse`, `format`, and `semantics`, each a thin wrapper around the exported
-invariant batteries. The `semantics` target derives its document kind and an incremental edit from
-the input bytes, so a single byte stream drives the full battery, the splice cache included.
+`fuzz/` is a cargo-fuzz crate, in its own workspace and excluded from the main one. Each target is a
+thin wrapper around a battery its crate exports, which the crate's in-tree harness runs too:
+
+| Target | Battery |
+| --- | --- |
+| `parse` | `syntax::testing::check_parse_invariants` |
+| `format` | `format::check_format_invariants` |
+| `semantics` | `semantics::testing::check_semantics_input` |
+| `ide` | `ide::testing::check_ide_invariants` |
+| `position` | `ry::position::check_position_invariants` |
+| `config` | `ry::config::check_config_invariants` |
+| `lsp` | the language-server simulator, `run_session`, reading its choices from the input |
+| `load_index`, `reload` | `loader::testing::check_load_index_input`, `check_random_reload` |
+| `sniff` | `sniff::check_sniff_invariants` |
+| `csv` | `table::io::check_csv_input` |
+| `interp_lower`, `interp_unserialize`, `bytecode` | `interp::testing::check_lowering_input`, `check_unserialize_input`, `check_bytecode_agreement` |
+| `unserialize` | `R::serialize::check_unserialize_input` |
+
+The `semantics` target derives its document kind and an incremental edit from the input bytes, so a
+single byte stream drives the full battery, the splice cache included. The generator-driven targets
+(`lsp`, `reload`, `bytecode`) read the generator's choices from the input through
+`syntax::testing::ByteStream`, so a byte mutation is a mutation of the program or session. The
+runtime targets link polars, so `cargo fuzz build --no-default-features` builds only the analysis
+targets on a machine with little memory.
 
 It needs nightly, which the repository's pinned toolchain already is. Run `cargo install
-cargo-fuzz`, then from `fuzz/`:
+cargo-fuzz`, then `just fuzz-run format` runs one target, and `just fuzz-all 120` runs every target
+for two minutes each after seeding the corpora. Without `just`, from `fuzz/`:
 
 ```sh
 cargo -Zscript ../scripts/seed-fuzz-corpus.rs   # seed from all fixture case sources
@@ -406,6 +442,85 @@ diff's ordering rules turns it red within a few hundred seeds.
 options resolve to the documented runtime and mode, and no argument vector panics the parser.
 `test_repl_e2e.rs` runs every entry point on both runtimes: script arguments, `-i`, piped consoles,
 and the earlier spellings (`--runtime`, `RY_RUNTIME`, `ry repl`).
+
+### Docs examples
+
+`crates/ry/tests/test_docs.rs` runs the examples in the docs through the real `ry` binary, so a page
+that shows stale output fails the suite. A block opts in with a marker: the word `ry` after the
+fence's language, then the command and its options. Expressive Code ignores the extra words, so the
+site shows a plain block, and the pages' Markdown versions drop the marker. Here an output block
+follows a tab group:
+
+````md
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x this function has no parameter `greting`. Did you mean `greeting`?
+```
+````
+
+A marked `text` block is the output of the nearest `r` block above it, or of every tab of the
+nearest tab group above it, and each tab must produce it on its own. The code runs in a throwaway
+project of one `ry.toml` and one file, `main.R` unless the output's snippet names another file, as
+`--[R/both.R:2:31]` does. A tab group that no output block follows must give the same findings in
+every tab, with typing on. An unmarked output block is not tested.
+
+| Word | Meaning |
+| --- | --- |
+| `check` / `run` | Run `ry check`, or `ry run main.R`. |
+| `typing`, `strict` | Set that `[check]` key to `true`. Type checking is off unless a block says `typing`. |
+| `KEY=VALUE` | Any other `[check]` key, written as in `ry.toml`, such as `object-systems=false`. |
+| `runtime=ry` / `runtime=gnu-r` | Which runtime `run` uses; GNU R by default, as on the command line. |
+| `exact` | Compare the whole output instead of an excerpt. |
+| `continue` | Run the page's earlier `r` blocks first, as one session, and compare only this block's output. A `check` takes every earlier block; a `run` takes only those whose output the page checks, so an illustration that needs a package the machine lacks does not stop it. |
+| `tab=LABEL` | Only that tab produces this output, for the rare example whose spellings legitimately differ. |
+| `dput` | On an `r` block with `#>` output, print each result with `dput()` instead of `print()`. |
+
+An `r` block can also hold its own output, as `#>` lines after the code that prints it, with a marker
+such as ```` ```r ry run runtime=ry dput ````. Each run of code before a `#>` group shows its last
+value, and the comparison is always exact. A page's `#>` blocks share one R process, each in its
+own `local()` environment, because a runtime start costs seconds and the standard library reference
+has over a hundred of them.
+
+An excerpt matches when every non-blank line of it equals a line of the real output, both trimmed of
+surrounding whitespace, in the page's order. Lines the page leaves out, such as the summary, a
+source snippet, or other findings, are free. A message the page wraps by hand matches one output
+line when its lines are joined with single spaces. This rule lets a page show the part of the
+output that matters while still pinning every word it does show. An exact block matches when the
+whole output agrees, ignoring trailing whitespace and the project's temporary directory. Both
+compare standard output and standard error as one stream, interleaved as a terminal shows them,
+with color off.
+
+`just docs-test [PAGE]` runs the pages whose path contains `PAGE`, and `just docs-bless [PAGE]`
+rewrites the output of exact and `#>` blocks from the real tool. An excerpt is curated by hand, so
+bless leaves it alone: the failure prints the full output to choose the lines from. A `run` block
+is skipped with a note when GNU R is missing, or for `runtime=ry`, when `libR.so` is not built
+beside `ry`. The landing page's samples in `docs/src/pages/index.astro` are checked as excerpts with
+typing on, without markers.
 
 ### Package loading
 
@@ -479,6 +594,12 @@ cancellation token flips. The test sends its `didChange` only after the marker a
 cancellation provably lands while the pull is in flight, and the retryable `SERVER_CANCELLED`
 response and the successful retry after it can be asserted without sleeping and hoping. Nothing
 else sets these variables.
+
+`crates/ry/tests/test_simulation.rs` runs the in-process language-server simulator: random editor
+sessions under a seeded schedule, checked at random points against a server started fresh on the same
+disk and buffers. `crates/ry/tests/test_scenarios.rs` runs the scripted user journeys in
+`crates/ry/tests/scenarios/`. [Robustness](/contributing/robustness/) documents both, including the
+scenario format and the replay variables.
 
 ## Incrementality
 

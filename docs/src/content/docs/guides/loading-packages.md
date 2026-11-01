@@ -93,8 +93,9 @@ definitions you changed. On a generated package of 500 files, against `devtools:
 | cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
 | reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |
 
-In the `ry run` console, a command after a body edit takes 57 to 86 ms including the reload, and
-the console takes 2.9 s to start on this package.
+In the `ry run` console, a command after a body edit takes 57 to 86 ms including the reload. On
+this package, `ry run` starts its console with the package loaded in 1.0 s, against 1.2 s for
+`ry R` (medians of seven runs, timed in turn on the same machine).
 
 These are medians of five runs of `tools/loader-bench` (`load_all()` is `pkgload::load_all()`, which
 `devtools::load_all()` calls). The machine was shared and ry was built without link-time

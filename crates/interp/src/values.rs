@@ -751,6 +751,15 @@ pub unsafe fn set_attr(object: Sexp, name: Sexp, value: Sexp) -> R<()> {
         remove_attr(object, name);
         return Ok(());
     }
+    // An object cannot carry itself as an attribute: the cycle would make `serialize`, `identical`
+    // and printing recurse forever, so GNU R's `R_FixupRHS` attaches a copy instead.
+    let value = if value == object {
+        let copy = duplicate(value)?;
+        heap.root(copy);
+        copy
+    } else {
+        value
+    };
     let mut cell = object.attrib();
     let mut last = nil;
     while cell.kind() == SexpType::Pairlist {

@@ -896,10 +896,10 @@ pub unsafe extern "C" fn R_NamespaceEnvSpec(env: Sexp) -> Sexp {
                 .heap
                 .mk_char(b"base", heap::strings::Encoding::Native)?;
             runtime().heap.set_element(spec, 0, name);
-            let version = runtime().heap.mk_char(
-                crate::R_VERSION_STRING.as_bytes(),
-                heap::strings::Encoding::Native,
-            )?;
+            let version = interp::system::r_version();
+            let version = runtime()
+                .heap
+                .mk_char(version.number().as_bytes(), heap::strings::Encoding::Native)?;
             runtime().heap.set_element(spec, 1, version);
             return Ok(spec);
         }
