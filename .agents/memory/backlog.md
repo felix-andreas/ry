@@ -1832,8 +1832,26 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the built-in frame
 
-- **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
-  `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
+- **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
+  needs R code (including under `.EACHI`) stop with an error.
+- **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
+  ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
+- **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
+  "update subset", 1e6 rows: about 0.11 s for both). From R it takes 0.10 to 0.14 s against the
+  engine's 0.085 s from Rust, so the interpreter's per-query cost (schema clone, lowering, fork
+  checks) shows here and is worth profiling.
+- **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
+  which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
+  take `frame` directly would let the compat go.
+- **R code evaluated while lowering can run twice.** A sub-expression that names no column is
+  evaluated eagerly during lowering, and if a sibling then falls back to R, the whole `i` or `j`
+  runs again in the data mask. An `i` or `j` that updates the queried frame during lowering
+  leaves the IR built against the old schema.
+- **The bytecode compiles `[` as a generic call**, because it is a special, so a JIT-compiled loop
+  that subsets no longer runs `[` through `CallBuiltin`. Re-measure `tools/bench/jit` vector loops
+  and give plain subjects a fast path again if they regressed.
+- **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
+  reject a frame, so users call `ry::setkey`.
 - **Checker:** `.SDcols` as positions, `patterns()` or a variable, `(cols) := ...` through a
   variable, and `c(.N, lapply(.SD, f))` as `j` give a frame with unknown columns.
 - **Checker:** `lapply(xs, sum)` outside a query is `list[Unknown]`: an overloaded function passed by
@@ -1850,8 +1868,6 @@ The end-to-end guard rests on the corpus suites.
   type error does, so later column errors on the same frame are not reported.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
-- **Naming:** the interpreter must bind `frame` as the delegating closure `decisions.md` describes
-  ("the built-in frame"), ahead of `package:graphics`.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
