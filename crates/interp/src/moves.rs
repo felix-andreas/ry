@@ -209,6 +209,16 @@ unsafe fn creates_closure(expression: Sexp) -> bool {
     false
 }
 
+/// Whether the innermost move is into the frame `env` and still lasts, which shows that no code
+/// the checks did not cover has run, so nothing can have captured the frame.
+pub unsafe fn frame_private(env: Sexp) -> bool {
+    interp()
+        .moves
+        .moves
+        .last()
+        .is_some_and(|entry| !entry.ended && !entry.shared && entry.callee == env)
+}
+
 /// Called as a closure starts running on `env`. The callee of the innermost move records its
 /// frame; any other closure ends every move.
 pub unsafe fn entering_closure(env: Sexp) -> R<()> {

@@ -338,6 +338,18 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] 4 3\n",
     ),
     (
+        "{ add <- function(m, k) Dict.insert(m, k, k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:5) m <- add(m, i); keep <- m; m <- add(m, 9L); c(Dict.len(m), Dict.len(keep)) }; f() }",
+        "[1] 6 5\n",
+    ),
+    (
+        "{ saved <- NULL; grab <- function(k) { saved <<- parent.frame(); k }; add <- function(m, k) Dict.insert(m, grab(k), k); f <- function() { for (i in 1) NULL; m <- Dict.empty(); for (i in 1:4) m <- add(m, i); c(Dict.len(m), Dict.len(saved$m)) }; f() }",
+        "[1] 4 3\n",
+    ),
+    (
+        "{ add <- function(s, k) Set.insert(s, k); f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:4) s <- add(s, i); other <- add(s, 7L); c(Set.len(s), Set.len(other)) }; f() }",
+        "[1] 4 5\n",
+    ),
+    (
         "{ add <- function(s, k) { s <- Set.insert(s, k); s }; f <- function() { for (i in 1) NULL; s <- Set.empty(); for (i in 1:6) { if (i == 4L) old <- s; s <- add(s, i %% 5L) }; c(Set.len(old), Set.len(s)) }; f() }",
         "[1] 3 5\n",
     ),

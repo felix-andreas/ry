@@ -2526,7 +2526,7 @@ unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
 pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
     match function.kind() {
         SexpType::Builtin if builtin_def(function)?.reuses_first_argument => {
-            reuse_first_argument(target, call, function, env)
+            reuse_first_argument(target, call, function, env, false)
         }
         SexpType::Closure if target.kind() == SexpType::Symbol => {
             match moves::call_moving(call, function, target, env)? {
@@ -2538,13 +2538,33 @@ pub unsafe fn rebind_call(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -
     }
 }
 
-unsafe fn reuse_first_argument(target: Sexp, call: Sexp, function: Sexp, env: Sexp) -> R<Sexp> {
+/// Calls the builtin `function` for `call`, the last call of a closure body that passes the
+/// first parameter `target` as the first argument (`bytecode::tail_update`). Unlike
+/// [`rebind_call`], nothing assigns the result to `target`, so the parameter's value may be
+/// updated in place only when no one can see the parameter afterwards: a move into this frame
+/// still lasts once the arguments are evaluated, which shows that nothing has reached the frame
+/// (`moves::frame_private`).
+pub unsafe fn tail_update(call: Sexp, function: Sexp, target: Sexp, env: Sexp) -> R<Sexp> {
+    if function.kind() != SexpType::Builtin || !builtin_def(function)?.reuses_first_argument {
+        return apply_call(call, function, call.cdr(), env);
+    }
+    reuse_first_argument(target, call, function, env, true)
+}
+
+unsafe fn reuse_first_argument(
+    target: Sexp,
+    call: Sexp,
+    function: Sexp,
+    env: Sexp,
+    private_frame: bool,
+) -> R<Sexp> {
     let definition = builtin_def(function)?;
     let args = evaluate_args(call.cdr(), env, definition.keep_missing, call)?;
     // Argument values are not counted, so another argument that is the subject, or one of the
     // lists holding it, would see the update.
     let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
         subject.refcount() == 1
+            && (!private_frame || moves::frame_private(env))
             && solely_held(target, subject, env)
             && !args[1..]
                 .iter()
