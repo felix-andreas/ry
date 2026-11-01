@@ -22,7 +22,7 @@ use {
     polars::prelude::{
         BooleanChunked, ChunkedArray, Column, CsvEncoding, CsvReadOptions, DataFrame, DataType,
         Float64Type, Int32Type, IntoColumn, NullValues, PlSmallStr, PolarsDataType,
-        Schema as PolarsSchema, SerReader,
+        Schema as PolarsSchema, SerReader, Series,
     },
     polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
     rayon::prelude::*,
@@ -381,17 +381,19 @@ fn write_text(buffer: &mut Vec<u8>, text: &str) {
 }
 
 /// Reads a column sniffed as character as a factor, as `fread(stringsAsFactors = TRUE)` does.
+/// The columns convert in parallel, since each one is a separate hash-and-sort.
 pub fn strings_as_factors(table: &mut Table) -> Result<()> {
-    let names: Vec<PlSmallStr> = table
+    let text: Vec<&Column> = table
         .frame()
         .columns()
         .iter()
         .filter(|column| column.dtype() == &DataType::String)
-        .map(|column| column.name().clone())
         .collect();
-    for name in names {
-        let column = table.take_column(&name)?;
-        let factor = string_to_factor(column.as_materialized_series())?;
+    let factors = text
+        .par_iter()
+        .map(|column| string_to_factor(column.as_materialized_series()))
+        .collect::<Result<Vec<Series>>>()?;
+    for factor in factors {
         table.put_column(factor.into_column())?;
     }
     Ok(())
