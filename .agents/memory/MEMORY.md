@@ -40,7 +40,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 
 ## Long-term
 
-- **Positioning:** one toolchain for R, a type system on top of R, R++ for everything ry runs (R plus its additions) and R-- for strict mode, sold through a four-step migration that the docs sidebar mirrors (`decisions.md`, "positioning"). Keep the landing page, `why-ry.mdx` and the sidebar on the same step names.
+- **Positioning:** one toolchain for R, a type system on top of R, R++ for everything ry runs (R plus its additions) and R-- for strict mode, sold through a four-step migration that the docs sidebar mirrors (`decisions.md`, "positioning"). The landing page sells features first (tabbed toolchain, then tabbed runtime) and the migration last, with almost no prose. Keep the landing page, `why-ry.mdx` and the sidebar on the same step names.
 
 ### Runtime traps
 

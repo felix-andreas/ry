@@ -2880,10 +2880,22 @@ first lines R had already read, leaving R mid-command.
   diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
   in the overlap, the union is R++ and the right circle is strict mode. The diagram has one
   source, `docs/src/components/Venn.astro`, used by the landing page and `why-ry.mdx`.
-- **The migration story is the spine of the pitch,** in four steps that each show a real snippet
-  and real output: check the code you have, add types as `#:` comments, switch to inline types,
-  then move data to ry's records, tags and frames under strict mode. Each step is optional and
-  reversible, which is what makes adopting ry safe for an existing code base.
+- **The landing page sells features first and the migration last.** Below the hero come three
+  tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
+  the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
+  then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
+  purple one") above the four steps as tabs. A reader has to want the features before a path to
+  them matters, which is why the migration is the last part of the sell and not the opening.
+- **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
+  and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
+  people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
+- **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
+  tab when the JIT benchmark table lands, and a table tab when the `DataFrame` API lands (data.table
+  syntax is compatibility only, so it is not shown as ry's table API). No placeholder tabs.
+- **The migration has four steps, each with a real snippet and real output:** check the code you
+  have, add types as `#:` comments, switch to inline types, then move data to ry's records, tags
+  and tables under strict mode. Each step is optional and reversible, which is what makes adopting
+  ry safe for an existing code base. `why-ry.mdx` tells it in full.
 - **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
   GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
 - **The benchmark is honest about typing.** Its three columns are GNU R, ry on the same untyped
@@ -2892,11 +2904,11 @@ first lines R had already read, leaving R mid-command.
   third column shows it without a rewrite of the copy.
 - **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Check the code you
   have" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Move to ry's
-  types" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.md` and the
+  types" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.mdx` and the
   sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
   not moved, so every URL and cross-link keeps working.
-- **Rejected:** leading with editor features (rust-analyzer-style tooling is table stakes, not a
-  reason to switch), and leading with "a reimplementation of R" (true, but a reader cannot use the
+- **Rejected:** opening the landing page with the Venn diagram and the migration (it explains a
+  path before the reader wants the destination), and leading with "a reimplementation of R" (true, but a reader cannot use the
   incomplete runtime for real work today, so it is the destination, not the pitch).
 - **Rationale for the user's framing being kept:** the user proposed this structure. It was kept
   because each step maps to a real, shipped feature with real output, and because R++/R-- is a
