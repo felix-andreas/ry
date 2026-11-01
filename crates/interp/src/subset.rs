@@ -2371,7 +2371,12 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     if dimnames.kind() != SexpType::List {
         return Err(crate::unwind::error_in(call, "'dimnames' must be a list"));
     }
-    if length(dimnames) != dims.len() {
+    if length(dimnames) == 0 {
+        values::remove_attr(object, symbols().dimnames);
+        return Ok(());
+    }
+    // A shorter list leaves the remaining dimensions unnamed, as GNU R pads it with NULL.
+    if length(dimnames) > dims.len() {
         return Err(crate::unwind::error_in(
             call,
             format!(
@@ -2383,7 +2388,11 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     }
     let result = alloc(SexpType::List, dims.len())?;
     let mut all_null = true;
+    let given = length(dimnames);
     for (dimension, &extent) in dims.iter().enumerate() {
+        if dimension >= given {
+            break;
+        }
         let component = dimnames.element(dimension);
         if component == nil() {
             continue;
@@ -2409,8 +2418,20 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
         }
         values::set_elt(result, dimension, component);
     }
-    let names = values::names(dimnames);
+    let mut names = values::names(dimnames);
     if names != nil() {
+        if given < dims.len() {
+            let padded = alloc(SexpType::String, dims.len())?;
+            for index in 0..dims.len() {
+                let name = if index < given {
+                    names.element(index)
+                } else {
+                    values::blank_string()
+                };
+                values::set_elt(padded, index, name);
+            }
+            names = padded;
+        }
         values::set_attr(result, symbols().names, names)?;
         all_null = false;
     }
@@ -2688,8 +2709,9 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     }
     let dim = values::integer_vector(&[rows as i32, cols as i32])?;
     values::set_attr(result, symbols().dim, dim)?;
+    // GNU R reports a bad `dimnames` against the closure that called the internal.
     if dimnames != nil() && length(dimnames) > 0 {
-        set_dimnames(result, dimnames, call.call)?;
+        set_dimnames(result, dimnames, crate::heap().known().unbound)?;
     }
     Ok(result)
 }
@@ -2744,8 +2766,9 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
     let dims = values::duplicate(dims)?;
     values::clear_attributes(dims);
     values::set_attr(result, symbols().dim, dims)?;
+    // GNU R reports a bad `dimnames` against the closure that called the internal.
     if dimnames != nil() && length(dimnames) > 0 {
-        set_dimnames(result, dimnames, call.call)?;
+        set_dimnames(result, dimnames, crate::heap().known().unbound)?;
     }
     Ok(result)
 }

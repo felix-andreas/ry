@@ -398,7 +398,12 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     }
     let x = real_values(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
-    if length(x_argument) == 0 {
+    if length(x_argument) == 0
+        && matches!(
+            policy,
+            MissingPolicy::AllObservations | MissingPolicy::Pairwise
+        )
+    {
         return Err(call.error("'x' is empty"));
     }
     let has_y = y_argument != values::nil();
@@ -433,17 +438,20 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                 let used: Vec<bool> = (0..n)
                     .map(|row| !x_data[i][row].is_nan() && !y_data[j][row].is_nan())
                     .collect();
-                result[i + j * x_columns] = if !has_y && i == j && correlate {
+                let statistic = pair_statistic(
+                    &x_data[i],
+                    &y_data[j],
+                    &used,
+                    correlate,
+                    kendall,
+                    &mut zero_deviation,
+                );
+                // A column correlates with itself exactly, unless it has no spread at all.
+                result[i + j * x_columns] = if !has_y && i == j && correlate && !statistic.is_nan()
+                {
                     1.0
                 } else {
-                    pair_statistic(
-                        &x_data[i],
-                        &y_data[j],
-                        &used,
-                        correlate,
-                        kendall,
-                        &mut zero_deviation,
-                    )
+                    statistic
                 };
             }
         }
@@ -458,7 +466,9 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
         } else {
             vec![true; n]
         };
-        if !used.iter().any(|&flag| flag) && policy == MissingPolicy::CompleteObservations {
+        // With no columns no row counts as complete, so GNU R reports an empty input here.
+        let none_complete = all_columns.is_empty() || !used.iter().any(|&flag| flag);
+        if none_complete && policy == MissingPolicy::CompleteObservations {
             return Err(call.error("no complete element pairs"));
         }
         let has_missing = |data: &Vec<f64>| {
@@ -489,6 +499,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
                     })
                     .collect()
             };
+            let observations = used.iter().filter(|&&flag| flag).count();
             let x_scale = scales(&x_data, &missing_x);
             let y_scale = if has_y {
                 scales(&y_data, &missing_y)
@@ -498,7 +509,7 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
             for i in 0..x_columns {
                 for j in 0..y_columns {
                     let slot = &mut result[i + j * x_columns];
-                    if !has_y && i == j {
+                    if !has_y && i == j && observations > 1 {
                         *slot = 1.0;
                     } else if slot.is_nan() {
                     } else if x_scale[i] == 0.0 || y_scale[j] == 0.0 {

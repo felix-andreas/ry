@@ -2374,10 +2374,14 @@ enum Matcher {
     /// time on patterns such as `(.*z.*){10}` that TRE matches instantly. The leftmost match
     /// starts where the leftmost-first match does, and `longest` (which reports every match end)
     /// searched anchored at that start finds where the longest one ends.
+    ///
+    /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`),
+    /// and its capture groups come from `first` searched over exactly that span.
     Automaton {
         regex: Rc<Regex>,
         first: meta::Regex,
         longest: meta::Regex,
+        shortest: bool,
     },
 }
 
@@ -2436,7 +2440,7 @@ impl Matcher {
                 .build(&translated.pattern)
         };
         let matcher = match compiled {
-            Ok(regex) if longest => {
+            Ok(regex) if longest || translated.minimal => {
                 let regex = Rc::new(regex);
                 match (
                     automaton(MatchKind::LeftmostFirst),
@@ -2446,6 +2450,7 @@ impl Matcher {
                         regex,
                         first,
                         longest,
+                        shortest: translated.minimal,
                     },
                     _ => Matcher::Pattern(regex),
                 }
@@ -2481,13 +2486,19 @@ impl Matcher {
                 .find_from_pos(text, from)
                 .map(|found| found.map(|found| (found.start(), found.end())))
                 .map_err(matching_error),
-            Matcher::Automaton { first, longest, .. } => {
+            Matcher::Automaton {
+                first,
+                longest,
+                shortest,
+                ..
+            } => {
                 let Some(found) = first.search(&Input::new(text).range(from..)) else {
                     return Ok(None);
                 };
                 let anchored = Input::new(text)
                     .range(found.start()..)
-                    .anchored(Anchored::Yes);
+                    .anchored(Anchored::Yes)
+                    .earliest(*shortest);
                 let end = longest
                     .search(&anchored)
                     .map_or(found.end(), |longest| longest.end());
@@ -2502,6 +2513,27 @@ impl Matcher {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| vec![Some(span)])),
             Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
                 Ok(self.find_at(text, from)?.map(|span| vec![Some(span)]))
+            }
+            Matcher::Automaton {
+                first,
+                shortest: true,
+                ..
+            } => {
+                let Some((start, end)) = self.find_at(text, from)? else {
+                    return Ok(None);
+                };
+                let mut captures = first.create_captures();
+                first.search_captures(
+                    &Input::new(text).range(start..end).anchored(Anchored::Yes),
+                    &mut captures,
+                );
+                Ok(Some(
+                    std::iter::once(Some((start, end)))
+                        .chain((1..captures.group_len()).map(|group| {
+                            captures.get_group(group).map(|span| (span.start, span.end))
+                        }))
+                        .collect(),
+                ))
             }
             Matcher::Pattern(regex) | Matcher::Automaton { regex, .. } => {
                 let Some(captures) = regex
@@ -2555,6 +2587,10 @@ fn matching_error(failure: fancy_regex::Error) -> crate::unwind::Unwind {
 struct Translation {
     pattern: String,
     problem: Option<&'static str>,
+    /// Whether a POSIX pattern repeats minimally (`*?`, `{1,3}?`). TRE then ends a match at the
+    /// first end it reaches, so the whole match is the shortest one at the leftmost start, and
+    /// even a greedy `.*` in such a pattern matches as little as it can.
+    minimal: bool,
 }
 
 fn translate(pattern: &str, syntax: Syntax) -> Translation {
@@ -2564,6 +2600,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
         unicode: syntax == Syntax::Extended || declares_ucp(&chars),
     };
     let mut problem = None;
+    let mut minimal = false;
     let mut output = String::with_capacity(pattern.len() + 8);
     if syntax == Syntax::Extended {
         // In POSIX syntax `.` matches a newline too.
@@ -2689,6 +2726,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                     } else if modifier == Some('?')
                         || (syntax == Syntax::Perl && modifier == Some('+'))
                     {
+                        minimal |= syntax == Syntax::Extended && modifier == Some('?');
                         output.extend(modifier);
                         index += 1;
                     }
@@ -2718,6 +2756,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                     index = next;
                     if chars.get(index) == Some(&'?') {
                         if !approximate {
+                            minimal |= syntax == Syntax::Extended;
                             output.push('?');
                         }
                         index += 1;
@@ -2760,6 +2799,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     Translation {
         pattern: output,
         problem,
+        minimal,
     }
 }
 

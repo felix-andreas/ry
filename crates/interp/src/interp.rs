@@ -171,6 +171,9 @@ pub struct Interp {
     /// assignment, so a builtin replacement function reports its errors and warnings against
     /// `x[i] <- v`, not `` `[<-`(*tmp*, i, v) `` or the enclosing function's call.
     pub assignment_call: Option<(Sexp, Sexp, usize)>,
+    /// The value of the closure whose `on.exit` code is running, which `returnValue()` reads:
+    /// `None` outside exit code and while the closure exits with an error.
+    pub exit_value: Option<Sexp>,
     /// Warnings deferred to the end of the top-level call, with the calls they came from.
     pub warnings: Vec<(Sexp, String)>,
     /// Set while `warning(immediate. = TRUE)` signals, so the default handler prints at once.
@@ -290,6 +293,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         symbols,
         visible: true,
         assignment_call: None,
+        exit_value: None,
         warnings: Vec::new(),
         immediate_warning: false,
         error_message: String::new(),
@@ -425,6 +429,9 @@ impl RootSource for InterpRoots {
             marker.mark(interp.srcref);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
+            }
+            if let Some(value) = interp.exit_value {
+                marker.mark(value);
             }
             if let Some((replacement, whole, _)) = interp.assignment_call {
                 marker.mark(replacement);

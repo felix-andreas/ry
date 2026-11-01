@@ -1678,10 +1678,177 @@ pub unsafe fn wrap(object: Sexp, sorted: c_int, no_na: c_int) -> ApiResult<Sexp>
     Ok(wrapper)
 }
 
-/// The interpreter builtins that need the wrapper classes.
-pub const INTERNALS: &[BuiltinDef] = &[internal("wrap_meta", 3, |call| unsafe {
-    do_wrap_meta(call)
-})];
+/// The interpreter builtins that need the ALTREP classes.
+pub const INTERNALS: &[BuiltinDef] = &[
+    internal("wrap_meta", 3, |call| unsafe { do_wrap_meta(call) }),
+    internal("inspect", -1, |call| unsafe { do_inspect(call) }).invisible(),
+];
+
+/// `.Internal(inspect(x, deep, pvec))`: GNU R's dump of an object's header and contents, in
+/// which an ALTREP class prints its own part. The header shows no GC generation or reference
+/// counts, which ry's heap does not keep the way GNU R's does.
+unsafe fn do_inspect(call: &Call<'_>) -> ApiResult<Sexp> {
+    let object = call.arg(0);
+    let deep = if call.len() > 1 {
+        as_integer_scalar(call.arg(1))
+    } else {
+        -1
+    };
+    let pvec = if call.len() > 2 {
+        as_integer_scalar(call.arg(2))
+    } else {
+        5
+    };
+    INSPECT_ERROR.with(|slot| slot.take());
+    inspect_tree(object, 0, deep, pvec)?;
+    if let Some(failure) = INSPECT_ERROR.with(|slot| slot.take()) {
+        return Err(failure);
+    }
+    Ok(object)
+}
+
+thread_local! {
+    /// The first error a class's `Inspect` method met in a sub-object, which the C callback
+    /// cannot unwind with, raised once `inspect` finishes.
+    static INSPECT_ERROR: std::cell::Cell<Option<crate::boundary::Unwind>> =
+        const { std::cell::Cell::new(None) };
+}
+
+unsafe extern "C" fn inspect_subtree(object: Sexp, pre: c_int, deep: c_int, pvec: c_int) {
+    if let Err(failure) = inspect_tree(object, pre, deep, pvec) {
+        INSPECT_ERROR.with(|slot| {
+            let first = slot.take();
+            slot.set(Some(first.unwrap_or(failure)));
+        });
+    }
+}
+
+unsafe fn inspect_tree(object: Sexp, pre: c_int, deep: c_int, pvec: c_int) -> ApiResult<()> {
+    let indent = " ".repeat(pre.max(0) as usize);
+    let kind = object.kind();
+    let attributes = object.attrib();
+    let has_attributes = attributes.kind() != SexpType::Nil && kind != SexpType::Char;
+    let flags = if has_attributes { "ATT" } else { "" };
+    write_console(
+        format!(
+            "{indent}@{:x} {:02} {} g0c0 [{flags}] ",
+            object.as_ptr() as usize,
+            kind.code(),
+            kind.constant_name()
+        )
+        .as_bytes(),
+        false,
+    );
+    if object.is_altrep() && inspect(object, pre, deep, pvec, inspect_subtree)? {
+        if has_attributes {
+            inspect_attributes(attributes, &indent, pre, deep, pvec)?;
+        }
+        return Ok(());
+    }
+    let mut line = String::new();
+    match kind {
+        SexpType::Symbol => line.push_str(&format!(
+            "\"{}\"",
+            String::from_utf8_lossy(object.car().bytes())
+        )),
+        SexpType::Char => {
+            line.push_str(&format!("\"{}\"", String::from_utf8_lossy(object.bytes())))
+        }
+        _ => {}
+    }
+    let atomic = matches!(
+        kind,
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex | SexpType::Raw
+    );
+    let length = if kind.is_vector() && kind != SexpType::Char {
+        vectors::xlength(object)? as usize
+    } else {
+        0
+    };
+    if kind.is_vector() && kind != SexpType::Char {
+        line.push_str(&format!("(len={length}, tl=0)"));
+    }
+    if atomic && length > 0 {
+        let shown = if pvec < 0 {
+            length
+        } else {
+            length.min(pvec as usize)
+        };
+        let mut items = Vec::with_capacity(shown);
+        for index in 0..shown {
+            items.push(match kind {
+                SexpType::Logical | SexpType::Integer => match vectors::int_elt(object, index)? {
+                    NA_INTEGER => "NA".to_string(),
+                    value => value.to_string(),
+                },
+                SexpType::Real => {
+                    let value = vectors::real_elt(object, index)?;
+                    if heap::object::is_na_real(value) {
+                        "NA".to_string()
+                    } else {
+                        value.to_string()
+                    }
+                }
+                SexpType::Raw => format!("{:02x}", elt::<u8>(object, index as R_xlen_t)?),
+                _ => {
+                    let value = elt::<Rcomplex>(object, index as R_xlen_t)?;
+                    format!("{}+{}i", value.r, value.i)
+                }
+            });
+        }
+        line.push(' ');
+        line.push_str(&items.join(","));
+        if shown < length {
+            line.push_str(",...");
+        }
+    }
+    line.push('\n');
+    write_console(line.as_bytes(), false);
+    if deep != 0
+        && matches!(
+            kind,
+            SexpType::String | SexpType::List | SexpType::Expression
+        )
+    {
+        let shown = if pvec < 0 {
+            length
+        } else {
+            length.min(pvec as usize)
+        };
+        for index in 0..shown {
+            inspect_tree(vectors::sexp_elt(object, index)?, pre + 2, deep - 1, pvec)?;
+        }
+        if shown < length {
+            write_console(format!("{indent}  ...\n").as_bytes(), false);
+        }
+    }
+    if deep != 0 && matches!(kind, SexpType::Pairlist | SexpType::Language) {
+        let mut cell = object;
+        while matches!(cell.kind(), SexpType::Pairlist | SexpType::Language) {
+            if cell.tag().kind() != SexpType::Nil {
+                write_console(format!("{indent}TAG: ").as_bytes(), false);
+                inspect_tree(cell.tag(), 0, deep - 1, pvec)?;
+            }
+            inspect_tree(cell.car(), pre + 2, deep - 1, pvec)?;
+            cell = cell.cdr();
+        }
+    }
+    if has_attributes {
+        inspect_attributes(attributes, &indent, pre, deep, pvec)?;
+    }
+    Ok(())
+}
+
+unsafe fn inspect_attributes(
+    attributes: Sexp,
+    indent: &str,
+    pre: c_int,
+    deep: c_int,
+    pvec: c_int,
+) -> ApiResult<()> {
+    write_console(format!("{indent}ATTRIB:\n").as_bytes(), false);
+    inspect_tree(attributes, pre + 2, deep, pvec)
+}
 
 /// `.Internal(wrap_meta(x, srt, no_na))`: `x` in a wrapper whose `*_IS_SORTED` and `*_NO_NA`
 /// report the given metadata. Base R calls it on every numeric `sort` and `order` result so

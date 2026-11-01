@@ -1070,6 +1070,15 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
     for &expression in &expressions {
         crate::heap().root(expression);
     }
+    let exit_value = match &result {
+        Ok(value) => Some(*value),
+        Err(Unwind::Jump(jump)) => match **jump {
+            Jump::Return { env: target, value } if target == env => Some(value),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let outer_exit_value = std::mem::replace(&mut interp().exit_value, exit_value);
     let mut outcome = result;
     for expression in expressions {
         // A handler stack that a condition left in place must not run the exit code.
@@ -1092,6 +1101,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
             Ok(_) => {}
         }
     }
+    interp().exit_value = outer_exit_value;
     crate::heap().release_handles(mark);
     match &outcome {
         Ok(value) => crate::heap().root(*value),
@@ -1436,7 +1446,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("call", -1, do_call),
     special("expression", -1, do_expression),
     internal("all.names", 4, do_all_names),
-    internal("returnValue", 1, |call| Ok(call.arg(0))),
+    internal("returnValue", 1, |call| {
+        Ok(interp().exit_value.unwrap_or(call.arg(0)))
+    }),
     internal("named", 1, |call| unsafe {
         values::scalar_integer(call.arg(0).refcount().min(2) as i32)
     }),
@@ -1927,7 +1939,7 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
                             return eval(later.value, call.env);
                         }
                     }
-                    return Err(call.error("empty alternative in numeric switch"));
+                    return Err(error("empty alternative in numeric switch"));
                 }
             }
         }
@@ -1958,7 +1970,7 @@ unsafe fn do_switch(call: &Call<'_>) -> R<Sexp> {
     if index >= 1 && (index as usize) <= alternatives.len() {
         let arg = alternatives[index as usize - 1];
         if arg.value == missing_arg() {
-            return Err(call.error("empty alternative in numeric switch"));
+            return Err(error("empty alternative in numeric switch"));
         }
         return eval(arg.value, call.env);
     }
@@ -2827,8 +2839,32 @@ unsafe fn apply_setter(setter_call: Sexp, whole: Sexp, env: Sexp) -> R<Sexp> {
                 None => call_builtin(definition, whole, function, &args, env),
             }
         }
+        SexpType::Closure => {
+            let mut args = Args::new();
+            promise_args_into(arguments, env, &mut args)?;
+            apply_closure(shown_setter_call(setter_call)?, function, &args, env, None)
+        }
         _ => apply_call(setter_call, function, arguments, env),
     }
+}
+
+/// The replacement call a closure sees as `sys.call()`: GNU R binds the target to `*tmp*` and
+/// puts the value itself into the call, so the forced promises that stand in for both here are
+/// shown as their expression and their value.
+unsafe fn shown_setter_call(setter_call: Sexp) -> R<Sexp> {
+    let value_tag = symbols().value;
+    let mut items = Vec::new();
+    for (tag, argument) in values::pairlist_items(setter_call) {
+        let shown = if argument.kind() != SexpType::Promise {
+            argument
+        } else if tag == value_tag {
+            argument.car()
+        } else {
+            argument.cdr()
+        };
+        items.push((tag, shown));
+    }
+    values::pairlist(&items, SexpType::Language)
 }
 
 /// The replacement function for a getter: `f<-` for `f`, and `pkg::\`f<-\`` for `pkg::f`.
