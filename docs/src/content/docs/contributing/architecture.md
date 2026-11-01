@@ -341,8 +341,8 @@ Diagnostics come in two layers over one source of truth:
   refusals of malformed `#:` blocks and inline annotations, and, while inline annotations are turned
   off, a warning at each one. All of them are pure functions of the parse and `AnalysisSettings`.
 - `file_diagnostics(file)` adds the naming findings (unresolved and unused names) and the type
-  errors. The strict-mode origins are rendered separately by `strict_diagnostics(file)`, so a host
-  publishes them only under `[check] strict` or a per-file directive.
+  errors. The strict-mode findings are rendered separately by `strict_diagnostics(file)`, which is
+  empty unless `file_is_strict` holds (`[check] strict` or the file's own directive).
 
 The host, meaning the server or the CLI, then gates diagnostic classes by configuration, applies
 per-file `# typing:` overrides, escalates unresolved names to errors under strict mode, appends the

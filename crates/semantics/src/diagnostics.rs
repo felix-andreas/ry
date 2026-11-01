@@ -2348,11 +2348,15 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Published by hosts only under `[check] strict` or the per-file directive. An
-/// origin that is an assignment's value is phrased against the assigned name.
+/// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
+/// strict origins for. An origin that is an assignment's value is phrased against the assigned
+/// name.
 #[salsa::tracked(returns(clone))]
 pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    if !crate::file_is_strict(db, file) {
+        return diagnostics;
+    }
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
     let broken_ranges = file_error_ranges(db, file);
