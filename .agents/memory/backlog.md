@@ -335,8 +335,6 @@ protects construction but nothing after it.
 
 - The runtime checks that atomic items share one type but not that ry-value items do, so
   `[(x = 1), [1]]` builds at run time; only the checker rejects it.
-- `c(x, x)` in an unannotated callback types as `Unknown`, so `List.map(xs, \(x) c(x, x))` passes
-  the `item` constraint and fails only at run time.
 - `List` functions added to `standard_library.rs` need an Array overload in `types/ry.Rtypes`, and
   any that reuse their first argument's storage must not reuse an Array's.
 - `class(xs)` is R's implicit class (`numeric`), and serialization (`saveRDS`) drops the flag, so
@@ -514,6 +512,9 @@ change that does not pay.
    flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
    less memory per flag. Expected win: small, since the engine is already columnar; worth doing
    only alongside other work in that file.
+
+- **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
+- **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
 
 ## Open: performance and memory
 

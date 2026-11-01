@@ -2334,6 +2334,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint_description(*constraint),
             renderer.render(db, *found)
         ),
+        TypeErrorKind::ContextualParameter {
+            name,
+            expected,
+            passed,
+        } => format!(
+            "`{name}` is used as {} here, but the call passes this function `{}` for it",
+            operand_description(*expected),
+            renderer.render(db, *passed)
+        ),
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {
             RecordMismatch::Field {
                 path,
@@ -2562,22 +2571,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
         ),
-        TypeErrorKind::InvalidOperand { expected, found } => {
-            let expected_description = match expected {
-                OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
-                OperandExpectation::ScalarNumeric => {
-                    "a scalar numeric value (`integer` or `double`)"
-                }
-                OperandExpectation::Logical => "a `logical` value",
-                OperandExpectation::Comparable => {
-                    "a comparable value (numeric, `character`, or `logical`)"
-                }
-            };
-            format!(
-                "expected {expected_description}, found `{}`",
-                renderer.render(db, *found)
-            )
-        }
+        TypeErrorKind::InvalidOperand { expected, found } => format!(
+            "expected {}, found `{}`",
+            operand_description(*expected),
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::UnsupportedOperandPair {
             operator,
             left,
@@ -2930,6 +2928,15 @@ impl<'db> TypeRenderer<'db> {
         } else {
             format!("{letter}{suffix}")
         }
+    }
+}
+
+fn operand_description(expected: OperandExpectation) -> &'static str {
+    match expected {
+        OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
+        OperandExpectation::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        OperandExpectation::Logical => "a `logical` value",
+        OperandExpectation::Comparable => "a comparable value (numeric, `character`, or `logical`)",
     }
 }
 

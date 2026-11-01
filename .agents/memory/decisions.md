@@ -3307,6 +3307,13 @@ first lines R had already read, leaving R mid-command.
 - **Checker.** `Array<T>` fits `T[]` (atomic items) or `list[T]` (ry-value items), never the reverse, so Arrays pass to R code and R vectors need `as.Array()`. A DataFrame stores an Array column as its plain vector, so `column_type` maps `Array<T>` to `T[]`.
 - **Impact.** No duplicated state: the flag is the single source of truth for strictness, and the checker's type and the runtime flag agree by construction. Pinned by `crates/semantics/tests/typing/arrays.R.test`, `crates/interp/tests/test_arrays.rs` (including a generated round trip) and Array seeds in both fuzzers.
 
+## Array storage stays row-major; record Arrays go columnar only with JIT field fusion
+
+- **Scalar Arrays already have the data-oriented layout.** An `Array<double>` is one contiguous `double` buffer with no NA and no attributes, which is exactly what a hot loop wants: `x[[i]]` is a bounds check and a load, and the JIT's Array guard can drop the NA and attribute checks (`decisions.md`, "An Array is a flagged R vector"). Nothing in that layout changes.
+- **The open case is an Array of records.** `Array<{x: double, y: double}>` is a list of record objects, one 48-byte object per item whose length-one numbers are already unboxed into slots (`crates/heap/src/object.rs`, `Slot`). A columnar shape (one atomic buffer per field) would save the per-item header and pointer, cut collector work from one object per item to one per field, and make `List.map(xs, \(p) p$x)` a column read.
+- **Why not now.** Every `xs[[i]]` on a columnar Array must allocate a record to hand out, so the interpreter's element loop trades a pointer load for an allocation, and a list a builtin or `.Call` code reads with `VECTOR_ELT` would need a materialized copy. The layout pays only once the JIT fuses `xs[[i]]$field` into a column load, so it waits for that, and DataFrame already serves the columnar-records workload.
+- **Trigger to revisit.** When the JIT compiles `xs[[i]]$field` on Arrays, measure a million-item record Array loop row-major against columnar (`backlog.md`, "Columnar record Arrays"), and switch only if it pays.
+
 # Decision record: editor responsiveness at 300,000 lines
 
 - **Previous shape.** Completion walked every item in the project per request, reading each item's
@@ -3462,3 +3469,22 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## A function literal in a call argument is typed in context
+
+- **Before.** Every argument inferred before the callee was consulted, so a literal's formals were
+  open variables while its body was inferred. `c(x, x)` over an open `x` types as `Unknown`, so
+  `List.map(xs, \(x) c(x, x))` passed the `item` constraint and failed only at run time.
+- **Now.** `infer_call_arguments_against` (`check.rs`) infers the other arguments first, probes each
+  candidate signature with them in a rolled-back snapshot, and hands the literal the expected
+  function type's parameter types through `parameter_hints`. The literal is still inferred exactly
+  once, because a probe snapshot does not reverse environment or recorded-type writes.
+- **All or nothing.** A literal takes hints only when every formal without a default gets one. A
+  partial hint broke `Reduce(function(a, b) a + b, xs)`: with `b` fixed and `a` open, `a + b` no
+  longer ties the two together and the fold's result stayed generic.
+- **Overloads.** A hint survives only where every candidate that accepts the other arguments agrees,
+  so the list and Array overloads of `List.map` each hint their own item type.
+- **Findings.** An operand error on a hinted formal's use becomes `ContextualParameter`, which names
+  the formal and says the call supplied its type, and is reported on the use rather than the whole
+  literal.
+- The spec is "Function literals in call arguments" in `reference/type-system.mdx`.
