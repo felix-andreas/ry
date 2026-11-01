@@ -1,10 +1,31 @@
-# Exports of ry's runtime package, `package:ry`: the standard library and the frame functions.
+# Exports of ry's runtime package, `package:ry`: the standard library and the DataFrame API.
 # `test_standard_library.rs` keeps this list equal to what the runtime binds, except for the `as.*`
 # conversions: those are base builtins on ry's runtime, listed here only because `ry.Rtypes` declares
 # them for the checker and the stub tests require every declaration to appear in its manifest.
+as.DataFrame
 as.record
 as.tag
 as.tuple
+col
+copy
+DataFrame
+DataFrame.columns
+DataFrame.filter
+DataFrame.group_by
+DataFrame.head
+DataFrame.height
+DataFrame.join
+DataFrame.lazy
+DataFrame.read_csv
+DataFrame.read_parquet
+DataFrame.schema
+DataFrame.select
+DataFrame.sort
+DataFrame.tail
+DataFrame.width
+DataFrame.with_columns
+DataFrame.write_csv
+DataFrame.write_parquet
 Dict.contains
 Dict.drop_if
 Dict.empty
@@ -25,6 +46,37 @@ Dict.to_list
 Dict.update
 Dict.values
 Dict.walk
+Expr.alias
+Expr.cor
+Expr.count
+Expr.first
+Expr.if_else
+Expr.is_null
+Expr.last
+Expr.len
+Expr.max
+Expr.mean
+Expr.median
+Expr.min
+Expr.std
+Expr.sum
+Expr.var
+GroupBy.agg
+is.DataFrame
+key
+LazyFrame.collect
+LazyFrame.explain
+LazyFrame.filter
+LazyFrame.group_by
+LazyFrame.head
+LazyFrame.join
+LazyFrame.scan_csv
+LazyFrame.scan_parquet
+LazyFrame.select
+LazyFrame.sort
+LazyFrame.tail
+LazyFrame.with_columns
+LazyGroupBy.agg
 List.all
 List.any
 List.append
@@ -77,6 +129,7 @@ List.update
 List.walk
 List.walk_backwards
 List.walk_until
+lit
 Num.add_checked
 Num.compare
 Num.div_checked
@@ -118,6 +171,8 @@ Set.single
 Set.to_list
 Set.union
 Set.walk
+setkey
+setkeyv
 Str.concat
 Str.contains
 Str.count_utf8_bytes
@@ -144,15 +199,3 @@ Str.trim_start
 Str.with_ascii_lowercased
 Str.with_ascii_uppercased
 Str.with_prefix
-as.frame
-copy
-frame
-frame_read_csv
-frame_read_parquet
-frame_type
-frame_write_csv
-frame_write_parquet
-is.frame
-key
-setkey
-setkeyv

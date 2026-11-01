@@ -10,7 +10,7 @@ use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
 use semantics::infer::apply_definition;
 use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
 use semantics::types::{
-    Constraint, FunctionType, Name, Ty, TyKind, TypeScheme, contains_inference_var,
+    Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme, contains_inference_var,
 };
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
@@ -250,6 +250,17 @@ fn member_at<'db>(
                     ty,
                 });
             }
+            ExpressionKind::Literal(LiteralKind::String(name)) => {
+                if let Some(columns) = dataframe_columns_for(db, hir, check, expression.range)
+                    && let Some(column) = columns.iter().find(|column| column.name.text(db) == name.as_ref())
+                {
+                    return Some(Member {
+                        range: expression.range,
+                        label: Some(name.to_string()),
+                        ty: column.ty,
+                    });
+                }
+            }
             ExpressionKind::Index {
                 double: false,
                 arguments,
@@ -269,7 +280,7 @@ fn member_at<'db>(
 
 fn field_type<'db>(db: &'db dyn Db, ty: Ty<'db>, name: &str) -> Option<Ty<'db>> {
     match ty.kind(db) {
-        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
             .iter()
             .find(|field| field.name.text(db) == name)
             .map(|field| field.ty),
@@ -291,7 +302,7 @@ fn updated_column_at<'db>(
     arguments: &[Argument],
     relative: TextSize,
 ) -> Option<Member<'db>> {
-    let TyKind::Frame(Some(columns)) = check.expression_types.get(&query)?.kind(db) else {
+    let TyKind::Frame(_, Some(columns)) = check.expression_types.get(&query)?.kind(db) else {
         return None;
     };
     let column_ty = |name: &str| {
@@ -2382,11 +2393,11 @@ fn string_subscript_completion(
                 Some(*target)
             }
             _ => None,
-        })?;
-    let (TyKind::Record(fields) | TyKind::Frame(Some(fields))) =
-        check.expression_types.get(&target)?.kind(db)
-    else {
-        return None;
+        });
+    let fields = match target.map(|target| check.expression_types.get(&target).map(|ty| ty.kind(db))) {
+        Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
+        Some(_) => return None,
+        None => dataframe_columns_for(db, hir, &check, string_range)?,
     };
 
     let typed = usize::from(offset - string_token.text_range().start());
@@ -2406,6 +2417,64 @@ fn string_subscript_completion(
         })
         .collect();
     finish_completions(items, query)
+}
+
+/// The columns a string names when it is a column argument of a DataFrame verb, such as
+/// `DataFrame.select(sales, "price")`, or the name in `col("price")` inside one. The verb's first
+/// argument is the frame whose columns are in scope.
+fn dataframe_columns_for<'a, 'db>(
+    db: &'db dyn Db,
+    hir: &Module,
+    check: &'a ItemCheck<'db>,
+    string_range: TextRange,
+) -> Option<&'a [RecordField<'db>]> {
+    let is_column_string = hir.expressions.iter().any(|expression| match &expression.kind {
+        ExpressionKind::Call { callee, arguments } => {
+            let in_arguments = |arguments: &[Argument]| {
+                arguments.iter().any(|argument| {
+                    argument.value.is_some_and(|value| hir.expression(value).range == string_range)
+                })
+            };
+            match &hir.expression(*callee).kind {
+                ExpressionKind::NameRef(name) if name.as_str() == "col" => {
+                    arguments.first().is_some_and(|argument| in_arguments(std::slice::from_ref(argument)))
+                }
+                ExpressionKind::NameRef(name) if is_dataframe_verb(name) => {
+                    arguments.get(1..).is_some_and(in_arguments)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    });
+    if !is_column_string {
+        return None;
+    }
+    let (_, subject) = hir
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            ExpressionKind::Call { callee, arguments }
+                if expression.range.contains_range(string_range)
+                    && matches!(&hir.expression(*callee).kind, ExpressionKind::NameRef(name) if is_dataframe_verb(name)) =>
+            {
+                let subject = arguments.first()?.value?;
+                (!hir.expression(subject).range.contains_range(string_range))
+                    .then_some((expression.range.len(), subject))
+            }
+            _ => None,
+        })
+        .min_by_key(|(length, _)| *length)?;
+    match check.expression_types.get(&subject)?.kind(db) {
+        TyKind::Frame(_, Some(columns)) => Some(columns.as_slice()),
+        _ => None,
+    }
+}
+
+fn is_dataframe_verb(name: &str) -> bool {
+    name.split_once('.').is_some_and(|(receiver, _)| {
+        matches!(receiver, "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy")
+    })
 }
 
 fn annotation_completion(
@@ -2610,7 +2679,7 @@ fn dollar_completions(
             .min_by_key(|(range, _)| range.len())?;
         let target_ty = representation(db, file, *check.expression_types.get(&target)?);
         let fields: Vec<(&str, Ty<'_>)> = match target_ty.kind(db) {
-            TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+            TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
                 .iter()
                 .map(|field| (field.name.text(db), field.ty))
                 .collect(),
@@ -3017,7 +3086,7 @@ fn frame_query_completions(
             })
             .min_by_key(|(length, _)| *length)
             .map(|(_, target)| target)?;
-        let TyKind::Frame(Some(columns)) = check.expression_types.get(&target)?.kind(db) else {
+        let TyKind::Frame(_, Some(columns)) = check.expression_types.get(&target)?.kind(db) else {
             return None;
         };
         let mut renderer = TypeRenderer::default();
@@ -3453,7 +3522,7 @@ fn is_impossible_vector(db: &dyn Db, ty: Ty<'_>) -> bool {
                 | TyKind::Tuple(_)
                 | TyKind::List(_)
                 | TyKind::NamedList(_)
-                | TyKind::Frame(_)
+                | TyKind::Frame(..)
                 | TyKind::Function(_)
         )
     };
@@ -3489,10 +3558,10 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::Tuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),
-        TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
             .iter()
             .all(|field| is_hintable(db, field.ty, variables_allowed)),
-        TyKind::Frame(None) => true,
+        TyKind::Frame(_, None) => true,
         TyKind::Union(members) => members
             .iter()
             .all(|&member| is_hintable(db, member, variables_allowed)),

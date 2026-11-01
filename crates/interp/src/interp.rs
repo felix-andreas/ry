@@ -31,6 +31,7 @@ pub mod coerce;
 pub mod conditions;
 pub mod connections;
 pub mod data_table;
+pub mod dataframe;
 pub mod deparse;
 pub mod dispatch;
 pub mod distributions;

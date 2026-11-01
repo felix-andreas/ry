@@ -1937,7 +1937,7 @@ fn grouped(
 
 /// Whether an expression yields one value per group. One that does not (`head`, or a plain
 /// column) yields a list per group, which is exploded into rows as data.table recycles it.
-fn collapses(expr: &Expr) -> bool {
+pub(crate) fn collapses(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate { .. } | Expr::Count | Expr::Correlation(..) => true,
         Expr::Integer(_)

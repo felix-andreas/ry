@@ -33,9 +33,9 @@ pair <- (1L, "a")
 circle <- :Circle(radius = 2)
 type UserId = integer
 alias Shape = :Circle(radius: double) | :Empty
-type Point = record{x: double, y: double}
-type OrderId = record{id: integer}
-type Pair = tuple{integer, character}
+type Point = Record{x: double, y: double}
+type OrderId = Record{id: integer}
+type Pair = Tuple{integer, character}
 type Figure = :Circle(radius: double) | :Empty
 type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)
 size <- function(t: Tree<integer>) -> integer {

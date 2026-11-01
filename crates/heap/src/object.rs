@@ -269,6 +269,9 @@ pub mod gp {
     pub const UTF8: u16 = 1 << 3;
     pub const S4_OBJECT: u16 = 1 << 4;
     pub const CACHED: u16 = 1 << 5;
+    /// GNU R's `GROWABLE_MASK` on a vector, the same bit as `CACHED` on a string. ry keeps
+    /// growability in the heap's resizable flag, and `LEVELS` reports it through this bit.
+    pub const GROWABLE: u16 = 1 << 5;
     pub const ASCII: u16 = 1 << 6;
     /// The encoding bits that distinguish two interned strings with the same bytes.
     pub const ENCODING: u16 = BYTES | LATIN1 | UTF8;

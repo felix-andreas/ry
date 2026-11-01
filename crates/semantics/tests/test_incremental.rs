@@ -551,6 +551,6 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
     let scheme = global_scheme(&db, definition(&db, "prices"));
     assert_eq!(
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
-        "frame{id: integer[], price: double[], ticker: character[]}"
+        "data.table{id: integer[], price: double[], ticker: character[]}"
     );
 }

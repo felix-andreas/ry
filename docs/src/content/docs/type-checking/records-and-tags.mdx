@@ -62,8 +62,8 @@ with the right shape is not one until its constructor `@Name(...)` creates it:
 
 | | Records and tuples | Tag unions |
 | --- | --- | --- |
-| **Structural** | `alias Point = record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
-| **Nominal** | `type Celsius = record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
+| **Structural** | `alias Point = Record{x: double, y: double}` | `alias Answer = :Yes \| :No` |
+| **Nominal** | `type Celsius = Record{degrees: double}` | `type Shape = :Circle(radius: double) \| :Square(side: double)` |
 
 The comment spellings are `#: @alias Point {...}` and `#: @type Celsius {...}`. Structural is the
 default and usually right. Choose nominal when values have the same shape but must not mix, such as
@@ -74,8 +74,8 @@ constructor that checks it:
 <TabItem label="Inline">
 
 ```r
-type Celsius = record{degrees: double}
-type Fahrenheit = record{degrees: double}
+type Celsius = Record{degrees: double}
+type Fahrenheit = Record{degrees: double}
 type Shape = :Circle(radius: double) | :Square(side: double)
 
 boiling <- function() -> Celsius @Celsius(degrees = 100,)
@@ -88,9 +88,9 @@ bare: Shape <- :Circle(radius = 1)
 <TabItem label="Comments">
 
 ```r
-#: @type Celsius {record{degrees: double}}
+#: @type Celsius {Record{degrees: double}}
 
-#: @type Fahrenheit {record{degrees: double}}
+#: @type Fahrenheit {Record{degrees: double}}
 
 #: @type Shape {:Circle(radius: double) | :Square(side: double)}
 
@@ -133,10 +133,10 @@ A record is written in parentheses with named fields, and a tuple with unnamed i
 form needs a trailing comma, so that `(x = 1)` and `(1)` keep the meaning they have in R:
 
 ```r
-point <- (x = 1, y = 2)     # record{x: double, y: double}
-pair <- (1L, "a")           # tuple{integer, character}
-one <- (x = 1,)             # record{x: double}
-empty <- ()                 # tuple{}
+point <- (x = 1, y = 2)     # Record{x: double, y: double}
+pair <- (1L, "a")           # Tuple{integer, character}
+one <- (x = 1,)             # Record{x: double}
+empty <- ()                 # Tuple{}
 ```
 
 Fields are exact. `$` never matches a prefix, and a field that does not exist is an error:
@@ -145,7 +145,7 @@ Fields are exact. `$` never matches a prefix, and a field that does not exist is
 <TabItem label="Inline">
 
 ```r
-origin: record{x: double, y: double} <- (x = 0, y = 0)
+origin: Record{x: double, y: double} <- (x = 0, y = 0)
 moved <- origin$xx
 ```
 
@@ -153,7 +153,7 @@ moved <- origin$xx
 <TabItem label="Comments">
 
 ```r
-#: record{x: double, y: double}
+#: Record{x: double, y: double}
 origin <- (x = 0, y = 0)
 moved <- origin$xx
 ```
@@ -164,7 +164,7 @@ moved <- origin$xx
 ```text
 type-mismatch
 
-  x field `xx` does not exist in `record{x: double, y: double}`
+  x field `xx` does not exist in `Record{x: double, y: double}`
 ```
 
 A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The new value must fit

@@ -485,8 +485,8 @@ fn ry_runtime_admits_a_frame_for_a_frame_annotation() {
     if !ry_runtime_available() {
         return;
     }
-    let script = "total <- function(sales: frame{team: character, amount: double}) -> double sum(sales$amount)\n\
-        print(total(frame(team = \"a\", amount = 2)))\n";
+    let script = "total <- function(sales: DataFrame{team: character, amount: double}) -> double sum(sales$amount)\n\
+        print(total(DataFrame(team = \"a\", amount = 2)))\n";
     let (status, stdout, stderr) = run_project("ry", &[("script.R", script)]);
     assert_eq!(status, Some(0), "{stderr}");
     assert!(stdout.contains("[1] 2"), "{stdout}");
@@ -748,23 +748,39 @@ fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
 const FRAME_TYPES: &[(&str, &str)] = &[
     (
         "sales",
-        "frame{team: character[], amount: double[], units: integer[]}",
+        "DataFrame{team: character[], amount: double[], units: integer[]}",
     ),
     (
         "sales[amount > 1]",
-        "frame{team: character[], amount: double[], units: integer[]}",
+        "DataFrame{team: character[], amount: double[], units: integer[]}",
     ),
     (
         "sales[, .(total = sum(amount), n = .N), by = team]",
-        "frame{team: character[], total: double[], n: integer[]}",
+        "DataFrame{team: character[], total: double[], n: integer[]}",
     ),
     (
         "sales[, .(team, double = units * 2)]",
-        "frame{team: character[], double: double[]}",
+        "DataFrame{team: character[], double: double[]}",
     ),
     (
         "sales[labels, on = \"team\"]",
-        "frame{team: character[], amount: double[], units: integer[], label: character[]}",
+        "DataFrame{team: character[], amount: double[], units: integer[], label: character[]}",
+    ),
+    (
+        "DataFrame.select(sales, \"team\", double = col(\"units\") * 2)",
+        "DataFrame{team: character[], double: double[]}",
+    ),
+    (
+        "sales |> DataFrame.group_by(\"team\") |> GroupBy.agg(total = col(\"amount\") |> Expr.sum(), n = Expr.len())",
+        "DataFrame{team: character[], total: double[], n: integer[]}",
+    ),
+    (
+        "DataFrame.join(sales, labels, on = \"team\")",
+        "DataFrame{team: character[], amount: double[], units: integer[], label: character[]}",
+    ),
+    (
+        "sales |> DataFrame.lazy() |> LazyFrame.filter(col(\"units\") > 4L) |> LazyFrame.collect()",
+        "DataFrame{team: character[], amount: double[], units: integer[]}",
     ),
 ];
 
@@ -774,12 +790,16 @@ fn frame_types_agree_between_the_checker_and_the_runtime() {
         return;
     }
     let mut script = String::from(
-        "sales <- frame(team = c(\"a\", \"b\", \"a\"), amount = c(1, 2, 3), units = c(4L, 5L, 6L))\n\
-         labels <- frame(team = c(\"a\", \"b\"), label = c(\"A\", \"B\"))\n",
+        "sales <- DataFrame(team = c(\"a\", \"b\", \"a\"), amount = c(1, 2, 3), units = c(4L, 5L, 6L))\n\
+         labels <- DataFrame(team = c(\"a\", \"b\"), label = c(\"A\", \"B\"))\n\
+         type_of <- function(x) {\n\
+           schema <- DataFrame.schema(x)\n\
+           paste0(\"DataFrame{\", paste(names(schema), schema, sep = \": \", collapse = \", \"), \"}\")\n\
+         }\n",
     );
     for (index, (expression, ty)) in FRAME_TYPES.iter().enumerate() {
         script.push_str(&format!(
-            "q{index}: {ty} <- {expression}\nprint(frame_type(q{index}))\n"
+            "q{index}: {ty} <- {expression}\nprint(type_of(q{index}))\n"
         ));
     }
     let directory = tempfile::tempdir().expect("temp dir");

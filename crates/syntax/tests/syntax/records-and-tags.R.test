@@ -433,7 +433,7 @@ SOURCE_FILE@0..39
         IDENT@35..39 "None"
 
 #---- record_and_tuple_types
-f <- function(p: record{x: double}, t: tuple{integer, character}) -> :Ok(value: double) p
+f <- function(p: Record{x: double}, t: Tuple{integer, character}) -> :Ok(value: double) p
 #++++
 SOURCE_FILE@0..89
   BINARY_EXPR@0..89
@@ -453,7 +453,7 @@ SOURCE_FILE@0..89
             WHITESPACE@16..17 " "
             TYPE_RECORD@17..34
               NAME@17..23
-                IDENT@17..23 "record"
+                IDENT@17..23 "Record"
               L_BRACE@23..24 "{"
               TYPE_FIELD@24..33
                 NAME@24..25
@@ -472,7 +472,7 @@ SOURCE_FILE@0..89
             WHITESPACE@38..39 " "
             TYPE_TUPLE@39..64
               NAME@39..44
-                IDENT@39..44 "tuple"
+                IDENT@39..44 "Tuple"
               L_BRACE@44..45 "{"
               TYPE_REF@45..52
                 IDENT@45..52 "integer"

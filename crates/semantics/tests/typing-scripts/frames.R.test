@@ -1,18 +1,18 @@
 #==== script_frames
 #---- a_walrus_statement_feeds_later_statements
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 prices[, tax := price * 0.2]
 print(prices$tax)
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[], tax: double[]}
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[], tax: double[]}
 double[]
 
 #---- a_misspelled_column_warns_even_without_typing
 # typing: off
-prices <- frame(id = 1:3, price = c(1, 2, 3))
+prices <- DataFrame(id = 1:3, price = c(1, 2, 3))
 print(prices[pirce > 1])
 #++++
-prices: frame{id: integer[], price: double[]}
-frame{id: integer[], price: double[]}
-73..78 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?
+prices: DataFrame{id: integer[], price: double[]}
+DataFrame{id: integer[], price: double[]}
+77..82 warning[unresolved] the frame `prices` has no column `pirce`, and nothing else defines that name. Did you mean `price`?

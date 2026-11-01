@@ -80,7 +80,7 @@ top: :Ok(double) | :Err(:ListWasEmpty)
 halves <- List.split_at(list("a", "b", "c"), 1L)
 before <- halves$before
 #++++
-halves: record{before: list[character], others: list[character]}
+halves: Record{before: list[character], others: list[character]}
 before: list[character]
 
 #---- vector_is_not_a_list
@@ -100,7 +100,7 @@ first: character
 #---- split_first_returns_a_record_result
 parts <- Str.split_first("key=value", "=")
 #++++
-parts: :Ok(record{after: character, before: character}) | :Err(:NotFound)
+parts: :Ok(Record{after: character, before: character}) | :Err(:NotFound)
 
 #---- string_functions_need_strings
 n <- Str.trim(1L)
