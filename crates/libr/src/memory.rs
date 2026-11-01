@@ -555,6 +555,10 @@ pub unsafe extern "C" fn R_maxLength(vector: Sexp) -> R_xlen_t {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_protect(object: *mut Header) -> *mut Header {
+    // Native code protects every temporary, so only an overflow enters the boundary to raise.
+    if runtime().heap.roots.protect.protect(protectable(object)).is_ok() {
+        return object;
+    }
     enter(|| {
         runtime().heap.roots.protect.protect(protectable(object))?;
         Ok(object)
@@ -570,6 +574,10 @@ unsafe fn protectable(object: *mut Header) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Rf_unprotect(count: c_int) {
+    // An underflow leaves the stack untouched, so the boundary only has to raise it.
+    if count >= 0 && runtime().heap.roots.protect.unprotect(count as usize).is_ok() {
+        return;
+    }
     enter(|| {
         if count < 0 {
             return Err(error("unprotect(): negative count"));
