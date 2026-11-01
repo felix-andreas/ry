@@ -21,7 +21,7 @@ file R/scale.R
 run ry load -e "print(scale_area(2, 3, 10))"
 expect exit 0
 expect stdout "[1] 60"
-expect stderr "Loaded shapes: 2 functions bound lazily"
+expect stderr "Loaded shapes: 2 definitions bound lazily"
 
 file tests/check.R
 | for (file in list.files("R", full.names = TRUE)) source(file)
