@@ -4,7 +4,7 @@
 use crate::cli::{self, CommandError};
 use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
-use salsa::Durability;
+use salsa::{Durability, Setter};
 use semantics::check::CHECK_EXECUTIONS;
 use semantics::diagnostics::file_diagnostics;
 use semantics::infer::resolve_calls;
@@ -148,7 +148,6 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     // hosts see them.
     let attached = attached_union(&db, records.iter().map(|record| record.file));
     if !attached.is_empty() {
-        use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
     }
     let mut lower_total = Duration::ZERO;
@@ -312,7 +311,6 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
 /// Editor requests at identifiers sampled across the package files, on a settled database and
 /// right after a keystroke in another file, the moment a request pays for revalidation.
 fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize, config: &Config) {
-    use salsa::Setter;
     let Some(files) = ProjectFiles::try_get(db) else {
         return;
     };
@@ -509,7 +507,6 @@ fn typing_burst(
     root: &Path,
     detailed: bool,
 ) {
-    use salsa::Setter;
     let record = &records[index];
     let mut text = record.source.clone();
     text.push('\n');

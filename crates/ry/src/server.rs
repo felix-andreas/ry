@@ -519,15 +519,16 @@ impl Worker {
     }
 
     /// When the project-wide attach union moves, every file's resolution universe
-    /// changes, so all diagnostics refresh.
-    fn refresh_attached(&mut self, path: &Path) {
+    /// changes, so all diagnostics refresh. Returns false when the scan was cancelled. A sync
+    /// can ignore that, because the edit that cancelled it re-scans in its own sync, but an
+    /// idle caller must requeue the file: a request preempts idle work without re-scanning.
+    fn refresh_attached(&mut self, path: &Path) -> bool {
         let scanned = match self.files.get(path) {
             Some(&file) => {
                 let scan = self.cancellable(|worker| file_attached_namespaces(&worker.db, file));
                 match scan {
                     Ok(scanned) => scanned,
-                    // A newer edit is already queued; its own sync re-scans.
-                    Err(_) => return,
+                    Err(_) => return false,
                 }
             }
             None => Default::default(),
@@ -541,15 +542,16 @@ impl Worker {
             false
         };
         if !changed {
-            return;
+            return true;
         }
         let union = self.attached_union();
         let metadata = PackageMetadata::get(&self.db);
         if metadata.attached(&self.db) == &union {
-            return;
+            return true;
         }
         metadata.set_attached(&mut self.db).to(union);
         self.refresh_all_diagnostics();
+        true
     }
 
     /// A real change refreshes all diagnostics; a `Collate` change reorders the project.
@@ -693,9 +695,11 @@ impl Worker {
                 ide::warm_completion_indexes(&worker.db, file);
             });
             match outcome {
+                // Scans the startup workspace's attach facts without a blocking sweep.
                 Ok(()) => {
-                    // Scans the startup workspace's attach facts without a blocking sweep.
-                    self.refresh_attached(&path);
+                    if !self.refresh_attached(&path) {
+                        self.prime_queue.push_front(path);
+                    }
                 }
                 Err(_) => self.prime_queue.push_front(path),
             }

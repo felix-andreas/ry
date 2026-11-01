@@ -5,8 +5,8 @@
 use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
 use semantics::check::{CalleeTarget, ItemCheck};
 use semantics::diagnostics::TypeRenderer;
-use semantics::infer::apply_definition;
 use semantics::hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind};
+use semantics::infer::apply_definition;
 use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
 use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
 use semantics::types::{
@@ -254,7 +254,9 @@ fn member_at<'db>(
             }
             ExpressionKind::Literal(LiteralKind::String(name)) => {
                 if let Some(columns) = dataframe_columns_for(db, hir, check, expression.range)
-                    && let Some(column) = columns.iter().find(|column| column.name.text(db) == name.as_ref())
+                    && let Some(column) = columns
+                        .iter()
+                        .find(|column| column.name.text(db) == name.as_ref())
                 {
                     return Some(Member {
                         range: expression.range,
@@ -1075,7 +1077,7 @@ pub fn completion(
 
     // Resolving a scheme can type-check its item, so call shapes are filled in only for the
     // globals that survive truncation, not for every global that matches the query.
-    let mut globals: Vec<Item<'_>> = Vec::new();
+    let mut globals: Vec<(&str, Option<Item<'_>>)> = Vec::new();
     let items = match context {
         CompletionContext::Field => {
             spelled_completions(db, files, &query, AT_EXPR, CompletionSource::Field)
@@ -1132,9 +1134,9 @@ pub fn completion(
                     if search_match(&global.name, &query).is_none() {
                         continue;
                     }
+                    globals.push((global.name.as_str(), global.item));
                     let kind = match global.item {
-                        Some(item) => {
-                            globals.push(item);
+                        Some(_) => {
                             if global.is_function {
                                 CompletionKind::Function
                             } else {
@@ -1205,10 +1207,11 @@ pub fn completion(
         .map(|(index, item)| (item.label.as_str(), index))
         .collect();
     let mut shapes = Vec::new();
-    // The first writer in project order is the one deduplication kept.
-    for item in globals {
-        if let Some(name) = item.name(db)
-            && let Some(index) = unresolved.remove(name.as_str())
+    // The first writer in project order is the one deduplication kept, and a statement writer
+    // (no item) has no call shape, so it must still claim its name ahead of a later function.
+    for (name, item) in globals {
+        if let Some(index) = unresolved.remove(name)
+            && let Some(item) = item
         {
             shapes.push((index, scheme_takes_arguments(db, &global_scheme(db, item))));
         }
@@ -2408,7 +2411,9 @@ fn string_subscript_completion(
             }
             _ => None,
         });
-    let fields = match target.map(|target| check.expression_types.get(&target).map(|ty| ty.kind(db))) {
+    let fields = match target
+        .map(|target| check.expression_types.get(&target).map(|ty| ty.kind(db)))
+    {
         Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => fields.as_slice(),
         Some(_) => return None,
         None => dataframe_columns_for(db, hir, &check, string_range)?,
@@ -2442,25 +2447,30 @@ fn dataframe_columns_for<'a, 'db>(
     check: &'a ItemCheck<'db>,
     string_range: TextRange,
 ) -> Option<&'a [RecordField<'db>]> {
-    let is_column_string = hir.expressions.iter().any(|expression| match &expression.kind {
-        ExpressionKind::Call { callee, arguments } => {
-            let in_arguments = |arguments: &[Argument]| {
-                arguments.iter().any(|argument| {
-                    argument.value.is_some_and(|value| hir.expression(value).range == string_range)
-                })
-            };
-            match &hir.expression(*callee).kind {
-                ExpressionKind::NameRef(name) if name.as_str() == "col" => {
-                    arguments.first().is_some_and(|argument| in_arguments(std::slice::from_ref(argument)))
+    let is_column_string = hir
+        .expressions
+        .iter()
+        .any(|expression| match &expression.kind {
+            ExpressionKind::Call { callee, arguments } => {
+                let in_arguments = |arguments: &[Argument]| {
+                    arguments.iter().any(|argument| {
+                        argument
+                            .value
+                            .is_some_and(|value| hir.expression(value).range == string_range)
+                    })
+                };
+                match &hir.expression(*callee).kind {
+                    ExpressionKind::NameRef(name) if name.as_str() == "col" => arguments
+                        .first()
+                        .is_some_and(|argument| in_arguments(std::slice::from_ref(argument))),
+                    ExpressionKind::NameRef(name) if is_dataframe_verb(name) => {
+                        arguments.get(1..).is_some_and(in_arguments)
+                    }
+                    _ => false,
                 }
-                ExpressionKind::NameRef(name) if is_dataframe_verb(name) => {
-                    arguments.get(1..).is_some_and(in_arguments)
-                }
-                _ => false,
             }
-        }
-        _ => false,
-    });
+            _ => false,
+        });
     if !is_column_string {
         return None;
     }
@@ -2487,7 +2497,10 @@ fn dataframe_columns_for<'a, 'db>(
 
 fn is_dataframe_verb(name: &str) -> bool {
     name.split_once('.').is_some_and(|(receiver, _)| {
-        matches!(receiver, "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy")
+        matches!(
+            receiver,
+            "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+        )
     })
 }
 
@@ -3189,7 +3202,10 @@ fn union_members<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Vec<Ty<'db>> {
 /// With nothing to check it against, `:Circle(|)` builds the payload that the project's type
 /// definitions declare for `:Circle`.
 fn declared_payloads<'db>(db: &'db dyn Db, container: &SyntaxNode) -> Vec<Ty<'db>> {
-    let Some(tag) = container.parent().filter(|parent| parent.kind() == TAG_EXPR) else {
+    let Some(tag) = container
+        .parent()
+        .filter(|parent| parent.kind() == TAG_EXPR)
+    else {
         return Vec::new();
     };
     let (Some(name), Some(files)) = (child_node(&tag, NAME), ProjectFiles::try_get(db)) else {
@@ -3255,18 +3271,18 @@ fn literal_field_completions(
     };
     // Every item of a record literal is named, so its name positions never take R's globals;
     // a tag's payload or a parenthesized name may still be a value.
-    let in_record = container.parent().is_some_and(|parent| parent.kind() == RECORD_EXPR);
-    let fields = literal_expected_fields(db, file, &container);
+    let in_record = container
+        .parent()
+        .is_some_and(|parent| parent.kind() == RECORD_EXPR);
+    let fields: Vec<CompletionItem> = literal_expected_fields(db, file, &container)
+        .into_iter()
+        .filter(|item| !named.contains(&item.label))
+        .filter(|item| search_match(&item.label, query).is_some())
+        .collect();
     if fields.is_empty() && !in_record {
         return None;
     }
-    Some(
-        fields
-            .into_iter()
-            .filter(|item| !named.contains(&item.label))
-            .filter(|item| search_match(&item.label, query).is_some())
-            .collect(),
-    )
+    Some(fields)
 }
 
 /// The fields the record at `container` (a literal's item list, or a parenthesized name) is
@@ -3304,7 +3320,9 @@ fn literal_expected_fields(
         } else {
             let literal = list.parent()?;
             if literal.kind() == TAG_EXPR {
-                steps.push(PatternStep::Payload(child_node(&literal, NAME)?.text().to_string()));
+                steps.push(PatternStep::Payload(
+                    child_node(&literal, NAME)?.text().to_string(),
+                ));
             }
             literal
         };
@@ -3322,15 +3340,17 @@ fn literal_expected_fields(
         if !matches!(list.parent()?.kind(), RECORD_EXPR | TUPLE_EXPR | TAG_EXPR) {
             return None;
         }
-        steps.push(match child_node(&outer, NAME).filter(|_| child_token(&outer, EQ).is_some()) {
-            Some(name) => PatternStep::Field(name.text().to_string()),
-            None => PatternStep::Item(
-                list.children()
-                    .filter(|child| child.kind() == ARGUMENT)
-                    .take_while(|child| child != &outer)
-                    .count(),
-            ),
-        });
+        steps.push(
+            match child_node(&outer, NAME).filter(|_| child_token(&outer, EQ).is_some()) {
+                Some(name) => PatternStep::Field(name.text().to_string()),
+                None => PatternStep::Item(
+                    list.children()
+                        .filter(|child| child.kind() == ARGUMENT)
+                        .take_while(|child| child != &outer)
+                        .count(),
+                ),
+            },
+        );
     })();
     let members = match expected {
         Some(expected) => {

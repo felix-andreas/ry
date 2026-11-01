@@ -499,6 +499,22 @@ rename: none
 signature: none
 completion (1): height
 
+#---- completion_in_a_tag_payload_falls_back_to_values_when_no_field_matches
+#: :Circle(radius: double) | :Rect(width: double, height: double)
+s <- :Circle(totalRadius$0)
+totalRadius <- 2
+#++++
+hover 79..90: totalRadius: double
+hover-definition: global 92..103
+definition 92..103
+references: 79..90, 92..103*
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 92..92 -> "#: double\n"
+completion (1): totalRadius
+hint @103: double
+
 #---- completion_in_a_nominal_constructor_follows_its_definition
 type Money = Record{amount: double, currency: character}
 m <- @Money((amount = 1, cur$0))
