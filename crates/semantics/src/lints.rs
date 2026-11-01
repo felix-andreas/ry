@@ -4,6 +4,7 @@ use crate::stubs::{declaring_namespace, stubs};
 use crate::{Db, SourceFile, is_s3_method_name, item_naming, item_spans, parse, s3_generics};
 use rowan::{NodeOrToken, WalkEvent};
 use syntax::ast::BinaryExpr;
+use syntax::native_values::{object_system_function, object_systems_disabled_message};
 use syntax::{SyntaxKind, SyntaxNode, TextRange, is_inline_annotation};
 
 /// `Default` keeps the lint's built-in severity, which is off for opt-in lints.
@@ -309,9 +310,7 @@ fn object_system_lint(
             range,
             Severity::Error,
             "object-system",
-            format!(
-                "{system} are turned off in this project (`[check] object-systems = false`), so `{function}` cannot define {defines}. Use a record or a tagged union instead"
-            ),
+            object_systems_disabled_message(system, defines, &function),
         ));
     } else {
         push_lint(
@@ -333,21 +332,6 @@ fn object_system_lint(
                 .map(|diagnostic| (function.clone(), diagnostic)),
         ),
     }
-}
-
-/// The object system a class-defining function belongs to, what it defines, and its home
-/// package.
-fn object_system_function(function: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    Some(match function {
-        "setClass" => ("S4 classes", "an S4 class", "methods"),
-        "setClassUnion" => ("S4 classes", "an S4 class union", "methods"),
-        "setGeneric" => ("S4 classes", "an S4 generic", "methods"),
-        "setMethod" => ("S4 classes", "an S4 method", "methods"),
-        "setValidity" => ("S4 classes", "an S4 validity check", "methods"),
-        "setRefClass" => ("Reference Classes", "a Reference Class", "methods"),
-        "R6Class" => ("R6 classes", "an R6 class", "R6"),
-        _ => return None,
-    })
 }
 
 fn trailing_comma_lint(
