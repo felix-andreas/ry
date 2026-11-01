@@ -1431,7 +1431,7 @@ impl<'p, 'b> Translator<'p, 'b> {
 
     /// Continues when `condition` holds and otherwise hands the instruction to tier 0, which
     /// raises whatever error the compiled fast path declined to.
-    fn hand_off_unless(&mut self, position: usize, before: &State, condition: Value) {
+    fn hand_off_unless(&mut self, position: usize, before: &StateRef<'p>, condition: Value) {
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
         self.builder.ins().brif(condition, fast, &[], slow, &[]);

@@ -412,10 +412,10 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     // untouched item recomputing its reads.
     assert_eq!(
         db.executions_since(&["item_interface_reads", "item_top_level_names"]),
-        [0, 1],
-        "only the edited item re-derives its top-level names, for its own file's frame binders; \
-         its naming backdates, so nothing recomputes interface reads, and none of the five items \
-         in the untouched files reruns either"
+        [0, 0],
+        "the edited item's top-level names read only its memoized own-name flag, which backdates; \
+         its naming backdates too, so nothing recomputes interface reads, and none of the five \
+         items in the untouched files reruns either"
     );
 }
 
