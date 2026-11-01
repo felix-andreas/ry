@@ -13,13 +13,14 @@ use {
         builtin_libraries::{NativeCall, NativeFn, c_result},
         coerce::coerce_vector,
         distributions, linalg,
-        long_double::LongDouble,
+        long_double::{self, LongDouble},
         random, stats_arima, stats_cluster, stats_deriv, stats_loess, stats_models, stats_nlm,
         stats_optimize, stats_port, stats_spline, stats_tests,
         unwind::{R, error},
         values::{self, length, scalar_bool, scalar_integer, symbols},
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
+    std::borrow::Cow,
 };
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
@@ -586,14 +587,17 @@ fn complete_covariance(x: &[f64], y: &[f64], used: &[bool], kendall: bool) -> Lo
         }
         return sum;
     }
-    let x_mean = arith::long_double_mean(&used_values(x, used));
-    let y_mean = arith::long_double_mean(&used_values(y, used));
-    for k in 0..x.len() {
-        if used[k] {
-            sum = sum + (LongDouble::from(x[k]) - x_mean) * (LongDouble::from(y[k]) - y_mean);
-        }
-    }
-    sum / (count - 1)
+    let (x, y) = if count == x.len() {
+        (Cow::Borrowed(x), Cow::Borrowed(y))
+    } else {
+        (
+            Cow::Owned(used_values(x, used)),
+            Cow::Owned(used_values(y, used)),
+        )
+    };
+    let x_mean = arith::long_double_mean(&x);
+    let y_mean = arith::long_double_mean(&y);
+    long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
 }
 
 fn used_values(data: &[f64], used: &[bool]) -> Vec<f64> {
