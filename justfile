@@ -271,6 +271,11 @@ oracle *args:
 bench-gen *args:
     python3 -I tools/bench/generate.py {{ args }}
 
+# Compare generated packages' tests under GNU R and ry's runtime test by test, e.g. `just bench-compare .bench/finbench`.
+bench-compare *args:
+    cargo build -q --release -p ry-lang -p libr -p oracle
+    R_LIBS=$PWD/.corpus/library ./target/release/oracle bench --ry target/release/ry {{ args }}
+
 # Run a generated package's tests under GNU R, e.g. `just bench-test .bench/finbench`.
 bench-test package reporter="summary":
     Rscript tools/bench/run-tests.R {{ package }} {{ reporter }}

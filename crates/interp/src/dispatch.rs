@@ -651,8 +651,10 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
         _ => {
             let definition = eval::builtin_def(method)?;
             // A special evaluates its arguments itself, so it gets the promises, which
-            // evaluate to their values without running a value that is a call.
-            let special = matches!(definition.kind, Kind::Special | Kind::InternalSpecial);
+            // evaluate to their values without running a value that is a call. A
+            // dispatch-or-eval special's function takes values, so it gets them forced.
+            let special = matches!(definition.kind, Kind::Special | Kind::InternalSpecial)
+                && !definition.is_dispatch_or_eval();
             let mut forced = Vec::with_capacity(args.len());
             for arg in &args {
                 let value = if arg.value == missing_arg() || special {
@@ -775,7 +777,7 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
             .map(|(_, expression)| *expression)
             .filter(|expression| *expression != symbols().dots)
             .unwrap_or(arg.value);
-        let value = if arg.value == missing_arg() {
+        let value = if arg.value == missing_arg() || arg.value.kind() == SexpType::Promise {
             arg.value
         } else {
             forced_promise(code, arg.value)?
@@ -788,7 +790,8 @@ unsafe fn promised_args(call: Sexp, args: &[Arg]) -> R<Vec<Arg>> {
     Ok(result)
 }
 
-/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`).
+/// S3 dispatch for a builtin that evaluated its own arguments (`$`, `$<-`). A call named
+/// `<generic>.default` comes from `NextMethod` and runs the builtin's own code.
 pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     if call.kind() == SexpType::Language
         && call.car().kind() == SexpType::Symbol
@@ -805,19 +808,121 @@ pub unsafe fn dispatch_builtin(name: &str, call: Sexp, args: &[Arg], env: Sexp) 
     internal_dispatch(name, call, args, env)
 }
 
+/// GNU R's `DispatchOrEval`, for a [`BuiltinDef::dispatch_or_eval`] special called with the
+/// unevaluated `arguments`. Only the first argument is evaluated before dispatch, so a method
+/// receives the others as unevaluated promises. Returns the method's value, or the evaluated
+/// arguments when the primitive's own code should run.
+pub unsafe fn dispatch_or_eval(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    arguments: Sexp,
+    env: Sexp,
+) -> R<Result<Sexp, Vec<Arg>>> {
+    let first = arguments.car();
+    if arguments.kind() != SexpType::Pairlist || first == missing_arg() {
+        return Ok(Err(eval::evaluate_args(arguments, env, true, call)?));
+    }
+    // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
+    // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
+    let promised = if first == symbols().dots {
+        let promised = eval::promise_args(arguments, env)?;
+        let Some(head) = promised.first() else {
+            return Ok(Err(promised));
+        };
+        if head.value == missing_arg() {
+            return Ok(Err(promised));
+        }
+        let object = value_of(head.value)?;
+        crate::heap().root(object);
+        promised
+    } else {
+        let object = eval::eval(first, env)?;
+        crate::heap().root(object);
+        let head = Arg {
+            tag: arguments.tag(),
+            value: object,
+        };
+        if !object.is_object() {
+            let mut args = vec![head];
+            args.extend(eval::evaluate_args(arguments.cdr(), env, true, call)?);
+            return Ok(Err(args));
+        }
+        let mut promised = vec![Arg {
+            tag: head.tag,
+            value: forced_promise(first, object)?,
+        }];
+        promised.extend(eval::promise_args(arguments.cdr(), env)?);
+        promised
+    };
+    let object = value_of(promised[0].value)?;
+    if object.is_object() {
+        // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4
+        // object without one falls back to S3 methods of its class.
+        let value = if object.has_gp(gp::S4_OBJECT)
+            && let Some(value) = s4_dispatch(op, call, &promised, env)?
+        {
+            Some(value)
+        } else if let Some(found) =
+            find_s3_method(definition.name, object, env, values::base_namespace(), None)?
+        {
+            Some(apply_internal_method(call, found, &promised, env)?)
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            interp().visible = true;
+            return Ok(Ok(value));
+        }
+    }
+    let mut forced = Vec::with_capacity(promised.len());
+    for arg in &promised {
+        let value = if arg.value == missing_arg() || promise_of_missing(arg.value)? {
+            missing_arg()
+        } else {
+            value_of(arg.value)?
+        };
+        crate::heap().root(value);
+        forced.push(Arg { tag: arg.tag, value });
+    }
+    Ok(Err(forced))
+}
+
+/// Whether `value` is an unforced promise of a symbol that is a missing argument where the
+/// promise was made, which the primitive takes as an empty subscript.
+unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
+    if value.kind() != SexpType::Promise || value.car() != unbound() {
+        return Ok(false);
+    }
+    let environment = value.tag();
+    if environment.kind() != SexpType::Environment {
+        return Ok(false);
+    }
+    eval::argument_is_missing(value.cdr(), environment)
+}
+
 unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> R<Option<Sexp>> {
     let object = args[0].value;
     let Some(found) = find_s3_method(name, object, env, values::base_namespace(), None)? else {
         return Ok(None);
     };
     let promised = promised_args(call, args)?;
+    apply_internal_method(call, found, &promised, env).map(Some)
+}
+
+unsafe fn apply_internal_method(
+    call: Sexp,
+    found: Found,
+    promised: &[Arg],
+    env: Sexp,
+) -> R<Sexp> {
     let new_call = renamed_call(call, found.method_name)?;
     // GNU R evaluates the method inside a context of the builtin's own call, which shows in
     // `sys.calls()`.
     let state = interp();
     let handlers = state.handlers.clone();
     let restarts = state.restarts.clone();
-    let promargs = eval::args_pairlist(&promised)?;
+    let promargs = eval::args_pairlist(promised)?;
     state.frames.push(Frame {
         call,
         function: found.method,
@@ -830,13 +935,13 @@ unsafe fn internal_dispatch(name: &str, call: Sexp, args: &[Arg], env: Sexp) -> 
         srcref: state.srcref,
     });
     let depth = state.frames.len();
-    let result = apply_method(new_call, found.method, &promised, env, &found.vars);
+    let result = apply_method(new_call, found.method, promised, env, &found.vars);
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     state.handlers = state.frames[depth - 1].handlers.clone();
     state.frames.truncate(depth - 1);
     state.restarts = restarts;
-    result.map(Some)
+    result
 }
 
 unsafe fn group_dispatch(

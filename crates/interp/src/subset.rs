@@ -15,20 +15,12 @@ use crate::{
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    builtin("[", -1, do_subset)
-        .generic(Generic::Internal)
-        .keep_missing(),
-    builtin("[[", -1, do_subset2)
-        .generic(Generic::Internal)
-        .keep_missing(),
+    special("[", -1, do_subset).dispatch_or_eval(),
+    special("[[", -1, do_subset2).dispatch_or_eval(),
     special("$", 2, do_dollar),
     special("@", 2, do_at),
-    builtin("[<-", -1, do_subassign)
-        .generic(Generic::Internal)
-        .keep_missing(),
-    builtin("[[<-", -1, do_subassign2)
-        .generic(Generic::Internal)
-        .keep_missing(),
+    special("[<-", -1, do_subassign).dispatch_or_eval(),
+    special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
     special("@<-", 3, do_at_assign),
     builtin(".subset", -1, do_subset).keep_missing(),
@@ -417,6 +409,13 @@ unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
 
 pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> R<Sexp> {
     let object = values::materialize(object)?;
+    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
+        let data = s4_data_part(object);
+        if data == nil() {
+            return Err(crate::unwind::error_in(call, "object of type 'S4' is not subsettable"));
+        }
+        return subset(data, indices, drop, call);
+    }
     match object.kind() {
         SexpType::Nil => return Ok(nil()),
         SexpType::Environment => {
@@ -651,6 +650,17 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
     subset2(object, &indices, exact, call.call)
 }
 
+/// GNU R's `R_getS4DataSlot`: the data part of an S4 object whose class extends a basic type,
+/// held in `.Data` or, for an environment such as a reference class object, in `.xData`.
+/// `NULL` when the class extends none.
+unsafe fn s4_data_part(object: Sexp) -> Sexp {
+    let data = get_attr(object, symbols().dot_data);
+    if data != nil() {
+        return data;
+    }
+    get_attr(object, symbols().dot_xdata)
+}
+
 /// The position `name` matches among `names`: exactly, or with `exact == Some(false)` (or
 /// `None`, which also warns) by a unique partial match.
 unsafe fn match_name(names: Sexp, name: &[u8], exact: Option<bool>) -> R<Option<usize>> {
@@ -690,11 +700,18 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         return crate::records::subset2(object, indices, call);
     }
     let object = values::materialize(object)?;
+    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
+        let data = s4_data_part(object);
+        if data == nil() {
+            return Err(crate::unwind::error_in(call, "this S4 class is not subsettable"));
+        }
+        return subset2(data, indices, exact, call);
+    }
     if object == nil() {
         return Ok(nil());
     }
     if indices.is_empty() || indices[0] == missing_arg() {
-        return Err(crate::unwind::error_in(call, "subscript out of bounds"));
+        return Err(crate::unwind::error_in(call, "missing subscript"));
     }
     if object.kind() == SexpType::Environment {
         let index = indices[0];
@@ -1433,6 +1450,18 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
         return crate::records::subassign2(object, indices, value, call);
     }
     let object = values::materialize(object)?;
+    // A reference class object assigns into its environment and stays itself.
+    if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
+        let data = s4_data_part(object);
+        if data.kind() != SexpType::Environment {
+            return Err(crate::unwind::error_in(
+                call,
+                "[[<- defined for objects of type \"S4\" only for subclasses of environment",
+            ));
+        }
+        subassign2(data, indices, value, call)?;
+        return Ok(object);
+    }
     if object.kind() == SexpType::Environment {
         let index = indices.first().copied().unwrap_or(nil());
         if index.kind() != SexpType::String || length(index) != 1 {
@@ -1472,10 +1501,8 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     }
     if is_list || object == nil() || !value.kind().is_atomic() || length(value) != 1 {
         // Whole-element assignment into a list.
+        // GNU R grows `NULL` into a list for `[[<-` and `$<-` whatever the value is.
         let list = if object == nil() {
-            if value.kind().is_atomic() && length(value) == 1 {
-                return subassign(object, indices, value, call);
-            }
             alloc(SexpType::List, 0)?
         } else if is_list {
             modifiable(object)?
@@ -1596,10 +1623,6 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
             subassign2(object, &[index], value, call)
         }
         _ if object.kind().is_atomic() => {
-            if length(object) == 0 {
-                let index = values::scalar_string_charsxp(name)?;
-                return subassign2(nil(), &[index], value, call);
-            }
             conditions::warning_call(call, "Coercing LHS to a list")?;
             let list = coerce_vector(object, SexpType::List)?;
             let index = values::scalar_string_charsxp(name)?;
@@ -2792,6 +2815,27 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
         values::set_attr(result, symbols().dimnames, dimnames)?;
     }
     Ok(result)
+}
+
+/// The unevaluated expressions behind the `...` arguments of the `cbind` or `rbind` closure
+/// whose environment is `env`, which `deparse.level` names untagged vectors after. A position
+/// with no expression to read (the internal called some other way) holds `NULL`.
+unsafe fn argument_expressions(env: Sexp, count: usize) -> R<Vec<Sexp>> {
+    let mut expressions = vec![nil(); count];
+    let dots = eval::find_var(symbols().dots, env)?;
+    if dots.kind() != SexpType::Dots || values::pairlist_length(dots) != count {
+        return Ok(expressions);
+    }
+    let mut cell = dots;
+    for expression in expressions.iter_mut() {
+        let mut value = cell.car();
+        while value.kind() == SexpType::Promise {
+            value = value.cdr();
+        }
+        *expression = value;
+        cell = cell.cdr();
+    }
+    Ok(expressions)
 }
 
 unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
