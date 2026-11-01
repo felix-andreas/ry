@@ -386,8 +386,8 @@ trunc : fn(x: Any, ...: Any) -> double
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for
 # the shapes the candidates cannot express. `order`/`which` genuinely produce integer index vectors.
 # `rank`'s result type depends on `ties.method` (double for averages, integer otherwise).
-sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
 sort : <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
+sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
 sort : fn(x: Any, [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
 order : fn(...: Any, [na.last]: Any, [decreasing]: logical, [method]: character) -> integer[]
 rank : fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
@@ -399,8 +399,8 @@ rev : <T> fn(x: T[]) -> T[]
 rev : <T> fn(x: list[named: T]) -> list[named: T]
 rev : <T> fn(x: list[T]) -> list[T]
 rev : fn(x: Any) -> Any
-unique : fn(x: factor, [incomparables]: Any, ...: Any) -> factor
 unique : <T> fn(x: T[], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> T[]
+unique : fn(x: factor, [incomparables]: Any, ...: Any) -> factor
 unique : <T> fn(x: list[named: T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[named: T]
 unique : <T> fn(x: list[T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[T]
 # The fallback candidate is variadic because `unique` is a generic and its
