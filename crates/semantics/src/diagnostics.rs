@@ -10,11 +10,11 @@ use {
             TypeErrorKind, column_element,
         },
         exhaustiveness::{MatchFinding, MatchFindingKind},
-        file_syntax_sites, file_type_definitions,
+        file_conditional_writers, file_definitions, file_syntax_sites, file_type_definitions,
         hir::{ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
-        item_tree,
+        item_syntax, item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
@@ -86,8 +86,7 @@ pub fn derive_from_syntax(db: &dyn Db, file: SourceFile, lints: &LintConfig) {
     let _ = definition_agreement_candidates(db, file);
     let _ = crate::lints::file_syntax_lints(db, file, *lints);
     let _ = crate::file_typing_mode(db, file);
-    let _ = crate::file_type_definitions(db, file);
-    let _ = type_declaration_names(db, file);
+    warm_project_folds(db, file);
     let _ = parse_stage_diagnostics(db, file);
     for &item in item_tree(db, file) {
         let _ = crate::item_hir(db, item);
@@ -330,6 +329,18 @@ fn file_error_ranges(db: &dyn Db, file: SourceFile) -> Vec<TextRange> {
         .filter(|error| !error.in_annotation)
         .map(|error| error.range)
         .collect()
+}
+
+/// Derives the file's share of every project-wide map a single file's check folds, so a host
+/// can spread that work across cores before the first check. Without it, the first check
+/// derives the share of every file of the project on one thread.
+pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
+    file_definitions(db, file);
+    file_conditional_writers(db, file);
+    file_type_definitions(db, file);
+    top_level_binding_names(db, file);
+    type_declaration_names(db, file);
+    file_global_variable_declarations(db, file);
 }
 
 #[salsa::tracked(returns(clone))]
@@ -1716,7 +1727,24 @@ fn super_globals(db: &dyn Db, file: SourceFile) -> BTreeSet<Symbol> {
 fn file_global_variable_declarations(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     use crate::hir::LiteralKind;
     let mut declared = BTreeSet::new();
+    // Every file of the project is asked, so the common answer must not cost a tree walk.
+    if !file.text(db).contains("globalVariables") {
+        return declared;
+    }
     for &item in item_tree(db, file) {
+        // Lowering every item of the project to find a handful of calls would dominate a
+        // single file's check, so the name is matched on the syntax first.
+        let spelled = *item.kind(db) == ItemKind::Statement
+            && item_syntax(db, item).is_some_and(|syntax| {
+                syntax
+                    .syntax_node()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.text() == "globalVariables")
+            });
+        if !spelled {
+            continue;
+        }
         let Some(module) = item_hir(db, item) else {
             continue;
         };

@@ -393,8 +393,8 @@ pub(crate) fn analyze_project(
         metadata.set_attached(&mut db).to(attached);
     }
 
-    // Per-item naming and the per-file read sets derived from it run across cores first:
-    // inside the project-wide interface and slot walks they would serialize on one thread.
+    // Every item is named across cores first: a file's check names the items of other files its
+    // interface reaches, and two threads reaching the same item would block on one claim.
     // This pass reads no tree and holds nothing evictable, so it runs as one batch with no
     // barriers.
     in_batches(&mut db, workers, &by_size, by_size.len(), |db, index| {
@@ -402,8 +402,6 @@ pub(crate) fn analyze_project(
         for &item in semantics::item_tree(db, file) {
             semantics::item_naming(db, item);
         }
-        semantics::file_interface_reads(db, file);
-        semantics::file_conditional_writers(db, file);
     });
     let mut per_file: Vec<Vec<Diagnostic>> = (0..files.len()).map(|_| Vec::new()).collect();
     // Reads no tree either, but evicting between larger batches still bounds the peak on a

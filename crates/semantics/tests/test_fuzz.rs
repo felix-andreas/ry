@@ -218,7 +218,16 @@ fn check_multi_file_edit(first_source: &str, second_source: &str, edited_source:
 }
 
 /// Inputs that once broke an invariant, pinned without the gitignored fuzz corpus.
-const REGRESSIONS: &[&str] = &["foo$\n", "f)\nla<- function()"];
+const REGRESSIONS: &[&str] = &[
+    "foo$\n",
+    "f)\nla<- function()",
+    // Writes the syntactic write screen must see: a nested write, a destructure, a by-reference
+    // rename, and a superassignment inside a nested function.
+    "x <- (y <- 1L)\n",
+    "c(a, b) %<-% list(1L, 2L)\n",
+    "frame <- data.frame(a = 1L)\nsetnames(frame, \"a\", \"b\")\n",
+    "x <- list(f = function() y <<- 1L)\n",
+];
 
 /// One shared database (a fresh one re-parses the stubs per case), so this asserts only
 /// never-panic and range geometry; the generated arms cover determinism and equivalence.

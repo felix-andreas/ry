@@ -363,7 +363,10 @@ definition 51..56
 references: 51..56*
 rename: 1 edit(s)
 signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
 completion (48): maybe, makePrototypeFromClassDef, mapply, mauchly.test, .mapply, simplify2array, Summary, summary
+hint @5: data.frame
 
 #---- trust_annotation
 #: @trust integer

@@ -1057,7 +1057,9 @@ were not.
 
 The shape now lives in `crates/semantics/src/semantics.rs` and has three parts.
 
-- `interface_sccs(files)` builds the static interface-reference graph over every item of every
+- (Superseded in part by "a file's check names only what its interface reaches": the graph is
+  now walked per item by `interface_group`, and groups are keyed by their first member.)
+  `interface_sccs(files)` built the static interface-reference graph over every item of every
   file, statements included. Each read is resolved by `item_interface_reads` through the same binder
   the check uses (the nearest earlier writer in the reading file, or a script's last writer, then the
   test layer, the package-layer winner, and the conditional writers up to the join cap), so the
@@ -3352,8 +3354,8 @@ first lines R had already read, leaving R mid-command.
 - **Project-wide maps fold per-file memos.** `package_definitions`, `conditional_slot_items`,
   `interface_sccs` and their test-file twins read every item's projections directly. Once the
   edited file was `LOW`, each map was too, and confirming it after a keystroke checked about 56,000
-  item memos, about 35 ms before any request could answer. They now read `file_definitions`,
-  `file_interface_reads` and `file_conditional_writers` (`crates/semantics/src/semantics.rs`), so
+  item memos, about 35 ms before any request could answer. They now read `file_definitions` and
+  `file_conditional_writers` (`crates/semantics/src/semantics.rs`; `interface_sccs` is gone), so
   the check touches about 500 file memos and every untouched one passes on durability.
   `project_arithmetic_classes` needed no change: it reads only `package_definitions`.
 - **Every host input but the open documents and the file list is `MEDIUM`.** The server and
@@ -3378,8 +3380,8 @@ first lines R had already read, leaving R mid-command.
   diagnostics, so an open file was republished about six times, with counts that flickered.
 - **Target shape.** `Worker::warm_up` in `crates/ry/src/server.rs` runs before any other idle
   work: it scans every file's attach facts across all cores and applies the union once, then
-  derives every item's naming and the per-file folds (`file_interface_reads`,
-  `file_conditional_writers`) across all cores, as `ry check` does. Until it ends, the first wave
+  derives the per-file folds behind the project-wide maps (`warm_project_folds`) across all cores.
+  It used to name every item as well, which the next record removed. Until it ends, the first wave
   holds only parse-stage diagnostics (the lints need the maps), pull diagnostics answer the same,
   and settled publishes wait; its end refreshes every open file. The rest of the cold check runs
   in parallel batches of 64 files. `Worker::in_parallel` is the one helper for both.
@@ -3407,6 +3409,44 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** The ry binary kept a per-root fingerprint map beside its `Loader` (`crates/ry/src/load.rs`), updated by the GNU R `.Call` routines, and its `ReloadWatcher` compared it before each command. `libR.so` has its own `Loader` (`crates/loader/src/ry_runtime.rs`) that the binary cannot see, so ry's console had no watcher, no `load_all()` and no package autoload. The fingerprint was duplicated state outside the loader that owns what is loaded.
 - **Target shape.** `Loader` records the fingerprint of the sources a plan read (taken before reading, so an edit made mid-read counts later) and promotes it on `commit`. `Loader::changed_roots` reports each committed package whose fingerprint moved, once per change. Both backends ask it: the binary's `ReloadWatcher` for GNU R, and for ry's runtime `libR.so` exports `ry_loader_changed`, which `repl`'s `RuntimeReloadWatcher` calls before each command. `ry_repl` attaches `tools:ry` and runs a startup load, so `ry run` in a package loads it as `ry R` does.
 - **Impact.** One source of truth per loaded package, one console loop on both runtimes, and the reload is the same `.ry_autoreload()`. The check stats `DESCRIPTION`, `NAMESPACE` and the code files in `R/` (the same extension test `collated_r_files` uses, so editor swap files do not reload) without reading them. It overlaps the per-file `stamps` that `Loader::read` keeps, on purpose: `stamps` decides which texts a plan rereads, the fingerprint decides whether to plan at all, and merging them would make the per-command check walk `Collate` too. `crates/loader/tests/test_reload_fuzz.rs` and `test_repl_e2e.rs` pin it.
+
+# Decision record: a file's check names only what its interface reaches
+
+- **Previous source of truth.** Cyclic interface groups came from one project-wide query,
+  `interface_sccs`, which built the reference graph over every item of every file and condensed it
+  with Tarjan. The conditional-writer map (`conditional_slot_items`) came from
+  `item_top_level_names` of every package item, and `globalVariables()` declarations from lowering
+  every statement. So the first check of any one file named all 56,546 items of a 300,000-line
+  package, and the server's warm-up had to name everything across cores before a file opened at
+  startup could get its settled diagnostics (about 0.5 to 0.6 s).
+- **What was structurally weak.** Group membership is a property of the items an item reaches, but
+  it was stored in a whole-project map, so one file's check paid for the whole project's naming.
+  The top-level-writes projection paid a full naming pass to learn, for nearly every item, that it
+  binds only its own name, which its syntax already says.
+- **Target shape.** `item_interface_edges` is one item's edge list, and `interface_group` runs an
+  iterative Tarjan walk from the item over only what it reaches. That is exact, because every
+  member of the item's strongly connected component lies in its reachable set. Members come back
+  in canonical order, and `scc_exports` is keyed by the first. `file_conditional_writers` screens
+  each item on the file's tree (`binds_only_own_name`): only an assignment operator, `for`, `%<-%`
+  or `%->%`, or a `setnames`/`setcolorder` call outside a nested function can write a top-level
+  name, so an item with at most its own write is skipped without any per-item query. The screen
+  may overcount, never undercount, and `testing::check_write_screen` asserts it against naming in
+  the fuzz battery. `file_global_variable_declarations` checks the file text for
+  `globalVariables` before walking anything. The server's warm-up now derives only the per-file
+  folds (`warm_project_folds`) and names nothing.
+- **Correctness.** Same groups and same findings: `ry check` reports 2,337 problems on dsbench
+  before and after, and the typing, incremental, parallel and fuzz suites pass.
+- **Simplicity.** One whole-project query and `file_interface_reads` are gone; the group walk is a
+  plain per-item query.
+- **Performance.** A cold check of one dsbench file executes `item_naming` 318 times instead of
+  56,546, and takes about 0.25 s on one thread after parsing instead of 2.3 s. A file opened at
+  server startup settles in 170 to 240 ms instead of 490 to 620 ms on all three benchmarks (4
+  cores). A keystroke after a cold prime (`examples/keystroke_probe.rs` on dsbench) takes a median
+  of 60 to 74 ms instead of 240 to 290 ms, because no project-wide walk re-runs per edit. `ry
+  check` is unchanged within noise, since it names everything anyway.
+- **Incremental analysis.** `file_conditional_writers` now reads the file's tree, so it re-runs on
+  any edit to that file, which costs one walk of one file and backdates when the writers are
+  unchanged. A group's walk re-runs only when an edge list it visited changes.
 
 # Decision record: data-oriented design and explicit allocators
 

@@ -4,9 +4,11 @@
 use {
     crate::{
         Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase, SourceFile, SpliceCache,
+        binds_only_own_name,
         diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
-        item_check, item_tree,
+        item_check, item_naming, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
+        naming::BindingKind,
         stubs::install_shipped_stubs,
     },
     salsa::{Setter as _, plumbing::AsId as _},
@@ -84,6 +86,7 @@ pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: Docum
     let first = fresh_output(source, kind);
     let (mut db, file) = single_file_project(source, kind);
     let before = render_semantics(&db, file);
+    check_write_screen(&db, file, source);
     // `first` comes from an independent database, so this comparison is the determinism check.
     assert_eq!(
         before, first,
@@ -102,6 +105,31 @@ pub fn check_semantics_invariants(source: &str, edited_source: &str, kind: Docum
         back, before,
         "output not restored after editing back\n---- source:\n{source}\n---- via:\n{edited_source}"
     );
+}
+
+/// The syntactic screen that spares most items a naming pass must never hide a top-level write
+/// naming records, or the project-wide maps would lose that binding.
+fn check_write_screen(db: &RootDatabase, file: SourceFile, source: &str) {
+    for &item in item_tree(db, file) {
+        let Some(syntax) = item_syntax(db, item) else {
+            continue;
+        };
+        if !binds_only_own_name(db, item, &syntax.syntax_node()) {
+            continue;
+        }
+        let Some(naming) = item_naming(db, item) else {
+            continue;
+        };
+        let own_name = item.name(db);
+        for binding in naming.bindings.values() {
+            assert!(
+                binding.kind != BindingKind::TopLevel
+                    || own_name.as_deref() == Some(binding.name.as_str()),
+                "the write screen passed an item that binds `{}` at top level in:\n{source}",
+                binding.name.as_str()
+            );
+        }
+    }
 }
 
 /// Derives the document kind and the edit from the input bytes, so one byte stream drives the

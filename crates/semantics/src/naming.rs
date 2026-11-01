@@ -484,7 +484,8 @@ impl Context<'_> {
                     }
                     // data.table's `setnames(f, ...)` and `setcolorder(f, ...)` change the
                     // frame's columns by reference, which ry models like `:=`: a new write of
-                    // the subject's slot.
+                    // the subject's slot. `write_tokens` screens items for these names, so a
+                    // new by-reference writer belongs there too.
                     Some("setnames" | "setcolorder") if !arguments.is_empty() => {
                         self.resolve_arguments(arguments);
                         if let Some(subject) =

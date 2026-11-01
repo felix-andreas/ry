@@ -122,7 +122,10 @@ rename: none
 signature: none
 action: Replace `@if-unknown` with `@trust`
   edit 32..43 -> "@trust"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: data.frame\n"
 completion (1): integer
+hint @5: data.frame
 
 #---- no_hint_restates_a_nominal_constructor
 type Money = double

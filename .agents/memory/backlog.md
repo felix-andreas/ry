@@ -90,10 +90,10 @@ False reports on correct R, worst first:
   rlang's `list2()` drops a trailing empty argument, but `trailing-comma` reports it as an error.
   The lint should skip calls to functions the stubs mark as taking dynamic dots (the `@masked`
   dplyr verbs at least). Unverified against a live R session.
-- **`data.frame()` is a strict finding.** base declares `data.frame`, `with`, `subset`, and
-  `transform` as a bare `Any` value, which calls to give `Unknown`, so `d <- data.frame(a = 1)` is
-  the first strict finding in most data code. Declaring them `fn(...) -> data.frame` (or `-> Any`)
-  would make the result deliberate.
+- **`with`, `subset` and `transform` are strict findings.** base declares them as bare `Any`
+  values, so calls to them give `Unknown`. `data.frame()` now returns `data.frame` through an
+  `...: Any` rest; the same shape (`-> data.frame` for `subset` and `transform` on a data frame,
+  `-> Any` for `with`) would make these results deliberate too.
 - **`source()` is not followed.** `source("utils.R"); util_fn(1)` reports `util_fn` as unresolved in
   the caller and unused in `utils.R`. Following a literal `source()` path would remove both; until
   then, limitations.md recommends moving shared helpers into `R/`.
@@ -293,8 +293,8 @@ type-level function the annotation language does not have.
 - The add-annotation code action writes a `#:` comment even in a project that uses inline
   annotations. It could offer the inline form where inline annotations are on.
 - Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
-  pins what works). `data.frame()` hovers `Unknown` and `df$` completes nothing, for the reason in
-  the `data.frame()` item above. `matrix()` hovers `Any` because ry has no array type. A local whose
+  pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
+  typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
 - `contributing/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
@@ -1830,7 +1830,7 @@ at 1, 2, 4, 8 and 16 cores. The user has offered to measure, and `--jobs` is wha
 Three things are worth investigating once there are honest numbers, in order of prior suspicion.
 
 - **Amdahl's law, not contention.** Rendering is deliberately sequential in discovery order, and the
-  project-wide interface walk in `interface_sccs` is one query on one thread. If the serial fraction
+  project-wide interface walk used to be one query on one thread (it is per item now). If the serial fraction
   is about 40%, the observed 1.34 to 1.67 times is simply correct, and the answer is to parallelize
   the walk or accept it rather than to hunt locks. Measure the serial fraction first. It is the
   cheapest thing to rule in.
@@ -2772,7 +2772,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Ten typing fixtures pin the overload-set and function-compatibility rules.** Writing them exposed a reference contradiction on a non-call use of an overloaded name: the implementation resolves to the last and most general candidate with recorded rationale, and the reference wrongly said first. The reference is fixed.
 - **Thirteen typing fixtures pin the `[[`, `[` and `$` rules and the guard-narrowing rules.** The per-position IDE differential over them caught one real defect: `$` field completion now offers a non-syntactic name in its backtick-quoted, insertable spelling, through `syntax::is_syntactic_name`.
 - **Eight typing fixtures pin the operator rules and the reserved constants.** Writing them caught a real bug, because the typed `NA_*` constants all lowered through the bare-`NA` catch-all and inferred `logical`. `LiteralKind::Na(NaAtom)` carries the atom at lowering now.
-- **A whole-project walk reads a small tracked projection of naming, not full `ItemNaming`.** `item_interface_reads` and `item_top_level_names` serve `interface_sccs`, `conditional_slot_items` and `script_definition`'s statement branch, so a body edit that shifts ranges without changing a name backdates and no project-wide walk re-executes per keystroke. Measured by `examples/keystroke_probe.rs`, walks went from 8 of 8 edits to 0 of 8. A new-item edit still re-runs them, as it must.
+- **A whole-project walk reads a small tracked projection of naming, not full `ItemNaming`.** `item_interface_reads` and `item_top_level_names` serve the interface group walk, `conditional_slot_items` and `script_definition`'s statement branch, so a body edit that shifts ranges without changing a name backdates and no project-wide walk re-executes per keystroke. Measured by `examples/keystroke_probe.rs`, walks went from 8 of 8 edits to 0 of 8. A new-item edit still re-runs them, as it must.
 - **Two shadow lints ship, both default-off.** `shadows-builtin` covers a top-level binding over a `base` export and `shadows-namespace` covers one over another stub namespace's name. Both read the stub corpus only, because bare resolution is ungated, so there is no NAMESPACE plumbing and no drift between the CLI and the LSP. A dotted S3 name is naturally exempt, because it is not an export.
 - **A top-level slot's read-before-write observes the cross-item binding.** It resolves through `GlobalEnv::scheme(name, deferred = false)`, which is the nearest earlier item in a script and the definition winner or conditional slot in a package, mirroring the unused check's cross-item-read rule. The observed type is materialized as the slot's pre-state, re-established after each loop-pass rollback, so the loop join keeps it and a first-iteration type error survives to the reported stable pass. A self-referential-only name keeps the tolerant `Unknown`.
 - **Generic-application arity errors report at the applied name.** That covers a generic applied with the wrong number of type arguments, a non-generic given arguments, and a bare generic that must be applied, except under `@new`, whose representation check infers the arguments. A mis-applied name floors to `Unknown` in the relations, so the one arity error never cascades.
@@ -2783,6 +2783,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **A hover carries a definition summary**, naming whether the binding is a local variable or a package global and where it is defined, a stub's origin namespace and overload count, and a maybe-undefined note. With `debug = true` it also carries lowering, naming and parsing sections.
 - **`ry check` runs on the query engine.** `decisions.md` has the record.
 - **Interface SCC rounds run per definition, with change-driven skips.** `decisions.md` has the record.
+- **A file's check names only what its interface reaches**, so a file opened at server startup settles in about 200 ms. `decisions.md` has the record.
+- **`data.frame()` and `matrix()` return their nominals**, so they hover and annotate as `data.frame` and `matrix` instead of `Unknown` and `Any`.
 - **Whole-file inference got about four times faster from constant factors.** `decisions.md` has the record of the data model.
 - **One inference runs per file per revision, and the typo hint is memoized per symbol.** `decisions.md` has the record.
 - **A same-file backward reference is walk-resolved and never interface-imported**, which kills the fake same-file SCC blowup, about a hundredfold on a chain file. A script overlays its declarations on the memoized package type environment, where it used to rebuild from every package module. `decisions.md` has the record.
@@ -2868,7 +2870,8 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-- A file opened at startup settles about 450 ms after the open (target 200 ms). On dsbench with 4 cores the time goes to the attach scan (about 110 ms, mostly parsing all 1,006 files), project naming (about 290 ms: `item_hir` lowering and `resolve_item`), then the file's own check (about 60 ms). The settled wave waits for all naming because `conditional_slot_items` (lints through `s3_generics`, and `package_name`) needs every item's top-level writes. In samples of the naming pass, about a fifth of helper time spins on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs` in `function/sync.rs`, taken twice per query execution) and another fifth is in mimalloc's page slow path. Levers: fewer tracked queries per item on the cold path, a cheaper source for the top-level writes than full naming, or a sharded claim table upstream.
+- `package_definitions` re-executes on every body edit in `examples/keystroke_probe.rs` (dsbench), so some file's `file_definitions` does not backdate across a body edit. Find which, since every name lookup in the project hangs off that map.
+- A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions.md`, "a file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
 
 ## Open: false errors on real CRAN code
 

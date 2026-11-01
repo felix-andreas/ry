@@ -68,8 +68,8 @@ through `UseMethod()` are `Any`, and strict mode does not report them.
 
 ## Data frames
 
-A base data frame's columns are not typed, so `df$amount` is `Unknown`. An annotation such as
-`df: data.frame` checks that a data frame arrives, but not which columns it has. ry's built-in
-[`DataFrame`](/type-checking/dataframes) is the typed alternative, with every column, query and join checked.
-For analysis code this is the gap that matters most, and `data.frame()` is usually the first place
-strict mode reports.
+`data.frame()` returns a `data.frame`, but a base data frame's columns are not typed, so
+`df$amount` is `Unknown`. An annotation such as `df: data.frame` checks that a data frame arrives,
+but not which columns it has. ry's built-in [`DataFrame`](/type-checking/dataframes) is the typed
+alternative, with every column, query and join checked. For analysis code this is the gap that
+matters most, and a column read such as `df$amount` is usually the first place strict mode reports.

@@ -3,7 +3,7 @@ use {
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
-        global_scheme, interface_sccs, item_naming, item_tree, limit_resident_trees,
+        global_scheme, interface_group, item_naming, item_tree, limit_resident_trees,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
@@ -377,12 +377,15 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
 
     db.edit(files[0], "x <- function() 3L\n".to_owned());
     settle(&db, &files);
+    // Each checked item's interface group verifies the edges it reaches, so validations of
+    // `item_interface_reads` follow the items a check demands. What must not happen is any
+    // untouched item recomputing its reads.
     assert_eq!(
-        db.validations_since(&["item_interface_reads", "item_top_level_names"]),
-        [1, 0],
-        "the project-wide name maps fold per-file memos, so an edit verifies only the edited \
-         file's one item and none of the five in the untouched files, and a function item \
-         writes only its own name, so the conditional writers never name it"
+        db.executions_since(&["item_interface_reads", "item_top_level_names"]),
+        [0, 1],
+        "only the edited item re-derives its top-level names, for its own file's frame binders; \
+         its naming backdates, so nothing recomputes interface reads, and none of the five items \
+         in the untouched files reruns either"
     );
 }
 
@@ -733,12 +736,12 @@ fn a_statement_reading_its_own_conditional_write_is_a_cyclic_group() {
     let db = ProbeDatabase::default();
     let files = db.project(&["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"]);
     let items = item_tree(&db, files[0]);
-    let sccs = interface_sccs(&db, ProjectFiles::get(&db));
+    let project = ProjectFiles::get(&db);
     assert!(
-        sccs.membership.contains_key(&items[1]),
+        interface_group(&db, project, items[1]).is_some(),
         "the loop reads the slot it writes, so the group fixpoint resolves it, not salsa"
     );
-    assert!(!sccs.membership.contains_key(&items[0]));
+    assert!(interface_group(&db, project, items[0]).is_none());
     round_trip_edit(
         DocumentKind::Package,
         &["if (TRUE) b <- 3L\nwhile (b > 0L) b <- b - 1L\n"],
