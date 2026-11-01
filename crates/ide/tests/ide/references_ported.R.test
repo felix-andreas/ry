@@ -30,7 +30,7 @@ action: Add inferred type annotations for the whole file
   edit 12..12 -> "#: integer\n"
   edit 51..51 -> "  #: integer\n"
   edit 28..28 -> "#: fn() -> integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer
 hint @18: integer
 hint @34: fn() -> integer
@@ -59,7 +59,7 @@ action: Add inferred type annotations for the whole file
   edit 12..12 -> "#: integer\n"
   edit 51..51 -> "  #: integer\n"
   edit 28..28 -> "#: fn() -> integer\n"
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 hint @5: integer
 hint @18: integer
 hint @34: fn() -> integer

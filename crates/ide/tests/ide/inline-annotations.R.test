@@ -8,7 +8,7 @@ definition 0..5
 references: 0..5*
 rename: 1 edit(s)
 signature: none
-completion (45): count, count.fields, c.noquote, capture.output, chol.default, chooseOpsMethod.default, colours, colSums
+completion (47): count, count.fields, Str.count_utf8_bytes, List.count_if, c.noquote, capture.output, chol.default, chooseOpsMethod.default
 
 #---- hover_on_a_parameter_read_uses_its_inline_type
 f <- function(count: integer) cou$0nt
@@ -19,7 +19,7 @@ definition 14..19
 references: 14..19*, 30..35
 rename: 2 edit(s)
 signature: none
-completion (45): count, count.fields, c.noquote, capture.output, chol.default, chooseOpsMethod.default, colours, colSums
+completion (47): count, count.fields, Str.count_utf8_bytes, List.count_if, c.noquote, capture.output, chol.default, chooseOpsMethod.default
 
 #---- hover_on_a_builtin_type_name
 count: inte$0ger <- 1L
@@ -55,7 +55,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (11): Any, character, complex, double, fn, integer, list, logical
+completion (14): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_parameter_colon
 #: @type Money {double}
@@ -67,7 +67,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (12): Any, character, complex, double, fn, integer, list, logical
+completion (15): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_binding_colon_before_the_type_exists
 #: @type Money {double}

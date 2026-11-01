@@ -1,0 +1,111 @@
+---
+title: Functions
+description: Function signatures, optional parameters, and generic functions
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Signatures
+
+A function annotation lists each parameter with its type, then the return type:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") paste(greeting, name)
+```
+
+</TabItem>
+</Tabs>
+
+A parameter callers may omit must have a default, so an omitted argument always has a value. Inline,
+the default itself marks the parameter as optional. In a comment you write `[greeting]` and the
+definition must give the default.
+
+Calls are checked for types, names, and the number of arguments. Parameter names are part of the
+type, because R matches arguments by name as often as by position:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x this function has no parameter `greting`. Did you mean `greeting`?
+```
+
+`...: character` types the extra arguments, so `fn(...: character) -> character` checks that every
+argument is a string. A function with `...` accepts any argument name, so a misspelled name is not
+reported there, just as R does not report it.
+
+## One signature per function
+
+Your own functions have exactly one signature. To accept several shapes, use a union such as
+`integer | character`. Several signatures per name would make every call a search over candidates,
+and would leave the function without one type to pass around as a value. The shipped declarations
+overload a few base functions such as `sum`, where the candidates are written out and the search
+stays small.
+
+## Generic functions
+
+A function is as general as its body allows. Hover shows the inferred types:
+
+```r
+identity2 <- function(x) x           # <T> fn(x: T) -> T
+increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
+```
+
+`T` stands for any type, and `T: numeric` for `integer` or `double`, so `increment(2.5)` is a
+`double` and `increment("a")` is an error. You can write the same yourself:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+pick <- function<T>(condition: logical, value: T) -> T | NULL {
+  if (condition) value else NULL
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: <T> fn(condition: logical, value: T) -> T | NULL
+pick <- function(condition, value) if (condition) value else NULL
+```
+
+</TabItem>
+</Tabs>

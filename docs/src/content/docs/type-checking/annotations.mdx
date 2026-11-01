@@ -1,0 +1,105 @@
+---
+title: Annotations
+description: Declaring types inline or in #: comments, and when to write each kind
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+An annotation declares a type, and ry checks it against the value and against every use. You can
+write it inline, in the code itself, or as a `#:` comment directly above the assignment. Both
+spellings mean the same, so pick the one you prefer: the tab you choose is remembered on every page
+of this site.
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+apply_rate <- function(price: double, rate: double) -> double price * rate
+
+apply_rate(10, "x")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(price: double, rate: double) -> double
+apply_rate <- function(price, rate) price * rate
+
+apply_rate(10, "x")
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `double`, found `character`
+```
+
+The body is checked too, so a function declared `-> double` that returns a string is an error at the
+return value. Only the comment spelling runs on every R tool; see
+[inline annotations](/type-checking/inline-annotations) for what that means in practice.
+
+## Values with no type
+
+A value read from a file has no type until you give it one, and then every use is checked:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+person: list{name: character, age: integer} <- readRDS("person.rds")
+person$age + "x"
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: list{name: character, age: integer}
+person <- readRDS("person.rds")
+person$age + "x"
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected a numeric value (`integer` or `double`), found `character`
+```
+
+## Overriding inference
+
+Two forms give a type without checking it against the value. Inline, they go between a binding's
+`:` and its type, as in `gap: @if-unknown integer <- frame$a`.
+
+- `#: @if-unknown TYPE` types an `Unknown` value, such as a data frame column, and becomes an
+  error once ry can infer the type, so it never goes stale. A value declared `Any`, such as the
+  result of `readRDS()`, takes a plain annotation instead:
+
+  ```text
+  x `@if-unknown` applies only where the type is unknown, and this is already `double`. Drop the
+    annotation, or use `#:` to check the type or `@trust` to override it
+  ```
+
+- `#: @trust TYPE` overrides a type ry did infer, for the cases where you know better.
+
+## Function annotations
+
+The compact form above fits most functions. A long signature can be written one parameter per line
+instead, in the style of roxygen. This block form is comment-only; inline, the same types sit on
+the parameter list itself.
+
+```r
+#: @param count {integer}
+#: @param [label] {character | NULL}
+#: @return {integer}
+```
+
+[Functions](/type-checking/functions) covers optional parameters, `...`, and generics. The
+[type system reference](/reference/type-system#typing-comment-syntax) has the full grammar,
+including where a block may attach.

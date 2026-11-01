@@ -208,12 +208,22 @@ impl Lexer<'_> {
             self.bump();
             let digits_start = self.pos;
             self.eat_while(|c| c.is_ascii_hexdigit());
-            if self.pos == digits_start {
+            let digits = self.pos - digits_start;
+            let fraction = self.eat(".");
+            if fraction {
+                self.eat_while(|c| c.is_ascii_hexdigit());
+            }
+            if digits == 0 && !fraction {
                 self.error("missing digits after `0x`", start);
                 return ERROR_TOKEN;
             }
-            // Hex-float exponent: `0x1Fp3`.
+            // Hex-float exponent: `0x1Fp3`, which a hexadecimal fraction like `0x1.8p1` requires.
+            let before_exponent = self.pos;
             self.exponent(['p', 'P']);
+            if fraction && self.pos == before_exponent {
+                self.error("a hexadecimal fraction needs a `p` exponent", start);
+                return ERROR_TOKEN;
+            }
         } else {
             self.eat_while(|c| c.is_ascii_digit());
             if self.eat(".") {
@@ -248,8 +258,8 @@ impl Lexer<'_> {
         }
     }
 
-    /// R strings may span lines, but an unterminated one would swallow the rest
-    /// of the file; cutting it at its first line break confines a stray quote's
+    /// R strings may span lines, except inside an annotation, which ends with
+    /// its line. An unterminated string would swallow the rest of the file; cutting it at its first line break confines a stray quote's
     /// damage to its own line.
     fn end_unterminated_at_line_break(&mut self, start: usize) {
         if let Some(offset) = self.text[start..self.pos].find(['\n', '\r']) {
@@ -271,6 +281,7 @@ impl Lexer<'_> {
                     self.bump();
                 }
                 Some(c) if c == quote => return kind,
+                Some('\n' | '\r') if self.in_annotation => break,
                 Some(_) => {}
                 None => break,
             }
@@ -299,7 +310,13 @@ impl Lexer<'_> {
         };
         self.bump();
         let closer = format!("{close}{}{quote}", "-".repeat(dashes));
-        match self.text[self.pos..].find(&closer) {
+        let line_end = self.text[self.pos..]
+            .find(['\n', '\r'])
+            .unwrap_or(self.text.len() - self.pos);
+        match self.text[self.pos..]
+            .find(&closer)
+            .filter(|offset| !self.in_annotation || *offset < line_end)
+        {
             Some(offset) => {
                 self.pos += offset + closer.len();
                 RAW_STRING

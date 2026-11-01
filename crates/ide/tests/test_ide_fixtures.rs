@@ -335,6 +335,40 @@ setMethod(\"bar\", signature(\"Person\", y = \"Other\"), function(x, y) x)
     assert_eq!(symbol_names(&db, files, "deposit"), ["deposit"]);
 }
 
+#[test]
+fn document_symbols_include_inline_type_definitions() {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    let source = "\
+#: @type Money {double}
+type UserId = integer
+alias Box<T> = list{value: T}
+id <- @UserId(1L)
+";
+    let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
+    let rendered: Vec<String> = document_symbols(&db, file)
+        .iter()
+        .map(|symbol| {
+            let selected = &source[std::ops::Range::<usize>::from(symbol.selection)];
+            format!(
+                "{} ({:?}, {}) at {selected}",
+                symbol.name,
+                symbol.kind,
+                symbol.detail.as_deref().unwrap_or_default()
+            )
+        })
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "Money (TypeDefinition, @type) at Money",
+            "UserId (TypeDefinition, type) at UserId",
+            "Box (AliasDefinition, alias) at Box",
+            "id (Value, ) at id",
+        ]
+    );
+}
+
 fn symbol_names(db: &RootDatabase, files: ProjectFiles, query: &str) -> Vec<String> {
     workspace_symbols(db, files, query)
         .into_iter()

@@ -2,9 +2,9 @@
 //! grammar. Stub text is a set-once input, so it never participates in per-edit invalidation.
 
 use crate::Db;
-use crate::annotations::lower_annotation;
+use crate::annotations::{NamedDefinition, lower_annotation};
 use crate::metadata::namespace_active;
-use crate::types::{Ty, TyKind, TypeScheme, for_each_child_type};
+use crate::types::{Name, Ty, TyKind, TypeScheme, for_each_child_type};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::{SyntaxKind, TextRange};
 
@@ -22,6 +22,9 @@ pub struct StubSources {
 pub struct StubLibrary<'db> {
     pub schemes: FxHashMap<String, Vec<TypeScheme<'db>>>,
     pub nominals: FxHashSet<String>,
+    /// `@alias` and generic `@type` declarations, which the checker resolves exactly like a
+    /// project's own; a project definition of the same name shadows one.
+    pub type_definitions: FxHashMap<Name<'db>, NamedDefinition<'db>>,
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
     pub masked: FxHashMap<String, Vec<String>>,
@@ -73,6 +76,17 @@ pub fn namespace_exports(db: &dyn Db, package: &str, name: &str) -> bool {
     })
 }
 
+/// The namespace of ry's standard library (`Result.map`, `Dict.get`, ...). Its functions are
+/// written for ry's records, tuples and tags, so passing one of those values to them is not the
+/// boundary error it is for an R function, and its `Dict` and `Set` types are native values.
+pub const STANDARD_LIBRARY: &str = "ry";
+
+/// Whether `name` is a type the standard library declares, rather than one a project or package
+/// spells the same way.
+pub fn is_ry_type(db: &dyn Db, name: &str) -> bool {
+    declaring_namespace(db, name) == Some(STANDARD_LIBRARY)
+}
+
 /// Embedded from top-level `types/`, not `stubs/`: a workspace-root `stubs/` is the
 /// project-override convention and would load as overrides when ry analyzes this repository.
 pub fn shipped_stub_sources() -> Vec<(String, String)> {
@@ -84,7 +98,6 @@ pub fn shipped_stub_sources() -> Vec<(String, String)> {
         ("graphics", include_str!("../../../types/graphics.Rtypes")),
         ("grDevices", include_str!("../../../types/grDevices.Rtypes")),
         ("datasets", include_str!("../../../types/datasets.Rtypes")),
-        ("ry", include_str!("../../../types/ry.Rtypes")),
         (
             "data.table",
             include_str!("../../../types/data.table.Rtypes"),
@@ -92,6 +105,7 @@ pub fn shipped_stub_sources() -> Vec<(String, String)> {
         ("dplyr", include_str!("../../../types/dplyr.Rtypes")),
         ("ggplot2", include_str!("../../../types/ggplot2.Rtypes")),
         ("testthat", include_str!("../../../types/testthat.Rtypes")),
+        (STANDARD_LIBRARY, include_str!("../../../types/ry.Rtypes")),
     ]
     .into_iter()
     .map(|(namespace, text)| (namespace.to_owned(), text.to_owned()))
@@ -245,6 +259,22 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                     TextRange::new(start.into(), (start + name.len() as u32).into())
                 })
             };
+            if let Some(definition) = type_definition_line(db, content) {
+                let name = definition.name.text(db).to_owned();
+                library.nominals.insert(name.clone());
+                namespace_exports.insert(name.clone());
+                if let Some(range) = name_range(&name) {
+                    library.declarations.insert(
+                        name,
+                        StubDeclaration {
+                            source_index,
+                            range,
+                        },
+                    );
+                }
+                library.type_definitions.insert(definition.name, definition);
+                continue;
+            }
             if let Some(rest) = content.strip_prefix("@type") {
                 let name = rest.trim();
                 if is_nominal_name(name) {
@@ -367,7 +397,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         .unwrap_or_default();
     for raw_line in text.lines() {
         let content = strip_comment(raw_line).trim();
-        if let Some(rest) = content.strip_prefix("@type") {
+        if let Some(name) = definition_line_name(content) {
+            known_nominals.insert(name.to_owned());
+        } else if let Some(rest) = content.strip_prefix("@type") {
             let name = rest.trim();
             if is_nominal_name(name) {
                 known_nominals.insert(name.to_owned());
@@ -379,6 +411,33 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     for (line, raw_line) in text.lines().enumerate() {
         let content = strip_comment(raw_line).trim();
         if content.is_empty() {
+            continue;
+        }
+        if definition_line_name(content).is_some() {
+            match type_definition_line(db, content) {
+                Some(definition) => {
+                    let mut unknown = Vec::new();
+                    collect_unknown_nominals(db, definition.body, &known_nominals, &mut unknown);
+                    for unknown_name in unknown {
+                        if !definition
+                            .parameters
+                            .iter()
+                            .any(|parameter| parameter.text(db) == unknown_name)
+                        {
+                            problems.push(StubProblem {
+                                line,
+                                message: format!(
+                                    "this declaration does not load: I do not know the type `{unknown_name}`."
+                                ),
+                            });
+                        }
+                    }
+                }
+                None => problems.push(StubProblem {
+                    line,
+                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}` or `@type NAME<T>`.".to_owned(),
+                }),
+            }
             continue;
         }
         if let Some(rest) = content.strip_prefix("@type") {
@@ -481,6 +540,43 @@ fn collect_unknown_nominals<'db>(
     for_each_child_type(db, ty, &mut |child| {
         collect_unknown_nominals(db, child, known, out)
     });
+}
+
+/// The declared name of an `@alias` line or a generic `@type NAME<T, ...>` line. A plain
+/// `@type NAME` is the older opaque form, handled on its own.
+fn definition_line_name(content: &str) -> Option<&str> {
+    let rest = content
+        .strip_prefix("@alias")
+        .or_else(|| content.strip_prefix("@type").filter(|rest| rest.contains('<')))?;
+    let rest = rest.trim_start();
+    let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
+    let name = &rest[..end];
+    is_nominal_name(name).then_some(name)
+}
+
+/// An `@alias NAME<T> {TYPE}` or `@type NAME<T>` line, lowered through the annotation grammar a
+/// project's own `#: @alias` uses. A generic opaque type is a `@type` whose representation is
+/// `Unknown`, which the checker already treats as having none.
+fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefinition<'db>> {
+    definition_line_name(content)?;
+    let text = if content.starts_with("@type") {
+        format!("#: {content} {{Unknown}}")
+    } else {
+        format!("#: {content}")
+    };
+    let parse = syntax::parse(&text);
+    if !parse.errors().is_empty() {
+        return None;
+    }
+    let annotation = parse
+        .syntax_node()
+        .children()
+        .find(|node| node.kind() == SyntaxKind::ANNOTATION)?;
+    let mut lowered = lower_annotation(db, &annotation);
+    if !lowered.errors.is_empty() || lowered.definitions.len() != 1 {
+        return None;
+    }
+    lowered.definitions.pop()
 }
 
 /// Routes through the annotation pipeline, the single type grammar.
@@ -586,6 +682,19 @@ mod tests {
             "sum keeps its ordered overload candidates"
         );
         assert_eq!(library.schemes["length"].len(), 1);
+    }
+
+    #[test]
+    fn standard_library_stub_loads_cleanly() {
+        let db = RootDatabase::default();
+        install_shipped_stubs(&db);
+        let text = include_str!("../../../types/ry.Rtypes");
+        let problems = stub_source_problems(&db, text);
+        assert!(problems.is_empty(), "{problems:?}");
+        let library = stubs(&db).expect("the shipped stubs are installed");
+        assert!(library.schemes.contains_key("Result.map"));
+        assert!(library.type_definitions.keys().any(|name| name.text(&db) == "Result"));
+        assert_eq!(declaring_namespace(&db, "Dict"), Some(STANDARD_LIBRARY));
     }
 
     #[test]

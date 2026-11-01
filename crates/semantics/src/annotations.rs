@@ -49,6 +49,8 @@ pub struct Annotation<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct NamedDefinition<'db> {
     pub alias: bool,
+    /// Written as `type Name = TYPE` rather than in a `#:` comment, so tools show it that way.
+    pub inline: bool,
     pub name: Name<'db>,
     /// Type parameters; the body references them as rigid variables.
     pub parameters: Vec<Name<'db>>,
@@ -128,31 +130,8 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
                         ret = lowering.lower_child_type(&child);
                     }
                     "strict" => annotation.strict = Some(!has_word(&child, "off")),
-                    "trust" | "if-unknown" => {
-                        if directive == "trust" {
-                            annotation.trusted = true;
-                        } else {
-                            annotation.if_unknown = true;
-                        }
-                        if let Some(body) = lowering.lower_child_type(&child) {
-                            annotation.declared = Some(TypeScheme::monomorphic(body));
-                        }
-                    }
-                    "new" => {
-                        let ty_node = child.children().find(|c| is_type_kind(c.kind()));
-                        let range = ty_node
-                            .as_ref()
-                            .map_or(child.text_range(), |ty| ty.text_range());
-                        let lowered = ty_node.map(|ty| lowering.lower_type(&ty));
-                        match lowered.map(|ty| ty.kind(db)) {
-                            Some(TyKind::Named(name, arguments)) => {
-                                annotation.new_nominal = Some((*name, arguments.clone(), range));
-                            }
-                            _ => lowering.errors.push((
-                                "expected a nominal type reference after `@new`.".to_owned(),
-                                range,
-                            )),
-                        }
+                    "trust" | "if-unknown" | "new" => {
+                        lowering.lower_coercion(&mut annotation, &child, &directive);
                     }
                     _ => {}
                 }
@@ -202,10 +181,12 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
     lowering.finish(annotation, node.text_range())
 }
 
-/// A binding (`name: TYPE <- value`) or a function literal with any of `<...>`, a
-/// parameter's `: TYPE`, or `-> TYPE`.
+/// A binding (`name: TYPE <- value`), a function literal with any of `<...>`, a
+/// parameter's `: TYPE`, or `-> TYPE`, a type definition (`type Name = TYPE`), or a
+/// nominal constructor (`@Name(value)`).
 pub fn is_inline_site(node: &SyntaxNode) -> bool {
     match node.kind() {
+        SyntaxKind::TYPE_DEFINITION | SyntaxKind::NEW_EXPR => true,
         SyntaxKind::BINARY_EXPR => node
             .children()
             .any(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION),
@@ -229,16 +210,45 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
     debug_assert!(is_inline_site(site));
     let mut lowering = Lowering::new(db);
     let mut annotation = Annotation::default();
-    if site.kind() == SyntaxKind::BINARY_EXPR {
-        lowering.definition_type = true;
-        let ty = site
-            .children()
-            .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION)
-            .and_then(|ascription| lowering.lower_child_type(&ascription))
-            .unwrap_or_else(|| unknown(db));
-        lowering.definition_type = false;
-        annotation.declared = Some(TypeScheme::monomorphic(ty));
-        return lowering.finish(annotation, inline_range(site));
+    match site.kind() {
+        SyntaxKind::TYPE_DEFINITION => {
+            let alias = type_definition_keyword(site) == "alias";
+            if let Some(definition) = lowering.lower_named_definition(site, alias) {
+                annotation.definitions.push(definition);
+                annotation.definition_sites.push(site.text_range());
+            }
+            return lowering.finish(annotation, site.text_range());
+        }
+        SyntaxKind::NEW_EXPR => {
+            if let Some(head) = site
+                .children()
+                .find(|child| child.kind() == SyntaxKind::NEW_TYPE)
+            {
+                lowering.lower_coercion(&mut annotation, &head, "new");
+            }
+            return lowering.finish(annotation, inline_range(site));
+        }
+        SyntaxKind::BINARY_EXPR => {
+            let ascription = site
+                .children()
+                .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION);
+            if let Some(directive) = ascription.as_ref().and_then(|ascription| {
+                ascription
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+            }) {
+                lowering.lower_coercion(&mut annotation, &directive, &directive_name(&directive));
+                return lowering.finish(annotation, inline_range(site));
+            }
+            lowering.definition_type = true;
+            let ty = ascription
+                .and_then(|ascription| lowering.lower_child_type(&ascription))
+                .unwrap_or_else(|| unknown(db));
+            lowering.definition_type = false;
+            annotation.declared = Some(TypeScheme::monomorphic(ty));
+            return lowering.finish(annotation, inline_range(site));
+        }
+        _ => {}
     }
     let mut forall = Vec::new();
     if let Some(list) = site
@@ -296,6 +306,14 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
     lowering.finish(annotation, inline_range(site))
 }
 
+/// `type` or `alias`, the word that opens an inline type definition.
+pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
+    definition
+        .first_token()
+        .map(|token| token.text().to_owned())
+        .unwrap_or_default()
+}
+
 /// The written inline annotations of a site, from the first to the last, so a finding
 /// about the whole annotation never covers the value or the body.
 fn inline_range(site: &SyntaxNode) -> TextRange {
@@ -345,8 +363,9 @@ pub fn formals(function: &SyntaxNode) -> Vec<Formal> {
         .collect()
 }
 
-/// What a statement's two annotations mean together. A coercion form in the comment
-/// (`@trust`, `@if-unknown`, `@new`) says how the value gets its type, so it governs;
+/// What a statement's two annotations mean together. A coercion form (`@trust`,
+/// `@if-unknown`, `@new`) says how the value gets its type, so it governs wherever it
+/// is written, and the inline one wins when both are coercions;
 /// otherwise both are declarations, merged one slot (the value, a parameter, the rest
 /// parameter, the return) at a time, with the inline type winning where both give one.
 /// Where they differ, the disagreement warning has already said so.
@@ -364,7 +383,10 @@ pub fn merge_annotations<'db>(
     if comment.declared.is_none() && comment.new_nominal.is_none() {
         return Some(inline);
     }
-    if comment.trusted || comment.if_unknown || comment.new_nominal.is_some() {
+    if is_coercion(&inline) {
+        return Some(inline);
+    }
+    if is_coercion(&comment) {
         return Some(comment);
     }
     let (Some(comment_scheme), Some(inline_scheme)) = (&comment.declared, &inline.declared) else {
@@ -489,6 +511,12 @@ pub fn merge_annotations<'db>(
             .collect(),
         ..inline
     })
+}
+
+/// `@trust`, `@if-unknown` or `@new`: the annotation says how the value gets its type
+/// rather than declaring one to check.
+fn is_coercion(annotation: &Annotation) -> bool {
+    annotation.trusted || annotation.if_unknown || annotation.new_nominal.is_some()
 }
 
 /// A place an annotation gives a type. Parameters are keyed by formal name, so a
@@ -662,6 +690,13 @@ pub fn comment_slots<'db>(
 /// The slots an inline site gives a type. A site with lowering errors has none.
 pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db>> {
     let annotation = lower_inline_annotation(db, site);
+    if let Some((name, arguments, range)) = annotation.new_nominal {
+        return vec![SlotType {
+            slot: Slot::Value,
+            ty: Ty::new(db, TyKind::Named(name, arguments)),
+            range,
+        }];
+    }
     let Some(declared) = annotation.declared else {
         return Vec::new();
     };
@@ -671,10 +706,19 @@ pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db
             .map(|ty| ty.text_range())
     };
     if site.kind() == SyntaxKind::BINARY_EXPR {
+        // A coercion's type sits after its directive.
         return site
             .children()
             .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION)
-            .and_then(|ascription| type_range(&ascription))
+            .and_then(|ascription| {
+                type_range(&ascription).or_else(|| {
+                    ascription
+                        .children()
+                        .find(|child| child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE)
+                        .as_ref()
+                        .and_then(type_range)
+                })
+            })
             .map(|range| SlotType {
                 slot: Slot::Value,
                 ty: declared.body,
@@ -1084,10 +1128,45 @@ impl<'db> Lowering<'db> {
         self.binders.truncate(saved);
         Some(NamedDefinition {
             alias,
+            inline: node.kind() == SyntaxKind::TYPE_DEFINITION,
             name: Name::new(self.db, name),
             parameters: parameters.into_iter().map(|(name, _)| name).collect(),
             body,
         })
+    }
+
+    /// `@trust TYPE`, `@if-unknown TYPE` or `@new Name<ARGS>`, from a `#:` directive, an
+    /// inline binding's directive, or the head of `@Name(value)`.
+    fn lower_coercion(&mut self, annotation: &mut Annotation<'db>, node: &SyntaxNode, directive: &str) {
+        match directive {
+            "trust" | "if-unknown" => {
+                if directive == "trust" {
+                    annotation.trusted = true;
+                } else {
+                    annotation.if_unknown = true;
+                }
+                if let Some(body) = self.lower_child_type(node) {
+                    annotation.declared = Some(TypeScheme::monomorphic(body));
+                }
+            }
+            "new" => {
+                let ty_node = node.children().find(|c| is_type_kind(c.kind()));
+                let range = ty_node
+                    .as_ref()
+                    .map_or(node.text_range(), |ty| ty.text_range());
+                let lowered = ty_node.map(|ty| self.lower_type(&ty));
+                match lowered.map(|ty| ty.kind(self.db)) {
+                    Some(TyKind::Named(name, arguments)) => {
+                        annotation.new_nominal = Some((*name, arguments.clone(), range));
+                    }
+                    _ => self.errors.push((
+                        "expected a nominal type reference after `@new`.".to_owned(),
+                        range,
+                    )),
+                }
+            }
+            _ => {}
+        }
     }
 
     fn lower_child_type(&mut self, node: &SyntaxNode) -> Option<Ty<'db>> {

@@ -67,3 +67,10 @@ explicit runtime choice are implemented.
 Roc-style records, tuples and tagged unions as ry's replacement for S4, R6 and Reference Classes.
 They are implemented, and the typing rules have moved to the reference; the page keeps the
 rationale, the runtime representation as ry's own heap objects, and the open questions.
+
+### [The standard library](/contributing/design/standard-library/)
+
+A Roc-style standard library of `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, named
+`Module.function` as plain R identifiers. It covers which of Roc's functions ry takes and why, how
+the names avoid every base R and recommended-package name, how the functions are typed as generic
+stubs, and why they are native builtins that are always available on ry's runtime.

@@ -1,0 +1,15 @@
+[stdout]
+| [1] "ab" "z" 
+| {
+|     txt <- paste0(...)
+|     c(txt, "z")
+| }
+[messages]
+[warnings]
+[errors]
+[value]
+language
+| {
+|     txt <- paste0(...)
+|     c(txt, "z")
+| }

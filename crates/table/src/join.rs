@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use polars::prelude::{Column, DataFrame, DataType, PlSmallStr};
+use polars::prelude::{Column, DataFrame, DataType, GroupsType, PlSmallStr};
 use polars_arrow::bitmap::Bitmap;
 use polars_core::runtime::THREAD_POOL;
 use rayon::prelude::*;
@@ -31,8 +31,8 @@ use crate::convert::factor_levels;
 use crate::kernel::{
     CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column, pack_map,
 };
-use crate::query::{I_PREFIX, Join, Mult, Roll};
-use crate::{Result, Table};
+use crate::query::{Comparison, Join, Mult, On, Roll, Side, join_layout};
+use crate::{Error, Result, Table};
 
 /// The widest code range the kernels index directly: one bucket per code on the built side.
 const MAX_CODES: u64 = 1 << 27;
@@ -47,12 +47,17 @@ const NO_ROW: u32 = u32::MAX;
 pub(crate) fn join(
     x: &Table,
     join: &Join,
-    on: &[(PlSmallStr, PlSmallStr)],
+    on: &[On],
+    types: &[Option<DataType>],
 ) -> Result<Option<DataFrame>> {
     let (x_frame, i_frame) = (x.frame(), join.other.frame());
     let (x_height, i_height) = (x_frame.height(), i_frame.height());
     if on.is_empty() || u32::try_from(x_height).is_err() || u32::try_from(i_height).is_err() {
         return Ok(None);
+    }
+    if on.iter().any(|condition| condition.op != Comparison::Equal) {
+        let matches = non_equi(x_frame, i_frame, on, types, join.drop_unmatched, join.mult)?;
+        return assemble(x_frame, i_frame, on, &matches).map(Some);
     }
     let matches = match join.roll {
         Roll::None => {
@@ -142,15 +147,11 @@ struct Keys {
     radix: u32,
 }
 
-fn key_codes(
-    x: &DataFrame,
-    i: &DataFrame,
-    on: &[(PlSmallStr, PlSmallStr)],
-) -> Result<Option<Keys>> {
+fn key_codes(x: &DataFrame, i: &DataFrame, on: &[On]) -> Result<Option<Keys>> {
     let mut keys: Option<Keys> = None;
-    for (x_column, i_column) in on {
+    for condition in on {
         // A missing column is left to the plan, which reports it.
-        let (Ok(x_column), Ok(i_column)) = (x.column(x_column), i.column(i_column)) else {
+        let (Ok(x_column), Ok(i_column)) = (x.column(&condition.x), i.column(&condition.i)) else {
             return Ok(None);
         };
         let Some(digit) = column_codes(x_column, i_column) else {
@@ -505,13 +506,14 @@ enum Direction {
 fn rolling(
     x: &DataFrame,
     i: &DataFrame,
-    on: &[(PlSmallStr, PlSmallStr)],
+    on: &[On],
     direction: Direction,
     limit: Option<f64>,
 ) -> Result<Option<Matches>> {
-    let Some(((x_roll, i_roll), groups)) = on.split_last() else {
+    let Some((rolled, groups)) = on.split_last() else {
         return Ok(None);
     };
+    let (x_roll, i_roll) = (&rolled.x, &rolled.i);
     let (x_height, i_height) = (x.height(), i.height());
     let keys = if groups.is_empty() {
         Keys {
@@ -649,14 +651,8 @@ where
     }))
 }
 
-/// The joined frame in data.table's layout: `x`'s columns, with each join column carrying `i`'s
-/// values, and then `i`'s other columns, prefixed with `i.` where `x` has the same name.
-fn assemble(
-    x: &DataFrame,
-    i: &DataFrame,
-    on: &[(PlSmallStr, PlSmallStr)],
-    matches: &Matches,
-) -> Result<DataFrame> {
+/// The joined frame in data.table's layout, as [`join_layout`] gives it.
+fn assemble(x: &DataFrame, i: &DataFrame, on: &[On], matches: &Matches) -> Result<DataFrame> {
     let height = matches.i_rows.len();
     let unmatched = pack_map(height, &matches.x_rows, |row| row != NO_ROW);
     let (x_rows, keep) = if unmatched.unset_bits() == 0 {
@@ -670,34 +666,331 @@ fn assemble(
         });
         (Cow::Owned(rows), Some(unmatched))
     };
-    let mut sources: Vec<(&Column, bool, PlSmallStr)> = Vec::with_capacity(x.width() + i.width());
-    for column in x.columns() {
-        match on.iter().find(|(x_column, _)| x_column == column.name()) {
-            Some((_, i_column)) => sources.push((i.column(i_column)?, true, column.name().clone())),
-            None => sources.push((column, false, column.name().clone())),
-        }
-    }
-    for column in i.columns() {
-        if on.iter().any(|(_, i_column)| i_column == column.name()) {
-            continue;
-        }
-        let name = if x.column(column.name()).is_ok() {
-            PlSmallStr::from(format!("{I_PREFIX}{}", column.name()))
-        } else {
-            column.name().clone()
-        };
-        sources.push((column, true, name));
-    }
+    let layout = join_layout(&x.get_column_names(), &i.get_column_names(), on);
     // Each gather is parallel over rows, so the columns go one at a time.
-    let columns = sources
+    let columns = layout
         .into_iter()
-        .map(|(column, from_i, name)| {
-            if from_i {
-                gather_column(column, &matches.i_rows, None, name)
-            } else {
-                gather_column(column, &x_rows, keep.as_ref(), name)
-            }
+        .map(|column| match column.side {
+            Side::I => gather_column(
+                i.column(&column.source)?,
+                &matches.i_rows,
+                None,
+                column.name,
+            ),
+            Side::X => gather_column(
+                x.column(&column.source)?,
+                &x_rows,
+                keep.as_ref(),
+                column.name,
+            ),
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(DataFrame::new(height, columns)?)
+}
+
+/// A join with an ordering condition, run for every such join. The equality conditions split `x`
+/// into groups, and the rows of each group sort by the column of `x` the first ordering condition
+/// compares. Every condition on that column bounds a range of the sorted group, found by binary
+/// search, so a row of `i` visits only the rows of `x` inside all of those ranges and checks the
+/// remaining conditions on them. Its matches then sort back into `x`'s order.
+fn non_equi(
+    x: &DataFrame,
+    i: &DataFrame,
+    on: &[On],
+    types: &[Option<DataType>],
+    drop_unmatched: bool,
+    mult: Mult,
+) -> Result<Matches> {
+    let (x_height, i_height) = (x.height(), i.height());
+    let equal: Vec<(On, Option<DataType>)> = on
+        .iter()
+        .zip(types)
+        .filter(|(condition, _)| condition.op == Comparison::Equal)
+        .map(|(condition, common)| (condition.clone(), common.clone()))
+        .collect();
+    let groups = equal_groups(x, i, &equal)?;
+    let ordering: Vec<&On> = on
+        .iter()
+        .filter(|condition| condition.op != Comparison::Equal)
+        .collect();
+    let ranged = &ordering
+        .first()
+        .ok_or_else(|| Error::Query("a non-equi join needs an ordering condition".to_string()))?
+        .x;
+    let x_keys = order_keys(x.column(ranged)?)?;
+    let mut bounds = Vec::new();
+    let mut checks = Vec::new();
+    for condition in ordering {
+        let i_keys = order_keys(i.column(&condition.i)?)?;
+        if condition.x == *ranged {
+            bounds.push((condition.op, i_keys));
+        } else {
+            checks.push((condition.op, order_keys(x.column(&condition.x)?)?, i_keys));
+        }
+    }
+    // The rows of `x` as `(order key, row)`, grouped and sorted by key within each group.
+    let mut starts = vec![0usize; groups.count + 1];
+    for group in &groups.x {
+        starts[*group as usize + 1] += 1;
+    }
+    for group in 0..groups.count {
+        starts[group + 1] += starts[group];
+    }
+    let mut sorted = vec![(0u64, 0u32); x_height];
+    let mut next = starts.clone();
+    for (row, group) in groups.x.iter().enumerate() {
+        let slot = &mut next[*group as usize];
+        sorted[*slot] = (x_keys[row], row as u32);
+        *slot += 1;
+    }
+    let mut slices = Vec::with_capacity(groups.count);
+    let mut rest = sorted.as_mut_slice();
+    for group in 0..groups.count {
+        let (slice, tail) = rest.split_at_mut(starts[group + 1] - starts[group]);
+        slices.push(slice);
+        rest = tail;
+    }
+    THREAD_POOL.install(|| {
+        slices.into_par_iter().for_each(|slice| {
+            if slice.len() > PARALLEL_ROWS {
+                slice.par_sort_unstable();
+            } else {
+                slice.sort_unstable();
+            }
+        });
+    });
+    let matches_of = |row: usize, found: &mut Vec<u32>| {
+        found.clear();
+        let group = groups.i[row] as usize;
+        let Some(slice) = starts
+            .get(group)
+            .zip(starts.get(group + 1))
+            .map(|(start, end)| &sorted[*start..*end])
+        else {
+            return;
+        };
+        let (mut start, mut end) = (0, slice.len());
+        for (op, i_keys) in &bounds {
+            let (low, high) = key_range(slice, *op, i_keys[row]);
+            start = start.max(low);
+            end = end.min(high);
+        }
+        if start >= end {
+            return;
+        }
+        found.extend(
+            slice[start..end]
+                .iter()
+                .map(|(_, x_row)| *x_row)
+                .filter(|x_row| {
+                    checks.iter().all(|(op, x_keys, i_keys)| {
+                        meets(*op, x_keys[*x_row as usize], i_keys[row])
+                    })
+                }),
+        );
+        match mult {
+            Mult::All => found.sort_unstable(),
+            Mult::First | Mult::Last => {
+                let kept = if mult == Mult::First {
+                    found.iter().min()
+                } else {
+                    found.iter().max()
+                };
+                let kept: Vec<u32> = kept.copied().into_iter().collect();
+                *found = kept;
+            }
+        }
+    };
+    const CHUNK: usize = 1 << 12;
+    let parts: Vec<(Vec<u32>, Vec<u32>)> = THREAD_POOL.install(|| {
+        (0..i_height.div_ceil(CHUNK))
+            .into_par_iter()
+            .map(|chunk| {
+                let (mut i_rows, mut x_rows) = (Vec::new(), Vec::new());
+                let mut found = Vec::new();
+                for row in chunk * CHUNK..((chunk + 1) * CHUNK).min(i_height) {
+                    matches_of(row, &mut found);
+                    if found.is_empty() {
+                        if !drop_unmatched {
+                            i_rows.push(row as u32);
+                            x_rows.push(NO_ROW);
+                        }
+                        continue;
+                    }
+                    i_rows.extend(std::iter::repeat_n(row as u32, found.len()));
+                    x_rows.extend_from_slice(&found);
+                }
+                (i_rows, x_rows)
+            })
+            .collect()
+    });
+    let height = parts.iter().map(|(i_rows, _)| i_rows.len()).sum();
+    let mut matches = Matches {
+        i_rows: Vec::with_capacity(height),
+        x_rows: Vec::with_capacity(height),
+    };
+    for (i_rows, x_rows) in parts {
+        matches.i_rows.extend(i_rows);
+        matches.x_rows.extend(x_rows);
+    }
+    Ok(matches)
+}
+
+/// The rows of `x` and of `i` numbered by their values in the equality conditions, equal values
+/// sharing a number in `0..count`, `NA` matching `NA`.
+struct Groups {
+    x: Vec<u32>,
+    i: Vec<u32>,
+    count: usize,
+}
+
+fn equal_groups(x: &DataFrame, i: &DataFrame, equal: &[(On, Option<DataType>)]) -> Result<Groups> {
+    let (x_height, i_height) = (x.height(), i.height());
+    if equal.is_empty() {
+        return Ok(Groups {
+            x: vec![0; x_height],
+            i: vec![0; i_height],
+            count: 1,
+        });
+    }
+    let conditions: Vec<On> = equal
+        .iter()
+        .map(|(condition, _)| condition.clone())
+        .collect();
+    if let Some(keys) = key_codes(x, i, &conditions)?
+        && u64::from(keys.radix) <= 8 * (x_height + i_height) as u64 + (1 << 12)
+    {
+        return Ok(Groups {
+            x: keys.x,
+            i: keys.i,
+            count: keys.radix as usize,
+        });
+    }
+    // Other types, or codes spread too wide to index, are numbered by Polars' grouping over both
+    // sides stacked, with each pair of columns in its common type.
+    let mut columns = Vec::with_capacity(equal.len());
+    for (index, (condition, common)) in equal.iter().enumerate() {
+        let (mut x_column, mut i_column) = (
+            x.column(&condition.x)?.as_materialized_series().clone(),
+            i.column(&condition.i)?.as_materialized_series().clone(),
+        );
+        if let Some(common) = common {
+            x_column = x_column.cast(common)?;
+            i_column = i_column.cast(common)?;
+        }
+        let mut stacked = x_column.with_name(format!("{index}").into());
+        stacked.append(&i_column)?;
+        columns.push(Column::from(stacked));
+    }
+    let names: Vec<PlSmallStr> = columns.iter().map(|column| column.name().clone()).collect();
+    let stacked = DataFrame::new(x_height + i_height, columns)?;
+    let grouping = stacked.group_by(names)?;
+    let mut numbers = vec![0u32; x_height + i_height];
+    let mut count = 0;
+    match &**grouping.get_groups() {
+        GroupsType::Idx(groups) => {
+            for rows in groups.all() {
+                for row in rows.iter() {
+                    numbers[*row as usize] = count;
+                }
+                count += 1;
+            }
+        }
+        GroupsType::Slice { groups, .. } => {
+            for [first, len] in groups.iter() {
+                numbers[*first as usize..(*first + *len) as usize].fill(count);
+                count += 1;
+            }
+        }
+    }
+    let i_numbers = numbers.split_off(x_height);
+    Ok(Groups {
+        x: numbers,
+        i: i_numbers,
+        count: count as usize,
+    })
+}
+
+/// The order key of an `NA`, below every other key.
+const NA_KEY: u64 = 0;
+/// The order key of a `NaN`, above `NA` and below every number.
+const NAN_KEY: u64 = 1;
+
+/// Each value of a numeric column as a `u64` whose order is the values' order: [`NA_KEY`], then
+/// [`NAN_KEY`], then the numbers. A number's key flips its sign bit when it is positive and all of
+/// its bits when it is negative, which orders the bit patterns as the numbers, and keeps every
+/// number's key above [`NAN_KEY`].
+fn order_keys(column: &Column) -> Result<Vec<u64>> {
+    let doubles = column.cast(&DataType::Float64)?;
+    let doubles = doubles.as_materialized_series().rechunk();
+    let array = doubles
+        .f64()?
+        .downcast_iter()
+        .next()
+        .cloned()
+        .ok_or_else(|| Error::Query("an empty join column has no values".to_string()))?;
+    let (values, validity) = (array.values().as_slice(), array.validity());
+    Ok(fill(values.len(), |start, out| {
+        for (offset, slot) in out.iter_mut().enumerate() {
+            let row = start + offset;
+            let valid = validity.is_none_or(|validity| validity.get_bit(row));
+            let value = values[row];
+            slot.write(if !valid {
+                NA_KEY
+            } else if value.is_nan() {
+                NAN_KEY
+            } else {
+                // Adding zero turns `-0.0` into `0.0`, so the two compare equal.
+                let bits = (value + 0.0).to_bits();
+                if bits >> 63 == 1 {
+                    !bits
+                } else {
+                    bits | (1 << 63)
+                }
+            });
+        }
+    }))
+}
+
+/// The positions of a group's sorted `(key, row)` pairs whose keys meet `op` against `value`.
+fn key_range(slice: &[(u64, u32)], op: Comparison, value: u64) -> (usize, usize) {
+    let below = |bound: u64| slice.partition_point(|(key, _)| *key < bound);
+    let through = |bound: u64| slice.partition_point(|(key, _)| *key <= bound);
+    if value <= NAN_KEY {
+        return if inclusive(op) {
+            (below(value), through(value))
+        } else {
+            (0, 0)
+        };
+    }
+    let numbers = NAN_KEY + 1;
+    match op {
+        Comparison::Equal => (below(value), through(value)),
+        Comparison::GreaterEqual => (below(value), slice.len()),
+        Comparison::Greater => (through(value), slice.len()),
+        Comparison::LessEqual => (below(numbers), through(value)),
+        Comparison::Less => (below(numbers), below(value)),
+    }
+}
+
+/// Whether the order keys `x` and `i` meet `x op i`. A missing value meets only the same missing
+/// value, and only through an operator that includes equality.
+fn meets(op: Comparison, x: u64, i: u64) -> bool {
+    if x <= NAN_KEY || i <= NAN_KEY {
+        return inclusive(op) && x == i;
+    }
+    match op {
+        Comparison::Equal => x == i,
+        Comparison::Less => x < i,
+        Comparison::LessEqual => x <= i,
+        Comparison::Greater => x > i,
+        Comparison::GreaterEqual => x >= i,
+    }
+}
+
+fn inclusive(op: Comparison) -> bool {
+    matches!(
+        op,
+        Comparison::Equal | Comparison::LessEqual | Comparison::GreaterEqual
+    )
 }

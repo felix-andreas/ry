@@ -1,4 +1,180 @@
-# ry: the functions ry's runtime attaches as `package:ry`, which every session has.
+# ry's standard library: the `Result`, `List`, `Str`, `Num`, `Dict` and `Set` functions, and the
+# frame functions.
+#
+# The functions run only on ry's runtime, which binds them in the `ry` namespace and attaches it as
+# `package:ry`. `crates/interp/src/standard_library.rs` implements the modules and
+# `crates/interp/src/frame.rs` the frame functions, and a test keeps this file's names and the
+# runtime's equal. The user contract is
+# `docs/src/content/docs/reference/standard-library.mdx`.
+#
+# Conventions shared by every module:
+# - A collection is an R list (`list[T]`); `List.from_vector` converts an atomic vector.
+# - A position is a 1-based `integer`.
+# - A function that can fail returns a `Result` whose error is a descriptive tag.
+# - Equality is `identical()`.
+
+@alias Result<T, E> {:Ok(T) | :Err(E)}
+@type Dict<K, V>
+@type Set<T>
+
+# Result
+
+Result.is_ok : <T, E> fn(result: Result<T, E>) -> logical
+Result.is_err : <T, E> fn(result: Result<T, E>) -> logical
+Result.with_default : <T, E> fn(result: Result<T, E>, default: T) -> T
+Result.map : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> B) -> Result<B, E>
+Result.map_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> B) -> Result<T, B>
+Result.map_both : <A, B, C, D> fn(result: Result<A, B>, on_ok: fn(A) -> C, on_err: fn(B) -> D) -> Result<C, D>
+Result.and_then : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> Result<B, E>) -> Result<B, E>
+Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> Result<T, B>
+
+# List
+
+List.from_vector : <T> fn(vector: T[]) -> list[T]
+List.to_vector : <T> fn(list: list[T]) -> T[]
+List.len : <T> fn(list: list[T]) -> integer
+List.is_empty : <T> fn(list: list[T]) -> logical
+List.get : <T> fn(list: list[T], index: integer) -> Result<T, :OutOfBounds>
+List.set : <T> fn(list: list[T], index: integer, value: T) -> list[T]
+List.update : <T> fn(list: list[T], index: integer, f: fn(T) -> T) -> list[T]
+List.append : <T> fn(list: list[T], value: T) -> list[T]
+List.prepend : <T> fn(list: list[T], value: T) -> list[T]
+List.concat : <T> fn(first: list[T], second: list[T]) -> list[T]
+List.single : <T> fn(value: T) -> list[T]
+List.repeat : <T> fn(value: T, count: integer) -> list[T]
+List.reverse : <T> fn(list: list[T]) -> list[T]
+List.join : <T> fn(lists: list[list[T]]) -> list[T]
+List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
+List.map_with_index : <A, B> fn(list: list[A], f: fn(A, integer) -> B) -> list[B]
+List.map2 : <A, B, C> fn(first: list[A], second: list[B], f: fn(A, B) -> C) -> list[C]
+List.join_map : <A, B> fn(list: list[A], f: fn(A) -> list[B]) -> list[B]
+List.keep_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+List.drop_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
+List.keep_oks : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[B]
+List.keep_errs : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[E]
+List.map_try : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> Result<list[B], E>
+List.walk : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
+List.walk_backwards : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S
+List.walk_until : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> :Continue(S) | :Break(S)) -> S
+List.any : <T> fn(list: list[T], predicate: fn(T) -> logical) -> logical
+List.all : <T> fn(list: list[T], predicate: fn(T) -> logical) -> logical
+List.contains : <T> fn(list: list[T], value: T) -> logical
+List.count_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> integer
+List.find_first : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<T, :NotFound>
+List.find_last : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<T, :NotFound>
+List.find_first_index : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+List.find_last_index : <T> fn(list: list[T], predicate: fn(T) -> logical) -> Result<integer, :NotFound>
+List.first : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.last : <T> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.take_first : <T> fn(list: list[T], count: integer) -> list[T]
+List.take_last : <T> fn(list: list[T], count: integer) -> list[T]
+List.drop_first : <T> fn(list: list[T], count: integer) -> list[T]
+List.drop_last : <T> fn(list: list[T], count: integer) -> list[T]
+List.drop_at : <T> fn(list: list[T], index: integer) -> list[T]
+List.sublist : <T> fn(list: list[T], start: integer, count: integer) -> list[T]
+List.split_at : <T> fn(list: list[T], count: integer) -> record{before: list[T], others: list[T]}
+List.chunks_of : <T> fn(list: list[T], size: integer) -> list[list[T]]
+List.intersperse : <T> fn(list: list[T], separator: T) -> list[T]
+List.sort_with : <T> fn(list: list[T], compare: fn(T, T) -> :LT | :EQ | :GT) -> list[T]
+List.sum : <T: scalar numeric> fn(list: list[T]) -> T
+List.product : <T: scalar numeric> fn(list: list[T]) -> T
+List.min : <T: scalar numeric> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.max : <T: scalar numeric> fn(list: list[T]) -> Result<T, :ListWasEmpty>
+List.starts_with : <T> fn(list: list[T], prefix: list[T]) -> logical
+List.ends_with : <T> fn(list: list[T], suffix: list[T]) -> logical
+
+# Str
+
+Str.is_empty : fn(string: character) -> logical
+Str.concat : fn(first: character, second: character) -> character
+Str.join_with : fn(strings: list[character], separator: character) -> character
+Str.split_on : fn(string: character, separator: character) -> list[character]
+Str.repeat : fn(string: character, count: integer) -> character
+Str.starts_with : fn(string: character, prefix: character) -> logical
+Str.ends_with : fn(string: character, suffix: character) -> logical
+Str.contains : fn(string: character, part: character) -> logical
+Str.trim : fn(string: character) -> character
+Str.trim_start : fn(string: character) -> character
+Str.trim_end : fn(string: character) -> character
+Str.drop_prefix : fn(string: character, prefix: character) -> character
+Str.drop_suffix : fn(string: character, suffix: character) -> character
+Str.with_prefix : fn(string: character, prefix: character) -> character
+Str.replace_each : fn(string: character, pattern: character, replacement: character) -> character
+Str.replace_first : fn(string: character, pattern: character, replacement: character) -> character
+Str.replace_last : fn(string: character, pattern: character, replacement: character) -> character
+Str.split_first : fn(string: character, separator: character) -> Result<record{before: character, after: character}, :NotFound>
+Str.split_last : fn(string: character, separator: character) -> Result<record{before: character, after: character}, :NotFound>
+Str.count_utf8_bytes : fn(string: character) -> integer
+Str.to_utf8 : fn(string: character) -> list[integer]
+Str.from_utf8 : fn(bytes: list[integer]) -> Result<character, :BadUtf8>
+Str.to_integer : fn(string: character) -> Result<integer, :InvalidNumStr>
+Str.to_double : fn(string: character) -> Result<double, :InvalidNumStr>
+Str.with_ascii_lowercased : fn(string: character) -> character
+Str.with_ascii_uppercased : fn(string: character) -> character
+
+# Num
+
+Num.to_str : <T: scalar numeric> fn(number: T) -> character
+Num.compare : <T: scalar numeric> fn(first: T, second: T) -> :LT | :EQ | :GT
+Num.min : <T: scalar numeric> fn(first: T, second: T) -> T
+Num.max : <T: scalar numeric> fn(first: T, second: T) -> T
+Num.is_zero : <T: scalar numeric> fn(number: T) -> logical
+Num.is_positive : <T: scalar numeric> fn(number: T) -> logical
+Num.is_negative : <T: scalar numeric> fn(number: T) -> logical
+Num.is_even : <T: scalar numeric> fn(number: T) -> logical
+Num.is_odd : <T: scalar numeric> fn(number: T) -> logical
+Num.add_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+Num.sub_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+Num.mul_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :Overflow>
+Num.div_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<double, :DivByZero>
+Num.div_trunc_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+Num.rem_checked : <T: scalar numeric> fn(first: T, second: T) -> Result<T, :DivByZero>
+Num.sqrt_checked : <T: scalar numeric> fn(number: T) -> Result<double, :SqrtOfNegative>
+Num.log_checked : <T: scalar numeric> fn(number: T) -> Result<double, :LogNeedsPositive>
+
+# Dict
+
+Dict.empty : <K: key, V> fn() -> Dict<K, V>
+Dict.single : <K: key, V> fn(key: K, value: V) -> Dict<K, V>
+Dict.from_list : <K: key, V> fn(pairs: list[tuple{K, V}]) -> Dict<K, V>
+Dict.to_list : <K: key, V> fn(dict: Dict<K, V>) -> list[tuple{K, V}]
+Dict.len : <K: key, V> fn(dict: Dict<K, V>) -> integer
+Dict.is_empty : <K: key, V> fn(dict: Dict<K, V>) -> logical
+Dict.get : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Result<V, :KeyNotFound>
+Dict.contains : <K: key, V> fn(dict: Dict<K, V>, key: K) -> logical
+Dict.insert : <K: key, V> fn(dict: Dict<K, V>, key: K, value: V) -> Dict<K, V>
+Dict.remove : <K: key, V> fn(dict: Dict<K, V>, key: K) -> Dict<K, V>
+Dict.update : <K: key, V> fn(dict: Dict<K, V>, key: K, f: fn(Result<V, :Missing>) -> Result<V, :Missing>) -> Dict<K, V>
+Dict.keys : <K: key, V> fn(dict: Dict<K, V>) -> list[K]
+Dict.values : <K: key, V> fn(dict: Dict<K, V>) -> list[V]
+Dict.walk : <K: key, V, S> fn(dict: Dict<K, V>, state: S, f: fn(S, K, V) -> S) -> S
+Dict.map : <K: key, A, B> fn(dict: Dict<K, A>, f: fn(K, A) -> B) -> Dict<K, B>
+Dict.keep_if : <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+Dict.drop_if : <K: key, V> fn(dict: Dict<K, V>, predicate: fn(K, V) -> logical) -> Dict<K, V>
+Dict.insert_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+Dict.keep_shared : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+Dict.remove_all : <K: key, V> fn(first: Dict<K, V>, second: Dict<K, V>) -> Dict<K, V>
+
+# Set
+
+Set.empty : <T: key> fn() -> Set<T>
+Set.single : <T: key> fn(element: T) -> Set<T>
+Set.from_list : <T: key> fn(list: list[T]) -> Set<T>
+Set.to_list : <T: key> fn(set: Set<T>) -> list[T]
+Set.len : <T: key> fn(set: Set<T>) -> integer
+Set.is_empty : <T: key> fn(set: Set<T>) -> logical
+Set.contains : <T: key> fn(set: Set<T>, element: T) -> logical
+Set.insert : <T: key> fn(set: Set<T>, element: T) -> Set<T>
+Set.remove : <T: key> fn(set: Set<T>, element: T) -> Set<T>
+Set.union : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
+Set.intersection : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
+Set.difference : <T: key> fn(first: Set<T>, second: Set<T>) -> Set<T>
+Set.walk : <T: key, S> fn(set: Set<T>, state: S, f: fn(S, T) -> S) -> S
+Set.map : <A: key, B: key> fn(set: Set<A>, f: fn(A) -> B) -> Set<B>
+Set.keep_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+Set.drop_if : <T: key> fn(set: Set<T>, predicate: fn(T) -> logical) -> Set<T>
+
+# Frames
 #
 # `frame()` itself is typed structurally by the checker, and so are queries on a frame
 # (`f[i, j, by]`). These declarations cover the conversions and file IO around them.

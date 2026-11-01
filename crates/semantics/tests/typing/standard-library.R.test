@@ -1,0 +1,158 @@
+#==== result
+#---- map_binds_both_members
+r <- Result.map(List.get(list(1L, 2L), 2L), function(x) x * 2)
+#++++
+r: :Ok(double) | :Err(:OutOfBounds)
+
+#---- with_default_unwraps
+v <- Result.with_default(List.first(list("a", "b")), "")
+#++++
+v: character
+
+#---- and_then_chains
+parse <- function(text: character) Str.to_integer(text)
+n <- Result.and_then(parse("4"), function(x) if (x > 0L) :Ok(x) else :Err(:InvalidNumStr))
+#++++
+parse: fn(text: character) -> Result<integer, :InvalidNumStr>
+n: :Ok(integer) | :Err(:InvalidNumStr)
+
+#---- map_err_replaces_the_error
+r <- Result.map_err(Str.to_double("x"), function(e) "not a number")
+#++++
+r: :Ok(double) | :Err(character)
+
+#---- result_alias_in_an_annotation
+#: @param text {character}
+#: @return {Result<integer, :InvalidNumStr>}
+parse <- function(text) Str.to_integer(text)
+#++++
+parse: fn(text: character) -> Result<integer, :InvalidNumStr>
+
+#---- project_alias_shadows_the_shipped_one
+#: @alias Result<T> {:Good(T) | :Bad}
+
+#: @param x {integer}
+#: @return {Result<integer>}
+check <- function(x) if (x > 0L) :Good(x) else :Bad
+#++++
+check: fn(x: integer) -> Result<integer>
+
+#==== list
+#---- from_vector_keeps_the_element_type
+xs <- List.from_vector(c(1L, 2L, 3L))
+#++++
+xs: list[integer]
+
+#---- walk_folds_to_the_state_type
+total <- List.walk(List.from_vector(c(1L, 2L)), 0L, function(acc, x) acc + x)
+#++++
+total: integer
+
+#---- map_changes_the_element_type
+names <- List.map(list(1L, 2L), function(x) as.character(x))
+#++++
+names: list[character]
+
+#---- map_try_collects_results
+parsed <- List.map_try(list("1", "2"), Str.to_integer)
+#++++
+parsed: :Ok(list[integer]) | :Err(:InvalidNumStr)
+
+#---- walk_until_stops_on_break
+found <- List.walk_until(list(1L, 5L, 2L), 0L, function(acc, x) if (x > 3L) :Break(x) else :Continue(acc))
+#++++
+found: integer
+
+#---- sum_needs_scalar_numbers
+s <- List.sum(list(1.5, 2))
+bad <- List.sum(list(c(1, 2)))
+#++++
+s: double
+bad: Unknown
+44..57 error[type-mismatch] expected `list[T]`, found `list{double[]}`
+
+#---- max_of_an_empty_list_checks
+top <- List.max(list())
+#++++
+top: :Ok(double) | :Err(:ListWasEmpty)
+
+#---- split_at_returns_a_record
+halves <- List.split_at(list("a", "b", "c"), 1L)
+before <- halves$before
+#++++
+halves: record{before: list[character], others: list[character]}
+before: list[character]
+
+#---- vector_is_not_a_list
+n <- List.len(c(1, 2))
+#++++
+n: Unknown
+14..21 error[type-mismatch] expected `list[T]`, found `double[]`
+
+#==== str
+#---- split_on_returns_a_list_of_strings
+words <- Str.split_on("a b", " ")
+first <- Result.with_default(List.first(words), "")
+#++++
+words: list[character]
+first: character
+
+#---- split_first_returns_a_record_result
+parts <- Str.split_first("key=value", "=")
+#++++
+parts: :Ok(record{after: character, before: character}) | :Err(:NotFound)
+
+#---- string_functions_need_strings
+n <- Str.trim(1L)
+#++++
+n: Unknown
+14..16 error[type-mismatch] expected `character`, found `integer`
+
+#==== num
+#---- checked_addition_keeps_the_number_type
+sum <- Num.add_checked(1L, 2L)
+#++++
+sum: :Ok(integer) | :Err(:Overflow)
+
+#---- compare_returns_an_ordering
+order <- Num.compare(1, 2)
+#++++
+order: :LT | :EQ | :GT
+
+#==== dict_and_set
+#---- dict_from_list_infers_key_and_value
+d <- Dict.from_list(list(("a", 1), ("b", 2)))
+got <- Dict.get(d, "a")
+#++++
+d: Dict<character, double>
+got: :Ok(double) | :Err(:KeyNotFound)
+
+#---- dict_rejects_a_key_of_the_wrong_type
+d <- Dict.single("a", 1)
+got <- Dict.get(d, 1L)
+#++++
+d: Dict<character, double>
+got: Unknown
+44..46 error[type-mismatch] expected `character`, found `integer`
+
+#---- dict_is_not_an_r_object
+d <- Dict.single("a", 1)
+n <- sum(d)
+#++++
+d: Dict<character, double>
+n: Unknown
+34..35 error[type-mismatch] `sum` is an R function, and this value is a ry dict, not an R object. Convert it with `as.list()` first
+
+#---- set_operations_keep_the_element_type
+s <- Set.union(Set.from_list(list(1L, 2L)), Set.single(3L))
+xs <- Set.to_list(s)
+#++++
+s: Set<integer>
+xs: list[integer]
+
+#---- set_is_not_an_r_object
+s <- Set.single("a")
+n <- length(s)
+#++++
+s: Set<character>
+n: integer

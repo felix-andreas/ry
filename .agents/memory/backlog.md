@@ -24,14 +24,15 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **A package with `src/` does not load on ry's runtime**: pkgbuild's `check_build_tools` fails
-  there (callr and friends hit interpreter gaps). `readDCF` and classed comparisons were the first two
-  blockers. Until it works, `--runtime gnu-r` is the documented route.
+- **Compiled code builds with GNU R's toolchain**: on ry's runtime `R.home()` is GNU R's, so
+  `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links GNU R's `libR.so`. It loads
+  because ry's `libR.so` already holds that soname. Pointing `R.home()` at `crates/rcmd`'s R home
+  would make the build ry's own.
 - **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
-- **ry's runtime keeps no source references**, so `print(f)` deparses and tracebacks name no file.
-  The loader has the byte range of every definition, so a srcref could be built from it once the
-  interpreter carries srcrefs at all.
+- **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
+  name no file. The loader has the byte range of every definition, so a srcref could be built from
+  it now that the interpreter keeps srcrefs for parsed code.
 - **A one-file reload spends about 28 ms rebuilding `package_index` and 10 ms in the diff** on the
   326,000-line bench package, shared by both runtimes; the next item is the fix.
 
@@ -257,6 +258,42 @@ generalization, an occurs check, per-parameter variance, working generic nominal
 distinctness, and no cascades outside the `@param` case. The gap is not the engine. Diagnostics
 render the artifact unification left behind rather than the fact that failed, and the nominal story
 protects construction but nothing after it.
+
+## Open: ry's standard library
+
+- `Result.and_then` keeps one error type: a step that fails with another tag is a `type-mismatch`,
+  because a generic's tag union does not widen across calls. Widen `E` to the union of both, then
+  drop the limit from `reference/standard-library.mdx` ("Limits").
+- `Dict.insert`, `Set.insert` and `List.append` copy, so a growing loop is quadratic. Reuse the
+  value in place when the compiler proves the argument is the last use of its binding.
+- A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
+  error; the checker rejects it statically, so only `Unknown` code reaches it.
+- The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
+  touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
+- `serialize()` fails on ry's runtime for every value ("5 arguments passed to .Internal(serialize)
+  which requires 6"); `saveRDS()` works and refuses dicts and sets as intended.
+
+## Open: the JIT
+
+`crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
+
+- **Direct calls between compiled closures, with promise elision.** `micro/closures` is slower
+  under the JIT than under tier 0 because each iteration's generic call writes `s` and `i` back and
+  reloads them, and fib and lapply gain nothing. A call to a speculated closure whose arguments are
+  effect-free should evaluate them eagerly and enter the callee's compiled code without a promise.
+- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
+  reads the checker's per-function summaries yet.
+- **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
+  and invalidated external pointers stay rooted.
+- **Builtin-bound benchmarks** (vector_arith, jackknife, log_rank, vasicek) are 2.5 to 3 times
+  slower than GNU R in tier 0 and the JIT alike; the cost is in the builtins, not the dispatch.
+- **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
+  `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
+  so they are tier-0 or base gaps, not JIT ones.
+- **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
+  may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
+  while the environment still holds the old value; and an allocation failure inside `boxed()`
+  (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
 
 ## Open: performance and memory
 
@@ -1129,6 +1166,16 @@ The message says to add a type annotation, and no annotation form silences it. `
   idempotent, so it is deliberate, and it is undocumented.
 - **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
   annotations with a blank line" when there is only one annotation.**
+- **The deep formatter fuzz (`FUZZ_ITERS=300000`) still finds `l: :Sost$field`**, which the formatter
+  rewrites to `l::Sost$field`, turning two `:` tokens into one `::` and changing the code. The
+  default `fuzz_deep` budget passes.
+- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
+  definition may also be written inline as `type` or `alias`.
+- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+  accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
+  two spellings stay one grammar.
+- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
+  states the type.
 - **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
   missing fence.
 
@@ -1696,7 +1743,7 @@ tagging fences `r` for Zed if that proves distant.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
   rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation.** `reference/type-system.md` runs about 2,700 lines.
+- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 2,700 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 
@@ -1777,8 +1824,8 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: the built-in frame
 
-- **Query features:** `.EACHI`, non-equi joins and a computed `by` are not lowered;
-  they run as R per group or fail.
+- **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
+  needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
 - **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
@@ -1796,12 +1843,17 @@ The end-to-end guard rests on the corpus suites.
   one redundant lookup per call on a classed subject without a `[` method.
 - **data.table masks `setkey`, `setkeyv`, `key` and `copy`** when attached after ry; its versions
   reject a frame, so users call `ry::setkey`.
-- **No warning channel.** data.table warns when a value is truncated into an integer column and when
-  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Warnings:** a `:=` that coerces a string into a number column does not warn, where data.table
+  does; only number narrowing does.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
 - **Naming:** `package:ry`'s `frame()` masks `graphics::frame` and calls it when given no
   arguments.
+- **Query gaps.** `j` cannot read `x.`-prefixed columns in a join. Under `.EACHI`, a column of `i`
+  inside an aggregate is the matched rows' values, where data.table gives the row's one value.
+  A non-equi join's extra condition columns are named `t.1` where data.table repeats `t`.
+- **Checker:** a non-equi `on =` and `by = .EACHI` give `Unknown`; the engine's `result_type`
+  already knows both results.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.
@@ -1822,9 +1874,19 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
-- **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
-  differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
-  unimplemented one when it is called) or printer details (complex numbers, wide matrices).
+- **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
+  (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
+  optimum along a slightly different path, so values agree to about seven digits only.
+- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
+  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
+  daylight-saving changes differ from GNU R.
+- **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
+  stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
+  with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
+  expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
+  the column of a second expression after `;` differ. `.Internal(.traceback(x))`, the helper
+  behind `traceback()` printing, is still a stub that returns `NULL`, and the interactive
+  `traceback()` output ("at #2") is unchecked against GNU R.
 - **Tier-0 speed.** A scalar `for` loop runs about 6x slower than GNU R's bytecode (`s <- s + i * 2`,
   1e6 iterations: 0.27 s against 0.04 s). The cost is per-instruction allocation of scalar results,
   handle-stack pushes, and the guard and frame probes. Next: reuse a register's scalar when it is
@@ -1833,8 +1895,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
-- **Missing internals.** Several `.Internal`s still raise "not supported" (`scan`'s binary
-  relatives `writeBin`/`readBin`, `save`/`load`, `url`, `polyroot`, `max.col`, `prmatrix`, ...);
+- **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
+  `file.copy`, `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -1842,16 +1904,24 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** bzip2 and xz file connections, sockets, and `pipe()` are not implemented.
+- **Connections gaps:** `bzfile()` and `xzfile()` read all three formats but always write gzip,
+  because ry has no streaming bzip2 or xz encoder (readers detect the format, so the files still
+  load). `memCompress(type = "bzip2")`, `fifo()`, URL connections and sockets are not
+  implemented.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
-- **Task callbacks never run.** The interpreter does not yet call `libr::eval::run_task_callbacks`
-  after each top-level task.
-- **The interpreter keeps its own connections and RNG beside libr's.** Both RNGs sync through
-  `.Random.seed`; the interpreter's connection builtins should move onto `libr::connections`, and
-  libr's primitive table and built-in evaluator are unused while the interpreter is installed, so
-  the libr connection tests that call `file()`/`stdout()` without base R fail until then.
+- **A task callback's warnings print under the plain "Warning message" header.** GNU R prints them
+  under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
+- **Compact sequences are not ALTREP.** `1:2e9` allocates the whole vector; GNU R's compact
+  intseq does not.
+- **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
+  supported; exact settings such as `{+}` compile to nothing, as in GNU R.
+- **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
+  bodies, `example()` echo without `keep.source` (GNU R shows the original text and comments), and
+  the "deparse may be incomplete" warning.
+- **The interpreter keeps its own RNG beside libr's.** Both sync through `.Random.seed`, and
+  libr's built-in evaluator is unused while the interpreter is installed.
 - **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack
@@ -1861,9 +1931,19 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics devices.** The interpreter's session has only the null device, so plotting and opening
-  any device fail with a clear error (`decisions.md`, "the default packages' utils, tools,
-  grDevices and graphics routines"). `stem()` fails too: its layout rules are not derived yet.
+- **Graphics devices draw nothing** (`decisions.md`, "the default packages' utils, tools,
+  grDevices and graphics routines"). Missing: rendering output files, GNU R's `R_pretty` warnings
+  on subnormal axis ranges, cairo font metrics for bitmap devices, plotmath sizes (an expression is
+  measured as its deparsed text), and `stem()` beyond the empty case.
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, 41 of 66 ending with
+  GNU R's exit status). First failures: precision in `polyroot` (complex), noncentral `qchisq`
+  and `dbeta` (d-p-q-r-tests, d-p-q-r-tst-2), complex `%*%` (reg-BLAS), `iconv` to ASCII,
+  `file.copy` (reg-packages), `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
+  `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
+  stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
+  (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
+  (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
+  (`RDX3`, where GNU R writes `RDA3`); `load()` reads it back the same, but the file differs.
 - **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
   `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.

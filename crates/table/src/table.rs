@@ -131,6 +131,10 @@ impl Schema {
         }
     }
 
+    pub fn names(&self) -> Vec<&PlSmallStr> {
+        self.columns.iter().map(|(name, _)| name).collect()
+    }
+
     pub fn column(&self, name: &str) -> Option<ColumnType> {
         self.columns
             .iter()

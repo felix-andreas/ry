@@ -1,0 +1,133 @@
+#==== inline_type_definitions
+#---- hover_on_the_defined_name
+type User$0Id = integer
+#++++
+hover 5..11: type UserId = integer
+definition 5..11
+references: 5..11*
+rename: 1 edit(s)
+signature: none
+completion (1): UserId
+
+#---- hover_on_a_use_shows_the_inline_definition
+type UserId = integer
+f <- function(id: User$0Id) id
+#++++
+hover 40..46: type UserId = integer
+definition 5..11
+references: 5..11*, 40..46
+rename: 2 edit(s)
+signature: none
+completion (1): UserId
+
+#---- definition_and_rename_from_a_use
+alias Box<T> = list{value: T}
+f <- function(b: Box<integer>) b
+unbox <- function(b: B$0ox<double>) b$value
+#++++
+hover 84..87: alias Box<T> = list{value: T}
+definition 6..9
+references: 6..9*, 47..50, 84..87
+rename: 3 edit(s)
+signature: none
+completion (1): Box
+
+#---- rename_from_the_definition
+type User$0Id = integer
+f <- function(id: UserId) -> UserId id
+x <- @UserId(1L)
+#++++
+hover 5..11: type UserId = integer
+definition 5..11
+references: 5..11*, 40..46, 51..57, 67..73
+rename: 4 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 61..61 -> "#: UserId\n"
+completion (1): UserId
+hint @62: UserId
+
+#---- paired_definition_and_comment_both_rename
+#: @type Celsius {double}
+type Cel$0sius = double
+x: Celsius <- @Celsius(1)
+#++++
+hover 31..38: type Celsius = double
+definition 31..38
+references: 9..16*, 31..38*, 51..58, 63..70
+rename: 4 edit(s)
+signature: none
+completion (1): Celsius
+
+#---- definition_binder_is_not_a_navigable_type
+alias Box<T> = list{value: $0T}
+#++++
+hover 27..28: T
+definition: none
+references: none
+rename: none
+signature: none
+completion (15): Any, character, complex, double, fn, integer, list, logical
+
+#---- nominal_constructor_name_navigates
+type UserId = integer
+x <- @User$0Id(1L)
+#++++
+hover 28..34: type UserId = integer
+definition 5..11
+references: 5..11*, 28..34
+rename: 2 edit(s)
+type-definition 5..11
+signature: none
+action: Add inferred type annotation for `x`
+  edit 22..22 -> "#: UserId\n"
+action: Add inferred type annotations for the whole file
+  edit 22..22 -> "#: UserId\n"
+completion (1): UserId
+hint @23: UserId
+
+#---- completion_after_the_equals
+type UserId = integer
+alias Ids = Use$0
+#++++
+hover 34..37: Use
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): UserId
+
+#---- completion_in_a_nominal_constructor
+type UserId = integer
+x <- @Us$0
+#++++
+hover 28..30: Us
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): UserId
+
+#---- completion_after_a_coercion_directive
+type UserId = integer
+x: @new Us$0 <- 1L
+#++++
+hover 30..32: Us
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): UserId
+
+#---- if_unknown_directive_offers_trust
+frame <- data.frame(a = 1)
+gap: @if-unknown inte$0ger <- frame$a
+#++++
+hover 44..51: integer
+definition: none
+references: none
+rename: none
+signature: none
+action: Replace `@if-unknown` with `@trust`
+  edit 32..43 -> "@trust"
+completion (1): integer

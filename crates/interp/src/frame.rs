@@ -36,8 +36,8 @@ use table::{
         ParquetReader, ParquetWriter, PlSmallStr, SerReader, SerWriter, col,
     },
     query::{
-        self, Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, Roll, Rows, Select, SortKey,
-        UnaryOp,
+        self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
+        Select, SortKey, UnaryOp,
     },
 };
 
@@ -86,10 +86,17 @@ local({
 })
 "#;
 
-/// Exports every function of the namespace and attaches them as `package:ry` at position 2.
+/// Exports every function of the namespace, the standard library's included, and attaches them
+/// as `package:ry` at position 2. The builtins bind the standard library in a `package:ry` just
+/// above base, which plain code without base R uses; once the default packages are attached, that
+/// environment is replaced by the full package in front of them, so `frame` masks
+/// `graphics::frame` and `ry::List.map` resolves through the namespace.
 const ATTACH: &str = r#"
 local({
   ns <- asNamespace("ry")
+  library <- as.environment("package:ry")
+  for (name in ls(library, all.names = TRUE)) assign(name, get(name, envir = library), envir = ns)
+  detach("package:ry", character.only = TRUE)
   functions <- ls(ns)
   exports <- new.env(hash = TRUE, parent = baseenv())
   for (name in functions) assign(name, name, envir = exports)
@@ -150,6 +157,12 @@ local({
   })
 })
 "#;
+
+/// The names `package:ry` binds beyond the standard library, read from the package's source so
+/// that the declarations in `types/ry.Rtypes` can be checked against them.
+pub fn package_functions() -> impl Iterator<Item = &'static str> {
+    PACKAGE.lines().filter_map(|line| line.split_once(" <- ").map(|(name, _)| name)).filter(|name| !name.starts_with(' '))
+}
 
 /// Attaches `package:ry` at position 2 of the search path.
 pub unsafe fn attach_package() -> R<()> {
@@ -698,9 +711,7 @@ unsafe fn do_bracket_values(call: &Call<'_>) -> R<Sexp> {
         && rows != missing_arg()
     {
         let positions = row_positions(rows, result.height(), call.call)?;
-        result = match query::execute(&mut result, Query { rows: Rows::Positions(positions), ..Query::default() })
-            .map_err(|failure| table_error(call.call, failure))?
-        {
+        result = match execute(&mut result, Query { rows: Rows::Positions(positions), ..Query::default() }, call.call)? {
             Output::Table(table) => table,
             _ => return Err(call.error("the row selection did not produce a frame")),
         };
@@ -847,6 +858,7 @@ unsafe fn render(table: &mut Table) -> R<String> {
     };
     let shown = match query::execute(table, Query { rows: Rows::Positions(positions.clone()), ..Query::default() })
         .map_err(|failure| error(failure.to_string()))?
+        .output
     {
         Output::Table(shown) => shown,
         _ => return Err(error("printing a frame did not select rows")),
@@ -1082,6 +1094,8 @@ struct Parts {
     mult: Option<Piece>,
     sdcols: Option<Piece>,
     with: Option<Piece>,
+    /// `by = .EACHI`, which belongs to the join rather than to `by`.
+    each_i: bool,
 }
 
 /// Runs `subject[i, j, by]`, where `call` is the whole `[` call as written.
@@ -1141,6 +1155,13 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
         env,
         call,
     };
+    if let Some(expression) = parts.by.as_ref().and_then(Piece::expression)
+        && expression.kind() == SexpType::Symbol
+        && symbol_name(expression) == ".EACHI"
+    {
+        parts.by = None;
+        parts.each_i = true;
+    }
     let by = match &parts.by {
         Some(piece) => lowering.by(piece)?,
         None => Some(Vec::new()),
@@ -1172,7 +1193,7 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
             };
             if assigns {
                 assign(subject, table, call, env, |table| {
-                    query::execute(table, query).map(|_| ()).map_err(|failure| table_error(call, failure))
+                    execute(table, query, call).map(|_| ())
                 })?
             } else {
                 finish(table, query, call)?
@@ -1186,11 +1207,34 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Sexp> {
 
 /// Runs a query that does not assign and wraps what it produced.
 unsafe fn finish(table: &mut Table, query: Query, call: Sexp) -> R<Sexp> {
-    match query::execute(table, query).map_err(|failure| table_error(call, failure))? {
+    match execute(table, query, call)? {
         Output::Table(result) => wrap(result),
         Output::Vector(series) => column_value(&series.into_column()),
         Output::Updated => Err(error_in(call, "the query updated the frame unexpectedly")),
     }
+}
+
+/// The text of a condition such as `a >= b` in `on = .(a >= b)`, for [`Lowering::condition`].
+unsafe fn deparse_condition(call: Sexp) -> R<String> {
+    let operator = call.car();
+    let arguments = values::pairlist_items(call.cdr());
+    match (operator.kind(), arguments.as_slice()) {
+        (SexpType::Symbol, [(_, left), (_, right)])
+            if left.kind() == SexpType::Symbol && right.kind() == SexpType::Symbol =>
+        {
+            Ok(format!("{} {} {}", symbol_name(*left), symbol_name(operator), symbol_name(*right)))
+        }
+        _ => Err(error("`on =` takes column names or comparisons between two columns")),
+    }
+}
+
+/// Runs `query` and raises the warnings data.table would raise for it as R warnings of `call`.
+unsafe fn execute(table: &mut Table, query: Query, call: Sexp) -> R<Output> {
+    let executed = query::execute(table, query).map_err(|failure| table_error(call, failure))?;
+    for warning in &executed.warnings {
+        conditions::warning_call(call, warning.to_string())?;
+    }
+    Ok(executed.output)
 }
 
 /// Applies an update to `subject`, whose table is `table`, under copy-on-modify: in place when
@@ -1319,31 +1363,39 @@ impl Lowering<'_> {
             drop_unmatched,
             roll,
             mult,
+            each_i: parts.each_i,
         })
     }
 
-    unsafe fn on(&self, piece: &Piece) -> R<Vec<(PlSmallStr, PlSmallStr)>> {
+    /// The join conditions of `on =`: `.(a, b = c, d >= e)` or `c("a", "b == c", "d>=e")`.
+    unsafe fn on(&self, piece: &Piece) -> R<Vec<On>> {
         if let Some(expression) = piece.expression()
             && (is_call_to(expression, ".") || is_call_to(expression, "list"))
         {
-            let mut pairs = Vec::new();
+            let mut conditions = Vec::new();
             for (tag, value) in values::pairlist_items(expression.cdr()) {
-                let other = match value.kind() {
-                    SexpType::Symbol => symbol_name(value).into_owned(),
-                    SexpType::String => values::require_string(value, "on")?,
+                let condition = match value.kind() {
+                    SexpType::Symbol => {
+                        let other = symbol_name(value).into_owned();
+                        On::equal(tag_name(tag).unwrap_or_else(|| other.clone()), other)
+                    }
+                    SexpType::String => {
+                        let text = values::require_string(value, "on")?;
+                        self.condition(tag_name(tag).as_deref(), &text)?
+                    }
+                    SexpType::Language if tag_name(tag).is_none() => self.condition(None, &deparse_condition(value)?)?,
                     _ => return Err(error_in(self.call, "`on =` takes column names")),
                 };
-                let own = tag_name(tag).unwrap_or_else(|| other.clone());
-                pairs.push((PlSmallStr::from(own), PlSmallStr::from(other)));
+                conditions.push(condition);
             }
-            return Ok(pairs);
+            return Ok(conditions);
         }
         let value = piece.value()?;
         if value.kind() != SexpType::String {
             return Err(error_in(self.call, "`on =` takes column names"));
         }
         let names = values::names(value);
-        let mut pairs = Vec::new();
+        let mut conditions = Vec::new();
         for (index, text) in values::strings(value).into_iter().enumerate() {
             let text = text.unwrap_or_default();
             let tag = if is_nil(names) {
@@ -1352,16 +1404,33 @@ impl Lowering<'_> {
                 values::string_at(names, index).filter(|name| !name.is_empty()).map(|name| name.into_owned())
             };
             for part in text.split(',') {
-                let part = part.trim();
-                let (own, other) = match (tag.as_deref(), part.split_once("==")) {
-                    (_, Some((own, other))) => (own.trim().to_string(), other.trim().to_string()),
-                    (Some(tag), None) => (tag.to_string(), part.to_string()),
-                    (None, None) => (part.to_string(), part.to_string()),
-                };
-                pairs.push((PlSmallStr::from(own), PlSmallStr::from(other)));
+                conditions.push(self.condition(tag.as_deref(), part)?);
             }
         }
-        Ok(pairs)
+        Ok(conditions)
+    }
+
+    /// One condition of `on =` written as text, such as `"a"`, `"a == b"` or `"a>=b"`. A tag
+    /// names the column of `x` when the text names only the column of `i`.
+    unsafe fn condition(&self, tag: Option<&str>, text: &str) -> R<On> {
+        const OPERATORS: [(&str, Comparison); 5] = [
+            ("==", Comparison::Equal),
+            (">=", Comparison::GreaterEqual),
+            ("<=", Comparison::LessEqual),
+            (">", Comparison::Greater),
+            ("<", Comparison::Less),
+        ];
+        let text = text.trim();
+        for (symbol, comparison) in OPERATORS {
+            if let Some((own, other)) = text.split_once(symbol) {
+                let (own, other) = (own.trim(), other.trim());
+                if own.is_empty() || other.is_empty() {
+                    return Err(error_in(self.call, format!("`on =` cannot read the condition `{text}`")));
+                }
+                return Ok(On::new(own, comparison, other));
+            }
+        }
+        Ok(On::equal(tag.unwrap_or(text), text))
     }
 
     unsafe fn select(
@@ -1989,7 +2058,7 @@ unsafe fn selected_positions(table: &mut Table, rows: Rows, call: Sexp) -> R<Vec
         select: Select::Value(Expr::Column(ROW_INDEX.into())),
         ..Query::default()
     };
-    match query::execute(&mut numbered, query).map_err(|failure| table_error(call, failure))? {
+    match execute(&mut numbered, query, call)? {
         Output::Vector(series) => Ok(series
             .i32()
             .map_err(|failure| error(failure.to_string()))?
@@ -2007,7 +2076,7 @@ unsafe fn selected(table: &mut Table, positions: Vec<u32>, call: Sexp) -> R<Tabl
         rows: Rows::Positions(positions),
         ..Query::default()
     };
-    match query::execute(table, query).map_err(|failure| table_error(call, failure))? {
+    match execute(table, query, call)? {
         Output::Table(result) => Ok(result),
         _ => Err(error_in(call, "the row selection did not produce a frame")),
     }

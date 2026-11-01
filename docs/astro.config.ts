@@ -92,6 +92,7 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					items: [
+						{ slug: 'reference/standard-library' },
 						{ slug: 'reference/configuration' },
 						{ slug: 'reference/cli' },
 						{ slug: 'reference/package-loading' },

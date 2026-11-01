@@ -37,7 +37,8 @@ expects a `data.frame` is a type error.
 ## Queries
 
 `x[i, j, by]` works as in data.table: `i` filters or orders rows, `j` selects or computes columns,
-and `by` or `keyby` groups. Joins take `on =`, `nomatch = NULL`, `mult =` and `roll =`, and `.N`, `.SD`,
+and `by` or `keyby` groups. Joins take `on =` (including non-equi conditions such as `on = .(id, t >= lo)`),
+`nomatch = NULL`, `mult =`, `roll =` and `by = .EACHI`, and `.N`, `.SD`,
 `.SDcols`, `.I` and `.GRP` are available. Columns are in scope inside the brackets, so `amount`
 above is the column.
 
@@ -46,6 +47,8 @@ Common aggregations (`sum`, `mean`, `min`, `max`, `median`, `sd`, `var`, `first`
 other R code still works: ry evaluates it as R code, once per group, with the columns it mentions
 bound as vectors, so it is slower but correct. A `by` that computes groups, `:=` with `by`, and a
 join whose `j` needs R code are not supported yet on that path and stop with an error saying so.
+Where data.table warns, for example when a group's integer sum overflows into doubles or `:=`
+truncates a value into an integer column, a frame query raises the same warning.
 
 ## Updating columns
 

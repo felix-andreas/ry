@@ -1,0 +1,104 @@
+[stdout]
+| [1] 66
+|  [1] "adj"       "ann"       "ask"       "bg"        "bty"       "cex"      
+|  [7] "cex.axis"  "cex.lab"   "cex.main"  "cex.sub"   "col"       "col.axis" 
+| [13] "col.lab"   "col.main"  "col.sub"   "crt"       "err"       "family"   
+| [19] "fg"        "fig"       "fin"       "font"      "font.axis" "font.lab" 
+| [25] "font.main" "font.sub"  "lab"       "las"       "lend"      "lheight"  
+| [31] "ljoin"     "lmitre"    "lty"       "lwd"       "mai"       "mar"      
+| [37] "mex"       "mfcol"     "mfg"       "mfrow"     "mgp"       "mkh"      
+| [43] "new"       "oma"       "omd"       "omi"       "pch"       "pin"      
+| [49] "plt"       "ps"        "pty"       "smo"       "srt"       "tck"      
+| [55] "tcl"       "usr"       "xaxp"      "xaxs"      "xaxt"      "xlog"     
+| [61] "xpd"       "yaxp"      "yaxs"      "yaxt"      "ylbias"    "ylog"     
+| List of 12
+|  $ mar: num [1:4] 5.1 4.1 4.1 2.1
+|  $ mai: num [1:4] 1.02 0.82 0.82 0.42
+|  $ oma: num [1:4] 0 0 0 0
+|  $ omi: num [1:4] 0 0 0 0
+|  $ mgp: num [1:3] 3 1 0
+|  $ tcl: num -0.5
+|  $ las: int 0
+|  $ cex: num 1
+|  $ ps : int 12
+|  $ lwd: num 1
+|  $ lty: chr "solid"
+|  $ pch: int 1
+| List of 10
+|  $ fin : num [1:2] 7 7
+|  $ pin : num [1:2] 5.76 5.16
+|  $ plt : num [1:4] 0.117 0.94 0.146 0.883
+|  $ fig : num [1:4] 0 1 0 1
+|  $ din : num [1:2] 7 7
+|  $ usr : num [1:4] 0 1 0 1
+|  $ xaxp: num [1:3] 0 1 5
+|  $ yaxp: num [1:3] 0 1 5
+|  $ xlog: logi FALSE
+|  $ ylog: logi FALSE
+| List of 10
+|  $ bg       : chr "transparent"
+|  $ fg       : chr "black"
+|  $ col      : chr "black"
+|  $ col.axis : chr "black"
+|  $ col.lab  : chr "black"
+|  $ col.main : chr "black"
+|  $ col.sub  : chr "black"
+|  $ family   : chr ""
+|  $ font     : int 1
+|  $ font.main: int 2
+| List of 13
+|  $ adj   : num 0.5
+|  $ ann   : logi TRUE
+|  $ ask   : logi FALSE
+|  $ bty   : chr "o"
+|  $ cra   : num [1:2] 10.8 14.4
+|  $ cin   : num [1:2] 0.15 0.2
+|  $ csi   : num 0.2
+|  $ cxy   : num [1:2] 0.026 0.0388
+|  $ err   : int 0
+|  $ lab   : int [1:3] 5 5 7
+|  $ lend  : chr "round"
+|  $ ljoin : chr "round"
+|  $ lmitre: num 10
+| List of 13
+|  $ mex  : num 1
+|  $ mfcol: int [1:2] 1 1
+|  $ mfg  : int [1:4] 1 1 1 1
+|  $ mfrow: int [1:2] 1 1
+|  $ mkh  : num 0.001
+|  $ new  : logi FALSE
+|  $ page : logi TRUE
+|  $ pty  : chr "m"
+|  $ smo  : num 1
+|  $ srt  : num 0
+|  $ xaxs : chr "r"
+|  $ xaxt : chr "s"
+|  $ xpd  : logi FALSE
+| List of 4
+|  $ mar: num [1:4] 5.1 4.1 4.1 2.1
+|  $ cex: num 1
+|  $ las: int 0
+|  $ bg : chr "transparent"
+| [1] 1 2 3 4
+| [1] 0.2 0.4 0.6 0.8
+| [1] 1.5
+| [1] 0.2
+| [1] 5.1 4.1 4.1 2.1
+| [1] 2.5 2.5 2.5 2.5
+| [1] 0.4 0.4 0.4 0.4
+| [1] 0.08064516 0.91935484 0.08064516 0.91935484
+| [1] 5.2 5.2
+| [1] "graphical parameter \"mar\" has the wrong length"
+| [1] "invalid value specified for graphical parameter \"cex\""
+| [1] "invalid hex digit in 'color' or 'lty'"
+| [1] "dashed"
+| [1] "dotted"
+| [1] "x"
+| [1] "#DF536B"
+| [1] "#FF000080"
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c("null device" = 1L)
