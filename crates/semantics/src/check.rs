@@ -5442,6 +5442,21 @@ impl<'db> Checker<'db, '_> {
         if arguments.is_empty() {
             return Ty::new(self.db, TyKind::Tuple(Vec::new()));
         }
+        // `list(...)` takes whatever names and arity the caller passed, so its shape is unknown.
+        let module = self.module;
+        let spreads_dots = arguments.iter().any(|argument| {
+            argument.value.is_some_and(|value| {
+                matches!(&module.expression(value).kind, ExpressionKind::NameRef(name) if name == "...")
+            })
+        });
+        if spreads_dots {
+            for argument in arguments {
+                if let Some(value) = argument.value {
+                    self.infer(value);
+                }
+            }
+            return Ty::new(self.db, TyKind::NamedList(unknown(self.db)));
+        }
         let all_named = arguments.iter().all(|argument| argument.name.is_some());
         let all_unnamed = arguments.iter().all(|argument| argument.name.is_none());
         if !(all_named || all_unnamed) {
@@ -8501,7 +8516,11 @@ impl<'db> Checker<'db, '_> {
                 range,
                 kind: TypeErrorKind::DollarOnAtomicVector { found: subject },
             }),
-            TyKind::NamedList(element) => Ok(union_of(self.db, [*element, null(self.db)])),
+            // An array-like list can still carry names at run time (`names(x) <- ...`, or a value
+            // a stub types loosely), and R reads a missing name as `NULL`.
+            TyKind::NamedList(element) | TyKind::List(element) => {
+                Ok(union_of(self.db, [*element, null(self.db)]))
+            }
             TyKind::Frame(None) => Ok(unknown(self.db)),
             TyKind::Frame(Some(columns)) => {
                 match columns
@@ -8547,7 +8566,7 @@ impl<'db> Checker<'db, '_> {
                     }),
                 }
             }
-            TyKind::Tuple(_) | TyKind::NativeTuple(_) | TyKind::List(_) => Err(TypeError {
+            TyKind::Tuple(_) | TyKind::NativeTuple(_) => Err(TypeError {
                 range: name_range,
                 kind: TypeErrorKind::FieldDoesNotExist {
                     suggestion: None,
