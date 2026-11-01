@@ -417,7 +417,10 @@ fn errors_come_back_on_the_error_stream() {
         return;
     };
     session.send("stop(\"boom\")\r");
-    session.expect("boom");
+    // The echoed command already contains "boom", so only the message's prefix shows that R
+    // reported the error, and the next line is sent once the command has finished, not while
+    // it may still be running.
+    session.expect("Error: boom");
     session.send("1 + 1\r");
     session.expect("[1] 2");
     session.quit();

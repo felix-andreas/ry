@@ -169,7 +169,7 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **A gate must fail on its own exit status.** `cmd | grep …; echo OK` always passes, and a background job's output file can be read mid-write.
 - **A simulator failure is a server bug until shown otherwise, but check the client model first.** Two false-positive classes came from the simulator, not the server: a reopened document must continue its version from the last one (VS Code does), and the first-wave-is-a-subset check only holds when no config or disk change landed since the sync.
 - **`syntax::testing::enable_invariants()` makes every splice reparse also parse from scratch.** The simulator turns it on; a harness that drives incremental code should too.
-- **The REPL pty suite flakes under concurrent load** (one failure, and a suite wall time of 41 s instead of 4 to 6 s). Re-run it serially before believing it. A real desync reproduces and takes about 90 s.
+- **A REPL pty test must expect text the echoed command cannot contain** (`Error: boom`, not `boom`; a `cat` of joined words). Matching the echo returns before the command runs, so the next line races its evaluation and the test asserts nothing about the output.
 
 ### REPL and environment
 
