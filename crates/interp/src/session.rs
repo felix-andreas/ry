@@ -32,6 +32,11 @@ pub struct StartOptions {
 pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
+    // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
+    // functions must agree: iconv's `//TRANSLIT` and packages calling `mbrtowc` read
+    // LC_CTYPE, which stays "C" (ASCII) until something sets it. Numeric formatting keeps
+    // the C locale, so only LC_CTYPE changes. A system without C.UTF-8 keeps ASCII.
+    libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
     read_renviron();
     crate::envir::install_default_options()?;
     let machine = crate::system::machine()?;

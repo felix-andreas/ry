@@ -2551,6 +2551,16 @@ enum NaTest {
 
 unsafe fn na_test(call: &Call<'_>, test: NaTest) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
+    // GNU R tests a pairlist's elements like a list's, but drops the tags.
+    let operand = if operand.kind() == SexpType::Pairlist && test == NaTest::Na {
+        let items: Vec<Sexp> = values::pairlist_items(operand)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        values::list_vector(&items)?
+    } else {
+        operand
+    };
     let count = length(operand);
     let result = alloc(SexpType::Logical, count)?;
     match operand.kind() {
@@ -2671,9 +2681,16 @@ unsafe fn any_na(operand: Sexp, recursive: bool) -> R<bool> {
         SexpType::String => {
             (0..length(operand)).any(|index| operand.element(index) == values::na_string())
         }
-        SexpType::List => {
-            for index in 0..length(operand) {
-                let element = operand.element(index);
+        SexpType::List | SexpType::Pairlist => {
+            let elements = if operand.kind() == SexpType::List {
+                values::list_items(operand)
+            } else {
+                values::pairlist_items(operand)
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect()
+            };
+            for element in elements {
                 let na = if recursive || (element.kind().is_atomic() && length(element) == 1) {
                     any_na(element, recursive)?
                 } else {
@@ -2694,6 +2711,9 @@ unsafe fn any_na(operand: Sexp, recursive: bool) -> R<bool> {
 unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
     let from = call.arg(0);
     let to = call.arg(1);
+    if values::inherits(from, "factor") && values::inherits(to, "factor") {
+        return factor_interaction(call, from, to);
+    }
     if length(from) == 0 || length(to) == 0 {
         return Err(call.error("argument of length 0"));
     }
@@ -2720,6 +2740,45 @@ unsafe fn do_colon(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("NA/NaN argument"));
     }
     colon(start, end)
+}
+
+/// `f:g` for two factors: the factor of their level pairs, levels ordered by `f` first.
+unsafe fn factor_interaction(call: &Call<'_>, left: Sexp, right: Sexp) -> R<Sexp> {
+    let count = length(left);
+    if length(right) != count {
+        return Err(call.error("unequal factor lengths"));
+    }
+    let left_levels = get_attr(left, symbols().levels);
+    let right_levels = get_attr(right, symbols().levels);
+    let right_count = length(right_levels);
+    let left_codes = coerce_vector(left, SexpType::Integer)?;
+    let right_codes = coerce_vector(right, SexpType::Integer)?;
+    let result = alloc(SexpType::Integer, count)?;
+    for index in 0..count {
+        let (a, b) = (
+            values::ints(left_codes)[index],
+            values::ints(right_codes)[index],
+        );
+        values::ints_mut(result)[index] = if a == NA_INTEGER || b == NA_INTEGER {
+            NA_INTEGER
+        } else {
+            (a - 1) * right_count as i32 + b
+        };
+    }
+    let mut labels = Vec::with_capacity(length(left_levels) * right_count);
+    for a in 0..length(left_levels) {
+        for b in 0..right_count {
+            labels.push(format!(
+                "{}:{}",
+                values::char_str(left_levels.element(a)),
+                values::char_str(right_levels.element(b))
+            ));
+        }
+    }
+    let levels = values::string_vector(&labels)?;
+    values::set_attr(result, symbols().levels, levels)?;
+    values::set_attr(result, symbols().class, values::scalar_string("factor")?)?;
+    Ok(result)
 }
 
 /// `from:to`: integers when `from` is a whole number and the sequence fits, doubles otherwise.

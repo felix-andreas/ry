@@ -216,6 +216,7 @@ pub unsafe fn dispatch_length(object: Sexp, env: Sexp) -> R<usize> {
     }
     let function = crate::builtins::primitive("length").ok_or_else(|| error("no length"))?;
     let value = eval::apply(nil(), function, &eval::value_args(&[object]), env)?;
+    let value = crate::coerce::coerce_vector(value, SexpType::Integer)?;
     Ok(values::as_integer_scalar(value).max(0) as usize)
 }
 

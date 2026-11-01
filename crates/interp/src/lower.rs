@@ -1377,9 +1377,21 @@ unsafe fn literal(token: &SyntaxToken) -> R<Sexp> {
         SyntaxKind::INTEGER => {
             let body = &text[..text.len() - 1];
             let value = parse_number(body);
+            let decimal = body.contains('.');
             if value.fract() == 0.0 && value.abs() <= i32::MAX as f64 {
+                let hex = body.starts_with("0x") || body.starts_with("0X");
+                if decimal && (hex || !body.contains(['e', 'E'])) {
+                    crate::conditions::warning(format!(
+                        "integer literal {text} contains unnecessary decimal point"
+                    ))?;
+                }
                 values::scalar_integer(value as i32)
             } else {
+                crate::conditions::warning(if decimal {
+                    format!("integer literal {text} contains decimal; using numeric value")
+                } else {
+                    format!("non-integer value {text} qualified with L; using numeric value")
+                })?;
                 values::scalar_real(value)
             }
         }

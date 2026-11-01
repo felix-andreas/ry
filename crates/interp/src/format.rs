@@ -280,10 +280,13 @@ pub fn localize_decimal(text: String) -> String {
     OUTPUT_DECIMAL.with(|decimal| {
         let decimal = decimal.borrow();
         if decimal.as_str() == "." || !text.contains('.') {
-            text
-        } else {
-            text.replace('.', &decimal)
+            return text;
         }
+        // The common width was measured with a one-character mark, so a shorter mark gives
+        // back the padding it would have taken.
+        let shortfall = 1usize.saturating_sub(decimal.chars().count());
+        let padding = text.len() - text.trim_start_matches(' ').len();
+        text[padding.min(shortfall)..].replace('.', &decimal)
     })
 }
 
@@ -545,8 +548,8 @@ pub unsafe fn format_vector(
             let items: Vec<String> = data
                 .iter()
                 .map(|&value| {
-                    let text = localize_decimal(format_real_with(value, format, na_string));
-                    pad(&text, format.width, true)
+                    let text = format_real_with(value, format, na_string);
+                    localize_decimal(pad(&text, format.width, true))
                 })
                 .collect();
             justify(items, true)

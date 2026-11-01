@@ -42,7 +42,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("debugonce", 3, |_| unsafe { Ok(nil()) }).invisible(),
     internal("isdebugged", 1, |_| unsafe { scalar_bool(false) }),
     internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("traceOnOff", 1, |_| unsafe { scalar_bool(false) }),
+    internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
     internal("browserText", 1, |call| unsafe {
         Err(call.error("no browser context to query"))
     }),
@@ -2947,4 +2947,25 @@ unsafe fn link_paths(call: &Call<'_>, function: impl Fn(&str, &str) -> bool) -> 
         };
     }
     Ok(result)
+}
+
+thread_local! {
+    /// Whether `trace()`'s inserted calls run. `.doTrace` turns it off while a tracer runs,
+    /// so a tracer that calls the traced function does not recurse.
+    static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
+/// unless that is `NULL`.
+unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
+    let state = call.arg(0);
+    let previous = TRACING.with(|tracing| tracing.get());
+    if state != nil() {
+        let value = values::as_logical_scalar(state);
+        if value == NA_LOGICAL {
+            return Err(call.error("Value for 'tracingState' must be TRUE or FALSE"));
+        }
+        TRACING.with(|tracing| tracing.set(value != 0));
+    }
+    scalar_bool(previous)
 }

@@ -748,9 +748,7 @@ impl Deparser {
             self.deparse(head);
         }
         self.print("(");
-        self.in_list += 1;
         self.arguments(arguments, false);
-        self.in_list -= 1;
         self.print(")");
     }
 
@@ -1008,9 +1006,16 @@ impl Deparser {
     unsafe fn plain_call(&mut self, name: &str, arguments: Sexp) {
         self.print(name);
         self.print("(");
-        self.in_list += 1;
+        // GNU R keeps a braced `if` on one line inside the arguments of a call to a
+        // primitive (`c`, `list`, `quote`), but breaks it inside any other call's.
+        let primitive = crate::builtins::primitive(name).is_some();
+        if primitive {
+            self.in_list += 1;
+        }
         self.arguments(arguments, false);
-        self.in_list -= 1;
+        if primitive {
+            self.in_list -= 1;
+        }
         self.print(")");
     }
 
@@ -1044,11 +1049,9 @@ impl Deparser {
             }
             if alternative.kind() == SexpType::Pairlist {
                 self.deparse(consequent);
+                self.write_line();
                 if !curly_ahead {
-                    self.write_line();
                     self.indent -= 1;
-                } else {
-                    self.print(" ");
                 }
                 self.print("else ");
                 self.deparse(alternative.car());
@@ -1072,7 +1075,6 @@ impl Deparser {
         let names = get_attr(list, symbols().names);
         let nice = self.opts & options::NICE_NAMES != 0 && names != nil();
         self.print(opener);
-        self.in_list += 1;
         let mut broken = false;
         for index in 0..count {
             // GNU R's vector deparse breaks a line that is past the cutoff before the next element
@@ -1092,7 +1094,6 @@ impl Deparser {
         if broken {
             self.indent -= 1;
         }
-        self.in_list -= 1;
         self.print(")");
     }
 

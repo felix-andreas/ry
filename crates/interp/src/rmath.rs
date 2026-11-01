@@ -2118,8 +2118,11 @@ fn gamma_density_factor(x: f64, shape: f64, log: bool) -> f64 {
 /// `-shape log1pmx(lambda - 1)` is accurate to a few rounding errors relative. Far below,
 /// `lambda - 1` would round away `lambda` itself, but the logarithm dominates the direct form.
 fn gamma_deviance(x: f64, shape: f64) -> f64 {
-    if x >= 0.25 * shape {
-        -shape * log1pmx((x - shape) / shape)
+    let relative = (x - shape) / shape;
+    // A tiny shape against a huge `x` overflows `lambda - 1`; that far from 1 the direct form
+    // has nothing to cancel.
+    if x >= 0.25 * shape && relative.is_finite() {
+        -shape * log1pmx(relative)
     } else {
         shape * (shape.ln() - x.ln()) + x - shape
     }
@@ -4795,7 +4798,28 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
         }
         t = next;
     }
-    if near_zero { t } else { 0.5 - t + 0.5 }
+    let quantile = if near_zero { t } else { 0.5 - t + 0.5 };
+    // Newton's method converges in t, and turning a t near 1/2 into 1 - t rounds, so the
+    // quantile can land a few doubles from the one whose probability is nearest the target.
+    // A short walk over neighbouring doubles settles it.
+    let miss = |x: f64| (pbeta(x, p, q, lower, log) - alpha).abs();
+    let mut best = quantile;
+    let mut best_miss = miss(best);
+    for step in [f64::next_up, f64::next_down] {
+        loop {
+            let candidate = step(best);
+            if !(candidate > 0.0 && candidate < 1.0) {
+                break;
+            }
+            let candidate_miss = miss(candidate);
+            if candidate_miss >= best_miss {
+                break;
+            }
+            best = candidate;
+            best_miss = candidate_miss;
+        }
+    }
+    best
 }
 
 /// AS 109's approximation of the lower-tail beta quantile at log probability `log_p`.
@@ -5995,6 +6019,15 @@ fn poisson_mixture_tails(
 /// The requested tail and scale from both tails of a mixture. A log probability near zero
 /// comes from the other tail, which keeps the digits the direct one has lost.
 fn mixture_tail(lower_sum: f64, upper_sum: f64, lower: bool, log: bool) -> f64 {
+    // The Poisson weights that were summed fall short of 1 by rounding and by the truncated
+    // remainder, so the tails are scaled by their total. Without that, a mixture whose every
+    // component is exactly 1 would come out a few units in the last place below 1.
+    let total = lower_sum + upper_sum;
+    let (lower_sum, upper_sum) = if total > 0.0 {
+        (lower_sum / total, upper_sum / total)
+    } else {
+        (lower_sum, upper_sum)
+    };
     let (direct, other) = if lower {
         (lower_sum, upper_sum)
     } else {
