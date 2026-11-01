@@ -9,9 +9,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 completion (1): y
-hint @5: record{x: double, y: character}
+hint @5: Record{x: double, y: character}
 
 #---- hover_on_a_tag_literal
 some <- :So$0me(5L)
@@ -74,9 +74,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: record{x: double, y: character}\n"
+  edit 18..18 -> "  #: Record{x: double, y: character}\n"
 completion (2): x, y
-hint @25: record{x: double, y: character}
+hint @25: Record{x: double, y: character}
 
 #---- completion_after_dollar_with_a_prefix
 f <- function() {
@@ -90,9 +90,9 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "  #: record{height: double, width: double}\n"
+  edit 18..18 -> "  #: Record{height: double, width: double}\n"
 completion (1): width
-hint @25: record{height: double, width: double}
+hint @25: Record{height: double, width: double}
 
 #---- completion_after_colon_in_an_arm_offers_tags
 #: fn(o: :Some(integer) | :None | :Pending) -> integer
@@ -126,7 +126,7 @@ signature: none
 completion (1): Pending
 
 #---- record_pattern_field_binding
-#: fn(r: record{x: double, y: character}) -> character
+#: fn(r: Record{x: double, y: character}) -> character
 f <- function(r) {
   match (r) {
     (x = a, y = la$0bel) => label
@@ -199,11 +199,11 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotation for `point`
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: record{x: double, y: character}\n"
+  edit 0..0 -> "#: Record{x: double, y: character}\n"
 completion (28): X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs, xfig
-hint @5: record{x: double, y: character}
+hint @5: Record{x: double, y: character}
 
 #---- hover_on_a_tag_payload_field_name
 shape <- :Circle(rad$0ius = 2)
@@ -217,7 +217,7 @@ action: Add inferred type annotation for `shape`
   edit 0..0 -> "#: :Circle(radius: double)\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: :Circle(radius: double)\n"
-completion (98): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
+completion (101): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
 hint @5: :Circle(radius: double)
 
 #---- tag_references_and_rename_cover_values_patterns_and_types
@@ -317,11 +317,11 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: tuple{integer, character}\n"
-  edit 18..18 -> "#: record{first: integer}\n"
+  edit 0..0 -> "#: Tuple{integer, character}\n"
+  edit 18..18 -> "#: Record{first: integer}\n"
 completion: none
-hint @4: tuple{integer, character}
-hint @23: record{first: integer}
+hint @4: Tuple{integer, character}
+hint @23: Record{first: integer}
 
 #---- no_hint_restates_a_payload_free_tag
 nothing <- :None
@@ -340,7 +340,7 @@ completion (6): nothing, nobs, noquote, norm, normalizePath, nottem
 hint @21: :Some(integer)
 
 #---- nominal_record_field_completion
-type Point = record{x: double, y: double}
+type Point = Record{x: double, y: double}
 p <- @Point(x = 1, y = 2)
 p$$0
 #++++
@@ -352,7 +352,7 @@ signature: none
 completion (2): x, y
 
 #---- nominal_record_field_hover
-type Point = record{x: double, y: double}
+type Point = Record{x: double, y: double}
 p <- @Point(x = 1, y = 2)
 p$y$0
 #++++
@@ -427,6 +427,6 @@ references: none
 rename: none
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: record{x: double, y: double}\n"
+  edit 0..0 -> "#: Record{x: double, y: double}\n"
 completion (2): x, y
-hint @5: record{x: double, y: double}
+hint @5: Record{x: double, y: double}

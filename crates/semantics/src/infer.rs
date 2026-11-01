@@ -7,6 +7,7 @@ use crate::annotations::NamedDefinition;
 use crate::diagnostics::nearest_name;
 use crate::stubs::stubs;
 use crate::types::{
+    FrameKind,
     Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, for_each_child_type,
     map_child_types, scalar, substitute_rigid, union_of, unknown,
 };
@@ -382,11 +383,16 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
+            (TyKind::Frame(left_kind, _), TyKind::Frame(right_kind, _))
+                if !same_frame_kind(*left_kind, *right_kind) =>
+            {
+                Err(UnifyError::Mismatch(a, b))
+            }
             // A frame whose columns are unknown makes no claim to check.
-            (TyKind::Frame(None), TyKind::Frame(_)) | (TyKind::Frame(_), TyKind::Frame(None)) => {
+            (TyKind::Frame(_, None), TyKind::Frame(..)) | (TyKind::Frame(..), TyKind::Frame(_, None)) => {
                 Ok(())
             }
-            (TyKind::Frame(Some(left)), TyKind::Frame(Some(right))) => {
+            (TyKind::Frame(_, Some(left)), TyKind::Frame(_, Some(right))) => {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
                 }
@@ -839,6 +845,13 @@ impl<'db> InferenceTable<'db> {
                         }
                     })
             }
+            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
+            // fit each other both ways.
+            (TyKind::Named(name, arguments), TyKind::Frame(FrameKind::DataTable, _))
+                if arguments.is_empty() && name.text(db) == "data.table" =>
+            {
+                true
+            }
             // Only the projection direction: structural into nominal happens only via `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
                 match self.representation(db, *actual_name, actual_arguments) {
@@ -888,10 +901,15 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            (TyKind::Frame(None), TyKind::Frame(_)) | (TyKind::Frame(_), TyKind::Frame(None)) => {
+            (TyKind::Frame(actual_kind, _), TyKind::Frame(expected_kind, _))
+                if !same_frame_kind(*actual_kind, *expected_kind) =>
+            {
+                false
+            }
+            (TyKind::Frame(_, None), TyKind::Frame(..)) | (TyKind::Frame(..), TyKind::Frame(_, None)) => {
                 true
             }
-            (TyKind::Frame(Some(actual_columns)), TyKind::Frame(Some(expected_columns)))
+            (TyKind::Frame(_, Some(actual_columns)), TyKind::Frame(_, Some(expected_columns)))
                 if actual_columns.len() == expected_columns.len() =>
             {
                 expected_columns.iter().all(|expected_column| {
@@ -908,24 +926,24 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            // A frame is no data.frame, but ry's table stands in for data.table: `fread` and
-            // the `set*` family read and return frames, so a frame satisfies a `data.table`
-            // parameter.
-            (TyKind::Frame(_), TyKind::Named(name, arguments))
+            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
+            // fit each other both ways.
+            (TyKind::Frame(FrameKind::DataTable, _), TyKind::Named(name, arguments))
                 if arguments.is_empty() && name.text(db) == "data.table" =>
             {
                 true
             }
             // `as.list` turns a frame into the list of its columns, which is how `lapply`,
-            // `Map` and `Filter` iterate one.
-            (TyKind::Frame(None), TyKind::List(_) | TyKind::NamedList(_)) => true,
-            (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
+            // `Map` and `Filter` iterate one. A plan or a grouping is not a list of columns.
+            (TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _), TyKind::List(_) | TyKind::NamedList(_)) => false,
+            (TyKind::Frame(_, None), TyKind::List(_) | TyKind::NamedList(_)) => true,
+            (TyKind::Frame(_, Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
                 if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
             {
                 let joined = union_of(db, columns.iter().map(|column| column.ty));
                 self.unify(db, *element, joined).is_ok()
             }
-            (TyKind::Frame(Some(columns)), TyKind::List(element) | TyKind::NamedList(element)) => {
+            (TyKind::Frame(_, Some(columns)), TyKind::List(element) | TyKind::NamedList(element)) => {
                 columns
                     .iter()
                     .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
@@ -1679,5 +1697,17 @@ mod tests {
             }),
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
+    }
+}
+
+/// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind
+/// only when both sides know it: a written `GroupBy{...}` names no keys.
+fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
+    match (left, right) {
+        (
+            FrameKind::GroupBy { lazy: left_lazy, keys: left_keys },
+            FrameKind::GroupBy { lazy: right_lazy, keys: right_keys },
+        ) => left_lazy == right_lazy && (left_keys == right_keys || left_keys == 0 || right_keys == 0),
+        _ => left == right,
     }
 }

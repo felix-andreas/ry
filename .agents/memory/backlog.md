@@ -1872,7 +1872,24 @@ pins to interact. What is pinned instead is the structural property the fix rest
 `refusal_is_idempotent` in `semantics.rs`. That is the part testable without reproducing the cycle.
 The end-to-end guard rests on the corpus suites.
 
-## Open: the built-in frame
+## Open: DataFrame
+
+- **Slower than data.table on two bench questions** (`tools/bench/table`, 1e6 rows): groupby q6
+  (median and sd per group, 0.13 s against 0.08 s) and the keyed rolling join (0.03 s against
+  0.02 s). The Rust engine alone runs q6 in 0.06 s, so most of the gap is the R-side call path.
+- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
+  `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
+  expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
+  has no parquet predicate statistics use beyond what Polars' reader does.
+- **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
+  column string to the verb or constructor argument that created it are not implemented; hover and
+  completion are.
+- **Checker:** an expression held in a variable (`e <- col("x") * 2`) leaves a verb's columns
+  unknown, because the refinement reads argument syntax. Typing `Expr` with its column type
+  (`Expr<double>`) would close it. The column-error wording says "the frame `x`" for every table
+  kind.
+- **R precedence trap:** `col("a") * 2 |> Expr.alias("b")` pipes only the `2`. A lint that
+  recognizes a pipe into an `Expr.` function whose left side is a literal would catch it.
 
 - **Query features:** a `by` that needs R code, `:=` with `by` on the R path, and a join whose `j`
   needs R code (including under `.EACHI`) stop with an error.
@@ -1902,12 +1919,10 @@ The end-to-end guard rests on the corpus suites.
 - **The checker and the runtime disagree about data.table's readers.** The stubs type `fread`,
   `rbindlist`, `melt` and `dcast` as returning frames, because ry's table replaces data.table, but
   under ry's runtime an attached data.table still runs its own versions, which return a
-  `data.table` and reject a frame. The runtime needs these names routed to the engine
-  (`table::io::read_csv`, `table::ops`), for example by a `data.table` shim that ry's R home
-  installs, before the checker's types are true at run time. The `[` bridge
-  (`crates/interp/src/data_table.rs`) sets the rule to follow: take over only where the output is
-  identical to data.table's (attributes, key, selfref), build results through `.datatable_result`,
-  and decline to data.table otherwise.
+  `data.table` and reject a frame. Routing them to the engine was measured and rejected
+  (`decisions.md`, "data.table's helpers run data.table's own C"), so the fix is in the checker:
+  type a call that resolves to data.table's export as returning `data.table`, and keep frames for
+  `frame_read_csv` and the other `ry` functions.
 - **Checker, data.table functions:** `fifelse` on a scalar `test` still types as a vector;
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
@@ -1916,6 +1931,22 @@ The end-to-end guard rests on the corpus suites.
   against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
   through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
   `ops::key_digits`, as `unique` does, would skip the general grouping.
+- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `dcast` takes 0.030 to
+  0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
+  bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
+  `setkey` is at parity (0.026 s on both).
+- **data.table's helpers that allocate many large vectors trail GNU R at 1e7 rows.** In
+  `tools/bench/table/ops.R`, `rbindlist` takes 1.26 s against 0.85 s, `fwrite` 1.21 s against
+  0.76 s and `melt` 1.38 s against 1.21 s; `setkey`, `dcast`, `unique` and the single-loop helpers
+  are at parity or faster. In `rbindlist` about 0.3 s is collection (minor collections tracing the
+  fresh 2e7-element character columns, and one major collection), and `SET_STRING_ELT`'s barrier
+  and reference counts touch each CHARSXP header. `fwrite` has not been profiled.
+- **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
+  `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
+  against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
+  digits cover factors, integers and logicals only. A string digit from `ops::string_ranks` was
+  tried and was slower (ranking sorts the distinct strings), so a digit needs first-appearance
+  numbers taken during import, where each distinct CHARSXP is already numbered.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every

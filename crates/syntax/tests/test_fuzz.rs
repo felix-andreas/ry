@@ -53,8 +53,8 @@ const SEEDS: &[&str] = &[
     "s <- :Rect(width = 2, height = 3); n <- :None",
     "match (s) {\n  :Circle(radius = r) => r\n  :Rect(width = w, ..) if (w > 0) => w\n  (a, _) | (_, a) => a\n  -1L => 0; _ => NULL\n}",
     "x: :Some(integer) | :None | .. <- :None",
-    "f <- function(p: record{x: double}, t: tuple{integer}) -> :Ok(value: double) p",
-    "type UserId = integer\nalias Pair<T: numeric> = tuple{T, T}\nu <- @UserId(5L)",
+    "f <- function(p: Record{x: double}, t: Tuple{integer}) -> :Ok(value: double) p",
+    "type UserId = integer\nalias Pair<T: numeric> = Tuple{T, T}\nu <- @UserId(5L)",
     "type Shape =\n  :Circle(radius: double) |\n  :Rect(width: double, height: double)\ns <- @Shape(:Circle(radius = 1))",
     "alias Point = list{\n  x: double, # across\n  y: double,\n}\np: @new Point <- list(x = 1, y = 2)",
     "x: @trust integer <- f(); y: @if-unknown character | NULL <- g()",
@@ -150,8 +150,8 @@ const ALPHABET: &[&str] = &[
     "..",
     ":None",
     ":Some(",
-    "record{",
-    "tuple{",
+    "Record{",
+    "Tuple{",
 ];
 
 fn iterations() -> usize {

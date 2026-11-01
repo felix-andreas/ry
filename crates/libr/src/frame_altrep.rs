@@ -90,7 +90,7 @@ pub unsafe fn expose_column(table: &Table, name: &str) -> ApiResult<Sexp> {
 }
 
 /// Exposes the whole frame as the R object `frame(...)` returns: a list of exposed columns with
-/// names, compact row names and the class `c("frame", "data.frame")`.
+/// names, compact row names and the class `c("DataFrame", "data.frame")`.
 ///
 /// # Safety
 ///
@@ -114,7 +114,7 @@ pub unsafe fn expose_table(table: &Table) -> ApiResult<Sexp> {
             .slice_mut::<i32>()
             .copy_from_slice(&[NA_INTEGER, -(height as i32)]);
         set_attrib(list, R_RowNamesSymbol.get(), row_names)?;
-        class_gets(list, strings(&["frame", "data.frame"])?)?;
+        class_gets(list, strings(&["DataFrame", "data.frame"])?)?;
         Ok(list)
     }
 }

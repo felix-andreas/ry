@@ -23,16 +23,22 @@ fn home() -> &'static PathBuf {
             .parent()
             .expect("its directory")
             .to_path_buf();
-        // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test.
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"])
-            .status()
-            .expect("cargo build");
-        assert!(status.success(), "building ry-rcmd failed");
-        let rcmd = deps
-            .parent()
-            .expect("the profile directory")
-            .join("ry-rcmd");
+        // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test,
+        // in the profile directory the test itself runs from.
+        let profile_directory = deps.parent().expect("the profile directory");
+        let mut build = Command::new(env!("CARGO"));
+        build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
+        if profile_directory
+            .file_name()
+            .is_some_and(|name| name == "release")
+        {
+            build.arg("--release");
+        }
+        assert!(
+            build.status().expect("cargo build").success(),
+            "building ry-rcmd failed"
+        );
+        let rcmd = profile_directory.join("ry-rcmd");
         let gnu_r_bin = which("Rscript").and_then(|rscript| rscript.parent().map(Path::to_path_buf));
         rcmd::assemble(
             &root,

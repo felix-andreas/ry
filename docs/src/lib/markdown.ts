@@ -11,8 +11,8 @@ type SidebarItem = { label?: string; slug?: string; items?: SidebarItem[] };
 const SUMMARY_FALLBACK = 'ry is a toolchain for R: a type checker, formatter, linter and runtime.';
 const OPTIONAL_PAGES_LABEL = 'Optional';
 
-export function markdownPath(page: DocsPage): string {
-  return `/${page.id}.md`;
+export function markdownUrl(page: DocsPage, site: URL): string {
+  return new URL(`/${page.id}.md`, site).href;
 }
 
 export async function loadPages(): Promise<DocsPage[]> {
