@@ -330,3 +330,11 @@ bad <- List.map(words, \(w) w * 2)
 words: Array<character>
 bad: Unknown
 48..49 error[type-mismatch] `w` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
+
+#---- a_formal_after_dots_takes_no_type
+words <- ["a", "b"]
+doubled <- List.map(words, function(..., w) w * 2)
+#++++
+words: Array<character>
+doubled: Unknown
+47..69 error[type-mismatch] this function is passed `character`, but its parameter `w` is used as a numeric value (`integer` or `double`)

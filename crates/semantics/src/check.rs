@@ -530,6 +530,7 @@ pub fn check_item_with_annotation<'db>(
         frame_level: 0,
         discarded_if: None,
         parameter_hints: FxHashMap::default(),
+        hinted_parameters: FxHashSet::default(),
         expression_annotations: expression_annotations.iter().cloned().collect(),
         environment: Environment::default(),
         scheme_arena: Vec::new(),
@@ -951,6 +952,9 @@ struct Checker<'db, 'a> {
     /// Parameter types an unannotated function literal takes from the function type its call
     /// argument position expects, by formal position; `None` leaves a formal to inference.
     parameter_hints: FxHashMap<ExprId, Vec<Option<Ty<'db>>>>,
+    /// The ranges of the formals that took their type from a call's expected function type, so
+    /// only findings on those say the call supplied the type.
+    hinted_parameters: FxHashSet<TextRange>,
     expression_annotations: FxHashMap<ExprId, Annotation<'db>>,
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
@@ -1980,6 +1984,7 @@ impl<'db> Checker<'db, '_> {
                     } else if let Some(hint) = hint
                         && parameter.default.is_none()
                     {
+                        self.hinted_parameters.insert(parameter.range);
                         hint
                     } else {
                         self.fresh(Constraint::Unconstrained)
@@ -8712,6 +8717,7 @@ impl<'db> Checker<'db, '_> {
         }
         let formals: Vec<(BindingId, &str)> = parameters
             .iter()
+            .filter(|parameter| self.hinted_parameters.contains(&parameter.range))
             .filter_map(|parameter| {
                 let binding = self
                     .naming
@@ -8747,17 +8753,24 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
-    /// A function literal with a formal that has neither a type annotation nor a default.
+    /// A function literal with a formal that has neither a type annotation nor a default. A
+    /// formal after `...` is left out, because R binds positional arguments to `...` first.
     fn needs_parameter_hints(&self, value: ExprId) -> bool {
         let ExpressionKind::Function { parameters, .. } = &self.module.expression(value).kind
         else {
             return false;
         };
+        let leading = parameters
+            .iter()
+            .position(|parameter| parameter.name == "...")
+            .map_or(&parameters[..], |dots| &parameters[..dots]);
+        let after_dots_required = parameters[leading.len()..]
+            .iter()
+            .any(|parameter| parameter.name != "..." && parameter.default.is_none());
         self.declared_function_annotation(value).is_none()
             && self.inline_parameters(value).is_empty()
-            && parameters
-                .iter()
-                .any(|parameter| parameter.name != "..." && parameter.default.is_none())
+            && !after_dots_required
+            && leading.iter().any(|parameter| parameter.default.is_none())
     }
 
     /// Per argument, the parameter types its deferred function literal takes, found by
@@ -8800,6 +8813,8 @@ impl<'db> Checker<'db, '_> {
                         (Some(actual), Some(expected)) => {
                             self.table.compatible(self.db, actual, expected)
                         }
+                        // An argument the candidate has no parameter for rules the candidate out.
+                        (Some(_), None) => false,
                         _ => true,
                     }
                 },

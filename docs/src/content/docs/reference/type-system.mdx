@@ -1241,11 +1241,14 @@ type, `x` would be an open variable and `c(x, x)` could not be typed. The rule h
 - With an overloaded callee, a formal takes a type only when every candidate that accepts the other
   arguments expects the same one. The overload is then chosen as usual, with the literal's inferred
   type among the arguments.
+- A literal with a formal after `...` takes no types, because R binds positional arguments to
+  `...` before any later formal.
 - A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no
   context.
 
-When the body uses such a parameter in a way its type does not allow, the finding is reported on that
-use and names the parameter:
+When the body uses a parameter that took its type this way as an operand its type does not allow,
+the finding is reported on that use and names the parameter. Other misuses, such as passing the
+parameter to a function that expects another type, keep their usual wording:
 
 ```r
 words <- ["a", "b"]
