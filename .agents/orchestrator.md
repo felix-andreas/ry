@@ -97,6 +97,5 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 Nothing queued: every build-order step is in flight.
 
 Follow-ups:
-- An in-session worker is running a docs pass over the recent merges (#154, #162, #166 to #177).
-- Robustness #154 (39ce6b4) merged and its session archived: LSP simulator, docs-as-tests, 15 cargo-fuzz targets, `oracle fuzz`, GC torture, 15 bugs fixed. An in-session worker is fixing the three main-side failures it found (oracle bytecode__hot_loops expected, libr numerics.expected, REPL e2e stderr flake).
+- Robustness #154 (39ce6b4) merged and its session archived: LSP simulator, docs-as-tests, 15 cargo-fuzz targets, `oracle fuzz`, GC torture, 15 bugs fixed. Its three main-side failures are fixed on main (0cf283da, b373ea9f, 600f511e).
 
