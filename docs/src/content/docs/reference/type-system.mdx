@@ -419,6 +419,11 @@ A `list(...)` expression infers a fixed shape whenever its elements allow one:
   `list(foo = 1L, bar = "foo")` is `list{foo: integer, bar: character}`.
 - When named and unnamed elements are mixed, the names are dropped and it is list-like, so
   `list(1L, bar = "foo")` is `list[integer | character]`.
+- When an argument is the enclosing function's `...`, the number and names of the elements are not
+  known, so `list(...)` is `list[named: Unknown]`. Any field may be present, so reading or writing
+  `dots$environment` is not reported. A list whose elements are not known at all, such as
+  `as.list(environment())`, likewise says nothing about its names: `$` on a `list[Any]` or
+  `list[Unknown]` reads `Any` or `Unknown` without an error.
 
 R lets a list name be any string. A field name that is not a syntactic R name is written, and
 rendered, in backticks, so `list(\`max size\` = 10L)` has the type `` list{`max size`: integer} ``.
@@ -530,8 +535,7 @@ only atomic elements. This is what makes element-preserving signatures possible.
 - An arithmetic operator on a `T[]` operand also requires the element to be numeric, so the variable
   then holds both bounds. The result keeps the element, so `keep(x) + 1L` is still `T[]`, unless a
   `double` operand promotes the result to `double[]`.
-- A comparison on a `T[]` operand yields `logical[]`, and a numeric partner requires the element to
-  be numeric.
+- A comparison on a `T[]` operand yields `logical[]` and constrains nothing beyond the bound.
 
 A bound that can no longer be satisfied is a type error at the expression that imposed it, whether
 that means binding an element variable to a type that is not atomic or requiring a `character`
@@ -1065,6 +1069,29 @@ Defaults are type-checked, and they interact with the parameter's type in four w
   is therefore checked against an *instantiation* of the declared type rather than against the
   binder, so `#: <T> fn([x]: T) -> T` over `function(x = 1) x` is accepted. A concrete declared type
   is unaffected: `fn(title: character)` still refuses a `NULL` default.
+- An inferred parameter type always admits the default's type, because a call that passes the
+  default's own value is always fine. When the body settles an unannotated parameter on a type the
+  default does not have, the exported type is widened by the default's: with `up` declared
+  `fn(x: character) -> character`, `function(s = NULL) up(s)` is
+  `fn([s]: character | NULL) -> character`.
+
+An `if` without `else` that writes a formal under a test reading that same formal *normalizes* the
+input, as in `if (is.logical(type)) type <- if (type) "q" else "m"` or
+`if (is.null(sep)) sep <- ","`. The write does not constrain the formal's own type, so callers may
+still pass anything, and after the `if` the body sees the written type rather than a union with the
+formal's type:
+
+```r
+to_double <- function(x = 1) {
+  if (is.character(x)) x <- as.numeric(x)
+  x
+}
+# to_double: <T> fn([x]: T) -> double
+```
+
+This is a deliberate approximation. A union with the open formal type would make every later use of
+the value accept anything, while the normalized type is what the code after such a test assumes. A
+`NULL` write is not a normalization and joins as an ordinary branch write.
 
 ### Named and positional parameters
 
@@ -1337,7 +1364,9 @@ scalar condition admits:
   so `if ("yes")` is reported.
 - A vector is a type error, because a condition whose length is not one is an error in R too.
 - A condition whose type is still undetermined becomes `logical`, so `function(flag) if (flag) 1L`
-  infers `flag: logical`.
+  infers `flag: logical`. An unannotated formal with a default is the exception: an option flag such
+  as `function(x, which = FALSE) if (which) ...` is called with `1` as often as with `TRUE`, so the
+  condition leaves its type to its other uses. The same holds for `!` on such a formal.
 
 ### Indexing
 
@@ -1508,26 +1537,19 @@ still counts as a read of its name, so a project's own operator is never reporte
 
 ### Comparison operators
 
-`<`, `<=`, `>`, `>=`, `==`, and `!=` compare two operands of the same *comparison family*:
+`<`, `<=`, `>`, `>=`, `==`, and `!=` compare two `logical`, `integer`, `double`, or `character`
+operands, mixed freely. R coerces both operands to a common type before comparing, so
+`Sys.getenv("RSTUDIO") == 1` and `1L < "a"` are legal R and are not reported. `complex` and `raw`
+operands are not supported, so `1i < 2` is a type error. A map-like vector takes part through its
+compatibility with an array-like vector.
 
-- the **numeric** family holds `logical`, `integer`, and `double`, freely mixed, because R promotes a
-  logical operand to `integer` before comparing, so `flags > 0` and `flag == TRUE` are ordinary
-  numeric comparisons;
-- the **character** family holds `character`.
-
-Comparing across families is a type error. `complex` and `raw` operands are not supported. A map-like
-vector takes part through its compatibility with an array-like vector.
-
-An unannotated operand is required to be numeric when the other operand is concretely numeric, and
-otherwise left unconstrained. When neither operand is concrete, both stay unconstrained, so
-`function(a, b) a < b` is `<T, U> fn(a: T, b: U) -> logical`, and calling it across families is
-accepted. There is deliberately no "comparable" constraint: R's comparison coerces across atomic
-families at run time, so `1 < "2"` is legal R, and the same-family rule applies only where both
-families are concretely known.
+An unannotated operand is left unconstrained, whatever the other operand is, so
+`function(x) x > 0` is `<T> fn(x: T) -> logical` and `function(a, b) a < b` is
+`<T, U> fn(a: T, b: U) -> logical`. A comparison against a number is often how R code tests a
+string or a flag, so it is not evidence that the operand is numeric.
 
 The result is always `logical`: scalar-like when both operands are scalar-like, and array-like
-otherwise. So `1L == 1.5` is `logical`, `c(TRUE, FALSE) > 0` is `logical[]`, and `1L < "a"` is a
-type error.
+otherwise. So `1L == 1.5` and `1L < "a"` are `logical`, and `c(TRUE, FALSE) > 0` is `logical[]`.
 
 ### Unary `!`
 
@@ -1539,7 +1561,8 @@ Logical negation coerces its operand exactly as a [scalar condition](#conditions
 - A map-like operand gives `logical[]`, because negation does not preserve map-likeness.
 - An `Any` or `Unknown` operand gives `Unknown`.
 - An operand whose type is still undetermined is constrained to `logical`, and the result is
-  `logical`.
+  `logical`, except for an unannotated formal with a default, which stays open as it does in a
+  [condition](#conditions).
 - Any other operand is a type error.
 
 ### Range operator `:`
@@ -1562,14 +1585,16 @@ turn out to be a `double`.
 - With no arguments, `c()` is `NULL`, as in R.
 - `NULL` arguments are dropped, as in R, so `c(x, NULL)` is `c(x)` and `c(NULL)` is `NULL`.
 - A union-typed argument takes part member by member. Its `NULL` members are dropped first, and every
-  remaining member must be an atomic vector type and joins the coercion like a separate argument. So
-  with `acc` of type `double[] | NULL`, `c(acc, 1.0)` is `double[]`.
+  remaining member joins the coercion like a separate argument. So with `acc` of type
+  `double[] | NULL`, `c(acc, 1.0)` is `double[]`, and `c(if (a) list(1), if (a) list(2))` is
+  `list[double]`.
 - When any argument is a list, `c` concatenates into a list-like `list[T]` whose element type is the
   join of every argument's elements, with an atomic argument contributing its own type:
   `c(list(1L), "a")` is `list[integer | character]`. The atomic rules below apply only when no
   argument is a list.
-- An argument whose element type is not known statically, such as `Any`, `Unknown`, or an unannotated
-  parameter, is tolerated, and the whole result is `Unknown`, because a concrete element type could
+- An argument whose element type is not known statically, such as `Any`, `Unknown`, an unannotated
+  parameter, or a union or vector that holds one (`T | NULL`, `T[]`), is tolerated, and the whole
+  result is `Unknown`, because a concrete element type could
   be widened by a later argument. So `function(x) c(x, 1L)` is `<T> fn(x: T) -> Unknown`. Under
   strict mode, an unannotated parameter makes the `c()` call the origin, an `Unknown` argument was
   already reported where it arose, and an `Any` argument is not reported.
@@ -1698,6 +1723,11 @@ Arguments are checked for compatibility, not exact equality:
   minus applied to a literal, not a literal, so `f(-3)` is rejected too.
 - An argument whose type is `Unknown` is accepted at any parameter, because whatever made the value
   `Unknown` was already diagnosed where it happened.
+- At a parameter of type `T | NULL` with `T` still open, which is what a callee that tests
+  `is.null(x)` infers, `T` binds to the argument's non-`NULL` part. Passing a value there says that
+  the callee tolerates `NULL`, not that the caller's value may be `NULL`, so with
+  `check <- function(x, allow_null = FALSE) if (allow_null && is.null(x)) ...`, a caller that runs
+  `check(thing)` and then reads `thing$field` keeps `thing` open.
 
 #### The native pipe
 
@@ -1875,7 +1905,10 @@ The details:
 - A read from inside a closure narrows when the guard is in the same statement, just as a local
   does. The guard's own subject must not itself be a deferred read: that body runs later, so the test
   proves nothing about the value it will see then.
-- A condition combined with `&&` or `||` does not narrow.
+- Guards compose across `&&` and `||`. The right operand of `&&` runs only on the left's true edge,
+  so it is checked under that refinement, and the whole condition refines its true edge by both
+  tests: `!is.null(x) && length(x) > 0L` reads a non-`NULL` `x`. `||` does the same on the false
+  edge. The other edge of a compound condition is not refined.
 - `is.na(x)` is not a type guard, because being `NA` is a property of a value, not of a type.
 
 #### Lazy arguments and required formals
@@ -1924,6 +1957,9 @@ control-flow construct recognized by its bare name, as `local` is, rather than a
 
 - A function's return type is the union of every `return` value in its body with the body's trailing
   value, so `function() { if (c) return("foo"); 5 }` is `fn() -> character | double`.
+- A body that always exits, because it ends in a `return`, or in a `repeat` that no `break` leaves,
+  contributes no trailing value, so `function() return(TRUE)` is `fn() -> logical`, not
+  `fn() -> logical | NULL`.
 - The `return` expression itself yields no value where it stands, so it types as `NULL` locally and is
   not a strict-mode origin, just like `break` and `next`.
 - The returned expression is checked like any other expression.
@@ -1942,6 +1978,14 @@ That selection cannot be modelled statically, but the call is still checked in f
   branch without a name, including the first.
 - A named branch with no value falls through to the next branch, as in R, and contributes no type of
   its own.
+- A branch label may be `NULL`, as R's grammar allows: `switch(typeof(x), NULL = 1, 2)` labels the
+  case for the string `"NULL"`.
+- With a subject `typeof(x)` on a local variable, each named branch runs only for values whose type
+  its labels (together with the empty labels falling through to it) name, so `x` is narrowed inside
+  the branch. A union keeps the members a label can match. An open `x` gets a fresh type inside each
+  branch, so `logical = if (x) ...` does not pin the type the other branches and callers see:
+  `function(x) switch(typeof(x), logical = if (x) "T" else "F", "other")` is
+  `<T> fn(x: T) -> character`.
 - Exactly one branch runs, so assignments inside them fork and join exactly like the arms of an
   [`if`](#if-expressions), and a branch that cannot fall through contributes no state. A name
   introduced only inside the branches is not defined on the path where nothing matches, which R
@@ -1980,7 +2024,9 @@ so reads in the condition see the loop's joined state. The loop evaluates to `NU
 ### `repeat`
 
 A `repeat` loop has no condition and runs its body at least once, so a variable written in the body is
-definitely assigned after the loop. It evaluates to `NULL`.
+definitely assigned after the loop. It evaluates to `NULL`. A `repeat` that no `break` leaves never
+completes, so code after it is unreachable and a function body ending in it contributes no trailing
+value.
 
 ## Naming and scoping
 
@@ -2192,6 +2238,14 @@ slot, so the slot's type reflects the update:
   - a list-like `list[T]` becomes `list[T | V]`, and stays list-like;
   - a record-like or tuple-like container is left unchanged, because widening a shape whose fields
     are individually known would throw away precision the code has not given up.
+- A write through a chain of accessors, such as `x[[1]]$private <- v` or `x$a$b <- v`, rewrites
+  each container on the way back to the root: the innermost one takes `v` by the rules above, and
+  each enclosing one takes the rewritten child at its own step. A step whose position is known
+  (`$name`, `[["name"]]`, or `[[1]]`) updates that field or position, and a computed `[[i]]` step
+  follows the computed-key rules above. A write through a `[` or `@` step is not tracked. So after
+  `old <- list(list(private = NULL)); old[[1]]$private <- list(deep_clone = 1)`, reading
+  `old[[1]]$private$deep_clone` is a `double`. Writing a field of a `NULL` grows it into a one-field
+  record, as R does, so `x <- NULL; x$a <- 1` makes `x` a `list{a: double}`.
 - The accessor chain and the index or key expressions are ordinary reads, so their own errors surface.
   A replacement whose accessor chain has no variable at its root, such as `f(x)$a <- v`, is an
   unsupported construct: it types as `Unknown` and is a strict-mode origin.

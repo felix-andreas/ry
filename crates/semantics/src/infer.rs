@@ -651,6 +651,46 @@ impl<'db> InferenceTable<'db> {
         if actual == expected {
             return true;
         }
+        // An argument fits an open `T | NULL` with `T` taking its non-`NULL` part. Binding an
+        // open argument to the whole union would tell the caller its own value may be `NULL`
+        // (`check(x); x$field` after `check <- function(x) if (is.null(x)) ...`), and binding
+        // `T` to one member of a union argument would reject the others.
+        if let TyKind::Union(members) = expected.kind(db)
+            && let [first, second] = members[..]
+            && let Some(open_member) = match (
+                self.shallow_resolve(db, first).kind(db),
+                self.shallow_resolve(db, second).kind(db),
+            ) {
+                (TyKind::Var(_), TyKind::Null) => Some(first),
+                (TyKind::Null, TyKind::Var(_)) => Some(second),
+                _ => None,
+            }
+        {
+            let present = match actual.kind(db) {
+                TyKind::Var(_) => Some(actual),
+                TyKind::Union(actual_members)
+                    if !actual_members
+                        .iter()
+                        .any(|member| matches!(member.kind(db), TyKind::OtherTags)) =>
+                {
+                    Some(union_of(
+                        db,
+                        actual_members
+                            .iter()
+                            .copied()
+                            .filter(|member| !matches!(member.kind(db), TyKind::Null)),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(present) = present {
+                let snapshot = self.snapshot();
+                if self.unify(db, open_member, present).is_ok() {
+                    return true;
+                }
+                self.rollback(snapshot);
+            }
+        }
         if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
         {
             return self.unify(db, actual, expected).is_ok();

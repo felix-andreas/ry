@@ -208,7 +208,6 @@ countdown: <T: numeric> fn(n: T) -> integer
 loose <- function(n) if (n <= 0L) 0L else loose(n - 1L)
 #++++
 loose: <T> fn(n: T) -> integer
-200..201 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
 223..224 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
 
 #---- an_atomic_bound_admits_a_vector_element_across_recursion

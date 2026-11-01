@@ -45,8 +45,8 @@ references: none
 rename: none
 signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U] (active)
 parameters: [X: list[named: T]] | FUN: fn(T) -> U | ...: Any
-signature: <T, U> fn(X: list[T] | T[], FUN: fn(T) -> U, ...: Any) -> list[U]
-parameters: [X: list[T] | T[]] | FUN: fn(T) -> U | ...: Any
+signature: <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
+parameters: [X: list[T] | T[] | NULL] | FUN: fn(T) -> U | ...: Any
 completion (128+): break, else, FALSE, for, function, if, in, Inf
 
 #---- lapply_resolved_instantiation
@@ -59,8 +59,8 @@ references: none
 rename: none
 signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 parameters: X: list[named: T] | [FUN: fn(T) -> U] | ...: Any
-signature: fn(X: list[integer] | integer[], FUN: fn(integer) -> integer, ...: Any) -> list[integer] (active)
-parameters: X: list[integer] | integer[] | [FUN: fn(integer) -> integer] | ...: Any
+signature: fn(X: list[integer] | integer[] | NULL, FUN: fn(integer) -> integer, ...: Any) -> list[integer] (active)
+parameters: X: list[integer] | integer[] | NULL | [FUN: fn(integer) -> integer] | ...: Any
 action: Add inferred type annotation for `result`
   edit 83..83 -> "#: list[integer]\n"
 action: Add inferred type annotations for the whole file

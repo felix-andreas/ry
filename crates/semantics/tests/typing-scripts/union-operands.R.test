@@ -74,15 +74,14 @@ flag: logical
 x: integer | double
 logical
 
-#---- union_of_mixed_families_is_rejected
+#---- union_of_mixed_atomics_compares
 flag <- TRUE
 x <- if (flag) 1L else "a"
 x > 0L
 #++++
 flag: logical
 x: integer | character
-Unknown
-44..46 error[type-mismatch] expected `integer | character`, found `integer`
+logical
 
 #---- character_union_compares_within_family
 flag <- TRUE

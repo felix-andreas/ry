@@ -49,11 +49,10 @@ c("a", "b") == "a"
 #++++
 logical[]
 
-#---- numeric_compared_to_character_is_rejected
+#---- numeric_compared_to_character_coerces
 1L < "a"
 #++++
-Unknown
-5..8 error[type-mismatch] expected `integer`, found `character`
+logical
 
 #---- logical_compared_to_numeric_promotes
 TRUE > 1L
