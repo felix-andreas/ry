@@ -435,7 +435,7 @@ apply_transform <- function(text, transform) {
 }
 #++++
 apply_transform: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
-136..145 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: character) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give the parameter a function default
+136..145 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: character) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter
 
 #---- a_default_branch_makes_the_switch_result_callable
 pick <- function(kind) {

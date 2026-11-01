@@ -1645,8 +1645,10 @@ result's atomic type depends on the operator:
 - `/`, `^`, and `**` (R's parser alias for `^`) always give `double`.
 - Unary `-` keeps its operand's atomic type. A class with arithmetic methods negates to itself,
   because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a `matrix`.
-- R rejects `-NULL`, and so does the checker. A value that may be `NULL` negates as its other
-  members, because code like `if (length(k)) res <- res[-k]` negates only once the value exists.
+- R rejects `-NULL`, and so does the checker. A value the body computes that may be `NULL` negates
+  as its other members, because code like `if (length(k)) res <- res[-k]` negates only once the
+  value exists. A parameter or an annotated variable keeps its `NULL`, so `-x` on a declared
+  `x: double | NULL` is reported.
 
 For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `integer[]`,
 `2L ^ 3L` is `double`, and `-c(foo = 1L, bar = 2L)` is `integer[]`. Every `%op%` operator other than
@@ -1759,8 +1761,9 @@ Logical negation coerces its operand exactly as a [scalar condition](#conditions
 - `!logical`, `!integer`, and `!double` are `logical`.
 - `!logical[]`, `!integer[]`, and `!double[]` are `logical[]`.
 - A map-like operand gives `logical[]`, because negation does not preserve map-likeness.
-- A class with arithmetic methods negates to itself, because `!` belongs to R's `Ops` group, so
-  `!as.matrix(flags)` is a `matrix`.
+- A `matrix` or `array` negates to itself, so `!as.matrix(flags)` is a `matrix`, and so does a
+  class with a `!` or `Ops` method, which R dispatches `!` to. A `-` or `Arith` method is not
+  enough, so `!Sys.Date()` is a type error, as it is in R.
 - `!NULL` is `logical[]`, the empty vector R returns, so a value that may be `NULL` negates without
   error: `!x` on `logical | NULL` is `logical[]`.
 - An `Any` or `Unknown` operand gives `Unknown`.
@@ -1914,7 +1917,8 @@ or from an `is.null()` test: in `function(H = NULL, Z) { ...; if (quadratic) sca
 Length works the same way. A variable the body computes as `character | character[]`, because a
 helper returns a vector on some path, passes to a parameter that takes one `character` as that one
 string, so `pattern <- format_message("^%s=", name)` followed by `sub(pattern, "", spec)` is clean.
-A declared vector passed to a scalar parameter is still reported.
+Only such a union qualifies: a variable known to hold a vector, as `flags <- c(TRUE, FALSE)` does,
+is still reported at a `logical` parameter, and so is a declared vector.
 
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
@@ -2426,6 +2430,10 @@ upper_names <- function(x) {
   bindings and then the package namespace, and a script's in the namespace, so
   `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
 - A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
+- A binding whose type joins functions with `NULL` is called as the functions when the body
+  computed it, such as `handler <- switch(kind, ...)` without a default, because the code presumably
+  rules the `NULL` path out. A parameter, or a variable whose last assignment is annotated, admits
+  that `NULL` on purpose, so calling it is reported until an `is.null()` test rules it out.
 - A binding with no type information yet, such as an unannotated parameter nothing has constrained
   or a parameter annotated with a type parameter `T`, may hold anything. When the body only ever
   calls it, it is a callback, and the call checks against it as usual: both

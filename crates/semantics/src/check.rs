@@ -1866,8 +1866,11 @@ impl<'db> Checker<'db, '_> {
                         self.apply_expression_annotation(id, value, value_ty)
                     }
                 };
-                if computed && let Some(&slot) = self.naming.resolutions.get(&target) {
-                    self.computed_slots.insert(slot);
+                if let Some(&slot) = self.naming.resolutions.get(&target) {
+                    match computed {
+                        true => self.computed_slots.insert(slot),
+                        false => self.computed_slots.remove(&slot),
+                    };
                 }
                 self.write_target(spelling, target, value, value_ty);
                 value_ty
@@ -4858,13 +4861,15 @@ impl<'db> Checker<'db, '_> {
                 OperandExpectation::Numeric,
             );
         }
-        // R rejects `-NULL`, but a value that is only sometimes `NULL` is negated where the code
-        // has ruled that out, as in `if (length(k)) res <- res[-k]`. A bare `NULL` stays an error.
+        // R rejects `-NULL`, but a computed value that is only sometimes `NULL` is negated where
+        // the code has ruled that out, as in `if (length(k)) res <- res[-k]`. A bare `NULL` and
+        // the `NULL` a declaration admits stay errors.
         let resolved = match resolved.kind(self.db) {
             TyKind::Union(members)
-                if members
-                    .iter()
-                    .any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
+                if !self.names_declared_value(operand)
+                    && members
+                        .iter()
+                        .any(|member| matches!(member.kind(self.db), TyKind::Null)) =>
             {
                 union_of(
                     self.db,
@@ -4935,6 +4940,26 @@ impl<'db> Checker<'db, '_> {
         })
     }
 
+    fn negates_to_itself(&self, ty: Ty<'db>) -> bool {
+        let TyKind::Named(name, _) = ty.kind(self.db) else {
+            return false;
+        };
+        let class = name.text(self.db);
+        if matches!(class, "matrix" | "array") {
+            return true;
+        }
+        let Some(globals) = self.globals else {
+            return false;
+        };
+        ["!", "Ops"].iter().any(|prefix| {
+            let method = format!("{prefix}.{class}");
+            globals
+                .overloads(&method, false)
+                .is_some_and(|candidates| !candidates.is_empty())
+                || globals.scheme(&method, false).is_some()
+        })
+    }
+
     fn infer_unary_not(&mut self, operand: ExprId) -> Ty<'db> {
         let operand_range = self.blame_range(operand);
         let inferred = self.infer(operand);
@@ -4963,9 +4988,10 @@ impl<'db> Checker<'db, '_> {
             }
             _ => {}
         }
-        // `!` belongs to the `Ops` group, so a class with arithmetic methods negates to itself:
-        // `!as.matrix(flags)` is a logical matrix.
-        if self.declares_arithmetic(resolved) {
+        // `!` keeps a matrix's shape (`!as.matrix(flags)` is a logical matrix) and dispatches
+        // to a class's `!` or `Ops` method. `Date` has only `-` and `Arith`, so `!Sys.Date()`
+        // stays an error.
+        if self.negates_to_itself(resolved) {
             return resolved;
         }
         let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
@@ -6525,7 +6551,7 @@ impl<'db> Checker<'db, '_> {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
-        let callee_ty = match self.binds_parameter(callee) {
+        let callee_ty = match self.names_declared_value(callee) {
             true => callee_ty,
             false => self.without_null_beside_functions(callee_ty),
         };
@@ -9323,6 +9349,20 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// A name bound by a declaration rather than by inference: a parameter, whose `NULL` the
+    /// caller supplies, or a local whose last assignment is annotated. Its `NULL` is meant.
+    fn names_declared_value(&self, value: ExprId) -> bool {
+        self.binds_parameter(value)
+            || (matches!(
+                self.module.expression(value).kind,
+                ExpressionKind::NameRef(_)
+            ) && self
+                .naming
+                .resolutions
+                .get(&value)
+                .is_some_and(|slot| !self.computed_slots.contains(slot)))
+    }
+
     fn names_computed_value(&self, value: ExprId) -> bool {
         matches!(
             self.module.expression(value).kind,
@@ -9396,9 +9436,14 @@ impl<'db> Checker<'db, '_> {
             }
             _ => false,
         };
+        // Only a value that may be one string or many: a plain vector is known to be a vector.
         let fits = match resolved.kind(self.db) {
-            TyKind::Vector(_) => same_atomic(resolved),
-            TyKind::Union(members) => members.iter().all(|&member| same_atomic(member)),
+            TyKind::Union(members) => {
+                members.iter().all(|&member| same_atomic(member))
+                    && members
+                        .iter()
+                        .any(|member| matches!(member.kind(self.db), TyKind::Scalar(_)))
+            }
             _ => false,
         };
         match fits {

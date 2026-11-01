@@ -403,9 +403,6 @@ trunc : fn(x: Any, ...: Any) -> double
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for
 # the shapes the candidates cannot express. `order`/`which` genuinely produce integer index vectors.
 # `rank`'s result type depends on `ties.method` (double for averages, integer otherwise).
-# `sort(x, index.return = TRUE)` returns the sorted values and their permutation, and the
-# candidate that requires `index.return` is chosen only when the call passes it.
-sort : <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, index.return: logical) -> list{x: T[], ix: integer[]}
 sort : <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
 sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
 sort : fn(x: Any, [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any

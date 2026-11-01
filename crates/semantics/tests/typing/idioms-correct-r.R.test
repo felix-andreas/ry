@@ -723,12 +723,56 @@ enquo: <T> fn([arg]: T) -> Any
 quo: <T> fn([expr]: T) -> Any
 empty: fn() -> Any
 
-#---- sorting_with_index_return_gives_the_values_and_the_permutation
-first_indices <- function(n) {
-  sorted <- sort(c(3, 1, 2), index.return = TRUE)
-  sorted$ix[1:n]
+
+#---- a_computed_vector_into_a_scalar_parameter_is_reported
+#: fn(flag: logical) -> character
+pick <- function(flag) if (flag) "yes" else "no"
+g <- function() {
+  flags <- c(TRUE, FALSE)
+  pick(flags)
 }
-plain <- function() sort(c(3, 1, 2), decreasing = TRUE)
 #++++
-first_indices: <T: scalar numeric> fn(n: T) -> integer[]
-plain: fn() -> double[]
+pick: fn(flag: logical) -> character
+g: Unknown
+134..139 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- an_annotated_reassignment_keeps_its_null
+#: fn(name: character) -> integer
+width <- function(name) nchar(name)
+f <- function() {
+  x <- 1
+  #: character | NULL
+  x <- if (runif(1) > 0.5) "b"
+  width(x)
+}
+#++++
+width: fn(name: character) -> integer
+f: Unknown
+90..91 warning[unused] `x` is assigned but never used.
+158..159 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- an_annotated_function_that_may_be_null_is_reported_when_called
+#: fn() -> (fn(x: integer) -> integer) | NULL
+maybe_handler <- function() NULL
+run <- function() {
+  #: (fn(x: integer) -> integer) | NULL
+  h <- maybe_handler()
+  h(1L)
+}
+#++++
+maybe_handler: fn() -> (fn(x: integer) -> integer) | NULL
+run: Unknown
+164..165 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: integer) -> integer) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter
+
+#---- negating_a_date_is_reported
+today_not <- function() !Sys.Date()
+#++++
+today_not: Unknown
+25..35 error[type-mismatch] expected a `logical` value, found `Date`
+
+#---- negating_a_declared_nullable_parameter_is_reported
+#: fn(x: double | NULL) -> double
+neg <- function(x) -x
+#++++
+neg: fn(x: double | NULL) -> double
+54..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | NULL`
