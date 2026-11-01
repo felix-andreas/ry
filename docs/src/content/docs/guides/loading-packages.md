@@ -9,7 +9,7 @@ definitions you changed. On a 14,000-line package a cold load is almost 10 times
 `load_all()` and a reload after an edit about 60 times faster (see [Speed](#speed)).
 
 ```sh
-ry repl            # inside a package: load it, and reload edits before each command
+ry R               # inside a package: load it, and reload edits before each command
 ry load -f run.R   # load it, run a script, and exit
 ```
 
@@ -21,7 +21,7 @@ Loaded tally: 1 function bound lazily, 0 top-level statements run, in 3 ms.
 
 ## In the console
 
-Started anywhere inside a package, `ry repl` loads that package before the first prompt. When you
+Started anywhere inside a package, `ry R` loads that package before the first prompt. When you
 then edit a file and run the next command, ry reloads first, so the command sees the code on disk:
 
 ```text
@@ -33,7 +33,8 @@ Reloaded replpkg: 1 function rebound, in 2 ms.
 ```
 
 `load_all()` reloads on demand, `load_all(full = TRUE)` rebuilds the namespace from scratch, and
-`ry repl --no-load` starts without loading anything.
+`ry R --no-load` starts without loading anything. The console of `ry run`, on ry's runtime, does not
+load the package yet.
 
 ## From plain R
 
@@ -50,9 +51,9 @@ Put the first line in your `~/.Rprofile` to keep calling `load_all()` as you do 
 ## Speed
 
 `ry load` runs on ry's own interpreter, and parses each file once: the analysis's syntax trees
-are what the interpreter evaluates, so a lazy function is lowered from that tree on first use. Pass
-`--runtime gnu-r` (or set `RY_RUNTIME=gnu-r`) to load on GNU R instead. `ry repl` always loads on GNU R, `ry run`
-does unless you pass `--runtime ry`, and `load_all()` in plain R runs on GNU R by definition.
+are what the interpreter evaluates, so a lazy function is lowered from that tree on first use.
+`load_all()` loads on the runtime it is called from: ry's in a `ry run` script, and GNU R in
+`ry R` and in plain R.
 
 A package that uses ry's own syntax (records, tags, `match`, frames) loads and runs only on ry's
 runtime, because GNU R's parser rejects it (`unexpected ':'` for a tag). Inline annotations alone

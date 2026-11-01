@@ -147,9 +147,9 @@ annotation-mismatch
 
 ## Running annotated code
 
-`ry run` and `ry repl` run annotated code. On GNU R they run the plain program it means, and on
-ry's own runtime (`--runtime ry`) the annotations also become checks: an argument of the wrong kind
-fails where the function was called.
+`ry run` runs annotated code on ry's own runtime, where the annotations also become checks: an
+argument of the wrong kind fails where the function was called. `ry R` runs it on GNU R as the plain
+program it means, with the annotations erased.
 
 Run-time checks are described in terms of inline annotations, so this example has a single spelling:
 

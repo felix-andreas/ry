@@ -3,7 +3,7 @@ title: REPL design
 description: "How the R console loads R at runtime with no build-time linking"
 ---
 
-The R console lives in `crates/repl`, behind `ry repl` and `ry run`. This page records how it embeds
+The R console lives in `crates/repl`, behind `ry run` (ry's runtime) and `ry R` (GNU R). This page records how it embeds
 R without linking against it at build time, and what is still open. Linking at build time (bindgen
 against a local R's headers, plus a load-time dependency on libR) would require a matching R on
 every build machine, bind the artifact to that R, and turn a missing symbol into a loader failure.
@@ -12,7 +12,7 @@ every build machine, bind the artifact to that R, and turn a missing symbol into
 
 The console discovers R, binds it at runtime, hosts its line editor inside R's ReadConsole hook, and
 highlights and completeness-checks input with ry's own lexer. It routes SIGINT, runs headless for
-`ry run` and `ry repl --file`, offers emacs and vi keybindings, and embeds on Windows as well as
+`ry R script.R` and `ry R -i script.R`, offers emacs and vi keybindings, and embeds on Windows as well as
 Unix. A pseudo-terminal end-to-end suite (`just repl-e2e`) covers interactive evaluation, multiline
 input, the error stream, Ctrl-C, and batch runs, on a Unix pty and on Windows ConPTY.
 
@@ -132,7 +132,7 @@ The declarations are original, written from R's public headers.
 
 ## The Windows implementation
 
-This recipe is verified on Windows against R 4.5.2, including `ry run`'s exit codes, `system()`,
+This recipe is verified on Windows against R 4.5.2, including the headless runner's exit codes, `system()`,
 `~` expansion, and `.Platform$GUI`. Embedding R on Windows does not use the Unix `ptr_R_ReadConsole` globals; the callbacks are wired
 through the `Rstart` struct instead. This is the recipe that works:
 
@@ -218,8 +218,8 @@ threaded through the console. Editor integration is already the language server'
 
 ## The headless runner
 
-`ry run script.R` executes a file through the embedded runtime and exits at its end. `ry repl --file
-script.R` (or `-f`) feeds the same script and then hands over to the interactive prompt.
+`ry R script.R` executes a file through the embedded GNU R and exits at its end. `ry R -i
+script.R` feeds the same script and then hands over to the interactive prompt.
 
 The ReadConsole front end feeds the script's bytes exactly as it feeds accepted console input, and in
 batch mode it answers "end of input" once they are used up. There is no second driver, so parsing,

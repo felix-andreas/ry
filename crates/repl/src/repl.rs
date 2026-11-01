@@ -75,6 +75,8 @@ pub struct RunOptions {
     pub input: String,
     /// Fed to R before the first prompt.
     pub file: Option<PathBuf>,
+    /// What `commandArgs(trailingOnly = TRUE)` returns.
+    pub arguments: Vec<String>,
     /// End the session when the script is consumed; a top-level error quits with
     /// a failing status.
     pub batch: bool,

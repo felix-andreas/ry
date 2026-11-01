@@ -7,7 +7,7 @@ A `DataFrame` is ry's built-in table. You query it with the same verbs as
 [Polars](https://pola.rs): `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join` and `head`, with column expressions written as `col("x")`. Each query runs inside the Polars
 engine instead of as R code, and the type checker knows every column's type at every step.
-DataFrames need ry's own runtime, so run scripts that use them with `ry run --runtime ry script.R`.
+DataFrames need ry's own runtime, so run scripts that use them with `ry run script.R`.
 
 ```r
 sales <- DataFrame(
@@ -207,7 +207,7 @@ and costs only the new column.
 
 ### Existing data.table code
 
-Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
+Code written for data.table runs unchanged under `ry run`, and most queries on a
 `data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
 behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
 when it can produce exactly what data.table would, meaning the same values, attributes, printing
@@ -251,7 +251,7 @@ Key: <g>
 
 `tools/bench/table/` runs db-benchmark's group-by and join questions, `:=` update loops and a
 keyed rolling join, written once for data.table under GNU R and once for DataFrames under
-`ry run --runtime ry`. At 1 million rows on 4 threads, the DataFrame version runs the whole set in
+`ry run`. At 1 million rows on 4 threads, the DataFrame version runs the whole set in
 2.4 s against data.table's 4.8 s, about twice as fast. It is ahead on most group-by and join
 questions and on the `:=` loops, and behind on the median-and-sd question (0.13 s against 0.08 s)
 and the keyed rolling join (0.03 s against 0.02 s). The
@@ -260,7 +260,7 @@ and the keyed rolling join (0.03 s against 0.02 s). The
 Calls to data.table's other functions (`fread`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`
 and the rest) run data.table's own C code through ry's C API, so their results are data.table's by
 construction. `tools/bench/table/ops.R` times them on the db-benchmark group-by file (10 million
-rows, 4 threads), once under GNU R and once under `ry run --runtime ry`, and both runs give the same
+rows, 4 threads), once under GNU R and once under `ry run`, and both runs give the same
 checksums. Times are in seconds.
 
 | Operation | GNU R | ry |

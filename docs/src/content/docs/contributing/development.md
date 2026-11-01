@@ -20,7 +20,7 @@ just bless -p semantics --test ...  # rewrite fixture expectations from current 
 just fuzz-deep                      # the long seeded fuzz run
 just stats <path>                   # phase timings and memory for one workspace
 just perf                           # corpus perf and memory budgets (needs corpus/)
-just repl-e2e                       # drive `ry repl` through a pty against the system R
+just repl-e2e                       # drive `ry R` and `ry run` through a pty
 ```
 
 `just fixture` runs a case from the `test_typing_fixtures` target in `semantics` unless you pass a

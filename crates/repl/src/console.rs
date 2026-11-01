@@ -31,11 +31,12 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     let batch = options.batch;
     let routines = std::mem::take(&mut options.routines);
     let startup = std::mem::take(&mut options.startup);
+    let arguments = std::mem::take(&mut options.arguments);
     install(options, false)?;
     install_sigint_handler();
     // A batch run prints only what its code prints, and so does a console reading a pipe.
     let quiet = batch || !stdin().is_terminal();
-    api.initialize(read_console, write_console_ex, quiet)?;
+    api.initialize(read_console, write_console_ex, quiet, &arguments)?;
     api.register_call_routines(&routines);
     for statement in &startup {
         api.eval(statement);

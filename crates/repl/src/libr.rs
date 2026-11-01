@@ -322,7 +322,9 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        arguments: &[String],
     ) -> Result<(), ReplError> {
+        let trailing = trailing_arguments(arguments)?;
         // R re-derives R_HOME through its own lookup; export ours so both agree.
         unsafe { env::set_var("R_HOME", &self.r_home) };
         export_wrapper_path_vars(&self.r_home);
@@ -334,8 +336,14 @@ impl RApi {
             c"--no-restore-data",
         ]
         .iter()
-        .chain(quiet.then_some(&c"--quiet"))
+        // `--no-echo` also keeps R from ending the session with a newline of its own.
+        .chain(quiet.then_some(&c"--no-echo"))
         .map(|argument| argument.as_ptr() as *mut c_char)
+        .chain(
+            trailing
+                .iter()
+                .map(|argument| argument.as_ptr() as *mut c_char),
+        )
         .collect();
 
         unsafe {
@@ -367,9 +375,17 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        arguments: &[String],
     ) -> Result<(), ReplError> {
         unsafe { env::set_var("R_HOME", &self.r_home) };
-        let mut argv = [c"ry".as_ptr() as *mut c_char];
+        let trailing = trailing_arguments(arguments)?;
+        let mut argv: Vec<*mut c_char> = std::iter::once(c"ry".as_ptr() as *mut c_char)
+            .chain(
+                trailing
+                    .iter()
+                    .map(|argument| argument.as_ptr() as *mut c_char),
+            )
+            .collect();
 
         let rhome = CString::new(self.r_home.to_string_lossy().into_owned())
             .map_err(|_| ReplError("R_HOME contains a NUL byte".to_owned()))?;
@@ -399,6 +415,7 @@ impl RApi {
             }
             start.r_interactive = 1;
             start.r_quiet = c_int::from(quiet);
+            start.r_no_echo = c_int::from(quiet);
             start.restore_action = SA_NORESTORE;
             start.save_action = SA_NOSAVE;
             start.rhome = rhome.as_ptr() as *mut c_char;
@@ -733,4 +750,21 @@ mod tests {
         assert!(error.0.contains("--enable-R-shlib"), "{}", error.0);
         fs::remove_dir_all(&directory).ok();
     }
+}
+
+/// `--args` and then `arguments`, which R hands to `commandArgs(trailingOnly = TRUE)` without
+/// reading them as options. R keeps the pointers for the whole process, so the strings leak.
+fn trailing_arguments(arguments: &[String]) -> Result<&'static [CString], ReplError> {
+    if arguments.is_empty() {
+        return Ok(&[]);
+    }
+    let strings = std::iter::once(Ok(c"--args".to_owned()))
+        .chain(
+            arguments
+                .iter()
+                .map(|argument| CString::new(argument.as_bytes())),
+        )
+        .collect::<Result<Vec<CString>, _>>()
+        .map_err(|_| ReplError("an argument contains a NUL byte".to_owned()))?;
+    Ok(Box::leak(strings.into_boxed_slice()))
 }

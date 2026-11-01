@@ -6,11 +6,11 @@ description: "Design draft: how ry runs R, from the C API up to the JIT, the tab
 This is a design draft: how ry becomes an R implementation of its own, in what order to build it,
 and why. Built so far are the object model and collector in `crates/heap`, the C API as `libR.so`
 in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
-`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run --runtime ry`),
+`crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run`),
 a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
 `crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
-code still comes from a GNU R installation), and the table type's use from the interpreter. `ry repl`
-and `ry run` still drive GNU R by default. The C API measurements in section 2 are real and
+code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
+runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
 reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
 boundary") records the settled details.
 
@@ -343,8 +343,7 @@ the interpreter and the base library, one for the JIT, and `libr` for the C API.
 shared `libR` and contains a small amount of C, for the reason in "Errors across the boundary" below.
 Because a package built against GNU R records `libR.so` as a needed library, `libR` is the whole
 runtime: the interpreter and the JIT link into it, and the `ry` binary loads it.
-The `repl` crate keeps driving GNU R until ry's runtime can run the console's own code, and then
-gains a backend switch, so `ry repl` and `ry run` keep working throughout.
+The `repl` crate drives both: GNU R behind `ry R`, and ry's runtime behind `ry run`.
 
 ### Objects
 
@@ -890,7 +889,7 @@ Each step ends with something real running, and each one is a large, whole chang
    exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
    URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
    `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
-   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`.
+   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run`.
    Parsed code keeps source references when `keep.source` asks for them. Connections are a single
    implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
    `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
