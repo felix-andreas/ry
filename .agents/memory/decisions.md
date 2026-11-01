@@ -1770,18 +1770,39 @@ frame keeps a hash index.
 
 **The collector: non-moving mark-sweep with sticky mark bits.** A surviving object keeps its mark,
 so outside a collection "marked" means "old". A minor collection marks only from the roots, the
-remembered set and the escaped set, and sweeps only the young list (every object allocated since
-the last collection), so its cost is proportional to young data, not the heap. A major collection
-clears the marks first and sweeps every page. Small objects live in 64 KiB pages of 17 size
-classes, the 40-byte class being a triple; larger objects are allocated one by one. Freed slots are
-poisoned, with the kind byte set to `FREESXP` and the collector byte cleared, so a stale handle
-reads as freed and unmarked; any set of handles kept across a sweep is filtered before it. The write barrier records an old parent
-that receives a young child. A vector whose writable element pointer escaped (`STRING_PTR`,
-`DATAPTR` on a list) bypasses the barrier from then on, so it joins the escaped set and every minor
-collection rescans it. Weak references follow ephemeron rules, and the `CHARSXP` intern table is
-weak, with minor collections checking only the young strings. GNU R ages objects through several
-generations; one promotion after one survival is simpler and costs some premature tenuring, which
-profiling can revisit without changing the API.
+remembered set and the escaped set, and sweeps only the pages allocated into since the last
+collection, so its cost is proportional to young data, not the heap. A major collection clears the
+marks first and sweeps every page. The write barrier records an old parent that receives a young
+child. A vector whose writable element pointer escaped (`STRING_PTR`, `DATAPTR` on a list) bypasses
+the barrier from then on, so it joins the escaped set and every minor collection rescans it. Weak
+references follow ephemeron rules, and the `CHARSXP` intern table is weak, with minor collections
+checking only the young strings. GNU R ages objects through several generations; one promotion
+after one survival is simpler and costs some premature tenuring, which profiling can revisit
+without changing the API.
+
+**Small objects live in bitmap pages** (`crates/heap/src/space.rs`). Objects up to 2 KiB come from
+one reserved address range (64 GiB, halved on failure down to 1 GiB for a capped address space such
+as valgrind's) cut into 64 KiB pages of 17 size classes, the 40-byte class being a triple. Each page
+keeps its mark, allocated and finalizable bits in side bitmaps, one bit per slot, stored as
+struct-of-arrays per page. Reasons:
+- Marking an old object tests a dense bit instead of loading its header, and sweeping is word
+  operations (`dead = allocated & !marks`, then `allocated = marks`) that never read a dead object.
+  Only a dead environment is visited, through the finalizable bit, to drop its Rust-side frame.
+- Allocation claims a whole bitmap word of free slots in one step and hands them out with a
+  trailing-zero count, so there is no free list, no young list and no per-object free. A claimed
+  slot never handed out reads as unmarked and is swept like a dead one.
+- Empty pages return to a pool any class can take, so a phase heavy in one size does not strand
+  memory in its class.
+- Debug builds poison dead slots and set their kind byte to `FREESXP`. Release builds do not touch
+  them, so a stale handle is caught only in debug.
+- Large objects are allocated one by one with the global allocator and keep a header mark bit.
+Measured on a closure-call microbenchmark under cachegrind: 4% fewer instructions and 46% fewer L1
+data misses than the free-list pages. Full collections on the loaded dsbench heap take about 35 ms
+against GNU R's 130 ms.
+
+**libR keeps freed memory.** mimalloc's purge delay is set to never (`crates/libr/src/libr.rs`),
+because returning pages that stay free for 10 ms made the kernel zero them again on reuse, which was
+15% of the benchmark tests' profile. The cost is resident memory that stays at its peak.
 
 **Roots.** The `PROTECT` stack, the precious multiset, the handle stack, registered globals, every
 interned symbol, the weak-reference list, and any `RootSource` an interpreter or JIT registers. A
@@ -3494,8 +3515,12 @@ explicit allocators".
 - **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_formals`
   skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
   cell, as GNU R's frame list does.
-- **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
-  `identical` has nine formals, and building a map per call cost more than scanning.
+- **Frames scan up to 16 cells before building a hash index**, and hold nine bindings inline as
+  symbol and cell pairs, so a lookup reads one cache line per four bindings. `identical` has nine
+  formals, and building a map per call cost more than scanning. Separate symbol and cell arrays
+  were measured and cost 3% more instructions, because inserts then check two spills.
+- **A call binds its formals in one batch** (`Heap::define_formals`): one collection check that
+  keeps every value and the environment alive, then the cells, then one write barrier.
 - **Compiled code inlines more of base**: `.Internal(f(...))` of a non-dispatching builtin
   compiles to register loads plus `CallBuiltin`; `local(expr)` compiles to a closure creation plus
   a call, as GNU R's compiler does, behind the usual guard that `local` is still base's (base binds
