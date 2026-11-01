@@ -9,7 +9,8 @@ step, because ry reloads what you changed before each command:
 
 ```text
 $ ry run
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 ```
@@ -85,7 +86,7 @@ A load parses a function only when something first calls it, and a reload touche
 definitions you changed. On a generated package of 500 files, against `devtools::load_all()` and
 [loadfast](https://github.com/finccam/loadfast):
 
-| 326,000 lines | `load_all()` | `load_fast()` | `ry R` | `ry load` |
+| 326,000 lines | `load_all()` | `load_fast()` | `ry R` | `ry run`, `ry load` |
 | --- | --- | --- | --- | --- |
 | cold load | 9.6 s | 4.0 s | 1.3 s | 1.7 s |
 | reload after a body edit | 8.6 s | 125 ms | 79 ms | 83 ms |

@@ -33,7 +33,8 @@ command, so you never call `load_all()` or restart R:
 
 ```text
 $ ry run
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 6 ms.
+Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 > count_words("the  quick fox")     # after editing R/count.R
