@@ -312,6 +312,62 @@ protects construction but nothing after it.
 - The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
   touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
 
+## Open: strict mode restricts what a file's top level runs
+
+User direction: under strict mode, library code should not run arbitrary statements when it loads,
+either through a restricted top level or through a purity system. Today strict mode checks types
+only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\n")` checks clean.
+
+- **Option A, a definitions-only top level.** In a strict library file, every top-level statement
+  defines something: a function, a `type` or `alias`, an import (`library()`, `requireNamespace()`),
+  a class through a definition form (below), or a constant whose value calls only functions that a
+  declaration marks pure (arithmetic, `c()`, `list()`, `paste()`, the standard library, record and
+  tag constructors) and reads only other constants. Anything else, such as `cat()` or `options()`,
+  is a `strict` error that names where the statement belongs: in a function, in `.onLoad`, or in
+  the script `ry run` starts. Entry files keep an unrestricted top level: the `ry run` script, test
+  files and the console.
+- **Option B, purity inference in the Roc style.** Roc infers whether each function is effectful,
+  writes an effectful type with `=>` and an effectful name with `!`, lets only effectful functions
+  call effectful ones, and so rejects `message = greet!("Sam")` at the top level and evaluates every
+  top-level constant at compile time. Roc has no effect polymorphism by design, so a higher-order
+  function exists twice, as `Try.map_ok` and `Try.map_ok!` (Roc's `docs/langref/functions.md`).
+- **Recommendation: A, with purity as a declared bit on declarations, never inferred.**
+  - Checking speed: A is a syntactic check per top-level item plus a per-name lookup of the `pure`
+    bit. B adds an effect to every function type and solves it over the call graph, with a fixpoint
+    over each recursive group.
+  - R compatibility: `lapply`, `Map`, `Reduce`, `do.call` and `purrr::map` take pure and effectful
+    functions under one name, so B could not copy Roc's two names and would need effect
+    polymorphism, an extra variable in the types R code calls most. Every base and package
+    declaration would also need an effect, and R's effects hide everywhere (`runif` advances
+    `.Random.seed`, an assignment into an environment or R6 object mutates shared state). A needs the
+    `pure` bit only on the functions a constant may call, which is a small set.
+  - Firewalls: an inferred effect is derived from a body, so in a function's type it would let one
+    added `cat()` change the interface of every transitive caller. The runtime design keeps "free of
+    effects" as a body fact in its own query for exactly this reason (`r-runtime.md`, "The runtime
+    body facts"). Under A the top-level items stop depending on execution order, so each one stays
+    independent.
+  - R already wants this: an installed package's `R/` code runs when the package is installed, to
+    build its lazy-load database, so a top-level effect in package code is already a bug, and R's
+    convention puts load-time work in `.onLoad`. A turns that convention into a check.
+- **Object systems and wrappers.** Non-strict files are unchanged. In a strict file, `setClass`,
+  `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` and `R6Class` count as
+  definition forms: registering a class is an effect, but a declarative one. Read the list from
+  `syntax::native_values::object_system_function`, which the object-systems lint and the run-time
+  refusal already share, so the three cannot drift; the lint still warns. `f <- memoise(f)` passes
+  when `memoise`'s declaration is marked pure, since creating its cache is allocation, which Roc also
+  allows in pure code. `utils::globalVariables()` is declarative and passes; `makeActiveBinding` and
+  `delayedAssign` need a decision each.
+- **Lazy loading.** `ry load` binds each function as a promise and runs every other top-level
+  statement at load time in `Collate` order (`reference/package-loading.md`). Under A, a strict
+  package's constants are pure, so the loader can bind them as promises too: a load runs only the
+  class definition forms and `.onLoad`, a reload reruns nothing until a name is used, and a constant
+  that reads a name defined later in collation order works. Pure constants could later be evaluated
+  once and cached with the bytecode, as Roc evaluates top-level constants at compile time.
+- **Open questions.** Which files outside a package are library files (perhaps every file except
+  the `ry run` entry and test files). Whether a constant may call a project function marked
+  `#: @pure`, checked shallowly against its callees' declarations rather than inferred. Update
+  `type-checking/strict-mode.mdx` and the reference's strict mode section when it ships.
+
 ## Open: the JIT
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
@@ -363,6 +419,62 @@ protects construction but nothing after it.
 - **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
   and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
   `crates/ry/tests/test_repl_e2e.rs`). They pass alone; their timeouts need headroom.
+
+## Open: data-oriented layouts and explicit allocators
+
+The rule and its limits are in `decisions.md`, "Data-oriented design and explicit allocators". This
+is the audit list, highest expected win first. The layouts below were read from the code; every
+expected win is unverified until measured, so profile before and after each change, and revert a
+change that does not pay.
+
+1. **The checker's types: a per-item store instead of interning every intermediate type.** `Ty`
+   is a salsa interned struct over `TyKind`, whose composite variants own `Vec<Ty>` children
+   (`crates/semantics/src/types.rs`). Every type `Checker::infer` builds mid-check, including
+   unions, substitutions and resolved variables, allocates a `Vec`, hashes it and goes through
+   salsa's shared intern table. Target: a per-check SoA store (kind tags, one flat child array,
+   `u32` ids, union-find variables in the style of Roc's `Subs`), interning only exported schemes
+   and recorded expression types at the item boundary. Expected win: item checking is about 45% of
+   cold-check CPU at roughly 1.5 µs per expression, and this is the structural cut the 1 s target
+   needs ("Benchmark code bases (measured)").
+2. **HIR as flat arrays.** `ExpressionKind` and `PatternKind` hold `Box<[Argument]>`,
+   `Box<[Parameter]>`, `Box<[ExprId]>` and similar lists, one allocation each
+   (`crates/semantics/src/hir.rs`). Target: per item, a tag array, a fixed-width payload
+   array and one `extra: Vec<u32>` side array for variable-length children, in the style of Zig's
+   AST, so lowering an item makes a handful of allocations instead of one per list. Expected win:
+   lowering is 13% of cold CPU, and HIR is among the largest memo holders at about 1.4 KiB per
+   line.
+3. **The JIT's analysis plan.** `Plan` stores `Inst { operands: Vec<usize> }` per instruction, a
+   full `State` (two `Vec`s) before every instruction and along every edge, liveness as
+   `Vec<Vec<bool>>`, and `block_at` as a hash map keyed by pc (`crates/jit/src/analysis.rs`).
+   Target: operands in one `Vec<u32>` addressed by ranges, states as rows of one flat matrix with
+   stride `registers + slots`, liveness as a bitset, `block_at` as a dense array, all in a bump
+   arena dropped after codegen. Expected win: compile latency, which decides how early and how much
+   code the JIT can afford to compile once it compiles calls.
+4. **Side mark bitmaps in the collector.** The mark bit lives in each object's `Header`
+   (`crates/heap/src/object.rs`); `sweep_all` reads the header of every slot on every page, and
+   `sweep_young` chases the `young: Vec<Sexp>` list in allocation order (`crates/heap/src/heap.rs`).
+   Target: a mark bitmap and a free bitmap per page, so marking writes dense bits and sweeping
+   scans words without touching dead objects. The header layout is private (packages reach it only
+   through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
+   in large-heap sessions such as the data.table groupby workloads.
+5. **The allocation fast path.** `Heap::allocate` searches `SLOT_SIZES` linearly, pops a `Vec`
+   free list, zeroes the whole slot and pushes onto `young` (`crates/heap/src/heap.rs`). Target: a
+   size-to-class lookup table, bump allocation through free runs of a page, and zeroing only what
+   must be initialized (pointer-holding objects; R leaves atomic vector payloads uninitialized).
+   Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
+   2.5 to 3 times slower than GNU R ("Open: the JIT").
+6. **Scratch storage for argument matching.** `match_args` returns a fresh `Vec<Sexp>` on every
+   closure call (`crates/interp/src/eval.rs`). Target: a reusable scratch stack beside the
+   bytecode register file, so a call allocates only what R's semantics require (the frame and its
+   promises). Expected win: call-heavy code such as fib, lapply and `micro/closures`.
+7. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
+   through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
+   re-check. Target: hash the index, and sort by spelling only where output order is visible.
+   Check first which maps rely on string order for deterministic output.
+8. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
+   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
+   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
+   only alongside other work in that file.
 
 ## Open: performance and memory
 
@@ -479,14 +591,6 @@ Format is 113 ms of parse plus about 890 ms of render, so the render is about ei
 at 1.9 MiB/s against about 18 MiB/s for parsing. The actionable part is to fan `fmt` out the way
 `check` already does. The render's factor of eight was not localized and needs its own profile
 before anyone touches it.
-
-### Suspected: `Checker::infer` deep-clones an `Expression` per call
-
-`let expression = self.module.expression(id).clone();` sits on the checker's hottest path. It clones
-a `NameRef(String)`, a `Call{arguments: Vec<Argument>}` and a `Binary{special_name: Option<String>}`
-per node, while most arms then re-extract only `Copy` fields. The clone exists only to release the
-borrow on `self.module`. It appeared in the profile solely as `drop_in_place` and allocator frames,
-so its cost was never isolated. Measure before acting.
 
 ### Open from a fixed entry: the `BTreeMap` choice in `ItemNaming`
 
