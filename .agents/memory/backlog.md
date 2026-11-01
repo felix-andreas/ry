@@ -1828,9 +1828,16 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
-- **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
-  differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
-  unimplemented one when it is called) or printer details (complex numbers, wide matrices).
+- **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
+  (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
+  optimum along a slightly different path, so values agree to about seven digits only.
+- **GNU R's own `tests/*.R`** (R 4.3.3 sources, run by both engines with `TZ=UTC`): most failing
+  files stop at a missing routine: `loess_raw`, `parse_Rd`, `parseLatex`, the PORT routines behind
+  `nlminb`, `nlm`, and `qbeta` precision. `datetime3.R` fails because every time zone is computed as
+  UTC (below).
+- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
+  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
+  daylight-saving changes differ from GNU R.
 - **Tier-0 speed.** A scalar `for` loop runs about 6x slower than GNU R's bytecode (`s <- s + i * 2`,
   1e6 iterations: 0.27 s against 0.04 s). The cost is per-instruction allocation of scalar results,
   handle-stack pushes, and the guard and frame probes. Next: reuse a register's scalar when it is
@@ -1839,8 +1846,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Promise code is not compiled.** A closure argument is a promise over its AST, which the AST
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
-- **Missing internals.** Several `.Internal`s still raise "not supported" (`scan`'s binary
-  relatives `writeBin`/`readBin`, `save`/`load`, `url`, `polyroot`, `max.col`, `prmatrix`, ...);
+- **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
+  `file.copy`, `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -1848,8 +1855,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** bzip2 and xz file connections, `fifo()`, URL connections and sockets are
-  not implemented.
+- **Connections gaps:** `bzfile()` and `xzfile()` read all three formats but always write gzip,
+  because ry has no streaming bzip2 or xz encoder (readers detect the format, so the files still
+  load). `memCompress(type = "bzip2")`, `fifo()`, URL connections and sockets are not
+  implemented.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -1857,8 +1866,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   under "warning messages from top-level task callback 'name'", with the call shown as `cb(...)`.
 - **Compact sequences are not ALTREP.** `1:2e9` allocates the whole vector; GNU R's compact
   intseq does not.
-- **`save()` to a binary connection, and the compiler package's `cmpfun`/`bcVersion`,** are not
-  implemented.
 - **TRE approximate matching** (`{~1}` and other non-exact settings) reports that it is not
   supported; exact settings such as `{+}` compile to nothing, as in GNU R.
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
