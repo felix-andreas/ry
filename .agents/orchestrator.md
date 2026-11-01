@@ -80,6 +80,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Positioning (session_0111kWqC4b6STPYdoGhJV3zZ, Opus): #139 (four-step pitch, sidebar) merged as c627057; #142 (landing redesign: tabbed toolchain, runtime and future sections; step names "Check the code you have", "Type your code", "Switch to inline types", "Go fully typed") merged as 241a63d. Waiting for #128 to add the benchmark tab and the why-ry table.
 - DataFrame round 2 (session_0111kWqESwZBLCytfJFF7GT3, Opus): #144 (Polars-style DataFrame API, UpperCamelCase ry types, 1e6-row bench 2.4 s vs data.table 4.8 s) merged as a84abfa. Now: beat data.table on every question (groupby q6, keyed rolling join), full db-benchmark set at 1e7 rows, API gaps those expose.
 - Package installation on ry (session_0111kWqBd1i4XC24Kx7uFf5y, Opus): the R-level half of R CMD INSTALL (lazy-load DB, Meta/, help, lazy data) on ry's interpreter, bin/R and bin/Rscript on ry, binary installs; exit criterion is step 4's: the 232 closure packages install, load and pass their tests with no GNU R at install time. Coordinates with corpus packages round 3.
+- Standard library round 2 (session_0111kWqCc5uyUU7uPVY2RzP4, Opus): Roc parity across List, Str, Dict, Set, Num, Result; Perceus-style in-place updates so growing loops stop being quadratic; error-union widening in `Result.and_then`; decide on a pure-R `Str`/`Num` build for GNU R.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
