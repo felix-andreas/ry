@@ -29,7 +29,7 @@ use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::metadata::{
     NativeSymbols, PackageMetadata, file_attached_namespaces, normalized_imports,
     parse_description_collate, parse_description_dependencies, parse_description_package,
-    parse_namespace_imports, parse_native_symbols,
+    parse_namespace,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -438,14 +438,12 @@ impl Worker {
             .get(&namespace_path)
             .cloned()
             .or_else(|| fs::read_to_string(&namespace_path).ok());
-        let imports = namespace_text
+        let namespace_file = namespace_text
             .as_deref()
-            .map(|text| normalized_imports(&parse_namespace_imports(text)))
+            .map(parse_namespace)
             .unwrap_or_default();
-        let native_symbols = namespace_text
-            .as_deref()
-            .map(parse_native_symbols)
-            .unwrap_or_default();
+        let imports = normalized_imports(&namespace_file.imports);
+        let native_symbols = namespace_file.native_symbols;
         let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
             .as_deref()
@@ -1304,7 +1302,7 @@ impl Worker {
     }
 
     fn namespace_diagnostics(&self, text: &str) -> Vec<lsp_types::Diagnostic> {
-        let imports = parse_namespace_imports(text);
+        let imports = parse_namespace(text).imports;
         let knows = |package: &str| namespace_known(&self.db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&self.db, package, name);
         namespace_import_problems(&imports, &knows, &exports)

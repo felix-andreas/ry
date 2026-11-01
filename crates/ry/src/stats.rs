@@ -10,7 +10,7 @@ use semantics::infer::resolve_calls;
 use semantics::lints::lint_file;
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_namespace_imports, parse_native_symbols,
+    parse_description_dependencies, parse_namespace,
 };
 use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
 use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
@@ -53,9 +53,9 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         }
     }
     let namespace_source = fs::read_to_string(root.join("NAMESPACE")).ok();
-    let namespace_imports = namespace_source
+    let namespace_file = namespace_source
         .as_deref()
-        .map(parse_namespace_imports)
+        .map(parse_namespace)
         .unwrap_or_default();
     let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let collate = description_source
@@ -79,17 +79,14 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     AnalysisSettings::new(&db, config.check.inline_annotations);
     let metadata = PackageMetadata::new(
         &db,
-        normalized_imports(&namespace_imports),
+        normalized_imports(&namespace_file.imports),
         description_source
             .as_deref()
             .map(parse_description_dependencies)
             .unwrap_or_default(),
         BTreeSet::new(),
         None,
-        namespace_source
-            .as_deref()
-            .map(parse_native_symbols)
-            .unwrap_or_default(),
+        namespace_file.native_symbols,
     );
     let mut records: Vec<FileRecord> = Vec::with_capacity(paths.len());
     let mut package_count = 0usize;

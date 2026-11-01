@@ -2,10 +2,10 @@
 //! ordinary grammar; `DESCRIPTION` is DCF.
 
 use crate::stubs::{META_PACKAGE_MEMBERS, namespace_exports, namespace_known};
-use crate::{Db, SourceFile, parse};
+use crate::{Db, SiteRole, SourceFile, file_syntax_sites, parse};
 use std::collections::BTreeSet;
 use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, SyntaxNode, TextRange, matching_nodes};
+use syntax::{GreenRef, SyntaxKind, SyntaxNode, TextRange};
 
 /// Absent (no metadata files, single-file analysis) means no imports and no dependencies.
 #[salsa::input(singleton, debug)]
@@ -41,9 +41,35 @@ pub struct NativeSymbols {
     pub registers: bool,
 }
 
-pub fn parse_native_symbols(namespace_source: &str) -> NativeSymbols {
+/// What the checker reads from `NAMESPACE`, all from one parse: a generated `NAMESPACE` can
+/// run to a megabyte, and parsing it is serial work before and after the parallel passes.
+#[derive(Default)]
+pub struct NamespaceFile {
+    pub imports: Vec<NamespaceImport>,
+    /// Only explicit `export()` names: `exportPattern` is a load-time regex, and
+    /// `exportClasses`/`exportMethods`/`S3method` name S4 and S3 entities, not bindings.
+    pub exports: Vec<(String, TextRange)>,
+    pub native_symbols: NativeSymbols,
+}
+
+pub fn parse_namespace(source: &str) -> NamespaceFile {
+    let root = syntax::parse(source).syntax_node();
+    let directives = namespace_directives(&root);
+    NamespaceFile {
+        imports: namespace_imports(&directives),
+        exports: directives
+            .iter()
+            .filter(|(directive, _)| directive == "export")
+            .flat_map(|(_, values)| values)
+            .filter_map(name_argument)
+            .collect(),
+        native_symbols: native_symbols(namespace_spec_of(&root)),
+    }
+}
+
+fn native_symbols(spec: NamespaceSpec) -> NativeSymbols {
     let mut symbols = NativeSymbols::default();
-    for library in parse_namespace_spec(namespace_source).dynamic_libraries {
+    for library in spec.dynamic_libraries {
         for (binding, _) in &library.symbols {
             symbols.names.insert(format!("{}{binding}", library.fixes));
         }
@@ -156,34 +182,9 @@ pub fn attached_union(
 #[salsa::tracked(returns(clone))]
 pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<String> {
     let mut attached = BTreeSet::new();
-    let calls = matching_nodes(&parse(db, file).syntax_node(), |node, _| {
-        node.kind() == SyntaxKind::CALL_EXPR
-            && node
-                .child_nodes()
-                .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
-                .is_some_and(|callee| {
-                    callee.kind() == SyntaxKind::NAME
-                        && matches!(
-                            callee.single_token_text(),
-                            Some("library" | "require" | "requireNamespace" | "loadNamespace")
-                        )
-                })
-    });
+    let root = parse(db, file).syntax_node();
+    let calls = file_syntax_sites(db, file).nodes(&root, SiteRole::AttachCall);
     for node in calls {
-        let Some(callee) = node
-            .children()
-            .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
-        else {
-            continue;
-        };
-        if callee.kind() != SyntaxKind::NAME
-            || !matches!(
-                callee.text().to_string().as_str(),
-                "library" | "require" | "requireNamespace" | "loadNamespace"
-            )
-        {
-            continue;
-        }
         let first_positional = node
             .children()
             .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
@@ -210,6 +211,20 @@ pub fn file_attached_namespaces(db: &dyn Db, file: SourceFile) -> BTreeSet<Strin
     attached
 }
 
+pub(crate) fn is_green_attach_call(node: GreenRef<'_>) -> bool {
+    node.kind() == SyntaxKind::CALL_EXPR
+        && node
+            .child_nodes()
+            .find(|child| child.kind() != SyntaxKind::ARGUMENT_LIST)
+            .is_some_and(|callee| {
+                callee.kind() == SyntaxKind::NAME
+                    && matches!(
+                        callee.single_token_text(),
+                        Some("library" | "require" | "requireNamespace" | "loadNamespace")
+                    )
+            })
+}
+
 pub struct NamespaceImport {
     pub namespace: String,
     /// `None` for a whole-namespace `import(pkg)`.
@@ -218,9 +233,9 @@ pub struct NamespaceImport {
 }
 
 /// Directives R would reject are skipped, not reported: R itself validates NAMESPACE syntax.
-pub fn parse_namespace_imports(source: &str) -> Vec<NamespaceImport> {
+fn namespace_imports(directives: &[(String, Vec<SyntaxNode>)]) -> Vec<NamespaceImport> {
     let mut imports = Vec::new();
-    for (directive, values) in namespace_directives(source) {
+    for (directive, values) in directives {
         match directive.as_str() {
             "import" => imports.extend(values.iter().filter_map(name_argument).map(
                 |(namespace, range)| NamespaceImport {
@@ -247,22 +262,11 @@ pub fn parse_namespace_imports(source: &str) -> Vec<NamespaceImport> {
     imports
 }
 
-/// Only explicit `export()` names: `exportPattern` is a load-time regex, and
-/// `exportClasses`/`exportMethods`/`S3method` name S4 and S3 entities, not bindings.
-pub fn parse_namespace_exports(source: &str) -> Vec<(String, TextRange)> {
-    namespace_directives(source)
-        .into_iter()
-        .filter(|(directive, _)| directive == "export")
-        .flat_map(|(_, values)| values)
-        .filter_map(|value| name_argument(&value))
-        .collect()
-}
-
 /// Each top-level call with a bare-name callee, with its argument values. A named argument
 /// (`except = ...`) puts its name first; the value is the last expression child.
-fn namespace_directives(source: &str) -> Vec<(String, Vec<SyntaxNode>)> {
+fn namespace_directives(root: &SyntaxNode) -> Vec<(String, Vec<SyntaxNode>)> {
     let mut directives = Vec::new();
-    for node in syntax::parse(source).syntax_node().children() {
+    for node in root.children() {
         if node.kind() != SyntaxKind::CALL_EXPR {
             continue;
         }
@@ -349,8 +353,12 @@ pub struct DynamicLibraryDirective {
 /// Directives R would reject are skipped: R validates `NAMESPACE` syntax itself when it
 /// installs the package.
 pub fn parse_namespace_spec(source: &str) -> NamespaceSpec {
+    namespace_spec_of(&syntax::parse(source).syntax_node())
+}
+
+fn namespace_spec_of(root: &SyntaxNode) -> NamespaceSpec {
     let mut spec = NamespaceSpec::default();
-    for node in syntax::parse(source).syntax_node().children() {
+    for node in root.children() {
         if !is_expression_kind(node.kind()) {
             continue;
         }

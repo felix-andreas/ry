@@ -12,8 +12,7 @@ use salsa::Database;
 use semantics::diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax};
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_description_package, parse_namespace_exports,
-    parse_namespace_imports, parse_native_symbols,
+    parse_description_dependencies, parse_description_package, parse_namespace,
 };
 use semantics::stubs::{
     StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -269,9 +268,9 @@ pub(crate) fn analyze_project(
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
-    let namespace_imports = namespace_source
+    let namespace_file = namespace_source
         .as_deref()
-        .map(parse_namespace_imports)
+        .map(parse_namespace)
         .unwrap_or_default();
     let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let dependencies = description_source
@@ -284,16 +283,13 @@ pub(crate) fn analyze_project(
         .unwrap_or_default();
     let metadata = PackageMetadata::new(
         &db,
-        normalized_imports(&namespace_imports),
+        normalized_imports(&namespace_file.imports),
         dependencies,
         BTreeSet::new(),
         description_source
             .as_deref()
             .and_then(parse_description_package),
-        namespace_source
-            .as_deref()
-            .map(parse_native_symbols)
-            .unwrap_or_default(),
+        namespace_file.native_symbols,
     );
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
@@ -344,14 +340,19 @@ pub(crate) fn analyze_project(
 
     // Trees are evicted batch by batch, so everything later phases read from them is
     // derived while they are resident.
-    let want_tokens = namespace_source.is_some();
+    let imported = namespace::imported_names(&namespace_file.imports);
+    let want_tokens = namespace_source.is_some() && !imported.is_empty();
     let mut used_tokens = BTreeSet::new();
     for (_, tokens) in in_batches(&mut db, workers, &by_size, |db, index| {
         let file = files[index];
         derive_from_syntax(db, file, &config.lint);
         let mut tokens = BTreeSet::new();
         if want_tokens {
-            namespace::collect_used_tokens(&semantics::parse(db, file).syntax_node(), &mut tokens);
+            namespace::collect_used_tokens(
+                &semantics::parse(db, file).syntax_node(),
+                &imported,
+                &mut tokens,
+            );
         }
         tokens
     }) {
@@ -383,7 +384,7 @@ pub(crate) fn analyze_project(
         let knows = |package: &str| namespace_known(&db, package).unwrap_or(false);
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
-            namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
+            namespace::namespace_import_problems(&namespace_file.imports, &knows, &exports);
         // A conditional or chained write (`a <- b <- function() ...`) defines `b` as well.
         let defines = |name: &str| {
             ProjectFiles::try_get(&db).is_some_and(|files| {
@@ -392,14 +393,14 @@ pub(crate) fn analyze_project(
             })
         };
         problems.extend(namespace::namespace_export_problems(
-            &parse_namespace_exports(namespace_source),
-            &namespace_imports,
+            &namespace_file.exports,
+            &namespace_file.imports,
             &defines,
             &knows,
             &exports,
         ));
         problems.extend(namespace::unused_import_diagnostics(
-            &namespace_imports,
+            &namespace_file.imports,
             &used_tokens,
             config.lint.unused_import,
         ));
