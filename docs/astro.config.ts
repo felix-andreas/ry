@@ -64,7 +64,7 @@ export default defineConfig({
 				// The groups follow the migration story on the landing page and in why-ry.md: classic R
 				// first (steps 1 and 2), then what ry adds on top of R (steps 3 and 4).
 				{
-					label: '1. Works on your code today',
+					label: '1. Check the code you have',
 					items: [
 						{ slug: 'guides/checking' },
 						{ slug: 'guides/formatting' },

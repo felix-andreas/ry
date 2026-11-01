@@ -2875,11 +2875,13 @@ first lines R had already read, leaving R mid-command.
   R (checker, language server, formatter, loader, console, runtime). Its type system sits on top of
   R and checks the code a project already has. ry's runtime adds features plain R does not have
   (records, tags and `match`, frames, the standard library, inline annotations), which the pitch
-  calls R++. Strict mode keeps only typed code, which the pitch calls R--. A two-circle Venn
+  calls R++ together with plain R (everything ry runs). Strict mode keeps only typed code, which
+  the pitch calls R--. A two-circle Venn
   diagram shows this: R on the left, ry's types and features on the right, typed R (`#:` comments)
-  in the overlap, the union is R++ and the right circle is strict mode.
+  in the overlap, the union is R++ and the right circle is strict mode. The diagram has one
+  source, `docs/src/components/Venn.astro`, used by the landing page and `why-ry.mdx`.
 - **The migration story is the spine of the pitch,** in four steps that each show a real snippet
-  and real output: it works on your code today, add types as `#:` comments, switch to inline types,
+  and real output: check the code you have, add types as `#:` comments, switch to inline types,
   then move data to ry's records, tags and frames under strict mode. Each step is optional and
   reversible, which is what makes adopting ry safe for an existing code base.
 - **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
@@ -2888,8 +2890,8 @@ first lines R had already read, leaving R mid-command.
   code, and ry on typed strict code. Typed code is not faster yet (`backlog.md`), and the pitch
   says so instead of implying that types buy speed. When typed runtime features do get faster, the
   third column shows it without a rewrite of the copy.
-- **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Works on your code
-  today" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Move to ry's
+- **The docs sidebar follows the four steps** (`docs/astro.config.ts`): "1. Check the code you
+  have" and "2. Type your code" hold classic R, "3. Switch to inline types" and "4. Move to ry's
   types" hold what ry adds (strict mode sits in step 4). The landing page, `why-ry.md` and the
   sidebar use the same step names, so a pitch step leads straight to its docs. Pages were regrouped,
   not moved, so every URL and cross-link keeps working.

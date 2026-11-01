@@ -3,48 +3,27 @@ title: Why ry
 description: One toolchain for R, a type system on top of it, and a path from the R code you have to code an agent can safely change
 ---
 
+import Venn from '../../components/Venn.astro';
+
 R code bases that are years old are now being changed by agents, and code an agent writes needs to
 be checked by something other than a person reading every line. A type checker does that on every
 edit. R has none, so ry adds one, and it works on the R code you already have.
 
-ry is one toolchain for R: a checker, a language server, a formatter, a package loader, a console
-and a runtime, all reading the same `ry.toml`. Its type system sits on top of R, so plain R stays
-valid. On top of that, ry adds features R does not have, such as records, tagged unions and a typed
-table, which we call R++. Strict mode then lets you keep only code whose types are known, which we
-call R−−.
+With ry you check, format, load and run R from one tool configured by one `ry.toml`. Its type
+system sits on top of R, so plain R stays valid. ry also adds what R lacks: records, tagged unions,
+a typed table called a frame, and a standard library. Everything ry runs, plain R plus these
+additions, is what we call R++. Strict mode then keeps only code whose types are known, which we
+call R--.
 
 <figure>
-<svg viewBox="0 0 660 400" role="img" aria-labelledby="ry-venn-title ry-venn-desc" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:660px;height:auto;font-family:inherit">
-  <title id="ry-venn-title">R, ry's additions, and strict mode</title>
-  <desc id="ry-venn-desc">Two overlapping circles. The left circle is R: untyped code, S4, R6 and eval run but are not checked. The right circle is what ry adds: records, tags, frames, the standard library and inline types, which run on ry. The overlap is typed R written with #: comments, which is checked and also runs on GNU R. Both circles together are R++, everything ry runs. The right circle alone is strict mode, R−−, where only typed code is allowed.</desc>
-  <path d="M 70 50 V 40 H 590 V 50" stroke="currentColor" stroke-opacity="0.45" fill="none"/>
-  <text x="330" y="30" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">R++: everything ry runs</text>
-  <circle cx="245" cy="210" r="150" fill="#3b82f6" fill-opacity="0.16" stroke="#3b82f6" stroke-width="2"/>
-  <circle cx="415" cy="210" r="150" fill="#a855f7" fill-opacity="0.16" stroke="#a855f7" stroke-width="2" stroke-dasharray="7 5"/>
-  <g fill="currentColor" text-anchor="middle">
-    <text x="175" y="165" font-size="22" font-weight="700">R</text>
-    <text x="175" y="198" font-size="13">untyped code</text>
-    <text x="175" y="217" font-size="13">S4, R6, eval</text>
-    <text x="175" y="246" font-size="12" fill-opacity="0.7">runs, not checked</text>
-    <text x="330" y="165" font-size="15" font-weight="700">typed R</text>
-    <text x="330" y="198" font-size="13" font-family="ui-monospace, monospace">#: comments</text>
-    <text x="330" y="246" font-size="12" fill-opacity="0.7">checked, and</text>
-    <text x="330" y="262" font-size="12" fill-opacity="0.7">runs on GNU R</text>
-    <text x="485" y="165" font-size="17" font-weight="700">ry additions</text>
-    <text x="485" y="198" font-size="13">records, tags</text>
-    <text x="485" y="217" font-size="13">frames, stdlib</text>
-    <text x="485" y="236" font-size="13">inline types</text>
-    <text x="485" y="262" font-size="12" fill-opacity="0.7">runs on ry</text>
-  </g>
-  <text x="485" y="385" text-anchor="middle" fill="currentColor" font-size="15" font-weight="600">strict mode (R−−): only this circle</text>
-</svg>
+  <Venn id="ry-venn" />
 </figure>
 
-## From R to typed ry in four steps
+## From plain R to fully typed code in four steps
 
-Each step is optional, and you can stop after any of them. The docs follow the same four steps.
+Each step is optional, and you can stop after any of them.
 
-### 1. It works on your code today
+### 1. Check the code you have
 
 Run `ry check` in a project, with no configuration and nothing to annotate. It reads the source
 without running it, so it reports mistakes that R reports only when the line runs:
@@ -95,7 +74,7 @@ type-mismatch
 ```
 
 The file is still plain R, so GNU R, `Rscript`, RStudio and every other R tool run it unchanged. If
-you want to stay on GNU R, this is where you stop.
+you want files that every R tool can run without ry, this is where you stop.
 
 ### 3. Switch to inline types
 
@@ -118,6 +97,7 @@ On ry's runtime, the call fails at the boundary and names the argument:
 $ ry run --runtime ry pricing.R
 Error in net_price(100, rate) :
   argument `rate` must be `double`, not `character`
+Execution halted
 ```
 
 GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to binary operator`.
@@ -126,10 +106,11 @@ GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to
 
 ### 4. Move to ry's types
 
-R models data with lists, S4, R6 or Reference Classes, which no checker can follow far. ry adds
-[records, tuples and tagged unions](/type-checking/records-and-tags) with a `match` that knows every
-case, a built-in [table type](/type-checking/frames) whose columns the checker knows, and a
-[standard library](/reference/standard-library) of `Result`, `List`, `Dict` and friends:
+A field read from an R6 object, or from a list built at run time, has a type the checker cannot
+see. ry's own data types have one. [Records, tuples and tagged unions](/type-checking/records-and-tags)
+come with a `match` that knows every case, [frames](/type-checking/frames) are a table whose
+columns the checker knows, and the [standard library](/reference/standard-library) returns
+`Result`, `List` and `Dict` values instead of `NA` or a warning:
 
 ```r
 alias Payment = :Paid(amount: double) | :Refunded(amount: double) | :Pending
@@ -179,9 +160,10 @@ left out on purpose:
   parameter can accept either of two types instead, written `integer | character`.
 - **Inheritance.** One type extending another makes inference slow and its results hard to predict.
   [Custom types](/type-checking/custom-types) keep values apart without it.
-- **What it cannot model.** S4 and R6 objects and data frame columns get a type that is compatible
-  with everything, so they never cause a false error, but they are not checked either. Strict mode
-  shows where that happens, and [limitations](/type-checking/limitations) lists the rest.
+
+Some things it cannot model yet. S4 and R6 objects and data frame columns get a type that is
+compatible with everything, so they never cause a false error, but they are not checked either.
+Strict mode shows where that happens, and [limitations](/type-checking/limitations) lists the rest.
 
 ## Status
 
@@ -191,5 +173,5 @@ The type system is still growing, so a new release can report findings an older 
 is why CI should pin the version.
 
 ry's own runtime is under construction. It still reads base R from your GNU R installation, and a
-script that uses something it lacks stops with an error that names it. Records, tags, frames and the
-standard library run only on it, so for production work today, run plain R and typed R on GNU R.
+script that uses something it lacks stops with an error that names it. Records, tagged unions, frames and
+the standard library run only on it, so for production work today, run plain R and typed R on GNU R.

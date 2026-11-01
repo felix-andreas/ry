@@ -3,14 +3,14 @@ title: Getting started
 description: What ry is, how to install it, and your first check
 ---
 
-ry is one toolchain for R, written in Rust: a checker, a language server, a formatter, a package
-loader, a console and a runtime. It adds a type system on top of R that works on the code you
-already have, so the mistakes R reports only when a line runs (a misspelled name, a wrong argument,
-a `NULL` you forgot) show up as you type. That matters most when agents write the code, because
-every edit gets checked without a person reading it.
+ry finds the mistakes R reports only when a line runs (a misspelled name, a wrong argument, a
+`NULL` you forgot) while you type, in the R code you already have. It checks, formats, loads and
+runs R from one tool configured by one `ry.toml`, and it adds a type system on top of R that you can
+adopt one step at a time.
 
-This page covers the first two of the [four steps](/why-ry#from-r-to-typed-ry-in-four-steps) from
-R to typed ry: checking the code you have, then turning on types.
+This page covers the first two of the
+[four steps](/why-ry#from-plain-r-to-fully-typed-code-in-four-steps): checking the code you have,
+then turning on types.
 
 ## Install
 
@@ -23,9 +23,10 @@ R to typed ry: checking the code you have, then turning on types.
 
 [Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 
-## Step 1: check a project
+## Step 1: check the code you have
 
-Run `ry check` in a project directory:
+Run `ry check` in a project directory. Files under `R/` are read as a package that shares one
+namespace, as R loads them, and every other `.R` file is a script read from top to bottom:
 
 ```r
 # R/discount.R
@@ -47,9 +48,7 @@ unresolved
 1 problem in 1 file
 ```
 
-R itself would report this only when the line runs. Files under `R/` are read as a package that
-shares one namespace, as R loads them, and every other `.R` file is a script read from top to
-bottom.
+R itself would report this only when the line runs.
 
 ## Step 2: turn on type checking
 
@@ -60,7 +59,7 @@ Type errors are opt-in. Add a `ry.toml` to the project root:
 typing = true
 ```
 
-ry already infers a type for every value from how it is used. Now it also reports the mismatches:
+ry already infers types from how values are used. Now it also reports the mismatches:
 
 ```r
 apply_discount <- function(price, rate) price * (1 - rate)
