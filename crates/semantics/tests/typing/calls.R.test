@@ -472,11 +472,11 @@ f: Unknown
 #---- a_callback_names_the_return_that_the_interface_refuses
 f <- function() {
   words <- list("a", "b")
-  Filter(function(s) s + 1L, words)
+  Filter(function(s) paste0(s, "!"), words)
 }
 #++++
 f: Unknown
-53..71 error[type-mismatch] this function must return `logical`, but its body produces a numeric value (`integer` or `double`)
+53..79 error[type-mismatch] this function must return `logical`, but it returns `character`
 
 #---- a_named_callback_parameter_reports_its_own_type
 #: fn(cb: fn(integer) -> integer) -> integer

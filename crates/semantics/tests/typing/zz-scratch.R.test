@@ -1,0 +1,19 @@
+#==== zz
+#---- a
+g <- function(x) x * 2
+a <- g(TRUE)
+b <- g(c(TRUE, FALSE))
+z <- 1i + 2
+w <- 1i / 2L
+h <- function(n) seq_len(n)
+k <- function(n) 1:n
+k(TRUE)
+#++++
+g: <T: numeric> fn(x: T) -> double
+a: double
+b: double
+z: complex
+w: complex
+h: <T> fn(n: T) -> integer[]
+k: <T: scalar numeric> fn(n: T) -> double[]
+double[]

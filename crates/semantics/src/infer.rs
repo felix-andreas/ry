@@ -1381,13 +1381,16 @@ fn constraint_rejects<'db>(
     };
     let admissible = match constraint {
         Constraint::Unconstrained => true,
+        // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
         Constraint::Numeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) | TyKind::Any | TyKind::Unknown => {
-                true
-            }
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex)
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Vector(element) | TyKind::NamedVector(element) => matches!(
                 element.kind(db),
-                TyKind::Scalar(Atomic::Integer | Atomic::Double)
+                TyKind::Scalar(
+                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex
+                )
             ),
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
@@ -1408,9 +1411,9 @@ fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::ScalarNumeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) | TyKind::Any | TyKind::Unknown => {
-                true
-            }
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,

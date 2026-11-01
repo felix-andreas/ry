@@ -1079,7 +1079,7 @@ fn numeric_operand_parts<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(OperandSh
     let arithmetic_atomic = |atomic: &Atomic| match atomic {
         // R promotes logical to integer before arithmetic (`TRUE + TRUE` is `2L`).
         Atomic::Logical => Some(Atomic::Integer),
-        Atomic::Integer | Atomic::Double => Some(*atomic),
+        Atomic::Integer | Atomic::Double | Atomic::Complex => Some(*atomic),
         _ => None,
     };
     match ty.kind(db) {
@@ -3759,18 +3759,45 @@ impl<'db> Checker<'db, '_> {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
         let resolved = self.structural(inferred);
-        if self.condition_coerces(resolved) {
+        if self.condition_coerces(resolved) && !self.is_long_combine(condition) {
+            return;
+        }
+        // A value already required to be numeric (`if (n %% 2L)`) coerces like a number, so the
+        // condition must not pin it to `logical`.
+        if matches!(resolved.kind(self.db), TyKind::Var(_))
+            && matches!(
+                self.table.open_constraint(self.db, resolved),
+                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+            )
+        {
             return;
         }
         self.unify_or_report(condition_range, scalar(self.db, Atomic::Logical), resolved);
     }
 
+    /// `c(a, b, ...)` with two or more elements is longer than one whatever its elements are,
+    /// which is the one case where a vector condition's length is known.
+    fn is_long_combine(&self, id: ExprId) -> bool {
+        let id = match &self.module.expression(id).kind {
+            ExpressionKind::Paren(inner) => *inner,
+            _ => id,
+        };
+        let ExpressionKind::Call { callee, arguments } = &self.module.expression(id).kind else {
+            return false;
+        };
+        matches!(&self.module.expression(*callee).kind, ExpressionKind::NameRef(name) if name == "c")
+            && arguments.iter().filter(|argument| argument.value.is_some()).count() >= 2
+    }
+
     /// A numeric condition is ordinary R (`if (length(x))`); character, complex, raw,
-    /// and non-scalar conditions keep their error as in R. A flexible condition is left
+    /// and map-like conditions keep their error as in R. A flexible condition is left
     /// to unification, which binds it to `logical`.
     fn condition_coerces(&self, ty: Ty<'db>) -> bool {
         match ty.kind(self.db) {
             TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => true,
+            // A vector type carries no length, and the vectors code tests (`if (x >= 1)` on a
+            // `double[]`) are length one at run time far more often than not.
+            TyKind::Vector(element) => self.condition_coerces(*element),
             TyKind::Union(members) => members.iter().all(|&member| self.condition_coerces(member)),
             _ => false,
         }
@@ -4097,7 +4124,10 @@ impl<'db> Checker<'db, '_> {
                 } else {
                     OperandShape::Scalar
                 };
-                let atomic = if always_double {
+                let atomic = if *left_atomic == Atomic::Complex || *right_atomic == Atomic::Complex
+                {
+                    Atomic::Complex
+                } else if always_double {
                     Atomic::Double
                 } else if *left_atomic == Atomic::Integer && *right_atomic == Atomic::Integer {
                     Atomic::Integer
