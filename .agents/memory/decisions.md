@@ -29,7 +29,7 @@ format, the overload rules, and the export manifests.
 # Decision record: the beta semantics
 
 This record holds the core type-system decisions. `backlog.md` holds the prioritized work that
-follows from them. The semantics contract is `reference/type-system.md`, and it is updated before
+follows from them. The semantics contract is `reference/type-system.mdx`, and it is updated before
 the behavior it describes ships.
 
 ## The R variable model is mutable slots with union joins
@@ -779,7 +779,7 @@ parameter list, `-> TYPE` between the parameter list and the body, and `function
 (or `\<T>(...)`) for type parameters. Every `TYPE` is the `#:` type grammar, run on R's token stream
 by the same parser functions, so there is one type grammar. A function header reads like the compact
 annotation it means: `function(x: integer) -> integer` is `fn(x: integer) -> integer` with formals.
-Docs: `reference/type-system.md#inline-annotation-syntax`.
+Docs: `reference/type-system.mdx#inline-annotation-syntax`.
 
 **Why this shape.** The record above gives the product reasons. The binding form is recognized only where a statement starts
 (top level, directly inside `{}`), by a shallow token scan for a `<-` or `=` outside every bracket, where only `(`, `[` and `{` carry
@@ -2284,3 +2284,51 @@ filter holds an unfinished command and releases it whole. "Unfinished" is
 or raised with only trivia left), which the parser knows and a range check cannot, because an error
 at a trailing newline is reported on the last code character. ry's own console uses the same rule. Otherwise strict mode could refuse the last line of a definition whose
 first lines R had already read, leaving R mid-command.
+
+# Decision record: the JIT tier
+
+`crates/jit` compiles hot tier-0 bytecode with Cranelift. `contributing/design/r-runtime.md`
+(section 5, "What tier 1 does today") is the contract for what it does; this records why.
+
+- **The tier interface is a hook table, not a dependency.** `interp` exposes `bytecode::Tier`
+  (`enter`, `back_edge`, the back-edge threshold) and `set_tier`, plus `Machine`, `TierExit`,
+  `step_one` and `load_variable`. `jit` depends on `interp`, never the reverse, and `libr`
+  installs it after the interpreter. Tier 0 changes from other work land without touching the JIT
+  as long as these stay stable.
+- **The typed plan is the IR.** One action plus one abstract state per bytecode instruction, with
+  Cranelift `Variable`s building the SSA form. A PIR-style R-level IR was deferred because the
+  first goal, unboxed loops, needs no rewriting across instructions; fusion, bounds-check
+  elimination and inlining will need it.
+- **Compiled code shares tier 0's register window.** Boxed values live in the window or in slot
+  root cells after it, so the collector sees them without stack maps, and deoptimization at any
+  instruction is a matter of boxing the unboxed live values in place and returning
+  `TierExit::Resume` with the pc.
+- **Deoptimization returns to tier 0's loop instead of calling into it.** An earlier shape ran
+  the rest of the body in tier 0 from inside the compiled frame, so a loop that deoptimized and
+  re-entered through on-stack replacement on every iteration nested native frames until the stack
+  overflowed. Returning the resume pc and any pending unwind keeps the native stack flat.
+- **Rare slow paths hand off to tier 0.** Integer overflow, an out-of-range element read and
+  `sqrt` or `log` of a negative number deoptimize to the instruction (reason `HANDOFF`, which does
+  not invalidate) instead of calling a helper, because they warn, and a calling handler may read
+  or rebind any variable the loop keeps in a register. Tier 0 runs them with the frame written
+  back, and the next backward jump re-enters compiled code.
+- **Plain arithmetic and pure builtins check for calling handlers.** They can warn, so when a
+  handler is established they write back and forget the frame like a generic call. Without a
+  handler a warning is only deferred, so the common case pays one helper call.
+- **Variables live in slots with a runtime status** (unloaded, local, enclosing, dirty). The
+  environment stays the truth for everything outside the body, so it is written back before any
+  operation that can observe it and forgotten after any that can change it. This keeps reflection
+  through callees (`parent.frame()`, `sys.function`) correct without proving it absent.
+- **The first read of a formal whose default is an expression writes back and forgets.** The
+  default is evaluated in the function's own frame and can read or assign the body's variables
+  (`[.data.frame`'s `drop` reads `cols`). Supplied arguments evaluate in the caller's frame and
+  need no write-back.
+- **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
+  feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
+  never to compile.
+- **The default mode compiles only bodies with loops.** Measured on `micro/closures`, compiling
+  `function(a, b) a + b` made each call slower, because entering compiled code and forcing two
+  promises through helpers cost more than tier 0's dispatch. Straight-line bodies wait for direct
+  calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
+- **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
+  tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
