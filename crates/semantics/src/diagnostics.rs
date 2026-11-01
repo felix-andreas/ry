@@ -2231,6 +2231,21 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *expected),
             renderer.render(db, *found)
         ),
+        TypeErrorKind::AssignmentForRecord { field, expected } => format!(
+            "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
+            renderer.render(db, *expected)
+        ),
+        TypeErrorKind::UnwrappedNominal { nominal, found } => {
+            let name = match nominal.kind(db) {
+                TyKind::Named(name, _) => name.text(db).to_owned(),
+                _ => renderer.render(db, *nominal),
+            };
+            format!(
+                "expected `{}`, found `{}`. The value has the right shape, but `{name}` is a nominal type, so only `@{name}(...)` or `#: @new {name}` creates one",
+                renderer.render(db, *nominal),
+                renderer.render(db, *found)
+            )
+        }
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
         ),

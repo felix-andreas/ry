@@ -49,7 +49,7 @@ value <- 1L
 #++++
 == R/main.R
 value: Person
-46..48 error[type-mismatch] expected `Person`, found `integer`
+46..48 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- annotation_can_reference_alias
 #~~~~ R/main.R
@@ -71,7 +71,7 @@ value <- 1L
 == R/a.R
 == R/b.R
 value: Person
-19..21 error[type-mismatch] expected `Person`, found `integer`
+19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- annotation_uses_alias_from_other_file
 #~~~~ R/a.R
@@ -93,7 +93,7 @@ value <- 1L
 #++++
 == R/a.R
 value: Person
-19..21 error[type-mismatch] expected `Person`, found `integer`
+19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 == R/b.R
 
 #==== nominal_introduction

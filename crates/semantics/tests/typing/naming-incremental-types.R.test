@@ -11,7 +11,7 @@ value <- 1L
 person: integer
 == R/b.R
 value: Person
-19..21 error[type-mismatch] expected `Person`, found `integer`
+19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- added_dropped_duplicate_flip_then_second_definer_added
 #~~~~ R/a.R
@@ -30,7 +30,7 @@ person: integer
   = 3..24 another declaration of this name is here.
 == R/b.R
 value: Person
-19..21 error[type-mismatch] expected `Person`, found `integer`
+19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 == R/c.R
 other: integer
 3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
@@ -75,7 +75,7 @@ value <- 1L
 compartment: integer
 == R/b.R
 value: Slot
-17..19 error[type-mismatch] expected `Slot`, found `integer`
+17..19 error[type-mismatch] expected `Slot`, found `integer`. The value has the right shape, but `Slot` is a nominal type, so only `@Slot(...)` or `#: @new Slot` creates one
 
 #---- arity_flip_on_non_dirty_referrer_then_slot_gains_type_parameter
 #~~~~ R/a.R
@@ -110,6 +110,6 @@ widget <- 1L
 #++++
 == R/a.R
 value: Widget
-19..21 error[type-mismatch] expected `Widget`, found `integer`
+19..21 error[type-mismatch] expected `Widget`, found `integer`. The value has the right shape, but `Widget` is a nominal type, so only `@Widget(...)` or `#: @new Widget` creates one
 == R/b.R
 widget: integer

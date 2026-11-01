@@ -7,6 +7,7 @@ use semantics::check::{CalleeTarget, ItemCheck};
 use semantics::diagnostics::TypeRenderer;
 use semantics::hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind};
 use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
+use semantics::infer::apply_definition;
 use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
 use semantics::types::{
     Constraint, FunctionType, Name, Ty, TyKind, TypeScheme, contains_inference_var,
@@ -14,7 +15,7 @@ use semantics::types::{
 use semantics::{
     Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
     item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range, item_naming,
-    item_node, item_tree, package_definitions, project_type_definitions,
+    item_node, item_tree, package_definitions, project_type_definitions, visible_type_definitions,
 };
 use std::collections::BTreeSet;
 use std::iter::once;
@@ -2607,7 +2608,7 @@ fn dollar_completions(
                 _ => None,
             })
             .min_by_key(|(range, _)| range.len())?;
-        let target_ty = *check.expression_types.get(&target)?;
+        let target_ty = representation(db, file, *check.expression_types.get(&target)?);
         let fields: Vec<(&str, Ty<'_>)> = match target_ty.kind(db) {
             TyKind::Record(fields) | TyKind::Frame(Some(fields)) => fields
                 .iter()
@@ -2645,6 +2646,25 @@ fn dollar_completions(
         Some(items) => items,
         None => spelled_completions(db, files, query, DOLLAR_EXPR, CompletionSource::Field),
     }
+}
+
+/// What `$` reads on a nominal value: its definition's body, as the checker projects it.
+fn representation<'db>(db: &'db dyn Db, file: SourceFile, ty: Ty<'db>) -> Ty<'db> {
+    let mut current = ty;
+    // Bounded, because a definition may name another definition as its whole body.
+    for _ in 0..16 {
+        let TyKind::Named(name, arguments) = current.kind(db) else {
+            break;
+        };
+        let Some(definition) = visible_type_definitions(db, file).get(name) else {
+            break;
+        };
+        if definition.parameters.len() != arguments.len() {
+            break;
+        }
+        current = apply_definition(db, definition, arguments);
+    }
+    current
 }
 
 /// After a lone `:` that starts a tag. Inside a `match` pattern it offers the tags the value at
