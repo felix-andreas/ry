@@ -1095,9 +1095,11 @@ impl<'db> InferenceTable<'db> {
         }
         if !self.compatible(db, actual.ret, expected.ret) {
             let returns = self.resolve(db, actual.ret);
+            let required = self.resolve(db, expected.ret);
             return Some(FunctionMismatch::Return {
-                required: self.resolve(db, expected.ret),
+                required,
                 constraint: self.variable_constraint(db, returns),
+                required_constraint: self.variable_constraint(db, required),
                 returns,
             });
         }
@@ -1247,7 +1249,10 @@ pub enum FunctionMismatch<'db> {
     Return {
         required: Ty<'db>,
         returns: Ty<'db>,
+        /// The constraint the function's own result type carries.
         constraint: Option<Constraint>,
+        /// The constraint the expected result type carries, such as `item` on `List.map`'s `B`.
+        required_constraint: Option<Constraint>,
     },
 }
 
@@ -1556,6 +1561,15 @@ fn constraint_rejects<'db>(
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
+        },
+        Constraint::ArrayItem => match ty.kind(db) {
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
+            )
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => is_ry_value_type(db, ty),
         },
     };
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))

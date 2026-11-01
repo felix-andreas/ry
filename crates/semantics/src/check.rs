@@ -810,7 +810,10 @@ fn erase_residual_vars_at<'db>(
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
             Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
-            Constraint::AtomicElement | Constraint::Key | Constraint::Unconstrained => unknown(db),
+            Constraint::AtomicElement
+            | Constraint::Key
+            | Constraint::ArrayItem
+            | Constraint::Unconstrained => unknown(db),
         };
     }
     if let Some(&rigid) = closer.generalized.get(&var) {

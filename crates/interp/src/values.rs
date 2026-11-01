@@ -894,13 +894,27 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
 
 /// A deep copy, as `duplicate()` makes: vectors and pairlists are copied all the way down, while
 /// environments, symbols, promises and external objects are shared.
+///
+/// The copy of an Array is a plain R vector. Whoever copies is about to write, and a builtin or C
+/// code may write a missing value or an attribute that an Array cannot hold, so only the Array
+/// code (which checks every write) puts the bit back. Arrays nested inside a copied list keep it,
+/// because the copy does not write into them.
 pub unsafe fn duplicate(object: Sexp) -> R<Sexp> {
-    duplicate_with(object, true)
+    let copy = duplicate_with(object, true)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
 }
 
-/// A copy of the top level only: list elements and attribute values are shared.
+/// A copy of the top level only: list elements and attribute values are shared. Like
+/// [`duplicate`], it drops the Array bit.
 pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
-    duplicate_with(object, false)
+    let copy = duplicate_with(object, false)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
 }
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
@@ -926,7 +940,7 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
                 let value = if deep {
-                    duplicate(cell.car())?
+                    duplicate_with(cell.car(), true)?
                 } else {
                     cell.car()
                 };
@@ -944,7 +958,7 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 // The head cell's attributes and flags are the object's, copied below.
                 if position != 0 && attributes != nil() {
                     let attributes = if deep {
-                        duplicate(attributes)?
+                        duplicate_with(attributes, true)?
                     } else {
                         attributes
                     };
@@ -977,7 +991,11 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 SexpType::List | SexpType::Expression => {
                     for index in 0..count {
                         let element = source.element(index);
-                        let element = if deep { duplicate(element)? } else { element };
+                        let element = if deep {
+                            duplicate_with(element, true)?
+                        } else {
+                            element
+                        };
                         heap.set_element(copy, index, element);
                     }
                 }
@@ -992,9 +1010,9 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     };
     if object.attrib() != nil() {
         let attributes = if deep {
-            duplicate(object.attrib())?
+            duplicate_with(object.attrib(), true)?
         } else {
-            shallow_duplicate(object.attrib())?
+            duplicate_with(object.attrib(), false)?
         };
         heap.set_attrib(copy, attributes);
     }
@@ -1011,9 +1029,7 @@ pub unsafe fn plain(object: Sexp) -> R<Sexp> {
     if !object.is_array() {
         return Ok(object);
     }
-    let copy = shallow_duplicate(object)?;
-    copy.set_array(false);
-    Ok(copy)
+    shallow_duplicate(object)
 }
 
 /// `MAYBE_SHARED`: more than one reference, so a modification must copy first.

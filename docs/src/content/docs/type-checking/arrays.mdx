@@ -99,8 +99,8 @@ recycled, and a result that would be `NA`, such as an integer overflow, stops wi
 ## Indexing
 
 `xs[[i]]` is one item, typed as the item type. `xs[i]` is an Array again, selected by positions or
-by a logical mask such as `xs[xs > 1]`. A position outside the Array is an error when the code runs,
-never an `NA`.
+by a logical mask such as `xs[xs > 1]`, and a negative position leaves an item out as in R. A
+position outside the Array is an error when the code runs, never an `NA`.
 
 `x[[...]]` directly after a value keeps its R meaning, so index with an Array of positions through a
 variable: `positions <- [1L, 3L]; xs[positions]`.
@@ -118,7 +118,8 @@ is.Array(xs)                 # TRUE
 ```
 
 `as.Array()` refuses a vector with an `NA` or a class, and drops names. Setting an attribute on an
-Array, such as `names(xs) <- ...`, turns it into a plain R vector. The standard library's `List`
+Array, such as `names(xs) <- ...`, turns it into a plain R vector, and so does R code that assigns
+an `NA` or an R vector into an Array it received, so base functions keep working on Arrays. The standard library's `List`
 functions accept an Array and return one, so `List.map([1, 2, 3], function(x) x * 2)` is
 `[2, 4, 6]`.
 

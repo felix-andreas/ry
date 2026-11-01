@@ -275,16 +275,20 @@ pub enum Constraint {
     /// runtime's collections use.
     Key,
     ScalarNumeric,
+    /// What an Array can hold: a `logical`, `integer`, `double` or `character` scalar, or a ry
+    /// value (a record, tuple, tag, Array, `Dict` or `Set`).
+    ArrayItem,
 }
 
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 4] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 5] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
+        ("item", Constraint::ArrayItem),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -308,7 +312,9 @@ impl Constraint {
             (a, b) if a == b => a,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
             (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
-            (Key, AtomicElement) | (AtomicElement, Key) => Key,
+            (Key, AtomicElement | ArrayItem) | (AtomicElement | ArrayItem, Key) => Key,
+            (ArrayItem, AtomicElement) | (AtomicElement, ArrayItem) => Key,
+            (ArrayItem, Numeric) | (Numeric, ArrayItem) => ScalarNumeric,
             _ => unreachable!("all constraint pairs are covered"),
         }
     }

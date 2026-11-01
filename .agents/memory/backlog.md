@@ -316,8 +316,12 @@ protects construction but nothing after it.
 
 `decisions.md`, "An Array is a flagged R vector". Known gaps:
 
-- `List.map` whose function returns a value that cannot be an item (a vector, `NULL`) is caught
-  only at run time; the checker should reject the function's return type.
+- The runtime checks that atomic items share one type but not that ry-value items do, so
+  `[(x = 1), [1]]` builds at run time; only the checker rejects it.
+- `c(x, x)` in an unannotated callback types as `Unknown`, so `List.map(xs, \(x) c(x, x))` passes
+  the `item` constraint and fails only at run time.
+- `List` functions added to `standard_library.rs` need an Array overload in `types/ry.Rtypes`, and
+  any that reuse their first argument's storage must not reuse an Array's.
 - `class(xs)` is R's implicit class (`numeric`), and serialization (`saveRDS`) drops the flag, so
   a reloaded Array is a plain vector.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.

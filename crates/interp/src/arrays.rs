@@ -356,8 +356,7 @@ pub unsafe fn finish_result(call: Sexp, operator: &str, result: Sexp) -> R<Sexp>
     Ok(finish(result))
 }
 
-/// `array[i]`: the items at positions `i` (whole numbers, or a logical mask as long as the
-/// Array), as an Array. `array[]` is the Array itself.
+/// `array[i]`: the items that positions `i` select, as an Array. `array[]` is the Array itself.
 pub unsafe fn subset(array: Sexp, indices: &[Sexp], call: Sexp) -> R<Sexp> {
     let index = match indices {
         [] => return Ok(array),
@@ -385,9 +384,17 @@ pub unsafe fn subset2(array: Sexp, indices: &[Sexp], call: Sexp) -> R<Sexp> {
     item(array, position)
 }
 
-/// `array[i] <- value`: `value` is a single item or an Array with one item per position, of the
-/// Array's item type and without NA.
-pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
+/// `array[i] <- value`, where `value` is a single item or an Array with one item per position,
+/// of the Array's item type. `None` means `value` is not that (an NA, an R vector, another item
+/// type), and the caller then assigns into the plain R vector instead. That keeps R code working
+/// when it receives an Array, as base `ifelse()` does when it assigns doubles into its logical
+/// `test`. Typed code never gets there, because the checker rejects such a value; the rules it
+/// cannot check, a position in bounds and no recycling, stay errors.
+pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Option<Sexp>> {
+    let kind = items(array);
+    if !fits(kind, value, false) {
+        return Ok(None);
+    }
     let positions = match indices {
         [] => (0..length(array)).collect(),
         [index] if *index == missing_arg() => (0..length(array)).collect(),
@@ -399,47 +406,43 @@ pub unsafe fn subassign(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) 
             ));
         }
     };
-    let kind = items(array);
-    let replacement = replacement(kind, value, call, "[<-")?;
-    let count = if replacement.is_array() {
-        length(replacement)
-    } else {
-        1
-    };
-    if replacement.is_array() && count != positions.len() {
+    if value.is_array() && length(value) != positions.len() {
         return Err(error_in(
             call,
             format!(
-                "`[<-` assigns {} positions but the replacement Array has {count} items; an Array is never recycled",
-                positions.len()
+                "`[<-` assigns {} positions but the replacement Array has {} items; an Array is never recycled",
+                positions.len(),
+                length(value)
             ),
         ));
     }
     let target = writable(array)?;
     for (offset, &position) in positions.iter().enumerate() {
-        if replacement.is_array() {
-            copy_item(replacement, offset, target, position);
+        if value.is_array() {
+            copy_item(value, offset, target, position);
         } else {
-            store_single(kind, replacement, target, position);
+            store_single(kind, value, target, position);
         }
     }
-    Ok(target)
+    Ok(Some(target))
 }
 
-/// `array[[i]] <- value`: `value` is a single item of the Array's item type.
-pub unsafe fn subassign2(array: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
-    let position = single_position(array, indices, call, "[[<-")?;
+/// `array[[i]] <- value`, under the rules of [`subassign`]: `None` when `value` is not one item
+/// of the Array's item type, and an error when `i` is not one position in bounds.
+pub unsafe fn subassign2(
+    array: Sexp,
+    indices: &[Sexp],
+    value: Sexp,
+    call: Sexp,
+) -> R<Option<Sexp>> {
     let kind = items(array);
-    let replacement = replacement(kind, value, call, "[[<-")?;
-    if replacement.is_array() && kind != Items::RyValues {
-        return Err(error_in(
-            call,
-            "`[[<-` stores one item; use `[<-` to assign several",
-        ));
+    if !fits(kind, value, true) {
+        return Ok(None);
     }
+    let position = single_position(array, indices, call, "[[<-")?;
     let target = writable(array)?;
-    store_single(kind, replacement, target, position);
-    Ok(target)
+    store_single(kind, value, target, position);
+    Ok(Some(target))
 }
 
 /// The item at `position` as an R value: a fresh scalar, or the ry value the list holds.
@@ -473,37 +476,27 @@ unsafe fn store_single(kind: Items, value: Sexp, to: Sexp, target: usize) {
     }
 }
 
-/// The Array itself when nothing else references it, or else a copy, which keeps the Array bit.
+/// The Array itself when nothing else references it, or else a copy flagged as an Array again
+/// (a copy drops the bit, see `values::duplicate`).
 unsafe fn writable(array: Sexp) -> R<Sexp> {
     if values::maybe_shared(array) {
-        values::duplicate(array)
+        Ok(finish(values::duplicate(array)?))
     } else {
         Ok(array)
     }
 }
 
-/// Checks a replacement against the Array's item type: a single item, or (for `[<-` and for an
-/// Array of Arrays) an Array of the same item type.
-unsafe fn replacement(kind: Items, value: Sexp, call: Sexp, operator: &str) -> R<Sexp> {
-    let found = if value.is_array() && !(kind == Items::RyValues && operator == "[[<-") {
-        items(value)
-    } else {
-        item_kind(value)
-            .map_err(|message| error_in(call, format!("`{operator}` on an Array: {message}")))?
-    };
-    if found != kind {
-        return Err(error_in(
-            call,
-            format!(
-                "`{operator}` cannot store a {} in an Array of {} items; convert it explicitly",
-                found.name(),
-                kind.name()
-            ),
-        ));
+/// Whether `value` can be stored in an Array of `kind` items: a single item of that kind, or
+/// (for `[<-`, which assigns several positions) an Array of them. An Array of ry values holds an
+/// Array as one item, so `[[<-` stores it whole.
+unsafe fn fits(kind: Items, value: Sexp, single: bool) -> bool {
+    if value.is_array() && !(single && kind == Items::RyValues) {
+        return !single && items(value) == kind;
     }
-    Ok(value)
+    item_kind(value).is_ok_and(|found| found == kind)
 }
 
+/// The one position `[[` and `[[<-` take: a positive whole number in bounds.
 unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &str) -> R<usize> {
     let [index] = indices else {
         return Err(error_in(
@@ -511,49 +504,54 @@ unsafe fn single_position(array: Sexp, indices: &[Sexp], call: Sexp, operator: &
             format!("`{operator}` on an Array takes one position"),
         ));
     };
-    if !matches!(index.kind(), SexpType::Integer | SexpType::Real) || length(*index) != 1 {
-        return Err(error_in(
+    let single = match index.kind() {
+        SexpType::Integer if length(*index) == 1 => Some(f64::from(values::ints(*index)[0])),
+        SexpType::Real if length(*index) == 1 => Some(values::reals(*index)[0]),
+        _ => None,
+    };
+    match single {
+        Some(number) if number >= 1.0 => Ok(positions(array, *index, call)?[0]),
+        _ => Err(error_in(
             call,
             format!(
                 "`{operator}` on an Array takes one whole-number position, not {}",
                 describe(*index)
             ),
-        ));
+        )),
     }
-    let positions = positions(array, *index, call)?;
-    Ok(positions[0])
 }
 
-/// The zero-based positions an index selects. Positions are whole numbers from 1 to the length,
-/// and a logical mask has exactly one entry per item; anything else is an error, because an
-/// Array has no names, no NA to return for a missing position, and no recycling.
+/// The positions an index selects, as in R but never producing an NA: whole numbers from 1 to
+/// the length, or negative ones that leave positions out (zeros select nothing), or a logical
+/// mask with one entry per item and no NA. Anything else is an error, because R would answer it
+/// with NA or with names an Array does not have.
 unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
     let count = length(array);
     let index = values::materialize(index)?;
     match index.kind() {
         SexpType::Logical => {
-            if length(index) != count {
+            let mask = values::ints(index);
+            if mask.len() != count {
                 return Err(error_in(
                     call,
                     format!(
                         "a logical mask needs one entry per item, but the Array has {count} items and the mask {}",
-                        length(index)
+                        mask.len()
                     ),
                 ));
             }
-            let mut selected = Vec::new();
-            for (position, &flag) in values::ints(index).iter().enumerate() {
-                if flag == NA_LOGICAL {
-                    return Err(error_in(
-                        call,
-                        format!("the logical mask is NA at {}", position + 1),
-                    ));
-                }
-                if flag != 0 {
-                    selected.push(position);
-                }
+            if let Some(position) = mask.iter().position(|&flag| flag == NA_LOGICAL) {
+                return Err(error_in(
+                    call,
+                    format!("the logical mask is NA at {}", position + 1),
+                ));
             }
-            Ok(selected)
+            Ok(mask
+                .iter()
+                .enumerate()
+                .filter(|(_, flag)| **flag != 0)
+                .map(|(position, _)| position)
+                .collect())
         }
         SexpType::Integer | SexpType::Real => {
             let numbers: Vec<f64> = if index.kind() == SexpType::Integer {
@@ -563,37 +561,57 @@ unsafe fn positions(array: Sexp, index: Sexp, call: Sexp) -> R<Vec<usize>> {
                         if number == NA_INTEGER {
                             f64::NAN
                         } else {
-                            number as f64
+                            f64::from(number)
                         }
                     })
                     .collect()
             } else {
                 values::reals(index).to_vec()
             };
-            numbers
-                .into_iter()
-                .map(|number| {
-                    if number.is_nan()
-                        || number.fract() != 0.0
-                        || number < 1.0
-                        || number > count as f64
-                    {
-                        let shown = if number.is_nan() {
-                            "NA".to_owned()
-                        } else {
-                            format!("{number}")
-                        };
-                        Err(error_in(
-                            call,
-                            format!(
-                                "position {shown} is out of bounds for an Array of {count} items"
-                            ),
-                        ))
-                    } else {
-                        Ok(number as usize - 1)
+            let out_of_bounds = |number: f64| {
+                let shown = if number.is_nan() {
+                    "NA".to_owned()
+                } else {
+                    format!("{number}")
+                };
+                error_in(
+                    call,
+                    format!("position {shown} is out of bounds for an Array of {count} items"),
+                )
+            };
+            // R truncates a fractional position toward zero.
+            let mut whole = Vec::with_capacity(numbers.len());
+            for number in numbers {
+                if number.is_nan() || number > count as f64 {
+                    return Err(out_of_bounds(number));
+                }
+                whole.push(number.trunc());
+            }
+            if whole.iter().any(|&number| number < 0.0) {
+                if whole.iter().any(|&number| number > 0.0) {
+                    return Err(error_in(
+                        call,
+                        "an index cannot mix positive and negative positions",
+                    ));
+                }
+                let mut keep = vec![true; count];
+                for number in whole.into_iter().filter(|&number| number < 0.0) {
+                    if let Some(slot) = keep.get_mut((-number) as usize - 1) {
+                        *slot = false;
                     }
-                })
-                .collect()
+                }
+                return Ok(keep
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, kept)| **kept)
+                    .map(|(position, _)| position)
+                    .collect());
+            }
+            Ok(whole
+                .into_iter()
+                .filter(|&number| number >= 1.0)
+                .map(|number| number as usize - 1)
+                .collect())
         }
         _ => Err(error_in(
             call,

@@ -265,3 +265,22 @@ parts: Record{before: Array<double>, others: Array<double>}
 n <- List.len(list(1, 2))
 #++++
 n: integer
+
+#---- mapping_to_a_non_item_is_an_error
+xs <- [1, 2]
+twice <- function(x: double) -> double[] c(x, x)
+pairs <- List.map(xs, twice)
+wrapped <- List.map(xs, function(x) list(x))
+#++++
+xs: Array<double>
+twice: fn(x: double) -> double[]
+pairs: Unknown
+wrapped: Unknown
+84..89 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `double[]`
+115..134 error[type-mismatch] this function must return an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag), but it returns `list{double}`
+
+#---- as_array_needs_items
+ys <- as.Array(list(c(1, 2)))
+#++++
+ys: Unknown
+6..29 error[type-mismatch] no overload of `as.Array` matches these arguments. I tried all 6 declared signatures; the first candidate fails with: expected `logical[]`, found `list{double[]}`

@@ -33,7 +33,7 @@ as.Array : fn(x: logical[]) -> Array<logical>
 as.Array : fn(x: integer[]) -> Array<integer>
 as.Array : fn(x: double[]) -> Array<double>
 as.Array : fn(x: character[]) -> Array<character>
-as.Array : <T> fn(x: list[T]) -> Array<T>
+as.Array : <T: item> fn(x: list[T]) -> Array<T>
 is.Array : fn(x: Any) -> logical
 
 # Result
@@ -73,11 +73,11 @@ List.reverse : <T> fn(list: Array<T>) -> Array<T>
 List.reverse : <T> fn(list: list[T]) -> list[T]
 List.join : <T> fn(lists: Array<Array<T>>) -> Array<T>
 List.join : <T> fn(lists: list[list[T]]) -> list[T]
-List.map : <A, B> fn(list: Array<A>, f: fn(A) -> B) -> Array<B>
+List.map : <A, B: item> fn(list: Array<A>, f: fn(A) -> B) -> Array<B>
 List.map : <A, B> fn(list: list[A], f: fn(A) -> B) -> list[B]
-List.map_with_index : <A, B> fn(list: Array<A>, f: fn(A, integer) -> B) -> Array<B>
+List.map_with_index : <A, B: item> fn(list: Array<A>, f: fn(A, integer) -> B) -> Array<B>
 List.map_with_index : <A, B> fn(list: list[A], f: fn(A, integer) -> B) -> list[B]
-List.map2 : <A, B, C> fn(first: Array<A>, second: Array<B>, f: fn(A, B) -> C) -> Array<C>
+List.map2 : <A, B, C: item> fn(first: Array<A>, second: Array<B>, f: fn(A, B) -> C) -> Array<C>
 List.map2 : <A, B, C> fn(first: list[A], second: list[B], f: fn(A, B) -> C) -> list[C]
 List.join_map : <A, B> fn(list: Array<A>, f: fn(A) -> Array<B>) -> Array<B>
 List.join_map : <A, B> fn(list: list[A], f: fn(A) -> list[B]) -> list[B]
@@ -85,11 +85,11 @@ List.keep_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.keep_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
 List.drop_if : <T> fn(list: Array<T>, predicate: fn(T) -> logical) -> Array<T>
 List.drop_if : <T> fn(list: list[T], predicate: fn(T) -> logical) -> list[T]
-List.keep_oks : <A, B, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<B>
+List.keep_oks : <A, B: item, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<B>
 List.keep_oks : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[B]
-List.keep_errs : <A, B, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<E>
+List.keep_errs : <A, B, E: item> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Array<E>
 List.keep_errs : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> list[E]
-List.map_try : <A, B, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Result<Array<B>, E>
+List.map_try : <A, B: item, E> fn(list: Array<A>, f: fn(A) -> Result<B, E>) -> Result<Array<B>, E>
 List.map_try : <A, B, E> fn(list: list[A], f: fn(A) -> Result<B, E>) -> Result<list[B], E>
 List.walk : <T, S> fn(list: Array<T>, state: S, f: fn(S, T) -> S) -> S
 List.walk : <T, S> fn(list: list[T], state: S, f: fn(S, T) -> S) -> S

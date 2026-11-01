@@ -1231,9 +1231,15 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 
 /// `x[i] <- value` and `x[i, j] <- value`.
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
-    if object.is_array() {
-        return crate::arrays::subassign(object, indices, value, call);
-    }
+    // A value an Array cannot hold, such as an NA, makes the result a plain R vector.
+    let object = if object.is_array() {
+        match crate::arrays::subassign(object, indices, value, call)? {
+            Some(result) => return Ok(result),
+            None => values::plain(object)?,
+        }
+    } else {
+        object
+    };
     let object = values::materialize(object)?;
     let value = values::materialize(value)?;
     // A pairlist value assigns its elements, as a list would.
@@ -1528,9 +1534,14 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     if object.kind() == SexpType::Record {
         return crate::records::subassign2(object, indices, value, call);
     }
-    if object.is_array() {
-        return crate::arrays::subassign2(object, indices, value, call);
-    }
+    let object = if object.is_array() {
+        match crate::arrays::subassign2(object, indices, value, call)? {
+            Some(result) => return Ok(result),
+            None => values::plain(object)?,
+        }
+    } else {
+        object
+    };
     let object = values::materialize(object)?;
     // A reference class object assigns into its environment and stays itself.
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {

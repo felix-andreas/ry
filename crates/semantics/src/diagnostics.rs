@@ -2393,14 +2393,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 required,
                 returns,
                 constraint,
+                required_constraint,
             } => {
                 let required = renderer.render(db, *required);
-                match constraint {
-                    Some(constraint) => format!(
+                match (constraint, required_constraint) {
+                    (Some(constraint), _) => format!(
                         "this function must return `{required}`, but its body produces {}",
                         constraint_description(*constraint)
                     ),
-                    None => format!(
+                    (None, Some(required_constraint)) => format!(
+                        "this function must return {}, but it returns `{}`",
+                        constraint_description(*required_constraint),
+                        renderer.render(db, *returns)
+                    ),
+                    (None, None) => format!(
                         "this function must return `{required}`, but it returns `{}`",
                         renderer.render(db, *returns)
                     ),
@@ -2933,6 +2939,9 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         }
         Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        Constraint::ArrayItem => {
+            "an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag)"
+        }
     }
 }
 

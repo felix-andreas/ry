@@ -107,6 +107,31 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.contains(words, \"a\")", "[1] TRUE\n"),
     ("List.chunks_of(xs, 2L)", "[[1, 2], [3]]\n"),
     ("List.join([[1], [2, 3]])", "[1, 2, 3]\n"),
+    // R's own positions where they give no NA.
+    ("xs[-1]", "[2, 3]\n"),
+    ("xs[0]", "[]\n"),
+    ("xs[c(0, 2)]", "[2]\n"),
+    ("xs[-5]", "[1, 2, 3]\n"),
+    // A value an Array cannot hold makes the result the plain R vector, so R code keeps working.
+    ("ys <- xs; ys[[1]] <- NA_real_; ys", "[1] NA  2  3\n"),
+    ("ys <- flags; ys[1:2] <- c(1, 2); ys", "[1] 1 2 1\n"),
+    ("ys <- xs; ys[[1]] <- \"a\"; ys", "[1] \"a\" \"2\" \"3\"\n"),
+    ("ys <- xs; ys[[1]] <- NA_real_; xs", "[1, 2, 3]\n"),
+    ("ys <- xs; ys[2] <- 9; is.Array(ys)", "[1] TRUE\n"),
+    // A copy that a builtin writes into is a plain vector, never a stale Array.
+    ("ys <- xs; ys[[1]] <- NA_real_; is.Array(ys)", "[1] FALSE\n"),
+    // Only the collection argument makes a `List` result an Array.
+    (
+        "List.append(list(\"a\"), [1])",
+        "[[1]]\n[1] \"a\"\n\n[[2]]\n[1]\n\n",
+    ),
+    ("is.Array(List.single([1, 2]))", "[1] FALSE\n"),
+    // Empty Arrays deparse to text that rebuilds them with their item type.
+    (
+        "deparse(as.Array(character(0)))",
+        "[1] \"as.Array(character(0))\"\n",
+    ),
+    ("deparse(xs[0])", "[1] \"as.Array(numeric(0))\"\n"),
 ];
 
 /// Each case's code and a fragment of the error it raises.
@@ -163,8 +188,9 @@ const ERRORS: &[(&str, &str)] = &[
         "xs[[4]]",
         "position 4 is out of bounds for an Array of 3 items",
     ),
-    ("xs[0]", "position 0 is out of bounds"),
-    ("xs[-1]", "position -1 is out of bounds"),
+    ("xs[NA_integer_]", "position NA is out of bounds"),
+    ("xs[c(-1, 2)]", "cannot mix positive and negative positions"),
+    ("xs[[0]]", "takes one whole-number position"),
     (
         "xs[\"a\"]",
         "an Array is indexed by positions or a logical mask, not a character vector",
@@ -175,12 +201,6 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     ("xs[1, 2]", "an Array has one dimension"),
     ("xs[[1:2]]", "takes one whole-number position"),
-    (
-        "ys <- xs; ys[[1]] <- \"a\"",
-        "cannot store a character in an Array of double items",
-    ),
-    ("ys <- xs; ys[[1]] <- NA_real_", "an Array cannot hold NA"),
-    ("ys <- xs; ys[[1]] <- 1L", "cannot store a integer"),
     (
         "ys <- xs; ys[1:2] <- [1, 2, 3]",
         "assigns 2 positions but the replacement Array has 3 items",

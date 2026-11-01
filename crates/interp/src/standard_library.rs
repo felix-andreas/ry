@@ -295,11 +295,13 @@ unsafe fn list_elements(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Vec<
         .collect())
 }
 
-/// A collection the library returns: an Array when the call received one, so `List.map` over
-/// an Array gives an Array, and an R list otherwise. Items an Array cannot hold, such as the
-/// vectors a mapped function returned, are an error rather than a silent fall back to a list.
-unsafe fn sequence(call: &Call<'_>, items: &[Sexp]) -> R<Sexp> {
-    if !call.args.iter().any(|arg| arg.value.is_array()) {
+/// A collection the library returns: an Array when the collection the call works on (`like`)
+/// is one, so `List.map` over an Array gives an Array, and an R list otherwise. Only that
+/// argument decides, because an item argument may itself be an Array (`List.append(xs, [1])`).
+/// Items an Array cannot hold, such as the vectors a mapped function returned, are an error
+/// rather than a silent fall back to a list.
+unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
+    if !like.is_array() {
         return list_vector(items);
     }
     arrays::from_items(items)?.map_err(|message| {
@@ -641,7 +643,7 @@ unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
     if let Some(at) = position(index, items.len()) {
         items[at] = value;
     }
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
@@ -652,46 +654,46 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     if let Some(at) = position(index, items.len()) {
         items[at] = invoke(call, f, &[items[at]])?;
     }
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_append(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
     let mut items = list_elements(call, "list", list)?;
     items.push(value);
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_prepend(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
     let mut items = vec![value];
     items.extend(list_elements(call, "list", list)?);
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_concat(call: &Call<'_>) -> R<Sexp> {
     let [first, second] = arguments(call, ["first", "second"])?;
     let mut items = list_elements(call, "first", first)?;
     items.extend(list_elements(call, "second", second)?);
-    sequence(call, &items)
+    sequence(call, first, &items)
 }
 
 unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
     let [value] = arguments(call, ["value"])?;
-    sequence(call, &[value])
+    list_vector(&[value])
 }
 
 unsafe fn list_repeat(call: &Call<'_>) -> R<Sexp> {
     let [value, times] = arguments(call, ["value", "count"])?;
     let times = count(call, "count", times)?;
-    sequence(call, &vec![value; times])
+    list_vector(&vec![value; times])
 }
 
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
     let mut items = list_elements(call, "list", list)?;
     items.reverse();
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
@@ -703,7 +705,7 @@ unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
         }
         items.extend(list_elements(call, "lists", inner)?);
     }
-    sequence(call, &items)
+    sequence(call, lists, &items)
 }
 
 unsafe fn list_map(call: &Call<'_>) -> R<Sexp> {
@@ -714,7 +716,7 @@ unsafe fn list_map(call: &Call<'_>) -> R<Sexp> {
     for item in items {
         mapped.push(scope(|| invoke(call, f, &[item]))?);
     }
-    sequence(call, &mapped)
+    sequence(call, list, &mapped)
 }
 
 unsafe fn list_map_with_index(call: &Call<'_>) -> R<Sexp> {
@@ -728,19 +730,19 @@ unsafe fn list_map_with_index(call: &Call<'_>) -> R<Sexp> {
             invoke(call, f, &[item, index])
         })?);
     }
-    sequence(call, &mapped)
+    sequence(call, list, &mapped)
 }
 
 unsafe fn list_map2(call: &Call<'_>) -> R<Sexp> {
-    let [first, second, f] = arguments(call, ["first", "second", "f"])?;
-    let first = list_elements(call, "first", first)?;
+    let [first_list, second, f] = arguments(call, ["first", "second", "f"])?;
+    let first = list_elements(call, "first", first_list)?;
     let second = list_elements(call, "second", second)?;
     let f = function(call, "f", f)?;
     let mut mapped = Vec::with_capacity(first.len().min(second.len()));
     for (&left, &right) in first.iter().zip(&second) {
         mapped.push(scope(|| invoke(call, f, &[left, right]))?);
     }
-    sequence(call, &mapped)
+    sequence(call, first_list, &mapped)
 }
 
 unsafe fn list_join_map(call: &Call<'_>) -> R<Sexp> {
@@ -755,7 +757,7 @@ unsafe fn list_join_map(call: &Call<'_>) -> R<Sexp> {
         }
         joined.extend(list_elements(call, "f()", inner)?);
     }
-    sequence(call, &joined)
+    sequence(call, list, &joined)
 }
 
 /// The elements for which `predicate` answers `keep`.
@@ -770,7 +772,7 @@ unsafe fn filter(call: &Call<'_>, keep: bool) -> R<Sexp> {
             kept.push(item);
         }
     }
-    sequence(call, &kept)
+    sequence(call, list, &kept)
 }
 
 unsafe fn list_keep_if(call: &Call<'_>) -> R<Sexp> {
@@ -794,7 +796,7 @@ unsafe fn keep_results(call: &Call<'_>, oks: bool) -> R<Sexp> {
             kept.push(payload);
         }
     }
-    sequence(call, &kept)
+    sequence(call, list, &kept)
 }
 
 unsafe fn list_keep_oks(call: &Call<'_>) -> R<Sexp> {
@@ -817,7 +819,7 @@ unsafe fn list_map_try(call: &Call<'_>) -> R<Sexp> {
             (false, _) => return Ok(result),
         }
     }
-    ok(sequence(call, &mapped)?)
+    ok(sequence(call, list, &mapped)?)
 }
 
 unsafe fn walk(call: &Call<'_>, backwards: bool) -> R<Sexp> {
@@ -967,32 +969,32 @@ unsafe fn list_last(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// The list and a count of elements, clamped to its length.
-unsafe fn list_and_count(call: &Call<'_>) -> R<(Vec<Sexp>, usize)> {
+/// The list, its elements and a count of elements, clamped to its length.
+unsafe fn list_and_count(call: &Call<'_>) -> R<(Sexp, Vec<Sexp>, usize)> {
     let [list, taken] = arguments(call, ["list", "count"])?;
     let items = list_elements(call, "list", list)?;
     let taken = count(call, "count", taken)?.min(items.len());
-    Ok((items, taken))
+    Ok((list, items, taken))
 }
 
 unsafe fn list_take_first(call: &Call<'_>) -> R<Sexp> {
-    let (items, taken) = list_and_count(call)?;
-    sequence(call, &items[..taken])
+    let (list, items, taken) = list_and_count(call)?;
+    sequence(call, list, &items[..taken])
 }
 
 unsafe fn list_take_last(call: &Call<'_>) -> R<Sexp> {
-    let (items, taken) = list_and_count(call)?;
-    sequence(call, &items[items.len() - taken..])
+    let (list, items, taken) = list_and_count(call)?;
+    sequence(call, list, &items[items.len() - taken..])
 }
 
 unsafe fn list_drop_first(call: &Call<'_>) -> R<Sexp> {
-    let (items, dropped) = list_and_count(call)?;
-    sequence(call, &items[dropped..])
+    let (list, items, dropped) = list_and_count(call)?;
+    sequence(call, list, &items[dropped..])
 }
 
 unsafe fn list_drop_last(call: &Call<'_>) -> R<Sexp> {
-    let (items, dropped) = list_and_count(call)?;
-    sequence(call, &items[..items.len() - dropped])
+    let (list, items, dropped) = list_and_count(call)?;
+    sequence(call, list, &items[..items.len() - dropped])
 }
 
 unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
@@ -1002,7 +1004,7 @@ unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
     if let Some(at) = position(index, items.len()) {
         items.remove(at);
     }
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
@@ -1020,13 +1022,13 @@ unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
     let taken = count(call, "count", taken)?;
     let from = (start as usize - 1).min(items.len());
     let to = from.saturating_add(taken).min(items.len());
-    sequence(call, &items[from..to])
+    sequence(call, list, &items[from..to])
 }
 
 unsafe fn list_split_at(call: &Call<'_>) -> R<Sexp> {
-    let (items, before) = list_and_count(call)?;
-    let first = sequence(call, &items[..before])?;
-    let others = sequence(call, &items[before..])?;
+    let (list, items, before) = list_and_count(call)?;
+    let first = sequence(call, list, &items[..before])?;
+    let others = sequence(call, list, &items[before..])?;
     record(&[("before", first), ("others", others)])
 }
 
@@ -1035,13 +1037,13 @@ unsafe fn list_chunks_of(call: &Call<'_>) -> R<Sexp> {
     let items = list_elements(call, "list", list)?;
     let size = count(call, "size", size)?;
     if size == 0 {
-        return sequence(call, &[]);
+        return sequence(call, list, &[]);
     }
     let mut chunks = Vec::with_capacity(items.len().div_ceil(size));
     for chunk in items.chunks(size) {
-        chunks.push(sequence(call, chunk)?);
+        chunks.push(sequence(call, list, chunk)?);
     }
-    sequence(call, &chunks)
+    sequence(call, list, &chunks)
 }
 
 unsafe fn list_intersperse(call: &Call<'_>) -> R<Sexp> {
@@ -1054,7 +1056,7 @@ unsafe fn list_intersperse(call: &Call<'_>) -> R<Sexp> {
         }
         spaced.push(item);
     }
-    sequence(call, &spaced)
+    sequence(call, list, &spaced)
 }
 
 /// An ordering tag, `:LT`, `:EQ` or `:GT`.
@@ -1089,7 +1091,7 @@ unsafe fn list_sort_with(call: &Call<'_>) -> R<Sexp> {
         let answer = scope(|| invoke(call, compare, &[left, right]))?;
         ordering(call, "compare()", answer)
     })?;
-    sequence(call, &items)
+    sequence(call, list, &items)
 }
 
 /// A stable merge sort of `items`, with `buffer` as scratch space of the same length.

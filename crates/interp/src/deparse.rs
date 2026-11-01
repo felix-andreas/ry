@@ -775,6 +775,16 @@ impl Deparser {
     /// An Array as its literal, `[1, 2, 3]`, which is the code that rebuilds it.
     unsafe fn array(&mut self, object: Sexp) {
         let count = values::length(object);
+        // `[]` rebuilds as an empty logical Array, so an empty one of another type converts.
+        if count == 0 {
+            match object.kind() {
+                SexpType::Integer => return self.print("as.Array(integer(0))"),
+                SexpType::Real => return self.print("as.Array(numeric(0))"),
+                SexpType::String => return self.print("as.Array(character(0))"),
+                SexpType::List => return self.print("as.Array(list())"),
+                _ => {}
+            }
+        }
         self.print("[");
         self.in_list += 1;
         let mut broken = false;
@@ -788,9 +798,12 @@ impl Deparser {
                 }
                 _ => Ok(values::list_elt(object, index)),
             };
+            // The deparser cannot fail, and boxing one item fails only on an exhausted heap.
             match item {
                 Ok(value) => self.deparse(value),
-                Err(_) => self.print("<unavailable>"),
+                Err(failure) => {
+                    panic!("an Array item could not be boxed for deparsing: {failure:?}")
+                }
             }
             if index + 1 < count {
                 self.print(", ");
