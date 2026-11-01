@@ -2184,7 +2184,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - Bitmap pages are written when the device closes rather than per page.
   - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
     warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
-  - Matrix's image methods are untested (Matrix is not in the corpus library).
+  - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
   GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
   (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
