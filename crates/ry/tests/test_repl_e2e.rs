@@ -149,8 +149,8 @@ impl ReplSession {
         }
     }
 
-    /// Waits for the editor's first prompt. The banner prints before the editor takes the
-    /// terminal, so a line typed after the banner but before the prompt is echoed and lost.
+    /// Waits for the editor's first prompt, so the lines a test sends are typed at a prompt
+    /// rather than ahead of it; typeahead has a test of its own.
     fn expect_prompt(&mut self) {
         const BANNER_END: &str = "Ctrl-D to quit.";
         self.expect(BANNER_END);
@@ -293,6 +293,42 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
             "{runtime}: {}",
             session.seen
         );
+        session.quit();
+    }
+}
+
+#[test]
+fn lines_typed_while_the_console_starts_run_once_it_prompts() {
+    for runtime in runtimes() {
+        let package = tempfile::tempdir().expect("temp dir");
+        let package = package.path();
+        fs::create_dir_all(package.join("R")).expect("create package");
+        fs::write(
+            package.join("DESCRIPTION"),
+            "Package: slowpkg\nVersion: 1.0\n",
+        )
+        .expect("write");
+        // A slow load holds the console back from its first prompt while the user types.
+        fs::write(
+            package.join("R/a.R"),
+            "Sys.sleep(1.5)\ngreet <- function() \"hello from slowpkg\"\n",
+        )
+        .expect("write");
+        let mut session = ReplSession::start_with(Some(package), &[runtime_command(runtime)]);
+        session.send("x <- 20\r");
+        // An arrow key pressed ahead of the prompt is dropped whole, not kept as `[A`.
+        session.send("x + 22\u{1b}[A\r");
+        session.send("gre");
+        session.expect("Loaded slowpkg");
+        session.expect("[1] 42");
+        // The unfinished line waits in the editor for the rest of it.
+        session.send("et()\r");
+        session.expect("hello from slowpkg");
+        // Lines typed while a command runs are kept the same way.
+        session.send("Sys.sleep(1)\r");
+        session.send("y <- 5\r");
+        session.send("y * 2\r");
+        session.expect("[1] 10");
         session.quit();
     }
 }

@@ -8,6 +8,9 @@ time you edit a file, the next command sees the change without a `load_all()` or
 [Loading packages](/guides/loading-packages) shows the loop and how to get the same `load_all()` in
 RStudio. Outside a package, `ry run` is a plain R console with the extras below.
 
+You can type ahead. Lines you type while the console starts or while a command runs are kept, and
+they run in order at the next prompt; an unfinished last line waits in the editor for the rest.
+
 ## Completion that knows your values
 
 Tab completion comes from the type checker, worked out from the code you typed rather than from
