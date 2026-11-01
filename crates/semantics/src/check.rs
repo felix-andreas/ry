@@ -1263,6 +1263,44 @@ fn is_type_probe(name: &str) -> bool {
     }
 }
 
+/// rlang's type predicates (`is_string`, `is_function`, `is_bare_list`, `is_scalar_integer`),
+/// which rlang, purrr and the packages that vendor rlang's standalone files define themselves.
+/// They test a type like `is.character` does, whether the project defines them or imports them.
+fn is_tidy_type_predicate(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("is_") else {
+        return false;
+    };
+    let rest = rest
+        .strip_prefix("scalar_")
+        .or_else(|| rest.strip_prefix("bare_"))
+        .unwrap_or(rest);
+    matches!(
+        rest,
+        "string"
+            | "bool"
+            | "character"
+            | "logical"
+            | "integer"
+            | "integerish"
+            | "double"
+            | "numeric"
+            | "complex"
+            | "raw"
+            | "list"
+            | "vector"
+            | "atomic"
+            | "function"
+            | "closure"
+            | "primitive"
+            | "formula"
+            | "quosure"
+            | "environment"
+            | "symbol"
+            | "call"
+            | "expression"
+    )
+}
+
 fn guard_kind(name: &str) -> Option<GuardKind> {
     Some(match name {
         "is.null" => GuardKind::Null,
@@ -4062,8 +4100,8 @@ impl<'db> Checker<'db, '_> {
         }
         if let ExpressionKind::Call { callee, arguments } = kind
             && let ExpressionKind::NameRef(name) = self.module.kind(*callee)
-            && !self.naming.resolutions.contains_key(callee)
-            && is_type_probe(name.as_str())
+            && ((!self.naming.resolutions.contains_key(callee) && is_type_probe(name.as_str()))
+                || is_tidy_type_predicate(name.as_str()))
             && let Some(first) = self.module[arguments].first()
             && first.name.is_none()
             && let Some(value) = first.value

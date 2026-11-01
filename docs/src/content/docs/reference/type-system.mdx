@@ -2220,7 +2220,9 @@ The details:
 - An unannotated parameter whose runtime type the body inspects is `Unknown`, because code that
   inspects a type uses the value as a different type on each branch, so no one type describes it.
   The inspections are `typeof()`, `class()`, `mode()`, `storage.mode()`, `inherits()`,
-  `is.object()`, `oldClass()`, and the `is.*` family tests, such as `is.character()`. So
+  `is.object()`, `oldClass()`, the `is.*` family tests, such as `is.character()`, and rlang's
+  type predicates, such as `is_string()`, `is_function()`, `is_formula()`, `is_bare_list()` and
+  `is_scalar_integer()`, which count whether rlang exports them or the project vendors them. So
   `function(x) if (is.character(x)) x else "other"` is `fn(x: Unknown) -> Unknown`. `is.null()`,
   `is.na()`, and `is.finite()` test a value rather than its type, so they keep the parameter typed,
   and an annotated parameter still narrows.

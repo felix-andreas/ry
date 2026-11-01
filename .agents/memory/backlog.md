@@ -148,16 +148,9 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 235 after the false-report fixes listed in `limitations.md` and the
-reference, then rose to 318 when the struct-of-arrays HIR and argument typing against the callee
-landed (main alone gave 468 at that point). A random sample of the rest is still almost entirely
-false reports on correct R. The classes, largest first:
-
-- **A function argument is reported against `character` (about 200 reports, rlang above all).**
-  rlang's `as_function(x)` returns `get(x, mode = "function")` under an `is_string(x)` test that
-  does not narrow, so `get()` pins `x`, and through `map(.x, .f)` every callback, to `character`.
-  `map(xs, function(d) d + 1)` reports `expected character, found fn(d: T) -> double`. It appeared
-  with argument typing against the callee (`infer_call_arguments_against`).
+went from 3,112 errors to 233 after the false-report fixes listed in `limitations.md` and the
+reference. A random sample of the rest is still almost entirely false reports on correct R. The
+classes, largest first:
 
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
