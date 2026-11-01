@@ -63,6 +63,55 @@ person <- readRDS("person.rds")
 Inline annotations and `#:` comments share one type language and mean the same thing. Deleting each
 inline annotation turns a file into the plain R program it means.
 
+## Type definitions
+
+`type` and `alias` define a type at the top level of a file, and `@Name(value)` creates a value of
+a nominal type:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type UserId = integer
+
+user_id <- function(raw: integer) -> UserId @UserId(raw)
+
+lookup <- function(id: UserId) -> character "ada"
+
+lookup(5L)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type UserId {integer}
+
+#: fn(raw: integer) -> UserId
+user_id <- function(raw) {
+  #: @new UserId
+  raw
+}
+
+#: fn(id: UserId) -> character
+lookup <- function(id) "ada"
+
+lookup(5L)
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `UserId`, found `integer`
+```
+
+A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
+`id: @new UserId <- 5L`. `type` and `alias` are definitions only when a name follows them on the
+same line, so R code that uses them as ordinary names keeps working.
+
 ## When the two disagree
 
 A statement may carry both spellings. If they give a parameter, the return, or the value different
@@ -80,6 +129,20 @@ annotation-mismatch
    --[R/both.R:2:31]
  2 | apply_rate <- function(price: integer, rate) price * rate
    |                               ^^^^^^^
+```
+
+A `#:` definition directly above an inline definition of the same name is the same definition
+written twice, so it is not a duplicate. ry uses the inline one and warns when the two differ:
+
+```r
+#: @type Celsius {double}
+type Celsius = integer
+```
+
+```text
+annotation-mismatch
+
+  ! the inline definition of `Celsius` says `integer`, but the `#:` comment says `double`. ry uses the inline definition; make the two agree, or delete one
 ```
 
 ## Running annotated code

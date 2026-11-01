@@ -74,8 +74,8 @@ type-mismatch
 
 ## Overriding inference
 
-Two forms give a type without checking it against the value. They exist only as `#:` comments,
-because they describe how a value gets its type rather than what type it has.
+Two forms give a type without checking it against the value. Inline, they go between a binding's
+`:` and its type, as in `gap: @if-unknown integer <- frame$a`.
 
 - `#: @if-unknown TYPE` types an `Unknown` value, such as a data frame column, and becomes an
   error once ry can infer the type, so it never goes stale. A value declared `Any`, such as the

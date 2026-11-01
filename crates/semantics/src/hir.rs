@@ -593,7 +593,9 @@ impl Module {
                 let kind = literal_kind(node);
                 self.allocate(ExpressionKind::Literal(kind), range)
             }
-            SyntaxKind::PAREN_EXPR => {
+            // `@Name(value)` is its value in parentheses once the nominal head is erased;
+            // the head is an annotation the checker applies to this expression.
+            SyntaxKind::PAREN_EXPR | SyntaxKind::NEW_EXPR => {
                 let inner = expression_children(node).next();
                 let inner = self.lower_optional(inner, range);
                 self.allocate(ExpressionKind::Paren(inner), range)
