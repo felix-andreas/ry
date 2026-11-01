@@ -640,6 +640,17 @@ fn removing_a_cross_file_cycle_and_restoring_it_revalidates() {
         1,
         "",
     );
+    for reader in ["rev", "sort", "as.Array"] {
+        round_trip_edit(
+            DocumentKind::Package,
+            &[
+                &format!("g <- {reader}(g)\nf <- g$x + g[[1L]]\n"),
+                "g <- g + 1L\n",
+            ],
+            1,
+            "",
+        );
+    }
 }
 
 #[test]
