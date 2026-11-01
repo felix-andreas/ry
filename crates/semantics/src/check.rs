@@ -3,8 +3,8 @@
 
 use {
     crate::{
-        DataPath, Db,
-        annotations::{Annotation, NamedDefinition},
+        DataPath, Db, TypeDefinitions,
+        annotations::Annotation,
         data_file_layout,
         diagnostics::nearest_name,
         exhaustiveness::{MatchFinding, match_findings},
@@ -511,7 +511,7 @@ pub trait GlobalEnv<'db> {
 
     /// Borrowed: per-file facts consulted once per item; an owned copy would make every
     /// item pay for the whole table.
-    fn type_definitions(&self) -> &'db FxHashMap<Name<'db>, NamedDefinition<'db>>;
+    fn type_definitions(&self) -> TypeDefinitions;
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String>;
 
@@ -1714,7 +1714,7 @@ impl<'db> Checker<'db, '_> {
         let declared = self
             .table
             .definitions
-            .and_then(|definitions| definitions.get(name));
+            .and_then(|definitions| definitions.get(self.db, *name));
         let from_stubs = stubs(self.db).and_then(|library| library.type_definitions.get(name));
         if declared.is_some() && declared == from_stubs {
             return false;
@@ -10386,7 +10386,7 @@ impl<'db> Checker<'db, '_> {
         let Some(definition) = self
             .table
             .definitions
-            .and_then(|table| table.get(&name))
+            .and_then(|table| table.get(self.db, name))
             .cloned()
         else {
             return self.generalize(value_ty);
@@ -13402,7 +13402,7 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
 /// diamond is not a cycle. Nominal definitions may legitimately recurse.
 fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
-    definitions: &FxHashMap<Name<'db>, NamedDefinition<'db>>,
+    definitions: TypeDefinitions,
     ty: Ty<'db>,
     expanding: &mut FxHashSet<Name<'db>>,
 ) -> Option<String> {
@@ -13414,7 +13414,7 @@ fn alias_cycle_walk<'db>(
             {
                 return Some(found);
             }
-            let definition = definitions.get(name)?;
+            let definition = definitions.get(db, *name)?;
             if !definition.alias {
                 return None;
             }

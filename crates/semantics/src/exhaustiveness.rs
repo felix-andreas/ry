@@ -7,14 +7,12 @@
 
 use {
     crate::{
-        Db,
-        annotations::NamedDefinition,
+        Db, TypeDefinitions,
         check::ExpressionTypes,
         hir::{ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         infer::apply_definition,
-        types::{Atomic, Name, Ty, TyKind, union_of, unknown},
+        types::{Atomic, Ty, TyKind, union_of, unknown},
     },
-    rustc_hash::FxHashMap,
     syntax::TextRange,
 };
 
@@ -39,12 +37,12 @@ pub const WITNESS_LIMIT: usize = 3;
 
 /// The project's `type` and `alias` definitions, through which a named scrutinee shows
 /// its cases.
-pub type Definitions<'db> = Option<&'db FxHashMap<Name<'db>, NamedDefinition<'db>>>;
+pub type Definitions = Option<TypeDefinitions>;
 
 /// Every `match` of an item, in expression order. Ranges are item-relative.
 pub fn match_findings<'db>(
     db: &'db dyn Db,
-    definitions: Definitions<'db>,
+    definitions: Definitions,
     module: &Module,
     types: &ExpressionTypes<'db>,
 ) -> Vec<MatchFinding> {
@@ -99,7 +97,7 @@ pub fn match_findings<'db>(
 /// union it wraps. Only the head and a union's members unfold, which keeps a recursive
 /// definition such as `Tree<T>` from unfolding forever; deeper positions unfold when the
 /// search reaches them. An opaque nominal, which has no definition body, stays named.
-fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) -> Ty<'db> {
+fn structural<'db>(db: &'db dyn Db, definitions: Definitions, ty: Ty<'db>) -> Ty<'db> {
     let unfold = |ty: Ty<'db>| {
         let mut current = ty;
         // Bounded, because a definition may name another definition as its whole body.
@@ -107,7 +105,7 @@ fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) 
             let TyKind::Named(name, arguments) = current.kind(db) else {
                 break;
             };
-            let Some(definition) = definitions.and_then(|table| table.get(name)) else {
+            let Some(definition) = definitions.and_then(|table| table.get(db, *name)) else {
                 break;
             };
             if matches!(definition.body.kind(db), TyKind::Unknown)
@@ -179,7 +177,7 @@ impl Constructor {
 
 struct Coverage<'db> {
     db: &'db dyn Db,
-    definitions: Definitions<'db>,
+    definitions: Definitions,
 }
 
 impl<'db> Coverage<'db> {
@@ -470,7 +468,7 @@ fn constructor_field_types<'db>(
 
 fn lower<'db>(
     db: &'db dyn Db,
-    definitions: Definitions<'db>,
+    definitions: Definitions,
     module: &Module,
     pattern: PatId,
     ty: Ty<'db>,

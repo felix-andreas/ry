@@ -4,7 +4,7 @@
 
 use {
     semantics::{
-        Db, Item, ItemKind, ProjectFiles, SourceFile,
+        Db, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
         annotations::{block_refusal, statement_inline_site, type_definition_keyword},
         check::{CalleeTarget, ItemCheck},
         diagnostics::TypeRenderer,
@@ -23,7 +23,6 @@ use {
             Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
             contains_inference_var,
         },
-        visible_type_definitions,
     },
     std::{
         collections::{BTreeSet, HashMap, HashSet},
@@ -2321,8 +2320,9 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
     // folds files.
     let declared = if cursor.navigable {
         file_type_definitions(db, file)
-            .into_iter()
+            .iter()
             .find(|definition| definition.name.text(db) == cursor.name)
+            .cloned()
     } else {
         None
     };
@@ -2919,7 +2919,7 @@ fn representation<'db>(db: &'db dyn Db, file: SourceFile, ty: Ty<'db>) -> Ty<'db
         let TyKind::Named(name, arguments) = current.kind(db) else {
             break;
         };
-        let Some(definition) = visible_type_definitions(db, file).get(name) else {
+        let Some(definition) = TypeDefinitions::of(file).get(db, *name) else {
             break;
         };
         if definition.parameters.len() != arguments.len() {
