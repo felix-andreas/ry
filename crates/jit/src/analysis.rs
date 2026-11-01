@@ -1501,7 +1501,7 @@ impl<'a> Builder<'a> {
             Op::CallTailUpdate => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
-                Vec::new(),
+                &[],
                 Effect::Opaque,
             ),
             Op::DispatchSubject => self.opaque_step(
@@ -2356,7 +2356,7 @@ impl<'a> Builder<'a> {
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                Vec::new(),
+                &[],
                 Effect::PureUnlessObserved,
             ));
         }
