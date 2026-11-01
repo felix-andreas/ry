@@ -105,18 +105,42 @@ pub async fn run(experimental_features: ExperimentalFeatures, debug: bool) {
 /// through the shared slot.
 #[derive(Clone, Default)]
 struct CancelHandle {
-    token: Arc<Mutex<Option<salsa::CancellationToken>>>,
+    state: Arc<Mutex<CancelState>>,
+}
+
+#[derive(Default)]
+struct CancelState {
+    token: Option<salsa::CancellationToken>,
+    /// Whether the worker is running background work (the semantic wave, priming), which a
+    /// request preempts. One lock covers both fields so a request can never cancel another
+    /// request that started after the background unit ended.
+    idle: bool,
 }
 
 impl CancelHandle {
     fn cancel(&self) {
-        if let Some(token) = self.token.lock().expect("cancel token lock").as_ref() {
+        if let Some(token) = self.state.lock().expect("cancel state lock").token.as_ref() {
             token.cancel();
         }
     }
 
+    /// A background unit is cancelled and requeued, so the request runs next instead of
+    /// waiting for a whole file's settled diagnostics.
+    fn preempt_idle(&self) {
+        let state = self.state.lock().expect("cancel state lock");
+        if state.idle
+            && let Some(token) = state.token.as_ref()
+        {
+            token.cancel();
+        }
+    }
+
+    fn set_idle(&self, idle: bool) {
+        self.state.lock().expect("cancel state lock").idle = idle;
+    }
+
     fn install(&self, token: salsa::CancellationToken) {
-        *self.token.lock().expect("cancel token lock") = Some(token);
+        self.state.lock().expect("cancel state lock").token = Some(token);
     }
 }
 
@@ -178,7 +202,11 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
                     worker.refresh_cancellation();
                     match job {
                         Some(Job::Run(work)) => work(worker),
-                        _ => worker.run_idle_unit(),
+                        _ => {
+                            worker.cancel.set_idle(true);
+                            worker.run_idle_unit();
+                            worker.cancel.set_idle(false);
+                        }
                     }
                 }
                 // LSP allows dropping notifications before initialize.
@@ -210,7 +238,11 @@ impl ServerState {
             // The receiver is gone only when the client cancelled the request.
             reply.send(build(worker)).ok();
         }));
-        self.submit(job, receive)
+        // Queued first: a background unit cancelled before the request is queued would just
+        // start the next one.
+        let response = self.submit(job, receive);
+        self.cancel.preempt_idle();
+        response
     }
 
     fn submit<T: Send + 'static>(

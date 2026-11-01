@@ -5,9 +5,9 @@
 use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
 use semantics::check::{CalleeTarget, ItemCheck};
 use semantics::diagnostics::TypeRenderer;
+use semantics::infer::apply_definition;
 use semantics::hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind};
 use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
-use semantics::infer::apply_definition;
 use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
 use semantics::types::{
     Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme, contains_inference_var,
@@ -122,6 +122,7 @@ pub fn hover(
         .expressions_at()
         .into_iter()
         .find_map(|id| check.expression_types.get(&id).map(|ty| (id, *ty)))?;
+    let ty = without_impossible_vectors(db, ty);
 
     let (lines, definition) = match &hir.expression(expression).kind {
         ExpressionKind::NameRef(name) => {
@@ -141,9 +142,10 @@ pub fn hover(
                 referenced_scheme(db, files, name, &check, expression)
             };
             // Render the whole scheme so the `<T>` prefix explains `T`, matching the inlay hint.
-            let scheme = exported
+            let mut scheme = exported
                 .or_else(referenced)
                 .unwrap_or_else(|| TypeScheme::monomorphic(ty));
+            scheme.body = without_impossible_vectors(db, scheme.body);
             (
                 hover_lines(db, name, &scheme),
                 hover_definition(db, files, position.item, expression, name),
@@ -1065,6 +1067,9 @@ pub fn completion(
         return finish_completions(items, &query);
     }
     if let Some(items) = pattern_completions(db, file, offset, &query) {
+        return finish_completions(items, &query);
+    }
+    if let Some(items) = literal_field_completions(db, file, offset, &query) {
         return finish_completions(items, &query);
     }
 
@@ -3027,7 +3032,14 @@ fn subject_along<'db>(
             }
             _ => None,
         })?;
-    let mut types = union_members(db, *check.expression_types.get(&scrutinee)?);
+    let types = descend(db, *check.expression_types.get(&scrutinee)?, steps);
+    Some(PatternSubject { types })
+}
+
+/// The union members of the value at `steps` below a value of type `ty`, the type a pattern or
+/// literal position nested inside it has.
+fn descend<'db>(db: &'db dyn Db, ty: Ty<'db>, steps: &[PatternStep]) -> Vec<Ty<'db>> {
+    let mut types = union_members(db, ty);
     for step in steps {
         types = types
             .into_iter()
@@ -3047,14 +3059,207 @@ fn subject_along<'db>(
             .flat_map(|ty| union_members(db, ty))
             .collect();
     }
-    Some(PatternSubject { types })
+    types
 }
 
+/// A nominal type's members are its representation's: `type Shape = :Circle(..) | :Empty`
+/// matches and builds the same tags as the union it names.
 fn union_members<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Vec<Ty<'db>> {
     match ty.kind(db) {
-        TyKind::Union(members) => members.clone(),
+        TyKind::Union(members) => members
+            .iter()
+            .flat_map(|&member| union_members(db, member))
+            .collect(),
+        TyKind::Named(name, arguments) => {
+            let representation = ProjectFiles::try_get(db).and_then(|files| {
+                let definition = project_type_definitions(db, files).get(name)?;
+                Some(apply_definition(db, definition, arguments))
+            });
+            match representation {
+                Some(representation) if representation != ty => union_members(db, representation),
+                _ => vec![ty],
+            }
+        }
         _ => vec![ty],
     }
+}
+
+/// With nothing to check it against, `:Circle(|)` builds the payload that the project's type
+/// definitions declare for `:Circle`.
+fn declared_payloads<'db>(db: &'db dyn Db, container: &SyntaxNode) -> Vec<Ty<'db>> {
+    let Some(tag) = container.parent().filter(|parent| parent.kind() == TAG_EXPR) else {
+        return Vec::new();
+    };
+    let (Some(name), Some(files)) = (child_node(&tag, NAME), ProjectFiles::try_get(db)) else {
+        return Vec::new();
+    };
+    let steps = [PatternStep::Payload(name.text().to_string())];
+    project_type_definitions(db, files)
+        .values()
+        .flat_map(|definition| descend(db, definition.body, &steps))
+        .collect()
+}
+
+/// Field names inside a record literal, `(amount = 1, |)`, or a tag's payload, `:Circle(|)`,
+/// come from the type the literal is checked against: an annotated binding's, a parameter's or
+/// a nominal constructor's. The literal is followed by its syntax, as in a pattern, because the
+/// half-typed literal completion runs on does not check.
+fn literal_field_completions(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    query: &str,
+) -> Option<Vec<CompletionItem>> {
+    let word_start = offset.checked_sub(TextSize::from(query.len() as u32))?;
+    let root = semantics::parse(db, file).syntax_node();
+    let anchor = pattern_anchor(&root, word_start, query)?;
+    let container = anchor
+        .parent_ancestors()
+        .find(|ancestor| matches!(ancestor.kind(), ARGUMENT_LIST | PAREN_EXPR))?;
+    let named = match container.kind() {
+        // `(am|` is a parenthesized name until the first `=` makes it a record.
+        PAREN_EXPR => {
+            let inner = container.children().next();
+            if inner.as_ref().is_some_and(|inner| inner.kind() != NAME) {
+                return None;
+            }
+            Vec::new()
+        }
+        _ => {
+            let literal = container.parent()?;
+            if !matches!(literal.kind(), RECORD_EXPR | TAG_EXPR) {
+                return None;
+            }
+            let current = container
+                .children()
+                .filter(|child| child.kind() == ARGUMENT)
+                .find(|argument| argument.text_range().contains_inclusive(word_start));
+            let at_name = current.as_ref().is_none_or(|argument| {
+                child_token(argument, EQ)
+                    .is_none_or(|equals| word_start <= equals.text_range().start())
+            });
+            if !at_name {
+                return None;
+            }
+            let named: Vec<String> = container
+                .children()
+                .filter(|child| child.kind() == ARGUMENT && Some(child) != current.as_ref())
+                .filter(|argument| child_token(argument, EQ).is_some())
+                .filter_map(|argument| child_node(&argument, NAME))
+                .map(|name| name.text().to_string())
+                .collect();
+            named
+        }
+    };
+    // Every item of a record literal is named, so its name positions never take R's globals;
+    // a tag's payload or a parenthesized name may still be a value.
+    let in_record = container.parent().is_some_and(|parent| parent.kind() == RECORD_EXPR);
+    let fields = literal_expected_fields(db, file, &container);
+    if fields.is_empty() && !in_record {
+        return None;
+    }
+    Some(
+        fields
+            .into_iter()
+            .filter(|item| !named.contains(&item.label))
+            .filter(|item| search_match(&item.label, query).is_some())
+            .collect(),
+    )
+}
+
+/// The fields the record at `container` (a literal's item list, or a parenthesized name) is
+/// expected to have, walking out through enclosing literals to the one the checker recorded an
+/// expectation for and back down along the same steps.
+fn literal_expected_fields(
+    db: &dyn Db,
+    file: SourceFile,
+    container: &SyntaxNode,
+) -> Vec<CompletionItem> {
+    let Some(position) = position_in_item(db, file, container.text_range().start()) else {
+        return Vec::new();
+    };
+    let Some(hir) = item_hir(db, position.item).as_ref() else {
+        return Vec::new();
+    };
+    let Some(check) = item_check(db, position.item) else {
+        return Vec::new();
+    };
+    let expectation_at = |node: &SyntaxNode| {
+        let range = node.text_range() - position.item_offset;
+        hir.expressions
+            .iter()
+            .enumerate()
+            .filter(|(_, expression)| expression.range == range)
+            .find_map(|(index, _)| check.literal_expectations.get(&ExprId(index as u32)))
+            .copied()
+    };
+
+    let mut steps = Vec::new();
+    let mut list = container.clone();
+    let expected = (|| loop {
+        let literal = if list.kind() == PAREN_EXPR {
+            list.clone()
+        } else {
+            let literal = list.parent()?;
+            if literal.kind() == TAG_EXPR {
+                steps.push(PatternStep::Payload(child_node(&literal, NAME)?.text().to_string()));
+            }
+            literal
+        };
+        if let Some(expected) = expectation_at(&literal) {
+            return Some(expected);
+        }
+        let mut outer = literal.parent()?;
+        while outer.kind() == PAREN_EXPR {
+            outer = outer.parent()?;
+        }
+        if outer.kind() != ARGUMENT {
+            return None;
+        }
+        list = outer.parent()?;
+        if !matches!(list.parent()?.kind(), RECORD_EXPR | TUPLE_EXPR | TAG_EXPR) {
+            return None;
+        }
+        steps.push(match child_node(&outer, NAME).filter(|_| child_token(&outer, EQ).is_some()) {
+            Some(name) => PatternStep::Field(name.text().to_string()),
+            None => PatternStep::Item(
+                list.children()
+                    .filter(|child| child.kind() == ARGUMENT)
+                    .take_while(|child| child != &outer)
+                    .count(),
+            ),
+        });
+    })();
+    let members = match expected {
+        Some(expected) => {
+            steps.reverse();
+            descend(db, expected, &steps)
+        }
+        None => declared_payloads(db, container),
+    };
+
+    let mut renderer = TypeRenderer::default();
+    let mut items = Vec::new();
+    for member in members {
+        let TyKind::NativeRecord(fields) = member.kind(db) else {
+            continue;
+        };
+        for field in fields {
+            let name = field.name.text(db);
+            if items.iter().any(|item: &CompletionItem| item.label == name) {
+                continue;
+            }
+            items.push(CompletionItem {
+                detail: Some(renderer.render(db, field.ty)),
+                ..CompletionItem::new(
+                    insertable_name(name),
+                    CompletionKind::Field,
+                    CompletionSource::Field,
+                )
+            });
+        }
+    }
+    items
 }
 
 /// Inside the brackets of a frame query, `x[i, j, by]`, column names are in scope as variables,
