@@ -438,6 +438,20 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
         assign.push(0);
     }
     for term in 0..term_count {
+        let mut width = 1.0;
+        for variable in 0..variable_count {
+            let code = codes[variable + term * variable_count];
+            width *= match (code, kinds[variable]) {
+                (0, _) => 1.0,
+                (_, Variable::Numeric { columns: count }) => count as f64,
+                (1, Variable::Factor { .. }) => contrasts[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64),
+                (_, Variable::Factor { .. }) => full_codings[variable].map_or(0.0, |coding| matrix_shape(coding).1 as f64),
+            };
+        }
+        if width > i32::MAX as f64 {
+            let width = crate::format::c_format(width, "g", 0, "", false);
+            return Err(call.error(format!("term {} would require {width} columns", term + 1)));
+        }
         let mut current: Vec<(Vec<f64>, String)> = vec![(vec![1.0; rows], String::new())];
         for variable in 0..variable_count {
             let code = codes[variable + term * variable_count];

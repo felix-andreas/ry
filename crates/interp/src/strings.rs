@@ -485,6 +485,31 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         });
     }
     let format_count = length(formats);
+    if format_count == 0 || arguments.iter().any(|argument| argument.length == 0) {
+        return alloc(SexpType::String, 0);
+    }
+    let kinds: Vec<SexpType> = arguments.iter().map(|argument| argument.value.kind()).collect();
+    let mut used = vec![false; arguments.len()];
+    let mut parsed = Vec::with_capacity(format_count);
+    for index in 0..format_count {
+        // An `NA` format is the text "NA", as in GNU R.
+        let format = string_at(formats, index).unwrap_or(Cow::Borrowed("NA"));
+        parsed.push(parse_format(&format, &kinds, &mut used)?);
+    }
+    // `%s` converts a classed argument with its `as.character` method first, and the result's
+    // length is what recycles, so a condition formats as one string.
+    for piece in parsed.iter().flatten() {
+        if let FormatPiece::Conversion(conversion) = piece
+            && conversion.kind == 's'
+        {
+            let argument = &mut arguments[conversion.argument];
+            if argument.text.is_none() && argument.value.is_object() {
+                let text = as_character(argument.value, call.env)?;
+                argument.text = Some(text);
+                argument.length = length(text);
+            }
+        }
+    }
     let lengths: Vec<usize> = std::iter::once(format_count)
         .chain(arguments.iter().map(|argument| argument.length))
         .collect();
@@ -494,13 +519,6 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     let count = lengths.iter().copied().max().unwrap_or(0);
     if lengths.iter().any(|&each| count % each != 0) {
         return Err(error("arguments cannot be recycled to the same length"));
-    }
-    let mut used = vec![false; arguments.len()];
-    let mut parsed = Vec::with_capacity(format_count);
-    for index in 0..format_count {
-        // An `NA` format is the text "NA", as in GNU R.
-        let format = string_at(formats, index).unwrap_or(Cow::Borrowed("NA"));
-        parsed.push(parse_format(&format, arguments.len(), &mut used)?);
     }
     let result = alloc(SexpType::String, count)?;
     for row in 0..count {
@@ -535,7 +553,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
 
 /// Splits a format string into literal text and conversions, resolving which argument each
 /// conversion (and each `*`) reads.
-fn parse_format(format: &str, argument_count: usize, used: &mut [bool]) -> R<Vec<FormatPiece>> {
+fn parse_format(format: &str, kinds: &[SexpType], used: &mut [bool]) -> R<Vec<FormatPiece>> {
     let chars: Vec<char> = format.chars().collect();
     let mut pieces = Vec::new();
     let mut literal = String::new();
@@ -554,7 +572,13 @@ fn parse_format(format: &str, argument_count: usize, used: &mut [bool]) -> R<Vec
                 *slot = true;
                 Ok(argument)
             }
-            None => Err(error("too few arguments")),
+            None => match explicit {
+                Some(argument) => Err(error(format!(
+                    "reference to non-existent argument {}",
+                    argument + 1
+                ))),
+                None => Err(error("too few arguments")),
+            },
         }
     };
     while index < chars.len() {
@@ -615,17 +639,30 @@ fn parse_format(format: &str, argument_count: usize, used: &mut [bool]) -> R<Vec
         let kind = chars.get(index).copied();
         let end = (index + 1).min(chars.len());
         conversion.text = chars[start..end].iter().collect();
-        match kind {
-            Some('d' | 'i' | 'o' | 'x' | 'X' | 'f' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A' | 's') => {}
-            _ => {
-                return Err(error(format!(
-                    "unrecognised format specification '{}'",
-                    conversion.text
-                )));
+        const CONVERSIONS: &[char] = &[
+            'd', 'i', 'o', 'x', 'X', 'f', 'e', 'E', 'g', 'G', 'a', 'A', 's',
+        ];
+        if !kind.is_some_and(|kind| CONVERSIONS.contains(&kind)) {
+            // GNU R reads a specification up to the next conversion letter, and blames it on
+            // the type of the argument it would have formatted.
+            let Some(letter) = chars[start + 1..].iter().position(|c| CONVERSIONS.contains(c)) else {
+                let rest: String = chars[start..].iter().collect();
+                return Err(error(format!("unrecognised format specification '{rest}'")));
+            };
+            let chunk: String = chars[start..=start + 1 + letter].iter().collect();
+            if kinds.is_empty() {
+                return Err(error("too few arguments"));
             }
+            let advice = match kinds[take(explicit, used)?] {
+                SexpType::Real => "use format %f, %e, %g or %a for numeric objects",
+                SexpType::Integer => "use format %d, %i, %o, %x or %X for integer objects",
+                SexpType::Logical => "use format %d or %i for logical objects",
+                _ => "use format %s for character objects",
+            };
+            return Err(error(format!("invalid format '{chunk}'; {advice}")));
         }
         conversion.kind = kind.unwrap_or('s');
-        if argument_count == 0 {
+        if kinds.is_empty() {
             return Err(error("too few arguments"));
         }
         conversion.argument = take(explicit, used)?;
