@@ -560,7 +560,9 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".External", -1, |call| unsafe {
         dot_call(call, RoutineKind::External)
     }),
-    builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
+    // GNU R lets `.External2` keep whatever visibility its native code last evaluated with,
+    // which is how magrittr's pipe forwards `invisible()`.
+    builtin(".External2", -1, |call| unsafe { dot_external2(call) }).keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
         dot_call(call, RoutineKind::Call)
     }),

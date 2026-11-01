@@ -3213,43 +3213,37 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
                             }
                         })
                         .collect();
-                    if all_integer && values.iter().all(|value| value.fract() == 0.0) {
-                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-                        return values::integer_vector(&integers);
-                    }
-                    values::real_vector(&values)
+                    whole_sequence(&values)
                 }
                 (from, None, by) => {
                     let from = from.unwrap_or(1.0);
                     let by = by.unwrap_or(1.0);
                     let values: Vec<f64> =
                         (0..count).map(|index| from + index as f64 * by).collect();
-                    if (from_value.is_none() || all_integer)
-                        && values
-                            .iter()
-                            .all(|value| value.fract() == 0.0 && value.abs() < i32::MAX as f64)
-                    {
-                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-                        return values::integer_vector(&integers);
-                    }
-                    values::real_vector(&values)
+                    whole_sequence(&values)
                 }
                 (None, Some(to), by) => {
                     let by = by.unwrap_or(1.0);
                     let from = to - (count as f64 - 1.0) * by;
                     let values: Vec<f64> =
                         (0..count).map(|index| from + index as f64 * by).collect();
-                    if all_integer && values.iter().all(|value| value.fract() == 0.0) {
-                        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
-                        return values::integer_vector(&integers);
-                    }
-                    values::real_vector(&values)
+                    whole_sequence(&values)
                 }
                 _ => Err(call.error("too many arguments")),
             }
         }
         _ => Err(call.error("invalid arguments")),
     }
+}
+
+/// A `length.out` sequence is integer whenever every element is a whole number in integer
+/// range, whatever the types of `from`, `to` and `by`, as in GNU R.
+unsafe fn whole_sequence(values: &[f64]) -> R<Sexp> {
+    if values.iter().all(|value| value.fract() == 0.0 && value.abs() <= i32::MAX as f64) {
+        let integers: Vec<i32> = values.iter().map(|&value| value as i32).collect();
+        return values::integer_vector(&integers);
+    }
+    values::real_vector(values)
 }
 
 /// `rep(x, times, each, length.out)`.

@@ -542,12 +542,14 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             value_of(value)?
         })
     };
-    // The generic: the argument, else `.Generic`, else the called function's name.
-    let mut generic = call.arg(0);
-    if generic == nil() || generic == missing_arg() {
-        generic = read(symbols.dot_generic)?;
+    // The generic: `.Generic`, else the argument, else the called function's name. GNU R reads
+    // `.Generic` first, so `NextMethod(object, ...)` in MASS's `predict.rlm` passes the object
+    // where the generic would go and still works.
+    let mut generic = read(symbols.dot_generic)?;
+    if generic == unbound() {
+        generic = call.arg(0);
     }
-    if generic == unbound() || generic == nil() {
+    if generic == missing_arg() || generic == nil() {
         let head = frame_call.car();
         if head.kind() == SexpType::Symbol {
             generic = scalar_string(&symbol_name(head))?;
