@@ -5644,6 +5644,43 @@ impl<'db> Checker<'db, '_> {
             };
         let left = nullable_union(left);
         let right = nullable_union(right);
+        // A union beside a class dispatches per member, as R does at run time, so the
+        // accumulator `acc <- 0; for (...) acc <- acc + m %*% m` (`double | matrix`) takes
+        // `Arith.matrix` for both members. Every member must dispatch to a method; otherwise
+        // the ordinary rules check the union.
+        for (index, operand) in [left, right].into_iter().enumerate() {
+            let TyKind::Union(members) = self.table.shallow_resolve(self.db, operand).kind(self.db)
+            else {
+                continue;
+            };
+            let members = members.clone();
+            let member_count = members.len();
+            let errors_before = self.errors.len();
+            let snapshot = self.table.snapshot();
+            let mut results = Vec::with_capacity(members.len());
+            for member in members {
+                let (member_left, member_right) = match index {
+                    0 => (member, right),
+                    _ => (left, member),
+                };
+                match self.operator_method_result(
+                    range,
+                    operator,
+                    lhs,
+                    rhs,
+                    member_left,
+                    member_right,
+                ) {
+                    Some(result) => results.push(result),
+                    None => break,
+                }
+            }
+            if results.len() == member_count {
+                return Some(union_of(self.db, results));
+            }
+            self.errors.truncate(errors_before);
+            self.table.rollback(snapshot);
+        }
         // A generic bounded `numeric` probes as the `double` it may be.
         let probe_operand =
             |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {

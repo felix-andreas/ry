@@ -1083,3 +1083,20 @@ count_up <- function(fine) span(1L, if (fine) 2.5 else "2")
 span: <T: numeric> fn(from: T, to: T) -> T
 count_up: Unknown
 73..95 error[type-mismatch] expected `integer`, found `double | character`
+
+#---- a_union_operand_dispatches_to_a_class_method_per_member
+penalty <- function(m, first) {
+  total <- if (first) 0 else t(m) %*% m
+  total + t(m) %*% m
+}
+#++++
+penalty: <T> fn(m: T, first: logical) -> matrix
+
+#---- a_union_member_without_a_method_is_still_rejected
+penalty <- function(m, first) {
+  total <- if (first) "none" else t(m) %*% m
+  total + t(m) %*% m
+}
+#++++
+penalty: Unknown
+79..97 error[type-mismatch] `+` is not defined between `character` and `matrix`

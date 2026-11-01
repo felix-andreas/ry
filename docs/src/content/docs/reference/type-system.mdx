@@ -1764,6 +1764,12 @@ the class from the first candidate, because R accepts a plain vector there too. 
 to be numeric, so in `function(omega, v) omega + v %*% t(v)`, `omega` is a `T: numeric`, and a call
 with two plain vectors is accepted.
 
+A union operand beside a class dispatches member by member, and the result is the union of the
+members' results. So the accumulator `total <- if (first) 0 else m %*% m; total + m %*% m` takes
+`Arith.matrix` for both `double` and `matrix` and is a `matrix`, while a `character` member is
+reported as `` `+` is not defined between `character` and `matrix` ``. When some member has no
+method to dispatch to, the union is checked by the ordinary operator rules instead.
+
 Your own classes count. A method declared anywhere the global scope reaches, which includes a
 package's `R/` sources and a script's own top level, makes its class support that operator exactly as
 a shipped stub does. That is also how the class satisfies the numeric requirement: passing a `Money`
