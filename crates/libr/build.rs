@@ -1,13 +1,22 @@
 //! Builds the C side of the native boundary and exports its symbols from the shared library.
 //!
-//! rustc gives a cdylib a version script that exports only Rust-defined symbols, so the C
-//! functions native code calls (the variadic `Rf_error` family, `R_UnwindProtect` and the other
-//! context functions) would stay hidden. A second version script lists them; the linker merges
-//! the two. The list comes from the `RY_EXPORT` markers in `src/native.c`, so it cannot drift.
+//! rustc gives a cdylib an export list (a version script on Linux, an exported-symbols list on
+//! macOS) that names only Rust-defined symbols, so the C functions native code calls (the
+//! variadic `Rf_error` family, `R_UnwindProtect` and the other context functions) would stay
+//! hidden. A second list names them, and the linker merges the two. The list comes from the
+//! `RY_EXPORT` markers in `src/native.c`, so it cannot drift.
 
-use std::{env, fs, path::PathBuf};
+#[path = "build_identity.rs"]
+mod build_identity;
+
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn main() {
+    emit_runtime_identity();
+    println!("cargo:rerun-if-changed=build_identity.rs");
     let source = "src/native.c";
     println!("cargo:rerun-if-changed={source}");
     println!("cargo:rerun-if-changed=include");
@@ -50,29 +59,67 @@ fn main() {
     let exported: Vec<String> = functions.chain(variables).collect();
     let out_dir =
         PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|error| panic!("OUT_DIR: {error}")));
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux") => link_linux(&out_dir, &exported),
+        Ok("macos") => link_macos(&out_dir, &exported),
+        _ => {}
+    }
+}
+
+fn link_linux(out_dir: &Path, exported: &[String]) {
     let script = out_dir.join("exports.map");
     let body: String = exported
         .iter()
         .map(|name| format!("{name};"))
         .collect::<Vec<_>>()
         .join(" ");
-    fs::write(&script, format!("{{ global: {body} }};\n"))
-        .unwrap_or_else(|error| panic!("cannot write {}: {error}", script.display()));
-
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        println!(
-            "cargo:rustc-cdylib-link-arg=-Wl,--version-script={}",
-            script.display()
-        );
-        // Packages built against GNU R record `libR.so` as a needed library. With this soname, the
-        // dynamic linker satisfies that from ry's already loaded libR instead of searching for
-        // GNU R's.
-        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libR.so");
-        // GNU R's libR depends on zlib, bzip2 and xz, and package binaries that call zlib
-        // without linking it themselves (gert, httpuv) find it through that dependency. ry's
-        // libR records the same dependencies, which the linker would otherwise drop as unused.
-        for library in ["z", "bz2", "lzma"] {
-            println!("cargo:rustc-cdylib-link-arg=-Wl,--no-as-needed,-l{library},--as-needed");
-        }
+    write(&script, &format!("{{ global: {body} }};\n"));
+    println!(
+        "cargo:rustc-cdylib-link-arg=-Wl,--version-script={}",
+        script.display()
+    );
+    // Packages built against GNU R record `libR.so` as a needed library. With this soname, the
+    // dynamic linker satisfies that from ry's already loaded libR instead of searching for
+    // GNU R's.
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libR.so");
+    // GNU R's libR depends on zlib, bzip2 and xz, and package binaries that call zlib
+    // without linking it themselves (gert, httpuv) find it through that dependency. ry's
+    // libR records the same dependencies, which the linker would otherwise drop as unused.
+    for library in ["z", "bz2", "lzma"] {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,--no-as-needed,-l{library},--as-needed");
     }
+}
+
+/// Mach-O symbol names carry a leading underscore. The install name `@rpath/libR.dylib` is
+/// what `dynload::load_library` rewrites a GNU R package binary's libR reference to: dyld
+/// satisfies a load command from an already loaded image whose install name matches it, so
+/// the package binds to ry's runtime and GNU R's libR is never loaded beside it
+/// (`decisions.md`, "macOS packages bind to ry's libR").
+fn link_macos(out_dir: &Path, exported: &[String]) {
+    let list = out_dir.join("exports.list");
+    let body: String = exported.iter().map(|name| format!("_{name}\n")).collect();
+    write(&list, &body);
+    println!(
+        "cargo:rustc-cdylib-link-arg=-Wl,-exported_symbols_list,{}",
+        list.display()
+    );
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libR.dylib");
+}
+
+fn write(path: &Path, text: &str) {
+    fs::write(path, text)
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
+}
+
+/// `ry` compares this value with its own after loading the library, so a `libR.so` left over
+/// from older sources is refused instead of silently running them.
+fn emit_runtime_identity() {
+    let manifest = env::var("CARGO_MANIFEST_DIR")
+        .unwrap_or_else(|error| panic!("CARGO_MANIFEST_DIR: {error}"));
+    let crates_directory = PathBuf::from(manifest).join("..");
+    let identity = build_identity::runtime_identity(&crates_directory);
+    for path in &identity.watched {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rustc-env=RY_RUNTIME_ID={}", identity.hash);
 }

@@ -4,20 +4,35 @@
 edition = "2024"
 ---
 
-//! Seeds the fuzz corpora with every fixture case source and shipped stub.
+//! Seeds the fuzz corpora: every fixture case source and shipped stub for the targets that read
+//! R source, the repository's delimited files for `sniff` and `csv`, its config files and config fixtures
+//! for `config`, and the recorded GNU R streams for the unserialize targets. The targets that
+//! read their input as a stream of generator choices (`bytecode`, `reload`, `lsp`) need no seed.
 //! Run `cargo +nightly -Zscript scripts/seed-fuzz-corpus.rs` before `cargo fuzz run`.
 
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FUZZ_TARGETS: [&str; 3] = ["parse", "format", "semantics"];
+const R_SOURCE_TARGETS: [&str; 7] = [
+    "parse",
+    "format",
+    "semantics",
+    "ide",
+    "interp_lower",
+    "load_index",
+    "position",
+];
+
+const CONFIG_SEEDS: [&str; 4] = [
+    "[format]\nindent-width = 4\nline-width = 100\n",
+    "[check]\ntyping = true\nstrict = true\nexclude = [\"scripts/\", \"!scripts/keep.R\"]\n",
+    "[lint]\nnaming-style = \"snake_case\"\n",
+    "case = \"camelCase\"\nspaces = 2\n",
+];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let repo_root = repo_root()?;
-    for target in FUZZ_TARGETS {
-        fs::create_dir_all(repo_root.join("fuzz/corpus").join(target))?;
-    }
 
     let mut sources: Vec<String> = Vec::new();
     let crates_root = repo_root.join("crates");
@@ -45,17 +60,67 @@ fn main() -> Result<(), Box<dyn Error>> {
         sources.push(read_text_lossy(&path)?);
     }
 
-    for target in FUZZ_TARGETS {
-        let corpus_dir = repo_root.join("fuzz/corpus").join(target);
-        for source in &sources {
-            fs::write(corpus_dir.join(sha1_hex(source.as_bytes())), source)?;
+    for target in R_SOURCE_TARGETS {
+        seed(&repo_root, target, sources.iter().map(String::as_bytes))?;
+    }
+
+    let mut delimited = Vec::new();
+    for suffix in [".csv", ".tsv"] {
+        for path in files_with_suffix(&crates_root, suffix)? {
+            let bytes = fs::read(&path)?;
+            // A file of thousands of records only slows every execution down.
+            delimited.push(bytes[..bytes.len().min(4096)].to_vec());
         }
     }
+    for target in ["sniff", "csv"] {
+        seed(&repo_root, target, delimited.iter().map(Vec::as_slice))?;
+    }
+
+    let mut configs: Vec<Vec<u8>> = CONFIG_SEEDS.iter().map(|text| text.as_bytes().to_vec()).collect();
+    for name in ["ry.toml", "roughly.toml"] {
+        for path in files_with_suffix(&crates_root, name)? {
+            configs.push(fs::read(&path)?);
+        }
+    }
+    seed(&repo_root, "config", configs.iter().map(Vec::as_slice))?;
+
+    let cases = read_text_lossy(&crates_root.join("libr/tests/data/serialize/cases.tsv"))?;
+    let streams: Vec<Vec<u8>> = cases
+        .lines()
+        .filter_map(|line| line.split('\t').nth(3))
+        .map(unhex)
+        .collect::<Result<_, _>>()?;
+    for target in ["unserialize", "interp_unserialize"] {
+        seed(&repo_root, target, streams.iter().map(Vec::as_slice))?;
+    }
+
     println!(
-        "seeded {} case sources into fuzz/corpus/{{parse,format,semantics}}",
-        sources.len()
+        "seeded {} case sources, {} delimited files, {} configs and {} serialized streams into fuzz/corpus/",
+        sources.len(),
+        delimited.len(),
+        configs.len(),
+        streams.len()
     );
     Ok(())
+}
+
+fn seed<'a>(
+    repo_root: &Path,
+    target: &str,
+    inputs: impl Iterator<Item = &'a [u8]>,
+) -> Result<(), Box<dyn Error>> {
+    let corpus_dir = repo_root.join("fuzz/corpus").join(target);
+    fs::create_dir_all(&corpus_dir)?;
+    for input in inputs {
+        fs::write(corpus_dir.join(sha1_hex(input)), input)?;
+    }
+    Ok(())
+}
+
+fn unhex(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    (0..hex.len() / 2)
+        .map(|at| Ok(u8::from_str_radix(&hex[2 * at..2 * at + 2], 16)?))
+        .collect()
 }
 
 fn repo_root() -> Result<PathBuf, Box<dyn Error>> {

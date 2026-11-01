@@ -73,7 +73,7 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
     }
 
     let result = values::shallow_duplicate(formula)?;
-    let environment = values::get_attr(formula, values::install(".Environment")?);
+    let environment = values::get_attr(formula, symbols().dot_environment);
     values::clear_attributes(result);
     if !model.frame_names.is_empty() {
         let expanded = expand_frame_dot(rhs, &model.frame_names)?;
@@ -174,7 +174,7 @@ pub unsafe fn termsform(call: &NativeCall<'_>) -> R<Sexp> {
         symbols().class,
         values::string_vector(&["terms", "formula"])?,
     )?;
-    values::set_attr(result, values::install(".Environment")?, environment)?;
+    values::set_attr(result, symbols().dot_environment, environment)?;
     Ok(result)
 }
 
@@ -207,7 +207,7 @@ pub unsafe fn updateform(call: &NativeCall<'_>) -> R<Sexp> {
         let expanded = expand_dots(cell.car(), rhs)?;
         heap.set_car(cell, expanded);
     }
-    let environment_symbol = values::install(".Environment")?;
+    let environment_symbol = symbols().dot_environment;
     let environment = values::get_attr(new, environment_symbol);
     values::clear_attributes(new);
     values::set_attr(new, environment_symbol, environment)?;

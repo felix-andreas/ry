@@ -420,14 +420,22 @@ labels: character[]
 wrong: Unknown
 130..140 error[type-mismatch] expected `character[] | character`, found `double[]`
 
-#---- a_switch_result_that_may_be_null_reports_the_nullability
+#---- a_switch_result_without_a_default_is_called_as_the_function
 pick <- function(kind) {
   fn <- switch(kind, upper = toupper, lower = tolower)
   fn("Text")
 }
 #++++
-pick: Unknown
-82..84 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: Any) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give the `switch` a default branch
+pick: <T> fn(kind: T) -> character
+
+#---- a_parameter_that_may_be_null_reports_the_nullability
+#: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
+apply_transform <- function(text, transform) {
+  transform(text)
+}
+#++++
+apply_transform: fn(text: character, transform: (fn(x: character) -> character) | NULL) -> character
+136..145 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: character) -> character) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter
 
 #---- a_default_branch_makes_the_switch_result_callable
 pick <- function(kind) {
@@ -613,17 +621,16 @@ fail_with: fn(x: Unknown) -> Any
 checked: fn(x: Unknown) -> character
 
 #---- a_callback_names_the_parameter_that_refuses_the_element
-# The two whole signatures cannot say this: the lambda's parameter is a
-# constrained variable, and a constraint does not survive into a rendered type,
-# so `fn(s: U) -> U` prints the same whether `U` takes anything or only numbers
-# — against `fn(character) -> T` it reads as a call that should have fit.
+# The lambda's parameter takes `character` from `words` before its body is
+# checked, so the finding lands on the use that refuses it and names the
+# parameter and the call that supplied its type.
 f <- function() {
   words <- list("a", "b")
   lapply(words, function(s) s + 1L)
 }
 #++++
 f: Unknown
-368..386 error[type-mismatch] this function is passed `character`, but its parameter `s` is used as a numeric value (`integer` or `double`)
+269..270 error[type-mismatch] `s` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
 
 #---- filter_accepts_a_predicate_returning_any_value
 # `Filter` applies `as.logical` to what the predicate returns, so a count works.

@@ -29,15 +29,17 @@ const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
 /// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
 /// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
-/// zeroing cost a cold check more time than parsing did. mimalloc reads the option when it
-/// creates its first arena, which happens before `main`, so the option is set from a constructor.
+/// zeroing cost a cold check more time than parsing did. The first arena is reserved before
+/// `main`, so the option is set from a constructor, as a default that
+/// `MIMALLOC_ARENA_EAGER_COMMIT` can still override. `libR.so` has its own allocator and sets the
+/// same option in `crates/libr/src/libr.rs`.
 #[cfg(all(feature = "mimalloc", target_os = "linux"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static LAZY_ARENA_COMMIT: extern "C" fn() = {
     extern "C" fn lazy_arena_commit() {
         // SAFETY: setting an option has no preconditions, and no thread exists yet.
-        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+        unsafe { libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
     }
     lazy_arena_commit
 };
@@ -230,11 +232,16 @@ fn run_console(
     let filter: Box<dyn repl::InputFilter> =
         Box::new(ConsoleFilter::new(preflight, runtime == Runtime::GnuR));
     let completer = Some(Box::new(AnalysisCompleter::new()) as Box<dyn repl::SessionCompleter>);
+    let load = load_package
+        .then(load::current_package)
+        .flatten()
+        .map(|root| load::load_statement(&root, true));
     match runtime {
-        // ry's runtime has no package loader in its console yet, so the console starts bare.
+        // ry's runtime carries its own loader, so it needs only the load statement.
         Runtime::Ry => runtime_exit(repl::run_console_on_ry_runtime(
             repl::RunOptions {
                 keybindings,
+                startup: load.into_iter().collect(),
                 input,
                 filter: Some(filter),
                 completer,
@@ -244,9 +251,7 @@ fn run_console(
         )),
         Runtime::GnuR => {
             let mut startup = vec![load::embedded_runtime()];
-            if let Some(root) = load_package.then(load::current_package).flatten() {
-                startup.push(load::load_statement(&root, true));
-            }
+            startup.extend(load);
             gnu_r_exit(repl::run(repl::RunOptions {
                 keybindings,
                 routines: load::call_routines(),
@@ -311,11 +316,12 @@ fn run_load(
 
 /// With inline annotations turned off they are erased and nothing checks them, at run time
 /// as in analysis. With object systems turned off, user code cannot define S4, R6 or Reference
-/// Classes.
+/// Classes. In strict mode, `ry load` binds a package's pure constants lazily.
 fn runtime_flags(config: &Config) -> repl::RuntimeFlags {
     repl::RuntimeFlags {
         annotation_checks: config.check.inline_annotations,
         object_systems: config.check.object_systems,
+        strict: config.check.strict,
     }
 }
 

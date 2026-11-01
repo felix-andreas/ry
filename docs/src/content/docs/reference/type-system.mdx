@@ -166,6 +166,9 @@ first <- function(items) items[[1L]]
 - `@Name(value)` and `@Name<ARGS>(value)` introduce a nominal type on a value, like `#: @new Name`
   on that value. The `(` must follow the type directly, and `value` may be any expression, including
   a record or tuple: `@Point((x = 1, y = 2))`.
+- `name <- @pure function(...)` and `name <- @pure \(x) ...` declare the function pure, like a
+  `#: @pure` line above the binding (see [purity](#purity)). Followed by `(`, `@pure(...)` is a
+  nominal introduction instead.
 
 Every `TYPE` is the type grammar of `#:` comments, so anything a `#:` type can say an inline type can
 say, and a type reads the same written either way.
@@ -288,7 +291,7 @@ This example deliberately uses both spellings on one function:
 apply_discount <- function(price: integer, rate) price * (1 - rate)
 ```
 
-```text
+```text ry check typing
 ! the inline annotation gives parameter `price` the type `integer`, but the `#:` comment gives it
   `double`. ry uses the inline type; make the two agree, or delete one
 ```
@@ -317,7 +320,7 @@ scale <- function(values: double, by: double) -> double values * by
 scale("a", 1)
 ```
 
-```text
+```text ry run runtime=ry
 Error in scale("a", 1) :
   argument `values` must be `double`, not `character`
 ```
@@ -531,7 +534,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   `character`, or a ry value. `as.Array : <T: item> fn(x: list[T]) -> Array<T>` uses it.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
-argument whose type violates a constraint is a type error at the call.
+argument whose type violates a constraint is a type error at the call. A union satisfies a
+constraint when every member does, so `double | integer` satisfies `numeric`.
 
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.
 Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. A body under a plain `<T>` that
@@ -687,16 +691,24 @@ the nominal identity.
 ##### Opaque nominal types
 
 An *opaque* nominal type has no representation to project. The standard-library stubs declare
-`data.frame`, `factor`, `connection`, `Date`, and other types the grammar cannot describe
-structurally as a bare `@type NAME` (see [stubs](/type-checking/stubs)). For these types:
+`factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
+`@type NAME` (see [stubs](/type-checking/stubs)). For these types:
 
 - `$`, `[`, and `[[` are accepted and give `Unknown`, because the R objects behind these classes
-  commonly support access that depends on values, such as `df$amount` and `df[rows, ]`.
+  commonly support access that depends on values.
 - The access is not checked further: there is no field-existence, index-count, or index-type check.
 - Every such access is an unsupported construct under [strict mode](#strict-mode).
 - Arithmetic and every other structural requirement remain type errors, unless the class declares
   the matching [operator method](#operator-methods-on-a-class). The nominal identity itself checks
   like any other nominal type.
+
+`data.frame` is not opaque: the stubs declare it as `@type data.frame {list[named: Unknown]}`, the
+named list of untyped columns it is at run time. A data frame is therefore accepted wherever a
+named list is, as in `lapply(frame, f)` and `vapply(frame, is.numeric, logical(1))`. A column read
+such as `frame$amount` or `frame[["amount"]]` is `Unknown`, and strict mode reports it where it is
+read. The stubs also declare its methods, so `frame[rows, cols]` is `Any`
+(R keeps the frame or drops it to a column depending on the indices), arithmetic such as
+`frame / 100` keeps the `data.frame`, and a comparison such as `frame > 0.5` is a `matrix`.
 
 #### Type-argument variance
 
@@ -976,7 +988,11 @@ whose message suggests `as.Array()`.
 
 When the code runs, two Arrays of different lengths are an error rather than recycled, and a result
 that holds `NA` or `NaN`, such as an integer overflow, is an error. An operator on Arrays of ry
-values is an error.
+values is an error, and so are two Arrays of different item types. An operand that is not an Array
+and not a single item of the item type, such as an R vector, `NA` or an `integer` beside an
+`Array<double>`, is a `type-mismatch` in checked code; when R code does it, as base `str()` does
+with `ob - signif(ob, digits)`, R's operator runs and the result is a plain R vector, as for a
+replacement below.
 
 ### Array indexing
 
@@ -1214,6 +1230,54 @@ to_double <- function(x = 1) {
 This is a deliberate approximation. A union with the open formal type would make every later use of
 the value accept anything, while the normalized type is what the code after such a test assumes. A
 `NULL` write is not a normalization and joins as an ordinary branch write.
+
+### Function literals in call arguments
+
+A function literal passed as a call argument takes its parameter types from the function type the
+callee expects at that position. The other arguments are checked first, so the callee's type
+parameters are already bound when the literal's body is inferred:
+
+```r
+xs <- [1, 2]
+pairs <- List.map(xs, \(x) c(x, x))
+# error: this function must return an Array item (...), but it returns `double[]`
+```
+
+`List.map` expects `fn(T) -> U` with `T` bound to `double` by `xs`, so `x` is `double` inside the
+body, `c(x, x)` is `double[]`, and the `item` constraint on `U` refuses it. Without the expected
+type, `x` would be an open variable and `c(x, x)` could not be typed. The rule has these limits:
+
+- It applies only to a literal written directly as the argument, with no `#:` or inline annotation
+  on any of its formals. An annotated formal keeps its annotation, which is then checked against the
+  expected type.
+- Every formal without a default must receive a type, or none does. In
+  `Reduce(function(a, b) a + b, xs)` the accumulator's type is still open when the literal is
+  checked, so both formals stay open and are inferred from the body, as for any unannotated
+  function. A formal with a default is always left to inference.
+- With an overloaded callee, a formal takes a type only when every candidate that accepts the other
+  arguments expects the same one. The overload is then chosen as usual, with the literal's inferred
+  type among the arguments.
+- A formal is an accumulator when its expected type shares a type variable with the expected
+  result type, and another argument of the call has exactly that variable as its type: `seen` is
+  one in `List.walk(xs, state: S, f: fn(S, T) -> S)`. The result widens the variable, so the type
+  the initial state gives it (such as an empty `list()`) is no context, and by the rule above the
+  literal takes no types. A variable fixed by a collection is not widened, so in
+  `List.update(xs, i, f: fn(T) -> T)` the literal's formal still takes the item type.
+- A literal with a formal after `...` takes no types, because R binds positional arguments to
+  `...` before any later formal.
+- A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no
+  context.
+
+When the body uses a parameter that took its type this way as an operand its type does not allow,
+the finding is reported on that use and names the parameter. Other misuses, such as passing the
+parameter to a function that expects another type, keep their usual wording:
+
+```r
+words <- ["a", "b"]
+bad <- List.map(words, \(w) w * 2)
+# error: `w` is used as a numeric value (`integer` or `double`) here, but the call passes this
+# function `character` for it
+```
 
 ### Named and positional parameters
 
@@ -1478,7 +1542,8 @@ members.
 - `(integer | character) + 1L` is a type error, because the `character` member is not numeric.
 - `(integer | NULL) + 1L` is `integer`. R's arithmetic and comparison give an empty vector for a
   `NULL` operand rather than failing, so a `NULL` member is accepted and contributes nothing to the
-  result, and `(character | NULL) == "a"` is `logical`. An operand that is only `NULL`, as in
+  result, and `(character | NULL) == "a"` is `logical`. A class member dispatches its declared
+  operator method the same way, so `(factor | NULL) == "a"` goes through `==.factor`. An operand that is only `NULL`, as in
   `NULL + 1L` or `NULL == 1L`, gives `Unknown`.
 - `rec$a` on `list{a: integer} | list{a: character}` is `integer | character`. A member that lacks
   the field changes the result, as [indexing](#indexing) describes.
@@ -1635,6 +1700,10 @@ result's atomic type depends on the operator:
 - `/`, `^`, and `**` (R's parser alias for `^`) always give `double`.
 - Unary `-` keeps its operand's atomic type. A class with arithmetic methods negates to itself,
   because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a `matrix`.
+- R rejects `-NULL`, and so does the checker. A value the body computes that may be `NULL` negates
+  as its other members, because code like `if (length(k)) res <- res[-k]` negates only once the
+  value exists. A parameter or an annotated variable keeps its `NULL`, so `-x` on a declared
+  `x: double | NULL` is reported.
 
 For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `integer[]`,
 `2L ^ 3L` is `double`, and `-c(foo = 1L, bar = 2L)` is `integer[]`. Every `%op%` operator other than
@@ -1657,6 +1726,13 @@ to a scalar `double`, which matches how R treats bare numbers. An operand whose 
 counts as scalar-like here and in comparisons, by the same claim that
 [`[` on vectors](#-on-vectors-1) makes. A generic vector written `T[]` is the exception, and its
 operator results really are vectors.
+
+A union operand is checked member by member. A union of numeric types, such as `double | integer`,
+follows the rules above. A union that also holds an unannotated value or a class with arithmetic
+methods, such as `double | matrix` from `if (is.null(previous)) 1 else x %*% x`, requires its
+unannotated members to be numeric, and the result is `Unknown`, because R picks the result type per
+member at run time. A member that is neither, such as the `character` in `double | character`, is a
+type error.
 
 A `logical` argument satisfies the numeric requirement, because R promotes it, so
 `cost <- function(price, rate) price * rate` accepts `cost(TRUE, 0.5)` and `cost(1L, 0.5)`. Mixed
@@ -1740,12 +1816,18 @@ Logical negation coerces its operand exactly as a [scalar condition](#conditions
 - `!logical`, `!integer`, and `!double` are `logical`.
 - `!logical[]`, `!integer[]`, and `!double[]` are `logical[]`.
 - A map-like operand gives `logical[]`, because negation does not preserve map-likeness.
+- A `matrix` or `array` negates to itself, so `!as.matrix(flags)` is a `matrix`, and so does a
+  class with a `!` or `Ops` method, which R dispatches `!` to. A `-` or `Arith` method is not
+  enough, so `!Sys.Date()` is a type error, as it is in R.
 - `!NULL` is `logical[]`, the empty vector R returns, so a value that may be `NULL` negates without
   error: `!x` on `logical | NULL` is `logical[]`.
 - An `Any` or `Unknown` operand gives `Unknown`.
 - An operand whose type is still undetermined is constrained to `logical`, and the result is
   `logical`, except for an unannotated formal with a default, which stays open as it does in a
   [condition](#conditions).
+- A union negates when each member does, and an undetermined member counts as one that does. An
+  unannotated parameter shaped by an `is.null()` test has such a type, so after
+  `if (is.null(read)) read <- !write` the `!write` is not an error.
 - Any other operand is a type error.
 
 ### Range operator `:`
@@ -1861,6 +1943,37 @@ A call evaluates to its callee's return type. When the callee expression or its 
 the call must be valid against every member, since the value could be any of them, and it evaluates
 to the union of the members' return types. No member's argument bindings leak into another's.
 Calling a function looked up in a list, as in `handlers[[name]](...)`, has this shape.
+
+A callee whose union joins functions with plain values, such as `(fn(id: T) -> character) | character`,
+comes from a function whose result kind depends on an argument, as `prefixer(namespace)` below
+returns its inner function exactly when `id` is missing. The call presumes the function: it is
+checked against the function members only and is `Unknown`. A union of functions and `NULL` alone
+is different and is reported, as [called names](#called-names) describes.
+
+```r
+prefixer <- function(namespace, id) {
+  f <- function(id) paste(namespace, id, sep = "-")
+  if (missing(id)) f else f(id)
+}
+scoped <- function(namespace, name) prefixer(namespace)(name)
+```
+
+An argument that names a variable the body assigns without an annotation drops its `NULL` member
+when the parameter's type admits no `NULL`. The `NULL` there comes from a `switch` without a default,
+an `if` without `else`, or a helper that returns `NULL` on some path, and the code presumably does
+not reach the call on that path. So `type <- switch(type, logical = "a logical %s", integer =
+"an integer %s")` followed by `sprintf(type, kind)` is clean. A parameter the body does not
+reassign, and a variable whose assignment is annotated, keep their `NULL`, so passing a
+`name: character | NULL` parameter on to a `character` parameter is still reported. The `NULL` of
+an unannotated parameter is a placeholder of the same kind, whether it comes from a `NULL` default
+or from an `is.null()` test: in `function(H = NULL, Z) { ...; if (quadratic) scale_by(Z, H) }`, where
+`quadratic` was set from an `is.null(H)` test, `H` passes to a numeric parameter without its `NULL`.
+
+Length works the same way. A variable the body computes as `character | character[]`, because a
+helper returns a vector on some path, passes to a parameter that takes one `character` as that one
+string, so `pattern <- format_message("^%s=", name)` followed by `sub(pattern, "", spec)` is clean.
+Only such a union qualifies: a variable known to hold a vector, as `flags <- c(TRUE, FALSE)` does,
+is still reported at a `logical` parameter, and so is a declared vector.
 
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
@@ -2054,7 +2167,9 @@ rebinding `stop` is not modelled.
 
 A condition that applies a type-guard predicate to a plain local variable refines that variable's
 type along each edge of the `if`. Inside each branch, the variable keeps the refined type until a
-write replaces it, and the refinements merge back at the join exactly as branch writes do. With `x`
+write replaces it, and the refinements merge back at the join exactly as branch writes do. A
+branch the guard does not refine holds the value from before the test, so `if (!is.null(x)) ...` on
+an untyped `x` leaves `x` untyped after the `if`, not `NULL`. With `x`
 a local variable or parameter, the recognized guards are:
 
 - `is.null(x)` makes `x` a `NULL` in the true branch, and removes `NULL` from its union in the false
@@ -2158,13 +2273,17 @@ exceptions and additions:
   they force nothing either.
 - Passing the formal on under its own name to a project function, as in `inner(x, finally = finally)`,
   does not force it, because the callee decides whether it is needed. A call to a library function
-  still forces it.
+  still forces it, except for a base R parameter that has no default and that the function tests
+  with `missing()`: `Reduce(f, x, init = .init)` and `base::tryCatch(expr, finally = finally)` leave
+  the formal unforced.
 - A body that dispatches with `UseMethod()` forces none of its formals, because it hands them to a
   method unevaluated, and the method decides what it needs. So
   `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`.
 - A read guarded by `missing(name)` does not make the formal required; see below.
 - An argument of `substitute()` or `quote()` is not evaluated, so a formal named only there is not
-  forced.
+  forced. The same holds for rlang's `enquo()`, `enquos()`, `enexpr()`, `enexprs()`, `ensym()`,
+  `ensyms()`, and `maybe_missing()`, so `quo <- function(expr) enquo(expr)` may be called as
+  `quo()`.
 - A formal assigned before any read, as in `function(x) { x <- 1; x }`, is never forced. The order
   is evaluation order, so `n <- n / 2` forces `n`, and a `for` variable is assigned by the loop.
 - The write must happen on every path to the read. `if (flag) x <- 1 else x <- 2` assigns `x`, and
@@ -2366,6 +2485,10 @@ upper_names <- function(x) {
   bindings and then the package namespace, and a script's in the namespace, so
   `path <- path("a")` in a test still leaves `path("b")` calling the package's `path`.
 - A binding typed as a function, `Unknown`, `Any` or a nominal type is used.
+- A binding whose type joins functions with `NULL` is called as the functions when the body
+  computed it, such as `handler <- switch(kind, ...)` without a default, because the code presumably
+  rules the `NULL` path out. A parameter, or a variable whose last assignment is annotated, admits
+  that `NULL` on purpose, so calling it is reported until an `is.null()` test rules it out.
 - A binding with no type information yet, such as an unannotated parameter nothing has constrained
   or a parameter annotated with a type parameter `T`, may hold anything. When the body only ever
   calls it, it is a callback, and the call checks against it as usual: both
@@ -2382,8 +2505,12 @@ upper_names <- function(x) {
   names the nearest binding's type. A `NULL` binding is the exception, because it is usually a
   placeholder that a package fills in later, from `.onLoad` or with `<<-`. A call on a callee whose
   type is `NULL`, such as `reject(1)` after a top-level `reject <- NULL`, or `registry$invoke()` on
-  a `NULL` `registry`, is unchecked and types as `Unknown`. A callee that only may be `NULL`, such as
-  `(fn(x: T) -> T) | NULL`, is still reported.
+  a `NULL` `registry`, is unchecked and types as `Unknown`. A function the body computes that only
+  may be `NULL`, such as `fn <- switch(kind, upper = toupper, lower = tolower)`, is called as the
+  function, because the `NULL` path is one the code presumably rules out (`match.arg(kind)`). A
+  parameter whose default or declared type admits `NULL`, such as
+  `transform: (fn(x: character) -> character) | NULL`, is still reported, because the caller
+  supplies that `NULL`.
 - Hover and go-to-definition on the called name follow the binding the call reaches.
 
 `pkg::name` is never looked up this way: it names one namespace, as described next.
@@ -3329,6 +3456,76 @@ in both directions:
 - The directive changes only which diagnostics are published for the file. Inference and every other
   check are untouched, so hover and the other editor features keep working under `off`.
 
+### A package file's top level
+
+Under strict mode, the top level of a library file may hold only definitions, so that loading the
+package binds names and registers classes and does nothing else. A library file is a file in the
+package's `R/` directory. Every other file is an entry: a script that `ry run` starts, a test file
+or helper under `tests/`, and each console command. Entries may run anything at their top level.
+
+A top-level statement of a library file is a definition when it is one of these:
+
+- `name <- value` or `name = value` whose value is a function, a class definition form, or a
+  constant (below), including a chain such as `a <- b <- function(x) x`. zeallot's
+  `c(a, b) %<-% value` counts the same way.
+- A call to a class definition form: `setClass`, `setClassUnion`, `setGeneric`, `setMethod`,
+  `setReplaceMethod`, `setValidity`, `setOldClass`, `setAs`, `setRefClass`, or `R6Class`, bare or
+  namespace-qualified. Their arguments are not inspected.
+- A call that imports a package (`library`, `require`, `requireNamespace`, `loadNamespace`,
+  `attachNamespace`) or only declares something (`globalVariables`, `suppressForeignCheck`,
+  `delayedAssign`, `makeActiveBinding`, `.S3method`, `registerS3method`).
+- A `type` or `alias` definition, or an expression with no effect, such as `NULL`.
+- An `if` whose condition has no effect, or is an import call such as
+  `requireNamespace("x", quietly = TRUE)` (negated or not), and whose branches are definitions, or a
+  `{` block of definitions.
+
+A constant's initializer must have no effect. Literals, names, `pkg::name`, function literals,
+formulas, and the built-in operators have none. A call has none when its function is declared pure
+and its arguments have none; the arguments of `quote`, `expression`, `alist` and `substitute` are not
+evaluated, so they are not inspected. Inside `local()`, assignments and loops touch only the local
+environment and are allowed, but a call to a function bound inside that `local()` is an effect,
+because nothing declares it pure.
+
+Anything else is an effect, which is a `strict` error reported on the expression that causes it.
+Only the first effect of a statement is reported. The effects are:
+
+- a call to a function that is not declared pure, including a `%op%` operator;
+- a call whose function is computed, such as `handlers[[1]]()`;
+- a `for`, `while` or `repeat` loop outside `local()`;
+- `<<-`, which assigns outside the package namespace;
+- a replacement such as `names(x) <- value` or `x$field <- value`, which changes a value after its
+  definition;
+- an assignment nested inside an expression, such as `f(x <- 1)`;
+- `?`, which looks up help.
+
+#### Purity
+
+A function is pure when calling it has no effect beyond returning a value, whatever its arguments.
+Purity is declared and never inferred, and the declaration is trusted: ry does not check the body.
+A project function is declared pure with a `#: @pure` comment line above its definition or an inline
+`@pure` before `function` (or `\(x)`), and a stub declares one with `name : @pure fn(...)`. With
+inline annotations turned off, an inline `@pure` declares nothing and carries the `inline-annotation`
+warning. The
+standard library's stubs mark base R's pure functions, such as `paste0`, `seq_len` and `sum`, and
+`c`, `list`, `switch`, `expression` and `alist` are pure without a stub.
+
+A project definition of a name shadows the stub's declaration, so a package's own `paste0` is pure
+only if it is marked. A function defined inside a condition, such as `if (cond) f <- function() 1`,
+is never pure, because which definition exists depends on the condition.
+
+Purity belongs to each definition alone. Adding `cat()` to the body of a function marked `@pure`
+re-checks only that function, and removing the marker re-checks only the statements that call it.
+
+#### Lazy constants
+
+`ry load` binds a library file's functions lazily, and under strict mode its constants too: a constant
+whose name has exactly one top-level writer becomes a promise that evaluates its initializer on first
+use. Every package name the initializer mentions must also be written exactly once, by a statement
+earlier in collation order, and otherwise the constant runs eagerly in order. Because the initializer
+has no effect and what it reads cannot change after it, evaluating it later gives the value a load
+would have computed. A reload binds the constant again whenever anything its initializer reaches changed, such
+as the body of a pure function it calls.
+
 ### Untyped parameters
 
 A parameter without an annotation is reported when nothing constrains it, because it then accepts
@@ -3339,7 +3536,7 @@ variable of its own function that neither another parameter nor the return type 
 describe <- function(x) cat("a value\n")
 ```
 
-```text
+```text ry check typing strict
 x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any
   value is accepted unchecked. Annotate it, as in `x: TYPE`
 ```

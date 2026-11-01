@@ -11,8 +11,8 @@ use {
     R::{
         runtime,
         serialize::{
-            Format, LazyLoadCompression, PersistHook, from_bytes, header_of, lazyload_fetch,
-            read_rds, to_bytes,
+            Format, LazyLoadCompression, PersistHook, check_unserialize_input, from_bytes,
+            header_of, lazyload_fetch, read_rds, to_bytes,
         },
     },
     heap::{
@@ -786,7 +786,9 @@ fn installed_lazy_load_databases_read() {
     }
 }
 
-/// Corrupted streams fail with an error: never a panic, a crash or a runaway allocation.
+/// Corrupted streams fail with an error, or read into an object that writes back: never a panic,
+/// a crash or a runaway allocation. The contract is `serialize::check_unserialize_input`, which
+/// the coverage-guided `unserialize` target shares.
 #[test]
 fn corrupted_streams_fail_cleanly() {
     let _session = session();
@@ -811,13 +813,11 @@ fn corrupted_streams_fail_cleanly() {
                 _ => bytes.insert(at, rng.next_u64() as u8),
             }
         }
-        let mark = runtime().heap.handle_mark();
         if iteration % 64 == 63 {
             runtime().heap.policy_mut().stress = GcStress::EveryAllocation;
         }
-        let outcome = std::panic::catch_unwind(|| unsafe { from_bytes(&bytes) });
+        let outcome = std::panic::catch_unwind(|| unsafe { check_unserialize_input(&bytes) });
         runtime().heap.policy_mut().stress = GcStress::Off;
-        runtime().heap.release_handles(mark);
         assert!(
             outcome.is_ok(),
             "iteration {iteration} panicked on {}",

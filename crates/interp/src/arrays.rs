@@ -248,66 +248,62 @@ unsafe fn do_is_array(call: &Call<'_>) -> R<Sexp> {
     values::scalar_bool(call.arg(0).is_array())
 }
 
-/// An operator applied to at least one Array: `expression` is the operator's spelling,
-/// `operands` its one or two arguments. Checks the strict rules before R's own operator runs:
-/// the item types match exactly, a second operand is an Array of the same length or a single
-/// plain value, and the operator suits the items.
+/// An operator applied to at least one Array: `operator` is its spelling, `operands` its one or
+/// two arguments. Returns whether the strict rules govern it, checking them first: two Arrays
+/// must have one item type and one length, and the operator must suit the items.
+///
+/// An operand that is neither an Array nor a single item of the Array's item type (an R
+/// vector, an `NA`, a number of the other numeric type) makes it `false`: R's operator then
+/// runs and the result is the plain R vector R would build, as an Array replacement does with a
+/// value that is not an item. That keeps base R code working when it combines an Array with a
+/// vector it derived, as `str()` does with `ob - signif(ob, digits)`. Typed code never gets
+/// there, because the checker rejects such an operand.
 pub unsafe fn check_operands(
     call: Sexp,
     operator: &str,
     class: OperatorClass,
     operands: &[Sexp],
-) -> R<()> {
-    let length_of = |value: Sexp| length(value);
-    let array_length = operands
+) -> R<bool> {
+    let arrays: Vec<Sexp> = operands
         .iter()
-        .find(|value| value.is_array())
-        .map(|&value| length_of(value))
-        .unwrap_or(0);
-    let mut kind: Option<Items> = None;
-    for &operand in operands {
-        let operand_kind = if operand.is_array() {
-            if length_of(operand) != array_length {
-                return Err(error_in(
-                    call,
-                    format!(
-                        "`{operator}` needs Arrays of the same length, but they have {} and {} items; an Array is never recycled",
-                        length_of(operands[0]),
-                        length_of(operands[1])
-                    ),
-                ));
-            }
-            items(operand)
-        } else {
-            match item_kind(operand) {
-                Ok(Items::RyValues) | Err(_) => {
-                    return Err(error_in(
-                        call,
-                        format!(
-                            "`{operator}` combines an Array only with another Array or a single value, not {}",
-                            describe(operand)
-                        ),
-                    ));
-                }
-                Ok(item) => item,
-            }
-        };
-        match kind {
-            None => kind = Some(operand_kind),
-            Some(first) if first != operand_kind => {
-                return Err(error_in(
-                    call,
-                    format!(
-                        "`{operator}` needs operands with one item type, but one is {} and the other is {}; convert one explicitly",
-                        first.name(),
-                        operand_kind.name()
-                    ),
-                ));
-            }
-            Some(_) => {}
+        .copied()
+        .filter(|value| value.is_array())
+        .collect();
+    let Some(&first) = arrays.first() else {
+        return Ok(false);
+    };
+    let kind = items(first);
+    if let [left, right] = arrays[..] {
+        if length(left) != length(right) {
+            return Err(error_in(
+                call,
+                format!(
+                    "`{operator}` needs Arrays of the same length, but they have {} and {} items; an Array is never recycled",
+                    length(left),
+                    length(right)
+                ),
+            ));
+        }
+        if items(right) != kind {
+            return Err(error_in(
+                call,
+                format!(
+                    "`{operator}` needs operands with one item type, but one is {} and the other is {}; convert one explicitly",
+                    kind.name(),
+                    items(right).name()
+                ),
+            ));
         }
     }
-    let kind = kind.unwrap_or(Items::Logical);
+    // No operator is defined on ry values, so their own message beats R's fallback error.
+    let plain_items_fit = kind == Items::RyValues
+        || operands
+            .iter()
+            .filter(|value| !value.is_array())
+            .all(|&value| item_kind(value).is_ok_and(|found| found == kind));
+    if !plain_items_fit {
+        return Ok(false);
+    }
     let allowed = match class {
         OperatorClass::Arithmetic => matches!(kind, Items::Integer | Items::Double),
         OperatorClass::Comparison => kind != Items::RyValues,
@@ -322,7 +318,7 @@ pub unsafe fn check_operands(
             ),
         ));
     }
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Clone, Copy)]

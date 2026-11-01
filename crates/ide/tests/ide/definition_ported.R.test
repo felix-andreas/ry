@@ -2,7 +2,7 @@
 #---- parameter_declaration_position
 f <- function(para$0meter) parameter
 #++++
-hover 5..34: fn(parameter: T) -> T
+hover 14..23: parameter: T
 definition 14..23
 references: 14..23*, 25..34
 rename: 2 edit(s)
@@ -11,7 +11,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn(parameter: T) -> T\n"
-completion (29): parameter, packageStartupMessage, pairs.default, pairwise.table, parent.frame, parseNamespaceFile, print.data.frame, print.summary.table
+completion (30): parameter, packageStartupMessage, pairs.default, pairwise.table, parent.frame, parseNamespaceFile, print.data.frame, print.summary.table
 hint @1: <T> fn(parameter: T) -> T
 
 #---- for_variable_use

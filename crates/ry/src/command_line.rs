@@ -69,8 +69,8 @@ pub enum Command {
         /// Kept for scripts written before `ry R` existed: `gnu-r` runs on GNU R
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
-        /// With `--runtime gnu-r`, do not load the package the working directory belongs to
-        #[arg(long, hide = true, conflicts_with = "script")]
+        /// Do not load the package the working directory belongs to into the console
+        #[arg(long, conflicts_with = "script")]
         no_load: bool,
     },
     /// Run an R script on GNU R, or open a GNU R console without one
@@ -100,9 +100,9 @@ pub enum Command {
     },
     /// Load an R package from source, lazily, and run code against it
     ///
-    /// Function definitions are bound lazily, so each is parsed and evaluated on first use,
-    /// and other top-level code runs in collation order. The exit status is 0 when the
-    /// package loaded and the code ran without a top-level error.
+    /// Function definitions, and in strict mode pure constants, are bound lazily, so each is
+    /// parsed and evaluated on first use, and other top-level code runs in collation order. The
+    /// exit status is 0 when the package loaded and the code ran without a top-level error.
     Load {
         /// The package, or any path inside it
         #[arg(default_value = ".")]

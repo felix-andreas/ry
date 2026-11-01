@@ -74,7 +74,7 @@ persistence <- function(object, pars, distribution = "norm") UseMethod("persiste
 f <- function(fit) persistence(fit)
 #++++
 persistence: <T, U, V> fn([object]: T, [pars]: U, [distribution]: V) -> Any
-f: <T> fn(fit: T) -> Any
+f: <T> fn([fit]: T) -> Any
 
 #---- a_generic_leaves_its_dispatch_formal_to_the_method
 describe <- function(x, ...) UseMethod("describe")
@@ -299,7 +299,7 @@ outer <- function(x, finally) inner(x, finally = finally)
 run <- function() outer(1)
 #++++
 inner: <T> fn([x]: T, [finally]: T) -> T
-outer: <T> fn(x: T, [finally]: T) -> T
+outer: <T> fn([x]: T, [finally]: T) -> T
 run: fn() -> double
 
 #---- vapply_promotes_an_integer_result_under_a_double_template
@@ -477,7 +477,7 @@ forecast <- function(omega, regressors, flag) {
 run <- function(m) forecast(c(1, 2), m, TRUE)
 #++++
 forecast: <T: numeric, U> fn(omega: T, [regressors]: U, flag: logical) -> Unknown
-run: <T> fn(m: T) -> Unknown
+run: <T> fn([m]: T) -> Unknown
 
 #---- a_matrix_scales_by_a_vector
 scale_rows <- function(m, weights) {
@@ -487,3 +487,292 @@ scale_rows <- function(m, weights) {
 }
 #++++
 scale_rows: <T, U> fn(m: T, [weights]: U) -> matrix
+
+#---- a_data_frame_maps_over_its_columns
+summarise <- function(path) {
+  frame <- read.csv(path)
+  numeric <- vapply(frame, is.numeric, logical(1))
+  lapply(frame[numeric], mean)
+}
+#++++
+summarise: fn(path: character | connection) -> list[named: double]
+
+#---- a_data_frame_reads_its_columns_as_untyped
+first_column <- function(path) read.csv(path)[[1L]]
+#++++
+first_column: fn(path: character | connection) -> Unknown
+
+#---- a_data_frame_scales_and_compares_elementwise
+normalise <- function(path) {
+  frame <- read.csv(path)
+  frame / 100 > 0.5
+}
+#++++
+normalise: fn(path: character | connection) -> matrix
+
+#---- a_data_frame_subset_by_rows_and_columns_is_untyped
+filtered <- function(path) {
+  frame <- read.csv(path)
+  frame[frame$amount > 1, c("id", "amount")]
+}
+#++++
+filtered: fn(path: character | connection) -> Any
+
+#---- arithmetic_accepts_a_matrix_or_a_number
+smooth <- function(x, previous) {
+  current <- if (is.null(previous)) 1 else x %*% x
+  (current + 2) / 2
+}
+#++++
+smooth: <T, U> fn([x]: T, previous: U | NULL) -> Unknown
+
+#---- arithmetic_accepts_an_open_parameter_or_a_vector
+drop_rows <- function(x, drop) {
+  if (!is.null(drop)) drop <- which(x > 1)
+  if (!is.null(drop)) x[-drop] else x
+}
+#++++
+drop_rows: <T, U: numeric> fn(x: T, drop: U | NULL) -> Unknown
+
+#---- a_numeric_bound_accepts_a_union_of_numbers
+shift <- function(n) n + 1L
+pick <- function(flag) {
+  start <- if (flag) 1 else 2L
+  shift(start)
+}
+#++++
+shift: <T: numeric> fn(n: T) -> T
+pick: fn(flag: logical) -> double | integer
+
+#---- arithmetic_rejects_a_union_with_a_string
+#: fn(flag: logical) -> double
+broken <- function(flag) {
+  value <- if (flag) 1 else "a"
+  value + 1
+}
+#++++
+broken: fn(flag: logical) -> double
+92..97 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+
+#---- forwarding_a_formal_positionally_leaves_it_to_the_callee
+fast_svd <- function(m, tol) {
+  if (missing(tol)) tol <- 1e-8
+  list(m, tol)
+}
+pseudoinverse <- function(m, tol) fast_svd(m, tol)
+inverse <- function(m) pseudoinverse(m)
+#++++
+fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, Unknown}
+pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, Unknown}
+inverse: <T> fn(m: T) -> list{T, Unknown}
+
+#---- forwarding_a_formal_to_a_required_parameter_still_requires_it
+scale_by <- function(m, factor) m * factor
+rescale <- function(m, factor) scale_by(m, factor)
+broken <- function(m) rescale(m)
+#++++
+scale_by: <T: numeric> fn(m: T, factor: T) -> T
+rescale: <T: numeric> fn(m: T, factor: T) -> T
+broken: Unknown
+116..123 error[type-mismatch] this call leaves out `factor`, which the function requires
+
+#---- a_function_or_a_value_is_called_as_the_function
+prefixer <- function(namespace, id) {
+  f <- function(id) paste(namespace, id, sep = "-")
+  if (missing(id)) f else f(id)
+}
+scoped <- function(namespace, name) {
+  ns <- prefixer(namespace)
+  ns(name)
+}
+#++++
+prefixer: <T, U, V> fn(namespace: T, [id]: U) -> (fn(id: V) -> character) | character
+scoped: <T, U> fn(namespace: T, name: U) -> Unknown
+
+#---- a_local_that_a_switch_may_leave_null_is_passed_as_its_value
+friendly <- function(type, n_dim) {
+  type <- switch(type, logical = "a logical %s", integer = "an integer %s")
+  kind <- if (n_dim < 2) "vector" else "matrix"
+  sprintf(type, kind)
+}
+#++++
+friendly: <T, U> fn(type: T, n_dim: U) -> character
+
+#---- a_parameter_that_may_be_null_is_still_checked_as_an_argument
+#: fn(name: character) -> character
+shout <- function(name) toupper(name)
+#: fn(name: character | NULL) -> character
+greet <- function(name) shout(name)
+#++++
+shout: fn(name: character) -> character
+greet: fn(name: character | NULL) -> character
+147..151 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- a_factor_that_may_be_null_compares_through_its_method
+matches <- function(truth, flag) {
+  truth <- as.factor(truth)
+  if (flag) truth <- NULL
+  truth == "a"
+}
+#++++
+matches: <T> fn(truth: T, flag: logical) -> logical
+
+#---- a_null_default_is_a_placeholder_at_a_numeric_parameter
+scale_by <- function(Z, H) Z * H * Z
+solve <- function(H = NULL, Z) {
+  if (is.null(H)) {
+    quadratic <- 0
+  } else if (norm(H, "I") == 0) {
+    quadratic <- 0
+  } else {
+    quadratic <- 1
+  }
+  if (quadratic) scale_by(Z, H) else Z
+}
+#++++
+scale_by: <T: numeric> fn(Z: T, H: T) -> T
+solve: <T: numeric> fn([H]: T | NULL, Z: T) -> T
+
+#---- negating_a_value_that_may_be_null_negates_the_value
+drop_marked <- function(res, labels) {
+  k <- if (any(labels == "")) which(labels == "") else NULL
+  if (length(k)) res <- res[-k]
+  res
+}
+negate_nothing <- function() -NULL
+#++++
+drop_marked: <T, U> fn(res: T, labels: U) -> Unknown
+negate_nothing: Unknown
+169..173 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
+
+#---- a_test_that_narrows_only_its_false_edge_keeps_the_value_after_the_if
+first_rows <- function(vectors, firstEig = 1, lastEig = 3) vectors[firstEig:lastEig, ]
+reduce <- function(X, firstEig = NULL, lastEig = NULL) {
+  if (is.null(firstEig)) firstEig = 1
+  if (!is.null(firstEig)) {
+    if (is.null(lastEig)) lastEig = firstEig + 2
+  }
+  first_rows(X, firstEig, lastEig)
+}
+#++++
+first_rows: <T, U: scalar numeric, V: scalar numeric> fn(vectors: T, [firstEig]: U, [lastEig]: V) -> Unknown
+reduce: <T, U, V: scalar numeric> fn(X: T, [firstEig]: U | NULL, [lastEig]: V | NULL) -> Unknown
+
+#---- a_formal_shaped_by_an_is_null_test_passes_to_a_callback_parameter
+evaluate <- function(pars, fun, eqfun = NULL) c(fun(pars), eqfun(pars))
+sample_starts <- function(pars, fun, eqfun) {
+  if (is.null(eqfun)) kind <- "a" else kind <- "b"
+  evaluate(pars, fun, eqfun)
+}
+#++++
+evaluate: <T, U, V> fn(pars: T, fun: fn(T) -> U, [eqfun]: fn(T) -> V) -> Unknown
+sample_starts: <T, U, V> fn(pars: T, fun: fn(T) -> U, eqfun: (fn(T) -> V) | NULL) -> Unknown
+140..144 warning[unused] `kind` is assigned but never used.
+157..161 warning[unused] `kind` is assigned but never used.
+
+#---- a_computed_string_that_may_be_a_vector_passes_as_one_string
+format_message <- function(fmt, ...) if (nargs() == 1L) fmt else sprintf(fmt, ...)
+strip_name <- function(spec, name) {
+  pattern <- format_message("^%s=", name)
+  sub(pattern, "", spec)
+}
+#++++
+format_message: fn(fmt: character[], ...: Any) -> character[] | character
+strip_name: <T, U> fn(spec: T, name: U) -> character
+
+#---- negating_a_matrix_gives_a_matrix
+active_rows <- function(gradient, fixed) which(gradient > 0 & !as.matrix(fixed))
+#++++
+active_rows: <T, U> fn(gradient: T, fixed: U) -> integer[]
+
+#---- negating_a_parameter_shaped_by_an_is_null_test
+fifo_mode <- function(read = NULL, write = NULL) {
+  if (is.null(read) && is.null(write)) {
+    read <- TRUE
+    write <- FALSE
+  }
+  if (is.null(read)) read <- !write
+  if (is.null(write)) write <- !read
+  read && write
+}
+#++++
+fifo_mode: fn([read]: logical | NULL, [write]: logical | NULL) -> logical
+
+#---- a_formal_passed_to_a_parameter_base_r_tests_with_missing_is_optional
+reduce <- function(.x, .f, ..., .init) {
+  f <- function(x, y) .f(x, y, ...)
+  Reduce(f, .x, init = .init)
+}
+total <- function(values) reduce(values, `+`)
+guarded <- function(expr, ..., finally) {
+  base::tryCatch(expr, ..., finally = finally)
+}
+run <- function() guarded(1 + 1)
+#++++
+reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
+total: <T, U> fn(values: list[T] | T[]) -> U
+guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> Unknown
+run: fn() -> Unknown
+
+#---- a_formal_captured_by_a_defuser_is_optional
+enquo <- function(arg) substitute(arg)
+quo <- function(expr) enquo(expr)
+empty <- function() quo()
+#++++
+enquo: <T> fn([arg]: T) -> Any
+quo: <T> fn([expr]: T) -> Any
+empty: fn() -> Any
+
+
+#---- a_computed_vector_into_a_scalar_parameter_is_reported
+#: fn(flag: logical) -> character
+pick <- function(flag) if (flag) "yes" else "no"
+g <- function() {
+  flags <- c(TRUE, FALSE)
+  pick(flags)
+}
+#++++
+pick: fn(flag: logical) -> character
+g: Unknown
+134..139 error[type-mismatch] expected `logical`, found `logical[]`
+
+#---- an_annotated_reassignment_keeps_its_null
+#: fn(name: character) -> integer
+width <- function(name) nchar(name)
+f <- function() {
+  x <- 1
+  #: character | NULL
+  x <- if (runif(1) > 0.5) "b"
+  width(x)
+}
+#++++
+width: fn(name: character) -> integer
+f: Unknown
+90..91 warning[unused] `x` is assigned but never used.
+158..159 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- an_annotated_function_that_may_be_null_is_reported_when_called
+#: fn() -> (fn(x: integer) -> integer) | NULL
+maybe_handler <- function() NULL
+run <- function() {
+  #: (fn(x: integer) -> integer) | NULL
+  h <- maybe_handler()
+  h(1L)
+}
+#++++
+maybe_handler: fn() -> (fn(x: integer) -> integer) | NULL
+run: Unknown
+164..165 error[type-mismatch] this may be `NULL` here (its type is `(fn(x: integer) -> integer) | NULL`), so calling it is not safe. Guard it with `is.null()`, or give it a function on every path, such as a function default for a parameter
+
+#---- negating_a_date_is_reported
+today_not <- function() !Sys.Date()
+#++++
+today_not: Unknown
+25..35 error[type-mismatch] expected a `logical` value, found `Date`
+
+#---- negating_a_declared_nullable_parameter_is_reported
+#: fn(x: double | NULL) -> double
+neg <- function(x) -x
+#++++
+neg: fn(x: double | NULL) -> double
+54..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | NULL`

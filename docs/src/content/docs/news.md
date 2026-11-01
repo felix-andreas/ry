@@ -3,6 +3,28 @@ title: News
 description: Release announcements and project news
 ---
 
+## ry 0.4.0-beta, the first release that runs R
+
+*Not released yet: this entry is prepared for the beta.*
+
+Version 0.4.0-beta adds ry's own R runtime beside the checker, plus the language features that only
+that runtime runs.
+
+- **`ry run script.R` runs R on ry's runtime**, and `ry R script.R` runs the same script on GNU R.
+  ry's runtime still reads base R from your GNU R installation, so both need one.
+- **Inline annotations** such as `function(price: double) -> double` sit beside `#:` comments. ry's
+  runtime checks them at function boundaries, and GNU R runs the code with them erased.
+- **Records, tuples, tagged unions and `match`**, checked for exhaustiveness, are ry's recommended
+  way to model data.
+- **`DataFrame`** is a typed table with a Polars-style API that runs on the Polars engine.
+- **`ry load`** loads the package you are developing from source, lazily, and the `ry run` and `ry R`
+  consoles reload what you edited before each command.
+
+Each release archive now holds `ry` and ry's runtime library side by side, for Linux (x86_64 and
+aarch64) and macOS (Apple silicon and Intel). The Windows archive holds the checker, formatter and
+language server, without the runtime. The macOS runtime has not been run on a Mac yet, and it
+does not set up the symbol exports that compiled packages need, so treat it as experimental.
+
 ## ry 0.3.0, a complete rewrite
 
 *Released in July 2026 as a pre-release.*

@@ -1,0 +1,19 @@
+[stdout]
+| [1] 3
+| [1] 3
+| x[]
+| nargs: 3 
+| nargs: 3 
+| nargs: 4 
+| [1] 0 0 0
+|      [,1] [,2]
+| [1,]    9    9
+| [2,]    9    9
+|   a b
+| 1 1 X
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(a = "1", b = "X"), row.names = c(NA, -1L), class = "data.frame")
