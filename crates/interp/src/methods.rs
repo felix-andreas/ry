@@ -8,6 +8,7 @@
 
 use {
     crate::{
+        annotations::Entry,
         builtin_libraries::{NativeCall, NativeFn},
         conditions::{self, Handler},
         dispatch::{self, MethodsState},
@@ -210,7 +211,14 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         ));
     }
     eval::define(generic_symbol, generic, method_env)?;
-    eval::run_closure(call, method, method_env, sys_parent, promargs)
+    eval::run_closure(
+        call,
+        method,
+        method_env,
+        sys_parent,
+        promargs,
+        Entry::Unchecked,
+    )
 }
 
 /// `R_do_new_object`: a new object of the class `class_def` defines, a copy of its prototype,

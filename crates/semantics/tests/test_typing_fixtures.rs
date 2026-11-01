@@ -14,7 +14,10 @@ use {
             PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
             parse_description_package, parse_namespace,
         },
-        stubs::{StubSources, install_shipped_stubs, stub_library, stub_source_problems},
+        stubs::{
+            StubSources, install_shipped_stubs, shipped_export_manifests, shipped_stub_sources,
+            stub_library, stub_source_problems,
+        },
         test_document_kind,
         testing::with_fixture_project,
         top_level::{TopLevel, item_declared_pure, item_top_level},
@@ -259,12 +262,21 @@ fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
 }
 
 /// A fresh database per case, with the packages the files attach made active, so a
-/// conditional stub such as memoise's joins resolution as it does in a real project.
+/// conditional stub such as memoise's joins resolution as it does in a real project. A
+/// `stubs/<namespace>.Rtypes` file declares that namespace after the shipped stubs.
 fn render_top_level_case(source: &str) -> String {
     let files =
         split_files(source).unwrap_or_else(|| vec![("R/main.R".to_owned(), source.to_owned())]);
     let mut db = RootDatabase::default();
-    install_shipped_stubs(&db);
+    let (stub_files, files): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(path, _)| path.starts_with("stubs/") && path.ends_with(".Rtypes"));
+    let mut stub_sources = shipped_stub_sources();
+    stub_sources.extend(stub_files.into_iter().map(|(path, text)| {
+        let namespace = path["stubs/".len()..path.len() - ".Rtypes".len()].to_owned();
+        (namespace, text)
+    }));
+    StubSources::new(&db, stub_sources, shipped_export_manifests());
     let sources: Vec<(String, SourceFile)> = files
         .into_iter()
         .map(|(path, text)| {
@@ -301,7 +313,7 @@ fn top_level_fixtures() {
 fn render_with_inline_annotations_off(source: &str) -> String {
     let db = RootDatabase::default();
     install_shipped_stubs(&db);
-    AnalysisSettings::new(&db, false);
+    AnalysisSettings::new(&db, false, true);
     let file = SourceFile::new(&db, source.to_owned(), DocumentKind::Package);
     ProjectFiles::new(&db, vec![file]);
     render_file(&db, file)
@@ -332,7 +344,11 @@ fn render_stub_source(source: &str) -> String {
     for (name, _) in names {
         for scheme in library.schemes.get(name).into_iter().flatten() {
             let rendered = TypeRenderer::default().render_scheme(&db, scheme);
-            let pure = if library.pure.contains(name.as_str()) {
+            let pure = if library
+                .pure_by_namespace
+                .get("base")
+                .is_some_and(|names| names.contains(name.as_str()))
+            {
                 "@pure "
             } else {
                 ""

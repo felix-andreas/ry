@@ -21,7 +21,9 @@ use {
     crate::{
         arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
-        eval, records, scope,
+        eval,
+        long_double::LongDouble,
+        records, scope,
         sort::{IdenticalFlags, identical},
         unwind::{R, error},
         values::{
@@ -44,6 +46,27 @@ use {
 /// A builtin of the library: it takes its arguments by name or position and accepts ry values.
 const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> BuiltinDef {
     builtin(name, -1, function).accepting_native()
+}
+
+/// The library builtins that never run R code: they read their arguments, compute natively and
+/// return or raise an error, so compiled code may call them without saving its state first.
+const LEAVES: &[&str] = &[
+    "List.len",
+    "List.is_empty",
+    "List.get",
+    "List.contains",
+    "Dict.len",
+    "Dict.is_empty",
+    "Dict.get",
+    "Dict.contains",
+    "Set.len",
+    "Set.is_empty",
+    "Set.contains",
+];
+
+/// Whether the library builtin `name` is one of [`LEAVES`].
+pub fn is_leaf(name: &str) -> bool {
+    LEAVES.contains(&name)
 }
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -248,6 +271,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.reserve", set_reserve).reusing_first_argument(),
 ];
 
+thread_local! {
+    static BUILTINS_ENV: std::cell::Cell<Option<Sexp>> = const { std::cell::Cell::new(None) };
+}
+
+/// The environment the builtins of `package:ry` are bound in. S3 method lookup falls back to it,
+/// because lookup from the global environment skips the search path, and with base R loaded the
+/// environment is no longer on it.
+pub(crate) fn builtins_env() -> Option<Sexp> {
+    BUILTINS_ENV.with(std::cell::Cell::get)
+}
+
 /// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
 /// global environment's enclosure is the base environment, and `library()` attaches between the
 /// global environment and its enclosure, so `package:ry` stays the last entry before base.
@@ -259,6 +293,8 @@ pub(crate) unsafe fn attach() -> Sexp {
         .alloc_environment(base)
         .unwrap_or_else(|failure| panic!("cannot create `package:ry`: {failure}"));
     heap.set_enclosure(global, env);
+    heap.preserve(env);
+    BUILTINS_ENV.with(|cell| cell.set(Some(env)));
     let name = values::install("name")
         .and_then(|symbol| Ok((symbol, scalar_string("package:ry")?)))
         .and_then(|(symbol, value)| values::set_attr(env, symbol, value));
@@ -272,6 +308,21 @@ pub(crate) unsafe fn attach() -> Sexp {
 
 /// The arguments for `formals`, matched by name or position. Every formal is required.
 unsafe fn arguments<const N: usize>(call: &Call<'_>, formals: [&str; N]) -> R<[Sexp; N]> {
+    // Nearly every call passes exactly the formals by position, which needs no matching.
+    if call.args.len() == N && call.args.iter().all(|arg| arg.tag == nil()) {
+        let mut values = [nil(); N];
+        for (index, arg) in call.args.iter().enumerate() {
+            if arg.value == missing_arg() {
+                return Err(call.error(format!(
+                    "`{}()` needs the argument `{}`",
+                    call.name(),
+                    formals[index]
+                )));
+            }
+            values[index] = arg.value;
+        }
+        return Ok(values);
+    }
     // With no `...` formal, the matcher itself refuses an argument it cannot place.
     let (matched, _) = call.match_args(&formals)?;
     let mut values = [nil(); N];
@@ -392,6 +443,7 @@ unsafe fn invoke(call: &Call<'_>, function: Sexp, arguments: &[Sexp]) -> R<Sexp>
         .iter()
         .map(|&value| Arg { tag: nil(), value })
         .collect();
+    crate::moves::calling_back(function)?;
     eval::apply(nil(), function, &arguments, call.env)
 }
 
@@ -454,11 +506,56 @@ unsafe fn text<'a>(call: &Call<'_>, parameter: &str, value: Sexp) -> R<std::borr
 
 // Tags.
 
-unsafe fn tag(name: &str, payload: &[Sexp]) -> R<Sexp> {
-    let symbol = values::install(name)?;
-    let id = crate::heap().layouts.intern_tag(symbol);
-    let items: Vec<(Option<Sexp>, Sexp)> = payload.iter().map(|&value| (None, value)).collect();
-    records::make(Some(id), &items).map_err(error)
+/// The tags the library returns on its hot paths, interned once per interpreter. Building
+/// `:Ok(value)` then costs one allocation and no symbol or layout lookup, and an error without a
+/// payload, such as `:Err(:KeyNotFound)`, is one shared value: a tag is immutable, so sharing it
+/// is unobservable.
+#[derive(Default)]
+pub struct Tags {
+    layouts: Vec<(&'static str, usize, u32)>,
+    errors: Vec<(&'static str, Sexp)>,
+}
+
+impl Tags {
+    pub fn trace(&self, marker: &mut heap::Marker<'_>) {
+        for &(_, error) in &self.errors {
+            // SAFETY: the collector runs on the interpreter's thread, and the cache keeps each
+            // error alive for the interpreter's lifetime.
+            unsafe { marker.mark(error) };
+        }
+    }
+}
+
+unsafe fn tag(name: &'static str, payload: &[Sexp]) -> R<Sexp> {
+    let cached = crate::interp()
+        .library_tags
+        .layouts
+        .iter()
+        .find(|(cached, arity, _)| *cached == name && *arity == payload.len())
+        .map(|&(_, _, layout)| layout);
+    let layout = match cached {
+        Some(layout) => layout,
+        None => {
+            let symbol = values::install(name)?;
+            let heap = crate::heap();
+            let id = heap.layouts.intern_tag(symbol);
+            let layout = heap.layouts.intern(Layout {
+                tag: Some(id),
+                fields: Fields::Positional(payload.len() as u32),
+            });
+            crate::interp()
+                .library_tags
+                .layouts
+                .push((name, payload.len(), layout));
+            layout
+        }
+    };
+    let heap = crate::heap();
+    let object = heap
+        .alloc_record(layout, payload)
+        .map_err(|failure| error(failure.to_string()))?;
+    heap.root(object);
+    Ok(object)
 }
 
 unsafe fn ok(value: Sexp) -> R<Sexp> {
@@ -466,9 +563,19 @@ unsafe fn ok(value: Sexp) -> R<Sexp> {
 }
 
 /// `:Err(:Name)`.
-unsafe fn err(name: &str) -> R<Sexp> {
+unsafe fn err(name: &'static str) -> R<Sexp> {
+    if let Some(&(_, error)) = crate::interp()
+        .library_tags
+        .errors
+        .iter()
+        .find(|(cached, _)| *cached == name)
+    {
+        return Ok(error);
+    }
     let reason = tag(name, &[])?;
-    tag("Err", &[reason])
+    let error = tag("Err", &[reason])?;
+    crate::interp().library_tags.errors.push((name, error));
+    Ok(error)
 }
 
 unsafe fn record(fields: &[(&str, Sexp)]) -> R<Sexp> {
@@ -690,8 +797,11 @@ unsafe fn list_to_vector(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_len(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
-    let items = list_elements(call, "list", list)?;
-    scalar_integer(items.len() as i32)
+    // Counting needs no items, and making one per position of a long Array is the slow part.
+    if !list.is_array() && list.kind() != SexpType::List {
+        return Err(wrong(call, "list", "a list", list));
+    }
+    scalar_integer(length(list) as i32)
 }
 
 unsafe fn list_is_empty(call: &Call<'_>) -> R<Sexp> {
@@ -1435,6 +1545,24 @@ unsafe fn number_value(number: Number) -> R<Sexp> {
 /// The numbers of a list, all integers or (if any is a double) all doubles.
 unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     let [list] = arguments(call, ["list"])?;
+    // A numeric Array's storage already holds the numbers, so it is read without boxing them.
+    if list.is_array() {
+        match list.kind() {
+            SexpType::Real => {
+                return Ok(values::reals(list)
+                    .iter()
+                    .map(|&number| Number::Double(number))
+                    .collect());
+            }
+            SexpType::Integer => {
+                return Ok(values::ints(list)
+                    .iter()
+                    .map(|&number| Number::Integer(number))
+                    .collect());
+            }
+            _ => {}
+        }
+    }
     let items = list_elements(call, "list", list)?;
     let mut numbers = Vec::with_capacity(items.len());
     for item in items {
@@ -1451,39 +1579,61 @@ unsafe fn list_numbers(call: &Call<'_>) -> R<Vec<Number>> {
     Ok(numbers)
 }
 
-/// Folds the list's numbers with `integer` (checked) or `double`, starting at `start`.
+/// Folds the list's numbers with `integer` (checked), or totals them with `double` once any is a
+/// double, starting at `start`.
 unsafe fn fold_numbers(
     call: &Call<'_>,
     start: i32,
     integer: fn(i32, i32) -> Option<i32>,
-    double: fn(f64, f64) -> f64,
+    double: fn(f64, &[f64]) -> f64,
 ) -> R<Sexp> {
+    // A double Array is totaled straight from its storage, which skips building a million boxed
+    // numbers for a million-item Array.
+    let [list] = arguments(call, ["list"])?;
+    if list.is_array() && list.kind() == SexpType::Real {
+        return scalar_real(double(f64::from(start), values::reals(list)));
+    }
     let numbers = list_numbers(call)?;
-    let mut total = Number::Integer(start);
+    if numbers
+        .iter()
+        .any(|number| matches!(number, Number::Double(_)))
+    {
+        let doubles: Vec<f64> = numbers.iter().map(|number| number.as_double()).collect();
+        return scalar_real(double(f64::from(start), &doubles));
+    }
+    let mut total = start;
     for number in numbers {
-        total = match (total, number) {
-            (Number::Integer(left), Number::Integer(right)) => {
-                match integer(left, right).filter(|value| *value != NA_INTEGER) {
-                    Some(value) => Number::Integer(value),
-                    None => {
-                        return Err(call.error(
-                            "the integer result overflows; convert the elements to doubles first",
-                        ));
-                    }
-                }
+        let Number::Integer(item) = number else {
+            continue;
+        };
+        total = match integer(total, item).filter(|value| *value != NA_INTEGER) {
+            Some(value) => value,
+            None => {
+                return Err(call
+                    .error("the integer result overflows; convert the elements to doubles first"));
             }
-            (left, right) => Number::Double(double(left.as_double(), right.as_double())),
         };
     }
-    number_value(total)
+    number_value(Number::Integer(total))
 }
 
+// R's `sum()` accumulates doubles in x87 long double, so `List.sum(xs)` does too and agrees
+// with `sum(xs)` to the last bit.
 unsafe fn list_sum(call: &Call<'_>) -> R<Sexp> {
-    fold_numbers(call, 0, i32::checked_add, |left, right| left + right)
+    fold_numbers(call, 0, i32::checked_add, |start, items| {
+        let mut total = LongDouble::ZERO;
+        total += start;
+        for &item in items {
+            total += item;
+        }
+        total.to_f64()
+    })
 }
 
 unsafe fn list_product(call: &Call<'_>) -> R<Sexp> {
-    fold_numbers(call, 1, i32::checked_mul, |left, right| left * right)
+    fold_numbers(call, 1, i32::checked_mul, |start, items| {
+        items.iter().fold(start, |total, &item| total * item)
+    })
 }
 
 unsafe fn extreme(call: &Call<'_>, wanted: Ordering) -> R<Sexp> {
@@ -2499,6 +2649,7 @@ unsafe fn insert_in_place(object: Sexp, key: Key, value: Sexp) -> R<()> {
     let slot = match probe(values::ints(index), key, |position| key_at(keys, position)) {
         Ok(position) => {
             if is_dict && let Some(stored) = object.record_handle(1) {
+                crate::moves::replacing(object, position, stored.element(position));
                 heap.set_element(stored, position, value);
             }
             return Ok(());
@@ -2691,7 +2842,15 @@ unsafe fn key_hash(key: Key) -> u64 {
         Key::Number(number) => (1u8, (number + 0.0).to_bits()).hash(&mut hasher),
         Key::Text(text) => (2u8, text.bytes()).hash(&mut hasher),
     }
-    hasher.finish()
+    // FxHash's final multiply carries entropy only toward the high bits, and the index masks
+    // the low ones: whole numbers as doubles differ only in their high bits, so without this
+    // mix every integer key would share one probe chain. This is the finalizer of MurmurHash3.
+    let mut hash = hasher.finish();
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^ (hash >> 33)
 }
 
 /// The key a length-one value names, refusing `NA`, `NaN` and the atomic types that are not keys.
@@ -2701,26 +2860,32 @@ unsafe fn key_of(call: &Call<'_>, parameter: &str, value: Sexp) -> R<(Key, KeyKi
         return Err(wrong(call, parameter, needed, value));
     }
     let materialized = values::materialize(value)?;
-    let key = match materialized.kind() {
-        SexpType::Logical => match values::ints(materialized)[0] {
+    key_in(materialized).ok_or_else(|| wrong(call, parameter, needed, value))
+}
+
+/// The key a length-one, materialized, attribute-free value names, if it is one.
+unsafe fn key_in(value: Sexp) -> Option<(Key, KeyKind)> {
+    match value.kind() {
+        SexpType::Logical => match values::ints(value)[0] {
             NA_LOGICAL => None,
             flag => Some((Key::Logical(flag != 0), KeyKind::Logical)),
         },
-        SexpType::Integer => match values::ints(materialized)[0] {
-            NA_INTEGER => None,
-            number => Some((Key::Number(f64::from(number)), KeyKind::Integer)),
-        },
-        SexpType::Real => {
-            let number = values::reals(materialized)[0];
-            (!number.is_nan()).then_some((Key::Number(number), KeyKind::Double))
-        }
+        SexpType::Integer => integer_key(values::ints(value)[0]),
+        SexpType::Real => double_key(values::reals(value)[0]),
         SexpType::String => {
-            let text = materialized.element(0);
+            let text = value.element(0);
             (text != values::na_string()).then_some((Key::Text(text), KeyKind::Text))
         }
         _ => None,
-    };
-    key.ok_or_else(|| wrong(call, parameter, needed, value))
+    }
+}
+
+fn integer_key(number: i32) -> Option<(Key, KeyKind)> {
+    (number != NA_INTEGER).then_some((Key::Number(f64::from(number)), KeyKind::Integer))
+}
+
+fn double_key(number: f64) -> Option<(Key, KeyKind)> {
+    (!number.is_nan()).then_some((Key::Number(number), KeyKind::Double))
 }
 
 /// The key at `index` of a collection's key vector.
@@ -2960,6 +3125,91 @@ unsafe fn collection(call: &Call<'_>, parameter: &str, value: Sexp, kind: Native
         "a set"
     };
     Err(wrong(call, parameter, needed, value))
+}
+
+/// A new dictionary or set holding the first `entries` entries of `object`, with the values at
+/// the `replaced` positions put back, newest first, as they were before in-place updates.
+pub(crate) unsafe fn collection_prefix(
+    object: Sexp,
+    entries: usize,
+    replaced: &[(usize, Sexp)],
+) -> R<Sexp> {
+    let mut collection = Collection::read(object)?;
+    collection.keys.truncate(entries);
+    if collection.kind == NativeKind::Dict {
+        collection.values.truncate(entries);
+        for &(position, old) in replaced.iter().rev() {
+            if let Some(slot) = collection.values.get_mut(position) {
+                *slot = old;
+            }
+        }
+    }
+    if collection.keys.is_empty() {
+        collection.key_kind = None;
+    }
+    collection.rebuild_index()?;
+    collection.write()
+}
+
+// Compiled code. The optimizing tier calls the hot collection builtins through these, without
+// an argument list or a handle scope. `None` means the call would raise an error, and compiled
+// code then hands the call back to tier 0, which raises it.
+
+/// A key as compiled code holds it: an unboxed integer or double, or a boxed value.
+#[derive(Clone, Copy)]
+pub enum CompiledKey {
+    Integer(i32),
+    Double(f64),
+    Value(Sexp),
+}
+
+/// The entry count of `value` when it is a collection of `kind`.
+pub unsafe fn compiled_count(value: Sexp, kind: NativeKind) -> Option<usize> {
+    (value.kind() == SexpType::Record && records::native_kind(value) == kind)
+        .then(|| entry_count(value))
+}
+
+/// The position of `key` in `collection`, a collection of `kind`, with `Some(None)` when it is
+/// absent.
+pub unsafe fn compiled_position(
+    collection: Sexp,
+    kind: NativeKind,
+    key: CompiledKey,
+) -> Option<Option<usize>> {
+    if collection.kind() != SexpType::Record || records::native_kind(collection) != kind {
+        return None;
+    }
+    let (key, key_kind) = match key {
+        CompiledKey::Integer(number) => integer_key(number)?,
+        CompiledKey::Double(number) => double_key(number)?,
+        CompiledKey::Value(value) => {
+            if length(value) != 1 || value.is_object() || value.is_altrep() {
+                return None;
+            }
+            key_in(value)?
+        }
+    };
+    // A single key is stored unboxed in the slot; the general path reads it.
+    let Slot::Handle(keys) = collection.record_slot(0) else {
+        return None;
+    };
+    match (key_kind_of(keys)?, key_kind) {
+        (stored, given) if stored == given => {}
+        (KeyKind::Integer | KeyKind::Double, KeyKind::Integer | KeyKind::Double) => {}
+        _ => return None,
+    }
+    let Slot::Handle(index) = collection.record_slot(index_slot(kind)) else {
+        return None;
+    };
+    Some(probe(values::ints(index), key, |position| key_at(keys, position)).ok())
+}
+
+/// What `Dict.get()` returns for the entry at `position` of `dict`, or for a missing key.
+pub unsafe fn compiled_get_result(dict: Sexp, position: Option<usize>) -> R<Sexp> {
+    match position {
+        Some(position) => ok(records::slot_value(dict, 1)?.element(position)),
+        None => err("KeyNotFound"),
+    }
 }
 
 /// The number of entries of a dictionary or set, `length()`'s answer for one.

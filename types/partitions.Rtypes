@@ -1,0 +1,4 @@
+# partitions: integer partitions, returned as an integer matrix of class `partition`, one
+# partition per column.
+@type partition
+parts : @pure fn(n: double) -> partition

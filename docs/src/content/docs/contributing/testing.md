@@ -157,6 +157,11 @@ on purpose.
   A target inside the stub corpus renders the token its range covers, as in
   ``declared in stub source 0 at `print` ``, rather than a byte offset, because an offset shifts
   whenever an unrelated declaration is added, while the token proves the range is right.
+- **`crates/ide/tests/structure`**: whole-file editor features. Each case renders the outline
+  (nested by indentation), the folds as zero-based inclusive line ranges, the semantic tokens for
+  R names, the quick fixes the diagnostics and default lints offer, and, when the source has a `$0`
+  marker, every step of selection expansion from it. Run it with
+  `cargo test -p ide --test test_ide_fixtures structure`.
 
 ## Fuzzing and property tests
 
@@ -318,7 +323,12 @@ meant to fail. Behavior that needs base R, such as a warning handler watching a 
 goes in the oracle case `bytecode__hot_loops.R`. `crates/interp/tests/test_linalg.rs` pins base R's linear
 algebra to GNU R's results bit for bit. `crates/table/tests/test_table.rs` checks the table engine
 against values read from data.table, `test_lazy.rs` there checks the Polars-style verbs, and
-`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/heap/tests/test_gc.rs` builds random
+`crates/libr/tests/test_frame_altrep.rs` checks the columns as ALTREP vectors. `crates/interp/tests/test_records.rs`, `test_arrays.rs` and `test_standard_library.rs` cover ry's
+own values at run time, the last one also holding the runtime's function table against the
+declarations in `types/ry.Rtypes`. `crates/libr/tests/test_rmath.rs`, `test_numerics.rs` and
+`test_linpack.rs` compare the C API's numerics with answers recorded from GNU R, so they run
+without R, and `test_fuzz_rmath.rs` checks properties of the distribution functions on random and
+extreme arguments. `crates/heap/tests/test_gc.rs` builds random
 object graphs (vectors, lists, interned strings, environments), drops roots, stores young objects
 into old ones and collects at random points, with and without collection stress, and after every
 collection checks each object the model still reaches. It also re-interns every string ever made,

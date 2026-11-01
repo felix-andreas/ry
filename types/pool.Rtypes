@@ -1,0 +1,6 @@
+# pool: a pool of DBI connections, an R6 object of class "Pool". Creating one opens its first
+# connection.
+
+@type Pool
+
+dbPool : fn(drv: DBIDriver, ...: Any, [minSize]: double, [maxSize]: double, [onCreate]: (fn(...: Any) -> Any) | NULL, [idleTimeout]: double, [validationInterval]: double, [validateQuery]: character | NULL) -> Pool

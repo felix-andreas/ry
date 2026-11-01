@@ -344,3 +344,21 @@ remove w
 run R/a.R:2 z <- 1
 run R/b.R:2 y <- z + 1
 run R/c.R:2 z <- 2
+
+#---- a_constant_reading_a_name_on_load_writes_turns_eager
+#~~~~ R/a.R
+# typing: strict
+z <- 1
+#~~~~ before R/b.R
+# typing: strict
+y <- z + 1
+.onLoad <- function(libname, pkgname) NULL
+#~~~~ after R/b.R
+# typing: strict
+y <- z + 1
+.onLoad <- function(libname, pkgname) z <<- 5
+#++++
+source R/b.R
+bind .onLoad from R/b.R:3:11
+run R/b.R:2 y <- z + 1
+run .onLoad

@@ -7,7 +7,10 @@
 //! value and back, and a column without nulls has the same bytes on both sides.
 
 use {
-    crate::{Error, Result},
+    crate::{
+        Error, Result,
+        kernel::{gather_values, pack_rows},
+    },
     foldhash::fast::FixedState,
     hashbrown::HashTable,
     polars::prelude::{
@@ -374,4 +377,42 @@ fn validity<T>(values: &[T], valid: impl Fn(&T) -> bool) -> Option<Bitmap> {
         return None;
     }
     Some(values.iter().map(valid).collect())
+}
+
+/// A string column from codes into `distinct`: code 0 is `NA` and code `c` is `distinct[c - 1]`,
+/// as [`StringCodes`](crate::StringCodes) numbers a column's rows. The rows share the distinct
+/// strings' bytes and get a 16-byte view each, gathered in parallel.
+pub fn strings_from_codes<'a>(
+    name: PlSmallStr,
+    distinct: impl Iterator<Item = &'a str>,
+    codes: &[u32],
+) -> Result<Series> {
+    let dictionary =
+        StringChunked::from_iter_values(PlSmallStr::EMPTY, std::iter::once("").chain(distinct));
+    let dictionary = dictionary.rechunk();
+    let [chunk] = dictionary.chunks().as_slice() else {
+        return Err(Error::InvalidStringCodes(name.to_string()));
+    };
+    let Some(array) = chunk.as_any().downcast_ref::<Utf8ViewArray>() else {
+        return Err(Error::InvalidStringCodes(name.to_string()));
+    };
+    let entries = array.len() as u32;
+    if codes.iter().any(|code| *code >= entries) {
+        return Err(Error::InvalidStringCodes(name.to_string()));
+    }
+    let views = gather_values(array.views(), codes);
+    let validity = codes
+        .contains(&0)
+        .then(|| pack_rows(codes.len(), |row| codes[row] != 0));
+    // SAFETY: every gathered view is a view of `array`, so it stays valid over its buffers.
+    let gathered = unsafe {
+        Utf8ViewArray::new_unchecked_unknown_md(
+            array.dtype().clone(),
+            views,
+            array.data_buffers().clone(),
+            validity,
+            Some(array.total_buffer_len()),
+        )
+    };
+    Ok(StringChunked::with_chunk(name, gathered).into_series())
 }

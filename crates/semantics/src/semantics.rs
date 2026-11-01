@@ -15,7 +15,7 @@ pub mod top_level;
 pub mod types;
 
 use {
-    crate::hir::Symbol,
+    crate::{hir::Symbol, sorted::SortedSet},
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         cell::{OnceCell, RefCell},
@@ -27,6 +27,7 @@ use {
         ast::{self, BinaryExpr, is_expression_kind},
         matching_nodes, paired_comment_definition,
     },
+    thin_vec::ThinVec,
 };
 
 /// Analysis walks recurse as deeply as the source nests, so commands and analysis workers
@@ -59,6 +60,37 @@ impl RootDatabase {
             }),
         }
     }
+}
+
+/// Releases every memoized tree of `files` and keeps everything derived from them. A one-shot
+/// check calls it once its syntax pass has derived what later passes read, because the trees
+/// are its largest memos. A later tree read still works, by reparsing that file.
+///
+/// The queries record reads only while their capacity is nonzero, so the capacity is raised for
+/// one single-threaded touch of every tree, which fills the eviction lists, and lowered again
+/// after: recording on every read of a parallel pass queues the threads on one mutex per query.
+/// The file trees come back to the caller, which owns the last reference to every node and can
+/// free them off the critical path.
+pub fn release_trees(db: &mut RootDatabase, files: &[SourceFile]) -> Vec<Parse> {
+    parse::set_lru_capacity(db, 1);
+    item_syntax::set_lru_capacity(db, 1);
+    item_annotation_syntax::set_lru_capacity(db, 1);
+    file_item_annotations::set_lru_capacity(db, 1);
+    let mut trees = Vec::with_capacity(files.len());
+    for &file in files {
+        trees.push(parse(db, file));
+        file_item_annotations(db, file);
+        for &item in item_tree(db, file) {
+            item_syntax(db, item);
+            item_annotation_syntax(db, item);
+        }
+    }
+    salsa::Database::trigger_lru_eviction(db);
+    parse::set_lru_capacity(db, 0);
+    item_syntax::set_lru_capacity(db, 0);
+    item_annotation_syntax::set_lru_capacity(db, 0);
+    file_item_annotations::set_lru_capacity(db, 0);
+    trees
 }
 
 #[salsa::db]
@@ -102,7 +134,9 @@ pub struct SourceFile {
     pub kind: DocumentKind,
 }
 
-#[salsa::tracked(returns(clone))]
+// Every tree-holding query takes an LRU capacity of 0, which records nothing on a read, so a
+// one-shot host can still release the trees once ([`release_trees`]).
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn parse(db: &dyn Db, file: SourceFile) -> Parse {
     db.splice_cache().parse(file, file.text(db))
 }
@@ -220,7 +254,7 @@ pub fn item_tree<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Item<'db>> {
 /// Width-only, so position-independent: an edit elsewhere in the file cuts off
 /// here. Item innards must be read through this (never `parse`), and spans derived
 /// from it stay item-relative until the rendering edge.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     item_node(db, item).map(|node| ItemSyntax(node.green().into()))
 }
@@ -522,7 +556,7 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// Annotations are siblings of the item in the file tree, so they attach here, not in
 /// `item_syntax`. A per-item firewall over one file-wide walk: untouched items'
 /// annotation subtrees compare equal and cut off.
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(clone), lru = 0)]
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
     file_item_annotations(db, *item.file(db))
         .get(&item)
@@ -530,7 +564,7 @@ pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<I
 }
 
 /// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 0)]
 fn file_item_annotations<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -575,6 +609,26 @@ pub fn item_annotations<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemAnnotation
 }
 
 fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations::Annotation<'db>> {
+    let written = written_root_annotation(db, item);
+    if written
+        .as_ref()
+        .is_some_and(|annotation| annotation.declared.is_some() || !annotation.errors.is_empty())
+    {
+        return written;
+    }
+    let Some(declared) = package_hook_signature(db, item) else {
+        return written;
+    };
+    Some(annotations::Annotation {
+        declared: Some(declared),
+        ..written.unwrap_or_default()
+    })
+}
+
+fn written_root_annotation<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+) -> Option<annotations::Annotation<'db>> {
     let comment = item_annotation_syntax(db, item)
         .map(|syntax| annotations::lower_annotation(db, &syntax.syntax_node()));
     let root = item_syntax(db, item)?.syntax_node();
@@ -586,6 +640,54 @@ fn root_annotation<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<annotations:
     }
     let inline = annotations::lower_inline_annotation(db, &site);
     annotations::merge_annotations(db, comment, Some(inline), Some(&site))
+}
+
+/// R calls a package file's `.onLoad` and `.onAttach` with two character arguments, and
+/// `.onUnload`, `.onDetach` and `.Last.lib` with one, so an unannotated hook is typed as if it
+/// declared that. R passes them by position, so the hook's own formal names are kept, `...`
+/// takes whatever is left, and a formal past the passed ones is optional.
+fn package_hook_signature<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<types::TypeScheme<'db>> {
+    if *item.kind(db) != ItemKind::Function
+        || item.parent(db).is_some()
+        || *item.file(db).kind(db) != DocumentKind::Package
+    {
+        return None;
+    }
+    let passed = match item.name(db).as_deref()? {
+        ".onLoad" | ".onAttach" => 2,
+        ".onUnload" | ".onDetach" | ".Last.lib" => 1,
+        _ => return None,
+    };
+    let root = item_syntax(db, item)?.syntax_node();
+    let function = root
+        .descendants()
+        .find(|node| node.kind() == SyntaxKind::FUNCTION_DEF)?;
+    let mut parameters = Vec::new();
+    let mut takes_rest = false;
+    for (position, formal) in annotations::formals(&function).iter().enumerate() {
+        if formal.name == "..." {
+            parameters.push("...: Any".to_owned());
+            takes_rest = true;
+            break;
+        }
+        let plain = formal
+            .name
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_' || character == '.');
+        if !plain {
+            return None;
+        }
+        parameters.push(if position < passed {
+            format!("{}: character", formal.name)
+        } else {
+            format!("[{}]: Any", formal.name)
+        });
+    }
+    // A hook that cannot take the arguments R passes fails when R calls it, not when it is typed.
+    if !takes_rest && parameters.len() < passed {
+        return None;
+    }
+    stubs::lower_type_text(db, &format!("fn({}) -> Any", parameters.join(", ")))
 }
 
 fn expression_annotations<'db>(
@@ -661,7 +763,7 @@ fn expression_annotations<'db>(
         if lowered.declared.is_none() && lowered.new_nominal.is_none() && !lowered.trusted {
             continue;
         }
-        attachments.push((hir::ExprId(index as u32), lowered));
+        attachments.push((hir::ExprId::new(index), lowered));
     }
     attachments
 }
@@ -672,12 +774,27 @@ fn expression_annotations<'db>(
 pub struct AnalysisSettings {
     /// `[check] inline-annotations`. Off, inline annotations type nothing.
     pub inline_annotations: bool,
+    /// `[check] strict`: whether a file without a `# typing:` directive is strict. Only a
+    /// strict file's checks record the undetermined origins strict mode reports, which in
+    /// untyped code are about one per expression.
+    pub strict: bool,
 }
 
 /// Read only where an inline annotation exists, so a project without any never
 /// depends on the setting.
 pub fn inline_annotations_enabled(db: &dyn Db) -> bool {
     AnalysisSettings::try_get(db).is_none_or(|settings| *settings.inline_annotations(db))
+}
+
+/// A file's `# typing:` directive wins over `[check] strict`. Unset settings count as strict,
+/// so a host that installs none still sees every origin [`diagnostics::strict_diagnostics`]
+/// reports.
+pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
+    match file_typing_mode(db, file) {
+        Some(TypingMode::Strict) => true,
+        Some(TypingMode::On | TypingMode::Off) => false,
+        None => AnalysisSettings::try_get(db).is_none_or(|settings| *settings.strict(db)),
+    }
 }
 
 /// Package files first, in path order; the order decides last-writer-wins winners.
@@ -827,8 +944,9 @@ pub fn project_type_definitions<'db>(
 /// Whether any package file binds `name` at top level, including the inner targets of
 /// `a <- b <- value` and conditional writes.
 pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
-    package_definitions(db, files).contains_key(name)
-        || conditional_slot_items(db, files).contains_key(name)
+    let name = Symbol::new(name);
+    package_definitions(db, files).contains_key(&name)
+        || conditional_slot_items(db, files).contains_key(&name)
 }
 
 /// Every name a project file of any kind declares at top level: its named definitions and its
@@ -838,11 +956,7 @@ pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
 pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbol> {
     let mut names = FxHashSet::default();
     for &file in files.files(db) {
-        names.extend(
-            file_definitions(db, file)
-                .iter()
-                .map(|(name, _)| Symbol::new(name)),
-        );
+        names.extend(file_definitions(db, file).iter().map(|&(name, _)| name));
         names.extend(
             file_conditional_writers(db, file)
                 .iter()
@@ -858,7 +972,7 @@ pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbo
 pub fn conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> FxHashMap<String, Vec<Item<'db>>> {
+) -> FxHashMap<Symbol, Vec<Item<'db>>> {
     conditional_writers_of(db, files, DocumentKind::Package)
 }
 
@@ -867,7 +981,7 @@ pub fn conditional_slot_items<'db>(
 pub fn test_conditional_slot_items<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> FxHashMap<String, Vec<Item<'db>>> {
+) -> FxHashMap<Symbol, Vec<Item<'db>>> {
     conditional_writers_of(db, files, DocumentKind::TestHelper)
 }
 
@@ -875,14 +989,14 @@ fn conditional_writers_of<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     kind: DocumentKind,
-) -> FxHashMap<String, Vec<Item<'db>>> {
-    let mut writers: FxHashMap<String, Vec<Item<'db>>> = FxHashMap::default();
+) -> FxHashMap<Symbol, Vec<Item<'db>>> {
+    let mut writers: FxHashMap<Symbol, Vec<Item<'db>>> = FxHashMap::default();
     for &file in files.files(db) {
         if *file.kind(db) != kind {
             continue;
         }
         for &(name, item) in file_conditional_writers(db, file) {
-            writers.entry(name.to_string()).or_default().push(item);
+            writers.entry(name).or_default().push(item);
         }
     }
     writers
@@ -944,11 +1058,11 @@ pub fn package_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> Packag
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = name.name(db).text(db);
+    let text = Symbol::new(name.name(db).text(db));
     PackageName {
-        winner: package_definitions(db, files).get(text).copied(),
+        winner: package_definitions(db, files).get(&text).copied(),
         conditional_writers: conditional_slot_items(db, files)
-            .get(text)
+            .get(&text)
             .cloned()
             .unwrap_or_default(),
     }
@@ -960,11 +1074,11 @@ pub fn test_name<'db>(db: &'db dyn Db, name: types::QueryName<'db>) -> PackageNa
     let Some(files) = ProjectFiles::try_get(db) else {
         return PackageName::default();
     };
-    let text = name.name(db).text(db);
+    let text = Symbol::new(name.name(db).text(db));
     PackageName {
-        winner: test_definitions(db, files).get(text).copied(),
+        winner: test_definitions(db, files).get(&text).copied(),
         conditional_writers: test_conditional_slot_items(db, files)
-            .get(text)
+            .get(&text)
             .cloned()
             .unwrap_or_default(),
     }
@@ -1017,46 +1131,71 @@ fn statement_binding_recover<'db>(
     value
 }
 
-#[salsa::tracked(returns(ref))]
+/// The last top-level definition of each name across the package files.
 pub fn package_definitions<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
-) -> FxHashMap<String, Item<'db>> {
+) -> &'db FxHashMap<Symbol, Item<'db>> {
+    &package_definition_index(db, files).winners
+}
+
+/// The package files' definitions, folded once: a new top-level name re-runs this fold on
+/// every keystroke until the name is complete, so the duplicate check shares its pass.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct DefinitionIndex<'db> {
+    pub winners: FxHashMap<Symbol, Item<'db>>,
+    /// Every file that defines a name the package defines more than once, one entry per
+    /// definition, in project order. Near-empty in a healthy project.
+    pub duplicates: FxHashMap<Symbol, Vec<SourceFile>>,
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn package_definition_index<'db>(db: &'db dyn Db, files: ProjectFiles) -> DefinitionIndex<'db> {
     winners_of(db, files, DocumentKind::Package)
 }
 
 /// The last top-level definition of each name across the helper files, which testthat
 /// sources into the one environment every test file runs in.
 #[salsa::tracked(returns(ref))]
-pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<String, Item<'db>> {
-    winners_of(db, files, DocumentKind::TestHelper)
+pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Item<'db>> {
+    winners_of(db, files, DocumentKind::TestHelper).winners
 }
 
 fn winners_of<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     kind: DocumentKind,
-) -> FxHashMap<String, Item<'db>> {
-    let mut winners = FxHashMap::default();
+) -> DefinitionIndex<'db> {
+    let mut index = DefinitionIndex::default();
     for &file in files.files(db) {
         if *file.kind(db) != kind {
             continue;
         }
-        for (name, item) in file_definitions(db, file) {
-            winners.insert(name.clone(), *item);
+        let definitions = file_definitions(db, file);
+        index.winners.reserve(definitions.len());
+        for &(name, item) in definitions {
+            if let Some(previous) = index.winners.insert(name, item) {
+                index
+                    .duplicates
+                    .entry(name)
+                    .or_insert_with(|| vec![*previous.file(db)])
+                    .push(file);
+            }
         }
     }
-    winners
+    index
 }
 
 /// The file's named function and value items in item order, the candidates for
 /// [`package_definitions`]. Per file for the same reason as [`file_conditional_writers`].
+/// Names are symbols so the project-wide folds hash and copy four bytes per name, which is
+/// what a new top-level binding costs on every keystroke until it is named.
 #[salsa::tracked(returns(ref))]
-pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(String, Item<'db>)> {
+pub fn file_definitions<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<(Symbol, Item<'db>)> {
     item_tree(db, file)
         .iter()
         .filter(|item| matches!(*item.kind(db), ItemKind::Function | ItemKind::Value))
-        .filter_map(|&item| Some((item.name(db).clone()?, item)))
+        .filter_map(|&item| Some((Symbol::new(item.name(db).as_deref()?), item)))
         .collect()
 }
 
@@ -1184,10 +1323,24 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
             .iter()
             .map(|&name| (name, false)),
     );
-    let globals = SalsaGlobals::for_item(db, item, None);
+    // The same lookup as `SalsaGlobals::frame_definition`, keyed by symbol: going through it
+    // would intern a query name per read only to turn it back into a symbol.
+    let frame_binders = item_frame_binders(db, item);
+    let frame_definition = |name: Symbol, deferred: bool| {
+        if deferred && package {
+            return None;
+        }
+        match frame_binders.get(&name) {
+            Some(&(immediate, later)) => match deferred {
+                true => later,
+                false => immediate,
+            },
+            None => frame_binder(db, item, types::Name::new(db, name.as_str()), deferred),
+        }
+    };
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
     for name in item_side_names(db, item) {
-        match globals.frame_definition(types::Name::new(db, name.as_str()), false) {
+        match frame_definition(name, false) {
             Some(binder) => push_unique(&mut reads.frame, binder),
             None => {
                 reads.earlier.insert(name);
@@ -1195,7 +1348,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
         }
     }
     for (name, deferred) in lookups {
-        let binder = globals.frame_definition(types::Name::new(db, name.as_str()), deferred);
+        let binder = frame_definition(name, deferred);
         match binder.map(|binder| binder_source(db, binder, name.as_str())) {
             Some(Source::Definition(binder)) => push_unique(&mut reads.frame, binder),
             Some(Source::Statement(binder)) => {
@@ -1248,10 +1401,8 @@ fn layer_source<'a, 'db>(
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
-    if item_syntax(db, item)
-        .is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))
-    {
+pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> SortedSet<Symbol> {
+    if item_binds_only_own_name(db, item) {
         return item
             .name(db)
             .as_deref()
@@ -1260,7 +1411,7 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
             .collect();
     }
     let Some(naming) = item_naming(db, item) else {
-        return BTreeSet::new();
+        return SortedSet::default();
     };
     naming
         .bindings
@@ -1275,35 +1426,26 @@ pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<S
 /// order `SalsaGlobals` resolves them. Memoized per item so the reachability walks of every
 /// item share one edge list each.
 #[salsa::tracked(returns(ref))]
-fn item_interface_edges<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-    item: Item<'db>,
-) -> Vec<Item<'db>> {
-    let package_winners = package_definitions(db, files);
-    let package_writers = conditional_slot_items(db, files);
-    let test_winners = test_definitions(db, files);
-    let test_writers = test_conditional_slot_items(db, files);
+fn item_interface_edges<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Item<'db>> {
     let test = matches!(
         *item.file(db).kind(db),
         DocumentKind::Test | DocumentKind::TestHelper
     );
+    // Through the per-name projections, not the project-wide maps: a new top-level name
+    // anywhere changes those maps, and reading them here would re-run every item's edges.
+    let projections = |name: Symbol| {
+        let name = types::QueryName::new(db, types::Name::new(db, name.as_str()));
+        (test.then(|| test_name(db, name)), package_name(db, name))
+    };
     let reads = item_interface_reads(db, item);
     let mut targets: Vec<Item<'db>> = reads.frame.clone();
-    for name in &reads.layered {
-        let name = name.as_str();
-        let layer = |winners: &FxHashMap<String, Item<'db>>,
-                     writers: &'db FxHashMap<String, Vec<Item<'db>>>| {
-            layer_source(
-                winners.get(name).copied(),
-                writers.get(name).map_or(&[][..], Vec::as_slice),
-            )
+    for &name in &reads.layered {
+        let (test_projection, package_projection) = projections(name);
+        let layer = |projection: &'db PackageName<'db>| {
+            layer_source(projection.winner, &projection.conditional_writers)
         };
-        let test_layer = test.then(|| layer(test_winners, test_writers)).flatten();
-        for source in test_layer
-            .into_iter()
-            .chain(layer(package_winners, package_writers))
-        {
+        let test_layer = test_projection.and_then(layer);
+        for source in test_layer.into_iter().chain(layer(package_projection)) {
             match source {
                 Source::Definition(item) | Source::Statement(item) => {
                     push_unique(&mut targets, item);
@@ -1322,10 +1464,10 @@ fn item_interface_edges<'db>(
             }
         }
     }
-    for name in &reads.earlier {
-        let name = name.as_str();
-        let test_winner = test.then(|| test_winners.get(name)).flatten();
-        if let Some(&winner) = test_winner.or_else(|| package_winners.get(name)) {
+    for &name in &reads.earlier {
+        let (test_projection, package_projection) = projections(name);
+        let test_winner = test_projection.and_then(|projection| projection.winner);
+        if let Some(winner) = test_winner.or(package_projection.winner) {
             push_unique(&mut targets, winner);
         }
     }
@@ -1333,7 +1475,13 @@ fn item_interface_edges<'db>(
 }
 
 /// Whether the item's top-level writes are at most its own binding, read off its syntax so the
-/// common case needs no naming pass.
+/// common case needs no naming pass. It is memoized on its own because the naming pass runs
+/// after a one-shot check has released the item's tree.
+#[salsa::tracked(returns(copy))]
+pub fn item_binds_only_own_name<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    item_syntax(db, item).is_some_and(|syntax| binds_only_own_name(db, item, &syntax.syntax_node()))
+}
+
 fn binds_only_own_name(db: &dyn Db, item: Item<'_>, node: &SyntaxNode) -> bool {
     // `name <- function(...)` binds only its own name at top level, since the body is a scope
     // of its own. Most items are functions, and skipping them keeps whole-project walks, such
@@ -1415,7 +1563,7 @@ pub fn interface_group<'db>(
     let mut stack: Vec<usize> = vec![0];
     let mut work: Vec<(usize, usize)> = vec![(0, 0)];
     while let Some(&mut (node, ref mut edge_cursor)) = work.last_mut() {
-        let edges = item_interface_edges(db, files, nodes[node]);
+        let edges = item_interface_edges(db, nodes[node]);
         if let Some(&target) = edges.get(*edge_cursor) {
             *edge_cursor += 1;
             match index_of.get(&target) {
@@ -1452,8 +1600,7 @@ pub fn interface_group<'db>(
                 }
             }
             if node == 0 {
-                let cyclic =
-                    members.len() > 1 || item_interface_edges(db, files, item).contains(&item);
+                let cyclic = members.len() > 1 || item_interface_edges(db, item).contains(&item);
                 if !cyclic {
                     return None;
                 }
@@ -1484,7 +1631,7 @@ pub fn interface_group<'db>(
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct MemberExports<'db> {
     pub scheme: types::TypeScheme<'db>,
-    pub top_level_bindings: Vec<(Symbol, types::TypeScheme<'db>)>,
+    pub top_level_bindings: ThinVec<(Symbol, types::TypeScheme<'db>)>,
 }
 
 /// Independent of which member was queried first: each round re-checks every member
@@ -1536,7 +1683,7 @@ fn member_exports<'db>(
         },
         None => MemberExports {
             scheme: unknown(),
-            top_level_bindings: Vec::new(),
+            top_level_bindings: ThinVec::new(),
         },
     }
 }
@@ -1611,6 +1758,7 @@ fn check_item_against<'db>(
         annotations.root.as_deref(),
         &annotations.expressions,
         Some(globals),
+        file_is_strict(db, *item.file(db)),
     ))
 }
 
@@ -1685,6 +1833,7 @@ fn check_item<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<check::ItemCheck<
             // so strict mode marks the whole binding.
             if check.errors.is_empty()
                 && check.strict_origins.is_empty()
+                && file_is_strict(db, *item.file(db))
                 && types::contains_unknown(db, exports.scheme.body)
                 && let Some(module) = item_hir(db, item)
                 && let Some(root) = module.root
@@ -1821,19 +1970,16 @@ const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
 fn file_binders<'db>(
     db: &'db dyn Db,
     file: SourceFile,
-) -> FxHashMap<String, Vec<(usize, Item<'db>)>> {
-    let mut binders: FxHashMap<String, Vec<(usize, Item<'db>)>> = FxHashMap::default();
+) -> FxHashMap<Symbol, Vec<(usize, Item<'db>)>> {
+    let mut binders: FxHashMap<Symbol, Vec<(usize, Item<'db>)>> = FxHashMap::default();
     for (index, &item) in item_tree(db, file).iter().enumerate() {
-        let own_name = item.name(db).clone();
-        if let Some(name) = &own_name {
-            binders.entry(name.clone()).or_default().push((index, item));
+        let own_name = item.name(db).as_deref().map(Symbol::new);
+        if let Some(name) = own_name {
+            binders.entry(name).or_default().push((index, item));
         }
-        for name in item_top_level_names(db, item) {
-            if own_name.as_deref() != Some(name.as_str()) {
-                binders
-                    .entry(name.to_string())
-                    .or_default()
-                    .push((index, item));
+        for &name in item_top_level_names(db, item) {
+            if own_name != Some(name) {
+                binders.entry(name).or_default().push((index, item));
             }
         }
     }
@@ -1852,7 +1998,7 @@ fn frame_binder<'db>(
     name: types::Name<'db>,
     deferred: bool,
 ) -> Option<Item<'db>> {
-    frame_binder_of(db, item, name.text(db), deferred)
+    frame_binder_of(db, item, Symbol::new(name.text(db)), deferred)
 }
 
 /// [`frame_binder`] for every name the item's naming reads from outside its own frame, as
@@ -1876,8 +2022,8 @@ fn item_frame_binders<'db>(
     for &name in names {
         binders.entry(name).or_insert_with(|| {
             (
-                frame_binder_of(db, item, name.as_str(), false),
-                frame_binder_of(db, item, name.as_str(), true),
+                frame_binder_of(db, item, name, false),
+                frame_binder_of(db, item, name, true),
             )
         });
     }
@@ -1887,11 +2033,11 @@ fn item_frame_binders<'db>(
 fn frame_binder_of<'db>(
     db: &'db dyn Db,
     item: Item<'db>,
-    name: &str,
+    name: Symbol,
     deferred: bool,
 ) -> Option<Item<'db>> {
     let file = *item.file(db);
-    let binders = file_binders(db, file).get(name)?;
+    let binders = file_binders(db, file).get(&name)?;
     if deferred
         && matches!(
             *file.kind(db),
@@ -2183,17 +2329,25 @@ fn stub_arithmetic_classes(db: &dyn Db) -> FxHashSet<String> {
     arithmetic_classes_among(library.schemes.keys().map(String::as_str))
 }
 
+/// A union of the per-file sets, which are almost always empty, rather than a scan of every
+/// project name: a new top-level name then costs one file's scan.
 #[salsa::tracked(returns(clone))]
 fn project_arithmetic_classes(db: &dyn Db, files: ProjectFiles) -> FxHashSet<String> {
-    arithmetic_classes_among(package_definitions(db, files).keys().map(String::as_str))
+    let mut classes = FxHashSet::default();
+    for &file in files.files(db) {
+        if *file.kind(db) == DocumentKind::Package {
+            classes.extend(file_arithmetic_classes(db, file).iter().cloned());
+        }
+    }
+    classes
 }
 
 #[salsa::tracked(returns(ref))]
 fn file_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     arithmetic_classes_among(
-        item_tree(db, file)
+        file_definitions(db, file)
             .iter()
-            .filter_map(|item| item.name(db).as_deref()),
+            .map(|(name, _)| name.as_str()),
     )
 }
 
@@ -2355,18 +2509,19 @@ mod tests {
             pattern_types: Default::default(),
             literal_expectations: Default::default(),
             loop_variables: Default::default(),
-            errors: Vec::new(),
-            strict_origins: Vec::new(),
+            errors: ThinVec::new(),
+            strict_origins: ThinVec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
             selected_overloads: Default::default(),
             masked_reads: Default::default(),
             column_misses: Default::default(),
-            match_findings: Vec::new(),
+            match_findings: ThinVec::new(),
             callee_targets: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
-            )],
+            )]
+            .into(),
         };
 
         let once = refuse_check(&db, check);
@@ -2377,7 +2532,7 @@ mod tests {
         assert_eq!(once.scheme.as_ref(), Some(&unknown));
         assert_eq!(
             once.top_level_bindings,
-            vec![(hir::Symbol::new("value"), unknown)]
+            thin_vec::thin_vec![(hir::Symbol::new("value"), unknown)]
         );
     }
 
@@ -2485,6 +2640,7 @@ mod tests {
             !bad_check.errors.is_empty(),
             "character into numeric parameter must report"
         );
+        drop((use_check, bad_check));
 
         util.set_text(&mut db)
             .to("add <- function(x, y) y + x\n".to_owned());
@@ -2534,7 +2690,7 @@ mod tests {
         let second = SourceFile::new(&db, "limit <- 10L\n".to_owned(), DocumentKind::Package);
         let files = ProjectFiles::new(&db, vec![first, second]);
         let winners = package_definitions(&db, files);
-        let winner = winners.get("limit").expect("winner exists");
+        let winner = winners.get(&Symbol::new("limit")).expect("winner exists");
         assert_eq!(*winner.file(&db), second);
         let scheme = global_scheme(&db, *winner);
         assert_eq!(

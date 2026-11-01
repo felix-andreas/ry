@@ -23,6 +23,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 pub mod annotations;
+mod approximate;
 pub mod arith;
 pub mod arrays;
 pub mod builtin_libraries;
@@ -42,12 +43,19 @@ pub mod format;
 pub mod frame;
 pub mod gnu_r_home;
 pub mod graphics;
+pub mod graphics_engine;
 pub mod graphics_render;
+pub mod http;
+pub mod latex;
 pub mod linalg;
+pub mod long_double;
 pub mod lower;
 pub mod methods;
+pub mod moves;
 pub mod native;
 pub mod parallel;
+pub mod parse_data;
+pub mod platform;
 pub mod print;
 pub mod random;
 pub mod rd;
@@ -62,10 +70,12 @@ pub mod stats_arima;
 pub mod stats_cluster;
 pub mod stats_deriv;
 pub mod stats_lbfgsb;
+pub mod stats_loess;
 pub mod stats_models;
 pub mod stats_nlm;
 pub mod stats_optimize;
 pub mod stats_port;
+pub mod stats_spline;
 pub mod stats_tests;
 pub mod strings;
 pub mod subset;
@@ -133,6 +143,10 @@ pub struct Hooks {
     /// Runs `body` as an entry from native code: the host's boundary turns an unwind into a
     /// `longjmp` into whatever native frame called the connection.
     pub enter_from_native: unsafe fn(&mut dyn FnMut() -> R<()>),
+    /// Calls a graphics device or system callback, which may be C code, under the host's
+    /// native-code boundary: a `longjmp` out of it becomes an `Err`, and the protection stack
+    /// and handles it left behind are released.
+    pub guard_native: unsafe fn(&mut dyn FnMut()) -> R<()>,
     /// The host's C `vfprintf` method for connections, which formats a C variadic argument
     /// list. Without a host no C code can call it, so it is `None`.
     pub connection_vfprintf: Option<connections::OpaqueMethod>,
@@ -166,6 +180,9 @@ pub struct Interp {
     pub symbols: values::Symbols,
     /// `R_Visible`: whether the value of the last top-level evaluation prints.
     pub visible: bool,
+    /// `returnValue()` for the `on.exit` code running innermost: the value its function
+    /// returns, or `None` when the function is being left by an error or a jump past it.
+    pub returned_values: Vec<Option<Sexp>>,
     /// The innermost complex assignment running: its replacement call, the whole assignment,
     /// and the frame depth it runs at. GNU R evaluates the replacement inside a context for the
     /// assignment, so a builtin replacement function reports its errors and warnings against
@@ -201,6 +218,9 @@ pub struct Interp {
     pub builtin_libraries: Vec<(&'static str, String)>,
     /// Inline type annotations turned into checks at function boundaries.
     pub annotations: annotations::State,
+    /// Values moved out of a caller's variable into a closure's parameter.
+    pub moves: moves::State,
+    pub library_tags: standard_library::Tags,
     /// Whether S4, R6 and Reference Class definitions in user code are allowed. A host turns it
     /// off when the project sets `[check] object-systems = false`.
     pub object_systems: bool,
@@ -287,6 +307,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         primitive_formals: FxHashMap::default(),
         symbols,
         visible: true,
+        returned_values: Vec::new(),
         assignment_call: None,
         warnings: Vec::new(),
         immediate_warning: false,
@@ -305,6 +326,8 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         interactive: false,
         builtin_libraries: Vec::new(),
         annotations: annotations::State::default(),
+        moves: moves::State::default(),
+        library_tags: standard_library::Tags::default(),
         object_systems: true,
         parked_unwind: None,
     });
@@ -339,6 +362,10 @@ pub fn default_hooks() -> Hooks {
                 panic!("an R error escaped into native code without the libR host");
             }
         },
+        guard_native: |body| {
+            body();
+            Ok(())
+        },
         connection_vfprintf: None,
     }
 }
@@ -361,7 +388,8 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
 /// the terminal.
 pub fn write_console(text: &[u8], is_error: bool) {
     if is_error {
-        write_terminal(text, true);
+        // SAFETY: the connection table only holds connections of this session.
+        unsafe { connections::write_message(text) }
     } else {
         // SAFETY: the sink table only holds connections of this session.
         unsafe { connections::write_output(text) }
@@ -419,6 +447,7 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            graphics_engine::trace(marker);
             if let Some(unwind) = &interp.parked_unwind {
                 crate::unwind::trace_unwind(unwind, marker);
             }
@@ -439,6 +468,8 @@ impl RootSource for InterpRoots {
             interp.bytecode.trace(marker);
             interp.connections.trace(marker);
             interp.annotations.trace(marker);
+            interp.moves.trace(marker);
+            interp.library_tags.trace(marker);
         }
     }
 }

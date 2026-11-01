@@ -23,24 +23,30 @@ code whose types are known, which we call R--.
 
 ## Speed
 
-On ry's own runtime, loops and vector code run several times faster than on GNU R, with the same
-results:
+On ry's own runtime, loops over scalars and vector elements run several times faster than on GNU
+R, with the same results:
 
 | program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
 | --- | ---: | ---: | ---: | ---: |
-| closures | 0.818 s | 0.395 s | 0.397 s | 2.1x |
-| drawdown | 0.314 s | 0.024 s | 0.023 s | 13.1x |
-| fib | 0.080 s | 0.094 s | 0.109 s | 0.9x |
-| log_rank | 0.101 s | 0.073 s | 0.062 s | 1.4x |
-| loop_sum | 0.265 s | 0.042 s | 0.040 s | 6.3x |
-| vasicek | 0.042 s | 0.041 s | 0.039 s | 1.0x |
-| vector_arith | 0.176 s | 0.140 s | 0.135 s | 1.3x |
+| array_dot | 0.218 s | 0.027 s | 0.030 s | 8.1x |
+| array_filter | 0.194 s | 0.036 s | 0.027 s | 5.4x |
+| array_map | 0.309 s | 0.044 s | 0.050 s | 7.0x |
+| array_sum | 0.139 s | 0.028 s | 0.038 s | 5.0x |
+| closures | 0.731 s | 0.434 s | 0.451 s | 1.7x |
+| drawdown | 0.298 s | 0.022 s | 0.021 s | 13.5x |
+| fib | 0.079 s | 0.067 s | 0.071 s | 1.2x |
+| log_rank | 0.098 s | 0.063 s | 0.061 s | 1.6x |
+| loop_sum | 0.244 s | 0.054 s | 0.050 s | 4.5x |
+| vasicek | 0.036 s | 0.050 s | 0.039 s | 0.7x |
+| vector_arith | 0.188 s | 0.164 s | 0.190 s | 1.1x |
 
-Code dominated by small function calls (`fib`) is still about 10% slower, and `vasicek` is at
-parity. Types do not make code faster yet: a static `double` still admits an integer or a logical
-through promotion, so the compiled code keeps its runtime checks, and the differences between the
-two ry columns are measurement noise. The runtime is still incomplete (see [Status](#status)), and
-[How it was measured](#how-it-was-measured) describes the benchmark.
+`vasicek` is still slower than GNU R, and call-heavy code (`fib`) is close to parity. Typed code runs
+as fast as untyped code, but not yet faster: every call to a typed function still checks its
+arguments and its result. The typed `array_*` programs store their values in ry's `Array` type,
+which compiles to direct item loads and stores. The typed `array_map` sums with `List.sum` in double
+precision, while GNU R's `sum` uses extended precision, so its last digits differ. The runtime is
+still incomplete (see [Status](#status)), and [How it was measured](#how-it-was-measured) describes
+the benchmark.
 
 ## From plain R to fully typed code in four steps
 
@@ -164,7 +170,7 @@ non-exhaustive-match
    |   ^^^^^^^^^^^^^^^
 ```
 
-[Strict mode](/type-checking/strict-mode) (`strict = true`, kept beside `typing = true`) finishes the move: a value ry cannot
+[Strict mode](/type-checking/strict-mode) (`strict = true`) finishes the move: a value ry cannot
 type, or a parameter nothing constrains, is an error, and ry's run commands (`ry run`, `ry R`, `ry load` and the console) refuse to run code that has
 one.
 `object-systems = false` additionally rejects new S4, R6 and Reference Classes:

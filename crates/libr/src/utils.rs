@@ -10,7 +10,8 @@ use {
         strings::c_bytes,
     },
     heap::object::{NA_INTEGER, is_na_real},
-    std::ffi::{CStr, c_char, c_int, c_uint},
+    interp::platform,
+    std::ffi::{c_char, c_int, c_uint},
 };
 
 const PRINT_WIDTH: usize = 80;
@@ -49,32 +50,14 @@ fn expand_tilde(name: &[u8]) -> Option<Vec<u8>> {
     let home = if user.is_empty() {
         match std::env::var_os("HOME") {
             Some(home) if !home.is_empty() => home.into_encoded_bytes(),
-            _ => user_home(None)?,
+            _ => platform::home_directory(None)?,
         }
     } else {
-        user_home(Some(user))?
+        platform::home_directory(Some(user))?
     };
     let mut expanded = home;
     expanded.extend_from_slice(tail);
     Some(expanded)
-}
-
-/// The home directory from the password database, of `user` or of the current user.
-fn user_home(user: Option<&[u8]>) -> Option<Vec<u8>> {
-    // SAFETY: the password database entry is copied out before anything else can overwrite it.
-    unsafe {
-        let entry = match user {
-            Some(user) => {
-                let user = std::ffi::CString::new(user).ok()?;
-                libc::getpwnam(user.as_ptr())
-            }
-            None => libc::getpwuid(libc::getuid()),
-        };
-        if entry.is_null() || (*entry).pw_dir.is_null() {
-            return None;
-        }
-        Some(CStr::from_ptr((*entry).pw_dir).to_bytes().to_vec())
-    }
 }
 
 #[unsafe(no_mangle)]

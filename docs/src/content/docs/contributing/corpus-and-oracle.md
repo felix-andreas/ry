@@ -62,7 +62,7 @@ stopped it, and the deparsed last value. A warning or error carries its call, as
 environments, S3 and S4, conditions, vectors, recycling, attributes, NA handling, numerics,
 control flow, printing, delimited data I/O (`read.table`, `write.table`, `scan`, `type.convert`),
 colours, contour lines and axis ticks, graphics devices and parameters (`par`, layouts, the
-device list, text metrics), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
+device list, text metrics), grid and the graphics engine (the `grid__*` cases, which need ragg and lattice installed and compare drawings with GNU R by pixel checksums of a ragg capture), object sizes, hash tables, and data.table queries (the `datatable__*` cases, which need data.table installed and check that the queries ry answers itself print and behave exactly as under data.table). `cargo test -p oracle` replays them and passes without R installed. The expectations are GNU R 4.3.3 output, so another R version can differ in printing details and needs `RY_BLESS=1` to re-record.
 
 The driver differs from `Rscript` in four ways that the cases avoid: it parses the whole file first, so a syntax error hides the output of the lines before it; its own frames show in `sys.nframe()` and `sys.calls()` (so data.table prints the table after a top-level `:=`, which it skips at a real prompt); `commandArgs(TRUE)` holds the two paths; and `quit()` ends the run without a report.
 
@@ -179,7 +179,11 @@ just bench-test .bench/finbench
 an R package with a `DESCRIPTION` that imports exactly the benchmark dependency set, a
 `NAMESPACE`, R files, and a testthat suite. The generator is deterministic for a given `--seed`,
 and its output is not committed. `--domain` generates one package, and `--files` fixes the file
-count (by default one file per 600 lines).
+count (by default one file per 600 lines). `--typed` keeps the templates' `#:` annotations and
+turns on strict mode in the generated `ry.toml`, so the package doubles as a strict-mode dogfood
+corpus; without it the annotations are stripped and the package is plain R. The line target counts
+code without annotations, so a typed and an untyped run with the same seed generate the same program. `--only` limits
+generation to the named templates, which is the quick way to iterate on one of them.
 
 The code comes from the R templates in `tools/bench/templates/` (see its `README.md`): shared
 infrastructure plus domain code, instantiated with random parameters until the line target is

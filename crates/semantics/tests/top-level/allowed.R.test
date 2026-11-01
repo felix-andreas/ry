@@ -70,6 +70,19 @@ squares <- local({
 == R/main.R
 constant: squares <- local({
 
+#---- local_replaces_in_a_copy_of_an_outer_vector_or_list
+#~~~~ R/main.R
+defaults <- list(a = 1, b = c(2, 3))
+tuned <- local({
+  defaults$a <- 2
+  names(defaults) <- c("x", "y")
+  defaults
+})
+#++++
+== R/main.R
+constant: defaults <- list(a = 1, b = c(2, 3))
+constant: tuned <- local({
+
 #---- functions_marked_pure_may_be_called
 #~~~~ R/main.R
 #: @pure
@@ -139,3 +152,20 @@ constant: total <- local({
 definition: if (requireNamespace("utils", quietly = TRUE)) utils::globalVariables("x")
 definition: if (!requireNamespace("stats", quietly = TRUE)) NULL
 constant: shape <- ~ x + y
+
+#---- a_bare_call_takes_the_purity_of_the_declaration_it_resolves_to
+#~~~~ stubs/alpha.Rtypes
+blend : @pure fn(x: double) -> double
+mix : @pure fn(x: double) -> double
+#~~~~ stubs/beta.Rtypes
+mix : fn(x: double) -> double
+#~~~~ R/main.R
+blended <- blend(1)
+mixed <- mix(1)
+qualified <- alpha::mix(1)
+#++++
+== R/main.R
+constant: blended <- blend(1)
+effect: mixed <- mix(1)
+constant: qualified <- alpha::mix(1)
+29..35 error[strict] strict mode: this calls `mix`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts

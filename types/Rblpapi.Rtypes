@@ -1,0 +1,7 @@
+# Rblpapi: the Bloomberg API. A connection is an untyped external pointer.
+@type blpConnection
+blpConnect : fn([host]: character, [port]: double, [default]: logical, [appName]: character | NULL, [appIdentityKey]: character | NULL) -> blpConnection
+# The result's class follows the `returnAs` argument or the `bdhType` option (data.frame, xts,
+# zoo or data.table), and it is one frame or a list of them depending on `simplify` and the
+# number of securities, so it is `Any`.
+bdh : fn(securities: character[], fields: character[], start.date: Date | character, [end.date]: Date | character | NULL, [include.non.trading.days]: logical, [options]: character[named] | NULL, [overrides]: character[named] | NULL, [verbose]: logical, [returnAs]: character, [identity]: Any, [con]: blpConnection | NULL, [int.as.double]: logical, [simplify]: logical) -> Any

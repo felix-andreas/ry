@@ -23,11 +23,27 @@ use {
     interp::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
+        graphics_engine,
         native::Interface,
         unwind::park,
     },
-    std::ffi::{c_char, c_int, c_void},
+    std::{
+        ffi::{c_char, c_int, c_void},
+        path::PathBuf,
+    },
 };
+
+/// Runs a graphics callback inside a C context, so that an R error raised from C code in it
+/// unwinds to here instead of past Rust frames.
+unsafe fn guard_native(body: &mut dyn FnMut()) -> ApiResult<()> {
+    unsafe extern "C" fn trampoline(data: *mut c_void) {
+        // SAFETY: `data` is the `&mut &mut dyn FnMut()` passed below, alive for the call.
+        let body = unsafe { &mut *(data as *mut &mut dyn FnMut()) };
+        body();
+    }
+    let mut body = body;
+    crate::boundary::call_void(trampoline, (&mut body as *mut &mut dyn FnMut()).cast())
+}
 
 /// An ALTREP string or list element for [`heap::object::Sexp::element`], rooted because a class
 /// may build it fresh on every call (nanoarrow's strings do). The accessor cannot fail, so an
@@ -72,6 +88,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         task_callback_routine: |routine, args| unsafe { task_callback_routine(routine, args) },
         connection_method: |con, call| unsafe { crate::connections::call_method(con, call) },
         enter_from_native: |body| unsafe { crate::boundary::enter(|| body()) },
+        guard_native: |body| unsafe { guard_native(body) },
         connection_vfprintf: Some(crate::connections::default_vfprintf()),
     };
     interp::install(&mut runtime.heap, hooks);
@@ -561,10 +578,10 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     }),
     builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
     builtin(".Call.graphics", -1, |call| unsafe {
-        dot_call(call, RoutineKind::Call)
+        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        dot_call(call, RoutineKind::External)
+        graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::External))
     }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
     builtin(".Fortran", -1, |call| unsafe {
@@ -590,7 +607,7 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     {
         return Ok(result);
     }
-    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+    if let Some(value) = builtin_libraries::try_call(call)? {
         return Ok(value);
     }
     native_call(call, kind, false)
@@ -599,7 +616,7 @@ unsafe fn dot_call(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
 /// `.External2`, whose routines also receive the call, the primitive and the calling
 /// environment.
 unsafe fn dot_external2(call: &Call<'_>) -> ApiResult<Sexp> {
-    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+    if let Some(value) = builtin_libraries::try_call(call)? {
         return Ok(value);
     }
     native_call(call, RoutineKind::External, true)
@@ -615,7 +632,7 @@ unsafe fn dot_c(call: &Call<'_>, kind: RoutineKind) -> ApiResult<Sexp> {
     if let Some(result) = interp::native::call_base_routine(call, interface)? {
         return Ok(result);
     }
-    if let Some(value) = builtin_libraries::try_call(call.call, call.args, call.env)? {
+    if let Some(value) = builtin_libraries::try_call(call)? {
         return Ok(value);
     }
     native_call(call, kind, false)
@@ -1257,8 +1274,10 @@ pub unsafe extern "C" fn ry_run(
         );
     }
     if let (interp::session::Outcome::Completed, Some(path)) = (&outcome, &path) {
-        outcome = match std::fs::read_to_string(path) {
-            Ok(text) => interp::session::run_text(&text, path),
+        outcome = match std::fs::read(path) {
+            Ok(bytes) => {
+                interp::session::run_text(&interp::values::escape_invalid_bytes(&bytes), path)
+            }
             Err(failure) => {
                 let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
                 crate::boundary::write_console(message.as_bytes(), true);
@@ -1399,6 +1418,19 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
+}
+
+/// Starts analyzing the package at or above `path` (a NUL-terminated path) in the background
+/// and returns at once, so a later `load_all()` of it finds the analysis done. `flags` are the
+/// `RUN_FLAG_*` bits the session will start with. The console and `ry load` call this before
+/// `ry_repl` or `ry_run`, which overlaps the analysis with loading base R.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_loader_prepare(path: *const c_char, flags: c_int) {
+    if path.is_null() {
+        return;
+    }
+    let path = String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned();
+    loader::ry_runtime::prepare(PathBuf::from(path), flags & RUN_FLAG_STRICT != 0);
 }
 
 /// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0

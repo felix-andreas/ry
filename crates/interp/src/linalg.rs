@@ -14,7 +14,7 @@ use {
     crate::{
         builtins::{Arg, BuiltinDef, Call, Generic, builtin, internal},
         coerce::coerce_vector,
-        conditions,
+        conditions, platform,
         unwind::{R, error},
         values::{
             self, alloc, complexes, complexes_mut, dims, get_attr, ints, ints_mut, length, nil,
@@ -23,7 +23,9 @@ use {
     },
     heap::object::{Rcomplex, Sexp, SexpType, gp},
     std::{
-        ffi::{CStr, c_char, c_void},
+        cell::Cell,
+        ffi::{CStr, c_char, c_int, c_void},
+        ops::Deref,
         sync::OnceLock,
     },
 };
@@ -1181,7 +1183,7 @@ unsafe fn qr_coef_real(qr_object: Sexp, b: Sexp) -> R<Sexp> {
     let factor = lapack_qr(qr_object, SexpType::Real, rows)?;
     let k = length(factor.tau) as i32;
     let (n, rhs) = (factor.rows as i32, rhs_count as i32);
-    multiply_by_q_real(lapack, &factor, result, c"T", n, rhs, k)?;
+    multiply_by_q_real(&lapack, &factor, result, c"T", n, rhs, k)?;
     let mut info = 0;
     (lapack.dtrtrs)(
         c"U".as_ptr(),
@@ -1211,7 +1213,7 @@ unsafe fn qr_coef_complex(qr_object: Sexp, b: Sexp) -> R<Sexp> {
     let factor = lapack_qr(qr_object, SexpType::Complex, rows)?;
     let k = length(factor.tau) as i32;
     let (n, rhs) = (factor.rows as i32, rhs_count as i32);
-    multiply_by_q_complex(lapack, &factor, result, c"C", n, rhs, k)?;
+    multiply_by_q_complex(&lapack, &factor, result, c"C", n, rhs, k)?;
     let mut info = 0;
     (lapack.ztrtrs)(
         c"U".as_ptr(),
@@ -1244,7 +1246,7 @@ unsafe fn qr_qy_real(qr_object: Sexp, b: Sexp, transpose: Sexp) -> R<Sexp> {
     let k = length(factor.tau) as i32;
     let trans = if transpose { c"T" } else { c"N" };
     multiply_by_q_real(
-        lapack,
+        &lapack,
         &factor,
         result,
         trans,
@@ -1267,7 +1269,7 @@ unsafe fn qr_qy_complex(qr_object: Sexp, b: Sexp, transpose: Sexp) -> R<Sexp> {
     let k = length(factor.tau) as i32;
     let trans = if transpose { c"C" } else { c"N" };
     multiply_by_q_complex(
-        lapack,
+        &lapack,
         &factor,
         result,
         trans,
@@ -2364,16 +2366,11 @@ unsafe fn la_version() -> R<Sexp> {
 /// The file the LAPACK routines came from, with symbolic links resolved, as GNU R reports it.
 unsafe fn la_library() -> R<Sexp> {
     let lapack = lapack()?;
-    let mut info: libc::Dl_info = std::mem::zeroed();
-    let address = lapack.ilaver as *const c_void;
-    if libc::dladdr(address, &mut info) == 0 || info.dli_fname.is_null() {
+    let Some(path) = platform::library_path(lapack.ilaver as *const c_void) else {
         return values::scalar_string("");
-    }
-    let path = CStr::from_ptr(info.dli_fname)
-        .to_string_lossy()
-        .into_owned();
-    let resolved = std::fs::canonicalize(&path)
-        .map_or(path, |resolved| resolved.to_string_lossy().into_owned());
+    };
+    let resolved =
+        std::fs::canonicalize(&path).map_or(path, |resolved| platform::path_text(&resolved));
     values::scalar_string(&resolved)
 }
 
@@ -2551,7 +2548,7 @@ pub unsafe fn dqrxb(args: &[Sexp]) -> R<()> {
 /// The shared arguments of the `dqr*` routines: a compact QR factor from `dqrdc2` with `n`
 /// rows and rank `k`, and the number of right-hand side columns.
 struct QrProblem<'a> {
-    blas: &'static Blas,
+    blas: DirectFortran<Blas>,
     qr: &'a mut [f64],
     n: usize,
     k: usize,
@@ -2936,7 +2933,7 @@ fn lapack_status(failed: bool, info: i32, routine: &str) -> R<()> {
 }
 
 /// `%g` with six significant digits, as GNU R's messages print reals.
-fn format_g(value: f64) -> String {
+pub fn format_g(value: f64) -> String {
     let mut buffer = [0u8; 64];
     // SAFETY: the format takes one double and the buffer is large enough for any `%g` output.
     let written = unsafe {
@@ -2985,8 +2982,9 @@ macro_rules! fortran_library {
 }
 
 // macOS has no `libblas.dylib` on the default search path; Accelerate's vecLib carries the
-// reference Fortran interface.
-fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib",
+// reference Fortran interface. Windows has no system BLAS, so ry uses the R installation's own
+// `Rblas.dll` and `Rlapack.dll` from `R_HOME/bin/x64` (see `open_library`).
+fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib", "Rblas.dll",
     "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib"], {
     dgemm: fn(Text, Text, Integer, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
     dgemv: fn(Text, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength);
@@ -3000,7 +2998,7 @@ fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib",
     dscal: fn(Integer, Double, DoubleOut, Integer);
 });
 
-fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib",
+fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib", "Rlapack.dll",
     "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib"], {
     ilaver: fn(IntegerOut, IntegerOut, IntegerOut);
     dgesv: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, DoubleOut, Integer, IntegerOut);
@@ -3063,38 +3061,93 @@ impl Blas {
 static BLAS: OnceLock<Result<Blas, String>> = OnceLock::new();
 static LAPACK: OnceLock<Result<Lapack, String>> = OnceLock::new();
 
-fn blas() -> R<&'static Blas> {
+fn blas() -> R<DirectFortran<Blas>> {
     // SAFETY: opening a library and reading its symbols has no preconditions.
     let library = BLAS.get_or_init(|| unsafe { Blas::open() });
-    library.as_ref().map_err(|message| error(message.clone()))
+    library
+        .as_ref()
+        .map(DirectFortran::new)
+        .map_err(|message| error(message.clone()))
 }
 
-fn lapack() -> R<&'static Lapack> {
+fn lapack() -> R<DirectFortran<Lapack>> {
     // SAFETY: as for `blas`.
     let library = LAPACK.get_or_init(|| unsafe { Lapack::open() });
-    library.as_ref().map_err(|message| error(message.clone()))
+    library
+        .as_ref()
+        .map(DirectFortran::new)
+        .map_err(|message| error(message.clone()))
+}
+
+thread_local! {
+    static DIRECT_FORTRAN_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// A BLAS or LAPACK library in use by Rust code. While one is alive, `xerbla_` (the routines'
+/// error handler, which R.dll exports on Windows) returns instead of raising an R error, because
+/// raising one would `longjmp` over the Rust frames between here and the innermost native
+/// context. Reference LAPACK then returns a negative `info`, which the caller reports itself.
+struct DirectFortran<T: 'static> {
+    library: &'static T,
+}
+
+impl<T> DirectFortran<T> {
+    fn new(library: &'static T) -> DirectFortran<T> {
+        DIRECT_FORTRAN_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        DirectFortran { library }
+    }
+}
+
+impl<T> Deref for DirectFortran<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.library
+    }
+}
+
+impl<T> Drop for DirectFortran<T> {
+    fn drop(&mut self) {
+        DIRECT_FORTRAN_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Whether Rust code is calling BLAS or LAPACK directly on this thread (see `DirectFortran`).
+#[unsafe(no_mangle)]
+pub extern "C" fn ry_direct_fortran_active() -> c_int {
+    DIRECT_FORTRAN_DEPTH.with(|depth| c_int::from(depth.get() > 0))
 }
 
 unsafe fn open_library(candidates: &[&str], description: &str) -> Result<*mut c_void, String> {
-    let mut failure = String::new();
-    for candidate in candidates {
-        let name = std::ffi::CString::new(*candidate)
-            .map_err(|_| format!("invalid library name {candidate}"))?;
-        let handle = libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
-        if !handle.is_null() {
-            return Ok(handle);
-        }
-        if failure.is_empty() {
-            let message = libc::dlerror();
-            if !message.is_null() {
-                failure = CStr::from_ptr(message).to_string_lossy().into_owned();
+    let candidates: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| candidate.ends_with(".dll") == cfg!(windows))
+        .map(|candidate| {
+            if cfg!(windows) {
+                format!("{}/bin/x64/{candidate}", crate::system::r_home())
+            } else {
+                candidate.to_string()
             }
+        })
+        .collect();
+    let mut failure = String::new();
+    for candidate in &candidates {
+        match platform::open_library(candidate, true) {
+            Ok(handle) => return Ok(handle),
+            Err(message) if failure.is_empty() => failure = message,
+            Err(_) => {}
         }
     }
-    Err(format!(
-        "linear algebra needs the system {description} library ({}), which could not be loaded: {failure}",
-        candidates.first().copied().unwrap_or_default()
-    ))
+    let first = candidates.first().map_or("", String::as_str);
+    Err(if cfg!(windows) {
+        format!(
+            "linear algebra needs R's {description} library ({first}), which could not be loaded: {failure}"
+        )
+    } else {
+        format!(
+            "linear algebra needs the system {description} library ({first}), which could not be loaded: {failure}"
+        )
+    })
 }
 
 unsafe fn library_symbol(
@@ -3102,7 +3155,9 @@ unsafe fn library_symbol(
     name: &str,
     description: &str,
 ) -> Result<*mut c_void, String> {
-    let symbol = libc::dlsym(handle, name.as_ptr().cast());
+    let symbol = CStr::from_bytes_with_nul(name.as_bytes()).map_or(std::ptr::null_mut(), |name| {
+        platform::library_symbol(handle, name)
+    });
     if symbol.is_null() {
         return Err(format!(
             "the system {description} library has no routine '{}'",

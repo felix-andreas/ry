@@ -15,7 +15,10 @@ use {
     salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{Diagnostic, RelatedLocation, Severity, derive_from_syntax},
+        diagnostics::{
+            Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
+            derive_from_syntax,
+        },
         metadata::{
             PackageMetadata, attached_union, normalized_imports, parse_description_collate,
             parse_description_dependencies, parse_description_package, parse_namespace,
@@ -35,14 +38,14 @@ use {
         num::NonZero,
         path::{Path, PathBuf},
         sync::{
-            LazyLock,
+            LazyLock, Mutex, PoisonError,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
         time::{Duration, Instant},
     },
     syntax::{
-        TextRange,
+        Parse, TextRange,
         literate::{is_literate_extension, r_source_of_literate},
     },
 };
@@ -100,10 +103,23 @@ pub enum MinSeverity {
     Error,
 }
 
+/// Which fixes `ry check` applies before it reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixMode {
+    Off,
+    Safe,
+    All,
+}
+
+/// A fix can enable another (removing an arm can expose the next unreachable one), so fixing
+/// repeats until a pass changes nothing, up to this many passes.
+const MAX_FIX_PASSES: usize = 10;
+
 pub fn check(
     maybe_files: Option<&[PathBuf]>,
     output: OutputFormat,
     min_severity: MinSeverity,
+    fix: FixMode,
 ) -> Result<Outcome, CommandError> {
     let root: Vec<PathBuf> = vec![".".into()];
     let files = maybe_files.unwrap_or(&root);
@@ -134,9 +150,30 @@ pub fn check(
     let mut n_files = 0;
     let mut n_diagnostics = 0;
     let mut n_failures = 0;
+    let mut n_fixed = 0;
+    let mut n_fixable = 0;
+    let mut n_unsafe_fixable = 0;
     for (root, config, requested) in groups {
-        let analysis = analyze_project(&root, config, &requested)?;
+        let mut analysis = analyze_project(&root, config.clone(), &requested)?;
+        if fix != FixMode::Off {
+            for _ in 0..MAX_FIX_PASSES {
+                let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
+                if fixed == 0 {
+                    break;
+                }
+                n_fixed += fixed;
+                analysis = analyze_project(&root, config.clone(), &requested)?;
+            }
+        }
         n_failures += analysis.failures;
+        for file in analysis
+            .files
+            .iter()
+            .filter(|file| file.requested && fixes_apply(file))
+        {
+            n_fixable += applicable_fixes(&file.diagnostics, false).len();
+            n_unsafe_fixable += applicable_fixes(&file.diagnostics, true).len();
+        }
         for (path, source, problems) in &analysis.stub_problems {
             n_diagnostics +=
                 render_findings(output, min_severity, path, source, problems, &|_| None);
@@ -167,13 +204,75 @@ pub fn check(
     }
     // Always summarize: silence would read as success on a run that matched nothing.
     if output == OutputFormat::Human {
+        if n_fixed > 0 {
+            let fixes = if n_fixed == 1 { "fix" } else { "fixes" };
+            println!("applied {n_fixed} {fixes}");
+        }
         report_check_summary(n_files, n_diagnostics);
+        let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
+        match (n_fixable, unsafe_only) {
+            (0, 0) => {}
+            (0, more) => println!("{more} fixable with `ry check --fix --unsafe-fixes`"),
+            (safe, 0) => println!("{safe} fixable with `ry check --fix`"),
+            (safe, more) => {
+                println!("{safe} fixable with `ry check --fix` ({more} more with `--unsafe-fixes`)")
+            }
+        }
     }
     Ok(if n_diagnostics == 0 {
         Outcome::Clean
     } else {
         Outcome::Findings
     })
+}
+
+/// Writes the fixes for every requested file back to disk and returns how many changed a file.
+/// The edits apply to the file as it is on disk, which for a literate document still has its
+/// prose: the analysis blanks prose without moving any offset.
+fn apply_check_fixes(
+    analysis: &ProjectAnalysis,
+    include_unsafe: bool,
+) -> Result<usize, CommandError> {
+    let mut applied = 0;
+    for file in analysis
+        .files
+        .iter()
+        .filter(|file| file.requested && fixes_apply(file))
+    {
+        let fixes = applicable_fixes(&file.diagnostics, include_unsafe);
+        if fixes.is_empty() {
+            continue;
+        }
+        let original = fs::read_to_string(&file.path).map_err(|err| {
+            error_because(&format!("failed to read: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        // A file that changed on disk since the analysis would take edits at stale offsets.
+        if analysable_source(&file.path, original.clone()) != analysis.source(file) {
+            continue;
+        }
+        let edited = apply_fixes(&original, &fixes);
+        // A fix whose replacement equals what is there changes nothing, and counting it would
+        // keep the fix loop going until its pass limit.
+        if edited == original {
+            continue;
+        }
+        fs::write(&file.path, edited).map_err(|err| {
+            error_because(&format!("failed to write: {}", file.path.display()), &err);
+            CommandError
+        })?;
+        applied += fixes.len();
+    }
+    Ok(applied)
+}
+
+/// A file with a syntax error takes no fixes, because they were computed on a recovered tree and
+/// may not mean what they say.
+fn fixes_apply(file: &AnalyzedFile) -> bool {
+    !file
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "syntax-error")
 }
 
 /// One project's analysis, as `ry check` reports it and as `ry load`'s strict-mode check reads
@@ -260,31 +359,10 @@ pub(crate) fn analyze_project(
     let _: StubSources = StubSources::builder(stub_sources, shipped_export_manifests())
         .durability(Durability::HIGH)
         .new(&db);
-    let _: AnalysisSettings = AnalysisSettings::builder(config.check.inline_annotations)
-        .durability(Durability::HIGH)
-        .new(&db);
-
-    // A broken override stub silently changes what every file checks against, so
-    // its dropped declarations are reported as findings.
-    let mut stub_problems = Vec::new();
-    for stub in &project_stubs {
-        let stub_text = &stub.text;
-        let stub_index = LineIndex::new(stub_text);
-        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
-            .into_iter()
-            .map(|problem| {
-                let start = stub_index.line_start(problem.line as u32);
-                let end = start + stub_index.line_length(problem.line as u32, stub_text);
-                Diagnostic::new(
-                    TextRange::new(start.into(), end.into()),
-                    Severity::Error,
-                    "stub",
-                    problem.message,
-                )
-            })
-            .collect();
-        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
-    }
+    let _: AnalysisSettings =
+        AnalysisSettings::builder(config.check.inline_annotations, config.check.strict)
+            .durability(Durability::HIGH)
+            .new(&db);
 
     let namespace_path = root.join("NAMESPACE");
     let namespace_source = fs::read_to_string(&namespace_path).ok();
@@ -313,6 +391,30 @@ pub(crate) fn analyze_project(
     .durability(Durability::HIGH)
     .attached_durability(Durability::LOW)
     .new(&db);
+
+    // A broken override stub silently changes what every file checks against, so
+    // its dropped declarations are reported as findings. This reads the stub library, so it
+    // must follow the metadata input: a high-durability memo computed before that input
+    // existed is never re-verified, and would keep every conditional namespace inactive.
+    let mut stub_problems = Vec::new();
+    for stub in &project_stubs {
+        let stub_text = &stub.text;
+        let stub_index = LineIndex::new(stub_text);
+        let problems: Vec<Diagnostic> = stub_source_problems(&db, stub_text)
+            .into_iter()
+            .map(|problem| {
+                let start = stub_index.line_start(problem.line as u32);
+                let end = start + stub_index.line_length(problem.line as u32, stub_text);
+                Diagnostic::new(
+                    TextRange::new(start.into(), end.into()),
+                    Severity::Error,
+                    "stub",
+                    problem.message,
+                )
+            })
+            .collect();
+        stub_problems.push((stub.path.clone(), stub_text.clone(), problems));
+    }
 
     let mut checked: Vec<(PathBuf, String)> = Vec::with_capacity(paths.len());
     let mut reported: Vec<bool> = Vec::with_capacity(paths.len());
@@ -387,6 +489,12 @@ pub(crate) fn analyze_project(
         used_tokens.extend(tokens);
     }
     let attached = attached_union(&db, project);
+    // Freeing a million tree nodes takes longer than naming the first files, so each naming
+    // worker frees the tree of the file it is about to name, across all cores.
+    let trees: Vec<Mutex<Option<Parse>>> = semantics::release_trees(&mut db, &files)
+        .into_iter()
+        .map(|tree| Mutex::new(Some(tree)))
+        .collect();
     if !attached.is_empty() {
         use salsa::Setter;
         metadata.set_attached(&mut db).to(attached);
@@ -395,6 +503,9 @@ pub(crate) fn analyze_project(
     // Every item is named across cores first: a file's check names the items of other files its
     // interface reaches, and two threads reaching the same item would block on one claim.
     in_parallel(&db, workers, &by_size, |db, index| {
+        if let Some(tree) = trees.get(index) {
+            drop(tree.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
         let file = files[index];
         for &item in semantics::item_tree(db, file) {
             semantics::item_naming(db, item);
@@ -852,6 +963,12 @@ fn render_human_diagnostic(
                 ..Report::default()
             })
             .collect(),
+        help: diagnostic.fix.as_ref().map(|fix| match fix.applicability {
+            Applicability::Safe => format!("{} (`ry check --fix` applies it)", fix.title),
+            Applicability::Unsafe => {
+                format!("{} (`ry check --fix --unsafe-fixes` applies it)", fix.title)
+            }
+        }),
         ..Report::default()
     });
     eprintln!();
@@ -929,6 +1046,22 @@ fn render_json_diagnostic(
         "code": diagnostic.code,
         "message": diagnostic.message,
         "related": related,
+        "fix": diagnostic.fix.as_ref().map(|fix| {
+            let start = index.line_column_chars(fix.range.start(), source);
+            let end = index.line_column_chars(fix.range.end(), source);
+            serde_json::json!({
+                "title": fix.title,
+                "applicability": match fix.applicability {
+                    Applicability::Safe => "safe",
+                    Applicability::Unsafe => "unsafe",
+                },
+                "line": start.line + 1,
+                "column": start.column + 1,
+                "endLine": end.line + 1,
+                "endColumn": end.column + 1,
+                "replacement": fix.replacement,
+            })
+        }),
     });
     println!("{record}");
 }
@@ -942,6 +1075,7 @@ struct Report<'a> {
     cause: Option<&'a (dyn std::error::Error + 'static)>,
     snippet: Option<Snippet<'a>>,
     related: Vec<Report<'a>>,
+    help: Option<String>,
 }
 
 #[derive(Debug)]
@@ -959,6 +1093,7 @@ impl<'a> Default for Report<'a> {
             cause: None,
             snippet: None,
             related: Vec::new(),
+            help: None,
         }
     }
 }
@@ -989,6 +1124,12 @@ impl miette::Diagnostic for Report<'_> {
         self.snippet
             .as_ref()
             .map(|snippet| &snippet.source as &dyn SourceCode)
+    }
+
+    fn help(&self) -> Option<Box<dyn fmt::Display + '_>> {
+        self.help
+            .as_ref()
+            .map(|help| Box::new(help) as Box<dyn fmt::Display>)
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {

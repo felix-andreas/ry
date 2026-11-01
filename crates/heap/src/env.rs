@@ -3,6 +3,9 @@
 //! as long as anything references it, which is what lets compiled code watch a binding for
 //! redefinition, and it outlives its removal from the frame if compiled code still holds it.
 //!
+//! The frame keeps each cell's symbol beside it, so a lookup scans one contiguous array inside the
+//! environment object instead of loading every cell, which would cost a cache miss per binding.
+//!
 //! The cells are kept in insertion order, and [`Frame::listed_cells`] derives from it the order
 //! GNU R lists a frame in (`ls(sorted = FALSE)`, `as.list`, `eapply`), which packages such as R6
 //! depend on. An unhashed frame is a cons list there, so it lists the newest binding first, after
@@ -19,18 +22,31 @@ use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 /// formals (`identical` has nine) would otherwise pay on every call.
 const INDEX_THRESHOLD: usize = 16;
 
-/// The cells a frame holds without a second allocation.
-const INLINE_CELLS: usize = 12;
+/// The bindings a frame holds without a second allocation: as many as keep the environment object
+/// in the 192-byte size class.
+const INLINE_BINDINGS: usize = 9;
+
+/// A binding cell and its symbol, which is the cell's own first field.
+#[derive(Clone, Copy)]
+struct Binding {
+    symbol: Sexp,
+    cell: Sexp,
+}
 
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
+
+/// The end of a bucket chain in `Frame::hash_chains`.
+const EMPTY_CHAIN: usize = usize::MAX;
 
 #[derive(Default)]
 pub struct Frame {
     /// Inline, because most frames are a call's few arguments and locals, and a closure call
     /// should not pay for a second allocation beside the frame's own.
-    cells: SmallVec<[Sexp; INLINE_CELLS]>,
-    index: Option<FxHashMap<Sexp, u32>>,
+    bindings: SmallVec<[Binding; INLINE_BINDINGS]>,
+    /// Boxed, because only large frames have one and the inline map would push every
+    /// environment into a larger size class.
+    index: Option<Box<FxHashMap<Sexp, u32>>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,
     /// How many leading cells are a closure's formals, which GNU R lists after the locals and
@@ -41,33 +57,40 @@ pub struct Frame {
 impl Frame {
     pub fn with_capacity(bindings: usize) -> Frame {
         Frame {
-            cells: SmallVec::with_capacity(bindings),
+            bindings: SmallVec::with_capacity(bindings),
             ..Frame::default()
         }
     }
 
-    pub fn cells(&self) -> &[Sexp] {
-        &self.cells
+    pub fn cells(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.bindings.iter().map(|binding| binding.cell)
+    }
+
+    pub fn symbols(&self) -> impl Iterator<Item = Sexp> + '_ {
+        self.bindings.iter().map(|binding| binding.symbol)
     }
 
     pub fn len(&self) -> usize {
-        self.cells.len()
+        self.bindings.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
+        self.bindings.is_empty()
     }
 
     /// The binding cell for `symbol`, if the frame binds it.
-    ///
-    /// # Safety
-    /// Every cell in the frame must be live, which holds while the environment is reachable.
-    pub unsafe fn find(&self, symbol: Sexp) -> Option<Sexp> {
+    #[inline]
+    pub fn find(&self, symbol: Sexp) -> Option<Sexp> {
         match &self.index {
-            Some(index) => index
-                .get(&symbol)
-                .and_then(|&position| self.cells.get(position as usize).copied()),
-            None => unsafe { self.cells.iter().copied().find(|cell| cell.car() == symbol) },
+            Some(index) => self
+                .bindings
+                .get(*index.get(&symbol)? as usize)
+                .map(|binding| binding.cell),
+            None => self
+                .bindings
+                .iter()
+                .find(|binding| binding.symbol == symbol)
+                .map(|binding| binding.cell),
         }
     }
 
@@ -83,7 +106,7 @@ impl Frame {
 
     /// Marks every cell bound so far as a closure formal.
     pub fn mark_formals(&mut self) {
-        self.formals = self.cells.len() as u32;
+        self.formals = self.bindings.len() as u32;
     }
 
     /// The cells in the order GNU R lists the frame in.
@@ -92,25 +115,68 @@ impl Frame {
     /// Every cell in the frame must be live, which holds while the environment is reachable.
     pub unsafe fn listed_cells(&self) -> Vec<Sexp> {
         if self.hash_size == 0 {
-            let formals = (self.formals as usize).min(self.cells.len());
-            let (formals, locals) = self.cells.split_at(formals);
-            return locals.iter().rev().chain(formals).copied().collect();
+            let formals = (self.formals as usize).min(self.bindings.len());
+            let (formals, locals) = self.bindings.split_at(formals);
+            return locals
+                .iter()
+                .rev()
+                .chain(formals)
+                .map(|binding| binding.cell)
+                .collect();
         }
-        // Replays GNU R's chained table, measured against its output: an insert prepends to its
-        // bucket and counts one, and once the count passes 85% of the size the table grows to
-        // `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry
-        // prepended, after which the count restarts at the number of occupied buckets.
-        // Each bucket is a chain threaded through `next`, so an insert and a rehash allocate
-        // nothing per entry.
-        const EMPTY: usize = usize::MAX;
-        let mut size = self.hash_size as usize;
-        let mut heads = vec![EMPTY; size];
-        let mut next = vec![EMPTY; self.cells.len()];
+        let (heads, next, _) = unsafe { self.hash_chains() };
+        let mut listed = Vec::with_capacity(self.bindings.len());
+        for &head in &heads {
+            let mut position = head;
+            while position != EMPTY_CHAIN {
+                listed.push(self.bindings[position].cell);
+                position = next[position];
+            }
+        }
+        listed
+    }
+
+    /// The binding count of each bucket of GNU R's hash table for a hashed frame, together with
+    /// the table's chain counter, or `None` for an unhashed frame. `env.profile` reports the
+    /// counter as `nchains`, so it can exceed the number of non-empty buckets.
+    ///
+    /// # Safety
+    /// Every cell in the frame must be live, which holds while the environment is reachable.
+    pub unsafe fn hash_profile(&self) -> Option<(Vec<usize>, usize)> {
+        if self.hash_size == 0 {
+            return None;
+        }
+        let (heads, next, count) = unsafe { self.hash_chains() };
+        let lengths = heads
+            .iter()
+            .map(|&head| {
+                let mut length = 0;
+                let mut position = head;
+                while position != EMPTY_CHAIN {
+                    length += 1;
+                    position = next[position];
+                }
+                length
+            })
+            .collect();
+        Some((lengths, count))
+    }
+
+    /// Replays GNU R's chained table, measured against its output: an insert prepends to its
+    /// bucket and counts one, and once the count passes 85% of the size the table grows to
+    /// `size * 1.2 + 1`, rehashing the old buckets in ascending order with each entry prepended,
+    /// after which the count restarts at the number of occupied buckets. Each bucket is a chain
+    /// threaded through `next`, so an insert and a rehash allocate nothing per entry. Returns the
+    /// bucket heads, the chain links and the count.
+    unsafe fn hash_chains(&self) -> (Vec<usize>, Vec<usize>, usize) {
+        let mut size = (self.hash_size as usize).max(1);
+        let mut heads = vec![EMPTY_CHAIN; size];
+        let mut next = vec![EMPTY_CHAIN; self.bindings.len()];
         let mut count = 0;
         let hashes: Vec<usize> = self
-            .cells
+            .bindings
             .iter()
-            .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
+            .map(|binding| unsafe { pjw_hash(binding.symbol.car().bytes()) } as usize)
             .collect();
         for (position, hash) in hashes.iter().enumerate() {
             let bucket = hash % size;
@@ -119,10 +185,10 @@ impl Frame {
             count += 1;
             if count as f64 > size as f64 * 0.85 {
                 size = (size as f64 * 1.2) as usize + 1;
-                let mut grown = vec![EMPTY; size];
+                let mut grown = vec![EMPTY_CHAIN; size];
                 for &head in &heads {
                     let mut moved = head;
-                    while moved != EMPTY {
+                    while moved != EMPTY_CHAIN {
                         let following = next[moved];
                         let bucket = hashes[moved] % size;
                         next[moved] = grown[bucket];
@@ -130,55 +196,57 @@ impl Frame {
                         moved = following;
                     }
                 }
-                count = grown.iter().filter(|head| **head != EMPTY).count();
+                count = grown.iter().filter(|head| **head != EMPTY_CHAIN).count();
                 heads = grown;
             }
         }
-        let mut listed = Vec::with_capacity(self.cells.len());
-        for &head in &heads {
-            let mut position = head;
-            while position != EMPTY {
-                listed.push(self.cells[position]);
-                position = next[position];
-            }
-        }
-        listed
+        (heads, next, count)
     }
 
     /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
     /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
     /// first match in GNU R's frame list does.
-    pub(crate) unsafe fn insert(&mut self, cell: Sexp) {
-        let position = self.cells.len() as u32;
-        self.cells.push(cell);
+    pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
+        let position = self.bindings.len() as u32;
+        self.bindings.push(Binding { symbol, cell });
         match &mut self.index {
             Some(index) => {
-                index.entry(unsafe { cell.car() }).or_insert(position);
+                index.entry(symbol).or_insert(position);
             }
-            None if self.cells.len() > INDEX_THRESHOLD => {
+            None if self.bindings.len() > INDEX_THRESHOLD => {
                 let mut index = FxHashMap::default();
-                for (position, cell) in self.cells.iter().enumerate() {
-                    index
-                        .entry(unsafe { cell.car() })
-                        .or_insert(position as u32);
+                for (position, binding) in self.bindings.iter().enumerate() {
+                    index.entry(binding.symbol).or_insert(position as u32);
                 }
-                self.index = Some(index);
+                self.index = Some(Box::new(index));
             }
             None => {}
         }
     }
 
     /// Removes the cell for `symbol` and returns it.
-    pub(crate) unsafe fn remove(&mut self, symbol: Sexp) -> Option<Sexp> {
+    pub(crate) fn remove(&mut self, symbol: Sexp) -> Option<Sexp> {
         let position = match &mut self.index {
             Some(index) => index.remove(&symbol)? as usize,
-            None => unsafe { self.cells.iter().position(|cell| cell.car() == symbol)? },
+            None => self
+                .bindings
+                .iter()
+                .position(|binding| binding.symbol == symbol)?,
         };
         // Removal keeps the insertion order, which the listing order is derived from.
-        let cell = self.cells.remove(position);
+        let cell = self.bindings.remove(position).cell;
         if let Some(index) = &mut self.index {
-            for (offset, moved) in self.cells[position..].iter().enumerate() {
-                index.insert(unsafe { moved.car() }, (position + offset) as u32);
+            for slot in index.values_mut() {
+                if *slot as usize > position {
+                    *slot -= 1;
+                }
+            }
+            // A duplicate formal behind the removed binding now answers for its symbol.
+            if let Some(offset) = self.bindings[position..]
+                .iter()
+                .position(|binding| binding.symbol == symbol)
+            {
+                index.insert(symbol, (position + offset) as u32);
             }
         }
         if position < self.formals as usize {

@@ -1,0 +1,123 @@
+# lubridate: date-time arithmetic.
+#
+# Periods, durations and intervals are S4 classes. They are opaque here, and
+# their arithmetic is declared as operator methods, so `d + days(1)` on a
+# `Date` stays a `Date` and `interval(a, b) %/% months(1)` is a count.
+@type Period
+@type Duration
+@type Interval
+
+# Date and POSIXct gain Period and Duration offsets once lubridate is loaded,
+# through S4 methods on `+` and `-`. A stub that names `+.Date` replaces base's
+# whole overload set, so base's candidates are repeated first.
++.Date : fn(e1: Date, e2: double) -> Date
++.Date : fn(e1: double, e2: Date) -> Date
++.Date : fn(e1: Date, e2: difftime) -> Date
++.Date : fn(e1: difftime, e2: Date) -> Date
++.Date : fn(e1: Date, e2: Period | Duration) -> Date
++.Date : fn(e1: Period | Duration, e2: Date) -> Date
+-.Date : fn(e1: Date, e2: Date) -> difftime
+-.Date : fn(e1: Date, e2: double) -> Date
+-.Date : fn(e1: Date, e2: difftime) -> Date
+-.Date : fn(e1: Date, e2: Period | Duration) -> Date
++.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
++.POSIXct : fn(e1: double, e2: POSIXct) -> POSIXct
++.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
++.POSIXct : fn(e1: difftime, e2: POSIXct) -> POSIXct
++.POSIXct : fn(e1: POSIXct, e2: Period | Duration) -> POSIXct
++.POSIXct : fn(e1: Period | Duration, e2: POSIXct) -> POSIXct
+-.POSIXct : fn(e1: POSIXct, e2: POSIXct) -> difftime
+-.POSIXct : fn(e1: POSIXct, e2: double) -> POSIXct
+-.POSIXct : fn(e1: POSIXct, e2: difftime) -> POSIXct
+-.POSIXct : fn(e1: POSIXct, e2: Period | Duration) -> POSIXct
+
+# Period and Duration arithmetic among themselves and with numbers.
++.Period : fn(e1: Period, e2: Period) -> Period
+-.Period : fn(e1: Period, e2: Period) -> Period
+*.Period : fn(e1: Period, e2: double[]) -> Period
+*.Period : fn(e1: double[], e2: Period) -> Period
+/.Period : fn(e1: Period, e2: double[]) -> Period
++.Duration : fn(e1: Duration, e2: Duration) -> Duration
+-.Duration : fn(e1: Duration, e2: Duration) -> Duration
+*.Duration : fn(e1: Duration, e2: double[]) -> Duration
+*.Duration : fn(e1: double[], e2: Duration) -> Duration
+/.Duration : fn(e1: Duration, e2: double[]) -> Duration
+[.Period : fn(x: Period, ...: Any) -> Period
+[[.Period : fn(x: Period, ...: Any) -> Period
+
+# Dividing an interval by a period counts how many fit.
+%/%.Interval : fn(e1: Interval, e2: Period | Duration) -> double[]
+/.Interval : fn(e1: Interval, e2: Period | Duration) -> double[]
+
+# `months()` is base's generic; lubridate's method for numbers builds a Period.
+months : @pure fn(x: double[]) -> Period
+months : fn(x: Date | POSIXct, [abbreviate]: logical) -> character[]
+
+# Period and duration constructors.
+years : @pure fn([x]: double[]) -> Period
+weeks : @pure fn([x]: double[]) -> Period
+days : @pure fn([x]: double[]) -> Period
+hours : @pure fn([x]: double[]) -> Period
+minutes : @pure fn([x]: double[]) -> Period
+seconds : @pure fn([x]: double[]) -> Period
+period : @pure fn([num]: double[] | NULL, [units]: character[], ...: Any) -> Period
+dyears : @pure fn([x]: double[]) -> Duration
+dweeks : @pure fn([x]: double[]) -> Duration
+ddays : @pure fn([x]: double[]) -> Duration
+dhours : @pure fn([x]: double[]) -> Duration
+dminutes : @pure fn([x]: double[]) -> Duration
+dseconds : @pure fn([x]: double[]) -> Duration
+duration : @pure fn([num]: double[] | NULL, [units]: character, ...: Any) -> Duration
+as.duration : @pure fn(x: Any, ...: Any) -> Duration
+as.period : @pure fn(x: Any, [unit]: character, ...: Any) -> Period
+
+# Intervals.
+interval : @pure fn([start]: Date | POSIXct | character[] | NULL, [end]: Date | POSIXct | character[] | NULL, [tzone]: character) -> Interval
+%--% : @pure fn(start: Date | POSIXct | character[], end: Date | POSIXct | character[]) -> Interval
+int_start : @pure fn(int: Interval) -> POSIXct
+int_end : @pure fn(int: Interval) -> POSIXct
+int_length : @pure fn(int: Interval) -> double[]
+time_length : @pure fn(x: Interval | Period | Duration | difftime, [unit]: character) -> double[]
+%within% : @pure fn(a: Date | POSIXct | Interval, b: Interval | list[Interval]) -> logical[]
+
+# Parsing. Without `tz` the result is a Date; a time zone makes it a POSIXct.
+ymd : @pure fn(...: Any, [quiet]: logical, [tz]: NULL, [locale]: character, [truncated]: double) -> Date
+ymd : @pure fn(...: Any, [quiet]: logical, [tz]: character, [locale]: character, [truncated]: double) -> POSIXct
+dmy : @pure fn(...: Any, [quiet]: logical, [tz]: NULL, [locale]: character, [truncated]: double) -> Date
+dmy : @pure fn(...: Any, [quiet]: logical, [tz]: character, [locale]: character, [truncated]: double) -> POSIXct
+mdy : @pure fn(...: Any, [quiet]: logical, [tz]: NULL, [locale]: character, [truncated]: double) -> Date
+mdy : @pure fn(...: Any, [quiet]: logical, [tz]: character, [locale]: character, [truncated]: double) -> POSIXct
+ymd_hms : @pure fn(...: Any, [quiet]: logical, [tz]: character, [locale]: character, [truncated]: double) -> POSIXct
+make_date : @pure fn([year]: double[], [month]: double[], [day]: double[]) -> Date
+make_datetime : @pure fn([year]: double[], [month]: double[], [day]: double[], [hour]: double[], [min]: double[], [sec]: double[], [tz]: character) -> POSIXct
+today : fn([tzone]: character) -> Date
+now : fn([tzone]: character) -> POSIXct
+
+# Components. Each keeps the length of `x`.
+year : @pure fn(x: Date | POSIXct | character[]) -> double[]
+month : @pure fn(x: Date | POSIXct | character[]) -> double[]
+month : @pure fn(x: Date | POSIXct | character[], [label]: logical, [abbr]: logical, [locale]: character) -> double[] | factor
+day : @pure fn(x: Date | POSIXct | character[]) -> integer[]
+mday : @pure fn(x: Date | POSIXct | character[]) -> integer[]
+yday : @pure fn(x: Date | POSIXct | character[]) -> double[]
+quarter : @pure fn(x: Date | POSIXct | character[], [type]: character, [fiscal_start]: double, [with_year]: logical) -> double[]
+week : @pure fn(x: Date | POSIXct | character[]) -> double[]
+isoweek : @pure fn(x: Date | POSIXct | character[]) -> double[]
+# Weekday numbers, or an ordered factor of names when `label` is passed.
+wday : @pure fn(x: Date | POSIXct | character[], [abbr]: logical, [week_start]: double, [locale]: character) -> double[]
+wday : @pure fn(x: Date | POSIXct | character[], [label]: logical, [abbr]: logical, [week_start]: double, [locale]: character) -> double[] | factor
+leap_year : @pure fn(date: Date | POSIXct | double[]) -> logical[]
+
+# Rounding keeps the class of `x`.
+floor_date : @pure fn(x: Date, [unit]: character, [week_start]: double) -> Date
+floor_date : @pure fn(x: POSIXct, [unit]: character, [week_start]: double) -> POSIXct
+ceiling_date : @pure fn(x: Date, [unit]: character, [change_on_boundary]: logical | NULL, [week_start]: double) -> Date
+ceiling_date : @pure fn(x: POSIXct, [unit]: character, [change_on_boundary]: logical | NULL, [week_start]: double) -> POSIXct
+round_date : @pure fn(x: Date, [unit]: character, [week_start]: double) -> Date
+round_date : @pure fn(x: POSIXct, [unit]: character, [week_start]: double) -> POSIXct
+rollback : @pure fn(dates: Date, [roll_to_first]: logical, [preserve_hms]: logical) -> Date
+rollback : @pure fn(dates: POSIXct, [roll_to_first]: logical, [preserve_hms]: logical) -> POSIXct
+%m+% : @pure fn(e1: Date, e2: Period) -> Date
+%m+% : @pure fn(e1: POSIXct, e2: Period) -> POSIXct
+%m-% : @pure fn(e1: Date, e2: Period) -> Date
+%m-% : @pure fn(e1: POSIXct, e2: Period) -> POSIXct

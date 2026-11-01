@@ -3,7 +3,9 @@ use {
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
-        global_scheme, interface_group, item_naming, item_tree,
+        global_scheme,
+        hir::Symbol,
+        interface_group, item_naming, item_tree,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
         metadata::{PackageMetadata, attached_union},
@@ -24,7 +26,7 @@ fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
 fn definition<'db>(db: &'db ProbeDatabase, name: &str) -> Item<'db> {
     let files = ProjectFiles::get(db);
     *package_definitions(db, files)
-        .get(name)
+        .get(&Symbol::new(name))
         .unwrap_or_else(|| panic!("`{name}` is defined"))
 }
 
@@ -137,6 +139,34 @@ fn a_new_definition_rechecks_nothing_that_does_not_read_it() {
     db.edit(files[0], "x <- function() 1L\nfresh <- 2L\n".to_owned());
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["fresh"]);
+}
+
+/// A name being typed is a new top-level definition on every keystroke. The project-wide
+/// definition map changes each time, so whatever reads it directly re-runs for every item
+/// checked afterwards; the interface edges and the duplicate check read per-name projections
+/// instead, and the edited file is the only one whose edges re-run.
+#[test]
+fn a_new_definition_rebuilds_no_other_files_interface_edges() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "x <- function() 1L\n",
+        "use_x <- function() x()\nalso <- function() use_x()\n",
+        "other <- function() also()\n",
+    ]);
+    settle(&db, &files);
+    db.executions_since(&[]);
+
+    db.edit(files[0], "x <- function() 1L\nfresh <- 2L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&[
+            "item_interface_edges",
+            "duplicate_binding_map",
+            "package_definition_index",
+        ]),
+        [1, 1, 1],
+        "only the new item's edges are derived; the fold runs once and its duplicates backdate"
+    );
 }
 
 #[test]
@@ -277,7 +307,7 @@ fn a_deep_reexport_chain_resolves_fully() {
 #[test]
 fn turning_inline_annotations_off_rechecks_only_items_that_have_them() {
     let mut db = ProbeDatabase::default();
-    let settings = AnalysisSettings::new(&db, true);
+    let settings = AnalysisSettings::new(&db, true, true);
     let files = db.project(&[
         "typed <- function(x: integer) -> integer x\n",
         "untyped <- function(x) x + 1L\n",
@@ -382,10 +412,10 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     // untouched item recomputing its reads.
     assert_eq!(
         db.executions_since(&["item_interface_reads", "item_top_level_names"]),
-        [0, 1],
-        "only the edited item re-derives its top-level names, for its own file's frame binders; \
-         its naming backdates, so nothing recomputes interface reads, and none of the five items \
-         in the untouched files reruns either"
+        [0, 0],
+        "the edited item's top-level names read only its memoized own-name flag, which backdates; \
+         its naming backdates too, so nothing recomputes interface reads, and none of the five \
+         items in the untouched files reruns either"
     );
 }
 
@@ -523,14 +553,15 @@ fn package(
 }
 
 const LOAD_QUERIES: &[&str] = &[
-    "item_load",
     "file_items",
+    "file_binds",
+    "package_bindings",
     "item_immediate_reads",
     "package_index",
 ];
 
 #[test]
-fn a_body_edit_rederives_one_item_of_the_load_index() {
+fn a_body_edit_rederives_one_file_of_the_load_index() {
     let mut db = ProbeDatabase::default();
     let (sources, files) = package(
         &db,
@@ -553,8 +584,8 @@ fn a_body_edit_rederives_one_item_of_the_load_index() {
     let index = package_index(&db, sources);
     assert_eq!(
         db.executions_since(LOAD_QUERIES),
-        [1, 1, 0, 1],
-        "only the edited item's load facts and its own file's layer run again"
+        [1, 1, 0, 0, 1],
+        "only the edited file's layer runs again, and its bindings stop at the firewall"
     );
     assert_eq!(
         index.files[0].items.items[0].hash,
@@ -577,7 +608,7 @@ fn a_namespace_edit_rederives_no_item() {
         .set_namespace(&mut db)
         .to("export(first)\nexport(value)\n".to_owned());
     let index = package_index(&db, sources);
-    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 1]);
+    assert_eq!(db.executions_since(LOAD_QUERIES), [0, 0, 0, 0, 1]);
     assert_eq!(index.namespace.exports, ["first", "value"]);
 }
 
@@ -596,7 +627,7 @@ fn moving_a_statement_down_keeps_its_load_facts() {
     package_index(&db, sources);
     assert_eq!(
         db.executions_since(LOAD_QUERIES),
-        [0, 1, 0, 1],
+        [1, 1, 0, 0, 1],
         "positions are per-file facts, so only the file layer runs again"
     );
 }

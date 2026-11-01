@@ -4,8 +4,11 @@
 //! of first appearance, which is what made multi-key and high-cardinality groupings slower than
 //! data.table. These kernels code the grouping columns into one integer per row instead: each
 //! column is a digit of a mixed-radix number, with `NA` as digit zero, a factor's level `l` as
-//! `l + 1` and an integer `v` as `v - min + 1`. Comparing codes compares the keys in `keyby`
-//! order (`NA` first), so a sorted result only sorts the groups. When the next column would
+//! `l + 1` and an integer `v` as `v - min + 1`. A character column is a digit only when the table
+//! carries its [`StringCodes`](crate::StringCodes), which the R bridge takes from R's interned
+//! strings: the digit is the string's code, or for `keyby` its rank among the distinct strings.
+//! Comparing codes compares the keys in `keyby` order (`NA` first), so a sorted result only sorts
+//! the groups. When the next column would
 //! carry the code past 64 bits, the code so far is replaced by its rank among the distinct codes,
 //! which keeps the order and is below the row count, so any number of grouping columns fits.
 //!
@@ -23,7 +26,7 @@
 
 use {
     crate::{
-        ColumnType, Result, Schema, Table,
+        ColumnType, Result, Schema, StringCodes, Table,
         kernel::{
             CodeValues, Codes, Evaluator, PARALLEL_ROWS, Shared, Value, Vector, and, fill,
             gather_column,
@@ -35,6 +38,7 @@ use {
     polars_buffer::Buffer,
     polars_core::runtime::THREAD_POOL,
     rayon::prelude::*,
+    std::sync::Arc,
 };
 
 /// The widest code range whose group states are indexed by code directly. Each thread holds one
@@ -82,7 +86,7 @@ pub(crate) fn aggregate(
         },
         Rows::Filter(_) | Rows::Positions(_) | Rows::Join(_) => return Ok(None),
     };
-    let Some(keys) = group_keys(frame, schema, &query.by)? else {
+    let Some(keys) = group_keys(table, schema, &query.by, query.keyed)? else {
         return Ok(None);
     };
     let evaluator = Evaluator {
@@ -180,14 +184,23 @@ enum DigitSource {
         values: Bitmap,
         validity: Option<Bitmap>,
     },
+    /// A character column's [`StringCodes`], with `ranks[code]` the digit of each code when the
+    /// digits must follow the strings' order, as `keyby`'s do.
+    Strings {
+        codes: Arc<StringCodes>,
+        ranks: Option<Vec<u32>>,
+    },
 }
 
-/// The grouping columns as digits, or `None` when a group is computed, is a double or a string.
+/// The grouping columns as digits, or `None` when a group is computed, is a double or a string
+/// without [`StringCodes`].
 fn group_keys(
-    frame: &DataFrame,
+    table: &Table,
     schema: &Schema,
     by: &[(PlSmallStr, Expr)],
+    keyed: bool,
 ) -> Result<Option<Keys>> {
+    let frame = table.frame();
     let mut digits = Vec::with_capacity(by.len());
     for (_, expr) in by {
         let Expr::Column(name) = expr else {
@@ -237,6 +250,34 @@ fn group_keys(
                 Digit {
                     source: DigitSource::Logical { values, validity },
                     radix: 3,
+                }
+            }
+            Some(ColumnType::Character) => {
+                let Some(codes) = table.string_codes(name) else {
+                    return Ok(None);
+                };
+                // Only the distinct strings are sorted, which is what keeps this cheaper than
+                // hashing every row's string.
+                let ranks = if keyed {
+                    let strings = column.as_materialized_series().str()?;
+                    let mut order: Vec<u32> = (1..=codes.first_rows.len() as u32).collect();
+                    order.sort_unstable_by_key(|code| {
+                        strings.get(codes.first_rows[*code as usize - 1] as usize)
+                    });
+                    let mut ranks = vec![0; codes.first_rows.len() + 1];
+                    for (rank, code) in order.into_iter().enumerate() {
+                        ranks[code as usize] = rank as u32 + 1;
+                    }
+                    Some(ranks)
+                } else {
+                    None
+                };
+                Digit {
+                    radix: codes.first_rows.len() as u64 + 1,
+                    source: DigitSource::Strings {
+                        codes: Arc::clone(codes),
+                        ranks,
+                    },
                 }
             }
             _ => return Ok(None),
@@ -362,6 +403,15 @@ fn append_digit(out: &mut [u64], start: usize, digit: &Digit) {
             append_digits(out, start, radix, validity, |row| {
                 u64::from(values.get_bit(row)) + 1
             });
+        }
+        DigitSource::Strings { codes, ranks } => {
+            let codes = &codes.codes;
+            match ranks {
+                Some(ranks) => append_digits(out, start, radix, &None, |row| {
+                    u64::from(ranks[codes[row] as usize])
+                }),
+                None => append_digits(out, start, radix, &None, |row| u64::from(codes[row])),
+            }
         }
     }
 }
