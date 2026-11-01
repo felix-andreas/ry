@@ -25,14 +25,15 @@ use {
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
             Parameter, RecordField, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeScheme, any,
-            column_type, conflicting_tags, contains_inference_var, erase_vars, for_each_child_type,
-            map_child_types, native_record, null, scalar, substitute_rigid, type_size, union_of,
-            unknown,
+            array, array_element, column_type, conflicting_tags, contains_inference_var,
+            erase_vars, for_each_child_type, is_ry_value_type, is_tag_type, map_child_types,
+            native_record, null, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{
         mem,
+        ops::Range,
         sync::atomic::{AtomicUsize, Ordering},
     },
     syntax::{TextRange, TextSize, native_values::accepts_native},
@@ -154,6 +155,11 @@ pub enum TypeErrorKind<'db> {
     NotAnAggregation {
         column: String,
     },
+    /// `Expr.head(n)` inside a larger expression in `GroupBy.agg`, which accepts it only as a
+    /// whole item.
+    HeadInsideExpression {
+        column: String,
+    },
     /// `setnames(f, new)` with as many names as the frame has columns, which data.table
     /// requires.
     ColumnNameCount {
@@ -237,6 +243,29 @@ pub enum TypeErrorKind<'db> {
         function: String,
         kind: NativeValueKind,
     },
+    /// `[1L, 2.5]`: an Array's items share one type and are never converted into each other.
+    ArrayItemsDiffer {
+        first: Ty<'db>,
+        found: Ty<'db>,
+    },
+    /// An item an Array cannot hold, such as a vector, an R list, `NULL` or a function.
+    ArrayItemType {
+        found: Ty<'db>,
+    },
+    /// `NA` in an Array literal: an Array holds no missing values.
+    ArrayMissingValue,
+    /// An index an Array does not take: a name, several indexes, or a non-numeric position.
+    ArrayIndex {
+        double: bool,
+        found: Option<Ty<'db>>,
+    },
+    /// An elementwise operator on an Array whose operands do not share one item type, or whose
+    /// item type the operator does not take (`["a"] + ["b"]`).
+    ArrayOperands {
+        operator: &'static str,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    },
     /// `point$z <- value` on a record without a field `z`: a record's fields are fixed.
     FieldCannotBeAdded {
         field: String,
@@ -315,6 +344,7 @@ enum DataFrameVerb {
     Agg,
     Join {
         lazy: bool,
+        asof: bool,
     },
     /// `lazy` and `collect`, which keep the columns and change the kind.
     Convert(FrameKind),
@@ -322,12 +352,40 @@ enum DataFrameVerb {
 }
 
 /// The column a DataFrame expression computes. `reads_column` tells an expression from a
-/// constant, and `aggregated` whether it gives one value per group.
+/// constant, and `shape` how many values it gives per group.
 struct ComputedColumn<'db> {
     name: String,
     ty: Ty<'db>,
     reads_column: bool,
-    aggregated: bool,
+    shape: Shape,
+}
+
+/// How many values a DataFrame expression gives inside `GroupBy.agg`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// One per row, which `agg` rejects.
+    PerRow,
+    /// One per group.
+    PerGroup,
+    /// `Expr.head(n)`: up to `n` per group, which `agg` accepts only as a whole item, exploding
+    /// them into rows.
+    Head,
+    /// An expression that combines `Expr.head(n)` with something else, which `agg` rejects.
+    NestedHead,
+}
+
+impl Shape {
+    /// The shape of an expression combining two others: one value per group only when both give
+    /// one. A head inside wins, so that `agg` can say what is wrong.
+    fn combine(self, other: Shape) -> Shape {
+        match (self, other) {
+            (Shape::Head | Shape::NestedHead, _) | (_, Shape::Head | Shape::NestedHead) => {
+                Shape::NestedHead
+            }
+            (Shape::PerGroup, Shape::PerGroup) => Shape::PerGroup,
+            _ => Shape::PerRow,
+        }
+    }
 }
 
 /// The binding a call head reaches after skipping non-function bindings.
@@ -801,7 +859,10 @@ fn erase_residual_vars_at<'db>(
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
             Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
-            Constraint::AtomicElement | Constraint::Key | Constraint::Unconstrained => unknown(db),
+            Constraint::AtomicElement
+            | Constraint::Key
+            | Constraint::ArrayItem
+            | Constraint::Unconstrained => unknown(db),
         };
     }
     if let Some(&rigid) = closer.generalized.get(&var) {
@@ -2036,6 +2097,7 @@ impl<'db> Checker<'db, '_> {
                 let items = module[items].iter().map(|&item| self.infer(item)).collect();
                 Ty::new(self.db, TyKind::NativeTuple(items))
             }
+            ExpressionKind::Array(items) => self.infer_array_literal(&module[items]),
             ExpressionKind::Record(fields) => {
                 let fields = fields.clone();
                 let fields = module[fields]
@@ -3658,6 +3720,77 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// The items share one type exactly, with no coercion between them, except that tags join
+    /// into one tag union as they do across branches. An empty literal takes its item type from
+    /// its first use.
+    fn infer_array_literal(&mut self, items: &[ExprId]) -> Ty<'db> {
+        let mut element: Option<Ty<'db>> = None;
+        for &item in items {
+            let found = self.infer(item);
+            let range = self.blame_range(item);
+            if matches!(
+                self.module.kind(item),
+                ExpressionKind::Literal(LiteralKind::Na(_))
+            ) {
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::ArrayMissingValue,
+                });
+                continue;
+            }
+            if !self.array_item_allowed(found) {
+                let found = self.table.resolve(self.db, found);
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::ArrayItemType { found },
+                });
+                continue;
+            }
+            let Some(first) = element else {
+                element = Some(found);
+                continue;
+            };
+            let snapshot = self.table.snapshot();
+            if self.table.unify(self.db, first, found).is_ok() {
+                continue;
+            }
+            self.table.rollback(snapshot);
+            let first = self.table.resolve(self.db, first);
+            let found = self.table.resolve(self.db, found);
+            if is_tag_type(self.db, first) && is_tag_type(self.db, found) {
+                let joined = union_of(self.db, [first, found]);
+                element = Some(self.report_conflicting_tags(range, joined));
+                continue;
+            }
+            self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::ArrayItemsDiffer { first, found },
+            });
+        }
+        let element = match element {
+            Some(element) => element,
+            None => self.fresh(Constraint::Unconstrained),
+        };
+        array(self.db, element)
+    }
+
+    /// An Array holds single `logical`, `integer`, `double` or `character` values unboxed, or
+    /// ry values boxed. An R vector or list item would make the Array ragged, and `complex` and
+    /// `raw` have no unboxed storage that the JIT reads.
+    fn array_item_allowed(&mut self, ty: Ty<'db>) -> bool {
+        let structural = self.structural(ty);
+        match structural.kind(self.db) {
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
+            )
+            | TyKind::Var(_)
+            | TyKind::Rigid(_)
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            _ => is_ry_value_type(self.db, structural),
+        }
+    }
+
     /// A joined value holding one tag in two payload shapes is not a type a `match` could
     /// take apart, so the join is reported and the value becomes `Unknown`.
     fn report_conflicting_tags(&mut self, range: TextRange, joined: Ty<'db>) -> Ty<'db> {
@@ -3733,7 +3866,9 @@ impl<'db> Checker<'db, '_> {
             TyKind::Any => Ok(any(self.db)),
             // An already-failed source does not produce a second error.
             TyKind::Unknown => Ok(unknown(self.db)),
-            TyKind::Named(..) => Ok(any(self.db)),
+            TyKind::Named(..) => {
+                Ok(array_element(self.db, resolved).unwrap_or_else(|| any(self.db)))
+            }
             // Iteration commits neither vector nor list, so a variable stays unconstrained.
             TyKind::Var(_) | TyKind::Rigid(_) => Ok(unknown(self.db)),
             _ => Err(resolved),
@@ -4572,6 +4707,14 @@ impl<'db> Checker<'db, '_> {
         if is_expr_type(self.db, resolved) {
             return resolved;
         }
+        if let Some(element) = array_element(self.db, resolved) {
+            return self.array_unary(
+                operand_range,
+                resolved,
+                element,
+                OperandExpectation::Numeric,
+            );
+        }
         match self.classify_numeric_operand(resolved) {
             NumericOperand::Concrete(shape, atomic) => self.shaped(shape, atomic),
             NumericOperand::ConcreteUnion(parts) => {
@@ -4633,6 +4776,14 @@ impl<'db> Checker<'db, '_> {
         if is_expr_type(self.db, resolved) {
             return resolved;
         }
+        if let Some(element) = array_element(self.db, resolved) {
+            return self.array_unary(
+                operand_range,
+                resolved,
+                element,
+                OperandExpectation::Logical,
+            );
+        }
         match resolved.kind(self.db) {
             TyKind::Any | TyKind::Unknown => return unknown(self.db),
             TyKind::Var(_)
@@ -4693,6 +4844,36 @@ impl<'db> Checker<'db, '_> {
         }
     }
 
+    /// `-x` keeps an `integer` or `double` Array's type, and `!x` takes only `Array<logical>`.
+    fn array_unary(
+        &mut self,
+        operand_range: TextRange,
+        array: Ty<'db>,
+        element: Ty<'db>,
+        expected: OperandExpectation,
+    ) -> Ty<'db> {
+        let element = self.table.resolve(self.db, element);
+        let fits = match element.kind(self.db) {
+            TyKind::Scalar(Atomic::Integer | Atomic::Double) => {
+                expected == OperandExpectation::Numeric
+            }
+            TyKind::Scalar(Atomic::Logical) => expected == OperandExpectation::Logical,
+            TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => true,
+            _ => false,
+        };
+        if !fits {
+            self.errors.push(TypeError {
+                range: operand_range,
+                kind: TypeErrorKind::InvalidOperand {
+                    expected,
+                    found: array,
+                },
+            });
+            return unknown(self.db);
+        }
+        array
+    }
+
     fn infer_binary(
         &mut self,
         id: ExprId,
@@ -4717,6 +4898,9 @@ impl<'db> Checker<'db, '_> {
                 // exponential.
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
+                if let Some(result) = self.infer_array_operator(range, operator, left, right) {
+                    return result;
+                }
                 self.operator_method_result(range, operator, lhs, rhs, left, right)
                     .unwrap_or_else(|| match operator {
                         Less | Greater | LessEq | GreaterEq | Equal | NotEqual => {
@@ -4779,6 +4963,9 @@ impl<'db> Checker<'db, '_> {
                 let left = self.infer(lhs);
                 let right = self.infer(rhs);
                 if matches!(operator, And | Or) {
+                    if let Some(result) = self.infer_array_operator(range, operator, left, right) {
+                        return result;
+                    }
                     // An operand whose type is still a variable is not constrained: it may be a
                     // scalar or a vector, which no single type expresses, so the operator stays
                     // opaque for it.
@@ -4811,6 +4998,91 @@ impl<'db> Checker<'db, '_> {
                 unknown(self.db)
             }
         }
+    }
+
+    /// Elementwise operators on Arrays. Both operands share one item type, with no promotion
+    /// between `integer` and `double`, and a single value of that type may stand on either side.
+    /// `None` when neither operand is an Array, so R's own rules apply.
+    fn infer_array_operator(
+        &mut self,
+        range: TextRange,
+        operator: BinaryOperator,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    ) -> Option<Ty<'db>> {
+        use BinaryOperator::*;
+        let left = self.structural(left);
+        let right = self.structural(right);
+        let left_element = array_element(self.db, left);
+        let right_element = array_element(self.db, right);
+        let known = left_element.or(right_element)?;
+        let spelling = match operator {
+            And => "&",
+            Or => "|",
+            _ => operator_spelling(operator)?,
+        };
+        let reject = |checker: &mut Self| {
+            checker.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::ArrayOperands {
+                    operator: spelling,
+                    left,
+                    right,
+                },
+            });
+            Some(unknown(checker.db))
+        };
+        let operand_element = |checker: &mut Self, operand: Ty<'db>, element: Option<Ty<'db>>| {
+            if let Some(element) = element {
+                return Some(element);
+            }
+            match operand.kind(checker.db) {
+                TyKind::Scalar(_) | TyKind::Var(_) | TyKind::Rigid(_) => Some(operand),
+                TyKind::Any | TyKind::Unknown => Some(known),
+                _ => None,
+            }
+        };
+        let (Some(left_item), Some(right_item)) = (
+            operand_element(self, left, left_element),
+            operand_element(self, right, right_element),
+        ) else {
+            return reject(self);
+        };
+        let snapshot = self.table.snapshot();
+        if self.table.unify(self.db, left_item, right_item).is_err() {
+            self.table.rollback(snapshot);
+            return reject(self);
+        }
+        let item = self.table.resolve(self.db, left_item);
+        let item_kind = match item.kind(self.db) {
+            TyKind::Scalar(atomic) => Some(*atomic),
+            TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => None,
+            _ => return reject(self),
+        };
+        let logical = scalar(self.db, Atomic::Logical);
+        let result = match operator {
+            Add | Subtract | Multiply | Modulo | IntegerDivide | Divide | Power => {
+                if item_kind
+                    .is_some_and(|atomic| !matches!(atomic, Atomic::Integer | Atomic::Double))
+                {
+                    return reject(self);
+                }
+                if matches!(operator, Divide | Power) {
+                    scalar(self.db, Atomic::Double)
+                } else {
+                    item
+                }
+            }
+            Less | Greater | LessEq | GreaterEq | Equal | NotEqual => logical,
+            And | Or => {
+                if item_kind.is_some_and(|atomic| atomic != Atomic::Logical) {
+                    return reject(self);
+                }
+                logical
+            }
+            _ => return None,
+        };
+        Some(array(self.db, result))
     }
 
     /// The shape of an operand of elementwise `&` or `|`; `None` when it is not a plain logical
@@ -5965,6 +6237,8 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         arguments: &[Argument],
     ) -> Ty<'db> {
+        // The variables typing a named callee creates are its scheme's instantiated parameters.
+        let first_var = self.table.next_var().0;
         let looked_up = match self.function_lookup(callee) {
             FunctionLookup::Ordinary => None,
             FunctionLookup::Found(ty) => Some(ty),
@@ -6003,6 +6277,15 @@ impl<'db> Checker<'db, '_> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        let named_callee = matches!(
+            self.module.kind(callee),
+            ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
+        );
+        let callback_outputs = if named_callee {
+            self.callback_outputs(callee_ty, first_var..self.table.next_var().0)
+        } else {
+            Vec::new()
+        };
         if self.is_null_placeholder(self.table.resolve(self.db, callee_ty)) {
             self.infer_call_arguments(range, arguments);
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -6023,7 +6306,126 @@ impl<'db> Checker<'db, '_> {
         }
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        if callback_outputs.is_empty() {
+            return result;
+        }
+        self.drop_unconstrained_members(result, &callback_outputs, first_var)
+    }
+
+    /// The callee's freshly instantiated type parameters (`instantiated`) that its parameter
+    /// types mention only as what a callback returns, such as `F` in `Result.and_then`'s
+    /// `f: fn(A) -> Result<B, F>`. Only those can stand for no value after the call: a
+    /// parameter an argument fills directly, or one that appears only in the result, means
+    /// "any value" when it stays open.
+    fn callback_outputs(&self, callee_ty: Ty<'db>, instantiated: Range<u32>) -> Vec<InferenceVar> {
+        let db = self.db;
+        if instantiated.is_empty() {
+            return Vec::new();
+        }
+        let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
+            return Vec::new();
+        };
+        let mut direct = FxHashSet::default();
+        let mut outputs = FxHashSet::default();
+        let parameter_types = function
+            .positional
+            .iter()
+            .copied()
+            .chain(function.named.iter().map(|parameter| parameter.ty))
+            .chain(function.variadic.iter().map(|rest| rest.element));
+        for ty in parameter_types {
+            match ty.kind(db) {
+                TyKind::Function(callback) => {
+                    collect_vars(db, callback.ret, &mut outputs);
+                    let inputs = callback
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(callback.named.iter().map(|parameter| parameter.ty))
+                        .chain(callback.variadic.iter().map(|rest| rest.element));
+                    for input in inputs {
+                        collect_vars(db, input, &mut direct);
+                    }
+                }
+                _ => collect_vars(db, ty, &mut direct),
+            }
+        }
+        outputs
+            .into_iter()
+            .filter(|var| instantiated.contains(&var.0) && !direct.contains(var))
+            .collect()
+    }
+
+    /// A callback output that no argument constrained stands for no value, so as a member of a
+    /// union in the result it adds nothing: `Result.and_then`'s `Result<B, E | F>` is `:Err(E)`
+    /// when the step never fails. A union of nothing but such parameters stays as it is, and a
+    /// parameter that a variable from before the call reaches (an unannotated outer parameter
+    /// passed as the callback) stays too, because its value is decided by that outer code.
+    fn drop_unconstrained_members(
+        &mut self,
+        result: Ty<'db>,
+        callback_outputs: &[InferenceVar],
+        first_var: u32,
+    ) -> Ty<'db> {
+        let db = self.db;
+        let mut open: FxHashSet<InferenceVar> = callback_outputs
+            .iter()
+            .map(|&var| self.table.find(var))
+            .filter(|&root| matches!(self.table.entry(root), Entry::Unbound { .. }))
+            .collect();
+        if open.is_empty() {
+            return result;
+        }
+        let resolved = self.table.resolve(db, result);
+        let mut in_result = FxHashSet::default();
+        collect_vars(db, resolved, &mut in_result);
+        open.retain(|var| in_result.contains(var));
+        if open.is_empty() {
+            return resolved;
+        }
+        for outer in 0..first_var {
+            let outer = InferenceVar(outer);
+            let mut reached = FxHashSet::default();
+            match self.table.entry(outer) {
+                Entry::Unbound { .. } => {
+                    reached.insert(self.table.find(outer));
+                }
+                Entry::Bound { ty, .. } => {
+                    let ty = self.table.resolve(db, *ty);
+                    collect_vars(db, ty, &mut reached);
+                }
+                Entry::Redirect(_) => {}
+            }
+            open.retain(|var| !reached.contains(var));
+            if open.is_empty() {
+                return resolved;
+            }
+        }
+        let unconstrained = |member: Ty<'db>| match member.kind(db) {
+            TyKind::Var(var) => open.contains(var),
+            _ => false,
+        };
+        fn walk<'db>(
+            db: &'db dyn Db,
+            ty: Ty<'db>,
+            unconstrained: &dyn Fn(Ty<'db>) -> bool,
+        ) -> Ty<'db> {
+            let ty = map_child_types(db, ty, &mut |child| walk(db, child, unconstrained));
+            match ty.kind(db) {
+                TyKind::Union(members) if members.iter().any(|&member| !unconstrained(member)) => {
+                    union_of(
+                        db,
+                        members
+                            .iter()
+                            .copied()
+                            .filter(|&member| !unconstrained(member)),
+                    )
+                }
+                _ => ty,
+            }
+        }
+        walk(db, resolved, &unconstrained)
     }
 
     /// R looks a called name up as a function: a binding that holds no function is skipped,
@@ -6308,7 +6710,8 @@ impl<'db> Checker<'db, '_> {
             "with_columns" => DataFrameVerb::WithColumns { lazy },
             "filter" | "sort" | "head" | "tail" => DataFrameVerb::KeepColumns { lazy },
             "group_by" => DataFrameVerb::GroupBy { lazy },
-            "join" => DataFrameVerb::Join { lazy },
+            "join" => DataFrameVerb::Join { lazy, asof: false },
+            "join_asof" => DataFrameVerb::Join { lazy, asof: true },
             "lazy" => DataFrameVerb::Convert(FrameKind::LazyFrame),
             "collect" => DataFrameVerb::Convert(FrameKind::DataFrame),
             "read_csv" if !lazy => DataFrameVerb::ReadCsv(FrameKind::DataFrame),
@@ -6436,20 +6839,25 @@ impl<'db> Checker<'db, '_> {
                     .filter_map(|argument| argument.value)
                     .zip(&computed)
                 {
-                    if !column.aggregated {
-                        self.errors.push(TypeError {
-                            range: self.blame_range(argument),
-                            kind: TypeErrorKind::NotAnAggregation {
-                                column: column.name.clone(),
-                            },
-                        });
-                    }
+                    let kind = match column.shape {
+                        Shape::PerRow => TypeErrorKind::NotAnAggregation {
+                            column: column.name.clone(),
+                        },
+                        Shape::NestedHead => TypeErrorKind::HeadInsideExpression {
+                            column: column.name.clone(),
+                        },
+                        Shape::PerGroup | Shape::Head => continue,
+                    };
+                    self.errors.push(TypeError {
+                        range: self.blame_range(argument),
+                        kind,
+                    });
                 }
                 let mut result = existing(columns.get(..usize::try_from(keys).ok()?)?);
                 result.extend(fields(computed));
                 Some(frame_of(db, frame_kind(lazy), result))
             }
-            DataFrameVerb::Join { lazy } => self.join_type(lazy, &columns, frame, rest),
+            DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, &columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
             DataFrameVerb::ReadCsv(_) => None,
@@ -6458,20 +6866,24 @@ impl<'db> Checker<'db, '_> {
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
     /// other than its keys, with `suffix` added to a name the left already has. A semi or anti
-    /// join keeps only the left's columns.
+    /// join keeps only the left's columns. `DataFrame.join_asof(left, right, on, by)` joins on
+    /// `by` and then `on`, with a left join's columns.
     fn join_type(
         &mut self,
         lazy: bool,
+        asof: bool,
         left: &[RecordField<'db>],
         frame: Option<Symbol>,
         arguments: &[Argument],
     ) -> Option<Ty<'db>> {
         let db = self.db;
         let module = self.module;
-        let matched = match_formals(
-            arguments,
-            &["other", "on", "how", "left_on", "right_on", "suffix"],
-        );
+        let formals: &[&str] = if asof {
+            &["other", "on", "by", "strategy", "suffix"]
+        } else {
+            &["other", "on", "how", "left_on", "right_on", "suffix"]
+        };
+        let matched = match_formals(arguments, formals);
         let other = matched[0]?;
         let other_ty = *self.recorded.get(&other)?;
         let right = match self.structural(other_ty).kind(db).clone() {
@@ -6489,13 +6901,36 @@ impl<'db> Checker<'db, '_> {
                 },
             }
         };
-        let how = string(2)?.unwrap_or_else(|| "inner".to_owned());
-        let suffix = string(5)?.unwrap_or_else(|| "_right".to_owned());
         let keys = |position: usize| matched[position].map(|value| literal_strings(module, value));
-        let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
-            (Some(on), None, None) => (on.clone()?, on?),
-            (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
-            _ => return None,
+        let (how, suffix, left_keys, right_keys) = if asof {
+            let by_null = matched[2].is_some_and(|value| {
+                matches!(
+                    module.kind(value),
+                    ExpressionKind::Literal(LiteralKind::Null)
+                )
+            });
+            let mut keys_of_both = if by_null {
+                Vec::new()
+            } else {
+                keys(2).unwrap_or(Some(Vec::new()))?
+            };
+            keys_of_both.extend(keys(1)??);
+            let suffix = string(4)?.unwrap_or_else(|| "_right".to_owned());
+            (
+                "left".to_owned(),
+                suffix,
+                keys_of_both.clone(),
+                keys_of_both,
+            )
+        } else {
+            let how = string(2)?.unwrap_or_else(|| "inner".to_owned());
+            let suffix = string(5)?.unwrap_or_else(|| "_right".to_owned());
+            let (left_keys, right_keys) = match (keys(1), keys(3), keys(4)) {
+                (Some(on), None, None) => (on.clone()?, on?),
+                (None, Some(left_on), Some(right_on)) => (left_on?, right_on?),
+                _ => return None,
+            };
+            (how, suffix, left_keys, right_keys)
         };
         let other_name = variable_name(module, other);
         // `on` names each key once for both frames, so a key missing from both is reported once,
@@ -6589,7 +7024,7 @@ impl<'db> Checker<'db, '_> {
             name: name.to_owned(),
             ty,
             reads_column: true,
-            aggregated: false,
+            shape: Shape::PerRow,
         }
     }
 
@@ -6619,7 +7054,7 @@ impl<'db> Checker<'db, '_> {
                     |checker: &mut Self| checker.frame_expression(first?, columns, frame);
                 let aggregate = |column: ComputedColumn<'db>, ty: Ty<'db>| ComputedColumn {
                     ty,
-                    aggregated: true,
+                    shape: Shape::PerGroup,
                     ..column
                 };
                 match name.as_str() {
@@ -6637,14 +7072,14 @@ impl<'db> Checker<'db, '_> {
                             name: "literal".to_owned(),
                             ty,
                             reads_column: false,
-                            aggregated: false,
+                            shape: Shape::PerRow,
                         })
                     }
                     "Expr.len" => Some(ComputedColumn {
                         name: "len".to_owned(),
                         ty: vector(Atomic::Integer),
                         reads_column: false,
-                        aggregated: true,
+                        shape: Shape::PerGroup,
                     }),
                     "Expr.alias" => {
                         let column = argument(self)?;
@@ -6680,6 +7115,13 @@ impl<'db> Checker<'db, '_> {
                         let column = argument(self)?;
                         Some(aggregate(column, vector(Atomic::Integer)))
                     }
+                    "Expr.head" => {
+                        let column = argument(self)?;
+                        Some(ComputedColumn {
+                            shape: Shape::Head,
+                            ..column
+                        })
+                    }
                     "Expr.is_null" => {
                         let column = argument(self)?;
                         Some(ComputedColumn {
@@ -6712,7 +7154,7 @@ impl<'db> Checker<'db, '_> {
                             name,
                             ty,
                             reads_column: yes.reads_column || no.reads_column,
-                            aggregated: yes.aggregated && no.aggregated,
+                            shape: yes.shape.combine(no.shape),
                         })
                     }
                     _ => None,
@@ -6778,7 +7220,7 @@ impl<'db> Checker<'db, '_> {
                     name,
                     ty,
                     reads_column: left.reads_column || right.reads_column,
-                    aggregated: left.aggregated && right.aggregated,
+                    shape: left.shape.combine(right.shape),
                 })
             }
             _ => None,
@@ -6804,7 +7246,7 @@ impl<'db> Checker<'db, '_> {
             name: "literal".to_owned(),
             ty: column_type(self.db, self.table.resolve(self.db, ty)),
             reads_column: false,
-            aggregated: true,
+            shape: Shape::PerGroup,
         })
     }
 
@@ -8015,6 +8457,32 @@ impl<'db> Checker<'db, '_> {
         // Report the overload-set finding unless one answer exists: every candidate failed
         // for the same reason, or exactly one got strictly further into the call (its first
         // blamed argument is the deepest; a whole-call verdict blames none).
+        // The standard library declares an Array twin before each `List` signature. When the
+        // argument is not an Array at all, that twin's failure explains nothing, so the finding
+        // comes from the remaining candidates.
+        let candidate_count = schemes.len();
+        let (candidate_errors, candidate_count) = if candidate_errors.len() == candidate_count {
+            let relevant: Vec<TypeError<'db>> = candidate_errors
+                .iter()
+                .filter(|error| {
+                    !matches!(
+                        &error.kind,
+                        TypeErrorKind::Mismatch { expected, found }
+                            if array_element(self.db, *expected).is_some()
+                                && array_element(self.db, *found).is_none()
+                    )
+                })
+                .cloned()
+                .collect();
+            if relevant.is_empty() || relevant.len() == candidate_errors.len() {
+                (candidate_errors, candidate_count)
+            } else {
+                let count = relevant.len();
+                (relevant, count)
+            }
+        } else {
+            (candidate_errors, candidate_count)
+        };
         let blamed: Vec<Option<usize>> = candidate_errors
             .iter()
             .map(|error| {
@@ -8023,7 +8491,7 @@ impl<'db> Checker<'db, '_> {
                     .position(|argument| argument.range == error.range)
             })
             .collect();
-        let single_answer = if candidate_errors.len() != schemes.len() {
+        let single_answer = if candidate_errors.len() != candidate_count {
             None
         } else if candidate_errors
             .windows(2)
@@ -9031,6 +9499,9 @@ impl<'db> Checker<'db, '_> {
         if self.naming.masked_subsets.contains(&id) {
             return unknown(self.db);
         }
+        if let Some(element) = array_element(self.db, subject) {
+            return self.array_index(range, double, subject, element, arguments, &index_types);
+        }
         // An `Unknown`/`Any` subject's gap was already diagnosed, so `m[i, j]` must not
         // cascade an arity error.
         match subject.kind(self.db) {
@@ -9085,6 +9556,69 @@ impl<'db> Checker<'db, '_> {
                 unknown(self.db)
             }
         }
+    }
+
+    /// An Array has one dimension and no names, so it takes exactly one positional index:
+    /// `x[[i]]` reads one item by position, and `x[i]` selects an Array of items by positions or
+    /// by a logical mask. `x[]` is `x` itself.
+    fn array_index(
+        &mut self,
+        range: TextRange,
+        double: bool,
+        subject: Ty<'db>,
+        element: Ty<'db>,
+        arguments: &[Argument],
+        index_types: &[Ty<'db>],
+    ) -> Ty<'db> {
+        let result = if double { element } else { subject };
+        if !double
+            && arguments.iter().all(|argument| argument.value.is_none())
+            && arguments.len() <= 1
+        {
+            return subject;
+        }
+        let index = match (arguments, index_types) {
+            ([argument], [index]) if argument.name.is_none() => Some(self.structural(*index)),
+            _ => None,
+        };
+        let position = |db, ty: Ty<'db>, logical: bool| match ty.kind(db) {
+            TyKind::Scalar(Atomic::Integer | Atomic::Double) => true,
+            TyKind::Scalar(Atomic::Logical) => logical,
+            TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => true,
+            _ => false,
+        };
+        let fits = index.is_some_and(|index| {
+            let index = self.table.resolve(self.db, index);
+            match index.kind(self.db) {
+                _ if position(self.db, index, false) => true,
+                TyKind::Vector(item) if !double => position(self.db, *item, true),
+                _ if !double => array_element(self.db, index).is_some_and(|item| {
+                    let item = self.table.resolve(self.db, item);
+                    position(self.db, item, true)
+                }),
+                _ => false,
+            }
+        });
+        if !fits {
+            let range = match arguments {
+                [
+                    Argument {
+                        value: Some(value),
+                        name: None,
+                        ..
+                    },
+                ] => self.blame_range(*value),
+                _ => range,
+            };
+            self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::ArrayIndex {
+                    double,
+                    found: index,
+                },
+            });
+        }
+        result
     }
 
     /// `f[i, j, by]` on a frame: data.table's query. `i` filters or orders rows (or joins
@@ -12595,4 +13129,12 @@ mod tests {
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
     }
+}
+
+/// The inference variables `ty` mentions, as the table resolved them when `ty` was read.
+fn collect_vars<'db>(db: &'db dyn Db, ty: Ty<'db>, into: &mut FxHashSet<InferenceVar>) {
+    if let TyKind::Var(var) = ty.kind(db) {
+        into.insert(*var);
+    }
+    for_each_child_type(db, ty, &mut |child| collect_vars(db, child, into));
 }

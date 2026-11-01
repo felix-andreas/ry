@@ -1,0 +1,32 @@
+#==== arrays
+#---- named_item
+[x = 1]
+#++++
+error: an Array item has no name; use a record such as `(x = 1, y = 2)` for named fields
+ --> 1:2
+  | [x = 1]
+  |  ^
+
+#---- empty_item
+[1, , 2]
+#++++
+error: expected an item in this Array
+ --> 1:5
+  | [1, , 2]
+  |     ^
+
+#---- spliced_dots
+f <- function(...) [1, ...]
+#++++
+error: `...` cannot be spliced into an Array
+ --> 1:24
+  | f <- function(...) [1, ...]
+  |                        ^^^
+
+#---- unclosed
+x <- [1, 2
+#++++
+error: unclosed `[`; expected `]` to close it
+ --> 1:6
+  | x <- [1, 2
+  |      ^

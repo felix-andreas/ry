@@ -410,7 +410,7 @@ pub mod feedback {
 
 /// The [`feedback`] bit for `value`.
 pub unsafe fn value_kind(value: Sexp) -> u8 {
-    if values::has_attributes(value) || value.is_altrep() {
+    if values::has_attributes(value) || value.is_altrep() || value.is_array() {
         return feedback::OTHER;
     }
     let scalar = value.length() == 1;
@@ -552,6 +552,9 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         {
             return true;
         }
+        if reuses_first_argument(expression) {
+            return true;
+        }
         if matches!(
             &*name,
             "eval" | "evalq" | "local" | "with" | "within" | "source" | "sys.function" | "do.call"
@@ -567,6 +570,28 @@ unsafe fn may_modify_in_place(expression: Sexp) -> bool {
         cell = cell.cdr();
     }
     false
+}
+
+/// Whether `expression` is `x <- f(x, ...)` for a standard library function that updates its first
+/// argument in place. The AST evaluator decides at run time whether the binding owns the value
+/// (`eval::rebind`), so the compiler leaves the whole assignment to it, and an earlier argument
+/// of an enclosing call must not keep `x` in an uncounted register.
+unsafe fn reuses_first_argument(expression: Sexp) -> bool {
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol || !matches!(&*symbol_name(head), "<-" | "=") {
+        return false;
+    }
+    let target = expression.cdr().car();
+    let value = expression.cdr().cdr().car();
+    target.kind() == SexpType::Symbol
+        && value.kind() == SexpType::Language
+        && value.car().kind() == SexpType::Symbol
+        && value.cdr().kind() == SexpType::Pairlist
+        && value.cdr().car() == target
+        && value.cdr().tag() == nil()
+        && crate::standard_library::BUILTINS.iter().any(|definition| {
+            definition.reuses_first_argument && *symbol_name(value.car()) == *definition.name
+        })
 }
 
 /// Adds the symbols `expression` assigns locally; `false` when it reflects on its frame.
@@ -1020,6 +1045,7 @@ impl Compiler {
                 }
                 self.emit(Op::Return, &[dst]);
             }
+            "<-" | "=" if reuses_first_argument(call) => self.fallback(call, dst)?,
             "<-" | "=" => {
                 self.expression(args[1].1, dst)?;
                 let symbol = self.constant(args[0].1);
@@ -1769,6 +1795,7 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
             && value.length() == 1
             && !values::has_attributes(value)
             && !value.is_altrep()
+            && !value.is_array()
     };
     if !scalar(left) || !scalar(right) {
         return Ok(None);

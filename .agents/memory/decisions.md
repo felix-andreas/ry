@@ -2753,8 +2753,8 @@ first lines R had already read, leaving R mid-command.
 - **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
   with value semantics, insertion order and an open-addressing index, because a named list
   matches partially and allows duplicates, and an environment has reference semantics.
-  `identical()` ignores order, as Roc's equality does. Updates copy, which makes a growing loop
-  quadratic until the compiler can reuse a value it owns (backlog).
+  `identical()` ignores order, as Roc's equality does. Updates reuse a uniquely held value in
+  place (see "Standard library updates reuse a uniquely held value").
 - **Errors are tags, not conditions:** a function that can fail returns `:Ok(x) | :Err(:Tag)`, and a
   wrong argument type raises an R error that names the parameter, so a misuse is loud and a domain
   failure is a value.
@@ -2762,6 +2762,73 @@ first lines R had already read, leaving R mid-command.
   checker, hover, completion and goto-definition read the stub file like any other, so incremental
   analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
   the draft with open questions is `contributing/design/standard-library.md`.
+
+## Standard library updates reuse a uniquely held value
+
+- **Previous source of truth.** Every update (`Dict.insert`, `Set.insert`, `List.append`, ...)
+  built a fresh value, because a builtin could not know whether its caller would overwrite the
+  argument's binding. A loop growing a collection was quadratic: 40,000 `Dict.insert`s took 17.4 s.
+- **Target shape.** Perceus-style reuse, as Roc and Koka do it. `eval::rebind` recognizes
+  `x <- f(x, ...)` for a builtin flagged `reusing_first_argument` and passes the first argument as
+  `Call::reusable` when the frame binding holds its only reference and no other argument is the
+  same value; `standard_library::owned` also accepts a reference-count-zero temporary. Dicts and
+  sets are counted records whose key and value vectors are resizable and double when full, and
+  `build_index` takes spare room so `reserve` can presize the index. The bytecode compiler hands
+  such assignments to the AST evaluator.
+- **Why not a special form or last-use analysis.** A special form would make every library update
+  syntax, and last-use analysis needs the compiler; the reference count is exact at the call
+  boundary for AST frames, so reuse is decided where it is cheapest. It is not exact for a frame a
+  compiled closure owns: bytecode registers hold uncounted references (`backlog.md`). The remaining copies (a parameter's
+  first update, `state$seen <- Dict.insert(state$seen, ...)`) are in `backlog.md`.
+- **Impact.** Value semantics are unchanged (any second holder copies). 40,000 inserts: 0.04 s.
+  The checker is unaffected.
+
+## Standard library breadth against Roc's builtins
+
+- Each module was compared with Roc's builtins (pre-`Try` API) and everything that is typed,
+  `NA`-free and reports failure as a tag was taken; the full list and the renames are in
+  `contributing/design/standard-library.md`.
+- **Skipped, with the reason:**
+  - `Bool`, `Box`, `Encode`, `Decode`, `Hash`, `Inspect`: R covers booleans; the rest serve Roc's
+    memory layout or abilities, which ry does not have.
+  - Bitwise operations, shifts, `add_wrap`, `pow_int`: R's 32-bit integer reserves its minimum for
+    `NA`, so wrapping has no total definition and integer `pow` overflows almost at once.
+  - Unchecked `sqrt` and `log`, `asin`, `acos`, `is_nan`: they produce `NaN`, which the library
+    never returns.
+  - `pi`, `tau`, `e`: constants are not functions and R already has `pi`.
+  - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
+    and strings are immutable.
+  - `List.range`: `seq_len` and `seq` cover it.
+  - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
+    first key fixes the key type.
+- **Changed:** `Num.ceiling`, `floor` and `round` keep the number type (R integers are 32-bit, so a
+  rounded large double cannot become an integer); `Num.to_integer_checked` converts with
+  `:Err(:OutOfBounds)`. Saturating integer arithmetic clamps to plus or minus 2147483647.
+- **Hover docs** come from `#'` lines directly above a declaration in a `.Rtypes` file
+  (`StubLibrary::documentation`); a later source's first declaration of a name replaces or clears
+  them, the same override rule as the type.
+
+## A call's result drops unconstrained type-parameter members of a union
+
+- `Result.and_then : <A, B, E, F> ... -> Result<B, E | F>`. Without a rule, a step that never fails
+  left `F` an open variable, so the result rendered `:Err(:InvalidNumStr | ?)` and later
+  unification could bind it to anything.
+- `Checker::callback_outputs` picks the scheme's instantiated variables that occur in parameter
+  types only as a callback's return; `Checker::drop_unconstrained_members` removes those that are
+  still unbound after the call and that no variable older than the call reaches. A broader first
+  version dropped any still-open instantiated variable and wrongly typed `Find` in an unannotated
+  function and every return-only generic (`<T> fn() -> T | NULL`) as `NULL`; the fixtures
+  `standard-library.R.test` "an_open_parameter_filled_by_an_argument_is_kept" and
+  "a_return_only_parameter_is_kept" pin both. A union of only such members stays. Contract:
+  `type-system.mdx`, "Union normalization".
+
+## The standard library runs only on ry's runtime
+
+- A pure-R build for GNU R was declined. Many functions return result tags and `Dict`/`Set`
+  values, which GNU R cannot represent, and a partial build covering only `Str` and `Num` would
+  split the library into two dialects with different availability.
+- Instead, a diagnostic should flag library calls once a project can declare that it targets GNU R
+  (`backlog.md`).
 
 ## The benchmark harness compares test by test through `ry load`
 
@@ -3119,9 +3186,21 @@ first lines R had already read, leaving R mid-command.
   a leading `|`, and use the fewest annotations that make the point. If a snippet needs a sentence
   to be understood, simplify the snippet instead.
 - **The checker tab opens untyped.** Plain R with a real `ry check` finding comes first, and an
-  Untyped/Typed toggle in the frame header adds one `#:` line that finds a second bug, with a
-  one-line caption saying R reads it as a comment. Each toolchain view ends with one quiet docs
-  link. Leading with annotations assumed the reader already knew what they were.
+  Untyped/Typed toggle in the frame header shows the same file with that bug fixed and one `#:`
+  line that finds the next, with a one-line caption saying R reads it as a comment. Each mode shows
+  exactly one diagnostic, so the two outputs are the same height. Each toolchain view ends with one
+  quiet docs link. Leading with annotations assumed the reader already knew what they were.
+- **Tabs in one frame share the tallest tab's height, so the content is balanced to make that
+  height small.** On wide screens a switch must not move the page, so a showcase's panels share one
+  grid cell. A short tab then leaves a visibly empty frame, so the snippets are sized to land near
+  the same height (toolchain tabs about 320px at 1440, typing steps within about 100px of each
+  other), and the language server's feature tabs sit in the frame's header row like the checker
+  toggle. At 900px and below, code and output stack and the heights differ by hundreds of pixels, so
+  there each frame fits its own panel and a switch may move the page.
+- **The landing Venn has a step indicator and a caption; why-ry's static copy does not.** Four
+  clickable bars repeat the step tabs for pointer users, and one plain caption per step says what
+  the highlighted region means, which also defines R++ and R-- in context. The Venn is centred
+  against the steps column.
 - **A tab appears only once its feature has a real snippet.** The runtime's Speed tab charts the
   why-ry Speed table as speedup over GNU R on one linear axis from zero with a 1x line, sorted so
   the strongest wins lead, and keeps every program, including the slowdown (drawn in grey), because
@@ -3177,6 +3256,31 @@ first lines R had already read, leaving R mid-command.
   nominal cases in `crates/ide/tests/ide/records-and-tags.R.test` and `crates/interp/tests/test_records.rs`
   pin the behavior.
 
+## Per-group top rows and as-of joins reuse the engine's kernels
+
+- **Previous shape.** The Polars-style API had no way to keep each group's best rows or to join on
+  the nearest key, so the table bench answered db-benchmark's top-two question and the keyed
+  rolling join with data.table syntax (`x[order(-v3), head(v3, 2L), by = id6]`,
+  `prices[trades, roll = TRUE]`).
+- **`Expr.head(n)` inside `agg` keeps up to `n` values per group, as rows.** Polars gives a list
+  per group there, but ry has no list columns, so the values are exploded into rows, which is also
+  data.table's layout. The checker tracks an expression's shape (`Shape` in
+  `crates/semantics/src/check.rs`: per row, per group, or up to `n` per group) and accepts `Head`
+  only as a whole `agg` item, because `head(v, 2) + 1` would mix shapes. After a sort, the planner
+  fuses sort and aggregation into one query, which hits the engine's top-k kernel
+  (`group.rs::top_k_shape`) instead of sorting the whole table.
+- **`join_asof` is `How::Asof(Strategy)` in `table::lazy`, lowered to the rolling join.** The left
+  frame is data.table's `i`, so `"backward"` is `roll = TRUE`, `"forward"` is `roll = -Inf` and
+  `"nearest"` is `roll = "nearest"`. The `by` columns become the leading equality keys and `on` the
+  rolled key. One kernel (`join.rs::rolling`, with Polars' asof as the fallback) serves both APIs.
+- **A grouped median holds `(row, slot)` pairs, one list per run of rows.** It used to hold
+  `(slot, value)` pairs and concatenate the threads' lists, 240 MB of fresh memory per 1e7-row
+  query; page-faulting that in made groupby q6 from R two to ten times slower than the same kernel
+  measured from Rust. Reading the value from the input column during the counting sort halves the
+  lists and drops the concatenation.
+- **Impact.** No new kernel or stored state; both verbs are thin plan steps. The typing fixtures in
+  `frames.R.test` and `crates/table/tests/test_lazy.rs` pin the semantics.
+
 ## data.table's helpers run data.table's own C, and the C API is what makes them fast
 
 - **Previous shape.** The plan was to route R calls to `fread`, `fwrite`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`, `fifelse`, `tstrsplit` and friends to the engine's kernels in `table::ops` and `table::io`, which beat data.table when measured from Rust. Under ry's runtime those calls ran data.table's own C through libr, at up to 2.5 times GNU R's time, because every C API call (`TRUELENGTH`, `STRING_ELT`, `LENGTH`, `INTEGER`, the type predicates, `PROTECT`) entered the full error boundary.
@@ -3191,6 +3295,18 @@ first lines R had already read, leaving R mid-command.
 - **Target shape.** `Heap::retire_escaped` runs when the outermost native call returns (`crates/libr/src/boundary.rs`). Native code may store through the pointer only while that call runs, so each old escaped vector moves to the remembered set: the next minor collection rescans it once, then it is an ordinary object. GNU R's collector never sees those stores at all, so this is strictly safer than GNU R. While a call still runs, an old escaped character vector is not rescanned: a minor collection marks every young CHARSXP instead, which is sound because a character vector holds only CHARSXPs and they point at nothing. A young CHARSXP that is garbage then lives until the next major collection.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
+
+## An Array is a flagged R vector, written `[...]`
+
+- **Previous shape.** ry had no strict vector. Typed code used `c()`, whose result R coerces (`c(1, "a")` is character), recycles, and lets hold `NA`, so neither the checker nor a DataFrame column could promise one item type without missing values.
+- **Target shape.** `[a, b, c]` is ry syntax for `Array<T>`, the standard library's strict vector: one exact item type (a single `logical`, `integer`, `double` or `character`, or a ry value), no `NA`, no attributes, no recycling and no implicit conversion. The contract is `reference/type-system.mdx`, "Arrays"; the user page is `type-checking/arrays.mdx`.
+- **Runtime representation.** An Array is an ordinary R vector carrying the heap flag `flag_bits::ARRAY` (`crates/heap/src/object.rs`): atomic storage for scalar items, a VECSXP for ry-value items. A separate object type was rejected because every C API accessor, `sum()`, and the JIT already read the unboxed storage, so converting to R is free (drop the flag) and nothing has to learn a new layout. Setting any attribute clears the flag, which keeps "no attributes" true without checks at every attribute write. `values::duplicate` and `shallow_duplicate` drop the flag on the copy (nested Arrays keep theirs), because a copier is about to write and a builtin or C code may write an `NA`; only `arrays::writable` re-flags a copy, after checking the write.
+- **One place enforces the rules.** `crates/interp/src/arrays.rs` validates construction, operators (`arith.rs` wraps each builtin in `strict`), indexing and replacement, then flags the result. The bytecode fast paths and the JIT's type guard refuse a flagged operand, so they can never skip a check; a dedicated Array feedback kind is backlog work.
+- **R code keeps working on Arrays.** Reads follow R's positions wherever R gives no `NA` (negative positions, zeros), and everything that would produce `NA` is an error. A replacement that is not an item of the item type (an `NA`, an R vector, another type) does not error: the result is the plain R vector R would build, so base functions such as `ifelse()` that assign into an argument keep working. Typed code cannot reach that path because the checker rejects the value; the rules the checker cannot see (bounds, no recycling) stay runtime errors, so a typed `Array<T>` never holds a plain vector.
+- **`List` results.** A `List` function returns an Array only when its collection argument (`list`, `first`, `lists`) is one, never because an item argument is. A callback's result type is bound by the `item` constraint (`types/ry.Rtypes`), so the checker rejects `List.map` to a non-item instead of failing at run time.
+- **Checker.** `Array<T>` fits `T[]` (atomic items) or `list[T]` (ry-value items), never the reverse, so Arrays pass to R code and R vectors need `as.Array()`. A DataFrame stores an Array column as its plain vector, so `column_type` maps `Array<T>` to `T[]`.
+- **Impact.** No duplicated state: the flag is the single source of truth for strictness, and the checker's type and the runtime flag agree by construction. Pinned by `crates/semantics/tests/typing/arrays.R.test`, `crates/interp/tests/test_arrays.rs` (including a generated round trip) and Array seeds in both fuzzers.
+
 # Decision record: editor responsiveness at 300,000 lines
 
 - **Previous shape.** Completion walked every item in the project per request, reading each item's
@@ -3230,6 +3346,30 @@ first lines R had already read, leaving R mid-command.
 - **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
   right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
   finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
+
+# Decision record: a parallel startup warm-up in the server
+
+- **Previous shape.** The server primed the workspace one file at a time in idle units, and each
+  unit also scanned the file's `library()` calls and applied the grown attach union at once. The
+  first file's check derived every item's naming for the project-wide maps on one thread, about
+  1.3 s on a 300,000-line project, and the first wave's lints read those maps, so a file opened at
+  startup waited that long for any diagnostics. Each union change re-ran the open files'
+  diagnostics, so an open file was republished about six times, with counts that flickered.
+- **Target shape.** `Worker::warm_up` in `crates/ry/src/server.rs` runs before any other idle
+  work: it scans every file's attach facts across all cores and applies the union once, then
+  derives every item's naming and the per-file folds (`file_interface_reads`,
+  `file_conditional_writers`) across all cores, as `ry check` does. Until it ends, the first wave
+  holds only parse-stage diagnostics (the lints need the maps), pull diagnostics answer the same,
+  and settled publishes wait; its end refreshes every open file. The rest of the cold check runs
+  in parallel batches of 64 files. `Worker::in_parallel` is the one helper for both.
+- **Stopping parallel work.** The threads run on cloned handles whose tokens `CancelHandle`
+  cancels too, and they also poll a queued-job counter between files, because salsa resets a
+  handle's cancellation flag when a top-level query returns (`attach.rs`, `DbGuard::drop`), which
+  drops a flip that lands at a query's end. Without the counter an open sometimes waited for the
+  whole warm-up.
+- **Impact.** On dsbench a file opened at startup gets its first wave in under 15 ms (from about
+  1.3 s) and its settled diagnostics about 0.55 s after startup (from 1.3 to 1.9 s), published
+  once instead of six times. Analysis is unchanged; only the order and parallelism of work moved.
 
 ## ry run and ry R: the command chooses the runtime
 
@@ -3336,3 +3476,13 @@ explicit allocators".
   `ExprId` instead of a hash map (`RecordedTypes` in `check.rs`), since the memoized
   `ExpressionTypes` was already dense. IDE scans that need both kind and range go through
   `Module::expressions`, which zips the two arrays.
+
+## `just ry` builds ry's runtime; ry-lang does not depend on libr
+
+- `ry run` loads ry's runtime (`libR.so`) beside the executable at run time, and libr is a separate
+  cdylib, so `cargo run -p ry-lang` never builds it. `just ry` builds `-p ry-lang -p libr` first,
+  and `just build` builds the whole workspace; the not-found error names both.
+- A nightly artifact dependency (`artifact = "cdylib"`) was rejected: every `ry-lang` build,
+  including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
+  still lose the library, because the artifact path points into the build directory. Embedding
+  the library in the binary would double its size for users who never run code.

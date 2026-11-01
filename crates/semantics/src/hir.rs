@@ -440,9 +440,9 @@ impl Module {
                 visit(body);
             }
             ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => visit(body),
-            ExpressionKind::Block { statements: items } | ExpressionKind::Tuple(items) => {
-                self[items].iter().copied().for_each(visit)
-            }
+            ExpressionKind::Block { statements: items }
+            | ExpressionKind::Tuple(items)
+            | ExpressionKind::Array(items) => self[items].iter().copied().for_each(visit),
             ExpressionKind::Paren(inner) => visit(inner),
             ExpressionKind::Record(fields) => {
                 self[fields].iter().map(|field| field.value).for_each(visit)
@@ -703,6 +703,8 @@ pub enum ExpressionKind {
     Tuple(Span<ExprId>),
     /// `(x = 1, y = 2)`: a native record, fields in source order.
     Record(Span<RecordField>),
+    /// `[a, b]`: an Array literal.
+    Array(Span<ExprId>),
     /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
     /// parenthesized list, so a payload types exactly like the matching literal.
     Tag {
@@ -1053,6 +1055,25 @@ impl Lowering {
                     Some(list) => self.lower_items(list, range),
                     None => self.missing(range),
                 }
+            }
+            SyntaxKind::ARRAY_EXPR => {
+                let items = match child_of_kind(node, SyntaxKind::ARGUMENT_LIST) {
+                    Some(list) => {
+                        let mark = self.argument_stack.len();
+                        self.lower_arguments_of(list, None);
+                        let item_mark = self.expression_stack.len();
+                        for argument in self.argument_stack.drain(mark..) {
+                            self.expression_stack.extend(argument.value);
+                        }
+                        seal(
+                            &mut self.expression_stack,
+                            item_mark,
+                            &mut self.module.expression_lists,
+                        )
+                    }
+                    None => Span::default(),
+                };
+                self.allocate(ExpressionKind::Array(items), range)
             }
             SyntaxKind::TAG_EXPR => {
                 let Some(name_node) = child_of_kind(node, SyntaxKind::NAME) else {

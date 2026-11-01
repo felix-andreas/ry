@@ -9,10 +9,17 @@
 //!
 //! A dictionary or set is a record object with a fixed layout (see `heap::records`): its keys as
 //! one atomic vector, a dictionary's values as a list, and an open-addressing hash index as an
-//! integer vector. The values are immutable, so every update builds a new object.
+//! integer vector.
+//!
+//! The values are immutable to the program, but an update reuses its first argument when nothing
+//! else can observe it: a temporary, or the value of `x` in `x <- Dict.insert(x, k, v)` when that
+//! binding holds the only reference (`Call::reusable`, set by `eval::rebind`). A builtin flagged
+//! with `reusing_first_argument` checks [`owned`] and then grows the value in place, so a loop
+//! that keeps inserting or appending costs amortized constant time per step, as in Roc.
 
 use {
     crate::{
+        arrays,
         builtins::{Arg, BuiltinDef, Call, builtin},
         eval, records, scope,
         sort::{IdenticalFlags, identical},
@@ -47,16 +54,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Result.map_both", result_map_both),
     library("Result.and_then", result_and_then),
     library("Result.on_err", result_on_err),
+    library("Result.map2", result_map2),
     library("List.from_vector", list_from_vector),
     library("List.to_vector", list_to_vector),
     library("List.len", list_len),
     library("List.is_empty", list_is_empty),
     library("List.get", list_get),
-    library("List.set", list_set),
+    library("List.set", list_set).reusing_first_argument(),
     library("List.update", list_update),
-    library("List.append", list_append),
+    library("List.append", list_append).reusing_first_argument(),
     library("List.prepend", list_prepend),
-    library("List.concat", list_concat),
+    library("List.concat", list_concat).reusing_first_argument(),
     library("List.single", list_single),
     library("List.repeat", list_repeat),
     library("List.reverse", list_reverse),
@@ -64,6 +72,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.map", list_map),
     library("List.map_with_index", list_map_with_index),
     library("List.map2", list_map2),
+    library("List.map3", list_map3),
+    library("List.map4", list_map4),
     library("List.join_map", list_join_map),
     library("List.keep_if", list_keep_if),
     library("List.drop_if", list_drop_if),
@@ -73,6 +83,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.walk", list_walk),
     library("List.walk_backwards", list_walk_backwards),
     library("List.walk_until", list_walk_until),
+    library("List.walk_backwards_until", list_walk_backwards_until),
+    library("List.walk_with_index", list_walk_with_index),
+    library("List.walk_with_index_until", list_walk_with_index_until),
+    library("List.walk_from", list_walk_from),
+    library("List.walk_from_until", list_walk_from_until),
+    library("List.walk_try", list_walk_try),
+    library("List.for_each", list_for_each).invisible(),
+    library("List.for_each_try", list_for_each_try),
     library("List.any", list_any),
     library("List.all", list_all),
     library("List.contains", list_contains),
@@ -99,6 +117,19 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.max", list_max),
     library("List.starts_with", list_starts_with),
     library("List.ends_with", list_ends_with),
+    library("List.sort_asc", list_sort_asc),
+    library("List.sort_desc", list_sort_desc),
+    library("List.swap", list_swap).reusing_first_argument(),
+    library("List.replace", list_replace),
+    library("List.split_first", list_split_first),
+    library("List.split_last", list_split_last),
+    library("List.split_on", list_split_on),
+    library("List.split_on_list", list_split_on_list),
+    library("List.append_if_ok", list_append_if_ok).reusing_first_argument(),
+    library("List.prepend_if_ok", list_prepend_if_ok),
+    library("List.concat_utf8", list_concat_utf8).reusing_first_argument(),
+    library("List.with_capacity", list_with_capacity),
+    library("List.reserve", list_reserve).reusing_first_argument(),
     library("Str.is_empty", str_is_empty),
     library("Str.concat", str_concat),
     library("Str.join_with", str_join_with),
@@ -125,6 +156,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Str.to_double", str_to_double),
     library("Str.with_ascii_lowercased", str_with_ascii_lowercased),
     library("Str.with_ascii_uppercased", str_with_ascii_uppercased),
+    library("Str.caseless_ascii_equals", str_caseless_ascii_equals),
+    library("Str.walk_utf8", str_walk_utf8),
+    library("Str.walk_utf8_with_index", str_walk_utf8_with_index),
+    library("Str.from_utf8_lossy", str_from_utf8_lossy),
     library("Num.to_str", num_to_str),
     library("Num.compare", num_compare),
     library("Num.min", num_min),
@@ -142,6 +177,31 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Num.rem_checked", num_rem_checked),
     library("Num.sqrt_checked", num_sqrt_checked),
     library("Num.log_checked", num_log_checked),
+    library("Num.is_lt", num_is_lt),
+    library("Num.is_gt", num_is_gt),
+    library("Num.is_lte", num_is_lte),
+    library("Num.is_gte", num_is_gte),
+    library("Num.is_approx_eq", num_is_approx_eq),
+    library("Num.is_multiple_of", num_is_multiple_of),
+    library("Num.is_finite", num_is_finite),
+    library("Num.is_infinite", num_is_infinite),
+    library("Num.abs", num_abs),
+    library("Num.abs_diff", num_abs_diff),
+    library("Num.neg", num_neg),
+    library("Num.ceiling", num_ceiling),
+    library("Num.floor", num_floor),
+    library("Num.round", num_round),
+    library("Num.pow", num_pow),
+    library("Num.sin", num_sin),
+    library("Num.cos", num_cos),
+    library("Num.tan", num_tan),
+    library("Num.atan", num_atan),
+    library("Num.add_saturated", num_add_saturated),
+    library("Num.sub_saturated", num_sub_saturated),
+    library("Num.mul_saturated", num_mul_saturated),
+    library("Num.div_ceil_checked", num_div_ceil_checked),
+    library("Num.to_double", num_to_double),
+    library("Num.to_integer_checked", num_to_integer_checked),
     library("Dict.empty", dict_empty),
     library("Dict.single", dict_single),
     library("Dict.from_list", dict_from_list),
@@ -150,7 +210,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.is_empty", dict_is_empty),
     library("Dict.get", dict_get),
     library("Dict.contains", dict_contains),
-    library("Dict.insert", dict_insert),
+    library("Dict.insert", dict_insert).reusing_first_argument(),
     library("Dict.remove", dict_remove),
     library("Dict.update", dict_update),
     library("Dict.keys", dict_keys),
@@ -159,9 +219,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.map", dict_map),
     library("Dict.keep_if", dict_keep_if),
     library("Dict.drop_if", dict_drop_if),
-    library("Dict.insert_all", dict_insert_all),
+    library("Dict.insert_all", dict_insert_all).reusing_first_argument(),
     library("Dict.keep_shared", dict_keep_shared),
     library("Dict.remove_all", dict_remove_all),
+    library("Dict.walk_until", dict_walk_until),
+    library("Dict.join_map", dict_join_map),
+    library("Dict.reserve", dict_reserve).reusing_first_argument(),
+    library("Dict.clear", dict_clear),
     library("Set.empty", set_empty),
     library("Set.single", set_single),
     library("Set.from_list", set_from_list),
@@ -169,15 +233,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.len", set_len),
     library("Set.is_empty", set_is_empty),
     library("Set.contains", set_contains),
-    library("Set.insert", set_insert),
+    library("Set.insert", set_insert).reusing_first_argument(),
     library("Set.remove", set_remove),
-    library("Set.union", set_union),
+    library("Set.union", set_union).reusing_first_argument(),
     library("Set.intersection", set_intersection),
     library("Set.difference", set_difference),
     library("Set.walk", set_walk),
     library("Set.map", set_map),
     library("Set.keep_if", set_keep_if),
     library("Set.drop_if", set_drop_if),
+    library("Set.walk_until", set_walk_until),
+    library("Set.join_map", set_join_map),
+    library("Set.reserve", set_reserve).reusing_first_argument(),
 ];
 
 /// Creates `package:ry` just above `package:base` and binds the library in it. At startup the
@@ -281,12 +348,34 @@ unsafe fn missing_scalar(value: Sexp) -> Option<&'static str> {
 /// The elements of an R list. A list's names are not part of the library's model, so they are
 /// dropped.
 unsafe fn list_elements(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Vec<Sexp>> {
+    if value.is_array() {
+        return (0..length(value))
+            .map(|index| scope(|| arrays::item(value, index)))
+            .collect();
+    }
     if value.kind() != SexpType::List {
         return Err(wrong(call, parameter, "a list", value));
     }
     Ok((0..length(value))
         .map(|index| value.element(index))
         .collect())
+}
+
+/// A collection the library returns: an Array when the collection the call works on (`like`)
+/// is one, so `List.map` over an Array gives an Array, and an R list otherwise. Only that
+/// argument decides, because an item argument may itself be an Array (`List.append(xs, [1])`).
+/// Items an Array cannot hold, such as the vectors a mapped function returned, are an error
+/// rather than a silent fall back to a list.
+unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
+    if !like.is_array() {
+        return list_vector(items);
+    }
+    arrays::from_items(items)?.map_err(|message| {
+        call.error(format!(
+            "`{}()` received an Array, so its result must be one: {message}",
+            call.name()
+        ))
+    })
 }
 
 unsafe fn function(call: &Call<'_>, parameter: &str, value: Sexp) -> R<Sexp> {
@@ -499,6 +588,18 @@ unsafe fn result_on_err(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
+unsafe fn result_map2(call: &Call<'_>) -> R<Sexp> {
+    let [first, second, f] = arguments(call, ["first", "second", "f"])?;
+    let f = function(call, "f", f)?;
+    let (first_ok, left) = result_parts(call, "first", first)?;
+    let (second_ok, right) = result_parts(call, "second", second)?;
+    match (first_ok, second_ok) {
+        (true, true) => ok(invoke(call, f, &[left, right])?),
+        (false, _) => Ok(first),
+        (true, false) => Ok(second),
+    }
+}
+
 // List.
 
 unsafe fn list_from_vector(call: &Call<'_>) -> R<Sexp> {
@@ -615,12 +716,19 @@ unsafe fn list_get(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
     let [list, index, value] = arguments(call, ["list", "index", "value"])?;
+    if owned_list(call, list) {
+        let index = whole(call, "index", index)?;
+        if let Some(at) = position(index, length(list)) {
+            crate::heap().set_element(list, at, value);
+        }
+        return Ok(list);
+    }
     let mut items = list_elements(call, "list", list)?;
     let index = whole(call, "index", index)?;
     if let Some(at) = position(index, items.len()) {
         items[at] = value;
     }
-    list_vector(&items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
@@ -631,28 +739,35 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
     if let Some(at) = position(index, items.len()) {
         items[at] = invoke(call, f, &[items[at]])?;
     }
-    list_vector(&items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_append(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
+    if owned_list(call, list) {
+        return extend_in_place(list, &[value]);
+    }
     let mut items = list_elements(call, "list", list)?;
     items.push(value);
-    list_vector(&items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_prepend(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
     let mut items = vec![value];
     items.extend(list_elements(call, "list", list)?);
-    list_vector(&items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_concat(call: &Call<'_>) -> R<Sexp> {
     let [first, second] = arguments(call, ["first", "second"])?;
+    if owned_list(call, first) {
+        let added = list_elements(call, "second", second)?;
+        return extend_in_place(first, &added);
+    }
     let mut items = list_elements(call, "first", first)?;
     items.extend(list_elements(call, "second", second)?);
-    list_vector(&items)
+    sequence(call, first, &items)
 }
 
 unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
@@ -663,26 +778,31 @@ unsafe fn list_single(call: &Call<'_>) -> R<Sexp> {
 unsafe fn list_repeat(call: &Call<'_>) -> R<Sexp> {
     let [value, times] = arguments(call, ["value", "count"])?;
     let times = count(call, "count", times)?;
-    list_vector(&vec![value; times])
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(times)
+        .map_err(|_| error(format!("cannot allocate a list of {times} elements")))?;
+    items.resize(times, value);
+    list_vector(&items)
 }
 
 unsafe fn list_reverse(call: &Call<'_>) -> R<Sexp> {
     let [list] = arguments(call, ["list"])?;
     let mut items = list_elements(call, "list", list)?;
     items.reverse();
-    list_vector(&items)
+    sequence(call, list, &items)
 }
 
 unsafe fn list_join(call: &Call<'_>) -> R<Sexp> {
     let [lists] = arguments(call, ["lists"])?;
     let mut items = Vec::new();
     for inner in list_elements(call, "lists", lists)? {
-        if inner.kind() != SexpType::List {
+        if inner.kind() != SexpType::List && !inner.is_array() {
             return Err(wrong(call, "lists", "a list of lists", inner));
         }
-        items.extend((0..length(inner)).map(|index| inner.element(index)));
+        items.extend(list_elements(call, "lists", inner)?);
     }
-    list_vector(&items)
+    sequence(call, lists, &items)
 }
 
 unsafe fn list_map(call: &Call<'_>) -> R<Sexp> {
@@ -693,7 +813,7 @@ unsafe fn list_map(call: &Call<'_>) -> R<Sexp> {
     for item in items {
         mapped.push(scope(|| invoke(call, f, &[item]))?);
     }
-    list_vector(&mapped)
+    sequence(call, list, &mapped)
 }
 
 unsafe fn list_map_with_index(call: &Call<'_>) -> R<Sexp> {
@@ -707,19 +827,50 @@ unsafe fn list_map_with_index(call: &Call<'_>) -> R<Sexp> {
             invoke(call, f, &[item, index])
         })?);
     }
-    list_vector(&mapped)
+    sequence(call, list, &mapped)
 }
 
 unsafe fn list_map2(call: &Call<'_>) -> R<Sexp> {
     let [first, second, f] = arguments(call, ["first", "second", "f"])?;
-    let first = list_elements(call, "first", first)?;
-    let second = list_elements(call, "second", second)?;
-    let f = function(call, "f", f)?;
-    let mut mapped = Vec::with_capacity(first.len().min(second.len()));
-    for (&left, &right) in first.iter().zip(&second) {
-        mapped.push(scope(|| invoke(call, f, &[left, right]))?);
+    map_lists(call, &[("first", first), ("second", second)], f)
+}
+
+unsafe fn list_map3(call: &Call<'_>) -> R<Sexp> {
+    let [first, second, third, f] = arguments(call, ["first", "second", "third", "f"])?;
+    map_lists(
+        call,
+        &[("first", first), ("second", second), ("third", third)],
+        f,
+    )
+}
+
+unsafe fn list_map4(call: &Call<'_>) -> R<Sexp> {
+    let [first, second, third, fourth, f] =
+        arguments(call, ["first", "second", "third", "fourth", "f"])?;
+    let lists = [
+        ("first", first),
+        ("second", second),
+        ("third", third),
+        ("fourth", fourth),
+    ];
+    map_lists(call, &lists, f)
+}
+
+/// Calls `f` with the elements at each position of the named `lists`, up to the shortest one.
+unsafe fn map_lists(call: &Call<'_>, lists: &[(&str, Sexp)], f: Sexp) -> R<Sexp> {
+    let mut columns = Vec::with_capacity(lists.len());
+    for &(parameter, list) in lists {
+        columns.push(list_elements(call, parameter, list)?);
     }
-    list_vector(&mapped)
+    let f = function(call, "f", f)?;
+    let shortest = columns.iter().map(Vec::len).min().unwrap_or(0);
+    let mut mapped = Vec::with_capacity(shortest);
+    for at in 0..shortest {
+        let row: Vec<Sexp> = columns.iter().map(|column| column[at]).collect();
+        mapped.push(scope(|| invoke(call, f, &row))?);
+    }
+    let like = lists.first().map_or(nil(), |&(_, list)| list);
+    sequence(call, like, &mapped)
 }
 
 unsafe fn list_join_map(call: &Call<'_>) -> R<Sexp> {
@@ -729,12 +880,12 @@ unsafe fn list_join_map(call: &Call<'_>) -> R<Sexp> {
     let mut joined = Vec::new();
     for item in items {
         let inner = scope(|| invoke(call, f, &[item]))?;
-        if inner.kind() != SexpType::List {
+        if inner.kind() != SexpType::List && !inner.is_array() {
             return Err(wrong(call, "f()", "a list", inner));
         }
-        joined.extend((0..length(inner)).map(|index| inner.element(index)));
+        joined.extend(list_elements(call, "f()", inner)?);
     }
-    list_vector(&joined)
+    sequence(call, list, &joined)
 }
 
 /// The elements for which `predicate` answers `keep`.
@@ -749,7 +900,7 @@ unsafe fn filter(call: &Call<'_>, keep: bool) -> R<Sexp> {
             kept.push(item);
         }
     }
-    list_vector(&kept)
+    sequence(call, list, &kept)
 }
 
 unsafe fn list_keep_if(call: &Call<'_>) -> R<Sexp> {
@@ -773,7 +924,7 @@ unsafe fn keep_results(call: &Call<'_>, oks: bool) -> R<Sexp> {
             kept.push(payload);
         }
     }
-    list_vector(&kept)
+    sequence(call, list, &kept)
 }
 
 unsafe fn list_keep_oks(call: &Call<'_>) -> R<Sexp> {
@@ -796,52 +947,183 @@ unsafe fn list_map_try(call: &Call<'_>) -> R<Sexp> {
             (false, _) => return Ok(result),
         }
     }
-    ok(list_vector(&mapped)?)
+    ok(sequence(call, list, &mapped)?)
 }
 
-unsafe fn walk(call: &Call<'_>, backwards: bool) -> R<Sexp> {
-    let [list, state, f] = arguments(call, ["list", "state", "f"])?;
-    let mut items = list_elements(call, "list", list)?;
+/// How a walk visits a list's elements and what it passes `f`.
+#[derive(Clone, Copy)]
+struct Walk {
+    /// From the last element to the first.
+    backwards: bool,
+    /// `f` also receives the element's 1-based position.
+    with_index: bool,
+    /// `f` returns `:Continue(state)` or `:Break(state)`, and a break ends the walk.
+    until: bool,
+}
+
+const FORWARDS: Walk = Walk {
+    backwards: false,
+    with_index: false,
+    until: false,
+};
+
+/// Folds `f` over `items` from 0-based position `start`, as `walk` describes.
+unsafe fn walk_items(
+    call: &Call<'_>,
+    items: &[Sexp],
+    start: usize,
+    state: Sexp,
+    f: Sexp,
+    walk: Walk,
+) -> R<Sexp> {
     let f = function(call, "f", f)?;
-    if backwards {
-        items.reverse();
-    }
+    let positions = start.min(items.len())..items.len();
+    let order: Box<dyn Iterator<Item = usize>> = if walk.backwards {
+        Box::new(positions.rev())
+    } else {
+        Box::new(positions)
+    };
     let mut state = state;
-    for item in items {
-        state = scope(|| invoke(call, f, &[state, item]))?;
+    for at in order {
+        let step = scope(|| {
+            if walk.with_index {
+                let index = scalar_integer(at as i32 + 1)?;
+                invoke(call, f, &[state, items[at], index])
+            } else {
+                invoke(call, f, &[state, items[at]])
+            }
+        })?;
+        if !walk.until {
+            state = step;
+            continue;
+        }
+        match walk_step(call, step)? {
+            Ok(next) => state = next,
+            Err(last) => return Ok(last),
+        }
     }
     Ok(state)
 }
 
+/// A `walk_until` step: `Ok(state)` for `:Continue(state)` and `Err(state)` for `:Break(state)`.
+unsafe fn walk_step(call: &Call<'_>, step: Sexp) -> R<Result<Sexp, Sexp>> {
+    match tag_parts(step)? {
+        Some((name, Some(next))) if name == "Continue" => Ok(Ok(next)),
+        Some((name, Some(last))) if name == "Break" => Ok(Err(last)),
+        _ => Err(wrong(
+            call,
+            "f()",
+            "`:Continue(state)` or `:Break(state)`",
+            step,
+        )),
+    }
+}
+
+unsafe fn walk_list(call: &Call<'_>, walk: Walk) -> R<Sexp> {
+    let [list, state, f] = arguments(call, ["list", "state", "f"])?;
+    let items = list_elements(call, "list", list)?;
+    walk_items(call, &items, 0, state, f, walk)
+}
+
 unsafe fn list_walk(call: &Call<'_>) -> R<Sexp> {
-    walk(call, false)
+    walk_list(call, FORWARDS)
 }
 
 unsafe fn list_walk_backwards(call: &Call<'_>) -> R<Sexp> {
-    walk(call, true)
+    let walk = Walk {
+        backwards: true,
+        ..FORWARDS
+    };
+    walk_list(call, walk)
 }
 
 unsafe fn list_walk_until(call: &Call<'_>) -> R<Sexp> {
+    walk_list(
+        call,
+        Walk {
+            until: true,
+            ..FORWARDS
+        },
+    )
+}
+
+unsafe fn list_walk_backwards_until(call: &Call<'_>) -> R<Sexp> {
+    let walk = Walk {
+        backwards: true,
+        until: true,
+        ..FORWARDS
+    };
+    walk_list(call, walk)
+}
+
+unsafe fn list_walk_with_index(call: &Call<'_>) -> R<Sexp> {
+    let walk = Walk {
+        with_index: true,
+        ..FORWARDS
+    };
+    walk_list(call, walk)
+}
+
+unsafe fn list_walk_with_index_until(call: &Call<'_>) -> R<Sexp> {
+    let walk = Walk {
+        with_index: true,
+        until: true,
+        ..FORWARDS
+    };
+    walk_list(call, walk)
+}
+
+unsafe fn walk_from(call: &Call<'_>, until: bool) -> R<Sexp> {
+    let [list, index, state, f] = arguments(call, ["list", "index", "state", "f"])?;
+    let items = list_elements(call, "list", list)?;
+    let start = start_position(call, "index", index)?;
+    walk_items(call, &items, start, state, f, Walk { until, ..FORWARDS })
+}
+
+unsafe fn list_walk_from(call: &Call<'_>) -> R<Sexp> {
+    walk_from(call, false)
+}
+
+unsafe fn list_walk_from_until(call: &Call<'_>) -> R<Sexp> {
+    walk_from(call, true)
+}
+
+unsafe fn list_walk_try(call: &Call<'_>) -> R<Sexp> {
     let [list, state, f] = arguments(call, ["list", "state", "f"])?;
     let items = list_elements(call, "list", list)?;
     let f = function(call, "f", f)?;
     let mut state = state;
     for item in items {
         let step = scope(|| invoke(call, f, &[state, item]))?;
-        match tag_parts(step)? {
-            Some((name, Some(next))) if name == "Continue" => state = next,
-            Some((name, Some(last))) if name == "Break" => return Ok(last),
-            _ => {
-                return Err(wrong(
-                    call,
-                    "f()",
-                    "`:Continue(state)` or `:Break(state)`",
-                    step,
-                ));
-            }
+        match returned_result(call, "f", step)? {
+            (true, next) => state = next,
+            (false, _) => return Ok(step),
         }
     }
-    Ok(state)
+    ok(state)
+}
+
+unsafe fn list_for_each(call: &Call<'_>) -> R<Sexp> {
+    let [list, f] = arguments(call, ["list", "f"])?;
+    let items = list_elements(call, "list", list)?;
+    let f = function(call, "f", f)?;
+    for item in items {
+        scope(|| invoke(call, f, &[item]))?;
+    }
+    Ok(nil())
+}
+
+unsafe fn list_for_each_try(call: &Call<'_>) -> R<Sexp> {
+    let [list, f] = arguments(call, ["list", "f"])?;
+    let items = list_elements(call, "list", list)?;
+    let f = function(call, "f", f)?;
+    for item in items {
+        let result = scope(|| invoke(call, f, &[item]))?;
+        if !returned_result(call, "f", result)?.0 {
+            return Ok(result);
+        }
+    }
+    ok(nil())
 }
 
 /// The position of the first (or, `from_end`, the last) element `predicate` accepts.
@@ -947,31 +1229,31 @@ unsafe fn list_last(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// The list and a count of elements, clamped to its length.
-unsafe fn list_and_count(call: &Call<'_>) -> R<(Vec<Sexp>, usize)> {
+unsafe fn list_and_count(call: &Call<'_>) -> R<(Sexp, Vec<Sexp>, usize)> {
     let [list, taken] = arguments(call, ["list", "count"])?;
     let items = list_elements(call, "list", list)?;
     let taken = count(call, "count", taken)?.min(items.len());
-    Ok((items, taken))
+    Ok((list, items, taken))
 }
 
 unsafe fn list_take_first(call: &Call<'_>) -> R<Sexp> {
-    let (items, taken) = list_and_count(call)?;
-    list_vector(&items[..taken])
+    let (list, items, taken) = list_and_count(call)?;
+    sequence(call, list, &items[..taken])
 }
 
 unsafe fn list_take_last(call: &Call<'_>) -> R<Sexp> {
-    let (items, taken) = list_and_count(call)?;
-    list_vector(&items[items.len() - taken..])
+    let (list, items, taken) = list_and_count(call)?;
+    sequence(call, list, &items[items.len() - taken..])
 }
 
 unsafe fn list_drop_first(call: &Call<'_>) -> R<Sexp> {
-    let (items, dropped) = list_and_count(call)?;
-    list_vector(&items[dropped..])
+    let (list, items, dropped) = list_and_count(call)?;
+    sequence(call, list, &items[dropped..])
 }
 
 unsafe fn list_drop_last(call: &Call<'_>) -> R<Sexp> {
-    let (items, dropped) = list_and_count(call)?;
-    list_vector(&items[..items.len() - dropped])
+    let (list, items, dropped) = list_and_count(call)?;
+    sequence(call, list, &items[..items.len() - dropped])
 }
 
 unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
@@ -981,31 +1263,31 @@ unsafe fn list_drop_at(call: &Call<'_>) -> R<Sexp> {
     if let Some(at) = position(index, items.len()) {
         items.remove(at);
     }
-    list_vector(&items)
+    sequence(call, list, &items)
+}
+
+/// A 1-based start position as a 0-based index, which may lie past the end.
+unsafe fn start_position(call: &Call<'_>, parameter: &str, value: Sexp) -> R<usize> {
+    match usize::try_from(whole(call, parameter, value)?) {
+        Ok(start) if start >= 1 => Ok(start - 1),
+        _ => Err(wrong(call, parameter, "a position of 1 or more", value)),
+    }
 }
 
 unsafe fn list_sublist(call: &Call<'_>) -> R<Sexp> {
     let [list, start, taken] = arguments(call, ["list", "start", "count"])?;
     let items = list_elements(call, "list", list)?;
-    let start = whole(call, "start", start)?;
-    if start < 1 {
-        return Err(wrong(
-            call,
-            "start",
-            "a position of 1 or more",
-            values::scalar_integer(start as i32)?,
-        ));
-    }
+    let start = start_position(call, "start", start)?;
     let taken = count(call, "count", taken)?;
-    let from = (start as usize - 1).min(items.len());
+    let from = start.min(items.len());
     let to = from.saturating_add(taken).min(items.len());
-    list_vector(&items[from..to])
+    sequence(call, list, &items[from..to])
 }
 
 unsafe fn list_split_at(call: &Call<'_>) -> R<Sexp> {
-    let (items, before) = list_and_count(call)?;
-    let first = list_vector(&items[..before])?;
-    let others = list_vector(&items[before..])?;
+    let (list, items, before) = list_and_count(call)?;
+    let first = sequence(call, list, &items[..before])?;
+    let others = sequence(call, list, &items[before..])?;
     record(&[("before", first), ("others", others)])
 }
 
@@ -1014,13 +1296,13 @@ unsafe fn list_chunks_of(call: &Call<'_>) -> R<Sexp> {
     let items = list_elements(call, "list", list)?;
     let size = count(call, "size", size)?;
     if size == 0 {
-        return list_vector(&[]);
+        return sequence(call, list, &[]);
     }
     let mut chunks = Vec::with_capacity(items.len().div_ceil(size));
     for chunk in items.chunks(size) {
-        chunks.push(list_vector(chunk)?);
+        chunks.push(sequence(call, list, chunk)?);
     }
-    list_vector(&chunks)
+    sequence(call, list, &chunks)
 }
 
 unsafe fn list_intersperse(call: &Call<'_>) -> R<Sexp> {
@@ -1033,7 +1315,7 @@ unsafe fn list_intersperse(call: &Call<'_>) -> R<Sexp> {
         }
         spaced.push(item);
     }
-    list_vector(&spaced)
+    sequence(call, list, &spaced)
 }
 
 /// An ordering tag, `:LT`, `:EQ` or `:GT`.
@@ -1068,7 +1350,7 @@ unsafe fn list_sort_with(call: &Call<'_>) -> R<Sexp> {
         let answer = scope(|| invoke(call, compare, &[left, right]))?;
         ordering(call, "compare()", answer)
     })?;
-    list_vector(&items)
+    sequence(call, list, &items)
 }
 
 /// A stable merge sort of `items`, with `buffer` as scratch space of the same length.
@@ -1253,6 +1535,204 @@ unsafe fn list_ends_with(call: &Call<'_>) -> R<Sexp> {
     affix(call, "suffix", false)
 }
 
+unsafe fn sort_numbers(call: &Call<'_>, descending: bool) -> R<Sexp> {
+    let [list] = arguments(call, ["list"])?;
+    let mut numbers = list_numbers(call)?;
+    // `number` refuses `NaN`, so the comparison is total.
+    numbers.sort_by(|left, right| {
+        let order = left
+            .as_double()
+            .partial_cmp(&right.as_double())
+            .unwrap_or(Ordering::Equal);
+        if descending { order.reverse() } else { order }
+    });
+    let mut items = Vec::with_capacity(numbers.len());
+    for number in numbers {
+        items.push(number_value(number)?);
+    }
+    sequence(call, list, &items)
+}
+
+unsafe fn list_sort_asc(call: &Call<'_>) -> R<Sexp> {
+    sort_numbers(call, false)
+}
+
+unsafe fn list_sort_desc(call: &Call<'_>) -> R<Sexp> {
+    sort_numbers(call, true)
+}
+
+unsafe fn list_swap(call: &Call<'_>) -> R<Sexp> {
+    let [list, first, second] = arguments(call, ["list", "first", "second"])?;
+    let first = whole(call, "first", first)?;
+    let second = whole(call, "second", second)?;
+    if owned_list(call, list) {
+        let count = length(list);
+        if let (Some(left), Some(right)) = (position(first, count), position(second, count)) {
+            let (left_value, right_value) = (list.element(left), list.element(right));
+            let heap = crate::heap();
+            heap.set_element(list, left, right_value);
+            heap.set_element(list, right, left_value);
+        }
+        return Ok(list);
+    }
+    let mut items = list_elements(call, "list", list)?;
+    if let (Some(left), Some(right)) = (position(first, items.len()), position(second, items.len()))
+    {
+        items.swap(left, right);
+    }
+    sequence(call, list, &items)
+}
+
+unsafe fn list_replace(call: &Call<'_>) -> R<Sexp> {
+    let [list, index, value] = arguments(call, ["list", "index", "value"])?;
+    let mut items = list_elements(call, "list", list)?;
+    let index = whole(call, "index", index)?;
+    let previous = match position(index, items.len()) {
+        Some(at) => std::mem::replace(&mut items[at], value),
+        None => value,
+    };
+    let replaced = sequence(call, list, &items)?;
+    record(&[("list", replaced), ("value", previous)])
+}
+
+/// Splits the list around its first (or, `last`, its final) element identical to `delimiter`.
+unsafe fn split_around(call: &Call<'_>, last: bool) -> R<Sexp> {
+    let [list, delimiter] = arguments(call, ["list", "delimiter"])?;
+    let items = list_elements(call, "list", list)?;
+    let flags = IdenticalFlags::default();
+    let matches = |item: &Sexp| identical(*item, delimiter, &flags);
+    let found = if last {
+        items.iter().rposition(matches)
+    } else {
+        items.iter().position(matches)
+    };
+    match found {
+        Some(at) => {
+            let before = sequence(call, list, &items[..at])?;
+            let after = sequence(call, list, &items[at + 1..])?;
+            ok(record(&[("before", before), ("after", after)])?)
+        }
+        None => err("NotFound"),
+    }
+}
+
+unsafe fn list_split_first(call: &Call<'_>) -> R<Sexp> {
+    split_around(call, false)
+}
+
+unsafe fn list_split_last(call: &Call<'_>) -> R<Sexp> {
+    split_around(call, true)
+}
+
+/// The pieces of `items` between occurrences of the non-empty `delimiter` run.
+unsafe fn split_pieces(call: &Call<'_>, like: Sexp, items: &[Sexp], delimiter: &[Sexp]) -> R<Sexp> {
+    let flags = IdenticalFlags::default();
+    let mut pieces = Vec::new();
+    let (mut start, mut at) = (0, 0);
+    while at + delimiter.len() <= items.len() {
+        let window = &items[at..at + delimiter.len()];
+        if window
+            .iter()
+            .zip(delimiter)
+            .all(|(&left, &right)| identical(left, right, &flags))
+        {
+            pieces.push(sequence(call, like, &items[start..at])?);
+            at += delimiter.len();
+            start = at;
+        } else {
+            at += 1;
+        }
+    }
+    pieces.push(sequence(call, like, &items[start..])?);
+    sequence(call, like, &pieces)
+}
+
+unsafe fn list_split_on(call: &Call<'_>) -> R<Sexp> {
+    let [list, delimiter] = arguments(call, ["list", "delimiter"])?;
+    let items = list_elements(call, "list", list)?;
+    split_pieces(call, list, &items, &[delimiter])
+}
+
+unsafe fn list_split_on_list(call: &Call<'_>) -> R<Sexp> {
+    let [list, delimiter] = arguments(call, ["list", "delimiter"])?;
+    let items = list_elements(call, "list", list)?;
+    let delimiter = list_elements(call, "delimiter", delimiter)?;
+    if delimiter.is_empty() {
+        return sequence(call, list, &[sequence(call, list, &items)?]);
+    }
+    split_pieces(call, list, &items, &delimiter)
+}
+
+unsafe fn list_append_if_ok(call: &Call<'_>) -> R<Sexp> {
+    let [list, result] = arguments(call, ["list", "result"])?;
+    let (is_ok, value) = result_parts(call, "result", result)?;
+    if owned_list(call, list) {
+        return if is_ok {
+            extend_in_place(list, &[value])
+        } else {
+            Ok(list)
+        };
+    }
+    let mut items = list_elements(call, "list", list)?;
+    if is_ok {
+        items.push(value);
+    }
+    sequence(call, list, &items)
+}
+
+unsafe fn list_prepend_if_ok(call: &Call<'_>) -> R<Sexp> {
+    let [list, result] = arguments(call, ["list", "result"])?;
+    let (is_ok, value) = result_parts(call, "result", result)?;
+    let mut items = list_elements(call, "list", list)?;
+    if is_ok {
+        items.insert(0, value);
+    }
+    sequence(call, list, &items)
+}
+
+unsafe fn list_concat_utf8(call: &Call<'_>) -> R<Sexp> {
+    let [list, string] = arguments(call, ["list", "string"])?;
+    let string = text(call, "string", string)?.into_owned();
+    let mut bytes = Vec::with_capacity(string.len());
+    for &byte in string.as_bytes() {
+        bytes.push(scalar_integer(i32::from(byte))?);
+    }
+    if owned_list(call, list) {
+        return extend_in_place(list, &bytes);
+    }
+    let mut items = list_elements(call, "list", list)?;
+    items.extend(bytes);
+    sequence(call, list, &items)
+}
+
+unsafe fn list_with_capacity(call: &Call<'_>) -> R<Sexp> {
+    let [capacity] = arguments(call, ["capacity"])?;
+    let capacity = count(call, "capacity", capacity)?;
+    resizable(SexpType::List, 0, capacity)
+}
+
+unsafe fn list_reserve(call: &Call<'_>) -> R<Sexp> {
+    let [list, spare] = arguments(call, ["list", "spare"])?;
+    let spare = count(call, "spare", spare)?;
+    // An Array is never grown in place, so reserving room in one has nothing to do.
+    if list.is_array() {
+        return Ok(list);
+    }
+    let items = list_elements(call, "list", list)?;
+    let needed = items.len().saturating_add(spare);
+    if owned_list(call, list)
+        && crate::heap().is_resizable(list)
+        && needed <= list.capacity() as usize
+    {
+        return Ok(list);
+    }
+    let grown = resizable(SexpType::List, items.len(), needed)?;
+    for (at, &item) in items.iter().enumerate() {
+        crate::heap().set_element(grown, at, item);
+    }
+    Ok(grown)
+}
+
 // Str.
 
 unsafe fn one_string(call: &Call<'_>) -> R<String> {
@@ -1435,6 +1915,17 @@ unsafe fn str_to_utf8(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
     let [bytes] = arguments(call, ["bytes"])?;
+    let decoded = utf8_bytes(call, bytes)?;
+    // R strings cannot hold a NUL byte, so one is reported as bad UTF-8 like any other byte a
+    // string cannot carry.
+    match String::from_utf8(decoded) {
+        Ok(string) if !string.contains('\0') => ok(scalar_string(&string)?),
+        _ => err("BadUtf8"),
+    }
+}
+
+/// The bytes of a list of numbers from 0 to 255.
+unsafe fn utf8_bytes(call: &Call<'_>, bytes: Sexp) -> R<Vec<u8>> {
     let mut decoded = Vec::new();
     for item in list_elements(call, "bytes", bytes)? {
         let byte = whole(call, "bytes", item)?;
@@ -1450,12 +1941,7 @@ unsafe fn str_from_utf8(call: &Call<'_>) -> R<Sexp> {
             }
         }
     }
-    // R strings cannot hold a NUL byte, so one is reported as bad UTF-8 like any other byte a
-    // string cannot carry.
-    match String::from_utf8(decoded) {
-        Ok(string) if !string.contains('\0') => ok(scalar_string(&string)?),
-        _ => err("BadUtf8"),
-    }
+    Ok(decoded)
 }
 
 unsafe fn str_to_integer(call: &Call<'_>) -> R<Sexp> {
@@ -1478,6 +1964,50 @@ unsafe fn str_with_ascii_lowercased(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn str_with_ascii_uppercased(call: &Call<'_>) -> R<Sexp> {
     scalar_string(&one_string(call)?.to_ascii_uppercase())
+}
+
+unsafe fn str_caseless_ascii_equals(call: &Call<'_>) -> R<Sexp> {
+    let [first, second] = arguments(call, ["first", "second"])?;
+    let first = text(call, "first", first)?;
+    let second = text(call, "second", second)?;
+    scalar_bool(first.eq_ignore_ascii_case(&second))
+}
+
+/// Folds `f` over the string's UTF-8 bytes, passing each byte's 1-based position too when
+/// `with_index`.
+unsafe fn walk_bytes(call: &Call<'_>, with_index: bool) -> R<Sexp> {
+    let [string, state, f] = arguments(call, ["string", "state", "f"])?;
+    let string = text(call, "string", string)?.into_owned();
+    let f = function(call, "f", f)?;
+    let mut state = state;
+    for (at, &byte) in string.as_bytes().iter().enumerate() {
+        state = scope(|| {
+            let byte = scalar_integer(i32::from(byte))?;
+            if with_index {
+                let index = scalar_integer(at as i32 + 1)?;
+                invoke(call, f, &[state, byte, index])
+            } else {
+                invoke(call, f, &[state, byte])
+            }
+        })?;
+    }
+    Ok(state)
+}
+
+unsafe fn str_walk_utf8(call: &Call<'_>) -> R<Sexp> {
+    walk_bytes(call, false)
+}
+
+unsafe fn str_walk_utf8_with_index(call: &Call<'_>) -> R<Sexp> {
+    walk_bytes(call, true)
+}
+
+unsafe fn str_from_utf8_lossy(call: &Call<'_>) -> R<Sexp> {
+    let [bytes] = arguments(call, ["bytes"])?;
+    let decoded = utf8_bytes(call, bytes)?;
+    // R strings cannot hold a NUL byte, so it is replaced like a byte that is not UTF-8.
+    let string = String::from_utf8_lossy(&decoded).replace('\0', "\u{FFFD}");
+    scalar_string(&string)
 }
 
 // Num.
@@ -1648,6 +2178,422 @@ unsafe fn num_log_checked(call: &Call<'_>) -> R<Sexp> {
         return err("LogNeedsPositive");
     }
     ok(scalar_real(value.ln())?)
+}
+
+/// Compares two numbers with `holds`.
+unsafe fn comparison(call: &Call<'_>, holds: fn(f64, f64) -> bool) -> R<Sexp> {
+    let (first, second) = two_numbers(call)?;
+    scalar_bool(holds(first.as_double(), second.as_double()))
+}
+
+unsafe fn num_is_lt(call: &Call<'_>) -> R<Sexp> {
+    comparison(call, |first, second| first < second)
+}
+
+unsafe fn num_is_gt(call: &Call<'_>) -> R<Sexp> {
+    comparison(call, |first, second| first > second)
+}
+
+unsafe fn num_is_lte(call: &Call<'_>) -> R<Sexp> {
+    comparison(call, |first, second| first <= second)
+}
+
+unsafe fn num_is_gte(call: &Call<'_>) -> R<Sexp> {
+    comparison(call, |first, second| first >= second)
+}
+
+unsafe fn num_is_approx_eq(call: &Call<'_>) -> R<Sexp> {
+    let formals = ["first", "second", "rtol", "atol"];
+    let (matched, _) = call.match_args(&formals)?;
+    let supplied = |at: usize| {
+        matched
+            .get(at)
+            .copied()
+            .flatten()
+            .filter(|&value| value != missing_arg())
+    };
+    let mut numbers = [0.0, 0.0, 0.00001, 0.00000001];
+    for (at, formal) in formals.iter().enumerate() {
+        match supplied(at) {
+            Some(value) => numbers[at] = number(call, formal, value)?.as_double(),
+            None if at < 2 => {
+                return Err(call.error(format!(
+                    "`Num.is_approx_eq()` needs the argument `{formal}`"
+                )));
+            }
+            None => {}
+        }
+    }
+    let [first, second, rtol, atol] = numbers;
+    let tolerance = atol.max(rtol * first.abs().max(second.abs()));
+    scalar_bool(first == second || (first - second).abs() <= tolerance)
+}
+
+unsafe fn num_is_multiple_of(call: &Call<'_>) -> R<Sexp> {
+    let (first, second) = two_numbers(call)?;
+    let (first, second) = (first.as_double(), second.as_double());
+    scalar_bool(if second == 0.0 {
+        first == 0.0
+    } else {
+        first.is_finite() && first % second == 0.0
+    })
+}
+
+unsafe fn num_is_finite(call: &Call<'_>) -> R<Sexp> {
+    scalar_bool(one_number(call)?.as_double().is_finite())
+}
+
+unsafe fn num_is_infinite(call: &Call<'_>) -> R<Sexp> {
+    scalar_bool(one_number(call)?.as_double().is_infinite())
+}
+
+/// Applies an operation that keeps the number type. An integer cannot overflow here, because
+/// `NA` takes the one value, `i32::MIN`, whose negation does not fit.
+unsafe fn unary(call: &Call<'_>, integer: fn(i32) -> i32, double: fn(f64) -> f64) -> R<Sexp> {
+    match one_number(call)? {
+        Number::Integer(value) => scalar_integer(integer(value)),
+        Number::Double(value) => scalar_real(double(value)),
+    }
+}
+
+unsafe fn num_abs(call: &Call<'_>) -> R<Sexp> {
+    unary(call, i32::abs, f64::abs)
+}
+
+unsafe fn num_neg(call: &Call<'_>) -> R<Sexp> {
+    unary(call, |value| -value, |value| -value)
+}
+
+unsafe fn num_ceiling(call: &Call<'_>) -> R<Sexp> {
+    unary(call, |value| value, f64::ceil)
+}
+
+unsafe fn num_floor(call: &Call<'_>) -> R<Sexp> {
+    unary(call, |value| value, f64::floor)
+}
+
+unsafe fn num_round(call: &Call<'_>) -> R<Sexp> {
+    unary(call, |value| value, f64::round)
+}
+
+unsafe fn num_abs_diff(call: &Call<'_>) -> R<Sexp> {
+    match two_numbers(call)? {
+        (Number::Integer(first), Number::Integer(second)) => {
+            match i32::try_from((i64::from(first) - i64::from(second)).abs()) {
+                Ok(value) => scalar_integer(value),
+                Err(_) => Err(call
+                    .error("the integer result overflows; convert the numbers to doubles first")),
+            }
+        }
+        (first, second) => scalar_real((first.as_double() - second.as_double()).abs()),
+    }
+}
+
+/// A function of one number whose result is a double.
+unsafe fn real_function(call: &Call<'_>, function: fn(f64) -> f64) -> R<Sexp> {
+    scalar_real(function(one_number(call)?.as_double()))
+}
+
+unsafe fn num_pow(call: &Call<'_>) -> R<Sexp> {
+    let [base, exponent] = arguments(call, ["base", "exponent"])?;
+    let base = number(call, "base", base)?.as_double();
+    let exponent = number(call, "exponent", exponent)?.as_double();
+    scalar_real(base.powf(exponent))
+}
+
+unsafe fn num_sin(call: &Call<'_>) -> R<Sexp> {
+    real_function(call, f64::sin)
+}
+
+unsafe fn num_cos(call: &Call<'_>) -> R<Sexp> {
+    real_function(call, f64::cos)
+}
+
+unsafe fn num_tan(call: &Call<'_>) -> R<Sexp> {
+    real_function(call, f64::tan)
+}
+
+unsafe fn num_atan(call: &Call<'_>) -> R<Sexp> {
+    real_function(call, f64::atan)
+}
+
+/// An operation whose integer result is clamped to the integers R can hold, `-2147483647` to
+/// `2147483647`, and whose double result is the plain one.
+unsafe fn saturated(
+    call: &Call<'_>,
+    integer: fn(i64, i64) -> i64,
+    double: fn(f64, f64) -> f64,
+) -> R<Sexp> {
+    match two_numbers(call)? {
+        (Number::Integer(first), Number::Integer(second)) => {
+            let value = integer(i64::from(first), i64::from(second));
+            let limit = i64::from(i32::MAX);
+            scalar_integer(value.clamp(-limit, limit) as i32)
+        }
+        (first, second) => scalar_real(double(first.as_double(), second.as_double())),
+    }
+}
+
+unsafe fn num_add_saturated(call: &Call<'_>) -> R<Sexp> {
+    saturated(call, |left, right| left + right, |left, right| left + right)
+}
+
+unsafe fn num_sub_saturated(call: &Call<'_>) -> R<Sexp> {
+    saturated(call, |left, right| left - right, |left, right| left - right)
+}
+
+unsafe fn num_mul_saturated(call: &Call<'_>) -> R<Sexp> {
+    saturated(call, |left, right| left * right, |left, right| left * right)
+}
+
+unsafe fn num_div_ceil_checked(call: &Call<'_>) -> R<Sexp> {
+    checked_division(
+        call,
+        |left, right| {
+            let quotient = left.checked_div(right)?;
+            let rounds_up = left % right != 0 && (left < 0) == (right < 0);
+            Some(if rounds_up { quotient + 1 } else { quotient })
+        },
+        |left, right| (left / right).ceil(),
+    )
+}
+
+unsafe fn num_to_double(call: &Call<'_>) -> R<Sexp> {
+    scalar_real(one_number(call)?.as_double())
+}
+
+unsafe fn num_to_integer_checked(call: &Call<'_>) -> R<Sexp> {
+    match one_number(call)? {
+        Number::Integer(value) => ok(scalar_integer(value)?),
+        Number::Double(value) => {
+            let truncated = value.trunc();
+            if truncated.is_finite() && truncated.abs() <= f64::from(i32::MAX) {
+                ok(scalar_integer(truncated as i32)?)
+            } else {
+                err("OutOfBounds")
+            }
+        }
+    }
+}
+
+// In-place updates.
+
+/// Whether the call may update `value` in place: nothing else references it, because it is a
+/// temporary or because its only holder is the binding the result is assigned back to. This is
+/// reference counting's version of Roc's uniqueness check.
+unsafe fn owned(call: &Call<'_>, value: Sexp) -> bool {
+    !value.is_altrep()
+        && (value.refcount() == 0 || (call.reusable == Some(value) && value.refcount() == 1))
+}
+
+/// Whether `list` is a list the call owns. A list with attributes is copied instead, because the
+/// copy drops its names (see [`list_elements`]).
+unsafe fn owned_list(call: &Call<'_>, list: Sexp) -> bool {
+    // An Array of ry values is a list too, but an update must check its items, so it copies.
+    list.kind() == SexpType::List && !list.is_array() && list.attrib() == nil() && owned(call, list)
+}
+
+/// Appends `items` to an owned list, within its capacity when it has room and otherwise in a
+/// resizable copy with twice the room, so repeated appends cost amortized constant time.
+unsafe fn extend_in_place(list: Sexp, items: &[Sexp]) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = length(list);
+    let needed = count + items.len();
+    let list = if heap.is_resizable(list) && needed <= list.capacity() as usize {
+        list
+    } else {
+        with_capacity(list, needed.max(count * 2).max(4))?
+    };
+    heap.resize_vector(list, needed as isize)?;
+    for (offset, &item) in items.iter().enumerate() {
+        heap.set_element(list, count + offset, item);
+    }
+    Ok(list)
+}
+
+/// A fresh resizable vector of `kind` with room for `capacity` elements and length `count`.
+unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let vector = heap.alloc_resizable_vector(kind, capacity.max(count) as isize)?;
+    heap.root(vector);
+    heap.resize_vector(vector, count as isize)?;
+    Ok(vector)
+}
+
+/// A resizable copy of the atomic vector or list `vector` with room for `capacity` elements.
+unsafe fn with_capacity(vector: Sexp, capacity: usize) -> R<Sexp> {
+    let count = length(vector);
+    let grown = resizable(vector.kind(), count, capacity)?;
+    match vector.kind() {
+        SexpType::Real => grown
+            .slice_mut::<f64>()
+            .copy_from_slice(values::reals(vector)),
+        SexpType::Integer | SexpType::Logical => grown
+            .slice_mut::<i32>()
+            .copy_from_slice(values::ints(vector)),
+        _ => {
+            for index in 0..count {
+                crate::heap().set_element(grown, index, vector.element(index));
+            }
+        }
+    }
+    Ok(grown)
+}
+
+/// Whether the call owns the dictionary or set `object` and every vector inside it, which only
+/// the collection holds, so [`insert_in_place`] may grow them. An empty collection has no key
+/// vector yet and is rebuilt instead.
+unsafe fn owned_collection(call: &Call<'_>, object: Sexp) -> bool {
+    if !owned(call, object) {
+        return false;
+    }
+    let heap = crate::heap();
+    let kind = records::native_kind(object);
+    let index = index_slot(kind);
+    (0..object.record_slot_count()).all(|slot| match object.record_slot(slot) {
+        Slot::Handle(part) => {
+            part != nil() && part.refcount() <= 1 && (slot == index || heap.is_resizable(part))
+        }
+        _ => false,
+    })
+}
+
+/// Whether the key vector of a collection holds keys of `kind` without changing its type: an
+/// integer joins double keys as a double, but a double turns integer keys into doubles, which
+/// [`Collection::insert`] does by rebuilding.
+unsafe fn keys_hold(object: Sexp, kind: KeyKind) -> bool {
+    let keys = object.record_handle(0);
+    match (keys.and_then(|keys| key_kind_of(keys)), kind) {
+        (Some(KeyKind::Double), KeyKind::Integer) => true,
+        (Some(stored), kind) => stored == kind,
+        (None, _) => false,
+    }
+}
+
+/// Inserts `key` (with `value` for a dictionary) into a collection the call owns, which
+/// [`owned_collection`] and [`keys_hold`] confirmed. The key and value vectors double their
+/// capacity when full, and the index is rebuilt at half load, as [`Collection`] does.
+unsafe fn insert_in_place(object: Sexp, key: Key, value: Sexp) -> R<()> {
+    let heap = crate::heap();
+    let kind = records::native_kind(object);
+    let is_dict = kind == NativeKind::Dict;
+    let index_at = index_slot(kind);
+    let (Some(mut keys), Some(index)) = (object.record_handle(0), object.record_handle(index_at))
+    else {
+        return Err(error("a dictionary or set lost its key vector"));
+    };
+    let slot = match probe(values::ints(index), key, |position| key_at(keys, position)) {
+        Ok(position) => {
+            if is_dict && let Some(stored) = object.record_handle(1) {
+                heap.set_element(stored, position, value);
+            }
+            return Ok(());
+        }
+        Err(slot) => slot,
+    };
+    let count = length(keys);
+    if count == keys.capacity() as usize {
+        let capacity = (count * 2).max(8);
+        keys = with_capacity(keys, capacity)?;
+        heap.set_record_slot(object, 0, keys);
+        if let Some(stored) = object.record_handle(1).filter(|_| is_dict) {
+            let grown = with_capacity(stored, capacity)?;
+            heap.set_record_slot(object, 1, grown);
+        }
+    }
+    heap.resize_vector(keys, count as isize + 1)?;
+    match (keys.kind(), key) {
+        (SexpType::Logical, Key::Logical(flag)) => keys.slice_mut::<i32>()[count] = i32::from(flag),
+        (SexpType::Integer, Key::Number(number)) => keys.slice_mut::<i32>()[count] = number as i32,
+        (SexpType::Real, Key::Number(number)) => keys.slice_mut::<f64>()[count] = number,
+        (SexpType::String, Key::Text(text)) => heap.set_element(keys, count, text),
+        _ => return Err(error("a key does not fit its collection's key vector")),
+    }
+    if let Some(stored) = object.record_handle(1).filter(|_| is_dict) {
+        heap.resize_vector(stored, count as isize + 1)?;
+        heap.set_element(stored, count, value);
+    }
+    let entries = count + 1;
+    if entries * 2 > length(index) {
+        let rebuilt = build_index(entries, entries, |position| key_at(keys, position))?;
+        heap.set_record_slot(object, index_at, values::integer_vector(&rebuilt)?);
+    } else {
+        index.slice_mut::<i32>()[slot] = entries as i32;
+    }
+    Ok(())
+}
+
+/// The open-addressing index over `count` keys, with room for `room` keys: a power of two at
+/// least twice that, so it is never more than half full, whose entries are a key's position plus
+/// one.
+unsafe fn build_index(
+    count: usize,
+    room: usize,
+    key_at_position: impl Fn(usize) -> Key,
+) -> R<Vec<i32>> {
+    let size = room
+        .max(count)
+        .checked_mul(2)
+        .and_then(usize::checked_next_power_of_two)
+        .filter(|&size| size <= i32::MAX as usize)
+        .ok_or_else(|| {
+            error(format!(
+                "cannot index a collection with room for {room} keys"
+            ))
+        })?
+        .max(8);
+    let mut index = Vec::new();
+    index
+        .try_reserve_exact(size)
+        .map_err(|_| error(format!("cannot allocate an index for {room} keys")))?;
+    index.resize(size, 0);
+    for position in 0..count {
+        if let Err(slot) = probe(&index, key_at_position(position), &key_at_position) {
+            index[slot] = position as i32 + 1;
+        }
+    }
+    Ok(index)
+}
+
+/// A dictionary or set with room for `spare` more keys without growing: `object` itself when the
+/// call owns it, and otherwise a copy. An empty collection has no key vector, and so nothing to
+/// reserve, until its first key fixes the key type.
+unsafe fn reserve_collection(call: &Call<'_>, object: Sexp, spare: usize) -> R<Sexp> {
+    let count = entry_count(object);
+    if count == 0 {
+        return Ok(object);
+    }
+    let object = if owned_collection(call, object) {
+        object
+    } else {
+        Collection::read(object)?.write()?
+    };
+    let heap = crate::heap();
+    heap.root(object);
+    let kind = records::native_kind(object);
+    let room = count.saturating_add(spare);
+    if room > i32::MAX as usize / 2 {
+        // Positions in the index are `i32`, and the index holds twice the room.
+        return Err(error(format!("cannot reserve room for {room} keys")));
+    }
+    let parts = if kind == NativeKind::Dict { 2 } else { 1 };
+    for slot in 0..parts {
+        if let Some(part) = object.record_handle(slot)
+            && (part.capacity() as usize) < room
+        {
+            let grown = with_capacity(part, room)?;
+            heap.set_record_slot(object, slot, grown);
+        }
+    }
+    let index_at = index_slot(kind);
+    let wanted = (room * 2).next_power_of_two().max(8);
+    if let (Some(keys), Some(index)) = (object.record_handle(0), object.record_handle(index_at))
+        && length(index) < wanted
+    {
+        let rebuilt = build_index(count, room, |position| key_at(keys, position))?;
+        heap.set_record_slot(object, index_at, values::integer_vector(&rebuilt)?);
+    }
+    Ok(object)
 }
 
 // Dict and Set storage.
@@ -1845,7 +2791,7 @@ impl Collection {
                 }
                 self.index[slot] = self.keys.len() as i32;
                 if self.keys.len() * 2 > self.index.len() {
-                    self.rebuild_index();
+                    self.rebuild_index()?;
                 }
             }
         }
@@ -1871,18 +2817,14 @@ impl Collection {
         }
         self.keys = keys;
         self.values = values;
-        self.rebuild_index();
-        Ok(())
+        self.rebuild_index()
     }
 
-    unsafe fn rebuild_index(&mut self) {
-        let capacity = (self.keys.len() * 2).next_power_of_two().max(8);
-        self.index = vec![0; capacity];
-        for (position, &key) in self.keys.iter().enumerate() {
-            if let Err(slot) = probe(&self.index, key, |found| self.keys[found]) {
-                self.index[slot] = position as i32 + 1;
-            }
-        }
+    unsafe fn rebuild_index(&mut self) -> R<()> {
+        self.index = build_index(self.keys.len(), self.keys.len(), |position| {
+            self.keys[position]
+        })?;
+        Ok(())
     }
 
     unsafe fn write(&self) -> R<Sexp> {
@@ -1890,14 +2832,14 @@ impl Collection {
         let keys = match self.key_kind {
             None => nil(),
             Some(KeyKind::Logical) => {
-                let vector = values::alloc(SexpType::Logical, count)?;
+                let vector = resizable(SexpType::Logical, count, count)?;
                 for (slot, key) in vector.slice_mut::<i32>().iter_mut().zip(&self.keys) {
                     *slot = i32::from(matches!(key, Key::Logical(true)));
                 }
                 vector
             }
             Some(KeyKind::Integer) => {
-                let vector = values::alloc(SexpType::Integer, count)?;
+                let vector = resizable(SexpType::Integer, count, count)?;
                 for (slot, key) in vector.slice_mut::<i32>().iter_mut().zip(&self.keys) {
                     if let Key::Number(number) = key {
                         *slot = *number as i32;
@@ -1906,7 +2848,7 @@ impl Collection {
                 vector
             }
             Some(KeyKind::Double) => {
-                let vector = values::alloc(SexpType::Real, count)?;
+                let vector = resizable(SexpType::Real, count, count)?;
                 for (slot, key) in vector.slice_mut::<f64>().iter_mut().zip(&self.keys) {
                     if let Key::Number(number) = key {
                         *slot = *number;
@@ -1915,7 +2857,7 @@ impl Collection {
                 vector
             }
             Some(KeyKind::Text) => {
-                let vector = values::alloc(SexpType::String, count)?;
+                let vector = resizable(SexpType::String, count, count)?;
                 for (position, key) in self.keys.iter().enumerate() {
                     if let Key::Text(text) = key {
                         crate::heap().set_element(vector, position, *text);
@@ -1926,7 +2868,11 @@ impl Collection {
         };
         let index = values::integer_vector(&self.index)?;
         let (fields, slots) = if self.kind == NativeKind::Dict {
-            (Fields::Dict, vec![keys, list_vector(&self.values)?, index])
+            let stored = resizable(SexpType::List, count, count)?;
+            for (position, &value) in self.values.iter().enumerate() {
+                crate::heap().set_element(stored, position, value);
+            }
+            (Fields::Dict, vec![keys, stored, index])
         } else {
             (Fields::Set, vec![keys, index])
         };
@@ -2167,8 +3113,13 @@ unsafe fn dict_contains(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn dict_insert(call: &Call<'_>) -> R<Sexp> {
     let [object, key, value] = arguments(call, ["dict", "key", "value"])?;
-    let mut collection = Collection::read(dict(call, object)?)?;
+    let object = dict(call, object)?;
     let (key, kind) = key_of(call, "key", key)?;
+    if owned_collection(call, object) && keys_hold(object, kind) {
+        insert_in_place(object, key, value)?;
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
     collection.insert(call, key, kind, value)?;
     collection.write()
 }
@@ -2281,9 +3232,25 @@ unsafe fn two_collections(call: &Call<'_>, kind: NativeKind) -> R<(Collection, C
     Ok((first, second))
 }
 
-/// Inserts every entry of `second` into `first`, whose values `second`'s replace.
+/// Inserts every entry of `second` into `first`, whose values `second`'s replace. An owned
+/// `first` whose keys hold `second`'s grows in place.
 unsafe fn merge(call: &Call<'_>, kind: NativeKind) -> R<Sexp> {
-    let (mut first, second) = two_collections(call, kind)?;
+    let [first_object, second_object] = arguments(call, ["first", "second"])?;
+    let first_object = collection(call, "first", first_object, kind)?;
+    let second_object = collection(call, "second", second_object, kind)?;
+    let second = Collection::read(second_object)?;
+    if owned_collection(call, first_object)
+        && second
+            .key_kind
+            .is_none_or(|second_kind| keys_hold(first_object, second_kind))
+    {
+        for (position, &key) in second.keys.iter().enumerate() {
+            let value = second.values.get(position).copied().unwrap_or_else(nil);
+            insert_in_place(first_object, key, value)?;
+        }
+        return Ok(first_object);
+    }
+    let mut first = Collection::read(first_object)?;
     let second_kind = second.key_kind.unwrap_or(KeyKind::Logical);
     for (position, &key) in second.keys.iter().enumerate() {
         let value = second.values.get(position).copied().unwrap_or_else(nil);
@@ -2324,6 +3291,66 @@ unsafe fn dict_keep_shared(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn dict_remove_all(call: &Call<'_>) -> R<Sexp> {
     intersect(call, NativeKind::Dict, false)
+}
+
+unsafe fn dict_walk_until(call: &Call<'_>) -> R<Sexp> {
+    let [object, state, f] = arguments(call, ["dict", "state", "f"])?;
+    let collection = Collection::read(dict(call, object)?)?;
+    let f = function(call, "f", f)?;
+    let mut state = state;
+    for position in 0..collection.keys.len() {
+        let step = scope(|| {
+            let key = collection.key_value(position)?;
+            invoke(call, f, &[state, key, collection.values[position]])
+        })?;
+        match walk_step(call, step)? {
+            Ok(next) => state = next,
+            Err(last) => return Ok(last),
+        }
+    }
+    Ok(state)
+}
+
+/// Unions the collections `f` returns for each entry of `object`, a later entry's value
+/// replacing an earlier one's.
+unsafe fn join_map(call: &Call<'_>, object: Sexp, f: Sexp, kind: NativeKind) -> R<Sexp> {
+    let source = Collection::read(object)?;
+    let f = function(call, "f", f)?;
+    let mut joined = Collection::new(kind);
+    for position in 0..source.keys.len() {
+        let inner = scope(|| {
+            let key = source.key_value(position)?;
+            match source.values.get(position) {
+                Some(&value) => invoke(call, f, &[key, value]),
+                None => invoke(call, f, &[key]),
+            }
+        })?;
+        let inner = Collection::read(collection(call, "f()", inner, kind)?)?;
+        let inner_kind = inner.key_kind.unwrap_or(KeyKind::Logical);
+        for (at, &key) in inner.keys.iter().enumerate() {
+            let value = inner.values.get(at).copied().unwrap_or_else(nil);
+            joined.insert(call, key, inner_kind, value)?;
+        }
+    }
+    joined.write()
+}
+
+unsafe fn dict_join_map(call: &Call<'_>) -> R<Sexp> {
+    let [object, f] = arguments(call, ["dict", "f"])?;
+    join_map(call, dict(call, object)?, f, NativeKind::Dict)
+}
+
+unsafe fn dict_reserve(call: &Call<'_>) -> R<Sexp> {
+    let [object, spare] = arguments(call, ["dict", "spare"])?;
+    let object = dict(call, object)?;
+    let spare = count(call, "spare", spare)?;
+    reserve_collection(call, object, spare)
+}
+
+unsafe fn dict_clear(call: &Call<'_>) -> R<Sexp> {
+    let [object] = arguments(call, ["dict"])?;
+    dict(call, object)?;
+    Collection::new(NativeKind::Dict).write()
 }
 
 // Set.
@@ -2379,8 +3406,13 @@ unsafe fn set_contains(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn set_insert(call: &Call<'_>) -> R<Sexp> {
     let [object, element] = arguments(call, ["set", "element"])?;
-    let mut collection = Collection::read(set(call, object)?)?;
+    let object = set(call, object)?;
     let (key, kind) = key_of(call, "element", element)?;
+    if owned_collection(call, object) && keys_hold(object, kind) {
+        insert_in_place(object, key, nil())?;
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
     collection.insert(call, key, kind, nil())?;
     collection.write()
 }
@@ -2459,6 +3491,36 @@ unsafe fn set_keep_if(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn set_drop_if(call: &Call<'_>) -> R<Sexp> {
     set_filter(call, false)
+}
+
+unsafe fn set_walk_until(call: &Call<'_>) -> R<Sexp> {
+    let [object, state, f] = arguments(call, ["set", "state", "f"])?;
+    let collection = Collection::read(set(call, object)?)?;
+    let f = function(call, "f", f)?;
+    let mut state = state;
+    for position in 0..collection.keys.len() {
+        let step = scope(|| {
+            let element = collection.key_value(position)?;
+            invoke(call, f, &[state, element])
+        })?;
+        match walk_step(call, step)? {
+            Ok(next) => state = next,
+            Err(last) => return Ok(last),
+        }
+    }
+    Ok(state)
+}
+
+unsafe fn set_join_map(call: &Call<'_>) -> R<Sexp> {
+    let [object, f] = arguments(call, ["set", "f"])?;
+    join_map(call, set(call, object)?, f, NativeKind::Set)
+}
+
+unsafe fn set_reserve(call: &Call<'_>) -> R<Sexp> {
+    let [object, spare] = arguments(call, ["set", "spare"])?;
+    let object = set(call, object)?;
+    let spare = count(call, "spare", spare)?;
+    reserve_collection(call, object, spare)
 }
 
 /// The names the library binds, for the test that keeps them equal to `types/ry.Rtypes`.

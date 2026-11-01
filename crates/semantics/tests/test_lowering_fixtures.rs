@@ -101,6 +101,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Break => "Break".to_owned(),
         ExpressionKind::Next => "Next".to_owned(),
         ExpressionKind::Tuple(_) => "Tuple".to_owned(),
+        ExpressionKind::Array(_) => "Array".to_owned(),
         ExpressionKind::Record(fields) => {
             let names: Vec<&str> = module[fields]
                 .iter()

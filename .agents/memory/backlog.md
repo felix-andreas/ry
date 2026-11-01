@@ -302,15 +302,45 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
-- `Result.and_then` keeps one error type: a step that fails with another tag is a `type-mismatch`,
-  because a generic's tag union does not widen across calls. Widen `E` to the union of both, then
-  drop the limit from `reference/standard-library.mdx` ("Limits").
-- `Dict.insert`, `Set.insert` and `List.append` copy, so a growing loop is quadratic. Reuse the
-  value in place when the compiler proves the argument is the last use of its binding.
 - A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
   error; the checker rejects it statically, so only `Unknown` code reaches it.
-- The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
-  touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
+- A diagnostic for library calls in a project that targets GNU R, once a project can declare its
+  runtime (`decisions.md`, "The standard library runs only on ry's runtime").
+- Reuse misses two shapes: a nested update (`state$seen <- Dict.insert(state$seen, k, v)`, about
+  28 s for 20,000 inserts in a debug build, quadratic) and the first update of a parameter inside
+  a helper. Both need either a nested-replacement path in `eval::rebind` or last-use analysis.
+- **Bytecode registers are uncounted, so in-place updates can be observed.** In a compiled
+  closure, `r <- list(d, mod())` keeps `d` in a register without a reference; if `mod` runs
+  `d <- Dict.insert(d, ...)` in that frame through `eval.parent`, the count reads 1 and `r[[1]]`
+  sees the insert. `x[[1]] <- 99` through `eval.parent` misbehaves the same way, so the cause is
+  in `crates/interp/src/bytecode.rs` (`may_modify_in_place` is syntactic), not the library. Fix
+  by counting register references or refusing reuse while a compiled frame for the environment
+  is live.
+- `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
+  signalling) for the reuse path, and `bytecode::reuses_first_argument` matches the callee's name
+  against `BUILTINS` as a string for every subexpression. Fold the first into `eval_call` and give
+  the second a name set.
+- When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
+  "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
+  constraint. Belongs to the checker diagnostics work.
+
+## Open: Arrays
+
+`decisions.md`, "An Array is a flagged R vector". Known gaps:
+
+- The runtime checks that atomic items share one type but not that ry-value items do, so
+  `[(x = 1), [1]]` builds at run time; only the checker rejects it.
+- `c(x, x)` in an unannotated callback types as `Unknown`, so `List.map(xs, \(x) c(x, x))` passes
+  the `item` constraint and fails only at run time.
+- `List` functions added to `standard_library.rs` need an Array overload in `types/ry.Rtypes`, and
+  any that reuse their first argument's storage must not reuse an Array's.
+- `class(xs)` is R's implicit class (`numeric`), and serialization (`saveRDS`) drops the flag, so
+  a reloaded Array is a plain vector.
+- C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
+- The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
+  would let compiled loops run strict arithmetic without the generic call.
+- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
+- The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 
 ## Open: strict mode restricts what a file's top level runs
 
@@ -1972,6 +2002,19 @@ distinct-node count will not see the problem and a naive tree count is itself ex
 a memoized size where the size of a node is one plus the sum of its children's sizes, which is
 linear in the graph and yields the true tree magnitude. `types::type_size` already has that shape.
 
+## Open: a cross-file cycle panics salsa's backdate check
+
+`fuzz_multi_file` (`crates/semantics/tests/test_fuzz.rs`) panics in salsa's
+`backdate.rs` ("returned the same value, but the previous execution changed at R2 and the new
+execution changed at R1") for `global_scheme`. Minimal repro, with salsa 0.28.0 and 0.28.5 alike:
+file one is `g <- rev(g)` then `f <- g$x`, file two is `g <- g + 1L`; empty file two, render both,
+restore it, render again. `sort`, `List.reverse` and `as.Array` in place of `rev` panic too,
+`unlist` and `as.vector` do not. Every execution of the scheme is `Unknown`, so the result is
+deterministic: the panic comes from deep verification re-executing a cycle head
+(`maybe_changed_after_cold`) outside its fixpoint, where it reads only backdated cycle members.
+The Array fuzz templates reached it first; it predates Arrays. Fix the cycle shape (or report it to
+salsa with this repro), then pin the repro in `test_incremental.rs`.
+
 ## Open: neither cycle fix has end-to-end coverage
 
 Neither the non-convergence fix nor the missing cycle recovery has a fixture. The failing inputs are
@@ -1984,12 +2027,15 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Slower than data.table on two bench questions** (`tools/bench/table`, 1e6 rows): groupby q6
-  (median and sd per group, 0.13 s against 0.08 s) and the keyed rolling join (0.03 s against
-  0.02 s). The Rust engine alone runs q6 in 0.06 s, so most of the gap is the R-side call path.
+- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
+  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
+  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
+  is the fix used so far (the grouped median); a reusable arena or a purge delay set in
+  `crates/libr/src/libr.rs` is the general one, to be measured against resident memory.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
-  `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
-  expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
+  `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
+  `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
+  chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
 - **IDE:** rename of a column (across `col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and
@@ -2042,12 +2088,13 @@ The end-to-end guard rests on the corpus suites.
   0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
   bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
   `setkey` is at parity (0.026 s on both).
-- **data.table's helpers that allocate many large vectors trail GNU R at 1e7 rows.** In
-  `tools/bench/table/ops.R`, `rbindlist` takes 1.26 s against 0.85 s, `fwrite` 1.21 s against
-  0.76 s and `melt` 1.38 s against 1.21 s; `setkey`, `dcast`, `unique` and the single-loop helpers
-  are at parity or faster. In `rbindlist` about 0.3 s is collection (minor collections tracing the
-  fresh 2e7-element character columns, and one major collection), and `SET_STRING_ELT`'s barrier
-  and reference counts touch each CHARSXP header. `fwrite` has not been profiled.
+- **A few data.table helpers still trail GNU R at 1e7 rows.** In `tools/bench/table/ops.R`
+  (best of runs, 4 threads) `fwrite` takes 0.89 s against 0.76 s, `rbindlist` 0.97 s against
+  0.85 s, `unique` 0.105 s against 0.073 s and `uniqueN` 0.148 s against 0.113 s; `dcast`,
+  `between` and `chin` are within 15%, and `fread`, `setkey`, `setorder`, `melt` and the
+  single-loop helpers are at parity or faster. In `rbindlist` part of the gap is collection
+  (minor collections tracing the fresh 2e7-element character columns) and `SET_STRING_ELT`'s
+  barrier touching each CHARSXP header. `unique` and `uniqueN` have not been profiled.
 - **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
   `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
   against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
@@ -2222,6 +2269,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 ## Shipped ledger (one line each; rationale in `decisions.md`, contracts in the docs site)
 
+- **Arrays.** `[1, 2, 3]` parses, formats, types as `Array<T>` and runs as a flagged R vector with strict operators and indexing. `decisions.md`, "An Array is a flagged R vector".
 - **`ry load` on ry's own runtime.** Lazy bindings are promises over the analysis's syntax trees, both runtimes apply the same plan, and `test_load.rs` runs on both. `decisions.md`, "the loader on ry's runtime".
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
 - **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry R` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
@@ -2869,11 +2917,7 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-
-- **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
-  lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
-  lints when the project is still cold, but that changes the two-wave contract on the architecture
-  page, so weigh it against making the cold naming pass faster.
+- Goto-definition, references and rename have a p99 of 15 to 25 ms (p50 about 1 ms) on all three benches, on main as before. The slow positions are calls to stub globals (`seq_len`, `factor`, `vapply`). `stub_declaration` is a map lookup, so the cost sits elsewhere on that path (the item check, `position_in_item`, or the server's `stub_location`); profile it before guessing.
 
 ## Open: false errors on real CRAN code
 

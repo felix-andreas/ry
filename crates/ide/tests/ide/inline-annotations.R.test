@@ -8,7 +8,7 @@ definition 0..5
 references: 0..5*
 rename: 1 edit(s)
 signature: none
-completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 
 #---- hover_on_a_parameter_read_uses_its_inline_type
 f <- function(count: integer) cou$0nt
@@ -19,7 +19,7 @@ definition 14..19
 references: 14..19*, 30..35
 rename: 2 edit(s)
 signature: none
-completion (51): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
+completion (52): count, count.fields, Str.count_utf8_bytes, Expr.count, List.count_if, c.noquote, capture.output, chol.default
 
 #---- hover_on_a_builtin_type_name
 count: inte$0ger <- 1L
@@ -55,7 +55,7 @@ definition 17..18
 references: 17..18*, 23..24, 29..30
 rename: 3 edit(s)
 signature: none
-completion (14): Any, character, complex, double, fn, integer, list, logical
+completion (15): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_parameter_colon
 #: @type Money {double}
@@ -67,7 +67,7 @@ definition: none
 references: none
 rename: none
 signature: none
-completion (15): Any, character, complex, double, fn, integer, list, logical
+completion (16): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_binding_colon_before_the_type_exists
 #: @type Money {double}
@@ -121,4 +121,4 @@ definition 21..22
 references: 21..22*, 27..28, 33..34
 rename: 3 edit(s)
 signature: none
-completion (14): Any, character, complex, double, fn, integer, list, logical
+completion (15): Any, character, complex, double, fn, integer, list, logical
