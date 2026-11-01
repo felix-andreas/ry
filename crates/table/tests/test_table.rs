@@ -3572,7 +3572,10 @@ fn random_column(rng: &mut SplitMix64, kind: usize, length: usize) -> RVector {
             (0..length)
                 .map(|_| {
                     (!rng.chance(1, 10)).then(|| {
-                        format!("{}k{}", ["", "B", "a"][rng.below(3)], rng.below(distinct))
+                        // The long prefix puts strings out of line and makes them tie on their
+                        // first 16 bytes.
+                        let prefix = ["", "B", "a", "a_long_shared_prefix_"][rng.below(4)];
+                        format!("{prefix}k{}", rng.below(distinct))
                     })
                 })
                 .collect(),

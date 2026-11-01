@@ -38,6 +38,7 @@ ryu = "1.0"
 itoa = "1.0"
 sniff = { path = "../sniff" }
 rustc-hash.workspace = true
+foldhash.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

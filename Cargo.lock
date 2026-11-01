@@ -4157,6 +4157,7 @@ dependencies = [
 name = "table"
 version = "0.3.2-beta"
 dependencies = [
+ "foldhash 0.2.0",
  "itoa",
  "memmap2",
  "polars",

@@ -8,6 +8,7 @@
 //! way, with a warning.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use polars::prelude::{
     BooleanChunked, ChunkCompareEq, ChunkCompareIneq, ChunkFillNullValue, ChunkFull, Column,
@@ -20,7 +21,7 @@ use polars_arrow::bitmap::{Bitmap, MutableBitmap};
 use polars_buffer::Buffer;
 use polars_core::runtime::THREAD_POOL;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::{
     ColumnType, Error, Result, Table,
@@ -34,14 +35,25 @@ use crate::{
 
 /// The row number's share of a packed sort key: a table has fewer than 2^32 rows.
 const ROW_BITS: u32 = 32;
-/// Up to this many key bits, `unique` and `uniqueN` mark each key in a flat table of 2^bits
-/// flags instead of sorting.
+/// Up to this many key bits, `unique` and `uniqueN` record each key's first row in a flat table
+/// of 2^bits entries instead of sorting.
 const DENSE_BITS: u32 = 24;
+/// The widest dense table each parallel task keeps a copy of.
+const PARALLEL_DENSE_BITS: u32 = 20;
 /// A radix sort over at most this many key bits sorts them in one pass.
 const ONE_PASS_BITS: u32 = 16;
 /// The digit width of each pass of a radix sort over more bits.
 const RADIX_BITS: u32 = 11;
+/// LSD passes beyond this cost more than one MSD pass followed by in-cache bucket sorts.
+const MAX_LSD_PASSES: u32 = 3;
+/// The digit width of the MSD pass, which leaves buckets of a few hundred keys at ten million rows.
+const MSD_BITS: u32 = 16;
 /// The longest string a view holds inline.
+/// A string ranking run looks each short string up in a direct-mapped cache of 2^CACHE_BITS
+/// entries before its hash map, which pays off while the column has few distinct strings.
+const CACHE_BITS: u32 = 12;
+/// Past this many distinct strings in a run the cache mostly misses, so the run stops using it.
+const CACHED_DISTINCT: usize = 1 << (CACHE_BITS - 2);
 const INLINE_BYTES: u32 = 12;
 /// Up to this many strings, `%chin%` compares each value against every string in the set.
 const SHORT_SET: usize = 8;
@@ -961,16 +973,22 @@ fn order_digits(column: &Column, descending: bool) -> Result<Option<Digit>> {
         Some(Vector::Double { values, validity }) => {
             // `NA` is 0 and `NaN` is 1, both before every number, as `setorder` places them.
             let number = |row: usize| valid(validity.as_ref(), row) && !values[row].is_nan();
-            let mut low = u64::MAX;
-            let mut high = 0u64;
-            for row in 0..values.len() {
-                if number(row) {
-                    let bits = ordered_bits(values[row]);
-                    low = low.min(bits);
-                    high = high.max(bits);
-                }
-            }
-            let Some(top) = high.checked_sub(low).unwrap_or(0).checked_add(2) else {
+            let (low, high) = THREAD_POOL.install(|| {
+                (0..values.len())
+                    .into_par_iter()
+                    .with_min_len(CHUNK_ROWS)
+                    .filter(|row| number(*row))
+                    .map(|row| ordered_bits(values[row]))
+                    .fold(
+                        || (u64::MAX, 0u64),
+                        |(low, high), bits| (low.min(bits), high.max(bits)),
+                    )
+                    .reduce(
+                        || (u64::MAX, 0u64),
+                        |left, right| (left.0.min(right.0), left.1.max(right.1)),
+                    )
+            });
+            let Some(top) = high.saturating_sub(low).checked_add(2) else {
                 return Ok(None);
             };
             let codes = fill_rows(values.len(), |row| {
@@ -1041,10 +1059,12 @@ fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
         return Ok((Vec::new(), 0));
     };
     let length = array.len();
+    // Every run may meet every distinct string, so the sort and the translation below grow with
+    // the number of runs: one per thread keeps them small.
     let runs = if length < PARALLEL_ROWS {
         1
     } else {
-        THREAD_POOL.current_num_threads().max(1) * 4
+        THREAD_POOL.current_num_threads().max(1)
     };
     let run_length = length.div_ceil(runs).max(1);
     let numbered: Vec<(Vec<&str>, Vec<u32>)> = THREAD_POOL.install(|| {
@@ -1053,8 +1073,9 @@ fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|start| {
-                let mut inline: FxHashMap<u128, u32> = FxHashMap::default();
-                let mut long: FxHashMap<&str, u32> = FxHashMap::default();
+                let mut inline: foldhash::HashMap<u128, u32> = foldhash::HashMap::default();
+                let mut cache = vec![(0u128, u32::MAX); 1 << CACHE_BITS];
+                let mut long: foldhash::HashMap<&str, u32> = foldhash::HashMap::default();
                 let mut distinct: Vec<&str> = Vec::new();
                 let views = array.views();
                 let local = (start..(start + run_length).min(length))
@@ -1068,12 +1089,21 @@ fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
                         // reading or hashing the string itself.
                         if view.length <= INLINE_BYTES {
                             let bits = view.as_u128() & inline_mask(view.length);
-                            if let Some(number) = inline.get(&bits) {
-                                return *number;
+                            let cached = distinct.len() <= CACHED_DISTINCT;
+                            let slot = &mut cache[cache_slot(bits)];
+                            if cached && slot.0 == bits && slot.1 != u32::MAX {
+                                return slot.1;
                             }
-                            let number = distinct.len() as u32;
-                            distinct.push(array.value(row));
-                            inline.insert(bits, number);
+                            let number = match inline.get(&bits) {
+                                Some(number) => *number,
+                                None => {
+                                    let number = distinct.len() as u32;
+                                    distinct.push(array.value(row));
+                                    inline.insert(bits, number);
+                                    number
+                                }
+                            };
+                            *slot = (bits, number);
                             number
                         } else {
                             let value = array.value(row);
@@ -1088,12 +1118,15 @@ fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
             })
             .collect()
     });
-    let mut sorted: Vec<&str> = numbered
+    // Ordering by the first bytes as an integer first makes almost every comparison an integer
+    // one, and the integer order agrees with byte order because the zero padding of a short
+    // string sorts before every byte a longer string can continue with.
+    let mut sorted: Vec<(u128, &str)> = numbered
         .iter()
-        .flat_map(|(distinct, _)| distinct.iter().copied())
+        .flat_map(|(distinct, _)| distinct.iter().map(|value| (prefix_key(value), *value)))
         .collect();
     THREAD_POOL.install(|| sorted.par_sort_unstable());
-    sorted.dedup();
+    sorted.dedup_by(|right, left| right.1 == left.1);
     let mut ranks = vec![0u64; length];
     THREAD_POOL.install(|| {
         ranks
@@ -1102,7 +1135,10 @@ fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
             .for_each(|(out, (distinct, local))| {
                 let translation: Vec<u64> = distinct
                     .iter()
-                    .map(|value| sorted.partition_point(|other| other < value) as u64 + 1)
+                    .map(|value| {
+                        sorted.partition_point(|other| *other < (prefix_key(value), *value)) as u64
+                            + 1
+                    })
                     .collect();
                 for (slot, number) in out.iter_mut().zip(local) {
                     *slot = translation.get(*number as usize).copied().unwrap_or(0);
@@ -1110,6 +1146,21 @@ fn string_ranks(column: &Column) -> Result<(Vec<u64>, u64)> {
             });
     });
     Ok((ranks, sorted.len() as u64))
+}
+
+/// The string's first 16 bytes as a big-endian integer, zero-padded, so that integer order is
+/// byte order up to ties between strings that share those bytes.
+fn prefix_key(value: &str) -> u128 {
+    let mut bytes = [0u8; 16];
+    let length = value.len().min(16);
+    bytes[..length].copy_from_slice(&value.as_bytes()[..length]);
+    u128::from_be_bytes(bytes)
+}
+
+/// The cache entry for an inline view's bits: a multiplicative hash of both halves.
+fn cache_slot(bits: u128) -> usize {
+    let mixed = (bits as u64 ^ (bits >> 64) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (mixed >> (u64::BITS - CACHE_BITS)) as usize
 }
 
 /// The mask that keeps a view's length and the first `length` bytes of its inline string.
@@ -1138,16 +1189,11 @@ fn sorted_rows(digits: &[Digit], height: usize) -> Option<Vec<u32>> {
 fn first_rows(digits: &[Digit], height: usize) -> Vec<u32> {
     let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
     if bits <= DENSE_BITS {
-        let keys: Vec<u64> = packed_keys(digits, height, false);
-        let mut seen = vec![false; 1 << bits];
-        let mut rows = Vec::new();
-        for (row, key) in keys.iter().enumerate() {
-            let seen = &mut seen[*key as usize];
-            if !*seen {
-                *seen = true;
-                rows.push(row as u32);
-            }
-        }
+        let mut rows: Vec<u32> = dense_first_rows(digits, height, bits)
+            .into_iter()
+            .filter(|row| *row != u32::MAX)
+            .collect();
+        rows.sort_unstable();
         return rows;
     }
     let Some(sorted) = sorted_rows(digits, height) else {
@@ -1168,19 +1214,70 @@ fn first_rows(digits: &[Digit], height: usize) -> Vec<u32> {
     rows
 }
 
+/// For each packed combination of the digits, which fit in `bits` bits, the first row that holds
+/// it, or `u32::MAX` when none does.
+///
+/// Each parallel task records first rows in a table of its own, and the tables merge by taking
+/// the smallest row. Past `PARALLEL_DENSE_BITS` the per-task tables would cost more memory than
+/// the parallel scan saves, so one task scans every row.
+fn dense_first_rows(digits: &[Digit], height: usize, bits: u32) -> Vec<u32> {
+    let keys: Vec<u64> = packed_keys(digits, height, false);
+    let first_rows_of = |start: usize, slice: &[u64]| {
+        let mut first = vec![u32::MAX; 1 << bits];
+        for (offset, key) in slice.iter().enumerate() {
+            let slot = &mut first[*key as usize];
+            if *slot == u32::MAX {
+                *slot = (start + offset) as u32;
+            }
+        }
+        first
+    };
+    if bits > PARALLEL_DENSE_BITS || height < PARALLEL_ROWS {
+        return first_rows_of(0, &keys);
+    }
+    let task_length = height.div_ceil(THREAD_POOL.current_num_threads().max(1));
+    THREAD_POOL.install(|| {
+        keys.par_chunks(task_length)
+            .enumerate()
+            .map(|(task, slice)| first_rows_of(task * task_length, slice))
+            .reduce_with(|mut left, right| {
+                for (slot, row) in left.iter_mut().zip(right) {
+                    *slot = (*slot).min(row);
+                }
+                left
+            })
+            .unwrap_or_default()
+    })
+}
+
 /// How many distinct combinations of the digits the rows hold.
 fn distinct_count(digits: &[Digit], height: usize) -> usize {
     let bits: u32 = digits.iter().map(|digit| digit.bits).sum();
     if bits <= DENSE_BITS {
-        let keys: Vec<u64> = packed_keys(digits, height, false);
-        let mut seen = vec![false; 1 << bits];
-        let mut count = 0usize;
-        for key in keys {
-            let seen = &mut seen[key as usize];
-            count += usize::from(!*seen);
-            *seen = true;
-        }
-        return count;
+        // One shared bit per combination. A task reads a word before it sets a bit, so the words
+        // of common combinations stay shared in every core's cache instead of bouncing.
+        let words: Vec<AtomicU64> = (0..(1usize << bits).div_ceil(64))
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        THREAD_POOL.install(|| {
+            (0..height)
+                .into_par_iter()
+                .with_min_len(CHUNK_ROWS)
+                .for_each(|row| {
+                    let key = digits
+                        .iter()
+                        .fold(0u64, |key, digit| (key << digit.bits) | digit.codes[row]);
+                    let word = &words[(key >> 6) as usize];
+                    let bit = 1u64 << (key & 63);
+                    if word.load(Ordering::Relaxed) & bit == 0 {
+                        word.fetch_or(bit, Ordering::Relaxed);
+                    }
+                })
+        });
+        return words
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed).count_ones() as usize)
+            .sum();
     }
     fn count_sorted<T: Packed>(digits: &[Digit], height: usize) -> usize {
         let mut keys: Vec<T> = packed_keys(digits, height, false);
@@ -1259,12 +1356,12 @@ fn sort_packed<T: Packed>(digits: &[Digit], height: usize) -> Vec<u32> {
 }
 
 /// Sorts the keys by their bits from `low` up to `high`, keeping keys that tie on those bits in
-/// their order, by least-significant-digit radix sort.
+/// their order. The bits below `low` must be the row number, which the keys hold in ascending
+/// order, and no bit at or above `high` may be set.
 ///
-/// Each pass is a parallel stable counting sort: every task counts the digits of its slice, the
-/// counts give each task a disjoint run of output positions per digit, and the tasks then scatter
-/// their keys into those runs. The row number sits below `low`, so the sort never spends a pass on
-/// it, and a pass whose digit is the same for every key is skipped.
+/// Narrow keys take least-significant-digit radix passes, each a stable `counting_pass`. The row
+/// number sits below `low`, so the sort never spends a pass on it, and a pass whose digit is the
+/// same for every key is skipped.
 fn radix_sort<T: Packed>(mut keys: Vec<T>, low: u32, high: u32) -> Vec<T> {
     let total = high - low;
     if total == 0 || keys.len() < 2 {
@@ -1275,66 +1372,114 @@ fn radix_sort<T: Packed>(mut keys: Vec<T>, low: u32, high: u32) -> Vec<T> {
     } else {
         total.div_ceil(RADIX_BITS)
     };
+    let mut spare = vec![T::ZERO; keys.len()];
+    if passes > MAX_LSD_PASSES {
+        // Wide keys would cost a pass over every key per digit. One pass on the top bits instead
+        // splits the keys into buckets small enough to sort in cache, and each bucket sorts
+        // independently. The row number below `low` makes every key distinct, so an unstable
+        // sort of a bucket still keeps tied rows in row order.
+        let Some(ends) = counting_pass(&keys, &mut spare, high - MSD_BITS, MSD_BITS) else {
+            THREAD_POOL.install(|| keys.par_sort_unstable());
+            return keys;
+        };
+        let mut buckets = Vec::with_capacity(ends.len());
+        let mut rest = spare.as_mut_slice();
+        let mut start = 0;
+        for end in ends {
+            let (bucket, tail) = rest.split_at_mut(end - start);
+            buckets.push(bucket);
+            rest = tail;
+            start = end;
+        }
+        THREAD_POOL.install(|| {
+            buckets.into_par_iter().for_each(|bucket| {
+                if bucket.len() < PARALLEL_ROWS {
+                    bucket.sort_unstable();
+                } else {
+                    bucket.par_sort_unstable();
+                }
+            })
+        });
+        return spare;
+    }
     let width = total.div_ceil(passes);
+    for pass in 0..passes {
+        let shift = low + pass * width;
+        let digit_bits = width.min(high - shift);
+        if counting_pass(&keys, &mut spare, shift, digit_bits).is_some() {
+            std::mem::swap(&mut keys, &mut spare);
+        }
+    }
+    keys
+}
+
+/// One parallel stable counting sort of `keys` into `out` by the `bits` bits from `shift` on,
+/// returning where each digit's run ends. When every key has the same digit it writes nothing
+/// and returns `None`, since the pass would not change the order.
+///
+/// Every task counts the digits of its slice, the counts give each task a disjoint run of output
+/// positions per digit, and the tasks then scatter their keys into those runs.
+fn counting_pass<T: Packed>(
+    keys: &[T],
+    out: &mut [T],
+    shift: u32,
+    bits: u32,
+) -> Option<Vec<usize>> {
     let length = keys.len();
     let tasks = if length < PARALLEL_ROWS {
         1
     } else {
         THREAD_POOL.current_num_threads().max(1) * 4
     };
-    let task_length = length.div_ceil(tasks);
-    let mut spare = vec![T::ZERO; length];
-    for pass in 0..passes {
-        let shift = low + pass * width;
-        let digit_bits = width.min(high - shift);
-        let buckets = 1usize << digit_bits;
-        let mask = (buckets - 1) as u64;
-        let counts: Vec<Vec<u32>> = THREAD_POOL.install(|| {
-            keys.par_chunks(task_length)
-                .map(|slice| {
-                    let mut counts = vec![0u32; buckets];
-                    for key in slice {
-                        counts[key.digit(shift, mask)] += 1;
-                    }
-                    counts
-                })
-                .collect()
-        });
-        if (0..buckets).any(|bucket| {
-            counts
-                .iter()
-                .map(|counts| counts[bucket] as usize)
-                .sum::<usize>()
-                == length
-        }) {
-            continue;
+    let task_length = length.div_ceil(tasks).max(1);
+    let buckets = 1usize << bits;
+    let mask = (buckets - 1) as u64;
+    let counts: Vec<Vec<u32>> = THREAD_POOL.install(|| {
+        keys.par_chunks(task_length)
+            .map(|slice| {
+                let mut counts = vec![0u32; buckets];
+                for key in slice {
+                    counts[key.digit(shift, mask)] += 1;
+                }
+                counts
+            })
+            .collect()
+    });
+    let mut starts = vec![vec![0usize; buckets]; counts.len()];
+    let mut ends = Vec::with_capacity(buckets);
+    let mut position = 0usize;
+    for bucket in 0..buckets {
+        for (task, counts) in counts.iter().enumerate() {
+            starts[task][bucket] = position;
+            position += counts[bucket] as usize;
         }
-        let mut starts = vec![vec![0usize; buckets]; counts.len()];
-        let mut position = 0usize;
-        for bucket in 0..buckets {
-            for (task, counts) in counts.iter().enumerate() {
-                starts[task][bucket] = position;
-                position += counts[bucket] as usize;
-            }
-        }
-        let out = Shared(spare.as_mut_ptr());
-        THREAD_POOL.install(|| {
-            keys.par_chunks(task_length)
-                .zip(starts.into_par_iter())
-                .for_each(|(slice, mut next)| {
-                    for key in slice {
-                        let slot = &mut next[key.digit(shift, mask)];
-                        // SAFETY: the counts reserve each task a run of positions per digit that
-                        // no other task's run overlaps, all of them inside `spare`, and the task
-                        // writes each position once.
-                        unsafe { out.write(*slot, *key) };
-                        *slot += 1;
-                    }
-                });
-        });
-        std::mem::swap(&mut keys, &mut spare);
+        ends.push(position);
     }
-    keys
+    let mut previous = 0;
+    let uniform = ends.iter().any(|end| {
+        let full = end - previous == length;
+        previous = *end;
+        full
+    });
+    if uniform {
+        return None;
+    }
+    let target = Shared(out.as_mut_ptr());
+    THREAD_POOL.install(|| {
+        keys.par_chunks(task_length)
+            .zip(starts.into_par_iter())
+            .for_each(|(slice, mut next)| {
+                for key in slice {
+                    let slot = &mut next[key.digit(shift, mask)];
+                    // SAFETY: the counts reserve each task a run of positions per digit that no
+                    // other task's run overlaps, all of them inside `out`, which is as long as
+                    // `keys`, and the task writes each position once.
+                    unsafe { target.write(*slot, *key) };
+                    *slot += 1;
+                }
+            });
+    });
+    Some(ends)
 }
 
 fn gather_frame(frame: &DataFrame, rows: &[u32]) -> Result<DataFrame> {
@@ -1352,19 +1497,26 @@ fn valid(validity: Option<&Bitmap>, row: usize) -> bool {
     validity.is_none_or(|validity| validity.get_bit(row))
 }
 
-fn valid_range<T: Copy>(
+fn valid_range<T: Copy + Sync>(
     values: &[T],
     validity: Option<&Bitmap>,
-    widen: impl Fn(T) -> i64,
+    widen: impl Fn(T) -> i64 + Sync,
 ) -> (i64, i64) {
-    let mut low = i64::MAX;
-    let mut high = i64::MIN;
-    for (row, value) in values.iter().enumerate() {
-        if valid(validity, row) {
-            low = low.min(widen(*value));
-            high = high.max(widen(*value));
-        }
-    }
+    let (low, high) = THREAD_POOL.install(|| {
+        (0..values.len())
+            .into_par_iter()
+            .with_min_len(CHUNK_ROWS)
+            .filter(|row| valid(validity, *row))
+            .map(|row| widen(values[row]))
+            .fold(
+                || (i64::MAX, i64::MIN),
+                |(low, high), value| (low.min(value), high.max(value)),
+            )
+            .reduce(
+                || (i64::MAX, i64::MIN),
+                |left, right| (left.0.min(right.0), left.1.max(right.1)),
+            )
+    });
     if low > high { (0, 0) } else { (low, high) }
 }
 

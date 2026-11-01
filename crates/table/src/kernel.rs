@@ -14,10 +14,10 @@ use std::mem::MaybeUninit;
 
 use polars::prelude::{
     BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
-    Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr, UInt8Chunked,
-    UInt16Chunked, UInt32Chunked,
+    Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr, StringChunked,
+    UInt8Chunked, UInt16Chunked, UInt32Chunked,
 };
-use polars_arrow::array::{BooleanArray, PrimitiveArray};
+use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
 use polars_arrow::bitmap::{Bitmap, MutableBitmap};
 use polars_arrow::datatypes::ArrowDataType;
 use polars_buffer::Buffer;
@@ -1372,8 +1372,9 @@ pub(crate) fn and(left: Option<&Bitmap>, right: Option<&Bitmap>) -> Option<Bitma
 }
 
 /// The column's values at `rows`, in that order, as a column named `name`. A row whose bit in `keep`
-/// is unset becomes `NA`, and its entry in `rows` may be any row. Logical, integer, double and factor
-/// columns gather in parallel chunks; other columns go through Polars' `take`.
+/// is unset becomes `NA`, and its entry in `rows` may be any row. Logical, integer, double, factor
+/// and single-chunk string columns gather in parallel chunks; other columns go through Polars'
+/// `take`.
 pub(crate) fn gather_column(
     column: &Column,
     rows: &[u32],
@@ -1417,6 +1418,29 @@ pub(crate) fn gather_column(
         };
         // SAFETY: the codes come from a column of this dtype, so each is one of its levels.
         return Ok(unsafe { physical.from_physical_unchecked(column.dtype()) }?.into_column());
+    }
+    if let Ok(strings) = column.as_materialized_series().str()
+        && let [chunk] = strings.chunks().as_slice()
+        && let Some(array) = chunk.as_any().downcast_ref::<Utf8ViewArray>()
+    {
+        // A string column's 16-byte views either hold the string inline or point into the
+        // array's data buffers, so gathering the views and sharing the buffers gathers the
+        // strings without copying any of their bytes.
+        let views = gather_values(array.views(), rows);
+        let validity = array.validity().map(|validity| gather_bits(validity, rows));
+        let validity = and(validity.as_ref(), keep);
+        // SAFETY: every view is a valid view of `array`, so it stays valid over the same
+        // buffers.
+        let gathered = unsafe {
+            Utf8ViewArray::new_unchecked_unknown_md(
+                array.dtype().clone(),
+                views,
+                array.data_buffers().clone(),
+                validity,
+                Some(array.total_buffer_len()),
+            )
+        };
+        return Ok(StringChunked::with_chunk(name, gathered).into_column());
     }
     let index = IdxCa::with_chunk(
         PlSmallStr::EMPTY,
