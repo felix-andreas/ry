@@ -177,7 +177,10 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
     if show {
         write_console(text.as_bytes(), true);
         let calls_option = crate::envir::get_option("showErrorCalls");
-        if values::as_logical_scalar(calls_option) == 1 || std::env::var_os("RY_TRACEBACK").is_some() {
+        // GNU R prints no traceback for an error without a call, such as a variable missing in
+        // top-level code that a callee forced.
+        let traceback_wanted = values::as_logical_scalar(calls_option) == 1 && call != nil();
+        if traceback_wanted || std::env::var_os("RY_TRACEBACK").is_some() {
             if let Some(traceback) = concise_traceback(call) {
                 write_console(format!("Calls: {traceback}\n").as_bytes(), true);
             }

@@ -5,7 +5,7 @@ density <- function(x, log = FALSE) {
   if (log) y else exp(y)
 }
 #++++
-density: <T> fn(x: T, [log]: logical) -> Unknown
+density: <T, U> fn(x: T, [log]: U) -> Unknown
 
 #---- a_call_skips_a_local_number
 f <- function(x) {
@@ -65,7 +65,7 @@ g: <T> fn(path: T) -> character[]
 f <- function(left, length) left
 g <- function() f(1, le = 2)
 #++++
-f: <T, U> fn(left: T, length: U) -> T
+f: <T, U> fn(left: T, [length]: U) -> T
 g: Unknown
 54..56 error[type-mismatch] this function has no parameter `le`. Its named parameters are `left`, `length`
 
@@ -73,16 +73,15 @@ g: Unknown
 persistence <- function(object, pars, distribution = "norm") UseMethod("persistence")
 f <- function(fit) persistence(fit)
 #++++
-persistence: <T, U, V> fn(object: T, [pars]: U, [distribution]: V) -> Any
+persistence: <T, U, V> fn([object]: T, [pars]: U, [distribution]: V) -> Any
 f: <T> fn(fit: T) -> Any
 
-#---- a_generic_still_requires_the_formal_it_dispatches_on
+#---- a_generic_leaves_its_dispatch_formal_to_the_method
 describe <- function(x, ...) UseMethod("describe")
 f <- function() describe()
 #++++
-describe: <T> fn(x: T, ...: Any) -> Any
-f: Unknown
-67..75 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
+describe: <T> fn([x]: T, ...: Any) -> Any
+f: fn() -> Any
 
 #---- a_base_generic_takes_extra_named_arguments
 f <- function(x) unique(x, foo = TRUE)
@@ -96,7 +95,7 @@ draw <- function(range, pretty = TRUE) {
   if (pretty) pretty(range) else range
 }
 #++++
-draw: <T> fn(range: T, [pretty]: logical) -> Unknown
+draw: <T, U> fn(range: T, [pretty]: U) -> Unknown
 
 #---- a_null_field_reads_as_null
 retries <- function(config = NULL) {
@@ -130,7 +129,7 @@ cell <- function(m) {
   x[1L, 2L]
 }
 #++++
-cell: <T> fn(m: T) -> Unknown
+cell: <T> fn([m]: T) -> Unknown
 
 #---- a_returning_tail_adds_no_null
 is_even <- function(x) {
@@ -158,7 +157,7 @@ check <- function(x) if (x >= 1) "big" else "small"
 check(c(1, 2))
 bad <- if (c(TRUE, FALSE)) 1L
 #++++
-check: <T: numeric> fn(x: T) -> character
+check: <T> fn(x: T) -> character
 character
 bad: Unknown
 78..92 error[type-mismatch] expected `logical`, found `logical[]`

@@ -1054,9 +1054,11 @@ them, either to each other or to a new comparable constraint kind covering numer
 `logical`.
 
 It should not. Two flexible comparison operands stay fully unconstrained. The function infers as
-`<T, U> fn(a: T, b: U) -> logical`, and a cross-family call is accepted. A flexible operand is
-still constrained to numeric when its partner is concretely numeric, which is the existing rule,
-and two concretely known families must still match.
+`<T, U> fn(a: T, b: U) -> logical`, and a cross-family call is accepted.
+
+Superseded in part: the same-family rule and the numeric constraint from a numeric partner are
+both gone (see "comparisons coerce across atomic types" below). The reasoning here against a
+comparable constraint still holds.
 
 Three reasons.
 
@@ -2134,20 +2136,35 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
-  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
-  point size and the base graphics parameters. Output files follow GNU R for a device nothing was
-  drawn on: vector devices create their file at open (so a bad path fails there), `dev.off` on pdf
-  and cairo_pdf writes a valid PDF without pages, and bitmap devices write nothing, since they
-  write per finished page. Drawing routines check their arguments and a started plot, then return.
-  A real renderer would slot in behind the same table; nothing else reads pixels today.
-- **Display lists and snapshots stay empty until devices draw.** `dev.control` and
+- **Devices record pages of shapes and render them when they close.** Every file device (pdf,
+  postscript, xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device`
+  holding its size, point size, the base graphics parameters and the pages drawn so far. A page is
+  a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
+  each with the clip rectangle in force, so the drawing routines know nothing about file formats
+  and each format is one writer over the same pages. `plot.new` starts a page when the layout's
+  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
+  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
+  system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
+  than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
+  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
+  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
+  R: vector devices create their file at open (so a bad path fails there), a pdf without pages
+  is still a valid document, and bitmap devices with no page write nothing.
+- **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is
+  1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline offset by
+  `ylbias`, symbols are sized from half the character height, font sizes round to whole points,
+  and text widths come from Helvetica's AFM metrics, the same table `strwidth` uses. Rendering a
+  plot through both engines' pdf devices and rasterizing them is how to check a change: plot,
+  hist, barplot and `par(mfrow)` layouts differ in a handful of pixels. Contour labels use a
+  clean-room "flattest window" placement, so they can sit in a different spot than GNU R's.
+- **Display lists and snapshots stay empty.** `dev.control` and
   `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
   GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
   display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
   `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
   not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
-  and that belongs with real drawing, when the display list holds the calls to replay.
+  and that belongs with recording the display list, which would also let devices replay a
+  plot onto a resized or copied device.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
@@ -2672,6 +2689,68 @@ first lines R had already read, leaving R mid-command.
 
 - `crates/interp/src/parallel.rs` implements parallel's `.Call` routines that do not fork: the L'Ecuyer stream jumps (`nextStream`, `nextSubStream`) and the multicore queries, which report a parent process with no children. That is enough for `RNGkind("L'Ecuyer-CMRG")`, `detectCores()`, `doParallel` registration and sequential `foreach`. The fork routines (`mc_fork` and the rest) still error, so `mclapply` with more than one core fails; `backlog.md` tracks it.
 
+## The cold check searches green trees and caches globals per item check
+
+- **Before.** Every whole-file tree reader (parse-stage diagnostics, annotation sites, attached namespaces, used tokens) walked the red tree with `descendants()`, building a red node per element, about 8 ns each. One item check read `frame_definition` and `package_name` through salsa for every reference, and each read interned a key tuple and verified a memo. `map_child_types` re-interned every type it visited, even when nothing changed.
+- **Shape.** `syntax::matching_nodes` filters on green nodes and builds red nodes only for matches (and, lazily, their shared ancestors); `syntax::for_each_token` reads token text with no red nodes. `testing::check_parse_invariants` pins both to the red walks. `SalsaGlobals` holds per-check `RefCell` maps for the two lookups, and `map_child_types` returns the input type when no child changed.
+- **Why it is safe for salsa.** The first read inside a query records the dependency edge, and repeats only dedupe, so caching a read within one query execution changes no edge set. The cache lives as long as one `item_check` execution and is never shared.
+- **Allocator.** mimalloc's eager arena commit made the kernel zero transparent huge pages the process never used. `crates/ry/src/main.rs` turns it off from an `.init_array` constructor, before the first allocation. It cut peak RSS on the benchmark code bases from about 790 MiB to about 520 MiB.
+- **Counters.** `infer::RESOLVE_CALLS` is thread-local: a shared atomic bumped on every resolve step was a contended cache line across the worker threads.
+
+## Call checking follows R's lazy argument and matching rules
+
+- **Required formals.** Previous source of truth: a defaultless formal was required unless the body called `missing()` on it, which rejected `f(1)` for `function(x, unused) x`, valid R. Target shape: a formal is optional unless the body may force it. `check::FormalUses` walks the body in evaluation order (a read that no write dominates forces: a branch's writes count only when every non-diverging arm makes them, a loop body's or a `&&` operand's never, and `<<-` never assigns the local formal; `missing()`, `substitute()` and `quote()` arguments do not; reads in nested functions count, since the closure may run; a forced default forces what it reads, to a fixpoint). Inferred and declared types share the walk, so a declared `[name]` is legal over an unforced formal. Laziness only relaxes inferred signatures: a declared signature is honored as written, so `fn(a: integer, b: character)` over `function(a, b) a` keeps `b` required, because the annotation is the contract callers read. The rendered message names the missing formals instead of an arity count.
+- **Partial matching.** `argument_targets` runs R's middle pass: an unclaimed name that is a prefix of exactly one unclaimed formal before `...` claims it. Matching stays case-sensitive, so `x =` goes to `lapply`'s `...`, not `X`.
+- **`match.fun` strings.** A character argument at one of `check::MATCH_FUN_CALLERS` (base callees only, never a project function of the same name) checks as the named function when it is a literal that names a known scheme, else as `Unknown`. The resolved type rides on `CallArgument::named_function` and is used only where the expected type is a function, so the same argument still reads as `character` elsewhere.
+- **Variadic actuals.** `infer::pair_parameters` lets a variadic function serve a fixed interface (its rest requires nothing). Base generics such as `mean` and `as.numeric` declare `...` so method arguments (`as.numeric(d, units = "secs")`) pass, and without this the apply family rejected them as callbacks.
+- **Forwarded `...` to a callback parameter** adds no parameter to the demanded function type, because it may be empty.
+- **`trailing-comma` is a warning.** R fails on the empty argument only when the callee forces it, so it is not a certain run-time error.
+
+## Called names are looked up as functions
+
+- **Previous shape.** A call head resolved like any read, to the nearest binding, so `names <- toupper(names(x))` made `names(x)` a call of a character vector, and cli's `.Call <- NULL` made every `.Call` an error.
+- **Target shape.** R's `findFun`: `Checker::function_lookup` skips a binding whose type is definitely no function and continues through the enclosing slots, the project namespace (or, past a test file's or a script's top level, `GlobalEnv::enclosing_scheme`) and the library. An untyped binding that the body only ever calls is a callback and stays the function, so `function(format) format(1L)` types its parameter as a function as before. An untyped binding that is also read as a value somewhere (`dir <- path; dir(dir)`, `x[names(x) %in% names]`), next to an outer function of its name, types the call as `Unknown`, so neither is constrained. A unification probe was considered instead of the value-read test and rejected: at the call head the binding is still an open variable that any function type unifies with, and the conflict only appears at a later value use. The reached binding is stored once, in `ItemCheck.callee_targets`, and the IDE reads it there rather than recomputing the lookup.
+- **Qualified names.** `pkg::name` never takes this lookup: a foreign package reads only its stubs, and the project's own package only its namespace (`GlobalEnv::namespace_scheme`), never the reading file's bindings.
+
+## testthat files mirror testthat's environments
+
+- **Previous shape.** Every file under `tests/testthat/` was a package file, so test bindings leaked into the namespace and showed up as duplicates or shadowed package functions; a first fix pooled every test file into one shared test namespace, which let one test file resolve another's names.
+- **Target shape.** `DocumentKind::{Test, TestHelper}`. Helper and setup files fill the shared test namespace (`test_definitions`), each test file keeps its own bindings, and a closure in a test file prefers the binder its own top-level statement writes, because each `test_that()` block is its own environment. The kind is derived from the path in one place per surface (`cli::document_kind`, `semantics::test_document_kind`).
+- **Impact.** One more per-name layer (`test_name`) in the global lookup, read through the same tracked projection as `package_name`, so an edit to a test file does not invalidate package items. The unresolved-name diagnostics read `test_name` too, and their typo suggestions come from the per-name `project_typo_suggestion` firewall, so a new helper definition re-diagnoses no test file whose answer it does not change (`test_incremental.rs` pins it).
+
+## useDynLib native symbols resolve only as a native routine's name
+
+- `metadata::NativeSymbols` parses `useDynLib` (explicit names, `.registration = TRUE` with its `.fixes` prefix). Explicitly listed names and names carrying the `.fixes` prefix resolve anywhere, because `useDynLib` binds them in the namespace. A registering `useDynLib` binds the routines its compiled code registers, which ry cannot see, so any other bare name resolves only where naming recorded it as the `.NAME` (or first positional) argument of `.Call`, `.External`, `.External2`, `.C` or `.Fortran` (`naming.native_routine_reads`), and a typo elsewhere still reports.
+
+## Comparisons coerce across atomic types
+
+- **Previous shape.** `<`, `==` and the rest required both operands in one family (numeric or `character`), and an open operand compared against a number was constrained to `numeric`.
+- **Weakness.** Both rules rejected ordinary R. `Sys.getenv("RSTUDIO") == 1`, `type == "a"` after `if (is.logical(type))`, and `x > 0` on a flag all failed, and the numeric constraint leaked through exported schemes into every caller (zoo's `na.fill`, cli, lubridate).
+- **Target shape.** A comparison accepts any mix of `logical`, `integer`, `double` and `character`, because R coerces both sides to a common type. `complex` and `raw` stay unsupported. An open operand is never constrained. `comparison_operand_shape` in `check.rs` owns this.
+- **Cost.** `while (n && out)` now pins a counter `n` to `logical`, because the comparison that used to say "numeric" no longer does (rlang `stack.R`).
+
+## A test-guarded write to a formal normalizes it; inferred types admit the default
+
+- **Previous shape.** An `if` without `else` joined a branch write with the pre-if type by unification, so `if (is.logical(type)) type <- "q"` pinned `type: character`, and every caller passing the logical the code tested for was reported. A union join here instead produced `T | logical` everywhere, which cascaded through zoo, digest and xts.
+- **Target shape.** In `infer_if`, a non-`NULL` write to a slot whose pre-if type is an open formal (`is_open_parameter`), under a condition that reads the same slot (`reads_slot`), *normalizes*: the slot takes the written type after the `if`, and the formal's variable is not unified. Other writes still go through `join_writes`.
+- **Default widening.** After inference, a defaulted formal whose settled type does not admit its default's concrete type is widened to `settled | default`, probed with `compatible` under a snapshot. A call passing the default's own value is always fine.
+- **Defaulted flags.** A condition or `!` on an unannotated defaulted formal does not constrain it to `logical` (`reads_open_defaulted_formal`), because option flags are passed `1`/`0` as often as `TRUE`.
+- **Approximation.** After a normalizing write, the body sees only the written type, not a union with the input. This is unsound when the test does not cover every non-normalized input, and is accepted because the code after such a test assumes the normalized type.
+
+## An open `T | NULL` parameter binds `T` to the argument's non-`NULL` part
+
+- **Previous shape.** `is.null(x)` on an open formal shapes it to `T | NULL`, and a caller's open argument then unified with the whole union, so the caller's variable became `U | NULL` and every later use of it was reported (httr2's `check_request` pattern).
+- **Target shape.** `compatible_inner` in `infer.rs`: when the expected type is exactly a two-member union of an open variable and `NULL`, and the argument is a variable or a union with no other tag, the variable member unifies with the argument minus its `NULL` members, under a snapshot. The rule is deliberately this narrow; a broader one (any union with a variable member) produced `logical[][]` cascades.
+
+## `switch(typeof(x), ...)` narrows `x` per arm
+
+- An arm runs only for the types its labels (plus fall-through labels) name, so `infer_switch` narrows the subject slot before each named arm (`narrow_to_typeof_labels`, `typeof_label_membership`): a union keeps the matching members, an open variable gets a fresh one so that `logical = if (x) ...` does not pin the parameter for the other arms. The narrowing is a refinement, not a write, so it does not join back.
+- `NULL = ...` is a legal label in R's grammar and names the string `"NULL"` (`hir.rs`).
+
+## Nested replacement rewrites the spine
+
+- `x[[1]]$a <- v` used to leave `x` as it was. `replacement_written_type` now walks the accessor spine: each intermediate container is projected (`project_replacement`), the innermost takes `v`, and each enclosing container takes the rewritten child through the same `write_replacement_step` that single-level writes use. An undescribable intermediate projects as `Unknown`; a `[` or `@` step leaves its container unchanged.
+
 ## data.table queries run on ry's engine through a declining bridge at `[` dispatch
 
 - **Previous shape.** Under ry's runtime, every `dt[i, j, by]` on a data.table went to data.table's own R and C code; only `frame` objects reached ry's engine, so benchmark code that calls data.table directly got none of the speed.
@@ -2704,3 +2783,36 @@ first lines R had already read, leaving R mid-command.
 - **Previous shape.** Only the lint read the option, so `ry run` happily defined S4, Reference and R6 classes in a project that had turned them off.
 - **Target shape.** `ry run` and `ry repl` on ry's runtime pass the option to the interpreter as a run flag (`RUN_FLAG_OBJECT_SYSTEMS`). With it off, `run_closure` calls `refuse_object_system`, which raises the lint's message (one text, `syntax::native_values::object_systems_disabled_message`, and one table of defining functions, `object_system_function`, shared by both) when a call named `setClass`, `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` or `R6Class` (bare or after `::`) runs a closure owned by `methods` or `R6` and its caller's top environment is the global environment.
 - **Scope.** User code is whatever has the global environment as its top level: scripts, the console, and functions defined there. Packages are exempt, installed or loaded with `ry load`, because they must keep loading (`stats4` defines S4 classes when it loads) and a package's classes are the package author's call; the lint still flags a project package's source. Matching by call name keeps the hot path to one flag test when the option is on and one symbol-name lookup per closure call when it is off; a renamed alias (`f <- setClass`) slips through, which is acceptable for a guardrail whose job is to stop deliberate use.
+
+# Decision record: one Rmath, one codec stack, and the clean-room numerical routines
+
+- **One Rmath.** The interpreter's distributions and libR's Rmath were two independent
+  implementations of the same functions, so a precision fix landed in one and not the other.
+  `crates/interp/src/rmath.rs` is now the single copy (libR's version, the one the conformance
+  suite holds to GNU R): the interpreter's builtins vectorize it, libR only converts C flags,
+  raises the collected warnings and draws variates, and `gamma`, `lgamma`, `beta` and `lbeta` call
+  it instead of libm's `tgamma`, which is not exact for whole arguments.
+- **One compression stack.** libR decoded bzip2 and xz with `bzip2-rs` and `lzma-rs` while the
+  interpreter used `bzip2` and `lzma-rust2`, which also write. libR now calls
+  `interp::connections::decompress` (file magic) and `interp::serialize::decompress_record`
+  (lazy-load records), so one set of codecs reads every file and both crates drop the others.
+- **Time zones come from jiff** reading the system's tz database (`system.rs`, `Zone`). A name the
+  database does not know acts as UTC under the abbreviation glibc gives it (the name's leading
+  letters when there are three or more, else empty). Two glibc behaviors are copied deliberately:
+  an `isdst` that contradicts the zone's rule shifts the reading by an hour, even in a zone with
+  no daylight saving time, except for `"UTC"` and `"GMT"`, which GNU R converts itself; and a
+  year outside jiff's range moves by whole 400-year cycles, which keeps the calendar and weekdays.
+- **`nlm`, `nlminb` and `polyroot` are written from the published algorithms**, not GNU R's code:
+  Dennis and Schnabel's UNCMIN for `nlm`, a trust-region quasi-Newton method behind PORT's
+  `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
+  Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
+  GNU R returns.
+- **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
+  documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
+  (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and
+  errors for unterminated strings. `deparseRd` reads the same tree.
+- **`iconv` goes through the C library's `iconv`** rather than a Rust crate, because GNU R's
+  results (which names it accepts, how `sub` substitutes, transliteration) are glibc's.
+- **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
+  code that libR and the interpreter both run. No effect on static analysis.
+

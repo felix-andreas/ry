@@ -735,6 +735,34 @@ The claim that the frame outperforms data.table rests on a benchmark of its own
 DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
 same machine against data.table with all threads.
 
+`tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers on
+the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums. The
+numbers are measured from Rust, in seconds, as the faster of two runs. Calls from R do not reach
+these kernels yet.
+
+| Operation | data.table | ry |
+|---|---|---|
+| `fread` | 2.92 | 1.39 |
+| `fwrite` | 0.87 | 0.70 |
+| `setkey` | 0.42 | 0.46 |
+| `setorder` | 0.97 | 0.69 |
+| `unique` | 0.10 | 0.09 |
+| `uniqueN` | 0.13 | 0.10 |
+| `rbindlist` | 0.88 | 0.29 |
+| `melt` | 1.20 | 0.39 |
+| `dcast` | 0.26 | 0.26 |
+| `shift` | 0.024 | 0.004 |
+| `fifelse` | 0.084 | 0.050 |
+| `fcoalesce` | 0.059 | 0.047 |
+| `nafill` | 0.081 | 0.042 |
+| `rleid` | 0.026 | 0.011 |
+| `between` | 0.018 | 0.013 |
+| `%chin%` | 0.049 | 0.036 |
+| `tstrsplit` | 5.17 | 1.86 |
+
+Each cell is the faster of two runs.
+
+
 ## 8. Typing integration
 
 ### The inline syntax
@@ -851,17 +879,17 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 101 of the 103 oracle cases match GNU R (`oracle compare --engine ry`); the
-   other two, `stats__lbfgsb` and `stats__arima_and_kalman`, agree only to about seven digits
-   because ry's L-BFGS-B takes a slightly different path to the same optimum. Of GNU R 4.3.3's own
-   `tests/*.R`, 41 of 66 end with GNU R's exit status and 13 print exactly GNU R's output. The rest
-   stop at a routine or internal ry lacks (`nlm`, `parse_Rd`, `file.copy`, `env.profile`, URL
-   connections), at numerical precision in the distributions, `polyroot` and complex BLAS, or at
-   time zones, which ry computes as UTC only. All six corpus packages that run R code while loading
-   (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`. Parsed
-   code keeps source references when `keep.source` asks for them. Connections are a single
-   implementation shared by the interpreter and `libR`, and graphics devices open, keep their
-   parameters and record empty plots, but draw nothing.
+   The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
+   other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 47 of 66 end with GNU R's
+   exit status and 23 print exactly GNU R's output. The rest stop at a gap such as `env.profile`,
+   URL connections, `kmeans`, `qbeta` precision, S4 `initialize` and invalid multibyte strings, and
+   `reg-large` writes files of several gigabytes. All six corpus packages that run R code while
+   loading (S7, arrow, nanoarrow, reticulate, minqa and yaml) now load under `ry run --runtime ry`.
+   Parsed code keeps source references when `keep.source` asks for them. Connections are a single
+   implementation shared by the interpreter and `libR`. Base graphics draws into `pdf`, `svg`,
+   `png`, `bmp` and `tiff` files with GNU R's geometry, while `jpeg` and `postscript` devices open
+   but write no image.
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -885,14 +913,15 @@ Each step ends with something real running, and each one is a large, whole chang
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
    exists it applies the same plans.
-6. **Inline syntax, agreement warnings and strict mode,** in the parser, the checker and the
+6. **Inline syntax, agreement warnings and strict mode (done),** in the parser, the checker and the
    runtime, with the runtime type summary and body facts.
-7. **The JIT.** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
+7. **The JIT (loops done, calls next).** The SSA IR, speculation, deoptimization and Cranelift backend, then environment and
    promise elision, then vector fusion, driven by the benchmark code bases and a microbenchmark set
    (the Ř benchmark suite is a good public start).
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
-   IR, ALTREP exposure and the checker's `frame` type exist (section 7); wiring them into the
-   interpreter is next.
+   IR, ALTREP exposure and the checker's `frame` type exist (section 7); the interpreter now
+   runs frames, and data.table's queries run on the engine. Routing data.table's readers, writers and
+   helpers to it is next.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would

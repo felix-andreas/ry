@@ -5,7 +5,7 @@ mirror <- function(x) x
 render <- function(count) "ok"
 #++++
 mirror: <T> fn(x: T) -> T
-render: <T> fn(count: T) -> character
+render: <T> fn([count]: T) -> character
 
 #---- optional_parameter_export
 #: fn(count: integer, [label]: character) -> integer
@@ -20,7 +20,7 @@ render <- function(count) "ok"
 #: fn(count: integer, label: character) -> character
 render <- function(count, label) label
 #++++
-render: <T> fn(count: T) -> character
+render: <T> fn([count]: T) -> character
 render: fn(count: integer, label: character) -> character
 0..6 warning[duplicate] Top-level binding `render` is overwritten by a later top-level binding in this package.
   = 85..91 the later binding is here.

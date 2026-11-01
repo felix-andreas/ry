@@ -69,13 +69,13 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 
 ## In flight
 
-- Base R round 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): serialize arity, time zones, nlm, parse_Rd, nlminb PORT, file.copy, bzip2/xz, graphics devices that draw. PR #120 (stats natives, srcrefs, connections) merged as 25a05fb.
+- Base R round 4 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): the remaining GNU R tests/*.R failures, `.Internal(unz)`, jpeg and postscript devices, test_numerics made tolerance-robust. PR #134 (oracle 111/112, GNU tests 23/66 exact and 47/66 exit status, graphics draw to pdf/svg/png/bmp/tiff, time zones, nlm, parse_Rd) merged as 896e80a.
 - Corpus packages round 2 (session_0111kWqDJJsagmnUNcuZLJp4, Opus): DBI and pkgbuild crashes, R6 finalizer timing, toward all 146 packages passing. PR #127 (GC crash fixes, 50/146) merged as 06ad068.
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
-- data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): verify the #125 merge, run unchanged data.table code on the engine with identical output, remove the subset := overhead, then route data.table's functions from R to the #131 kernels and close the setkey and dcast gaps. PR #125 (frames in the runtime) merged as ed69655; PR #131 (fread/fwrite and helpers, typed; faster than data.table except setkey, 10% behind, and dcast, tied) merged as c3b4a87.
+- data.table code on ry's engine (session_0111kWqCxpbzWznPZjGyyBYk, Opus): route data.table's functions from R to the #131 kernels and close the setkey and dcast gaps. PR #133 (unchanged data.table queries on the engine, beating data.table on every 1e6-row question) merged as b89c852; #131 as c3b4a87.
 - Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
-- Analysis performance round 3 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): a parallel cold check well under 1 s with byte-identical findings, a false-positive audit of `ry check` on the full-size benchmark code bases, memory kept at or below round 2. PR #129 (peak RSS 795 to about 570 MiB, settled re-check about 39 to 49 ms) merged as 0cee236.
-- Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): backlog false reports worst first, then `ry check` on the corpus packages' R sources with every finding triaged.
+- Analysis performance round 4 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): performance only, halve per-file CPU toward a cold check under 1 s on 4 cores, findings byte-identical, memory at or below 520 MiB. PR #135 (cold check about 2.5 s, peak RSS about 520 MiB, CRAN false errors 669 to 175) merged as eebed45; #129 as 0cee236.
+- Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): sole owner of false reports. Dedupe against #135, then the backlog false reports, the 175 remaining CRAN errors, and `ry check` on the corpus packages' R sources with every finding triaged.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -84,4 +84,4 @@ Nothing queued: every build-order step is in flight.
 
 Follow-ups:
 
-- Run another docs pass after the table-in-interpreter and JIT round 2 PRs land.
+- Run another docs pass after JIT round 2 (#128) lands.

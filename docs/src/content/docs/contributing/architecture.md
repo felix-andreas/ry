@@ -134,6 +134,19 @@ once, and at most a few batches of trees are alive at a time. `RootDatabase::one
 off the splice cache, which would otherwise keep the previous tree of every file. A
 `test_incremental.rs` case pins the one-parse property.
 
+Most tree readers look for a handful of node kinds in a large file, and a red-tree walk pays for a
+red node at every element it visits. They search the green tree instead: `syntax::matching_nodes`
+takes a predicate over a green node and its parent, and builds red nodes only for the matches and
+their ancestors, while `syntax::for_each_token` visits token texts with no red nodes at all. The
+parse invariants check both against the red walks on every parsed program.
+
+The cold check is CPU-bound and scales about 3.8 times on 4 cores, so per-file constant costs set its
+wall time. Two of them are worth knowing. Every salsa read of a tracked function with several
+arguments interns its key and verifies a memo, which is why one item check caches the frame
+definitions and package names it looks up in `SalsaGlobals`. And mimalloc commits its arenas lazily
+(`crates/ry/src/main.rs`): eager commit made the kernel zero huge pages that a short-lived process
+never touched.
+
 The server keeps every tree. Eviction cost it about 10 ms per settled re-check on the benchmark code
 bases, measured with capacities set: each fetch of an LRU query then records its use, and an evicted
 tree must be rebuilt whenever a memo's value is needed. The memory it saves matters less in a

@@ -121,6 +121,10 @@ Smaller gaps:
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
+- A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
+  `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
+  on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
+  the generic argument check to carry which argument fixed the type variable.
 - `# typing: off  # reason` is rejected as an unknown directive. Accepting a trailing comment is the
   friendlier contract.
 - `greet(nme = "Ada")` on a function with `...` reports "passes 1 positional argument, but the
@@ -1916,16 +1920,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   - `eval(quote(next))` inside a loop reports no loop context.
   - Hashed environments do not reproduce GNU R's table growth, so a large hashed frame lists in a
     different order (`heap::env::Frame::listed_cells`).
-  - The graphics device keeps a display list but draws nothing.
 - **The oracle starter corpus does not fully pass yet.** `oracle compare --engine ry` lists the
   differing cases; most remaining ones need stats routines (`builtin_libraries.rs` names each
   unimplemented one when it is called) or printer details (complex numbers, wide matrices).
-- **Two oracle cases differ in the last digits**: `stats__lbfgsb` and `stats__arima_and_kalman`
-  (which optimizes through L-BFGS-B). ry's `optim(method = "L-BFGS-B")` converges to the same
-  optimum along a slightly different path, so values agree to about seven digits only.
-- **Time zones are UTC only.** `Sys.setenv(TZ = )` sets the variable, but every conversion
-  computes UTC and the session zone prints as `UTC`, so local times and arithmetic around
-  daylight-saving changes differ from GNU R.
+- **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
+  `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
+  values agree to about seven digits only.
 - **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
   stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
@@ -1942,7 +1942,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   evaluator runs; GNU R compiles promise code with the caller. Compiling it needs every reader of
   promise code (`substitute`, `match.call`) to go through a `promise_expression` helper first.
 - **Missing internals.** Several `.Internal`s still raise "not supported" (`max.col`, `prmatrix`,
-  `file.copy`, `format.Date`, `parse_Rd`, `parseLatex`, `stem`, profiling, ...);
+  `format.Date`, `parseLatex`, `stem`, profiling, ...);
   `grep -n 'not supported' crates/interp/src` lists them.
 - **Distributions differ from GNU R in the last digits** in extreme tails and in the noncentral
   families (`decisions.md`, the distributions record in `distributions.rs`'s module comment).
@@ -1950,10 +1950,8 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   compile. A source install keeps `R/` as sources and records `RyBuilt:` until the interpreter
   exists. `bin/Rscript` and `bin/R` (anything but `CMD` and `RHOME`) in ry's R home delegate to
   GNU R until then, because configure scripts run R code through them.
-- **Connections gaps:** `bzfile()` and `xzfile()` read all three formats but always write gzip,
-  because ry has no streaming bzip2 or xz encoder (readers detect the format, so the files still
-  load). `memCompress(type = "bzip2")`, `fifo()`, URL connections and sockets are not
-  implemented.
+- **Connections gaps:** `fifo()`, URL connections and sockets are not implemented. `xzfile()`'s
+  negative (extreme) compression levels use the ordinary preset.
 - **ALTREP `Inspect` and `Extract_subset`** are registered but no caller exists before the
   interpreter's `.Internal(inspect)` and subsetting.
 - **`R_withCallingErrorHandler` runs its handler after unwinding**, not before (`decisions.md`).
@@ -1977,21 +1975,24 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics devices draw nothing** (`decisions.md`, "the default packages' utils, tools,
-  grDevices and graphics routines"). Missing: rendering output files, GNU R's `R_pretty` warnings
-  on subnormal axis ranges, cairo font metrics for bitmap devices, plotmath sizes (an expression is
-  measured as its deparsed text), and `stem()` beyond the empty case.
-- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources, 41 of 66 ending with
-  GNU R's exit status). First failures: precision in `polyroot` (complex), noncentral `qchisq`
-  and `dbeta` (d-p-q-r-tests, d-p-q-r-tst-2), complex `%*%` (reg-BLAS), `iconv` to ASCII,
-  `file.copy` (reg-packages), `env.profile` (reg-tests-1e), Kendall `cor` on empty columns and
-  `kmeans` (reg-tests-1b, 1c), and these larger missing pieces:
-  stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
-  (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
-  (reg-tests-1c, reg-tests-3, reg-examples1). `save(ascii = TRUE)` writes the binary XDR format
-  (`RDX3`, where GNU R writes `RDA3`); `load()` reads it back the same, but the file differs.
-- **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
-  `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
+- **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
+  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
+  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
+  (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
+  ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
+  layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
+  case, and contour label placement, which picks slightly different positions than GNU R.
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
+  GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
+  (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
+  `initialize` error (reg-S4-examples), `news()` timing out (reg-examples1), "Error: block"
+  (reg-examples2), Kendall `cor` on empty columns (reg-tests-1b), `kmeans` (reg-tests-1c),
+  `assertCondition` (reg-tests-1d), `env.profile` (reg-tests-1e), the rank in `summary.manova`
+  (reg-tests-2), `nchar` on invalid multibyte strings (reg-tests-3), the DESCRIPTION column
+  layout (reg-packages), URL connections (libcurl), utf8-regex, and a timeout in utf8.
+  reg-large writes temporary files of several gigabytes under ry, so run it with a file size
+  limit (`ulimit -f`).
+- **Default-package routines still failing on purpose:** tools' `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
 - **The concise traceback lacks GNU R's foreign-call frames.** GNU R gives `.Call` and friends a
   context, so it prints `Calls: print -> .Call` where ry prints none.
@@ -2605,11 +2606,11 @@ typing on:
 
 | code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
 |---|---:|---:|---|---:|---:|
-| finance | 2.7-2.8 s | 566 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
-| data science | 3.5-3.7 s | 572 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
-| biostatistics | 2.8-2.9 s | 575 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
+| finance | 2.4-2.5 s | 515 MiB | 1005 `unused` (genuine), 848 `object-system` | 3 / 39 ms | 3 / 38 ms |
+| data science | 2.5-2.7 s | 520 MiB | 2337 `object-system` | 3 / 52 ms | 3 / 51 ms |
+| biostatistics | 2.5-2.7 s | 528 MiB | 784 `object-system` | 3 / 40 ms | 3 / 42 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (6.3 s on one core, 3.8 times faster on four), so per-file constant costs set its wall time; the remaining profile is item checking (about 3 s of CPU, half of it `infer_call_arguments`), parse, item HIR and lints. Before the green-tree searches, per-check caches and lazy arena commit, main measured 3.3-3.7 s and about 780-795 MiB on finance. Ideas not yet tried: fuse the per-file green walks into one tracked "syntax sites" query, cut type interning in `fresh_ty`, `literal_ty` and `substitute_rigid_memo`, and compute `interface_sccs` and `conditional_slot_items` before the third pass instead of inside its first batch. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
@@ -2669,5 +2670,14 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
   function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
   Position[]`; the second member is the vector view of the same element type and adds noise.
-- **A piped `ry repl` prints nothing.** With stdin not a terminal the console reads no commands and
-  exits silently; it should either evaluate stdin or say it needs a terminal.
+
+## Open: false errors on real CRAN code
+
+`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 175 after the call-checking, name-resolution and inference fixes (`decisions.md`). What remains, by message shape:
+- 38 "expected X, found Y" and 17 "expected a numeric value": mostly `T | NULL` results of functions that really can return NULL, vector `if` conditions, and parameters pinned by an unconditional write before a test (xts `Ops.xts.R:52`).
+- 26 "exported but this package defines no such top-level object": dynamic exports (cli `pb_*` through `makeActiveBinding`, rlang `ffi_` natives, lgr's `lgr`).
+- 20 "this call leaves out": formals the body does force on some path, worth a second look per site.
+- 17 "not a function": parameters named like a function and called (`log`, `serialize`, `format`, `lag`) where the parameter's own type is open.
+- 15 "expected a list": `$` on a value that is definitely NULL, and R6's metaprogrammed `generator_funs`.
+- 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
+- 5 matrix indexing, a documented limitation.

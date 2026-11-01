@@ -1,6 +1,9 @@
 //! Facts about ry's own records, tuples, tags, dictionaries and sets, and about the R object systems it
 //! discourages, that both the checker and the runtime need, kept here so the two cannot drift apart.
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 /// The R functions that accept a record, tuple, tag, dictionary or set as a top-level argument.
 /// The standard library's own functions are not listed: `types/ry.Rtypes` declares them for the
 /// checker, and the runtime marks them with `BuiltinDef::accepting_native`. Every other builtin
@@ -87,18 +90,28 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
 /// argument. Besides [`ACCEPTS_NATIVE`], that holds for a generic with a method for the values
 /// (`format` dispatches to `format.ry_record`) and for `print`, whose default method prints them.
 pub fn accepts_native(name: &str) -> bool {
-    ACCEPTS_NATIVE.contains(&name)
-        || name == "print"
-        || ACCEPTS_NATIVE.iter().any(|accepted| {
+    // Asked on every call the checker sees, so the list is indexed once.
+    static ACCEPTING: LazyLock<HashSet<&str>> = LazyLock::new(|| {
+        let generics = ACCEPTS_NATIVE.iter().filter_map(|accepted| {
             [".ry_record", ".ry_tuple", ".ry_tag", ".ry_dict", ".ry_set"]
                 .iter()
-                .any(|suffix| accepted.strip_suffix(suffix) == Some(name))
-        })
+                .find_map(|suffix| accepted.strip_suffix(suffix))
+        });
+        ACCEPTS_NATIVE
+            .iter()
+            .copied()
+            .chain(generics)
+            .chain(["print"])
+            .collect()
+    });
+    ACCEPTING.contains(name)
 }
 
 /// What a function that defines a class of an R object system is: the system's name, what one
 /// call defines, and the package that owns the function.
-pub fn object_system_function(function: &str) -> Option<(&'static str, &'static str, &'static str)> {
+pub fn object_system_function(
+    function: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
     Some(match function {
         "setClass" => ("S4 classes", "an S4 class", "methods"),
         "setClassUnion" => ("S4 classes", "an S4 class union", "methods"),

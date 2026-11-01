@@ -316,7 +316,7 @@ price <- 5
 bump <- function(x) x + 1L
 print(bump(price))
 #++++
-+.Money: <T, U> fn(e1: T, e2: U) -> T
++.Money: <T, U> fn(e1: T, [e2]: U) -> T
 price: Money
 bump: <T: numeric> fn(x: T) -> T
 Money
@@ -382,9 +382,9 @@ print(bump(md))
 print(bump(dv))
 print(bump(tg))
 #++++
-^.Pow: <T, U> fn(e1: T, e2: U) -> T
-%%.Mod: <T, U> fn(e1: T, e2: U) -> T
-%/%.Div: <T, U> fn(e1: T, e2: U) -> T
+^.Pow: <T, U> fn(e1: T, [e2]: U) -> T
+%%.Mod: <T, U> fn(e1: T, [e2]: U) -> T
+%/%.Div: <T, U> fn(e1: T, [e2]: U) -> T
 pw: Pow
 md: Mod
 dv: Div

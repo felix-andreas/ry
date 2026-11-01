@@ -6,11 +6,11 @@ use crate::config::Config;
 use crate::diagnostics::document_diagnostics;
 use semantics::check::CHECK_EXECUTIONS;
 use semantics::diagnostics::file_diagnostics;
-use semantics::infer::RESOLVE_CALLS;
+use semantics::infer::resolve_calls;
 use semantics::lints::lint_file;
 use semantics::metadata::{
     PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_namespace_imports,
+    parse_description_dependencies, parse_namespace_imports, parse_native_symbols,
 };
 use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
 use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
@@ -52,9 +52,10 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             ));
         }
     }
-    let namespace_imports = fs::read_to_string(root.join("NAMESPACE"))
-        .ok()
-        .map(|source| parse_namespace_imports(&source))
+    let namespace_source = fs::read_to_string(root.join("NAMESPACE")).ok();
+    let namespace_imports = namespace_source
+        .as_deref()
+        .map(parse_namespace_imports)
         .unwrap_or_default();
     let description_source = fs::read_to_string(root.join("DESCRIPTION")).ok();
     let collate = description_source
@@ -85,6 +86,10 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             .unwrap_or_default(),
         BTreeSet::new(),
         None,
+        namespace_source
+            .as_deref()
+            .map(parse_native_symbols)
+            .unwrap_or_default(),
     );
     let mut records: Vec<FileRecord> = Vec::with_capacity(paths.len());
     let mut package_count = 0usize;
@@ -98,12 +103,8 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
             }
         };
         let loc = source.lines().count();
-        let is_package = cli::shares_a_namespace(&path, &root);
-        let kind = if is_package {
-            DocumentKind::Package
-        } else {
-            DocumentKind::Script
-        };
+        let kind = cli::document_kind(&path, &root);
+        let is_package = kind == DocumentKind::Package;
         package_count += usize::from(is_package);
         let start = Instant::now();
         let file = SourceFile::new(&db, source.clone(), kind);
@@ -342,7 +343,7 @@ fn typing_burst(
     let mut text = record.source.clone();
     text.push('\n');
     let checks_before = CHECK_EXECUTIONS.load(Ordering::Relaxed);
-    let resolves_before = RESOLVE_CALLS.load(Ordering::Relaxed);
+    let resolves_before = resolve_calls();
     let mut keystroke_times = Vec::with_capacity(TYPING_BURST);
     for _ in 0..TYPING_BURST {
         text.push('#');
@@ -352,7 +353,7 @@ fn typing_burst(
         keystroke_times.push(start.elapsed());
     }
     let checks_after_burst = CHECK_EXECUTIONS.load(Ordering::Relaxed);
-    let resolves_after_burst = RESOLVE_CALLS.load(Ordering::Relaxed);
+    let resolves_after_burst = resolve_calls();
     let sweep_start = Instant::now();
     for other in records {
         let _ = document_diagnostics(db, other.file, config);

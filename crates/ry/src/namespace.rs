@@ -4,7 +4,7 @@ use semantics::diagnostics::{Diagnostic, Severity};
 use semantics::lints::{LintLevel, lint_severity};
 use semantics::metadata::NamespaceImport;
 use std::collections::BTreeSet;
-use syntax::{SyntaxElement, SyntaxKind, SyntaxNode, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, TextRange, for_each_token};
 
 /// Unknown namespaces produce nothing: without stubs there is no export set. An
 /// error, not a warning, because R refuses to load the package.
@@ -33,19 +33,29 @@ pub fn namespace_import_problems(
         .collect()
 }
 
-/// `R CMD check`'s "undefined exports". `defines` covers every top-level binding the
-/// package makes, in any file. A name the NAMESPACE also imports is a re-export
-/// (`importFrom(rlang, "%||%")` with `export("%||%")`), and a package that creates
-/// bindings at run time (`assign(name, ...)`, `makeActiveBinding("name", ...)`, a loop
-/// over a list of styles) can export a name it never writes as a definition, so a
-/// name the sources mention while they call such a definer is not reported.
+/// `R CMD check`'s "undefined exports". `defines` is the package's whole
+/// top-level name set, so a name bound by any file counts. An imported name is in the
+/// namespace too, so a package may re-export it: an `importFrom(pkg, name)`, or an
+/// `import(pkg)` whose namespace exports the name or has no known export set. A package that
+/// creates bindings at run time (`assign(name, ...)`, `makeActiveBinding("name", ...)`, a loop
+/// over a list of styles) can export a name it never writes as a definition, so a name the
+/// sources mention while they call such a definer is not reported either.
 pub fn namespace_export_problems(
     exports: &[(String, TextRange)],
     imports: &[NamespaceImport],
     defines: &dyn Fn(&str) -> bool,
-    imported_namespace_exports: &dyn Fn(&str, &str) -> Option<bool>,
+    knows_namespace: &dyn Fn(&str) -> bool,
+    namespace_exports: &dyn Fn(&str, &str) -> bool,
     used_tokens: &BTreeSet<String>,
 ) -> Vec<Diagnostic> {
+    let imported = |name: &str| {
+        imports.iter().any(|import| match &import.name {
+            Some(imported) => imported == name,
+            None => {
+                !knows_namespace(&import.namespace) || namespace_exports(&import.namespace, name)
+            }
+        })
+    };
     let defines_at_run_time = RUNTIME_DEFINERS
         .iter()
         .any(|definer| used_tokens.contains(*definer));
@@ -53,11 +63,7 @@ pub fn namespace_export_problems(
         .iter()
         .filter(|(name, _)| {
             !defines(name)
-                && !imports.iter().any(|import| match &import.name {
-                    Some(imported) => imported == name,
-                    // An unknown namespace may export anything.
-                    None => imported_namespace_exports(&import.namespace, name) != Some(false),
-                })
+                && !imported(name)
                 && !(defines_at_run_time && used_tokens.contains(name))
         })
         .map(|(name, range)| {
@@ -116,23 +122,26 @@ pub fn unused_import_diagnostics(
 /// Uses the real parser, not a hand-rolled scanner, so it sees exactly R's tokens;
 /// string tokens contribute their unquoted content.
 pub fn collect_used_tokens(root: &SyntaxNode, out: &mut BTreeSet<String>) {
-    for element in root.descendants_with_tokens() {
-        if let SyntaxElement::Token(token) = element {
-            if token.kind().is_trivia() {
-                continue;
-            }
-            let text = token.text();
+    let mut insert = |text: &str| {
+        // Most tokens repeat, so look before allocating.
+        if !out.contains(text) {
             out.insert(text.to_owned());
-            if token.kind() == SyntaxKind::STRING {
-                let content = text
-                    .trim_start_matches(['"', '\''])
-                    .trim_end_matches(['"', '\'']);
-                if !content.is_empty() {
-                    out.insert(content.to_owned());
-                }
+        }
+    };
+    for_each_token(root, |kind, text| {
+        if kind.is_trivia() {
+            return;
+        }
+        insert(text);
+        if kind == SyntaxKind::STRING {
+            let content = text
+                .trim_start_matches(['"', '\''])
+                .trim_end_matches(['"', '\'']);
+            if !content.is_empty() {
+                insert(content);
             }
         }
-    }
+    });
 }
 
 #[cfg(test)]

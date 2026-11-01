@@ -13,7 +13,6 @@ use crate::types::{
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, RefCell};
 use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -62,8 +61,17 @@ pub struct InferenceTable<'db> {
     epoch: Cell<u64>,
 }
 
-/// Read by the perf witnesses: must stay near-linear in corpus size.
-pub static RESOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// Per thread, because a counter every checking thread bumps on each step costs more
+    /// than the step when the threads contend for it.
+    static RESOLVE_CALLS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Resolution steps this thread has taken, read by the perf witnesses: must stay
+/// near-linear in corpus size.
+pub fn resolve_calls() -> u64 {
+    RESOLVE_CALLS.get()
+}
 
 /// Past any alias nested by hand; bounds a self-referential alias.
 const ALIAS_EXPANSION_LIMIT: usize = 64;
@@ -176,7 +184,7 @@ impl<'db> InferenceTable<'db> {
         ty: Ty<'db>,
         visiting: &mut Vec<InferenceVar>,
     ) -> (Ty<'db>, bool) {
-        RESOLVE_CALLS.fetch_add(1, Ordering::Relaxed);
+        RESOLVE_CALLS.set(RESOLVE_CALLS.get() + 1);
         if let TyKind::Var(var) = ty.kind(db) {
             let root = self.find(*var);
             let shallow = self.shallow_resolve(db, ty);
@@ -642,6 +650,46 @@ impl<'db> InferenceTable<'db> {
         }
         if actual == expected {
             return true;
+        }
+        // An argument fits an open `T | NULL` with `T` taking its non-`NULL` part. Binding an
+        // open argument to the whole union would tell the caller its own value may be `NULL`
+        // (`check(x); x$field` after `check <- function(x) if (is.null(x)) ...`), and binding
+        // `T` to one member of a union argument would reject the others.
+        if let TyKind::Union(members) = expected.kind(db)
+            && let [first, second] = members[..]
+            && let Some(open_member) = match (
+                self.shallow_resolve(db, first).kind(db),
+                self.shallow_resolve(db, second).kind(db),
+            ) {
+                (TyKind::Var(_), TyKind::Null) => Some(first),
+                (TyKind::Null, TyKind::Var(_)) => Some(second),
+                _ => None,
+            }
+        {
+            let present = match actual.kind(db) {
+                TyKind::Var(_) => Some(actual),
+                TyKind::Union(actual_members)
+                    if !actual_members
+                        .iter()
+                        .any(|member| matches!(member.kind(db), TyKind::OtherTags)) =>
+                {
+                    Some(union_of(
+                        db,
+                        actual_members
+                            .iter()
+                            .copied()
+                            .filter(|member| !matches!(member.kind(db), TyKind::Null)),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(present) = present {
+                let snapshot = self.snapshot();
+                if self.unify(db, open_member, present).is_ok() {
+                    return true;
+                }
+                self.rollback(snapshot);
+            }
         }
         if matches!(actual.kind(db), TyKind::Var(_)) || matches!(expected.kind(db), TyKind::Var(_))
         {
@@ -1192,7 +1240,7 @@ struct ParameterPair<'db> {
 
 /// Arity is a range: a function serves an interface when it accepts every call
 /// shape the interface allows, so extra parameters are fine when they default.
-/// Variadics pair only with variadics at the same formal position (conservative).
+/// A variadic interface pairs only with a variadic at the same formal position.
 fn pair_parameters<'db>(
     actual: &FunctionType<'db>,
     expected: &FunctionType<'db>,
@@ -1205,8 +1253,10 @@ fn pair_parameters<'db>(
             }
             rest.push((expected_variadic.element, actual_variadic.element));
         }
-        (None, None) => {}
-        _ => return None,
+        // An interface without `...` never passes extras, so the function's own `...`
+        // receives at most the leftovers paired below.
+        (Some(_), None) | (None, None) => {}
+        (None, Some(_)) => return None,
     }
     // R matches arguments to formals by name regardless of order; the rest pair
     // positionally.

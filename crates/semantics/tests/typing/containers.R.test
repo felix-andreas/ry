@@ -403,7 +403,7 @@ f <- function(x, i) {
   values[i]
 }
 #++++
-f: <T, U> fn(x: T, i: U) -> integer
+f: <T, U> fn([x]: T, i: U) -> integer
 
 #---- invalid_vector_indexes_error
 f <- function() c(1L, 2L)[list(1)]

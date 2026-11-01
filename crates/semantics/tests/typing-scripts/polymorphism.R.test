@@ -55,7 +55,7 @@ const_integer <- function(x) 1L
 const_integer(1L)
 const_integer("hello")
 #++++
-const_integer: <T> fn(x: T) -> integer
+const_integer: <T> fn([x]: T) -> integer
 integer
 integer
 
@@ -68,7 +68,7 @@ invoke(mirror, 1L)
 invoke(mirror, "hello")
 #++++
 invoke: <T, U> fn(f: fn(T) -> U, value: T) -> U
-const_integer: <T> fn(x: T) -> integer
+const_integer: <T> fn([x]: T) -> integer
 mirror: <T> fn(x: T) -> T
 integer
 integer

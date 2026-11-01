@@ -8,7 +8,7 @@ mirror: <T> fn(x: T) -> T
 #---- two_parameter_function_returns_first_argument_type
 first <- function(x, y) x
 #++++
-first: <T, U> fn(x: T, y: U) -> T
+first: <T, U> fn(x: T, [y]: U) -> T
 0..5 warning[unused] `first` is assigned but never used.
 
 #==== annotated_functions
@@ -85,7 +85,7 @@ mirror()
 #++++
 mirror: <T> fn(x: T) -> T
 T
-24..30 error[type-mismatch] this call supplies 0 arguments, but the function requires 1, so a required argument is missing
+24..30 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- extra_argument
 mirror <- function(x) x
@@ -181,11 +181,11 @@ integer
 
 #---- expected_optional_requires_actual_default
 #: fn(count: integer, [label]: character) -> integer
-double_count <- function(count, label) count + count
+double_count <- function(count, label) count + nchar(label)
 #++++
 double_count: fn(count: integer, label: character) -> integer
 53..65 warning[unused] `double_count` is assigned but never used.
-69..105 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
+69..112 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
 
 #==== argument_coercions
 #---- scalar_argument_coerces_to_array_parameter
@@ -477,7 +477,7 @@ f("a", 1L)
 #++++
 f: <T> fn(...: Any, sep: T) -> T
 T
-28..29 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
+28..29 error[type-mismatch] this call leaves out `sep`, which the function requires
 
 #---- unmatched_keyword_is_absorbed_by_the_rest
 f <- function(...) NULL

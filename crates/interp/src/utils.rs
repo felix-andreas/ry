@@ -1997,6 +1997,13 @@ fn zip_entries(archive: &[u8]) -> Option<Vec<ZipEntry>> {
     Some(entries)
 }
 
+/// The uncompressed bytes of the member called `name`, which `unz()` connections read.
+pub(crate) fn zip_member_named(archive: &[u8], name: &str) -> Option<Vec<u8>> {
+    let entries = zip_entries(archive)?;
+    let entry = entries.iter().find(|entry| entry.name == name)?;
+    zip_member(archive, entry)
+}
+
 /// The uncompressed bytes of one member.
 fn zip_member(archive: &[u8], entry: &ZipEntry) -> Option<Vec<u8>> {
     use std::io::Read;

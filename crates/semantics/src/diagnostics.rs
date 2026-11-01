@@ -1,6 +1,6 @@
 use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_inline_site, is_type_kind,
-    lower_annotation, lower_inline_annotation, statement_inline_site,
+    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_green_inline_site,
+    is_type_kind, lower_annotation, lower_inline_annotation, statement_inline_site,
 };
 use crate::check::{
     ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
@@ -11,7 +11,9 @@ use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
 use crate::infer::{FunctionMismatch, RecordMismatch};
 use crate::lints::LintConfig;
-use crate::metadata::{declared_dependency, imported_by_name, imports_every_name, is_own_package};
+use crate::metadata::{
+    declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
+};
 use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
 use crate::stubs::{namespace_exports, namespace_known, stubs};
 use crate::types::{
@@ -25,10 +27,13 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
-use std::{iter, mem};
+use std::mem;
 use syntax::SyntaxNode;
 use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
+use syntax::{
+    GreenRef, SyntaxKind, TextRange, TextSize, is_green_inline_annotation, is_syntactic_name,
+    matching_nodes, paired_comment_definition,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -113,10 +118,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     }
 
     let root = parsed.syntax_node();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
         let annotation = lower_annotation(db, &node);
         for (message, range) in &annotation.errors {
             diagnostics.push(Diagnostic::new(
@@ -135,9 +137,10 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
     }
-    for node in root.descendants().filter(|node| {
-        node.kind() == SyntaxKind::TYPE_DEFINITION && node.parent().as_ref() != Some(&root)
-    }) {
+    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::TYPE_DEFINITION)
+        .into_iter()
+        .filter(|node| node.parent().as_ref() != Some(&root))
+    {
         diagnostics.push(Diagnostic::new(
             node.text_range(),
             Severity::Error,
@@ -156,19 +159,15 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 /// typed, but `match` coverage is not counted.
 fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
-    let sites: Vec<SyntaxNode> = parsed
-        .syntax_node()
-        .descendants()
-        .filter(|node| {
-            matches!(
-                node.kind(),
-                SyntaxKind::RECORD_EXPR
-                    | SyntaxKind::TUPLE_EXPR
-                    | SyntaxKind::TAG_EXPR
-                    | SyntaxKind::MATCH_EXPR
-            )
-        })
-        .collect();
+    let sites = matching_nodes(&parsed.syntax_node(), |node, _| {
+        matches!(
+            node.kind(),
+            SyntaxKind::RECORD_EXPR
+                | SyntaxKind::TUPLE_EXPR
+                | SyntaxKind::TAG_EXPR
+                | SyntaxKind::MATCH_EXPR
+        )
+    });
     if sites.is_empty() || inline_annotations_enabled(db) {
         return Vec::new();
     }
@@ -205,21 +204,15 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// under R and the author should know the annotation is not checked.
 fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
-    let sites: Vec<SyntaxNode> = parsed
-        .syntax_node()
-        .descendants()
-        .filter(is_inline_site)
-        .collect();
+    let sites = matching_nodes(&parsed.syntax_node(), |node, _| is_green_inline_site(node));
     if sites.is_empty() {
         return Vec::new();
     }
     let mut diagnostics = Vec::new();
     if !inline_annotations_enabled(db) {
-        for node in parsed
-            .syntax_node()
-            .descendants()
-            .filter(syntax::is_inline_annotation)
-        {
+        for node in matching_nodes(&parsed.syntax_node(), |node, parent| {
+            is_green_inline_annotation(node.kind(), parent.map(GreenRef::kind))
+        }) {
             diagnostics.push(Diagnostic::new(
                 node.text_range(),
                 Severity::Warning,
@@ -249,11 +242,15 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
     let parsed = parse(db, file);
     let root = parsed.syntax_node();
     let mut diagnostics = Vec::new();
-    let sequences = iter::once(root.clone()).chain(
-        root.descendants()
-            .filter(|node| node.kind() == SyntaxKind::BRACE_EXPR),
-    );
-    for (node, target) in sequences.flat_map(|parent| crate::statement_annotations(&parent)) {
+    // Only a sequence with an annotation among its statements can hold a dangling one.
+    let sequences = matching_nodes(&root, |node, parent| {
+        (parent.is_none() || node.kind() == SyntaxKind::BRACE_EXPR)
+            && node.has_child(SyntaxKind::ANNOTATION)
+    });
+    for (node, target) in sequences
+        .iter()
+        .flat_map(|parent| crate::statement_annotations(&parent))
+    {
         let annotation = lower_annotation(db, &node);
         if !annotation.definitions.is_empty()
             || annotation.strict.is_some()
@@ -285,10 +282,7 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             message.to_owned(),
         ));
     }
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
         if node.parent().map(|parent| parent.kind()) != Some(SyntaxKind::ARGUMENT_LIST) {
             continue;
         }
@@ -566,8 +560,24 @@ fn classify_non_local_read(
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
+    if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+        return NonLocalRead::Resolvable;
+    }
+    if native_symbol(db, name, naming.native_routine_reads.contains(expression)) {
+        return NonLocalRead::Resolvable;
+    }
     let files = ProjectFiles::try_get(db);
+    let test_files = files.filter(|_| {
+        matches!(
+            *file.kind(db),
+            DocumentKind::Test | DocumentKind::TestHelper
+        )
+    });
     if crate::package_scheme_exists(db, name)
+        || test_files.is_some_and(|files| {
+            let binding = crate::test_name(db, files, Name::new(db, name));
+            binding.winner.is_some() || !binding.conditional_writers.is_empty()
+        })
         || super_globals(db, file).contains(name)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
@@ -579,12 +589,7 @@ fn classify_non_local_read(
     // checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
-            nearest_name(
-                name,
-                crate::package_definitions(db, files)
-                    .keys()
-                    .map(String::as_str),
-            )
+            project_typo_suggestion(db, files, Name::new(db, name), test_files.is_some())
         })
         .or_else(|| {
             nearest_name(
@@ -599,7 +604,7 @@ fn classify_non_local_read(
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
-        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name.to_owned()))),
+        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name))),
     }
 }
 
@@ -795,12 +800,12 @@ fn file_annotation_references<'db>(
     file: SourceFile,
 ) -> Vec<AnnotationReferences<'db>> {
     let root = parse(db, file).syntax_node();
-    let mut annotations: Vec<Annotation<'db>> = root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-        .map(|node| lower_annotation(db, &node))
-        .collect();
-    let sites: Vec<SyntaxNode> = root.descendants().filter(is_inline_site).collect();
+    let mut annotations: Vec<Annotation<'db>> =
+        matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION)
+            .iter()
+            .map(|node| lower_annotation(db, node))
+            .collect();
+    let sites = matching_nodes(&root, |node, _| is_green_inline_site(node));
     if !sites.is_empty() && inline_annotations_enabled(db) {
         annotations.extend(sites.iter().map(|site| lower_inline_annotation(db, site)));
     }
@@ -978,15 +983,14 @@ struct SlotPair<'db> {
 #[salsa::tracked(returns(ref))]
 fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<AgreementCandidate<'db>> {
     let root = parse(db, file).syntax_node();
-    if !root.descendants().any(|node| is_inline_site(&node)) || !inline_annotations_enabled(db) {
+    if matching_nodes(&root, |node, _| is_green_inline_site(node)).is_empty()
+        || !inline_annotations_enabled(db)
+    {
         return Vec::new();
     }
     let mut candidates = Vec::new();
     let mut parents: Vec<SyntaxNode> = Vec::new();
-    for node in root
-        .descendants()
-        .filter(|node| node.kind() == SyntaxKind::ANNOTATION)
-    {
+    for node in matching_nodes(&root, |node, _| node.kind() == SyntaxKind::ANNOTATION) {
         if let Some(parent) = node.parent()
             && !parents.contains(&parent)
         {
@@ -1524,7 +1528,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
 fn type_declaration_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange)> {
     let parsed = parse(db, file);
     let mut sites: Vec<(String, TextRange)> = Vec::new();
-    for node in parsed.syntax_node().descendants() {
+    let declarations = matching_nodes(&parsed.syntax_node(), |node, _| {
+        matches!(
+            node.kind(),
+            SyntaxKind::ANNOTATION | SyntaxKind::TYPE_DEFINITION
+        )
+    });
+    for node in declarations {
         let annotation = match node.kind() {
             SyntaxKind::ANNOTATION => lower_annotation(db, &node),
             SyntaxKind::TYPE_DEFINITION => {
@@ -1780,6 +1790,17 @@ fn project_global_variable_declarations(db: &dyn Db, files: ProjectFiles) -> BTr
 /// resolve nowhere lexically.
 const R6_INJECTED_BINDINGS: [&str; 3] = ["self", "private", "super"];
 
+/// `UseMethod`, `NextMethod` and group-generic dispatch bind these in the method's frame, and
+/// any function can be a method, so a read inside a function body may see them.
+const DISPATCH_VARIABLES: [&str; 6] = [
+    ".Generic",
+    ".Method",
+    ".Class",
+    ".Group",
+    ".GenericCallEnv",
+    ".GenericDefEnv",
+];
+
 /// Purely syntactic: a local binding shadowing `R6Class` is not honored.
 #[salsa::tracked]
 fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
@@ -1809,6 +1830,28 @@ fn display_name(name: &str) -> String {
     } else {
         format!("`{name}`")
     }
+}
+
+/// A per-name firewall over the project-wide definition maps: a new definition elsewhere
+/// re-runs this, but a reading file re-checks only when its suggestion changes.
+#[salsa::tracked(returns(clone))]
+fn project_typo_suggestion<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: Name<'db>,
+    tests: bool,
+) -> Option<String> {
+    let test_names = tests
+        .then(|| crate::test_definitions(db, files).keys())
+        .into_iter()
+        .flatten();
+    nearest_name(
+        name.text(db),
+        crate::package_definitions(db, files)
+            .keys()
+            .chain(test_names)
+            .map(String::as_str),
+    )
 }
 
 /// Memoized per name: the scan over the whole stub corpus is the expensive part.
@@ -2202,6 +2245,17 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                     plural(*found, "argument", "arguments"),
                 )
             }
+        }
+        TypeErrorKind::MissingArguments { names } => {
+            let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+            let listed = match quoted.split_last() {
+                Some((last, [])) => last.clone(),
+                Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+                None => String::new(),
+            };
+            // A declared required parameter need not be read, so the reason is the
+            // signature's, not the body's.
+            format!("this call leaves out {listed}, which the function requires")
         }
         TypeErrorKind::NamedArgumentMismatch {
             argument,

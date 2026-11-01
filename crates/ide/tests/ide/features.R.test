@@ -509,15 +509,19 @@ hint @5: <T> fn(x: T) -> T
 config <- list(alpha = 1, beta = "b")
 use <- function() config$al$0
 #++++
-hover 56..65: Unknown
+hover 56..65: double
 definition: none
 references: none
 rename: none
 signature: none
+action: Add inferred type annotation for `use`
+  edit 38..38 -> "#: fn() -> double\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: list{alpha: double, beta: character}\n"
+  edit 38..38 -> "#: fn() -> double\n"
 completion (1): alpha
 hint @6: list{alpha: double, beta: character}
+hint @41: fn() -> double
 
 #---- namespace_exports
 h <- function() stats::med$0

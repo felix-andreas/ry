@@ -14,6 +14,26 @@ use tracing_subscriber::prelude::*;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// `mi_option_arena_eager_commit` in mimalloc v3's `mi_option_e`, which `libmimalloc-sys` does
+/// not export as a constant.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+
+/// Eagerly committed arenas are backed by transparent huge pages, which the kernel zeroes in full
+/// on first touch. Analysis frees and reallocates far more memory than it keeps, so on Linux that
+/// zeroing cost a cold check more time than parsing did. mimalloc reads the option when it
+/// creates its first arena, which happens before `main`, so the option is set from a constructor.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static LAZY_ARENA_COMMIT: extern "C" fn() = {
+    extern "C" fn lazy_arena_commit() {
+        // SAFETY: setting an option has no preconditions, and no thread exists yet.
+        unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0) }
+    }
+    lazy_arena_commit
+};
+
 fn main() -> ExitCode {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())

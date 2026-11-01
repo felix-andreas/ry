@@ -387,6 +387,30 @@ pub fn map_child_types<'db>(
     ty: Ty<'db>,
     map: &mut impl FnMut(Ty<'db>) -> Ty<'db>,
 ) -> Ty<'db> {
+    if let TyKind::Union(members) = ty.kind(db) {
+        // Members can collapse once mapped, so re-normalize.
+        return union_of(db, members.iter().map(|&member| map(member)));
+    }
+    // Most maps leave most types alone, and re-interning an unchanged type costs a hash of
+    // the whole kind and a table lookup.
+    let mut changed = false;
+    let kind = mapped_kind(db, ty, &mut |child| {
+        let mapped = map(child);
+        changed |= mapped != child;
+        mapped
+    });
+    match kind {
+        Some(kind) if changed => Ty::new(db, kind),
+        _ => ty,
+    }
+}
+
+/// `ty`'s kind with `map` applied to each child, or `None` for a type without children.
+fn mapped_kind<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    map: &mut impl FnMut(Ty<'db>) -> Ty<'db>,
+) -> Option<TyKind<'db>> {
     match ty.kind(db) {
         TyKind::Any
         | TyKind::Unknown
@@ -394,86 +418,66 @@ pub fn map_child_types<'db>(
         | TyKind::Scalar(_)
         | TyKind::OtherTags
         | TyKind::Var(_)
-        | TyKind::Rigid(_) => ty,
-        TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(*inner))),
-        TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(map(*inner))),
-        TyKind::List(inner) => Ty::new(db, TyKind::List(map(*inner))),
-        TyKind::NamedList(inner) => Ty::new(db, TyKind::NamedList(map(*inner))),
-        TyKind::Tuple(items) => Ty::new(
-            db,
-            TyKind::Tuple(items.iter().map(|&item| map(item)).collect()),
-        ),
-        TyKind::Record(fields) => Ty::new(
-            db,
-            TyKind::Record(
-                fields
-                    .iter()
-                    .map(|field| RecordField {
-                        ty: map(field.ty),
-                        ..field.clone()
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::NativeTuple(items) => Ty::new(
-            db,
-            TyKind::NativeTuple(items.iter().map(|&item| map(item)).collect()),
-        ),
-        TyKind::NativeRecord(fields) => Ty::new(
-            db,
-            TyKind::NativeRecord(
-                fields
-                    .iter()
-                    .map(|field| NativeField {
-                        name: field.name,
-                        ty: map(field.ty),
-                    })
-                    .collect(),
-            ),
-        ),
-        TyKind::Tag(name, payload) => Ty::new(db, TyKind::Tag(*name, payload.map(&mut *map))),
-        TyKind::Frame(None) => ty,
-        TyKind::Frame(Some(columns)) => Ty::new(
-            db,
-            TyKind::Frame(Some(
-                columns
-                    .iter()
-                    .map(|column| RecordField {
-                        ty: map(column.ty),
-                        ..column.clone()
-                    })
-                    .collect(),
-            )),
-        ),
-        TyKind::Function(function) => Ty::new(
-            db,
-            TyKind::Function(FunctionType {
-                positional: function.positional.iter().map(|&ty| map(ty)).collect(),
-                named: function
-                    .named
-                    .iter()
-                    .map(|parameter| Parameter {
-                        ty: map(parameter.ty),
-                        default: parameter.default.map(&mut *map),
-                        ..parameter.clone()
-                    })
-                    .collect(),
-                variadic: function.variadic.as_ref().map(|rest| RestParameter {
-                    element: map(rest.element),
-                    ..rest.clone()
-                }),
-                ret: map(function.ret),
+        | TyKind::Rigid(_) => None,
+        TyKind::Vector(inner) => Some(TyKind::Vector(map(*inner))),
+        TyKind::NamedVector(inner) => Some(TyKind::NamedVector(map(*inner))),
+        TyKind::List(inner) => Some(TyKind::List(map(*inner))),
+        TyKind::NamedList(inner) => Some(TyKind::NamedList(map(*inner))),
+        TyKind::Tuple(items) => Some(TyKind::Tuple(items.iter().map(|&item| map(item)).collect())),
+        TyKind::Record(fields) => Some(TyKind::Record(
+            fields
+                .iter()
+                .map(|field| RecordField {
+                    ty: map(field.ty),
+                    ..field.clone()
+                })
+                .collect(),
+        )),
+        TyKind::NativeTuple(items) => Some(TyKind::NativeTuple(
+            items.iter().map(|&item| map(item)).collect(),
+        )),
+        TyKind::NativeRecord(fields) => Some(TyKind::NativeRecord(
+            fields
+                .iter()
+                .map(|field| NativeField {
+                    name: field.name,
+                    ty: map(field.ty),
+                })
+                .collect(),
+        )),
+        TyKind::Tag(name, payload) => Some(TyKind::Tag(*name, payload.map(&mut *map))),
+        TyKind::Frame(None) => None,
+        TyKind::Frame(Some(columns)) => Some(TyKind::Frame(Some(
+            columns
+                .iter()
+                .map(|column| RecordField {
+                    ty: map(column.ty),
+                    ..column.clone()
+                })
+                .collect(),
+        ))),
+        TyKind::Function(function) => Some(TyKind::Function(FunctionType {
+            positional: function.positional.iter().map(|&ty| map(ty)).collect(),
+            named: function
+                .named
+                .iter()
+                .map(|parameter| Parameter {
+                    ty: map(parameter.ty),
+                    default: parameter.default.map(&mut *map),
+                    ..parameter.clone()
+                })
+                .collect(),
+            variadic: function.variadic.as_ref().map(|rest| RestParameter {
+                element: map(rest.element),
+                ..rest.clone()
             }),
-        ),
-        // Members can collapse once mapped, so re-normalize.
-        TyKind::Union(members) => union_of(db, members.iter().map(|&member| map(member))),
-        TyKind::Named(name, arguments) => Ty::new(
-            db,
-            TyKind::Named(
-                *name,
-                arguments.iter().map(|&argument| map(argument)).collect(),
-            ),
-        ),
+            ret: map(function.ret),
+        })),
+        TyKind::Union(_) => None,
+        TyKind::Named(name, arguments) => Some(TyKind::Named(
+            *name,
+            arguments.iter().map(|&argument| map(argument)).collect(),
+        )),
     }
 }
 
@@ -682,7 +686,7 @@ mod tests {
 
     fn tag<'db>(db: &'db RootDatabase, name: &str, items: Option<Vec<Ty<'db>>>) -> Ty<'db> {
         let payload = items.map(|items| Ty::new(db, TyKind::NativeTuple(items)));
-        Ty::new(db, TyKind::Tag(Name::new(db, name.to_owned()), payload))
+        Ty::new(db, TyKind::Tag(Name::new(db, name), payload))
     }
 
     #[test]

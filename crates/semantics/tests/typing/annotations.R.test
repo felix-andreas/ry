@@ -166,7 +166,7 @@ f: fn(x: integer) -> character
 #: fn(x: integer) -> integer
 f <- function(y) 1L
 #++++
-f: fn(y: Unknown) -> integer
+f: fn([y]: Unknown) -> integer
 34..48 error[type-mismatch] this annotation names a parameter `x`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- rigid_refuses_undeclared_bound
@@ -208,7 +208,6 @@ countdown: <T: numeric> fn(n: T) -> integer
 loose <- function(n) if (n <= 0L) 0L else loose(n - 1L)
 #++++
 loose: <T> fn(n: T) -> integer
-200..201 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
 223..224 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
 
 #---- an_atomic_bound_admits_a_vector_element_across_recursion
@@ -270,7 +269,7 @@ n: integer
 #: @return {Person}
 make <- function(count) list(name = "a")
 #++++
-make: <T> fn(count: T) -> list{name: character}
+make: <T> fn([count]: T) -> list{name: character}
 0..85 error[annotation] `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
 
 #---- compact_mixed_with_expanded_is_refused
@@ -496,10 +495,10 @@ f: <T> fn(x: T[], y: Id[]) -> integer[]
 #==== declared_shape
 #---- declared_optional_requires_an_actual_default
 #: fn(count: integer, [label]: character) -> integer
-double_count <- function(count, label) count + count
+double_count <- function(count, label) count + nchar(label)
 #++++
 double_count: fn(count: integer, label: character) -> integer
-69..105 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
+69..112 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
 
 #---- rest_position_must_match_the_formals
 #: fn(...: Any, x: integer) -> integer

@@ -29,11 +29,10 @@ c(1L, 2L) >= 1.5
 #++++
 logical[]
 
-#---- comparison_logical_vs_character_rejected
+#---- comparison_logical_vs_character_coerces
 TRUE == "a"
 #++++
-Unknown
-8..11 error[type-mismatch] expected `logical`, found `character`
+logical
 
 #---- comparison_against_null_rejected
 1L == NULL
