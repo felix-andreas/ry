@@ -7,15 +7,15 @@ use {
     crate::{
         graphics::{Colour, text_width_ems},
         graphics_engine::{
-            DevDesc, GEContext, TRANSPARENT_WHITE, add_device_named, check_device_available,
-            create_device, fail,
+            DevDesc, GEContext, Rboolean, TRANSPARENT_WHITE, add_device_named,
+            check_device_available, create_device, fail,
         },
         unwind::{R, error},
     },
     heap::object::Sexp,
     std::{
         collections::BTreeMap,
-        ffi::{CStr, c_char, c_int},
+        ffi::{CStr, c_char, c_int, c_uint},
         io::Write,
         sync::OnceLock,
     },
@@ -1437,6 +1437,7 @@ pub unsafe fn open_device(spec: DeviceSpec) -> R<()> {
     d.polyline = Some(device_polyline);
     d.rect = Some(device_rect);
     d.path = Some(device_path);
+    d.raster = Some(device_raster);
     d.size = Some(device_size);
     d.str_width = Some(device_str_width);
     d.text = Some(device_text);
@@ -1750,6 +1751,67 @@ unsafe extern "C" fn device_rect(
         fill: (*gc).fill as Colour,
         stroke: stroke(&*gc),
     });
+}
+
+/// Draws a raster image as one filled quadrilateral per cell, its first row at the top, with
+/// its bottom-left corner at `x`, `y` and rotated `angle` degrees anticlockwise about it. The
+/// renderer has no images, so `interpolate` is ignored and cells keep hard edges.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn device_raster(
+    pixels: *mut c_uint,
+    columns: c_int,
+    rows: c_int,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    angle: f64,
+    _interpolate: Rboolean,
+    _gc: *const GEContext,
+    dd: *mut DevDesc,
+) {
+    let (Ok(columns), Ok(rows)) = (usize::try_from(columns), usize::try_from(rows)) else {
+        return;
+    };
+    if pixels.is_null() || columns == 0 || rows == 0 {
+        return;
+    }
+    let device = render_device(dd);
+    let pixels = std::slice::from_raw_parts(pixels, columns * rows);
+    let origin = device.point(x, y);
+    let across = device.point(x + width, y);
+    let up = device.point(x, y + height);
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let rotate = |[dx, dy]: [f64; 2]| [dx * cos - dy * sin, dx * sin + dy * cos];
+    let across = rotate([across[0] - origin[0], across[1] - origin[1]]);
+    let up = rotate([up[0] - origin[0], up[1] - origin[1]]);
+    let at = |column: usize, row: usize| {
+        let (u, v) = (
+            column as f64 / columns as f64,
+            1.0 - row as f64 / rows as f64,
+        );
+        [
+            origin[0] + u * across[0] + v * up[0],
+            origin[1] + u * across[1] + v * up[1],
+        ]
+    };
+    for (index, &pixel) in pixels.iter().enumerate() {
+        if pixel >> 24 == 0 {
+            continue;
+        }
+        let (row, column) = (index / columns, index % columns);
+        device.push(Shape::Path {
+            points: vec![
+                at(column, row + 1),
+                at(column + 1, row + 1),
+                at(column + 1, row),
+                at(column, row),
+            ],
+            closed: true,
+            fill: pixel as Colour,
+            stroke: None,
+        });
+    }
 }
 
 /// Draws each subpath as its own polygon. The renderer has no compound paths, so a subpath

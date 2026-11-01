@@ -1626,6 +1626,205 @@ pub unsafe fn line(
     guarded(|| draw(x1, y1, x2, y2, gc, dev))
 }
 
+/// `GEXspline`: the points of the X-spline through control points `x`, `y` in device units,
+/// drawn as a polyline (open) or polygon (closed) when `draw` is set, and returned in device
+/// units.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn xspline(
+    x: &[f64],
+    y: &[f64],
+    shapes: &[f64],
+    open: bool,
+    repeat_ends: bool,
+    draw: bool,
+    gc: &mut GEContext,
+    dd: *mut GEDevDesc,
+) -> R<(Vec<f64>, Vec<f64>)> {
+    let inches = [
+        from_device_width(1.0, Unit::Inches, dd).abs(),
+        from_device_height(1.0, Unit::Inches, dd).abs(),
+    ];
+    let (xs, ys) = xspline_points(x, y, shapes, open, repeat_ends, inches);
+    if draw {
+        if open {
+            polyline(&xs, &ys, gc, dd)?;
+        } else {
+            polygon(&xs, &ys, gc, dd)?;
+        }
+    }
+    Ok((xs, ys))
+}
+
+/// The points of an X-spline (Blanc and Schlick, "X-splines: a spline model designed for the
+/// end-user", 1995) through the control points `x`, `y`, with shape `shapes[k]` at point `k`
+/// recycled: 0 passes through the point as a corner, a positive shape approximates it as a
+/// B-spline does, and a negative shape interpolates it. An open spline with `repeat_ends`
+/// starts and ends at its end points, and its end shapes are taken as 0. `inches` is the size of
+/// one coordinate unit in inches on each axis, which sets how finely each segment is sampled.
+pub fn xspline_points(
+    x: &[f64],
+    y: &[f64],
+    shapes: &[f64],
+    open: bool,
+    repeat_ends: bool,
+    inches: [f64; 2],
+) -> (Vec<f64>, Vec<f64>) {
+    let count = x.len().min(y.len());
+    let shape_at = |index: usize| {
+        if shapes.is_empty() {
+            0.0
+        } else {
+            shapes[index % shapes.len()].clamp(-1.0, 1.0)
+        }
+    };
+    let mut control: Vec<([f64; 2], f64)> = Vec::with_capacity(count + 2);
+    if open {
+        if repeat_ends {
+            if count < 2 {
+                return (x[..count].to_vec(), y[..count].to_vec());
+            }
+            control.push(([x[0], y[0]], 0.0));
+        }
+        for index in 0..count {
+            let shape = if repeat_ends && (index == 0 || index + 1 == count) {
+                0.0
+            } else {
+                shape_at(index)
+            };
+            control.push(([x[index], y[index]], shape));
+        }
+        if repeat_ends {
+            control.push(([x[count - 1], y[count - 1]], 0.0));
+        }
+        if control.len() < 4 {
+            return (x[..count].to_vec(), y[..count].to_vec());
+        }
+    } else {
+        if count < 3 {
+            return (x[..count].to_vec(), y[..count].to_vec());
+        }
+        for index in 0..count {
+            control.push(([x[index], y[index]], shape_at(index)));
+        }
+    }
+    let segments = if open {
+        control.len() - 3
+    } else {
+        control.len()
+    };
+    let length = control.len();
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for segment in 0..segments {
+        // A closed spline's first segment runs from its first control point to its second.
+        let first = if open { segment } else { segment + length - 1 };
+        let window: [([f64; 2], f64); 4] =
+            std::array::from_fn(|offset| control[(first + offset) % length]);
+        let points = window.map(|(point, _)| point);
+        let (s1, s2) = (window[1].1, window[2].1);
+        let start = blend_point(&points, xspline_weights(0.0, s1, s2));
+        let end = blend_point(&points, xspline_weights(1.0, s1, s2));
+        let distance = (((end[0] - start[0]) * inches[0]).powi(2)
+            + ((end[1] - start[1]) * inches[1]).powi(2))
+        .sqrt();
+        // A segment between two corners is straight and needs only its start. Others are
+        // sampled more finely the longer they are: about 17 points an inch, and at least 5.
+        let step = if s1 == 0.0 && s2 == 0.0 {
+            1.0
+        } else {
+            (2.0 / (distance * 1200.0).sqrt()).min(0.2)
+        };
+        let step_count = (1.0 / step).ceil() as usize;
+        for index in 0..step_count {
+            let t = index as f64 * step;
+            let [px, py] = blend_point(&points, xspline_weights(t, s1, s2));
+            xs.push(px);
+            ys.push(py);
+        }
+    }
+    if open {
+        // The curve ends where its last segment does, which is the second last control point
+        // only when that point's shape is 0.
+        let window: [([f64; 2], f64); 4] =
+            std::array::from_fn(|offset| control[length - 4 + offset]);
+        let [last_x, last_y] = blend_point(
+            &window.map(|(point, _)| point),
+            xspline_weights(1.0, window[1].1, window[2].1),
+        );
+        xs.push(last_x);
+        ys.push(last_y);
+    }
+    (xs, ys)
+}
+
+fn blend_point(points: &[[f64; 2]; 4], weights: [f64; 4]) -> [f64; 2] {
+    let total: f64 = weights.iter().sum();
+    let mut point = [0.0; 2];
+    for (control, weight) in points.iter().zip(weights) {
+        point[0] += control[0] * weight;
+        point[1] += control[1] * weight;
+    }
+    [point[0] / total, point[1] / total]
+}
+
+/// The weights of the four control points of a segment at parameter `t`, given the shapes of
+/// the segment's start (`s1`) and end (`s2`) points.
+fn xspline_weights(t: f64, s1: f64, s2: f64) -> [f64; 4] {
+    let (first, third) = if s1 < 0.0 {
+        (interpolating_tail(-t, -s1), interpolating_body(t, -s1))
+    } else {
+        (
+            if t < s1 {
+                approximating(t - s1, -1.0 - s1)
+            } else {
+                0.0
+            },
+            approximating(t + s1, 1.0 + s1),
+        )
+    };
+    let (second, fourth) = if s2 < 0.0 {
+        (
+            interpolating_body(1.0 - t, -s2),
+            interpolating_tail(t - 1.0, -s2),
+        )
+    } else {
+        (
+            approximating(t - 1.0 - s2, -1.0 - s2),
+            if t > 1.0 - s2 {
+                approximating(t - 1.0 + s2, 1.0 + s2)
+            } else {
+                0.0
+            },
+        )
+    };
+    [first, second, third, fourth]
+}
+
+/// The quintic blending function of an approximating (non-negative) shape, at `numerator`
+/// along a span of `denominator`.
+fn approximating(numerator: f64, denominator: f64) -> f64 {
+    let p = 2.0 * denominator * denominator;
+    let u = numerator / denominator;
+    let u2 = u * u;
+    u * u2 * (10.0 - p + (2.0 * p - 15.0) * u + (6.0 - p) * u2)
+}
+
+/// The blending function of an interpolating (negative) shape for the segment's own end
+/// points, with tension `q`; it is the approximating function at `q` 0.
+fn interpolating_body(u: f64, q: f64) -> f64 {
+    let p = 2.0;
+    u * (q + u
+        * (2.0 * q
+            + u * (10.0 - 12.0 * q - p
+                + u * (2.0 * p + 14.0 * q - 15.0 + u * (6.0 - 5.0 * q - p)))))
+}
+
+/// The blending function of an interpolating shape for the neighbour beyond the segment,
+/// which pulls the curve through the point it interpolates.
+fn interpolating_tail(u: f64, q: f64) -> f64 {
+    u * (q + u * (2.0 * q + u * u * (-2.0 * q - u * q)))
+}
+
 /// `GEPolyline`.
 pub unsafe fn polyline(x: &[f64], y: &[f64], gc: &GEContext, dd: *mut GEDevDesc) -> R<()> {
     check_lwd(gc)?;

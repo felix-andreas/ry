@@ -58,3 +58,18 @@ shot(function() {
   symbols(0.7, 0.5, circles = 0.1, inches = FALSE, add = TRUE, bg = "yellow")
   arrows(0, 1, 1, 0, length = 0.1, lwd = 2)
 })
+shot(function() {
+  image <- matrix(hcl(0, 80, seq(50, 80, 10)), nrow = 4, ncol = 5)
+  plot.new()
+  rasterImage(image, 0.1, 0.1, 0.5, 0.5, interpolate = FALSE)
+  rasterImage(image, 0.6, 0.2, 0.9, 0.6, angle = 30, interpolate = FALSE)
+  grid.raster(image, x = 0.5, y = 0.8, width = 0.2, interpolate = FALSE)
+})
+shot(function() {
+  plot.new()
+  plot.window(c(0, 3), c(0, 3))
+  xspline(c(0, 1, 2, 3), c(0, 2, 0, 2), shape = 1, border = "red", lwd = 2)
+  xspline(c(0, 1, 2, 3), c(1, 3, 1, 3), shape = -1, border = "blue")
+  grid.bezier(c(0.1, 0.4, 0.6, 0.9), c(0.1, 0.9, 0.1, 0.9))
+  grid.xspline(c(0.1, 0.5, 0.9), c(0.5, 0.2, 0.5), shape = 1, gp = gpar(col = "darkgreen"))
+})

@@ -25,7 +25,7 @@ use {
     heap::object::{NA_INTEGER, Sexp, SexpType},
     std::{
         cell::{Cell, RefCell},
-        ffi::c_int,
+        ffi::{c_int, c_uint},
     },
 };
 
@@ -2093,6 +2093,8 @@ unsafe fn do_plot_new(call: &NativeCall<'_>) -> R<Sexp> {
         gc.fill = (*state).pars.bg as c_int;
         graphics_engine::new_page(&gc, dd)?;
     }
+    // Marking the device dirty keeps grid's first drawing from starting a page of its own.
+    graphics_engine::dirty_device(dd);
     let device = &mut *state;
     {
         // Over a plot kept with `par(new = TRUE)`, the regions stay as they were laid out,
@@ -3316,18 +3318,69 @@ unsafe fn do_dend_window(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `xspline(x, y, shape, open, repEnds, draw, ...)`: without drawing, the points of the
-/// spline, which ry approximates by its control points.
+/// `xspline(x, y, shape, open, repEnds, draw, col, border, ...)`: draws the X-spline, or
+/// without drawing returns its points in user coordinates.
 unsafe fn do_xspline(call: &NativeCall<'_>) -> R<Sexp> {
-    with_plot(|_| Ok(()))?;
-    if values::as_logical_scalar(call.arg(5)) == 1 {
-        return Ok(nil());
+    let x = reals_of(call.arg(0))?;
+    let y = reals_of(call.arg(1))?;
+    let shapes = reals_of(call.arg(2))?;
+    let open = values::as_logical_scalar(call.arg(3)) != 0;
+    let repeat_ends = values::as_logical_scalar(call.arg(4)) != 0;
+    let draw = values::as_logical_scalar(call.arg(5)) == 1;
+    let (col, border) = (call.arg(6), call.arg(7));
+    let points = with_inline_pars(call, 8, |device| {
+        let pars = device.pars.clone();
+        let [x_axis, y_axis] = user_axes(device);
+        let x_inches: Vec<f64> = x.iter().map(|value| x_axis.inches(*value)).collect();
+        let y_inches: Vec<f64> = y.iter().map(|value| y_axis.inches(*value)).collect();
+        let (xs, ys) = graphics_engine::xspline_points(
+            &x_inches,
+            &y_inches,
+            &shapes,
+            open,
+            repeat_ends,
+            [1.0, 1.0],
+        );
+        if !draw {
+            return Ok(Some((
+                xs.iter()
+                    .map(|value| x_axis.user(*value))
+                    .collect::<Vec<f64>>(),
+                ys.iter()
+                    .map(|value| y_axis.user(*value))
+                    .collect::<Vec<f64>>(),
+            )));
+        }
+        let clip = clip_rect(device);
+        let fill = if open {
+            TRANSPARENT_WHITE
+        } else {
+            colour_at(col, 0, TRANSPARENT_WHITE, pars.bg)?
+        };
+        let outline = colour_at(border, 0, pars.fg, pars.bg)?;
+        let stroke = stroke_with(&pars, outline, pars.lty, pars.lwd);
+        push_shape(
+            device,
+            clip,
+            Shape::Path {
+                points: xs.iter().zip(&ys).map(|(x, y)| [*x, *y]).collect(),
+                closed: !open,
+                fill,
+                stroke: Some(stroke),
+            },
+        )?;
+        Ok(None)
+    })?;
+    match points {
+        Some((xs, ys)) => {
+            let x = values::real_vector(&xs)?;
+            crate::heap().root(x);
+            let y = values::real_vector(&ys)?;
+            crate::heap().root(y);
+            values::named_list(&[("x", x), ("y", y)])
+        }
+        None => Ok(nil()),
     }
-    let x = coerce_vector(call.arg(0), SexpType::Real)?;
-    crate::heap().root(x);
-    let y = coerce_vector(call.arg(1), SexpType::Real)?;
-    crate::heap().root(y);
-    values::named_list(&[("x", x), ("y", y)])
 }
 
 /// `locator` and `identify` on a device without a pointer: nothing is located.
@@ -3446,6 +3499,11 @@ impl UserAxis {
     fn inches(self, value: f64) -> f64 {
         let value = if self.log { value.log10() } else { value };
         self.origin + self.scale * value
+    }
+
+    fn user(self, inches: f64) -> f64 {
+        let value = (inches - self.origin) / self.scale;
+        if self.log { 10f64.powf(value) } else { value }
     }
 }
 
@@ -5137,8 +5195,8 @@ unsafe fn do_image(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(nil())
 }
 
-/// `rasterImage(image, xleft, ybottom, xright, ytop, angle, interpolate, ...)`: the raster's
-/// cells as filled rectangles, its first row at the top.
+/// `rasterImage(image, xleft, ybottom, xright, ytop, angle, interpolate, ...)`: hands the
+/// image, its first row at the top, to the device for each rectangle.
 unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
     let image = call.arg(0);
     let dim = values::get_attr(image, symbols().dim);
@@ -5152,10 +5210,10 @@ unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(error("invalid raster object"));
     };
     let native = image.kind() == SexpType::Integer;
-    let colours: Vec<Colour> = (0..rows * columns)
+    let mut pixels: Vec<c_uint> = (0..rows * columns)
         .map(|index| {
             if native {
-                Ok(values::ints(image)[index] as u32)
+                Ok(values::ints(image)[index] as c_uint)
             } else {
                 colour_element(image, index)
             }
@@ -5164,46 +5222,55 @@ unsafe fn do_raster(call: &NativeCall<'_>) -> R<Sexp> {
     let corners: Vec<Vec<f64>> = (1..5)
         .map(|index| reals_of(call.arg(index)))
         .collect::<R<_>>()?;
+    let angles = reals_of(call.arg(5))?;
+    let interpolate = values::as_logical_scalar(call.arg(6)) == 1;
     with_inline_pars(call, 7, |device| {
         let clip = clip_rect(device);
         let [x_axis, y_axis] = user_axes(device);
         let count = corners.iter().map(Vec::len).min().unwrap_or(0);
+        let gc = shape_context(device, None, TRANSPARENT_WHITE);
+        let dd = device.dd;
+        let [cx0, cy0] = device.to_device([clip.x0, clip.y0]);
+        let [cx1, cy1] = device.to_device([clip.x1, clip.y1]);
         for index in 0..count {
-            let (left, right) = (
+            let bottom_left = [
                 x_axis.inches(corners[0][index]),
-                x_axis.inches(corners[2][index]),
-            );
-            let (bottom, top) = (
                 y_axis.inches(corners[1][index]),
+            ];
+            let top_right = [
+                x_axis.inches(corners[2][index]),
                 y_axis.inches(corners[3][index]),
-            );
-            if [left, right, bottom, top]
+            ];
+            if bottom_left
                 .iter()
+                .chain(&top_right)
                 .any(|value| !value.is_finite())
             {
                 continue;
             }
-            for row in 0..rows {
-                for column in 0..columns {
-                    // Raster objects hold their cells row by row.
-                    let Some(&fill) = colours.get(row * columns + column) else {
-                        continue;
-                    };
-                    let x0 = lerp([left, right], column as f64 / columns as f64);
-                    let x1 = lerp([left, right], (column + 1) as f64 / columns as f64);
-                    let y1 = lerp([top, bottom], row as f64 / rows as f64);
-                    let y0 = lerp([top, bottom], (row + 1) as f64 / rows as f64);
-                    push_shape(
-                        device,
-                        clip,
-                        Shape::Path {
-                            points: vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                            closed: true,
-                            fill,
-                            stroke: None,
-                        },
-                    )?;
-                }
+            let [x0, y0] = device.to_device(bottom_left);
+            let [x1, y1] = device.to_device(top_right);
+            let angle = if angles.is_empty() {
+                0.0
+            } else {
+                angles[index % angles.len()]
+            };
+            // SAFETY: base graphics' state lives as long as its device.
+            unsafe {
+                graphics_engine::set_clip(cx0, cy0, cx1, cy1, dd)?;
+                graphics_engine::raster(
+                    &mut pixels,
+                    columns as c_int,
+                    rows as c_int,
+                    x0,
+                    y0,
+                    x1 - x0,
+                    y1 - y0,
+                    angle,
+                    interpolate,
+                    &gc,
+                    dd,
+                )?;
             }
         }
         Ok(())

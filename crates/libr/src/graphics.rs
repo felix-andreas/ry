@@ -1070,31 +1070,33 @@ pub unsafe extern "C" fn GEPolygon(
     enter(|| graphics_engine::polygon(slice(x, count), slice(y, count), &mut *gc, dd))
 }
 
-/// `GEXspline(n, x, y, s, open, repEnds, draw, gc, dd)`: ry draws an X-spline through its
-/// control points as straight segments, and returns those points as `list(x, y)`.
+/// `GEXspline(n, x, y, s, open, repEnds, draw, gc, dd)`: the X-spline's points in device
+/// units as `list(x, y)`, drawn first when `draw` is set.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn GEXspline(
     count: c_int,
     x: *mut f64,
     y: *mut f64,
-    _shape: *mut f64,
+    shape: *mut f64,
     open: crate::Rboolean,
-    _repeat_ends: crate::Rboolean,
+    repeat_ends: crate::Rboolean,
     draw: crate::Rboolean,
     gc: *mut GEContext,
     dd: *mut GEDevDesc,
 ) -> Sexp {
     enter(|| {
-        let (x, y) = (slice(x, count), slice(y, count));
-        if draw != 0 {
-            if open != 0 {
-                graphics_engine::polyline(x, y, &*gc, dd)?;
-            } else {
-                graphics_engine::polygon(x, y, &mut *gc, dd)?;
-            }
-        }
-        let points = [values::real_vector(x)?, values::real_vector(y)?];
+        let (xs, ys) = graphics_engine::xspline(
+            slice(x, count),
+            slice(y, count),
+            slice(shape, count),
+            open != 0,
+            repeat_ends != 0,
+            draw != 0,
+            &mut *gc,
+            dd,
+        )?;
+        let points = [values::real_vector(&xs)?, values::real_vector(&ys)?];
         values::list_vector(&points)
     })
 }
