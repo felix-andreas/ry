@@ -86,6 +86,17 @@ fn seeds_agree_across_tiers() {
         ("x <- c()\nfor (i in 1:n) x[i] <- i * 2\nx", "(n = 5L)", false),
         // A `next` inside `switch`, which leaves compiled code from a nested evaluation.
         ("s <- 0\nfor (i in 1:n) { s <- s + 1; if (i %% 2 == 0) switch(\"a\", a = next) }\ns", "(n = 3000L)", false),
+        // Subsetting a plain vector, which reaches the element intrinsic.
+        ("s <- 0\nfor (i in 1:n) s <- s + v[(i %% 2L) + 1L] * v[[1L]]\ns", "(n = 50L)", false),
+        // A subject that gains a class mid-loop dispatches, and the method sees its index
+        // unevaluated.
+        (
+            "`[.tagged` <- function(x, i) deparse(substitute(i))\nx <- 1:3\nout <- list()\nfor (j in 1:n) { if (j == 3L) class(x) <- \"tagged\"; out[[j]] <- x[j + 1L] }\nout",
+            "(n = 4L)",
+            false,
+        ),
+        // A missing formal as the index selects everything.
+        ("g <- function(i) v[i]\nfor (j in 1:n) r <- g()\nr", "(n = 3L)", false),
     ];
     with_interpreter(|| {
         for (case, (body, call, fails)) in seeds.iter().enumerate() {

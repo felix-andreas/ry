@@ -290,6 +290,8 @@ pub enum Action {
     /// Control always goes to the jump target.
     Branch,
     BranchUnlessBuiltin { function: usize },
+    BranchUnlessPrimitive { function: usize, expected: Sexp },
+    BranchIfObject { src: usize },
     Jump,
     JumpUnless { src: usize },
     Arithmetic { arith: Arith, numeric: Numeric, dst: usize, left: usize, right: usize },
@@ -802,6 +804,29 @@ impl Builder<'_> {
                     Action::BranchUnlessBuiltin { function: operand(0) }
                 }
             },
+            Op::BranchUnlessPrimitive => {
+                let expected = self.constant(operand(1));
+                match state.registers[operand(0)] {
+                    Ty::Fun(function) if function == expected => Action::FallThrough,
+                    Ty::Fun(_) | Ty::Closure(..) => {
+                        edges.push((operand(2), state.clone()));
+                        return Ok((Action::Branch, edges));
+                    }
+                    _ => {
+                        edges.push((operand(2), state.clone()));
+                        Action::BranchUnlessPrimitive { function: operand(0), expected }
+                    }
+                }
+            }
+            Op::BranchIfObject => {
+                if state.registers[operand(0)].is_plain() {
+                    Action::FallThrough
+                } else {
+                    edges.push((operand(1), state.clone()));
+                    Action::BranchIfObject { src: operand(0) }
+                }
+            }
+            Op::DispatchSubject => self.opaque_step(state, Some((operand(0), self.feedback_at(inst.pc))), Vec::new(), Effect::Opaque),
             Op::CallBuiltin => self.call_builtin(&inst, state)?,
             Op::CallGeneric => {
                 let call = self.constant(operand(2));
@@ -1436,7 +1461,8 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
     match inst.op {
         Op::Jump => Some(inst.operands[0]),
         Op::JumpUnless => Some(inst.operands[2]),
-        Op::BranchUnlessBuiltin => Some(inst.operands[1]),
+        Op::BranchUnlessBuiltin | Op::BranchIfObject => Some(inst.operands[1]),
+        Op::BranchUnlessPrimitive => Some(inst.operands[2]),
         Op::ForStep => Some(inst.operands[3]),
         Op::LogicLeft => Some(inst.operands[4]),
         Op::Guard => Some(inst.operands[4]),
@@ -1447,7 +1473,15 @@ pub fn jump_target(inst: &Inst) -> Option<usize> {
 fn ends_block(op: Op) -> bool {
     matches!(
         op,
-        Op::Jump | Op::JumpUnless | Op::BranchUnlessBuiltin | Op::ForStep | Op::LogicLeft | Op::Guard | Op::Return
+        Op::Jump
+            | Op::JumpUnless
+            | Op::BranchUnlessBuiltin
+            | Op::BranchUnlessPrimitive
+            | Op::BranchIfObject
+            | Op::ForStep
+            | Op::LogicLeft
+            | Op::Guard
+            | Op::Return
     )
 }
 
@@ -1471,7 +1505,12 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
     match inst.op {
         Op::Constant | Op::GetVar | Op::GetFun | Op::Ast | Op::Closure => kill(operand(0), live),
         Op::SetVar => gen_(operand(1), live),
-        Op::BranchUnlessBuiltin => gen_(operand(0), live),
+        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => gen_(operand(0), live),
+        Op::DispatchSubject => {
+            kill(operand(0), live);
+            gen_(operand(1), live);
+            gen_(operand(3), live);
+        }
         Op::CallBuiltin => {
             kill(operand(0), live);
             gen_(operand(1), live);

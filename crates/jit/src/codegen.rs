@@ -399,6 +399,29 @@ impl<'p, 'b> Translator<'p, 'b> {
                 self.fill_edges()?;
                 return Ok(true);
             }
+            Action::BranchUnlessPrimitive { function, expected } => {
+                let value = self.load_register(function);
+                let same = self.builder.ins().icmp_imm(IntCC::Equal, value, expected.as_ptr() as i64);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(same, fall, &[], taken, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
+            Action::BranchIfObject { src } => {
+                let value = self.load_register(src);
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+                let target = jump_target(inst).ok_or(Refusal("a branch without a target"))?;
+                let taken = self.edge(position, target)?;
+                let next = self.next_pc(position)?;
+                let fall = self.edge(position, next)?;
+                self.builder.ins().brif(object, taken, &[], fall, &[]);
+                self.fill_edges()?;
+                return Ok(true);
+            }
             Action::Jump => {
                 let target = jump_target(inst).ok_or(Refusal("a jump without a target"))?;
                 if target <= pc {
@@ -1721,7 +1744,8 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
     match inst.op {
         Op::CallBuiltin => std::iter::once(operand(1)).chain(operand(3)..operand(3) + operand(4)).collect(),
         Op::CallGeneric => vec![operand(1)],
-        Op::BranchUnlessBuiltin => vec![operand(0)],
+        Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => vec![operand(0)],
+        Op::DispatchSubject => vec![operand(1), operand(3)],
         Op::Arithmetic => vec![operand(2), operand(3)],
         Op::SubAssign => vec![operand(2), operand(3)],
         Op::JumpUnless | Op::Return | Op::ForEnd => vec![operand(0)],

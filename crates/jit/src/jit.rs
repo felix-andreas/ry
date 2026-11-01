@@ -141,7 +141,20 @@ unsafe fn compile<'a>(machine: &Machine<'_>) -> Result<&'a Compiled, Refusal> {
         let plan = analysis::plan(machine.code, machine.function.car(), enclosure)?;
         let entry = codegen::compile(&plan, machine.code)?;
         if std::env::var_os("RY_JIT_LOG").is_some() {
-            eprintln!("jit: compiled {} ({} speculations)", describe(machine.code), plan.speculations.len());
+            // The instructions left to tier 0 are where compiled code is slow.
+            let steps: Vec<String> = plan
+                .insts
+                .iter()
+                .zip(&plan.actions)
+                .filter(|(_, action)| matches!(action, analysis::Action::Step { .. }))
+                .map(|(inst, _)| format!("{:?}@{}", inst.op, inst.pc))
+                .collect();
+            eprintln!(
+                "jit: compiled {} ({} speculations; tier 0 runs: {})",
+                describe(machine.code),
+                plan.speculations.len(),
+                if steps.is_empty() { "nothing".to_string() } else { steps.join(", ") }
+            );
         }
         let osr = plan.loop_headers.iter().map(|&block| plan.insts[plan.blocks[block].start].pc).collect();
         let compiled = Box::new(Compiled {
