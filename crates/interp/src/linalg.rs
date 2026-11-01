@@ -2925,7 +2925,10 @@ macro_rules! fortran_library {
     };
 }
 
-fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib"], {
+// macOS has no `libblas.dylib` on the default search path; Accelerate's vecLib carries the
+// reference Fortran interface.
+fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib",
+    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib"], {
     dgemm: fn(Text, Text, Integer, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
     dgemv: fn(Text, Integer, Integer, Double, Double, Integer, Double, Integer, Double, DoubleOut, Integer, TextLength);
     dsyrk: fn(Text, Text, Integer, Integer, Double, Double, Integer, Double, DoubleOut, Integer, TextLength, TextLength);
@@ -2938,7 +2941,8 @@ fortran_library!(Blas, "BLAS", ["libblas.so.3", "libblas.so", "libblas.dylib"], 
     dscal: fn(Integer, Double, DoubleOut, Integer);
 });
 
-fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib"], {
+fortran_library!(Lapack, "LAPACK", ["liblapack.so.3", "liblapack.so", "liblapack.dylib",
+    "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib"], {
     ilaver: fn(IntegerOut, IntegerOut, IntegerOut);
     dgesv: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, DoubleOut, Integer, IntegerOut);
     dgetrf: fn(Integer, Integer, DoubleOut, Integer, IntegerOut, IntegerOut);

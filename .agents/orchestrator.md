@@ -89,7 +89,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Graphics engine (session_0111kWqAywmCkqy2bYhhfetf, Opus, branch feat/graphics-engine): the GE device API in libr, grid and ragg, one engine under base graphics and grid, jpeg and postscript output; owns graphics, taken over from the base R session. Self-merges.
 - R 4.6 base support (session_0111kWqDR2SRxg7Gei82wZJy, Opus, branch fix/r-4-6-base): beta blocker. ry's runtime fails to load R 4.6's default packages (version check, then `registerS3method` substring error); R 4.3.3 works. Support R 4.3 and later, oracle and tests against both. Self-merges; tells the beta session when done.
 - Try ry and beta release (session_0111kWqBeVFPbHpyqC8bDyWu, Opus): `just try` end-to-end demo, working nix builds on the pinned nightly, beta release readiness. #162 (9e0b198) merged: version 0.4.0-beta (untagged), nix build/develop/flake check pass, release workflow staged at `.github/pending-release.yml`. User-only actions relayed to the user (move the workflow, VSCE_PAT/OVSX_PAT, Open VSX namespace, Zed submission, glibc 2.35 floor, Windows without runtime, docs deploy). Blocked on the R 4.6 runtime fix for the smoke test; reruns it once that lands. Self-merges.
-- Runtime on macOS and Windows (session_0111kWqEtmpZFGTxsHPxCDVn, Opus, branch feat/runtime-portable): libR.dylib exports and install_name, package linking, R_HOME discovery for R.framework and Homebrew, rcmd flags; then R.dll and Rtools import libraries. Verified by cross-compilation in Linux containers until the release workflow runs on macOS runners. Self-merges.
+- Runtime on macOS and Windows (session_0111kWqEtmpZFGTxsHPxCDVn, Opus): #181 (macOS runtime: @rpath libR.dylib, rebound and re-signed package binaries, R.framework/Homebrew discovery; cross-compile verified only, 554e142) merged. Now: the Windows runtime (platform seam over the interpreter's libc use, R.dll, Rtools import library, Wine run), the @loader_path gap, and dropping the GNU R 4.5 pin in pending-release.yml after #180. Self-merges.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
@@ -97,6 +97,5 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 Nothing queued: every build-order step is in flight.
 
 Follow-ups:
-- An in-session worker is running a docs pass over the recent merges (#154, #162, #166 to #177).
-- Robustness #154 (39ce6b4) merged and its session archived: LSP simulator, docs-as-tests, 15 cargo-fuzz targets, `oracle fuzz`, GC torture, 15 bugs fixed. An in-session worker is fixing the three main-side failures it found (oracle bytecode__hot_loops expected, libr numerics.expected, REPL e2e stderr flake).
+- Robustness #154 (39ce6b4) merged and its session archived: LSP simulator, docs-as-tests, 15 cargo-fuzz targets, `oracle fuzz`, GC torture, 15 bugs fixed. Its three main-side failures are fixed on main (0cf283da, b373ea9f, 600f511e).
 

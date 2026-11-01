@@ -450,13 +450,14 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
 - **Strict users must annotate `seq()` results.** The `seq` stub returns `Any`, so
   `x <- seq(...)` passes strict mode only with an annotation such as `x: double[]`. A precise
   overload set for `seq` and `seq_len` would remove that.
-- **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
-  and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
-  `crates/ry/tests/test_repl_e2e.rs`, and `errors_come_back_on_the_error_stream`). They pass alone.
-  The load comes from the ry-runtime cases running beside them, each of which spends about 2.8 s of
-  CPU starting a debug `libR.so`; input typed while a console is still starting arrives as one
-  paste. Waiting for the prompt instead of the banner (ry's console now prints its banner at the
-  first prompt), or serializing the ry-runtime cases, would remove it.
+- **The oracle's `stats__*` cases depend on the BLAS build.** Their expectations come from
+  reference BLAS; under OpenBLAS, `stats__formulas_and_least_squares` and
+  `stats__models_and_tests` differ in the last printed digits and `stats__lbfgsb` takes one more
+  L-BFGS-B iteration and warns in `HoltWinters`, so `recorded_outcomes_match_gnu_r` fails there.
+  Force reference BLAS with
+  `R_LD_LIBRARY_PATH=/usr/lib/R/lib:/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack`
+  (Debian's `ldpaths` otherwise puts the OpenBLAS alternative first), or make those cases print
+  rounded values. The `datatable__*` cases also need data.table in GNU R's library.
 
 ## Open: data-oriented layouts and explicit allocators
 
