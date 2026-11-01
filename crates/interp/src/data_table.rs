@@ -38,15 +38,11 @@ use crate::{
     unwind::{R, Unwind, error},
     values::{self, install, is_nil, length, nil, symbols},
 };
-use heap::{
-    object::{NA_LOGICAL, Sexp, SexpType},
-    strings::Encoding,
-};
+use heap::object::{Sexp, SexpType};
 use rustc_hash::FxHashSet;
 use std::cell::Cell;
 use table::{
     ColumnType, Schema, Table,
-    io::Layout,
     convert::{self, RVector},
     polars::prelude::{DataFrame, DataType, IntoColumn, PlSmallStr, Series},
     query::{self, Output, Query, Rows, Select},
@@ -111,29 +107,6 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     if option_is_true("ry.datatable.trace") {
         let engine = if value.is_some() { "ry" } else { "data.table" };
         crate::write_console(format!("[{engine}] {}\n", crate::deparse::deparse_one_line(call)).as_bytes(), true);
-    }
-    Ok(value)
-}
-
-/// Runs the data.table C routine named `routine` on ry's engine, or returns `None` to call the
-/// routine itself. The engine answers only where its result is identical to the routine's, so
-/// data.table's R code around the `.Call` runs unchanged either way.
-pub unsafe fn native(routine: &[u8], args: &[Sexp]) -> R<Option<Sexp>> {
-    if NAMESPACE.with(Cell::get).is_none() || !enabled() {
-        return Ok(None);
-    }
-    let value = match routine {
-        b"CfreadR" => scope(|| fread(args)),
-        _ => return Ok(None),
-    };
-    let value = match value {
-        Err(Unwind::Error(_)) => None,
-        result => result?,
-    };
-    if option_is_true("ry.datatable.trace") {
-        let engine = if value.is_some() { "ry" } else { "data.table" };
-        let routine = String::from_utf8_lossy(routine);
-        crate::write_console(format!("[{engine}] .Call({routine})\n").as_bytes(), true);
     }
     Ok(value)
 }
@@ -488,177 +461,6 @@ unsafe fn selects_columns(select: &Select, j: Option<Sexp>) -> bool {
         && columns
             .iter()
             .all(|(name, expr)| matches!(expr, table::query::Expr::Column(column) if column == name))
-}
-
-/// `freadR`, data.table's reader, on a file the engine reads exactly as `fread` does: every
-/// argument at its default, a comma-separated ASCII file with a header and no quotes, carriage
-/// returns or blank lines, and columns whose values `fread` cannot type differently. The answer
-/// is what `freadR` returns, the columns as a named list, which `fread` then classes.
-unsafe fn fread(args: &[Sexp]) -> R<Option<Sexp>> {
-    let [
-        input,
-        sep,
-        dec,
-        quote,
-        header,
-        nrows,
-        skip,
-        na_strings,
-        strip_white,
-        blank_lines_skip,
-        fill,
-        _show_progress,
-        _threads,
-        verbose,
-        warnings_are_errors,
-        logical01,
-        select,
-        drop,
-        col_classes,
-        integer64,
-        encoding,
-        keep_leading_zeros,
-        _no_tz_is_utc,
-    ] = args
-    else {
-        return Ok(None);
-    };
-    let defaults = is_string(*sep, &["", ","])
-        && is_string(*dec, &["."])
-        && is_string(*quote, &["\""])
-        && is_logical(*header, &[NA_LOGICAL, 1])
-        && nrows.kind() == SexpType::Real
-        && length(*nrows) == 1
-        && values::reals(*nrows)[0] == f64::INFINITY
-        && skip.kind() == SexpType::Integer
-        && values::ints(*skip) == [-1]
-        && is_string(*na_strings, &["NA"])
-        && is_logical(*strip_white, &[1])
-        && is_logical(*blank_lines_skip, &[0])
-        && is_logical(*fill, &[0])
-        && is_logical(*verbose, &[0])
-        && is_logical(*warnings_are_errors, &[0])
-        && is_logical(*logical01, &[0])
-        && is_nil(*select)
-        && is_nil(*drop)
-        && is_nil(*col_classes)
-        && is_string(*integer64, &["integer64"])
-        && is_string(*encoding, &["unknown"])
-        && is_logical(*keep_leading_zeros, &[0]);
-    if !defaults || length(*input) != 1 {
-        return Ok(None);
-    }
-    let Some(path) = values::string_at(*input, 0) else {
-        return Ok(None);
-    };
-    // A path `freadR` would expand or take as data stays with it.
-    if path.is_empty() || path.starts_with('~') || path.contains(['\n', '\r']) {
-        return Ok(None);
-    }
-    let Ok(Some(table)) = table::io::read_csv_if(std::path::Path::new(path.as_ref()), reads_like_fread) else {
-        return Ok(None);
-    };
-    let frame = table.frame();
-    let columns = values::alloc(SexpType::List, frame.width())?;
-    let names = values::alloc(SexpType::String, frame.width())?;
-    for (index, column) in frame.columns().iter().enumerate() {
-        let value = match column.dtype() {
-            DataType::Int32 | DataType::Boolean => frame::column_value(column)?,
-            DataType::Float64 => {
-                let doubles = column.f64().map_err(|failure| error(failure.to_string()))?;
-                // `fread` reads whole numbers past the integer range as integer64.
-                let wide_integer = doubles
-                    .iter()
-                    .flatten()
-                    .any(|value| value.fract() == 0.0 && value.abs() > f64::from(i32::MAX));
-                if wide_integer {
-                    return Ok(None);
-                }
-                frame::column_value(column)?
-            }
-            DataType::String => {
-                let Some(value) = fread_strings(column)? else {
-                    return Ok(None);
-                };
-                value
-            }
-            _ => return Ok(None),
-        };
-        values::set_elt(columns, index, value);
-        values::set_elt(names, index, values::mkchar_bytes(column.name().as_bytes(), Encoding::Native)?);
-    }
-    values::set_attr(columns, symbols().names, names)?;
-    Ok(Some(columns))
-}
-
-/// Whether the engine's reader reads `bytes` exactly as `fread` does with its defaults. This
-/// covers the layout only; [`fread`] checks the values of each column.
-fn reads_like_fread(bytes: &[u8], layout: &Layout) -> bool {
-    if layout.separator != b',' || !layout.header || layout.columns.len() < 2 || !bytes.is_ascii() {
-        return false;
-    }
-    if bytes.first() == Some(&b'\n')
-        || bytes.contains(&b'"')
-        || bytes.contains(&b'\r')
-        || bytes.windows(2).any(|pair| pair == b"\n\n")
-    {
-        return false;
-    }
-    // The sniffer renames an empty or repeated header name, and `fread` strips spaces from one.
-    let first_line = bytes.split(|&byte| byte == b'\n').next().unwrap_or_default();
-    let header: Vec<&[u8]> = first_line.split(|&byte| byte == b',').collect();
-    header.len() == layout.columns.len()
-        && header.iter().zip(&layout.columns).all(|(name, column)| {
-            *name == column.name.as_bytes()
-                && !name.is_empty()
-                && !name.first().is_some_and(u8::is_ascii_whitespace)
-                && !name.last().is_some_and(u8::is_ascii_whitespace)
-        })
-}
-
-/// A character column as `freadR` builds it, or `None` when `fread` could read one of its values
-/// differently: a value it strips of spaces, or one that starts like a number, a date or a time,
-/// which its parsers of those types might take.
-unsafe fn fread_strings(column: &table::polars::prelude::Column) -> R<Option<Sexp>> {
-    let strings = column.str().map_err(|failure| error(failure.to_string()))?;
-    let vector = values::alloc(SexpType::String, strings.len())?;
-    let heap = crate::heap();
-    let mut previous: Option<(&str, Sexp)> = None;
-    for (index, value) in strings.iter().enumerate() {
-        let Some(text) = value else {
-            values::set_elt(vector, index, values::na_string());
-            continue;
-        };
-        let charsxp = match previous {
-            Some((last, charsxp)) if last == text => charsxp,
-            _ => {
-                let bytes = text.as_bytes();
-                let suspicious = bytes.first().is_some_and(|&byte| {
-                    byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.') || byte.is_ascii_whitespace()
-                }) || bytes.last().is_some_and(u8::is_ascii_whitespace);
-                if suspicious {
-                    return Ok(None);
-                }
-                // The vector holds each string as soon as it is made, so no string needs a
-                // handle of its own.
-                let charsxp = heap.mk_char(bytes, Encoding::Native)?;
-                previous = Some((text, charsxp));
-                charsxp
-            }
-        };
-        heap.set_element(vector, index, charsxp);
-    }
-    Ok(Some(vector))
-}
-
-unsafe fn is_string(value: Sexp, allowed: &[&str]) -> bool {
-    value.kind() == SexpType::String
-        && length(value) == 1
-        && values::string_at(value, 0).is_some_and(|text| allowed.contains(&text.as_ref()))
-}
-
-unsafe fn is_logical(value: Sexp, allowed: &[i32]) -> bool {
-    value.kind() == SexpType::Logical && length(value) == 1 && allowed.contains(&values::ints(value)[0])
 }
 
 /// `result` as a new data.table, keyed by `sorted` when the query was a `keyby`.

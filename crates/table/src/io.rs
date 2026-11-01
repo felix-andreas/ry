@@ -31,8 +31,7 @@ use polars::prelude::{
 };
 use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
 use rayon::prelude::*;
-pub use sniff::Layout;
-use sniff::{ColumnType as TextColumn, Guess};
+use sniff::{ColumnType as TextColumn, Guess, Layout};
 
 use crate::{Error, Result, Table, convert::string_to_factor};
 
@@ -46,34 +45,16 @@ pub fn read_csv(path: &Path) -> Result<Table> {
     read_csv_bytes(map)
 }
 
-/// Reads a delimited text file as [`read_csv`] does, but only when `accept` approves the file's
-/// bytes and sniffed layout, so a caller that must match another reader exactly can decline a
-/// file it cannot vouch for without mapping or sniffing it twice.
-pub fn read_csv_if(path: &Path, accept: impl FnOnce(&[u8], &Layout) -> bool) -> Result<Option<Table>> {
-    let file = File::open(path)?;
-    // SAFETY: as in `read_csv`.
-    let map = unsafe { Mmap::map(&file)? };
-    let layout = sniff::sniff(map.as_ref());
-    if !accept(map.as_ref(), &layout) {
-        return Ok(None);
-    }
-    read_sniffed(map, &layout).map(Some)
-}
-
 /// Reads delimited text held in memory, as `fread(text = ...)` does.
 pub fn read_csv_bytes<B: AsRef<[u8]> + Send + Sync>(bytes: B) -> Result<Table> {
     let layout = sniff::sniff(bytes.as_ref());
-    read_sniffed(bytes, &layout)
-}
-
-fn read_sniffed<B: AsRef<[u8]> + Send + Sync>(bytes: B, layout: &Layout) -> Result<Table> {
     if layout.columns.is_empty() {
         return Ok(Table::default());
     }
     let cursor = Cursor::new(bytes);
-    let frame = match parse(cursor.get_ref().as_ref(), layout, false) {
+    let frame = match parse(cursor.get_ref().as_ref(), &layout, false) {
         Ok(frame) => frame,
-        Err(_) => parse(cursor.get_ref().as_ref(), layout, true)?,
+        Err(_) => parse(cursor.get_ref().as_ref(), &layout, true)?,
     };
     Table::new(frame)
 }

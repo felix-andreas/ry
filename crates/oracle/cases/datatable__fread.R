@@ -1,4 +1,4 @@
-# fread gives the same table whether ry's reader or data.table's own answers.
+# fread runs on data.table's own C code through ry's C API and reads every file as it does under GNU R.
 library(data.table)
 path <- tempfile(fileext = ".csv")
 show <- function(text) {
