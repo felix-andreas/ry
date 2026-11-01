@@ -1687,6 +1687,11 @@ unsafe fn do_dollar_assign(call: &Call<'_>) -> R<Sexp> {
             return Ok(result);
         }
     }
+    let object = if object.refcount() >= 1 && !eval::is_assignment(call.call) {
+        values::shallow_duplicate(object)?
+    } else {
+        object
+    };
     dollar_assign(object, name, value, call.call)
 }
 

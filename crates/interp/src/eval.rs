@@ -391,6 +391,25 @@ pub unsafe fn call_builtin(
     {
         check_argument_names(definition, call, args)?;
     }
+    // A replacement primitive modifies its target in place when the target is referenced
+    // only by the variable a complex assignment rebinds. Called directly, as in
+    // `` `class<-`(x, "foo") ``, the same single reference is the caller's own binding, which
+    // must keep its value, so the target is copied first, as GNU R does.
+    let copied_target;
+    let args = match args.first() {
+        Some(target)
+            if definition.name.ends_with("<-")
+                && !matches!(definition.name, "<-" | "<<-")
+                && target.value.refcount() >= 1
+                && !is_assignment(call) =>
+        {
+            let mut copy = args.to_vec();
+            copy[0].value = values::shallow_duplicate(target.value)?;
+            copied_target = copy;
+            copied_target.as_slice()
+        }
+        _ => args,
+    };
     let function = definition.function;
     let visibility = definition.visibility;
     let context = Call {
@@ -426,6 +445,22 @@ pub unsafe fn call_builtin(
             Err(conditions::signal_error(failure))
         }
         result => result,
+    }
+}
+
+/// Whether `call` is a complex assignment such as `x[1] <- 5`, or the replacement call one
+/// builds, whose replacement primitives may modify the target in place.
+pub unsafe fn is_assignment(call: Sexp) -> bool {
+    if interp()
+        .assignment_call
+        .is_some_and(|(setter, _, _)| setter == call)
+    {
+        return true;
+    }
+    call.kind() == SexpType::Language && {
+        let head = call.car();
+        let symbols = symbols();
+        head == symbols.assign || head == symbols.assign2 || head == symbols.assign_eq
     }
 }
 
