@@ -365,6 +365,18 @@ pub unsafe fn call_builtin(
     args: &[Arg],
     env: Sexp,
 ) -> R<Sexp> {
+    call_builtin_reusing(definition, call, op, args, env, None)
+}
+
+/// [`call_builtin`], offering the builtin `reusable` to update in place (see [`Call::reusable`]).
+unsafe fn call_builtin_reusing(
+    definition: &BuiltinDef,
+    call: Sexp,
+    op: Sexp,
+    args: &[Arg],
+    env: Sexp,
+    reusable: Option<Sexp>,
+) -> R<Sexp> {
     if definition.arity >= 0
         && matches!(definition.kind, Kind::Internal | Kind::InternalSpecial)
         && args.len() != definition.arity as usize
@@ -392,6 +404,7 @@ pub unsafe fn call_builtin(
         op,
         args,
         env,
+        reusable,
     };
     let result = if !definition.accepts_native
         && (matches!(definition.kind, Kind::Builtin | Kind::Internal)
@@ -2257,7 +2270,10 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     }
     match target.kind() {
         SexpType::Symbol => {
-            let value = eval(call.arg(1), call.env)?;
+            let value = match superassign {
+                false => rebind(target, call.arg(1), call.env)?,
+                true => eval(call.arg(1), call.env)?,
+            };
             assign_symbol(target, value, call.env, superassign)?;
             Ok(value)
         }
@@ -2268,6 +2284,51 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
         }
         _ => Err(call.error("invalid (do_set) left-hand side to assignment")),
     }
+}
+
+/// Evaluates `value`, the right-hand side of `target <- value`. When it calls a builtin that
+/// reuses its first argument with `target` itself, as in `d <- Dict.insert(d, k, v)`, and the
+/// local binding holds the only reference to that value, the builtin may update it in place:
+/// the old value becomes unreachable the moment the assignment completes, so nobody can observe
+/// the change. This is how `Dict.insert`, `Set.insert` and `List.append` grow in amortized
+/// constant time.
+unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
+    if value.kind() != SexpType::Language
+        || value.car().kind() != SexpType::Symbol
+        || value.cdr().kind() != SexpType::Pairlist
+        || value.cdr().car() != target
+        || value.cdr().tag() != nil()
+    {
+        return eval(value, env);
+    }
+    // The rest is `eval_call`, split so a reusing builtin learns what it may reuse.
+    let result = (|| {
+        crate::unwind::poll_interrupt()?;
+        interp().visible = true;
+        let function = find_called_fun(value.car(), env, value)?;
+        crate::heap().root(function);
+        if function.kind() != SexpType::Builtin || !builtin_def(function)?.reuses_first_argument {
+            return apply_call(value, function, value.cdr(), env);
+        }
+        reuse_first_argument(target, value, function, env)
+    })();
+    match result {
+        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+        result => result,
+    }
+}
+
+unsafe fn reuse_first_argument(target: Sexp, value: Sexp, function: Sexp, env: Sexp) -> R<Sexp> {
+    let definition = builtin_def(function)?;
+    let args = evaluate_args(value.cdr(), env, definition.keep_missing, value)?;
+    let reusable = args.first().map(|arg| arg.value).filter(|&subject| {
+        subject.refcount() == 1
+            && !args[1..].iter().any(|arg| arg.value == subject)
+            && crate::heap().frame_cell(env, target).is_some_and(|cell| {
+                !cell.has_gp(gp::ACTIVE_BINDING | gp::BINDING_LOCKED) && cell.cdr() == subject
+            })
+    });
+    call_builtin_reusing(definition, value, function, &args, env, reusable)
 }
 
 pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: bool) -> R<()> {

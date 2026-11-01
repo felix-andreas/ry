@@ -149,6 +149,29 @@ impl ReplSession {
         }
     }
 
+    /// Waits for the editor's first prompt. The banner prints before the editor takes the
+    /// terminal, so a line typed after the banner but before the prompt is echoed and lost.
+    fn expect_prompt(&mut self) {
+        const BANNER_END: &str = "Ctrl-D to quit.";
+        self.expect(BANNER_END);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let banner = self
+                .seen
+                .find(BANNER_END)
+                .map_or(0, |at| at + BANNER_END.len());
+            if self.seen[banner..].contains("> ") {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the first prompt; output so far:\n{}",
+                self.seen
+            );
+            self.drain(Duration::from_millis(100));
+        }
+    }
+
     fn quit(mut self) {
         self.send("q()\r");
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -208,7 +231,7 @@ fn start_session() -> Option<ReplSession> {
         return None;
     }
     let mut session = ReplSession::start();
-    session.expect("ry R console");
+    session.expect_prompt();
     Some(session)
 }
 
@@ -247,6 +270,7 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
         .expect("write");
         let mut session = ReplSession::start_with(Some(package), &[runtime_command(runtime)]);
         session.expect("Loaded replpkg");
+        session.expect_prompt();
         session.send("greet()\r");
         session.expect("first version");
         // Distinct sizes, so the change is visible even within one timestamp tick.
@@ -313,6 +337,7 @@ fn reloads_survive_a_custom_prompt_and_skip_readline_answers() {
     fs::write(package.join("R/a.R"), "level <- function() \"one\"\n").expect("write");
     let mut session = ReplSession::start_in(Some(&package));
     session.expect("Loaded promptpkg");
+    session.expect_prompt();
     session.send("options(prompt = \"R> \")\r");
     // The echoed command line never contains the joined text, so only the output matches.
     session.send("cat(\"prompt\", \"changed\\n\")\r");
@@ -687,8 +712,7 @@ fn the_ry_console_refuses_class_definitions_when_object_systems_are_off() {
     )
     .expect("write config");
     let mut session = ReplSession::start_with(Some(directory.path()), &["run"]);
-    session.expect("console");
-    session.settle(Duration::from_millis(400));
+    session.expect_prompt();
     session.send("setRefClass(\"A\")\r");
     session.expect("`setRefClass` cannot define a Reference Class");
     session.send("1 + 1\r");
@@ -771,8 +795,7 @@ fn the_console_holds_a_multiline_command_and_refuses_it_in_strict_mode() {
     for runtime in runtimes() {
         let mut session =
             ReplSession::start_with(Some(directory.path()), &[runtime_command(runtime)]);
-        session.expect("console");
-        // Input typed before the editor takes the terminal would arrive as one paste.
+        session.expect_prompt();
         for line in [
             "f <- function(x: integer) {\r",
             "x * 2L\r",

@@ -2343,6 +2343,7 @@ pub unsafe fn set_attribute_checked(object: Sexp, symbol: Sexp, value: Sexp, cal
             op: function,
             args: &args,
             env: values::global_env(),
+            reusable: None,
         };
         let result = do_set_dim(&context)?;
         if result != object {

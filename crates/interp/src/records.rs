@@ -241,8 +241,15 @@ pub(crate) unsafe fn make(
 
 pub(crate) unsafe fn alloc(layout: Layout, slots: &[Sexp]) -> Result<Sexp, heap::HeapError> {
     let heap = crate::heap();
+    // A dictionary or set counts its holders, so the standard library can grow one in place when
+    // its only holder is the binding being reassigned (`standard_library::reusable`).
+    let counted = matches!(layout.fields, Fields::Dict | Fields::Set);
     let id = heap.layouts.intern(layout);
-    let object = heap.alloc_record(id, slots)?;
+    let object = if counted {
+        heap.alloc_counted_record(id, slots)?
+    } else {
+        heap.alloc_record(id, slots)?
+    };
     heap.root(object);
     Ok(object)
 }
