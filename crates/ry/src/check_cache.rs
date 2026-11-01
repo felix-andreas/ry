@@ -2,13 +2,13 @@
 //! root. A run reuses a file's findings when nothing they can depend on changed, so a repeat
 //! check of an unchanged project only reads and hashes its files.
 //!
-//! A file's findings depend on its own text, on the project's top-level declarations (every
-//! name, type, class and attached package that resolution sees), and on the files whose
-//! exports its check reads. The record keeps each file's text fingerprint, its *surface*
-//! fingerprint (its text with the bodies of its top-level function definitions blanked, which
-//! is everything the project's declarations read from it), and the files its check reached.
-//! When every changed file keeps its surface, only the changed files and the files that
-//! reached them are checked again; any other change checks everything.
+//! A file's findings depend on its own text, on what the project's name-keyed maps read from
+//! every file (top-level declarations, and each file's share of the project-wide folds, such as
+//! the S3 generics and the type declarations), and on the files whose exports its check reads
+//! through interface edges. The record keeps each file's text fingerprint, its *surface*
+//! fingerprint (see [`surface`]), and the files its check reached. When every changed file
+//! keeps its surface, only the changed files and the files that reached them are checked again;
+//! any other change checks everything.
 
 use {
     rustc_hash::{FxHashMap, FxHasher},
@@ -31,7 +31,7 @@ use {
 pub const DIRECTORY: &str = ".ry_cache";
 const RECORD: &str = "check.json";
 /// Bumped whenever the record's layout or its reuse rule changes.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 
 /// Whether a run may read and write the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,11 +151,18 @@ pub fn fingerprint(text: &str) -> Fingerprint {
     Fingerprinter::new().text(text).finish()
 }
 
-/// The fingerprint of what the project's declarations read from a file: its text with the body
-/// of each top-level function definition left out. A body that can write or declare something
-/// outside its own frame (`<<-`, `assign`, `library`, `setClass` and the like) stays in.
-pub fn surface(text: &str, root: &SyntaxNode) -> Fingerprint {
+/// The fingerprint of what other files' checks can read from a file without an interface edge:
+/// its text with the body of each top-level function definition left out, and its share of
+/// every project-wide fold (`semantics::diagnostics::project_fold_shares`), which covers what a
+/// body contributes to them, such as a `UseMethod` call or a type declared inside it. A body
+/// that can write or declare something outside its own frame (`<<-`, `assign`, `library`,
+/// `setClass` and the like) also stays in.
+pub fn surface(text: &str, root: &SyntaxNode, shares: &[String]) -> Fingerprint {
     let mut fingerprinter = Fingerprinter::new();
+    for share in shares {
+        fingerprinter.text(share);
+    }
+    fingerprinter.bytes(&[0]);
     let mut cursor = 0;
     for body in root
         .children()
@@ -280,7 +287,8 @@ impl Record {
 }
 
 /// Builds the record for this run. `None` when a finding cannot be recorded, such as one whose
-/// related location lies outside the project's files; the next run then checks every file.
+/// related location lies outside the project's files; the previous record then stays, and the
+/// next run plans against it, which is sound because every reuse is decided by content.
 pub fn record(
     key: Fingerprint,
     files: &[SourceFile],

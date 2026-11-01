@@ -12,13 +12,13 @@ use {
         GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError, MietteSpanContents,
         Severity as ReportSeverity, SourceCode, SourceSpan, SpanContents,
     },
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::{FxHashMap, FxHashSet, FxHasher},
     salsa::Durability,
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{
             Applicability, Diagnostic, RelatedLocation, Severity, applicable_fixes, apply_fixes,
-            derive_from_syntax,
+            derive_from_syntax, project_fold_shares,
         },
         metadata::{
             PackageMetadata, attached_union, normalized_imports, parse_description_collate,
@@ -34,6 +34,7 @@ use {
         cmp::Reverse,
         collections::{BTreeMap, BTreeSet, HashMap},
         env, fmt, fs,
+        hash::Hasher,
         io::Read,
         iter, mem,
         num::NonZero,
@@ -325,6 +326,12 @@ pub(crate) fn analyze_project(
     requested: &[PathBuf],
     cache: CacheUse,
 ) -> Result<ProjectAnalysis, CommandError> {
+    // A directory that is no project, such as one holding a downloaded script, gets no record.
+    let is_project = config::CONFIG_FILE_NAMES
+        .iter()
+        .chain(["DESCRIPTION"].iter())
+        .any(|name| root.join(name).is_file());
+    let cache = if is_project { cache } else { CacheUse::Off };
     let (analysis, reused) = analyze_project_with(root, config.clone(), requested, cache)?;
     // Reused findings must be exactly the ones a fresh run computes.
     if reused && syntax::testing::invariants_enabled() {
@@ -534,7 +541,11 @@ fn analyze_project_with(
         CacheUse::ReadWrite => {
             check_cache::plan(check_cache::load(root), key, &paths, &contents, |index| {
                 let file = files[index];
-                check_cache::surface(file.text(&db), &semantics::parse(&db, file).syntax_node())
+                check_cache::surface(
+                    file.text(&db),
+                    &semantics::parse(&db, file).syntax_node(),
+                    &project_fold_shares(&db, file),
+                )
             })
         }
     };
@@ -611,7 +622,9 @@ fn analyze_project_with(
         }
         // A partial plan exists only when every surface matches the record.
         let surface = match (cache, previous) {
-            (CacheUse::ReadWrite, None) => check_cache::surface(file.text(db), &root),
+            (CacheUse::ReadWrite, None) => {
+                check_cache::surface(file.text(db), &root, &project_fold_shares(db, file))
+            }
             (CacheUse::ReadWrite, Some(_)) | (CacheUse::Off, _) => Fingerprint::default(),
         };
         (tokens, surface)
@@ -810,19 +823,17 @@ fn analyzed_files(
         .collect()
 }
 
-/// Identifies the running ry binary, so a record written by another build is never read back.
+/// Identifies the running ry binary by its bytes, so a record written by another build is never
+/// read back, even one with the same size and modification time. Hashing the binary takes a few
+/// milliseconds; an unreadable binary gets a fresh identity, so its record is never reused.
 fn build_identity() -> String {
-    let metadata = env::current_exe().and_then(fs::metadata);
-    match metadata {
-        Ok(metadata) => {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |elapsed| elapsed.as_nanos());
-            format!("{} {modified}", metadata.len())
+    match env::current_exe().and_then(fs::read) {
+        Ok(bytes) => {
+            let mut hasher = FxHasher::default();
+            hasher.write(&bytes);
+            format!("{} {:x}", bytes.len(), hasher.finish())
         }
-        Err(_) => String::new(),
+        Err(_) => format!("unreadable {}", std::process::id()),
     }
 }
 
@@ -1993,6 +2004,12 @@ mod tests {
         let directory = tempfile::tempdir().expect("a temporary project directory");
         let root = fs::canonicalize(directory.path()).expect("a canonical project root");
         fs::create_dir_all(root.join("R")).expect("the R directory");
+        fs::create_dir_all(root.join("scripts")).expect("the scripts directory");
+        fs::write(
+            root.join("ry.toml"),
+            "[lint]\nunused-parameter = \"warn\"\n",
+        )
+        .expect("ry.toml");
         fs::write(
             root.join("DESCRIPTION"),
             "Package: simulated\nVersion: 0.1.0\nImports: stats, utils\n",
@@ -2026,7 +2043,9 @@ mod tests {
                 simulated_edit(&mut random, &mut files, &mut next_name);
             }
             for (index, file) in files.iter().enumerate() {
-                let path = root.join("R").join(format!("file{index}.R"));
+                // Every fourth file is a script, which the package's folds also reach.
+                let directory = if index % 4 == 3 { "scripts" } else { "R" };
+                let path = root.join(directory).join(format!("file{index}.R"));
                 match file {
                     Some(file) => {
                         fs::write(&path, render_simulated_file(file)).expect("a project file")
@@ -2035,9 +2054,10 @@ mod tests {
                     None => {}
                 }
             }
+            let config = config::Config::discover(&root).expect("the simulated ry.toml");
             let analysis = analyze_project(
                 &root,
-                config::Config::default(),
+                config,
                 std::slice::from_ref(&root),
                 CacheUse::ReadWrite,
             );
@@ -2054,13 +2074,31 @@ mod tests {
         next_name: &mut usize,
         files: &[Option<SimulatedFile>],
     ) -> SimulatedFunction {
-        let name = format!("f{file}_{next_name}");
-        *next_name += 1;
-        let parameters = match random.below(3) {
-            0 => vec!["x"],
-            1 => vec!["x", "y = 1L"],
-            _ => vec!["x", "y = \"a\"", "z = TRUE"],
+        // Some functions are S3 methods of another function, which becomes a generic once its
+        // body calls `UseMethod`.
+        let generics: Vec<&str> = files
+            .iter()
+            .flatten()
+            .flat_map(|file| file.functions.iter())
+            .map(|function| function.name.as_str())
+            .filter(|name| !name.contains('.'))
+            .collect();
+        // An S3 method's unused `verbose` is reported only while its generic calls `UseMethod`.
+        let (name, parameters) = match random.below(3) {
+            0 if !generics.is_empty() => (
+                format!("{}.m{next_name}", generics[random.below(generics.len())]),
+                vec!["x", "verbose"],
+            ),
+            _ => (
+                format!("f{file}_{next_name}"),
+                match random.below(3) {
+                    0 => vec!["x"],
+                    1 => vec!["x", "y = 1L"],
+                    _ => vec!["x", "y = \"a\"", "z = TRUE"],
+                },
+            ),
         };
+        *next_name += 1;
         let body = (0..1 + random.below(3))
             .map(|_| simulated_statement(random, files))
             .collect();
@@ -2084,7 +2122,12 @@ mod tests {
             true => "f0_0",
             false => names[random.below(names.len())],
         };
-        match random.below(19) {
+        match random.below(26) {
+            22..=23 => "UseMethod(\"generic\")".to_owned(),
+            24 => "#: @type Money0 {double}".to_owned(),
+            19 => format!("UseMethod(\"{callee}\")"),
+            20 => format!("#: @type Money{} {{double}}", random.below(2)),
+            21 => format!("#: Money{}\n  amount <- 1", random.below(2)),
             16 => format!("{callee}(\"a\")"),
             17 => format!("{callee}(1L) + 1L"),
             18 => format!("nchar({callee}(2L))"),
@@ -2166,7 +2209,13 @@ mod tests {
                 }
             }
             7 => {
-                let line = match random.below(4) {
+                let line = match random.below(6) {
+                    4 => format!("#: @type Money{} {{character}}", random.below(2)),
+                    5 => format!(
+                        "#: Money{}\nprice_{} <- \"a\"",
+                        random.below(2),
+                        random.below(2)
+                    ),
                     0 => format!(
                         "setClass(\"Point{}\", representation(x = \"numeric\"))",
                         random.below(2)

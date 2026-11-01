@@ -4457,13 +4457,17 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   not the memos. Each file's record holds its content fingerprint, its surface fingerprint (the
   text without top-level function bodies, unless a body can write or declare outside its frame),
   the files its check read through interface edges, and the `NAMESPACE` imports it uses. The whole
-  record is keyed by the ry binary, the configuration, `NAMESPACE`, `DESCRIPTION`, the data files
-  and the stubs. With no changed file, every finding replays. When every changed file keeps its
-  surface, only the changed files and their dependents are checked. Anything else checks all files.
+  record is keyed by the ry binary (hashed by its bytes), the configuration, `NAMESPACE`,
+  `DESCRIPTION`, the data files and the stubs. With no changed file, every finding replays. When
+  every changed file keeps its surface, only the changed files and their dependents are checked.
+  Anything else checks all files. A directory with no `ry.toml` or `DESCRIPTION` gets no record.
   The architecture page's "The check cache" section has the details.
-- **Why the surface rule is sound.** Every name-keyed map that one file's check reads from other
-  files is built from top-level declarations, and the bodies that the surface leaves out declare
-  nothing. Inferred schemes are the exception, because a body changes what its function returns,
+- **Why the surface rule is sound.** One file's check reads other files without an interface edge
+  only through name-keyed project-wide maps. Those are folds of per-file shares, so the surface
+  fingerprints each share as `diagnostics::project_fold_shares` spells it, beside the text outside
+  function bodies. A text rule alone was not enough: a `UseMethod` call or a `#: @type` inside a
+  body feeds the S3-generic and type-declaration folds, and a review reproduced both as stale
+  findings before the shares were added. Inferred schemes are the remaining body-dependent fact,
   and the recorded interface dependencies cover them. On all three benches, a file's dependency
   closure has a median size of 0, a 90th percentile of 1 and a maximum of 1.
 - **Measured.** On the finance bench, a replay takes 0.10 s (57 MB peak), a body edit 0.45 s, and a
@@ -4473,6 +4477,7 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   file's item tree. It warms those folds on all cores, and keeps its trees instead of releasing
   them: releasing walks every item serially and cost more than it saved.
 - **Checked.** With invariants on, every run that reuses findings is compared against a fresh run
-  and panics on a difference. A seeded simulation of body, signature, `<<-`, `library`, `assign`,
-  `setClass`, file-add and file-remove edits drives that comparison
+  and panics on a difference. A seeded simulation drives that comparison with body and signature
+  edits, `<<-`, `library`, `assign`, `setClass`, `UseMethod` and S3 methods, `#: @type` in and
+  outside bodies, script files, and added and removed files
   (`cached_checks_match_fresh_checks_across_seeded_edits` in `cli.rs`).

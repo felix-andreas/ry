@@ -1233,7 +1233,7 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
 
 /// The `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
 #[salsa::tracked(returns(ref))]
-fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
+pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
         if let Some(name) = item.name(db).clone()
@@ -1539,16 +1539,8 @@ fn write_tokens(node: &SyntaxNode) -> usize {
     count
 }
 
-/// The cyclic group an item belongs to, members in canonical order (project file order, then
-/// item order), or `None` when no read cycle runs through the item. A group must resolve
-/// through one canonical fixpoint, since iterating from whichever member was queried first
-/// would make the round-cap pins depend on query order.
-///
-/// A strongly connected component lies inside the reachable set of each of its members, so
-/// the walk visits only what the item can read, transitively. One file's check therefore
-/// names only the items it can reach, not the whole project.
 /// Every other file whose items a check of `file` can read exports from, transitively through
-/// the interface edges, sorted by project position. A file's checked findings can change only
+/// the interface edges, in no particular order. A file's checked findings can change only
 /// when its own text, one of these files, or the project's top-level declarations change.
 pub fn file_dependency_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
     let mut seen: FxHashSet<Item<'_>> = FxHashSet::default();
@@ -1564,10 +1556,17 @@ pub fn file_dependency_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
         }
         stack.extend(item_interface_edges(db, item).iter().copied());
     }
-    let mut files: Vec<SourceFile> = files.into_iter().collect();
-    files.sort_by_key(|file| salsa::plumbing::AsId::as_id(file));
-    files
+    files.into_iter().collect()
 }
+
+/// The cyclic group an item belongs to, members in canonical order (project file order, then
+/// item order), or `None` when no read cycle runs through the item. A group must resolve
+/// through one canonical fixpoint, since iterating from whichever member was queried first
+/// would make the round-cap pins depend on query order.
+///
+/// A strongly connected component lies inside the reachable set of each of its members, so
+/// the walk visits only what the item can read, transitively. One file's check therefore
+/// names only the items it can reach, not the whole project.
 
 #[salsa::tracked(returns(ref))]
 pub fn interface_group<'db>(

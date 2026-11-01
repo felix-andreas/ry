@@ -426,6 +426,39 @@ pub fn warm_project_folds(db: &dyn Db, file: SourceFile) {
     file_global_variable_declarations(db, file);
 }
 
+/// The file's share of every project-wide fold, spelled out so that two runs can compare it
+/// without sharing a database. A file whose shares and top-level text are unchanged changes no
+/// fold, so a check of another file that reached it through no interface edge reads the same
+/// facts. A new fold over the project's files must add its per-file share here.
+pub fn project_fold_shares(db: &dyn Db, file: SourceFile) -> Vec<String> {
+    let mut shares = Vec::new();
+    for &(name, item) in file_definitions(db, file) {
+        shares.push(format!("definition {} {:?}", name.as_str(), item.kind(db)));
+    }
+    for &(name, _) in file_conditional_writers(db, file) {
+        shares.push(format!("writer {}", name.as_str()));
+    }
+    let text = file.text(db);
+    for (name, range) in type_declaration_sites(db, file) {
+        let declaration = text
+            .get(std::ops::Range::<usize>::from(*range))
+            .unwrap_or_default();
+        shares.push(format!("type {name} {declaration}"));
+    }
+    for name in file_global_variable_declarations(db, file) {
+        shares.push(format!("global {name}"));
+    }
+    let mut generics: Vec<&String> = crate::file_s3_generics(db, file).iter().collect();
+    generics.sort_unstable();
+    for name in generics {
+        shares.push(format!("generic {name}"));
+    }
+    for namespace in crate::metadata::file_attached_namespaces(db, file) {
+        shares.push(format!("attached {namespace}"));
+    }
+    shares
+}
+
 #[salsa::tracked(returns(clone))]
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let mut diagnostics = parse_stage_diagnostics(db, file);

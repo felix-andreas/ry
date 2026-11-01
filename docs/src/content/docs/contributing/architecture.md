@@ -206,11 +206,14 @@ The record has a key fingerprint and, for each file, four facts:
 - **Key**: the ry version and binary, the configuration, the project root, the data files,
   `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
 - **Content fingerprint**: the file's text.
-- **Surface fingerprint**: the text with the body of each top-level function definition left out,
-  unless the body contains `<<-`, `->>`, or a call that declares or attaches something (`assign`,
-  `library`, `setClass` and the rest of `DECLARING_CALLS`). Every name-keyed map a check reads
-  across files (definitions, classes, type definitions, attached packages, purity and the rest)
-  comes from what the surface keeps.
+- **Surface fingerprint**: two parts. The first is the text with the body of each top-level
+  function definition left out, unless the body contains `<<-`, `->>`, or a call that declares or
+  attaches something (`assign`, `library`, `setClass` and the rest of `DECLARING_CALLS`). The
+  second is the file's share of every project-wide fold, listed by
+  `diagnostics::project_fold_shares`: its definitions, conditional writers, type declarations,
+  `globalVariables` names, S3 generics and attached packages. A body can feed a fold, as a
+  `UseMethod` call or a `#: @type` inside it does, so the shares come from the queries rather
+  than from the text. A new fold over the project's files must add its share there.
 - **Dependencies**: the files whose items the check read through interface edges, transitively
   (`semantics::file_dependency_files`), plus the files that its findings point into.
 - **Imports used**: the `NAMESPACE` imports the file's code uses, which the `NAMESPACE` findings
