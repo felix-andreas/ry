@@ -48,7 +48,9 @@ type-mismatch
 
 Every typed page of this guide already shows this spelling in its Inline tab, and it shares one
 type language with `#:` comments, so this page covers only what changes when you switch. Deleting
-each inline annotation turns a file into the plain R program it means.
+each inline annotation turns a file into the plain R program it means. That includes `@pure` in
+front of `function`, the inline spelling of the `#: @pure` comment that
+[strict mode](/type-checking/strict-mode#package-files-only-define-things) reads.
 
 Definitions are spelled `type UserId = integer` and `alias Row = list{id: integer}`, and
 `@UserId(raw)` creates a value of a nominal type, as [custom types](/type-checking/custom-types)

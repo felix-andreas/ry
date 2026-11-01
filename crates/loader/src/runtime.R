@@ -1,6 +1,7 @@
 # ry's package loader, R side, shared by both runtimes. It applies plans that ry computes from
-# its analysis of the package: every function definition becomes a promise that evaluates only
-# that definition on first use, and other top-level code runs in collation order. A reload
+# its analysis of the package: every function definition, and every pure constant of a strict
+# file, becomes a promise that evaluates only that definition on first use, and other top-level
+# code runs in collation order. A reload
 # applies a plan that touches only the items that changed.
 #
 # A backend file follows this one and defines how code reaches R: `gnur.R` parses source text in
@@ -477,12 +478,12 @@ load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE,
   timing <- sprintf("in %.0f ms", elapsed * 1000)
   if (plan$full) {
     return(sprintf("Loaded %s: %s bound lazily, %s run, %s.", plan$package,
-                   count(length(plan$bind_name), "function", "functions"),
+                   count(length(plan$bind_name), "definition", "definitions"),
                    count(length(plan$run_path), "top-level statement", "top-level statements"),
                    timing))
   }
   parts <- c(
-    if (length(plan$bind_name)) count(length(plan$bind_name), "function rebound", "functions rebound"),
+    if (length(plan$bind_name)) count(length(plan$bind_name), "definition rebound", "definitions rebound"),
     if (length(plan$run_path)) count(length(plan$run_path), "statement rerun", "statements rerun"),
     if (length(plan$remove)) count(length(plan$remove), "binding removed", "bindings removed"),
     if (length(plan$unregister)) {

@@ -61,6 +61,12 @@ pub unsafe fn attach() -> R<()> {
     })
 }
 
+/// Whether a loaded package's sources changed on disk since it was loaded, which the console
+/// asks before each command to decide whether to reload. A change is reported once.
+pub fn changed() -> bool {
+    !session().loader.changed_roots().is_empty()
+}
+
 const ATTACH: &str = r#"
 runtime$.ry_packages <- new.env(parent = emptyenv())
 runtime$.ry_timing <- new.env(parent = emptyenv())
@@ -87,6 +93,11 @@ struct Pending {
     run: Vec<Code>,
     /// The syntax tree of every file the plan's code comes from.
     trees: FxHashMap<String, Parse>,
+}
+
+/// Whether the project is in strict mode, which the host reads from its `ry.toml`.
+pub fn set_strict(strict: bool) {
+    session().loader.set_strict(strict);
 }
 
 fn session() -> std::sync::MutexGuard<'static, Session> {

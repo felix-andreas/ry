@@ -23,6 +23,7 @@ use {
         naming::{BindingKind, ItemNaming, NamespaceRead},
         parse, project_type_definitions, statement_annotations,
         stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
+        top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
             Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
             QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
@@ -204,7 +205,9 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// under R and the author should know the annotation is not checked.
 fn inline_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let recorded = file_syntax_sites(db, file);
-    if !recorded.any(SiteRole::InlineSite) {
+    // A `@pure` marker is an inline annotation on a function that is not otherwise an
+    // inline site, so it alone can make a file need the turned-off warning.
+    if !recorded.any(SiteRole::InlineSite) && !recorded.any(SiteRole::InlineAnnotation) {
         return Vec::new();
     }
     let root = parse(db, file).syntax_node();
@@ -2201,8 +2204,94 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ));
         }
     }
+    diagnostics.extend(top_level_diagnostics(db, file));
     diagnostics.sort_by_key(|diagnostic| (diagnostic.range.start(), diagnostic.range.end()));
     diagnostics
+}
+
+/// A package file runs its top level at every load; scripts, tests and the console are where
+/// code runs on purpose, so only `R/` files are judged. An item a syntax error touches is
+/// skipped, because its statement boundaries are a guess.
+pub fn top_level_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    if *file.kind(db) != DocumentKind::Package {
+        return Vec::new();
+    }
+    let broken_ranges = file_error_ranges(db, file);
+    let mut diagnostics = Vec::new();
+    for span in item_spans(db, file) {
+        if broken_ranges
+            .iter()
+            .any(|error| error.start() <= span.range.end() && span.range.start() <= error.end())
+        {
+            continue;
+        }
+        if let TopLevel::Effect { range, effect } = item_top_level(db, span.item) {
+            diagnostics.push(Diagnostic::new(
+                *range + span.range.start(),
+                Severity::Error,
+                "strict",
+                top_level_effect_message(effect),
+            ));
+        }
+    }
+    diagnostics
+}
+
+const TOP_LEVEL_RULE: &str = "A file in `R/` may only define things at its top level";
+const TOP_LEVEL_HOMES: &str = "a function, `.onLoad`, or the script `ry run` starts";
+
+fn top_level_effect_message(effect: &Effect) -> String {
+    match effect {
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Project,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}, or mark `{callee}` `@pure` if calling it has no effect"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Conditional,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is defined inside a condition, so ry cannot tell which definition runs when the package loads. {TOP_LEVEL_RULE}: give `{callee}` one unconditional definition, or move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Local,
+        } => format!(
+            "strict mode: this calls `{callee}`, a function defined inside `local()`, so it may run code every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Call {
+            callee,
+            origin: CalleeOrigin::Other,
+        } => format!(
+            "strict mode: this calls `{callee}`, which is not declared pure, so it runs every time the package loads. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::DynamicCall => format!(
+            "strict mode: this calls a computed function, so ry cannot tell whether loading the package runs code. {TOP_LEVEL_RULE}: move the call into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Loop => format!(
+            "strict mode: this loop runs every time the package loads. {TOP_LEVEL_RULE}: move it into {TOP_LEVEL_HOMES}, or compute the value inside `local()`"
+        ),
+        Effect::SuperAssignment => format!(
+            "strict mode: `<<-` here assigns outside the package every time it loads. {TOP_LEVEL_RULE}: bind the name with `<-`, or move the assignment into {TOP_LEVEL_HOMES}"
+        ),
+        Effect::Replacement { target } => {
+            let target = target
+                .as_deref()
+                .map_or_else(|| "a value".to_owned(), |name| format!("`{name}`"));
+            format!(
+                "strict mode: this changes {target} after its definition, every time the package loads. {TOP_LEVEL_RULE}: build the whole value where it is defined (`local()` can hold the steps), or move the change into {TOP_LEVEL_HOMES}"
+            )
+        }
+        Effect::NestedAssignment { target } => {
+            let target = target
+                .as_deref()
+                .map_or_else(|| "a name".to_owned(), |name| format!("`{name}`"));
+            format!(
+                "strict mode: this assignment binds {target} in the middle of an expression. {TOP_LEVEL_RULE}: give {target} its own top-level definition, or build the value inside `local()`"
+            )
+        }
+    }
 }
 
 fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
@@ -2336,6 +2425,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "expected {}, found `{}`",
             constraint_description(*constraint),
             renderer.render(db, *found)
+        ),
+        TypeErrorKind::ContextualParameter {
+            name,
+            expected,
+            passed,
+        } => format!(
+            "`{name}` is used as {} here, but the call passes this function `{}` for it",
+            operand_description(*expected),
+            renderer.render(db, *passed)
         ),
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {
             RecordMismatch::Field {
@@ -2565,22 +2663,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
         ),
-        TypeErrorKind::InvalidOperand { expected, found } => {
-            let expected_description = match expected {
-                OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
-                OperandExpectation::ScalarNumeric => {
-                    "a scalar numeric value (`integer` or `double`)"
-                }
-                OperandExpectation::Logical => "a `logical` value",
-                OperandExpectation::Comparable => {
-                    "a comparable value (numeric, `character`, or `logical`)"
-                }
-            };
-            format!(
-                "expected {expected_description}, found `{}`",
-                renderer.render(db, *found)
-            )
-        }
+        TypeErrorKind::InvalidOperand { expected, found } => format!(
+            "expected {}, found `{}`",
+            operand_description(*expected),
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::UnsupportedOperandPair {
             operator,
             left,
@@ -2933,6 +3020,15 @@ impl<'db> TypeRenderer<'db> {
         } else {
             format!("{letter}{suffix}")
         }
+    }
+}
+
+fn operand_description(expected: OperandExpectation) -> &'static str {
+    match expected {
+        OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
+        OperandExpectation::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        OperandExpectation::Logical => "a `logical` value",
+        OperandExpectation::Comparable => "a comparable value (numeric, `character`, or `logical`)",
     }
 }
 

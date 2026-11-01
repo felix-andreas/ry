@@ -379,6 +379,13 @@ impl Module {
         &self.kinds[id.0 as usize]
     }
 
+    pub fn expression(&self, id: ExprId) -> Expression<'_> {
+        Expression {
+            kind: self.kind(id),
+            range: self.range(id),
+        }
+    }
+
     pub fn range(&self, id: ExprId) -> TextRange {
         self.ranges[id.0 as usize]
     }
