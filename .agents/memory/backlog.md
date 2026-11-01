@@ -1858,6 +1858,9 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **Slower than data.table on two bench questions** (`tools/bench/table`, 1e6 rows): groupby q6
+  (median and sd per group, 0.13 s against 0.08 s) and the keyed rolling join (0.03 s against
+  0.02 s). The Rust engine alone runs q6 in 0.06 s, so most of the gap is the R-side call path.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k`, `unique`, `rename`, `drop`, `pivot`/`unpivot`, `concat`, window
   expressions (`over`), or `when/then/otherwise` chains beyond `Expr.if_else`. `LazyFrame.scan_*`
