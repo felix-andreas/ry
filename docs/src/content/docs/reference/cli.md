@@ -74,8 +74,8 @@ of GNU R. It still reads base R's R code and the default packages from the GNU R
 must be installed, but no GNU R code runs. Unlike on GNU R, it also turns [inline
 annotations](/type-checking/inline-annotations#running-annotated-code) into checks at function
 boundaries. This runtime is under construction: a script that calls
-something it lacks stops with an error naming it. That error can be a missing `.Internal`, a native
-routine of a default package, or a graphics device, since only the null device exists.
+something it lacks stops with an error naming it, such as a missing `.Internal` or a native routine
+of a default package. Graphics devices open and keep their parameters, but they draw nothing.
 
 `ry load` [loads the package](/guides/loading-packages) at `PATH` (default: the one containing the
 current directory), then runs each `-e EXPR` and the `-f FILE` script, and exits like `ry run`.
