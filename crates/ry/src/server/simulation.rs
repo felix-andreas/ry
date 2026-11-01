@@ -82,6 +82,10 @@ pub enum RequestKind {
     /// Takes its query from the name a rename would.
     WorkspaceSymbol,
     SemanticTokensRange,
+    CallHierarchy,
+    /// Asks for callers of an item placed at the position, as a client replays one it kept.
+    IncomingCalls,
+    OutgoingCalls,
 }
 
 pub const REQUEST_KINDS: &[RequestKind] = &[
@@ -101,6 +105,9 @@ pub const REQUEST_KINDS: &[RequestKind] = &[
     RequestKind::SelectionRange,
     RequestKind::WorkspaceSymbol,
     RequestKind::SemanticTokensRange,
+    RequestKind::CallHierarchy,
+    RequestKind::IncomingCalls,
+    RequestKind::OutgoingCalls,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -303,6 +310,26 @@ impl Simulation {
                     partial_result_params: partial,
                     text_document: document,
                     range: lsp_types::Range::new(Position::new(position.line, 0), whole.end),
+                },
+            )),
+            RequestKind::CallHierarchy => json(self.state.prepare_call_hierarchy(
+                lsp_types::CallHierarchyPrepareParams {
+                    text_document_position_params: at,
+                    work_done_progress_params: work,
+                },
+            )),
+            RequestKind::IncomingCalls => json(self.state.incoming_calls(
+                lsp_types::CallHierarchyIncomingCallsParams {
+                    item: hierarchy_item(document.uri, position),
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
+                },
+            )),
+            RequestKind::OutgoingCalls => json(self.state.outgoing_calls(
+                lsp_types::CallHierarchyOutgoingCallsParams {
+                    item: hierarchy_item(document.uri, position),
+                    work_done_progress_params: work,
+                    partial_result_params: partial,
                 },
             )),
             RequestKind::Diagnostic => json(self.state.document_diagnostic(
@@ -512,6 +539,22 @@ fn json<T: serde::Serialize + 'static>(
 
 fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
     serde_json::to_value(value).expect("protocol types serialize")
+}
+
+/// A call hierarchy item only the server reads back: it re-resolves the item from its uri and
+/// the start of its selection, so the other fields can stay empty.
+fn hierarchy_item(uri: lsp_types::Url, position: Position) -> lsp_types::CallHierarchyItem {
+    let range = lsp_types::Range::new(position, position);
+    lsp_types::CallHierarchyItem {
+        name: String::new(),
+        kind: lsp_types::SymbolKind::FUNCTION,
+        tags: None,
+        detail: None,
+        uri,
+        range,
+        selection_range: range,
+        data: None,
+    }
 }
 
 fn initialize_params(root: &Path, options: ClientOptions) -> lsp_types::InitializeParams {
