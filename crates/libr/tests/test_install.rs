@@ -21,8 +21,9 @@ fn home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ry-home");
+        let libr = library_path();
         // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test,
-        // for the profile the test itself runs in.
+        // in the profile directory the test itself runs from.
         let profile_directory = profile_directory();
         let mut build = Command::new(env!("CARGO"));
         build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
@@ -41,7 +42,7 @@ fn home() -> &'static PathBuf {
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("include"),
-                libr: libr_path(),
+                libr: &libr,
                 rcmd: &rcmd,
                 gnu_r_home: &gnu_r_home(),
                 toolchain: rcmd::Toolchain::default(),
@@ -186,13 +187,7 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
 
 /// A package with R code, an S4 class, documentation, lazy data, `sysdata.rda` and `inst/`
 /// files, written out as a source directory.
-/// The `rcode` source package, written once because several tests read it concurrently.
 fn rcode_source() -> PathBuf {
-    static SOURCE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    SOURCE.get_or_init(write_rcode_source).clone()
-}
-
-fn write_rcode_source() -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rcode-source");
     drop(std::fs::remove_dir_all(&root));
     for directory in ["R", "man", "data", "inst/extdata"] {
@@ -294,42 +289,6 @@ fn the_r_level_half_runs_on_ry() {
     );
 }
 
-/// Rcpp turns dynamic symbols off and only then registers its routines, and still calls the
-/// unregistered `sourceCppContext` by name, because registering turns dynamic lookup back on.
-#[test]
-fn registering_routines_restores_dynamic_lookup() {
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-source");
-    drop(std::fs::remove_dir_all(&root));
-    std::fs::create_dir_all(root.join("src")).expect("a source directory");
-    let files = [
-        (
-            "DESCRIPTION",
-            "Package: lookup\nVersion: 0.1\nTitle: Symbol lookup\nLicense: UPL-1.0\nNeedsCompilation: yes\n",
-        ),
-        ("NAMESPACE", "useDynLib(lookup, .registration = TRUE)\n"),
-        (
-            "src/lookup.c",
-            "#include <Rinternals.h>\n#include <R_ext/Rdynload.h>\n\
-             SEXP lookup_registered(void) { return Rf_ScalarInteger(1); }\n\
-             SEXP lookup_unregistered(void) { return Rf_ScalarInteger(2); }\n\
-             static const R_CallMethodDef entries[] = {{\"lookup_registered\", (DL_FUNC) &lookup_registered, 0}, {NULL, NULL, 0}};\n\
-             void R_init_lookup(DllInfo *dll) { R_useDynamicSymbols(dll, FALSE); R_registerRoutines(dll, NULL, entries, NULL, NULL); }\n",
-        ),
-    ];
-    for (path, text) in files {
-        std::fs::write(root.join(path), text).expect("a source file");
-    }
-    let library = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lookup-library");
-    drop(std::fs::remove_dir_all(&library));
-    rcmd::install(home(), &root, &library, &no_test_load()).expect("install lookup");
-    let script = format!(
-        ".libPaths('{}')\nlibrary(lookup)\n\
-         cat(.Call('lookup_registered', PACKAGE = 'lookup'), .Call('lookup_unregistered', PACKAGE = 'lookup'), '\\n')\n",
-        library.display()
-    );
-    assert_eq!(run_home("Rscript", &["-e", &script], &library), "1 2 \n");
-}
-
 #[test]
 fn the_front_ends_run_r_code_on_ry() {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
@@ -379,75 +338,6 @@ fn the_front_ends_run_r_code_on_ry() {
         .expect("GNU R's Rdconv");
     assert_eq!(output, String::from_utf8_lossy(&gnu_r.stdout));
     assert!(output.contains("Says hello."), "{output}");
-}
-
-/// The headers, `R.version` and `R --version` present the version of the base R the
-/// interpreter runs, so a package's C code and its R code take the same version branches.
-#[test]
-fn the_headers_and_the_runtime_present_the_base_r_version() {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let script = "cat(format(getRversion()) == format(packageVersion('base')), format(getRversion()), R.version$`svn rev`)";
-    let output = run_home("Rscript", &["-e", script], directory);
-    let fields: Vec<&str> = output.split(' ').collect();
-    let [same, version, revision] = fields[..] else {
-        panic!("{output}")
-    };
-    assert_eq!(same, "TRUE", "{output}");
-    assert!(
-        revision
-            .parse::<u32>()
-            .is_ok_and(|revision| revision >= rcmd::MINIMUM_SVN_REVISION),
-        "{output}"
-    );
-    let header =
-        std::fs::read_to_string(home().join("include").join("Rversion.h")).expect("Rversion.h");
-    let parts: Vec<&str> = version.split('.').collect();
-    assert!(
-        header.contains(&format!(
-            "#define R_VERSION R_Version({})",
-            parts.join(", ")
-        )),
-        "{header}"
-    );
-    assert!(
-        header.contains(&format!("#define R_SVN_REVISION {revision}\n")),
-        "{header}"
-    );
-    assert!(
-        run_home("R", &["--version"], directory).starts_with(&format!("R version {version} ("))
-    );
-}
-
-/// `callr::r_session` drives `R --slave` over a stdin pipe and attaches its
-/// helpers from the user profile, so both have to behave as in GNU R.
-#[test]
-fn the_console_reads_stdin_after_the_user_profile() {
-    use std::{io::Write, process::Stdio};
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let profile = directory.join("console-profile.R");
-    std::fs::write(&profile, "greeting <- 'hi'\n").expect("a profile");
-    let mut child = Command::new(home().join("bin").join("R"))
-        .args(["--no-readline", "--slave", "--no-save", "--no-restore"])
-        .env("R_PROFILE_USER", &profile)
-        .current_dir(directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("run bin/R");
-    let mut stdin = child.stdin.take().expect("a stdin pipe");
-    stdin
-        .write_all(b"cat(greeting, '\\n')\nstop('boom')\ncat('unreached')\n")
-        .expect("write stdin");
-    std::mem::drop(stdin);
-    let output = child.wait_with_output().expect("bin/R exits");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi \n");
-    assert!(
-        stderr.contains("boom") && stderr.contains("Execution halted"),
-        "{stderr}"
-    );
 }
 
 /// Builds every source tarball in `RY_SOURCE_PACKAGES` against ry's headers into

@@ -71,10 +71,12 @@ Two things do change, and both are deliberate:
   `ls("package:ry")` lists the library, so a program that branches on `exists()` before defining a
   fallback takes the other branch. That is the same as running it under a newer R that added the
   name.
-- GNU R does not have them. A script that calls `List.map` and checks clean still fails with "could
-  not find function" under `ry R`, which runs GNU R.
-  Records, tags and `match` have the same split. Until ry's runtime is the default, this is a
-  documented limitation rather than a diagnostic.
+- GNU R does not have them. A script that calls `List.map` and checks clean still fails under
+  `ry R`, which runs GNU R, but with an error that names the cause: the GNU R session's `tools:ry`
+  binds every library name GNU R lacks to a function that stops with "`List.map()` is part of ry's
+  standard library, which only ry's runtime provides". So `exists("List.map")` is `TRUE` there too.
+  Plain `Rscript` still says "could not find function". Records, tags and `match` have the same
+  split without the friendlier error.
 
 ## Which modules, and which functions
 
@@ -253,13 +255,27 @@ double when full, so a loop of `d <- Dict.insert(d, k, v)` costs amortized const
 insert. Any other holder (a second binding, a list, a closure's environment) makes the function
 copy first, so value semantics never change.
 
+Two extensions widen the `x <- f(x, ...)` form (`decisions.md`, "In-place updates through nested
+targets"):
+
+- A nested target, `state$seen <- Dict.insert(state$seen, k, v)`, reuses when the target is a chain
+  of `$` or `[[` with a name, a string or a number, every list on the chain has one reference, and
+  no other argument is the value or one of those lists.
+- Compiled code keeps values in registers that do not count as references. An environment that a
+  compiled body runs on is flagged, and an update from outside that body (`eval.parent()`, a forced
+  promise) reuses only a value no register holds.
+
+A closure never receives the value for reuse. Moving the caller's value into the parameter was
+tried and removed: after the callee updates it in place, the caller's variable no longer holds the
+old value, and a second argument, a nested function, `get()` and an error unwinding through the
+assignment can all read that variable.
+
 ## Open questions
 
-- A diagnostic when a project that targets GNU R calls a library function, once a project can
-  declare its runtime. A pure-R build for GNU R was declined: many functions return result tags,
-  which GNU R cannot represent, and a partial build would split the library into two dialects.
-- Reuse covers only the `x <- f(x, ...)` form. A nested update such as
-  `state$seen <- Dict.insert(state$seen, k, v)` copies, because the list element is a second
-  holder. Inside a helper, the first update of a parameter copies (the caller's binding still holds
-  the value) and later ones reuse the copy; skipping that first copy needs last-use analysis in
-  the compiler.
+- A check-time diagnostic when a project that targets GNU R calls a library function, once a
+  project can declare its runtime. A pure-R build for GNU R was declined: many functions return
+  result tags, which GNU R cannot represent, and a partial build would split the library into two
+  dialects.
+- A helper that updates a collection it receives copies on every call, so `d <- helper(d, k)` in a
+  loop is quadratic. Reusing the value needs proof that nothing reads the caller's variable until
+  the assignment completes, which takes escape analysis of the callee and an undo path for errors.

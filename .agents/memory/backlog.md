@@ -28,7 +28,7 @@ The quality bar is four things.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **`sum(c(1, NaN, NA))` is NA in ry and NaN in GNU R**: the first non-finite value seen should decide.
 - **Small output differences:** a 0-row matrix header pads differently from GNU R, and data.table's verbose `Rprintf` output escapes `capture.output`.
-- **Per-test time.** At 300,000 lines the test blocks run 1.7x to 2.1x GNU R's time, while whole processes are close to parity because GNU R spends minutes in testthat's per-file `gc()`. The gap is spread across the interpreter core rather than one hot spot: bytecode `step`, environment-chain lookup (`Heap::frame_cell`), `match_args`, and an allocation per binding and promise on every closure call. Basic operations measured alone are 2x to 4x GNU R's (a closure call, `seq`, `tryCatch`, `format`, `rlang::enquo`). Call overhead and cached global lookup belong to the JIT tier's call work (`decisions.md`, "the JIT tier"); vector kernels such as arithmetic and `sum` are already at or ahead of GNU R.
+- **Per-test time.** At 300,000 lines, with the JIT off, the test blocks run 1.18x to 1.39x GNU R's time, while whole processes are already faster than GNU R. The rest is spread over the interpreter core: on the first 20 dsbench files, bytecode `step` is about 12% of the profile, first touches of fresh nursery pages (`clear_page_erms`) 6%, `Heap::frame_cell` 4%, `allocate_with` 4%, collection 3.5% (mostly R-level `gc()` calls), `mk_char` 3% and `match_args` 2%. Measured alone, a call to a closure with many formals still costs 3x to 5x GNU R's (`inherits` 598 ns against 152, `identical` 1215 against 265, `nchar` 754 against 157), because each formal gets its own binding cell; a bulk cell allocation per frame is the next lever. A plain closure call is already faster than GNU R's (147 ns against 207).
 
 ## Open: the package loader
 
@@ -307,24 +307,15 @@ protects construction but nothing after it.
 
 ## Open: ry's standard library
 
-- A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
-  error; the checker rejects it statically, so only `Unknown` code reaches it.
-- A diagnostic for library calls in a project that targets GNU R, once a project can declare its
-  runtime (`decisions.md`, "The standard library runs only on ry's runtime").
-- Reuse misses two shapes: a nested update (`state$seen <- Dict.insert(state$seen, k, v)`, about
-  28 s for 20,000 inserts in a debug build, quadratic) and the first update of a parameter inside
-  a helper. Both need either a nested-replacement path in `eval::rebind` or last-use analysis.
-- **Bytecode registers are uncounted, so in-place updates can be observed.** In a compiled
-  closure, `r <- list(d, mod())` keeps `d` in a register without a reference; if `mod` runs
-  `d <- Dict.insert(d, ...)` in that frame through `eval.parent`, the count reads 1 and `r[[1]]`
-  sees the insert. `x[[1]] <- 99` through `eval.parent` misbehaves the same way, so the cause is
-  in `crates/interp/src/bytecode.rs` (`may_modify_in_place` is syntactic), not the library. Fix
-  by counting register references or refusing reuse while a compiled frame for the environment
-  is live.
+- A check-time diagnostic for library calls in a project that targets GNU R, once a project can
+  declare its runtime (`decisions.md`, "The standard library runs only on ry's runtime"). At run
+  time, `ry R` already stops with an error that names the cause.
+- A helper that updates a collection it receives copies on every call, so `d <- helper(d, k)` in a
+  loop is quadratic (`decisions.md`, "In-place updates through nested targets", the rejected
+  move). A sound version needs escape analysis showing nothing reads the caller's variable while
+  the callee runs, plus restoring the old value on error.
 - `eval::rebind` re-implements part of `eval_call` (interrupt polling, `visible`, error
-  signalling) for the reuse path, and `bytecode::reuses_first_argument` matches the callee's name
-  against `BUILTINS` as a string for every subexpression. Fold the first into `eval_call` and give
-  the second a name set.
+  signalling) for the reuse path. Fold it into `eval_call`.
 - When a constrained type parameter fails (`List.sort_asc(list("b", "a"))`), the mismatch says
   "expected `list[T]`, found `list{character, character}`" without naming the `scalar numeric`
   constraint. Belongs to the checker diagnostics work.
@@ -345,61 +336,21 @@ protects construction but nothing after it.
 - A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 
-## Open: strict mode restricts what a file's top level runs
+## Open: `fuzz_multi_file` hits a salsa backdate violation
 
-User direction: under strict mode, library code should not run arbitrary statements when it loads,
-either through a restricted top level or through a purity system. Today strict mode checks types
-only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\n")` checks clean.
+`cargo test -p semantics --test test_fuzz fuzz_multi_file` panics in debug builds with a backdate violation on `global_scheme` (salsa's `report_backdate_violation`): the query's value compared equal while its new `changed_at` is older than the old one's. A query under `global_scheme` reads state salsa does not track, or depends on iteration order. Bisect among the Array (`[...]`) and function-literal typing changes.
 
-- **Option A, a definitions-only top level.** In a strict library file, every top-level statement
-  defines something: a function, a `type` or `alias`, an import (`library()`, `requireNamespace()`),
-  a class through a definition form (below), or a constant whose value calls only functions that a
-  declaration marks pure (arithmetic, `c()`, `list()`, `paste()`, the standard library, record and
-  tag constructors) and reads only other constants. Anything else, such as `cat()` or `options()`,
-  is a `strict` error that names where the statement belongs: in a function, in `.onLoad`, or in
-  the script `ry run` starts. Entry files keep an unrestricted top level: the `ry run` script, test
-  files and the console.
-- **Option B, purity inference in the Roc style.** Roc infers whether each function is effectful,
-  writes an effectful type with `=>` and an effectful name with `!`, lets only effectful functions
-  call effectful ones, and so rejects `message = greet!("Sam")` at the top level and evaluates every
-  top-level constant at compile time. Roc has no effect polymorphism by design, so a higher-order
-  function exists twice, as `Try.map_ok` and `Try.map_ok!` (Roc's `docs/langref/functions.md`).
-- **Recommendation: A, with purity as a declared bit on declarations, never inferred.**
-  - Checking speed: A is a syntactic check per top-level item plus a per-name lookup of the `pure`
-    bit. B adds an effect to every function type and solves it over the call graph, with a fixpoint
-    over each recursive group.
-  - R compatibility: `lapply`, `Map`, `Reduce`, `do.call` and `purrr::map` take pure and effectful
-    functions under one name, so B could not copy Roc's two names and would need effect
-    polymorphism, an extra variable in the types R code calls most. Every base and package
-    declaration would also need an effect, and R's effects hide everywhere (`runif` advances
-    `.Random.seed`, an assignment into an environment or R6 object mutates shared state). A needs the
-    `pure` bit only on the functions a constant may call, which is a small set.
-  - Firewalls: an inferred effect is derived from a body, so in a function's type it would let one
-    added `cat()` change the interface of every transitive caller. The runtime design keeps "free of
-    effects" as a body fact in its own query for exactly this reason (`r-runtime.md`, "The runtime
-    body facts"). Under A the top-level items stop depending on execution order, so each one stays
-    independent.
-  - R already wants this: an installed package's `R/` code runs when the package is installed, to
-    build its lazy-load database, so a top-level effect in package code is already a bug, and R's
-    convention puts load-time work in `.onLoad`. A turns that convention into a check.
-- **Object systems and wrappers.** Non-strict files are unchanged. In a strict file, `setClass`,
-  `setClassUnion`, `setGeneric`, `setMethod`, `setValidity`, `setRefClass` and `R6Class` count as
-  definition forms: registering a class is an effect, but a declarative one. Read the list from
-  `syntax::native_values::object_system_function`, which the object-systems lint and the run-time
-  refusal already share, so the three cannot drift; the lint still warns. `f <- memoise(f)` passes
-  when `memoise`'s declaration is marked pure, since creating its cache is allocation, which Roc also
-  allows in pure code. `utils::globalVariables()` is declarative and passes; `makeActiveBinding` and
-  `delayedAssign` need a decision each.
-- **Lazy loading.** `ry load` binds each function as a promise and runs every other top-level
-  statement at load time in `Collate` order (`reference/package-loading.md`). Under A, a strict
-  package's constants are pure, so the loader can bind them as promises too: a load runs only the
-  class definition forms and `.onLoad`, a reload reruns nothing until a name is used, and a constant
-  that reads a name defined later in collation order works. Pure constants could later be evaluated
-  once and cached with the bytecode, as Roc evaluates top-level constants at compile time.
-- **Open questions.** Which files outside a package are library files (perhaps every file except
-  the `ry run` entry and test files). Whether a constant may call a project function marked
-  `#: @pure`, checked shallowly against its callees' declarations rather than inferred. Update
-  `type-checking/strict-mode.mdx` and the reference's strict mode section when it ships.
+## Open: strict mode's top-level rule
+
+The rule ships (`decisions.md`, "A strict library file's top level holds only definitions"). Follow-ups:
+
+- **Higher-order calls.** `lapply(1:3, function(i) i * 2)` is refused, because `lapply` is not pure for every callback. A constant could accept a higher-order call whose function arguments are pure, which needs a per-parameter marker in stubs.
+- **Calls to functions bound inside `local()`** are effects today, even when the local function is pure. Accept them when the local binding is a function literal whose body has no effect.
+- **`@pure` on a non-binding** (`#: @pure` above `cat(1)`) is ignored silently; warn instead.
+- **Evaluate pure constants once and cache them** with the bytecode, as Roc evaluates top-level constants at compile time.
+- **Bare-name stub purity is one flat set** (`StubLibrary::pure`): `callee_purity` consults it for any bare call whether or not the declaring package is attached, and a later stub that redeclares a name without `@pure` clears it for every package. Resolve a bare callee through the attached namespaces first.
+- **A replacement inside `local()` of an outer name** (`local({ cfg$a <- 2; cfg })`) is reported as changing `cfg`. That holds when `cfg` is an environment, but for an ordinary value R makes a local copy; with the outer value's type known, accept it.
+- **`.onLoad` writes** (`z <<- 5`) are invisible to the lazy-constant rule, so a lazy constant mentioning `z` that is forced after `.onLoad` sees the new value where an eager one saw the old. Count `<<-` targets of `.onLoad` as writers.
 
 ## Open: the JIT
 
@@ -494,16 +445,17 @@ change that does not pay.
    scans words without touching dead objects. The header layout is private (packages reach it only
    through C API functions), and a `SEXP` stays a stable pointer. Expected win: major collections
    in large-heap sessions such as the data.table groupby workloads.
-5. **The allocation fast path.** `Heap::allocate` searches `SLOT_SIZES` linearly, pops a `Vec`
-   free list, zeroes the whole slot and pushes onto `young` (`crates/heap/src/heap.rs`). Target: a
-   size-to-class lookup table, bump allocation through free runs of a page, and zeroing only what
-   must be initialized (pointer-holding objects; R leaves atomic vector payloads uninitialized).
+5. **The allocation fast path.** The size-to-class table and partial zeroing are in
+   (`SIZE_CLASS_BY_WORDS`, `allocate_with`'s `zeroed`; a triple is not zeroed at all). Left:
+   bump allocation through free runs of a page instead of popping a `Vec` free list, and the
+   `young` list push (`crates/heap/src/heap.rs`). `allocate_with` is about 4% of a profile of
+   the benchmark tests.
    Expected win: the builtin-bound benchmarks (vector_arith, jackknife, log_rank, vasicek) that run
    2.5 to 3 times slower than GNU R ("Open: the JIT").
-6. **Scratch storage for argument matching.** `match_args` returns a fresh `Vec<Sexp>` on every
-   closure call (`crates/interp/src/eval.rs`). Target: a reusable scratch stack beside the
-   bytecode register file, so a call allocates only what R's semantics require (the frame and its
-   promises). Expected win: call-heavy code such as fib, lapply and `micro/closures`.
+6. **Scratch storage for argument matching.** Done with inline vectors instead of a scratch
+   stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
+   so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
+   interpreter's call path, lookups and allocation").
 7. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
    through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
    re-check. Target: hash the index, and sort by spelling only where output order is visible.
@@ -625,21 +577,6 @@ no ordering requirement, and `BTreeMap::get` showed up under `infer_read`. Switc
 `item_naming` to `returns(ref)` removed the node-walk half of that cost, so what is left is lookup
 only. Measure before switching, and check iteration order wherever any of these is walked to build
 diagnostics.
-
-### Cycles through statement items re-iterate on every structural edit
-
-`interface_sccs` has nodes for named definitions only. A reference cycle that runs through a
-statement item, such as a conditional top-level write read back through `statement_binding_scheme`,
-is therefore resolved by salsa's cycle backstop rather than by `scc_schemes`. Salsa cannot verify a
-cycle's memos without re-running it, so every structural edit (a new or renamed definition anywhere)
-re-iterates each such cycle twice once something demands it.
-
-Measured on data.table, a new top-level binding re-runs 72 `item_check`s, 13 of them twice, for the
-edited file's diagnostics. That costs about 50 ms against 12 ms for a body edit. The members are
-ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycle by a statement in
-`utils.R`. The fix is to make conditional writers nodes of the static graph, with an edge from a
-reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
-any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
 
 ### Judged fast enough, so do not invent work here
 

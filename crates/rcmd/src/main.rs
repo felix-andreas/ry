@@ -191,7 +191,7 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
     // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults;
     // the profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
     let flags =
-        0b11 | if site_profile { 1 << 2 } else { 0 } | if user_profile { 1 << 3 } else { 0 };
+        0b11 | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
     let status = unsafe {
         run(
             pointer(&file),

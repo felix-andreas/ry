@@ -10,6 +10,9 @@ z <- 1L %then% 2L
 y: integer
 z: integer
 Any
+23..35 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+52..64 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
+79..91 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- unsupported_constructs_are_origins
 special <- function(a, b) a %undeclared% b

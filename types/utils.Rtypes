@@ -6,12 +6,12 @@
 # Prefix/suffix of the argument: type-preserving returns, but the arity and `n =` formal are real.
 # Taking a slice of a list keeps its names, so the named candidate comes ahead of
 # the plain list one.
-head : fn(x: factor, [n]: integer, ...: Any) -> factor
+head : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
 head : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
 head : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
 head : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]
 head : fn(x: Any, [n]: Any, ...: Any) -> Any
-tail : fn(x: factor, [n]: integer, ...: Any) -> factor
+tail : @pure fn(x: factor, [n]: integer, ...: Any) -> factor
 tail : <T> fn(x: T[], [n]: integer, ...: Any) -> T[]
 tail : <T> fn(x: list[named: T], [n]: integer, ...: Any) -> list[named: T]
 tail : <T> fn(x: list[T], [n]: integer, ...: Any) -> list[T]
@@ -61,13 +61,13 @@ sessionInfo : fn([package]: Any) -> Any
 object.size : fn(x: Any) -> Any
 capture.output : fn(...: Any, [file]: Any, [append]: logical, [type]: character, [split]: logical) -> character[]
 combn : fn(x: Any, m: Any, [FUN]: Any, [simplify]: logical, ...: Any) -> Any
-modifyList : fn(x: Any, val: Any, [keep.null]: logical) -> Any
+modifyList : @pure fn(x: Any, val: Any, [keep.null]: logical) -> Any
 data : Any
 txtProgressBar : Any
 setTxtProgressBar : fn(pb: Any, value: Any, [title]: Any, [label]: Any) -> Any
-URLencode : fn(URL: Any, [reserved]: logical, [repeated]: logical) -> character
-URLdecode : fn(URL: Any) -> character
-glob2rx : fn(pattern: Any, [trim.head]: logical, [trim.tail]: logical) -> character
+URLencode : @pure fn(URL: Any, [reserved]: logical, [repeated]: logical) -> character
+URLdecode : @pure fn(URL: Any) -> character
+glob2rx : @pure fn(pattern: Any, [trim.head]: logical, [trim.tail]: logical) -> character
 globalVariables : fn(names: character | character[], [package]: character, [add]: logical) -> character[]
 
 # Interactive debugging and console helpers.

@@ -445,7 +445,7 @@ fn every_declared_name_is_exported_by_libr() {
         "the declaration scan finds the headers' variables: {variables:?}"
     );
     declared.extend(variables);
-    let exported = dynamic_symbols(harness::libr_path());
+    let exported = dynamic_symbols(&harness::library_path());
     let missing: Vec<String> = declared
         .iter()
         // Applic.h and Linpack.h include BLAS.h, so its names reach the scan transitively.

@@ -204,14 +204,23 @@ When definitions refer to each other in a cycle, the package interface resolves 
 through one canonical fixpoint, so the result never depends on which member happened to be queried
 first:
 
-1. `interface_sccs` condenses the static graph of references from each item to the definition it
-   resolves to, using an iterative Tarjan walk in canonical project order.
-2. `scc_schemes` starts every member at `Unknown` and runs Jacobi rounds until the table of schemes
-   stops changing. If the round cap is reached, every member is pinned.
-3. `item_check` adopts the canonical scheme as the one exported truth.
+1. `interface_sccs` condenses the static graph of references from every item, definitions and
+   top-level statements alike, to each item its reads resolve to, using an iterative Tarjan walk
+   in canonical project order. The edges follow exactly the resolution a check performs: the
+   frame binder in the item's own file, then the test and package layers, and every conditional
+   writer of a name that has no unconditional winner.
+2. `scc_exports` starts every member at `Unknown` and runs Jacobi rounds until the table of
+   exports (each member's scheme and the schemes of the top-level names it binds) stops changing.
+   If the round cap is reached, every member is pinned.
+3. `item_check` adopts the canonical exports as the one exported truth.
 
 A member check inside the fixpoint never re-enters `item_check`, so no salsa cycle forms. Salsa's own
 cycle recovery remains only as a backstop, for a reference the static graph cannot see.
+
+The graph must cover every edge a check can follow, not just the common ones. Salsa never backdates
+the memo of a query that took part in a cycle, so when an edit breaks a cycle the former members
+re-run with no cycle heads and salsa's backdating check panics on any member whose value did not
+change. A missing edge turns into exactly that panic on the edit that removes and restores it.
 
 That backstop has a trap of its own: **a cycle recovery must not pin a value that depends on the
 round that produced it.** Salsa stops iterating when a recovery returns the same value as last time,
@@ -224,9 +233,9 @@ the obvious one.
 ### Keeping project-wide work cheap
 
 A walk over the whole project reads small per-item projections instead of full naming results.
-`item_interface_reads` is the set of names an item reads, which feeds `interface_sccs`, and
-`item_top_level_names` is the set of names it binds, which feeds the resolution of conditional
-slots. Both are tiny tracked queries whose values survive an edit that only shifts ranges. The
+`item_interface_reads` is the set of items and names an item's reads resolve to, which feeds
+`interface_sccs`, and `item_top_level_names` is the set of names it binds, which feeds the
+resolution of conditional slots. Both are tiny tracked queries whose values survive an edit that only shifts ranges. The
 typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
 instead of running again.
 
