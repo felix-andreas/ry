@@ -2349,13 +2349,6 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "a vector cannot be indexed by `{}`. Expected a numeric, logical, or character index",
             renderer.render(db, *index)
         ),
-        TypeErrorKind::UnsupportedIndexShape { index_count } => match index_count {
-            0 => "indexing with an empty index (`x[]`) is not supported yet".to_owned(),
-            1 => "indexing with a named index argument is not supported yet".to_owned(),
-            count => format!(
-                "indexing with {count} indexes is not supported yet. ry does not model matrix and data.frame subsetting"
-            ),
-        },
         TypeErrorKind::PositionDoesNotExist {
             position,
             container,

@@ -108,9 +108,6 @@ pub enum TypeErrorKind<'db> {
     UnsupportedSubset {
         found: Ty<'db>,
     },
-    UnsupportedIndexShape {
-        index_count: usize,
-    },
     /// `position` is 1-based.
     PositionDoesNotExist {
         position: usize,
@@ -1459,7 +1456,7 @@ impl<'db> Checker<'db, '_> {
                     .return_frames
                     .pop()
                     .expect("return frames stay balanced around body inference");
-                let return_ty = self.join_early_returns(&early_returns, trailing_ty);
+                let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
                 let signature: Vec<(&Formal, Option<Ty<'db>>)> = parameters
                     .iter()
                     .filter(|parameter| parameter.name != "...")
@@ -4385,7 +4382,7 @@ impl<'db> Checker<'db, '_> {
         // An `Unknown` declared return (elided `->`) is inferred from the body, so
         // annotating only the parameters does not drop the return.
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
-            signature.ret = self.join_early_returns(&early_returns, trailing_ty);
+            signature.ret = self.join_early_returns(&early_returns, trailing_ty, *body);
             self.record_untyped_parameters(function_id, &untyped_candidates, signature.ret);
         } else {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
@@ -4416,6 +4413,7 @@ impl<'db> Checker<'db, '_> {
             // The trailing value alone: early returns already reported themselves.
             let resolved_body = self.table.resolve(self.db, trailing_ty);
             if !early_return_failed
+                && !self.diverges(*body)
                 && !matches!(resolved_body.kind(self.db), TyKind::Unknown)
                 && !self.table.compatible(self.db, resolved_body, declared.ret)
             {
@@ -4508,16 +4506,21 @@ impl<'db> Checker<'db, '_> {
         trailing_ty
     }
 
+    /// A body that ends in `return(x)` or `stop()` never produces its trailing value, so only
+    /// the early returns count: `function(x) return(x)` returns `x`'s type, not `x | NULL`.
     fn join_early_returns(
         &self,
         early_returns: &[(Ty<'db>, TextRange)],
         trailing: Ty<'db>,
+        body: ExprId,
     ) -> Ty<'db> {
         if early_returns.is_empty() {
             return trailing;
         }
         let mut members: Vec<Ty<'db>> = early_returns.iter().map(|(ty, _)| *ty).collect();
-        members.push(self.table.resolve(self.db, trailing));
+        if !self.diverges(body) {
+            members.push(self.table.resolve(self.db, trailing));
+        }
         union_of(self.db, members)
     }
 
@@ -6790,24 +6793,14 @@ impl<'db> Checker<'db, '_> {
             .iter()
             .filter(|argument| argument.value.is_some())
             .count();
-        if filled != 1 {
-            self.errors.push(TypeError {
-                range,
-                kind: TypeErrorKind::UnsupportedIndexShape {
-                    index_count: filled,
-                },
-            });
-            return unknown(self.db);
+        // `x[]` is `x` itself. Several indexes (matrix and data.frame selection) and named
+        // arguments such as `drop = FALSE` are unmodeled shapes, refused with `Unknown` rather
+        // than reported, because they are ordinary R.
+        if filled == 0 && arguments.len() <= 1 && !double {
+            return subject;
         }
-        if arguments.len() != 1 {
+        if filled != 1 || arguments.len() != 1 || arguments[0].name.is_some() {
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
-            return unknown(self.db);
-        }
-        if arguments[0].name.is_some() {
-            self.errors.push(TypeError {
-                range,
-                kind: TypeErrorKind::UnsupportedIndexShape { index_count: 1 },
-            });
             return unknown(self.db);
         }
         let result = if double {
@@ -8141,6 +8134,9 @@ impl<'db> Checker<'db, '_> {
         match subject.kind(self.db) {
             TyKind::Unknown => Ok(unknown(self.db)),
             TyKind::Any => Ok(any(self.db)),
+            // R reads every element of `NULL` as `NULL`, so `opts$name` on an optional list is the
+            // ordinary way to read a setting that may be absent.
+            TyKind::Null => Ok(subject),
             TyKind::Scalar(atomic) => Ok(scalar(self.db, *atomic)),
             TyKind::Vector(element) | TyKind::List(element) => Ok(*element),
             // A literal name may be absent at runtime (`T | NULL`).
@@ -8303,6 +8299,7 @@ impl<'db> Checker<'db, '_> {
         match subject.kind(self.db) {
             TyKind::Unknown => Ok(unknown(self.db)),
             TyKind::Any => Ok(any(self.db)),
+            TyKind::Null => Ok(subject),
             TyKind::Scalar(_) => match self.vector_index_shape(range, index)? {
                 VectorIndexShape::ScalarLike => Ok(subject),
                 VectorIndexShape::VectorLike => Ok(Ty::new(self.db, TyKind::Vector(subject))),
@@ -8468,6 +8465,8 @@ impl<'db> Checker<'db, '_> {
         match subject.kind(self.db) {
             TyKind::Unknown => Ok(unknown(self.db)),
             TyKind::Any => Ok(any(self.db)),
+            // `NULL$name` is `NULL` in R, so an optional list reads its settings directly.
+            TyKind::Null => Ok(subject),
             TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) => Err(TypeError {
                 range,
                 kind: TypeErrorKind::DollarOnAtomicVector { found: subject },
@@ -9992,15 +9991,6 @@ mod tests {
                 .any(|error| matches!(error.kind, TypeErrorKind::DollarOnAtomicVector { .. })),
             "{:?}",
             dollar_atomic.errors
-        );
-        let matrix = check_source(&db, "f <- function() {\n  x <- list(1L)\n  x[1L, 2L]\n}");
-        assert!(
-            matrix.errors.iter().any(|error| matches!(
-                error.kind,
-                TypeErrorKind::UnsupportedIndexShape { index_count: 2 }
-            )),
-            "{:?}",
-            matrix.errors
         );
     }
 
