@@ -1519,6 +1519,21 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
     classes
 }
 
+/// A project's `+.string` method dispatches on a class attribute that `class(x) <- "string"`
+/// sets on a plain list, which no type tracks, so arithmetic on a list may be that method.
+#[salsa::tracked]
+fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
+    let definitions = visible_type_definitions(db, file);
+    let tracked = |class: &String| definitions.keys().any(|name| name.text(db) == class);
+    let project_classes = ProjectFiles::try_get(db)
+        .map(|files| project_arithmetic_classes(db, files))
+        .unwrap_or_default();
+    project_classes
+        .iter()
+        .chain(file_arithmetic_classes(db, file).iter())
+        .any(|class| !tracked(class))
+}
+
 /// Past this many conditional writers a slot is `Unknown`: each writer costs an item
 /// check per read, and a union of dozens of unrelated types helps no diagnostic.
 const CONDITIONAL_SLOT_JOIN_CAP: usize = 8;
@@ -1849,6 +1864,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db> {
         visible_arithmetic_classes(self.db, self.file)
     }
 
+    fn has_untracked_arithmetic_class(&self) -> bool {
+        *has_untracked_arithmetic_class(self.db, self.file)
+    }
+
     fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {
         stubs::stubs(self.db)?.schemes.get(name)?.last().cloned()
     }
@@ -1959,6 +1978,10 @@ impl<'db> check::GlobalEnv<'db> for SccGlobals<'db, '_> {
     /// collapse the whole scheme to `Unknown`.
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {
         self.base.arithmetic_classes()
+    }
+
+    fn has_untracked_arithmetic_class(&self) -> bool {
+        self.base.has_untracked_arithmetic_class()
     }
 
     fn stub_scheme(&self, name: &str) -> Option<types::TypeScheme<'db>> {

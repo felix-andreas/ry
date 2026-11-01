@@ -421,3 +421,39 @@ use <- function(config) if (get_flag(config, default = FALSE)) "on" else "off"
 #++++
 get_flag: <T> fn(config: T | NULL, [default]: T) -> T
 use: fn(config: logical) -> character
+
+#---- arithmetic_on_a_list_may_dispatch_to_a_project_method
+"+.string" <- function(x, y) {
+  x$text <- paste(x$text, as.character(y), sep = "")
+  x
+}
+string <- function(text) {
+  x <- list(text = text)
+  class(x) <- "string"
+  x
+}
+render <- function(label) {
+  result <- string("")
+  result <- result + label + " and " + "more"
+  result$text
+}
+#++++
++.string: <T, U> fn(x: T, y: U) -> T
+string: <T> fn(text: T) -> list{text: T}
+render: <T> fn(label: T) -> Unknown
+
+#---- arithmetic_on_a_list_without_a_project_method_is_an_error
+total <- function() list(a = 1) + 1
+#++++
+total: Unknown
+20..31 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{a: double}`
+
+#---- a_list_compares_with_an_atomic_value
+drop_nulls <- function(parts) {
+  parts <- as.list(parts)
+  parts[parts != "null"]
+}
+any_duplicated <- function(columns) any(lapply(columns, anyDuplicated) > 0)
+#++++
+drop_nulls: <T> fn(parts: T) -> list[Any]
+any_duplicated: fn(columns: Unknown) -> logical

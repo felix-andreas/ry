@@ -142,7 +142,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 624 after the false-report fixes listed in `limitations.md` and the
+went from 3,112 errors to 452 after the false-report fixes listed in `limitations.md` and the
 reference. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
 
@@ -152,15 +152,15 @@ classes, largest first:
   `expected matrix, found double[]`; ks `kfe.1d`, pracma `.adaptsimstp`, rugarch). A small repro
   has not been isolated yet. The likely fix is leniency for shape-only mismatches at calls to
   unannotated project functions, which needs the callee's annotation provenance at the argument check.
-- **Inferred unions in conditions.** `T | logical | NULL` and `logical | NULL` reach `if` and `&&`
-  after `if (is.null(x)) x <- ...` rebinds (processx `conn_connect_fifo`, data.table, lattice).
+- **A top-level `x <- NULL` placeholder** that a function fills in with `assign()` or `<<-` and
+  another tests in a condition (brew `.extendedError`, rvest `new_chromote`).
 - **`character | NULL` into a scalar `character` parameter** after a `switch()` without a default or
   an `if` without `else` assigns the value (httr2 `sprintf(type, kind)`, `gsub` replacement).
 - **Callbacks whose arity the interface fixes.** purrr `.fmap(.x, function(x) ...)` against
   `fn(T, ...: Any) -> U`, Rsolnp `fun = .fn1`, rmgarch `f(pars = ...)` on a callback typed with no
   named parameters.
 - **Classes without operator stubs**: `difftime` in arithmetic (renv, PerformanceAnalytics),
-  xtable's string `+` method, `*` between `double[]` and a matrix.
+  `*` between `double[]` and a matrix.
 - **`$` on a value typed as a vector or `logical | list | NULL` union** that is a list at run time
   (httr `oauth_listener(url)$code`, rlang `trace$call`).
 - One known true positive: NlcOptim `solqp.R` calls `indall(indxact)`, but `indall` is a vector

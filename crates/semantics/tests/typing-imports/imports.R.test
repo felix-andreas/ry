@@ -367,3 +367,18 @@ f <- function(x) .Call(C_endpoints, x)
 #++++
 f: <T> fn(x: T) -> Unknown
 23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins.
+
+#---- a_parameter_named_like_an_unknown_import_calls_the_import
+#namespace import(fs)
+read_description <- function(path) {
+  path <- path(path, "DESCRIPTION")
+  path
+}
+#++++
+read_description: <T> fn(path: T) -> Unknown
+
+#---- a_parameter_applied_to_itself_without_an_import_is_an_infinite_type
+apply_twice <- function(path) path(path)
+#++++
+apply_twice: Unknown
+30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
