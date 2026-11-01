@@ -124,9 +124,7 @@ impl ProcessEngine {
     pub fn ry_jit() -> Self {
         let mut engine = ProcessEngine::ry();
         engine.name = "ry-jit".to_string();
-        engine
-            .environment
-            .push(("RY_JIT".to_string(), "force".to_string()));
+        engine.environment.push(("RY_JIT".to_string(), "force".to_string()));
         engine
     }
 
@@ -162,13 +160,10 @@ impl ProcessEngine {
 /// A relative `ORACLE_RY` resolves against the current directory, because the engines run
 /// each case from the case's own directory.
 pub fn ry_program() -> String {
-    let program = std::env::var("ORACLE_RY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry"));
-    std::fs::canonicalize(&program)
-        .unwrap_or(program)
-        .display()
-        .to_string()
+    let program = std::env::var("ORACLE_RY").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ry")
+    });
+    std::fs::canonicalize(&program).unwrap_or(program).display().to_string()
 }
 
 impl Engine for ProcessEngine {
@@ -306,11 +301,7 @@ pub fn gnu_r_available() -> bool {
 
 /// The engine named by `ORACLE_ENGINE`, or the stub.
 pub fn engine_from_environment() -> Box<dyn Engine> {
-    match std::env::var("ORACLE_ENGINE")
-        .ok()
-        .as_deref()
-        .and_then(ProcessEngine::named)
-    {
+    match std::env::var("ORACLE_ENGINE").ok().as_deref().and_then(ProcessEngine::named) {
         Some(engine) => Box::new(engine),
         None => Box::new(StubEngine),
     }

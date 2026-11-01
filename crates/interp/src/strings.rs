@@ -2296,8 +2296,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
     let approximate = syntax == Syntax::Extended
         && (0..chars.len()).any(|index| {
-            (index == 0 || chars[index - 1] != '\\')
-                && approximate_settings(&chars, index).is_some()
+            (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
         });
     let mut groups: Vec<usize> = Vec::new();
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
@@ -2333,8 +2332,7 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
             // TRE reads `(?:...)` as a group that does not capture, and `(?i)` or `(?i:...)` as
             // a case-insensitive region, as PCRE does.
             '(' if syntax == Syntax::Extended && chars.get(index + 1) == Some(&'?') => {
-                let flags_end = (index + 2..chars.len())
-                    .find(|&position| !matches!(chars[position], 'i' | '-'));
+                let flags_end = (index + 2..chars.len()).find(|&position| !matches!(chars[position], 'i' | '-'));
                 match flags_end.map(|position| (position, chars[position])) {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);

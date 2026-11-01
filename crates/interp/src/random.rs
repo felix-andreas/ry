@@ -1022,11 +1022,7 @@ fn kinderman_ramage(state: &mut State) -> f64 {
             let u3 = next_uniform(state);
             let tail = A * A - 2.0 * u3.ln();
             if u2 * u2 < (A * A) / tail {
-                return if u1 < 0.986655477086949 {
-                    tail.sqrt()
-                } else {
-                    -tail.sqrt()
-                };
+                return if u1 < 0.986655477086949 { tail.sqrt() } else { -tail.sqrt() };
             }
         }
     }

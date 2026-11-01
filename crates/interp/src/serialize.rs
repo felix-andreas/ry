@@ -23,9 +23,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("unserialize", 2, do_unserialize),
     internal("serialize", -1, do_serialize),
     internal("serializeb", -1, do_serialize),
-    internal("lazyLoadDBinsertValue", 5, |call| unsafe {
-        Err(call.error("lazyLoadDBinsertValue is not supported"))
-    }),
+    internal("lazyLoadDBinsertValue", 5, |call| unsafe { Err(call.error("lazyLoadDBinsertValue is not supported")) }),
     internal("lazyLoadDBflush", 1, |_| unsafe { Ok(nil()) }).invisible(),
     internal("loadFromConn2", 3, do_load_from_conn).invisible(),
     internal("saveToConn", 6, do_save_to_conn).invisible(),
@@ -244,8 +242,7 @@ impl Reader<'_> {
             }
             NAMESPACESXP => {
                 let names = self.string_vector()?;
-                let function =
-                    eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
+                let function = eval::find_fun(values::install("..getNamespace")?, values::base_env())?;
                 // GNU R names the object being read when it knows it, else "<unknown>", which
                 // `..getNamespace` compares as a string when the namespace fails to load.
                 let location = values::scalar_string("<unknown>")?;
@@ -1204,13 +1201,7 @@ unsafe fn do_get_vars_from_frame(call: &Call<'_>) -> R<Sexp> {
 
 /// The values bound to `names`, as `(symbol, value)` pairs. Each value stays reachable from
 /// `env`, which keeps it alive.
-unsafe fn saved_bindings(
-    call: &Call<'_>,
-    names: Sexp,
-    env: Sexp,
-    force: bool,
-    frame_only: bool,
-) -> R<Vec<(Sexp, Sexp)>> {
+unsafe fn saved_bindings(call: &Call<'_>, names: Sexp, env: Sexp, force: bool, frame_only: bool) -> R<Vec<(Sexp, Sexp)>> {
     let mut items = Vec::with_capacity(length(names));
     for index in 0..length(names) {
         let name = values::string_at(names, index).unwrap_or_default();
@@ -1238,19 +1229,14 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
     let compressed = match values::as_integer_scalar(call.arg(1)) {
         1 => from.to_vec(),
         2 => {
-            let mut encoder =
-                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-            std::io::Write::write_all(&mut encoder, from)
-                .map_err(|failure| call.error(failure.to_string()))?;
-            encoder
-                .finish()
-                .map_err(|failure| call.error(failure.to_string()))?
+            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut encoder, from).map_err(|failure| call.error(failure.to_string()))?;
+            encoder.finish().map_err(|failure| call.error(failure.to_string()))?
         }
         3 => return Err(call.error("bzip2 compression is not supported by ry yet")),
         4 => {
             let mut output = Vec::new();
-            lzma_rs::xz_compress(&mut &from[..], &mut output)
-                .map_err(|failure| call.error(failure.to_string()))?;
+            lzma_rs::xz_compress(&mut &from[..], &mut output).map_err(|failure| call.error(failure.to_string()))?;
             output
         }
         _ => return Err(call.error("invalid 'type' argument")),
@@ -1280,15 +1266,10 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     let mut output = Vec::new();
     let outcome = match kind {
         1 => return raw_vector(from),
-        2 if gzip_header => flate2::read::MultiGzDecoder::new(from)
-            .read_to_end(&mut output)
-            .map(drop),
+        2 if gzip_header => flate2::read::MultiGzDecoder::new(from).read_to_end(&mut output).map(drop),
         2 => ZlibDecoder::new(from).read_to_end(&mut output).map(drop),
-        3 => bzip2_rs::DecoderReader::new(from)
-            .read_to_end(&mut output)
-            .map(drop),
-        4 => lzma_rs::xz_decompress(&mut &from[..], &mut output)
-            .map_err(|failure| std::io::Error::other(failure.to_string())),
+        3 => bzip2_rs::DecoderReader::new(from).read_to_end(&mut output).map(drop),
+        4 => lzma_rs::xz_decompress(&mut &from[..], &mut output).map_err(|failure| std::io::Error::other(failure.to_string())),
         _ => return Err(call.error("invalid 'type' argument")),
     };
     outcome.map_err(|_| call.error("internal error in memDecompress"))?;

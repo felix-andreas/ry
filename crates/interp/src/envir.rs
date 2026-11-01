@@ -75,9 +75,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("detach", 1, do_detach),
     internal("options", -1, do_options).keep_visibility(),
     internal("getOption", 1, do_get_option),
-    builtin("interactive", 0, |_| unsafe {
-        scalar_bool(interp().interactive)
-    }),
+    builtin("interactive", 0, |_| unsafe { scalar_bool(interp().interactive) }),
     internal("getRegisteredNamespace", 1, do_get_registered_namespace),
     internal("isRegisteredNamespace", 1, do_is_registered_namespace),
     internal("registerNamespace", 2, do_register_namespace).invisible(),
@@ -1188,9 +1186,7 @@ unsafe fn validate_option(name: &str, value: Sexp) -> R<Sexp> {
         "expressions" => {
             let depth = values::as_integer_scalar(value);
             if !(25..=500_000).contains(&depth) {
-                return Err(error(
-                    "'expressions' parameter invalid, allowed 25...500000",
-                ));
+                return Err(error("'expressions' parameter invalid, allowed 25...500000"));
             }
             scalar_integer(depth)
         }
@@ -1237,10 +1233,7 @@ pub unsafe fn install_default_options() -> R<()> {
         ("verbose", scalar_bool(false)?),
         ("check.bounds", scalar_bool(false)?),
         ("keep.source", scalar_bool(false)?),
-        (
-            "keep.source.pkgs",
-            scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?,
-        ),
+        ("keep.source.pkgs", scalar_bool(std::env::var("R_KEEP_PKG_SOURCE").is_ok_and(|value| value == "yes"))?),
         ("keep.parse.data", scalar_bool(true)?),
         ("keep.parse.data.pkgs", scalar_bool(false)?),
         ("warning.length", scalar_integer(1000)?),
@@ -1525,14 +1518,8 @@ unsafe fn do_mapply(call: &Call<'_>) -> R<Sexp> {
             let mut args = Vec::new();
             for (position, &list) in lists.iter().enumerate() {
                 let element = if list.is_object() {
-                    let position_value =
-                        values::scalar_integer((index % lengths[position]) as i32 + 1)?;
-                    eval::apply(
-                        nil(),
-                        subset2,
-                        &eval::value_args(&[list, position_value]),
-                        call.env,
-                    )?
+                    let position_value = values::scalar_integer((index % lengths[position]) as i32 + 1)?;
+                    eval::apply(nil(), subset2, &eval::value_args(&[list, position_value]), call.env)?
                 } else {
                     crate::subset::list_or_vector_element(list, index % lengths[position])?
                 };
@@ -1892,15 +1879,9 @@ unsafe fn namespace_lookup(package: Sexp, name: &str, exported: bool, env: Sexp)
     }
     let package_name = if info.kind() == SexpType::Environment {
         let spec = find_var_in_frame(values::install("spec")?, info)?;
-        values::first_string(spec)
-            .map(|text| text.into_owned())
-            .unwrap_or_default()
+        values::first_string(spec).map(|text| text.into_owned()).unwrap_or_default()
     } else {
-        values::first_string(package)
-            .map(|text| text.into_owned())
-            .unwrap_or_default()
+        values::first_string(package).map(|text| text.into_owned()).unwrap_or_default()
     };
-    Err(error(format!(
-        "'{name}' is not an exported object from 'namespace:{package_name}'"
-    )))
+    Err(error(format!("'{name}' is not an exported object from 'namespace:{package_name}'")))
 }

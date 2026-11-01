@@ -6,7 +6,7 @@
 use crate::boundary::{ApiResult, enter, with_native_scope};
 use heap::object::Sexp;
 use interp::connections::{
-    IntMethod, NativeMethod, OpaqueMethod, OpenMethod, Rconnection, ReadMethod, SeekMethod,
+    IntMethod, NativeMethod, OpaqueMethod, OpenMethod, ReadMethod, Rconnection, SeekMethod,
     VoidMethod, WriteMethod,
 };
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -19,8 +19,11 @@ pub unsafe extern "C" fn R_new_custom_connection(
     ptr: *mut Rconnection,
 ) -> Sexp {
     enter(|| {
-        let (object, con) =
-            interp::connections::new_custom(c_text(description), c_text(mode), c_text(class_name))?;
+        let (object, con) = interp::connections::new_custom(
+            c_text(description),
+            c_text(mode),
+            c_text(class_name),
+        )?;
         if !ptr.is_null() {
             *ptr = con;
         }

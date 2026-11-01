@@ -450,7 +450,7 @@ impl Heap {
         Ok(())
     }
 
-    /// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
+/// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
     /// the length it was allocated with. GNU R before 4.6 let native code shrink any vector this
     /// way (`SETLENGTH`), and binaries built then still do.
     pub unsafe fn mark_resizable(&mut self, vector: Sexp) {
@@ -1248,8 +1248,7 @@ impl Heap {
     /// next minor collection would free a live child.
     unsafe fn verify_barrier(&self) {
         let check = |parent: Sexp| {
-            if !parent.is_marked()
-                || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
+            if !parent.is_marked() || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
             {
                 return;
             }
@@ -1288,11 +1287,7 @@ impl Heap {
                     panic!(
                         "write barrier violated: old {:?} (length {}) holds young {:?} at child {position}",
                         parent.kind(),
-                        if parent.kind().shape() == Shape::Vector {
-                            parent.length()
-                        } else {
-                            0
-                        },
+                        if parent.kind().shape() == Shape::Vector { parent.length() } else { 0 },
                         child.kind(),
                     );
                 }

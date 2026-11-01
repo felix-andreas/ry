@@ -289,11 +289,7 @@ fn run_packages(
             return ExitCode::from(2);
         }
     };
-    let packages = if packages.is_empty() {
-        everything.clone()
-    } else {
-        packages
-    };
+    let packages = if packages.is_empty() { everything.clone() } else { packages };
     let settings = Settings {
         corpus: corpus.clone(),
         rscript: std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_owned()),
@@ -350,12 +346,7 @@ fn default_ry() -> PathBuf {
     )
 }
 
-fn run_bench(
-    packages: &[PathBuf],
-    options: &bench::Options,
-    verbose: bool,
-    json: Option<&Path>,
-) -> ExitCode {
+fn run_bench(packages: &[PathBuf], options: &bench::Options, verbose: bool, json: Option<&Path>) -> ExitCode {
     if packages.is_empty() {
         eprintln!("name at least one package directory");
         return ExitCode::from(2);
@@ -376,21 +367,10 @@ fn run_bench(
     println!();
     println!(
         "{:<10} {:>6} {:>8} {:>6} {:>8} {:>8} {:>8} {:>10} {:>10} {:>7}",
-        "package",
-        "tests",
-        "match",
-        "rate",
-        "differs",
-        "missing",
-        "ry pass",
-        "GNU R s",
-        "ry s",
-        "ry/R"
+        "package", "tests", "match", "rate", "differs", "missing", "ry pass", "GNU R s", "ry s", "ry/R"
     );
     for summary in &summaries {
-        let suite = |seconds: Option<f64>| {
-            seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"))
-        };
+        let suite = |seconds: Option<f64>| seconds.map_or_else(|| "-".to_string(), |seconds| format!("{seconds:.2}"));
         let ratio = match (summary.gnu_r_suite_seconds, summary.ry_suite_seconds) {
             (Some(gnu_r), Some(ry)) if gnu_r > 0.0 => format!("{:.2}x", ry / gnu_r),
             _ => "-".to_string(),
@@ -409,9 +389,7 @@ fn run_bench(
             ratio
         );
     }
-    println!(
-        "Suite times count only the tests. Process wall time, which adds startup and loading the package:"
-    );
+    println!("Suite times count only the tests. Process wall time, which adds startup and loading the package:");
     for summary in &summaries {
         println!(
             "  {}: GNU R {:.2} s, ry {:.2} s",
@@ -431,12 +409,6 @@ fn run_bench(
             return ExitCode::FAILURE;
         }
     }
-    let all_match = summaries
-        .iter()
-        .all(|summary| summary.matching == summary.tests);
-    if all_match {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    let all_match = summaries.iter().all(|summary| summary.matching == summary.tests);
+    if all_match { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }

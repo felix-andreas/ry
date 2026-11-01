@@ -545,11 +545,9 @@ fn collect_unknown_nominals<'db>(
 /// The declared name of an `@alias` line or a generic `@type NAME<T, ...>` line. A plain
 /// `@type NAME` is the older opaque form, handled on its own.
 fn definition_line_name(content: &str) -> Option<&str> {
-    let rest = content.strip_prefix("@alias").or_else(|| {
-        content
-            .strip_prefix("@type")
-            .filter(|rest| rest.contains('<'))
-    })?;
+    let rest = content
+        .strip_prefix("@alias")
+        .or_else(|| content.strip_prefix("@type").filter(|rest| rest.contains('<')))?;
     let rest = rest.trim_start();
     let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
     let name = &rest[..end];
@@ -695,12 +693,7 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let library = stubs(&db).expect("the shipped stubs are installed");
         assert!(library.schemes.contains_key("Result.map"));
-        assert!(
-            library
-                .type_definitions
-                .keys()
-                .any(|name| name.text(&db) == "Result")
-        );
+        assert!(library.type_definitions.keys().any(|name| name.text(&db) == "Result"));
         assert_eq!(declaring_namespace(&db, "Dict"), Some(STANDARD_LIBRARY));
     }
 

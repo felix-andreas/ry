@@ -710,9 +710,7 @@ static GRAPHICS_SYSTEMS: std::sync::Mutex<[usize; MAX_GRAPHICS_SYSTEMS]> =
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
     let claimed = {
-        let mut systems = GRAPHICS_SYSTEMS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let free = systems.iter().position(|&slot| slot == 0);
         if let Some(free) = free {
             systems[free] = callback;
@@ -729,13 +727,8 @@ pub unsafe extern "C" fn GEregisterSystem(callback: usize, index: *mut c_int) {
 /// `GEunregisterSystem(index)`: frees a graphics system's slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GEunregisterSystem(index: c_int) {
-    let mut systems = GRAPHICS_SYSTEMS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match usize::try_from(index)
-        .ok()
-        .and_then(|index| systems.get_mut(index))
-    {
+    let mut systems = GRAPHICS_SYSTEMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match usize::try_from(index).ok().and_then(|index| systems.get_mut(index)) {
         Some(slot) if *slot != 0 => *slot = 0,
         _ => {
             drop(systems);

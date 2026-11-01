@@ -1391,9 +1391,7 @@ fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::Key => match ty.kind(db) {
-            TyKind::Scalar(
-                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
-            )
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character)
             | TyKind::Any
             | TyKind::Unknown => true,
             TyKind::Rigid(name) => binder_implies(name),

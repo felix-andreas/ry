@@ -188,11 +188,7 @@ pub fn r() -> R<'static> {
 /// `readLines()`, rather than builtins alone.
 pub fn r_with_base() -> R<'static> {
     let r = r();
-    assert_eq!(
-        unsafe { (r.api().ry_start_session)() },
-        0,
-        "base R did not load"
-    );
+    assert_eq!(unsafe { (r.api().ry_start_session)() }, 0, "base R did not load");
     r
 }
 

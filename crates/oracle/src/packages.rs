@@ -130,9 +130,7 @@ pub fn run_all(
             });
         }
     });
-    let mut results = results
-        .into_inner()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut results = results.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
     results.sort_by(|left, right| left.0.cmp(&right.0));
     results
 }
@@ -180,10 +178,7 @@ fn find_tarball(corpus: &Path, package: &str) -> Option<(PathBuf, String)> {
     let entries = fs::read_dir(corpus.join("sources")).ok()?;
     entries.flatten().find_map(|entry| {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let version = name
-            .strip_prefix(&prefix)?
-            .strip_suffix(".tar.gz")?
-            .to_owned();
+        let version = name.strip_prefix(&prefix)?.strip_suffix(".tar.gz")?.to_owned();
         Some((entry.path(), version))
     })
 }
@@ -193,11 +188,9 @@ fn extract(tarball: &Path, source: &Path, package: &str) -> Result<(), String> {
         return Ok(());
     }
     if source.exists() {
-        fs::remove_dir_all(source)
-            .map_err(|error| format!("cannot clear {}: {error}", source.display()))?;
+        fs::remove_dir_all(source).map_err(|error| format!("cannot clear {}: {error}", source.display()))?;
     }
-    fs::create_dir_all(source)
-        .map_err(|error| format!("cannot create {}: {error}", source.display()))?;
+    fs::create_dir_all(source).map_err(|error| format!("cannot create {}: {error}", source.display()))?;
     let status = Command::new("tar")
         .arg("-xzf")
         .arg(tarball)
@@ -225,8 +218,7 @@ fn run_suite(
     package: &str,
 ) -> Result<SuiteResult, String> {
     if work.exists() {
-        fs::remove_dir_all(work)
-            .map_err(|error| format!("cannot clear {}: {error}", work.display()))?;
+        fs::remove_dir_all(work).map_err(|error| format!("cannot clear {}: {error}", work.display()))?;
     }
     let status = Command::new("cp")
         .arg("-r")
@@ -314,8 +306,7 @@ fn run_suite(
         files,
     };
     let json = serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
-    fs::write(work.join("result.json"), json)
-        .map_err(|error| format!("cannot write result.json: {error}"))?;
+    fs::write(work.join("result.json"), json).map_err(|error| format!("cannot write result.json: {error}"))?;
     Ok(result)
 }
 
@@ -328,11 +319,7 @@ fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Stat
     let group = format!("-{}", child.id());
     let status = loop {
         if let Some(exit) = child.try_wait()? {
-            break if exit.success() {
-                Status::Pass
-            } else {
-                Status::Fail
-            };
+            break if exit.success() { Status::Pass } else { Status::Fail };
         }
         if Instant::now() >= deadline {
             break Status::Timeout;
@@ -341,11 +328,7 @@ fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Stat
     };
     // Killing a group whose members all exited fails with "no such process", which is the
     // common case and means there is nothing left to stop.
-    match Command::new("kill")
-        .args(["-KILL", "--", &group])
-        .stderr(Stdio::null())
-        .status()
-    {
+    match Command::new("kill").args(["-KILL", "--", &group]).stderr(Stdio::null()).status() {
         Ok(_) | Err(_) => {}
     }
     if status == Status::Timeout {
@@ -356,17 +339,9 @@ fn run_with_deadline(mut command: Command, deadline: Instant) -> io::Result<Stat
 
 /// The last testthat summary line, `[ FAIL 0 | WARN 1 | SKIP 2 | PASS 30 ]`.
 pub fn testthat_counts(text: &str) -> Option<TestthatCounts> {
-    let line = text
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with("[ FAIL "))?;
+    let line = text.lines().rev().find(|line| line.trim_start().starts_with("[ FAIL "))?;
     let mut counts = TestthatCounts::default();
-    for part in line
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split('|')
-    {
+    for part in line.trim().trim_start_matches('[').trim_end_matches(']').split('|') {
         let mut words = part.split_whitespace();
         let (Some(label), Some(value)) = (words.next(), words.next()) else {
             continue;
@@ -416,12 +391,8 @@ pub fn summary(results: &[(String, PackageOutcome)]) -> String {
             PackageOutcome::SetupFailed(error) => ("-".to_owned(), "-".to_owned(), error.clone()),
             PackageOutcome::Ran { gnu_r, ry } => {
                 with_tests += 1;
-                let gnu_r_passed = gnu_r
-                    .as_ref()
-                    .is_some_and(|result| result.status == Status::Pass);
-                let ry_passed = ry
-                    .as_ref()
-                    .is_some_and(|result| result.status == Status::Pass);
+                let gnu_r_passed = gnu_r.as_ref().is_some_and(|result| result.status == Status::Pass);
+                let ry_passed = ry.as_ref().is_some_and(|result| result.status == Status::Pass);
                 gnu_r_pass += usize::from(gnu_r_passed);
                 ry_pass += usize::from(ry_passed);
                 ry_pass_where_gnu_r_passes += usize::from(gnu_r_passed && ry_passed);
@@ -432,13 +403,7 @@ pub fn summary(results: &[(String, PackageOutcome)]) -> String {
                             .files
                             .iter()
                             .find(|file| file.status != Status::Pass)
-                            .map(|file| {
-                                format!(
-                                    "{}: {}",
-                                    file.file,
-                                    file.first_error.clone().unwrap_or_default()
-                                )
-                            })
+                            .map(|file| format!("{}: {}", file.file, file.first_error.clone().unwrap_or_default()))
                     })
                     .unwrap_or_default();
                 (cell(gnu_r.as_ref()), cell(ry.as_ref()), note)
@@ -457,11 +422,7 @@ pub fn summary(results: &[(String, PackageOutcome)]) -> String {
 }
 
 fn percent(part: usize, whole: usize) -> f64 {
-    if whole == 0 {
-        0.0
-    } else {
-        100.0 * part as f64 / whole as f64
-    }
+    if whole == 0 { 0.0 } else { 100.0 * part as f64 / whole as f64 }
 }
 
 fn cell(result: Option<&SuiteResult>) -> String {
@@ -473,18 +434,17 @@ fn cell(result: Option<&SuiteResult>) -> String {
         Status::Fail => "FAIL",
         Status::Timeout => "TIMEOUT",
     };
-    let counts = result
-        .files
-        .iter()
-        .filter_map(|file| file.testthat.as_ref())
-        .fold(None::<TestthatCounts>, |total, counts| {
+    let counts = result.files.iter().filter_map(|file| file.testthat.as_ref()).fold(
+        None::<TestthatCounts>,
+        |total, counts| {
             let mut total = total.unwrap_or_default();
             total.fail += counts.fail;
             total.pass += counts.pass;
             total.skip += counts.skip;
             total.warn += counts.warn;
             Some(total)
-        });
+        },
+    );
     match counts {
         Some(counts) => format!("{status} ({} ok, {} failed)", counts.pass, counts.fail),
         None => status.to_owned(),

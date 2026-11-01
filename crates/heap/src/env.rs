@@ -61,11 +61,7 @@ impl Frame {
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
     /// positive).
     pub fn set_hashed(&mut self, size: i32) {
-        self.hash_size = if size > 0 {
-            size as u32
-        } else {
-            HASH_MINIMUM_SIZE
-        };
+        self.hash_size = if size > 0 { size as u32 } else { HASH_MINIMUM_SIZE };
     }
 
     /// Marks every cell bound so far as a closure formal.
@@ -93,11 +89,7 @@ impl Frame {
                 bucket.insert(0, position);
             }
         }
-        buckets
-            .iter()
-            .flatten()
-            .map(|&position| self.cells[position])
-            .collect()
+        buckets.iter().flatten().map(|&position| self.cells[position]).collect()
     }
 
     /// Adds a cell whose symbol the frame does not bind yet.

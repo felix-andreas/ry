@@ -23,6 +23,14 @@
 //! The functions here allocate on the R heap and must run on the thread that owns the runtime.
 //! Their results are rooted in the current handle scope, like any value an API function returns.
 
+use table::{
+    ColumnType, Table,
+    convert::{RVector, to_r, to_series},
+};
+use heap::{
+    object::{Header, NA_INTEGER, NA_REAL, Sexp, SexpType},
+    strings::Encoding,
+};
 use crate::{
     R_xlen_t, Rboolean,
     altrep::{
@@ -40,10 +48,6 @@ use crate::{
     memory::alloc_vector,
     runtime,
 };
-use heap::{
-    object::{Header, NA_INTEGER, NA_REAL, Sexp, SexpType},
-    strings::Encoding,
-};
 use polars::prelude::{
     BooleanChunked, Float64Chunked, Int32Chunked, IntoSeries, PlSmallStr, Series, StringChunked,
 };
@@ -51,10 +55,6 @@ use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
 use std::{
     ffi::{c_int, c_void},
     sync::OnceLock,
-};
-use table::{
-    ColumnType, Table,
-    convert::{RVector, to_r, to_series},
 };
 
 /// Exposes one column as an R vector.

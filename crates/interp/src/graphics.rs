@@ -938,7 +938,8 @@ unsafe fn open_device(spec: DeviceSpec) -> R<Sexp> {
     if !spec.bitmap
         && let Some(path) = spec.file.as_deref().and_then(output_path)
     {
-        std::fs::File::create(&path).map_err(|_| error(format!("cannot open file '{path}'")))?;
+        std::fs::File::create(&path)
+            .map_err(|_| error(format!("cannot open file '{path}'")))?;
     }
     add_device(Device {
         name: spec.name,

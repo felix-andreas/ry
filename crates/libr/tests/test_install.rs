@@ -33,8 +33,7 @@ fn home() -> &'static PathBuf {
             .parent()
             .expect("the profile directory")
             .join("ry-rcmd");
-        let gnu_r_bin =
-            which("Rscript").and_then(|rscript| rscript.parent().map(Path::to_path_buf));
+        let gnu_r_bin = which("Rscript").and_then(|rscript| rscript.parent().map(Path::to_path_buf));
         rcmd::assemble(
             &root,
             &rcmd::HomeSources {

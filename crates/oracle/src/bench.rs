@@ -151,14 +151,13 @@ pub fn bench_package(package_dir: &Path, options: &Options) -> Result<Summary, B
 pub fn compare_runs(package: &str, gnu_r: &Run, gnu_r_again: &Run, ry: Option<&Run>) -> Summary {
     let tests = keyed(gnu_r);
     let again: HashMap<Key, &TestResult> = keyed(gnu_r_again).into_iter().collect();
-    let ry_by_key: HashMap<Key, &TestResult> =
-        ry.map(keyed).unwrap_or_default().into_iter().collect();
+    let ry_by_key: HashMap<Key, &TestResult> = ry.map(keyed).unwrap_or_default().into_iter().collect();
     let mut comparisons = Vec::with_capacity(tests.len());
     for (key, expected) in &tests {
         let actual = ry_by_key.get(key);
-        let stable = again.get(key).is_some_and(|other| {
-            other.value == expected.value && other.problems == expected.problems
-        });
+        let stable = again
+            .get(key)
+            .is_some_and(|other| other.value == expected.value && other.problems == expected.problems);
         let (verdict, detail) = match actual {
             None => (Verdict::Missing, String::new()),
             Some(actual) => match difference(expected, actual, stable) {
@@ -198,12 +197,7 @@ pub fn compare_runs(package: &str, gnu_r: &Run, gnu_r_again: &Run, ry: Option<&R
             }
         }
     }
-    let count = |verdict| {
-        comparisons
-            .iter()
-            .filter(|comparison| comparison.verdict == verdict)
-            .count()
-    };
+    let count = |verdict| comparisons.iter().filter(|comparison| comparison.verdict == verdict).count();
     let passing = |run: &Run| {
         run.results
             .iter()
@@ -236,10 +230,7 @@ pub fn render_summary(summary: &Summary, verbose: bool) -> String {
     let mut text = String::new();
     let mut by_file: BTreeMap<&str, Vec<&Comparison>> = BTreeMap::new();
     for comparison in &summary.comparisons {
-        by_file
-            .entry(&comparison.file)
-            .or_default()
-            .push(comparison);
+        by_file.entry(&comparison.file).or_default().push(comparison);
     }
     for (file, comparisons) in &by_file {
         let matching = comparisons
@@ -253,19 +244,12 @@ pub fn render_summary(summary: &Summary, verbose: bool) -> String {
             "{} {file}: {matching}/{} {}\n",
             summary.package,
             comparisons.len(),
-            if summary.ry_ran {
-                "match"
-            } else {
-                "pass under GNU R"
-            }
+            if summary.ry_ran { "match" } else { "pass under GNU R" }
         ));
         for comparison in comparisons {
             if !summary.ry_ran {
                 if comparison.gnu_r_status != "pass" || verbose {
-                    text.push_str(&format!(
-                        "  {:<8} {}\n",
-                        comparison.gnu_r_status, comparison.test
-                    ));
+                    text.push_str(&format!("  {:<8} {}\n", comparison.gnu_r_status, comparison.test));
                 }
                 continue;
             }
@@ -303,9 +287,7 @@ fn keyed(run: &Run) -> Vec<(Key, &TestResult)> {
     let mut seen: HashMap<(String, String), usize> = HashMap::new();
     let mut tests = Vec::new();
     for result in run.results.iter().filter(|result| is_test(result)) {
-        let count = seen
-            .entry((result.file.clone(), result.test.clone()))
-            .or_default();
+        let count = seen.entry((result.file.clone(), result.test.clone())).or_default();
         tests.push(((result.file.clone(), result.test.clone(), *count), result));
         *count += 1;
     }
@@ -336,12 +318,7 @@ fn difference(expected: &TestResult, actual: &TestResult, stable: bool) -> Optio
             .zip(&actual.problems)
             .position(|(left, right)| left != right)
             .unwrap_or(expected.problems.len().min(actual.problems.len()));
-        let at = |problems: &[String]| {
-            problems
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| "(none)".to_string())
-        };
+        let at = |problems: &[String]| problems.get(index).cloned().unwrap_or_else(|| "(none)".to_string());
         return Some(format!(
             "GNU R: {} | ry: {}",
             at(&expected.problems),
@@ -534,17 +511,8 @@ fn read_output(path: &Path, runtime: &str) -> String {
     }
 }
 
-fn keep_import(
-    entries: &str,
-    installed: &HashSet<String>,
-    output: &mut String,
-    dropped: &mut Vec<String>,
-) {
-    for entry in entries
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-    {
+fn keep_import(entries: &str, installed: &HashSet<String>, output: &mut String, dropped: &mut Vec<String>) {
+    for entry in entries.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
         let name = entry.split(['(', ' ']).next().unwrap_or(entry).trim();
         if installed.contains(name) {
             output.push_str(&format!("    {entry},\n"));
@@ -556,15 +524,10 @@ fn keep_import(
 
 /// Asks GNU R, because it knows its own library paths and `R_LIBS`.
 fn installed_packages() -> Result<HashSet<String>, BenchError> {
-    let output =
-        Command::new(std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_string()))
-            .args([
-                "--vanilla",
-                "-e",
-                "cat(rownames(installed.packages()), sep = '\\n')",
-            ])
-            .output()
-            .map_err(|error| BenchError::Setup(format!("Rscript: {error}")))?;
+    let output = Command::new(std::env::var("ORACLE_RSCRIPT").unwrap_or_else(|_| "Rscript".to_string()))
+        .args(["--vanilla", "-e", "cat(rownames(installed.packages()), sep = '\\n')"])
+        .output()
+        .map_err(|error| BenchError::Setup(format!("Rscript: {error}")))?;
     if !output.status.success() {
         return Err(BenchError::Setup(format!(
             "Rscript could not list the installed packages: {}",
@@ -582,11 +545,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), BenchError> {
     for entry in std::fs::read_dir(from).map_err(setup_error(from))? {
         let entry = entry.map_err(setup_error(from))?;
         let target = to.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(setup_error(&entry.path()))?
-            .is_dir()
-        {
+        if entry.file_type().map_err(setup_error(&entry.path()))?.is_dir() {
             copy_tree(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target).map_err(setup_error(&target))?;
