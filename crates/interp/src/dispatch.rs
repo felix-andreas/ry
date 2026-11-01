@@ -910,28 +910,31 @@ pub unsafe fn dispatch_or_eval(
     op: Sexp,
     arguments: Sexp,
     env: Sexp,
-) -> R<Result<Sexp, Args>> {
+    args: &mut Args,
+) -> R<Option<Sexp>> {
     let first = arguments.car();
     if arguments.kind() != SexpType::Pairlist || first == missing_arg() {
-        return Ok(Err(eval::evaluate_args(arguments, env, true, call)?));
+        eval::evaluate_args_into(arguments, env, true, call, args)?;
+        return Ok(None);
     }
     // `x[...]` takes its object from the dots, so every argument becomes a promise up front, and
     // the first keeps its promise so a method's `substitute(x)` sees the caller's expression.
     if first == symbols().dots {
         let promised = eval::promise_args(arguments, env)?;
         let Some(head) = promised.first() else {
-            return Ok(Err(promised));
+            return Ok(None);
         };
         if head.value == missing_arg() {
-            return Ok(Err(promised));
+            *args = promised;
+            return Ok(None);
         }
         let object = value_of(head.value)?;
         crate::heap().root(object);
-        return dispatch_promised(definition, call, op, promised, env);
+        return dispatch_promised(definition, call, op, &promised, env, args);
     }
     let object = eval::eval(first, env)?;
     crate::heap().root(object);
-    dispatch_evaluated_subject(definition, call, op, arguments, object, env)
+    dispatch_evaluated_subject(definition, call, op, arguments, object, env, args)
 }
 
 /// [`dispatch_or_eval`] after the first argument of `arguments` evaluated to `object`. A frame
@@ -943,73 +946,74 @@ pub unsafe fn dispatch_evaluated_subject(
     arguments: Sexp,
     object: Sexp,
     env: Sexp,
-) -> R<Result<Sexp, Args>> {
+    args: &mut Args,
+) -> R<Option<Sexp>> {
     if !object.is_object() {
-        let mut args: Args = smallvec::smallvec![Arg {
+        args.push(Arg {
             tag: arguments.tag(),
             value: object,
-        }];
-        args.extend(eval::evaluate_args(arguments.cdr(), env, true, call)?);
-        return Ok(Err(args));
+        });
+        eval::evaluate_args_into(arguments.cdr(), env, true, call, args)?;
+        return Ok(None);
     }
     if definition.name == "[" && crate::frame::is_frame(object) {
-        return crate::frame::run(call, object, env).map(Ok);
+        return crate::frame::run(call, object, env).map(Some);
     }
     if definition.name == "["
         && values::inherits(object, "data.table")
         && let Some(value) = crate::data_table::query(call, object, env)?
     {
-        return Ok(Ok(value));
+        return Ok(Some(value));
     }
     let mut promised: Args = smallvec::smallvec![Arg {
         tag: arguments.tag(),
         value: forced_promise(arguments.car(), object)?,
     }];
     promised.extend(eval::promise_args(arguments.cdr(), env)?);
-    dispatch_promised(definition, call, op, promised, env)
+    dispatch_promised(definition, call, op, &promised, env, args)
 }
 
 unsafe fn dispatch_promised(
     definition: &BuiltinDef,
     call: Sexp,
     op: Sexp,
-    promised: Args,
+    promised: &Args,
     env: Sexp,
-) -> R<Result<Sexp, Args>> {
+    args: &mut Args,
+) -> R<Option<Sexp>> {
     let object = value_of(promised[0].value)?;
     if object.is_object() {
         // S4 methods get the promises too, as GNU R's `R_possible_dispatch` does, and an S4
         // object without one falls back to S3 methods of its class.
         let value = if object.has_gp(gp::S4_OBJECT)
-            && let Some(value) = s4_dispatch(op, call, &promised, env)?
+            && let Some(value) = s4_dispatch(op, call, promised, env)?
         {
             Some(value)
         } else if let Some(found) =
             find_s3_method(definition.name, object, env, values::base_namespace(), None)?
         {
-            Some(apply_internal_method(call, found, &promised, env)?)
+            Some(apply_internal_method(call, found, promised, env)?)
         } else {
             None
         };
         if let Some(value) = value {
             interp().visible = true;
-            return Ok(Ok(value));
+            return Ok(Some(value));
         }
     }
-    let mut forced = Args::with_capacity(promised.len());
-    for arg in &promised {
+    for arg in promised {
         let value = if arg.value == missing_arg() || promise_of_missing(arg.value)? {
             missing_arg()
         } else {
             value_of(arg.value)?
         };
         crate::heap().root(value);
-        forced.push(Arg {
+        args.push(Arg {
             tag: arg.tag,
             value,
         });
     }
-    Ok(Err(forced))
+    Ok(None)
 }
 
 /// Whether `value` is an unforced promise of a symbol that is a missing argument where the

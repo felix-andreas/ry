@@ -16,17 +16,22 @@ use crate::object::Sexp;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-/// Frames this small are scanned; larger ones keep a hash index beside the cells.
-const INDEX_THRESHOLD: usize = 8;
+/// Frames this small are scanned; larger ones keep a hash index beside the cells. Scanning a
+/// dozen cells is cheaper than building the index, which a call to a function with many
+/// formals (`identical` has nine) would otherwise pay on every call.
+const INDEX_THRESHOLD: usize = 16;
+
+/// The cells a frame holds without a second allocation.
+const INLINE_CELLS: usize = 12;
 
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
 #[derive(Default)]
 pub struct Frame {
-    /// Inline up to the index threshold, because most frames are a call's few arguments and
-    /// locals, and a closure call should not pay for a second allocation beside the frame's own.
-    cells: SmallVec<[Sexp; INDEX_THRESHOLD]>,
+    /// Inline, because most frames are a call's few arguments and locals, and a closure call
+    /// should not pay for a second allocation beside the frame's own.
+    cells: SmallVec<[Sexp; INLINE_CELLS]>,
     index: Option<FxHashMap<Sexp, u32>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,
@@ -64,7 +69,11 @@ impl Frame {
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
     /// positive).
     pub fn set_hashed(&mut self, size: i32) {
-        self.hash_size = if size > 0 { size as u32 } else { HASH_MINIMUM_SIZE };
+        self.hash_size = if size > 0 {
+            size as u32
+        } else {
+            HASH_MINIMUM_SIZE
+        };
     }
 
     /// Marks every cell bound so far as a closure formal.
@@ -89,8 +98,11 @@ impl Frame {
         let mut size = self.hash_size as usize;
         let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); size];
         let mut count = 0;
-        let hashes: Vec<usize> =
-            self.cells.iter().map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize).collect();
+        let hashes: Vec<usize> = self
+            .cells
+            .iter()
+            .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
+            .collect();
         for (position, hash) in hashes.iter().enumerate() {
             buckets[hash % size].insert(0, position);
             count += 1;
@@ -104,7 +116,11 @@ impl Frame {
                 buckets = grown;
             }
         }
-        buckets.iter().flatten().map(|&position| self.cells[position]).collect()
+        buckets
+            .iter()
+            .flatten()
+            .map(|&position| self.cells[position])
+            .collect()
     }
 
     /// Adds a cell whose symbol the frame does not bind yet.

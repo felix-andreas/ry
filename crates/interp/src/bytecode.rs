@@ -527,6 +527,32 @@ pub unsafe fn local_symbols(body: Sexp, formals: Sexp) -> Option<FxHashSet<Sexp>
 
 /// Whether evaluating `expression` may modify a variable of the frame in place: it contains a
 /// replacement assignment such as `x[1] <- 9`, or code that evaluates other code in the frame.
+/// The builtin behind `.Internal(inner)` when the call can run as compiled code: an internal
+/// that takes evaluated arguments and never dispatches, called without `...`, empty arguments,
+/// or arguments that could modify an earlier one in place, so that evaluating them into
+/// registers is what the AST evaluator would do.
+unsafe fn compiled_internal(inner: Sexp) -> R<Option<Sexp>> {
+    if inner.kind() != SexpType::Language || inner.car().kind() != SexpType::Symbol {
+        return Ok(None);
+    }
+    let Some(function) = crate::builtins::internal_function(inner.car()) else {
+        return Ok(None);
+    };
+    if function.kind() != SexpType::Builtin || eval::builtin_def(function)?.generic != Generic::None
+    {
+        return Ok(None);
+    }
+    let args = values::pairlist_items(inner.cdr());
+    let simple = args
+        .iter()
+        .all(|(_, value)| *value != symbols().dots && *value != missing_arg())
+        && !args
+            .iter()
+            .skip(1)
+            .any(|(_, value)| may_modify_in_place(*value));
+    Ok(simple.then_some(function))
+}
+
 unsafe fn may_modify_in_place(expression: Sexp) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
@@ -717,6 +743,7 @@ impl Compiler {
                 ("<-" | "=", 2) => plain && args[0].1.kind() == SexpType::Symbol,
                 ("&&" | "||", 2) => plain,
                 ("function", 2..) => true,
+                (".Internal", 1) => plain && compiled_internal(args[0].1)?.is_some(),
                 (operator, 2) if plain && ARITHS.iter().any(|(_, symbol)| *symbol == operator) => {
                     args.iter()
                         .all(|(_, value)| *value != missing_arg() && *value != symbols().dots)
@@ -854,6 +881,7 @@ impl Compiler {
                 | "function"
                 | "[<-"
                 | "[[<-"
+                | ".Internal"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -938,6 +966,36 @@ impl Compiler {
             "(" => {
                 self.expression(args[0].1, dst)?;
                 self.emit(Op::Visible, &[]);
+            }
+            ".Internal" => {
+                let inner = args[0].1;
+                let Some(function) = compiled_internal(inner)? else {
+                    return self.fallback(call, dst);
+                };
+                let inner_args = values::pairlist_items(inner.cdr());
+                let mark = self.next_register;
+                let function_register = self.allocate();
+                let constant = self.constant(function);
+                self.emit(Op::Constant, &[function_register, constant]);
+                let base = self.next_register;
+                for _ in &inner_args {
+                    self.allocate();
+                }
+                for (index, (_, value)) in inner_args.iter().enumerate() {
+                    self.expression(*value, base + index as u32)?;
+                }
+                let inner_constant = self.constant(inner);
+                self.emit(
+                    Op::CallBuiltin,
+                    &[
+                        dst,
+                        function_register,
+                        inner_constant,
+                        base,
+                        inner_args.len() as u32,
+                    ],
+                );
+                self.release_to(mark);
             }
             "if" => {
                 let call_constant = self.constant(call);

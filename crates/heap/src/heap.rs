@@ -28,8 +28,8 @@ pub mod strings;
 use crate::{
     env::Frame,
     object::{
-        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, VECTOR_DATA_OFFSET, flag_bits,
-        gc_bits, gp, object_size, slot_for,
+        NA_LOGICAL, REFCOUNT_MAX, Sexp, SexpType, Shape, Slot, SymbolObject, VECTOR_DATA_OFFSET,
+        flag_bits, gc_bits, gp, object_size, slot_for,
     },
     records::Layouts,
     strings::{Encoding, StringTable},
@@ -459,7 +459,7 @@ impl Heap {
         Ok(())
     }
 
-/// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
+    /// Lets `resize_vector` change the length of a vector allocated with a fixed length, within
     /// the length it was allocated with. GNU R before 4.6 let native code shrink any vector this
     /// way (`SETLENGTH`), and binaries built then still do.
     pub unsafe fn mark_resizable(&mut self, vector: Sexp) {
@@ -837,7 +837,12 @@ impl Heap {
     /// Binds `symbol` in the frame of `env`, a function frame that does not bind it yet, and
     /// returns the new cell. A closure call binds each formal this way: formals are distinct, and
     /// the frame is new, so neither the probe nor the lock checks of [`Heap::define`] can matter.
-    pub unsafe fn define_fresh(&mut self, env: Sexp, symbol: Sexp, value: Sexp) -> HeapResult<Sexp> {
+    pub unsafe fn define_fresh(
+        &mut self,
+        env: Sexp,
+        symbol: Sexp,
+        value: Sexp,
+    ) -> HeapResult<Sexp> {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME) && self.frame_cell(env, symbol).is_none());
         let cell =
             self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
@@ -1033,7 +1038,13 @@ impl Heap {
 
     /// `allocate`, leaving the body uninitialized unless `zeroed`: a caller that writes every
     /// field itself, as a triple's does, saves clearing the slot on the hottest allocation path.
-    unsafe fn allocate_with(&mut self, kind: SexpType, size: usize, keep: &[Sexp], zeroed: bool) -> HeapResult<Sexp> {
+    unsafe fn allocate_with(
+        &mut self,
+        kind: SexpType,
+        size: usize,
+        keep: &[Sexp],
+        zeroed: bool,
+    ) -> HeapResult<Sexp> {
         self.maybe_collect(size, keep);
         let class = SLOT_SIZES.iter().position(|&slot| slot >= size);
         let (memory, size_class, gc) = match class {
@@ -1337,7 +1348,8 @@ impl Heap {
     /// next minor collection would free a live child.
     unsafe fn verify_barrier(&self) {
         let check = |parent: Sexp| {
-            if !parent.is_marked() || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
+            if !parent.is_marked()
+                || parent.gc_bits() & (gc_bits::REMEMBERED | gc_bits::ESCAPED) != 0
             {
                 return;
             }
@@ -1352,7 +1364,9 @@ impl Heap {
                             SexpType::String | SexpType::List | SexpType::Expression
                         ) =>
                     {
-                        children.extend((0..parent.length() as usize).map(|index| parent.element(index)));
+                        children.extend(
+                            (0..parent.length() as usize).map(|index| parent.element(index)),
+                        );
                     }
                     Shape::Triple => children.extend([parent.car(), parent.cdr(), parent.tag()]),
                     Shape::Environment => {
@@ -1366,7 +1380,8 @@ impl Heap {
                         children.extend([parent.external_tag(), parent.external_protected()])
                     }
                     Shape::Record => children.extend(
-                        (0..parent.record_slot_count()).filter_map(|slot| parent.record_handle(slot)),
+                        (0..parent.record_slot_count())
+                            .filter_map(|slot| parent.record_handle(slot)),
                     ),
                     _ => {}
                 }
@@ -1376,7 +1391,11 @@ impl Heap {
                     panic!(
                         "write barrier violated: old {:?} (length {}) holds young {:?} at child {position}",
                         parent.kind(),
-                        if parent.kind().shape() == Shape::Vector { parent.length() } else { 0 },
+                        if parent.kind().shape() == Shape::Vector {
+                            parent.length()
+                        } else {
+                            0
+                        },
                         child.kind(),
                     );
                 }
@@ -1668,7 +1687,9 @@ impl WellKnown {
 impl Default for GcPolicy {
     fn default() -> Self {
         GcPolicy {
-            young_limit: 32 * 1024 * 1024,
+            // A larger nursery collects less often but touches more fresh memory before its
+            // first collection, and first touches are what a short-lived process pays for most.
+            young_limit: 8 * 1024 * 1024,
             old_limit: 64 * 1024 * 1024,
             min_old_limit: 64 * 1024 * 1024,
             stress: GcStress::Off,

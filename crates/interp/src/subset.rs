@@ -375,6 +375,34 @@ unsafe fn resolve(
     }
 }
 
+/// The object and zero-based position of `x[i]` or `x[[i]]` with one untagged, attribute-free
+/// numeric scalar `i` inside the vector's bounds: the common case GNU R's byte code also
+/// answers before resolving subscripts in general.
+unsafe fn scalar_position(call: &Call<'_>) -> Option<(Sexp, usize)> {
+    let [object, index] = call.args else {
+        return None;
+    };
+    if object.tag != nil() || index.tag != nil() {
+        return None;
+    }
+    let (object, index) = (object.value, index.value);
+    if object.is_altrep()
+        || index.is_altrep()
+        || values::has_attributes(index)
+        || length(index) != 1
+    {
+        return None;
+    }
+    let position = match index.kind() {
+        SexpType::Integer => index.slice::<i32>()[0] as f64,
+        SexpType::Real => index.slice::<f64>()[0],
+        _ => return None,
+    };
+    // NaN fails both comparisons, and `x[2.7]` truncates to the second element.
+    (position >= 1.0 && position < length(object) as f64 + 1.0)
+        .then(|| (object, position as usize - 1))
+}
+
 /// Splits a builtin's arguments into the object, the subscripts, and `drop`/`exact`.
 unsafe fn subset_args(call: &Call<'_>) -> (Sexp, Vec<Sexp>, Option<Sexp>, Option<Sexp>) {
     let mut object = nil();
@@ -404,6 +432,12 @@ unsafe fn subset_args(call: &Call<'_>) -> (Sexp, Vec<Sexp>, Option<Sexp>, Option
 // `[`.
 
 unsafe fn do_subset(call: &Call<'_>) -> R<Sexp> {
+    if let Some((object, position)) = scalar_position(call)
+        && !values::has_attributes(object)
+        && object.kind().is_atomic()
+    {
+        return vector_element(object, position);
+    }
     let (object, indices, drop, _) = subset_args(call);
     let drop = drop.is_none_or(|drop| values::as_logical_scalar(drop) != 0);
     subset(object, &indices, drop, call.call)
@@ -644,6 +678,15 @@ unsafe fn array_subset(
 // `[[`.
 
 unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
+    if let Some((object, position)) = scalar_position(call)
+        && !object.is_object()
+    {
+        match object.kind() {
+            SexpType::List | SexpType::Expression => return Ok(object.element(position)),
+            kind if kind.is_atomic() => return vector_element(object, position),
+            _ => {}
+        }
+    }
     let (object, indices, _, exact) = subset_args(call);
     let exact = match exact {
         Some(exact) => match values::as_logical_scalar(exact) {

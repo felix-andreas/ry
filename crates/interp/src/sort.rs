@@ -856,7 +856,10 @@ unsafe fn do_identical(call: &Call<'_>) -> R<Sexp> {
         "extptr.as.ref",
     ];
     for (position, name) in names.iter().enumerate() {
-        settings[position] = flag(call.arg(position + 2), &format!("invalid '{name}' value"))?;
+        settings[position] = match as_logical_scalar(call.arg(position + 2)) {
+            NA_LOGICAL => return Err(error(format!("invalid '{name}' value"))),
+            value => value != 0,
+        };
     }
     let flags = IdenticalFlags {
         num_eq: settings[0],

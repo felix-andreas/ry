@@ -348,10 +348,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
         SexpType::Special => {
             let definition = builtin_def(function)?;
             if definition.is_dispatch_or_eval() {
-                return match dispatch::dispatch_or_eval(definition, call, function, arguments, env)?
-                {
-                    Ok(value) => Ok(value),
-                    Err(args) => call_builtin(definition, call, function, &args, env),
+                let mut args = Args::new();
+                return match dispatch::dispatch_or_eval(
+                    definition, call, function, arguments, env, &mut args,
+                )? {
+                    Some(value) => Ok(value),
+                    None => call_builtin(definition, call, function, &args, env),
                 };
             }
             call_builtin(
@@ -374,7 +376,8 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
             call_builtin(definition, call, function, &args, env)
         }
         SexpType::Closure => {
-            let args = promise_args(arguments, env)?;
+            let mut args = Args::new();
+            promise_args_into(arguments, env, &mut args)?;
             apply_closure(call, function, &args, env, None)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
@@ -579,11 +582,27 @@ unsafe fn recorded_formals(name: &str) -> R<Option<Option<Box<[String]>>>> {
 /// Evaluates a builtin's arguments, expanding `...`.
 pub unsafe fn evaluate_args(arguments: Sexp, env: Sexp, keep_missing: bool, call: Sexp) -> R<Args> {
     let mut args = Args::new();
-    let result = collect_evaluated_args(arguments, env, keep_missing, call, &mut args);
-    for arg in &args {
+    evaluate_args_into(arguments, env, keep_missing, call, &mut args)?;
+    Ok(args)
+}
+
+/// [`evaluate_args`], appending to `args`. The values already there count as referenced while
+/// the rest evaluate, like the arguments evaluated before them.
+pub unsafe fn evaluate_args_into(
+    arguments: Sexp,
+    env: Sexp,
+    keep_missing: bool,
+    call: Sexp,
+    args: &mut Args,
+) -> R<()> {
+    for arg in args.iter() {
+        arg.value.increment_refcount();
+    }
+    let result = collect_evaluated_args(arguments, env, keep_missing, call, args);
+    for arg in args.iter() {
         arg.value.decrement_refcount();
     }
-    result.map(|()| args)
+    result
 }
 
 /// Evaluates arguments into `args`, counting each value as referenced until the caller is done:
@@ -665,9 +684,16 @@ unsafe fn counted_push(args: &[Arg]) {
 }
 
 /// Wraps a closure's arguments in promises, expanding `...` into the promises it holds.
-pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Args> {
-    let dots = symbols().dots;
+pub unsafe fn promise_args(arguments: Sexp, env: Sexp) -> R<Args> {
     let mut args = Args::new();
+    promise_args_into(arguments, env, &mut args)?;
+    Ok(args)
+}
+
+/// [`promise_args`], appending to `args`, which a caller keeps on its own stack instead of
+/// moving a returned argument vector through every frame.
+pub unsafe fn promise_args_into(mut arguments: Sexp, env: Sexp, args: &mut Args) -> R<()> {
+    let dots = symbols().dots;
     while arguments.kind() == SexpType::Pairlist {
         let expression = arguments.car();
         if expression == dots {
@@ -699,7 +725,7 @@ pub unsafe fn promise_args(mut arguments: Sexp, env: Sexp) -> R<Args> {
         }
         arguments = arguments.cdr();
     }
-    Ok(args)
+    Ok(())
 }
 
 /// Calls any function with arguments that are values or promises, as `do.call` and the apply
@@ -2019,8 +2045,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
             env = crate::envir::sys_frame(which, call.env)?;
         }
         _ => {
-            return Err(call
-                .error("invalid 'envir' argument of type '".to_string() + env.kind().name() + "'"));
+            return Err(call.error(
+                "invalid 'envir' argument of type '".to_string() + env.kind().name() + "'",
+            ));
         }
     }
     // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame
@@ -2403,9 +2430,17 @@ unsafe fn apply_setter(setter_call: Sexp, whole: Sexp, env: Sexp) -> R<Sexp> {
         }
         SexpType::Special if builtin_def(function)?.is_dispatch_or_eval() => {
             let definition = builtin_def(function)?;
-            match dispatch::dispatch_or_eval(definition, setter_call, function, arguments, env)? {
-                Ok(value) => Ok(value),
-                Err(args) => call_builtin(definition, whole, function, &args, env),
+            let mut args = Args::new();
+            match dispatch::dispatch_or_eval(
+                definition,
+                setter_call,
+                function,
+                arguments,
+                env,
+                &mut args,
+            )? {
+                Some(value) => Ok(value),
+                None => call_builtin(definition, whole, function, &args, env),
             }
         }
         _ => apply_call(setter_call, function, arguments, env),
