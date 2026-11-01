@@ -2939,7 +2939,8 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     }
     let mut pieces: Vec<(Sexp, usize, bool)> = Vec::new();
     let mut total = 0usize;
-    for arg in &items {
+    let mut warned = false;
+    for (position, arg) in items.iter().enumerate() {
         match values::dims(arg.value).filter(|dims| dims.len() == 2) {
             Some(dims) => {
                 let count = if by_row { dims[0] } else { dims[1] };
@@ -2947,6 +2948,37 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
                 total += count;
             }
             None => {
+                let source_length = length(arg.value);
+                // A zero-length vector contributes nothing once some argument has fixed a
+                // nonzero extent, rather than a row or column of NA.
+                if source_length == 0 && extent > 0 {
+                    pieces.push((arg.value, 0, false));
+                    continue;
+                }
+                let uneven = source_length > 0
+                    && extent > 0
+                    && (if source_length > extent {
+                        source_length % extent
+                    } else {
+                        extent % source_length
+                    }) != 0;
+                if uneven && !warned {
+                    warned = true;
+                    let direction = if by_row { "columns" } else { "rows" };
+                    // The warning names the `rbind` or `cbind` closure call, not the internal.
+                    let frames = &crate::interp().frames;
+                    let closure_call = frames
+                        .iter()
+                        .rposition(|frame| frame.env == call.env)
+                        .map_or(call.call, |position| frames[position].call);
+                    crate::conditions::warning_call(
+                        closure_call,
+                        &format!(
+                            "number of {direction} of result is not a multiple of vector length (arg {})",
+                            position + 1
+                        ),
+                    )?;
+                }
                 pieces.push((arg.value, 1, false));
                 total += 1;
             }
