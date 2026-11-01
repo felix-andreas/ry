@@ -509,18 +509,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). A
   direct call's result type comes from the callee's declared return type when the call site has no
   feedback yet (`call_result_at` in `crates/jit/src/analysis.rs`), so typed `fib` compiles on its
-  first try. Nothing else reads the annotations, and typed code is still up to about 10% slower than
-  untyped code (`closures`, `fib`, `vasicek`) because every call runs the argument and return checks
-  (`annotations::enter`, `check_return`). Next: skip a direct call's argument checks when the
+  first try, and typed Arrays compile to direct item loads and stores (`decisions.md`, "Arrays are
+  their own JIT types"). Typed and untyped code now run within measurement noise of each other, but
+  every call still runs the argument and return checks (`annotations::enter`, `check_return`). Next: skip a direct call's argument checks when the
   compile-time argument types already satisfy the callee's masks, and the return check when the
   compiled body provably returns the declared type.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
-- **`uniroot(extendInt = "yes")` loops to its iteration limit under `RY_JIT=force`** after another
-  closure with a formal named `f` ran first (`stats__optimize_and_integrate`, the `ry-jit` engine
-  only). The `while` condition `f.lower * f.upper > 0` keeps reading the old `f.upper` after the
-  body reassigns it inside `is.na(f.upper <- f(...))`; both are formals with defaults
-  (`defaulted`). Already on main before the statement-clearing work.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.

@@ -226,6 +226,13 @@ fn seeds_agree_across_tiers() {
             "(n = 600L)",
             false,
         ),
+        // A loop compiled before the one after it has run: the second loop guesses an integer
+        // sequence, and a double one deoptimizes.
+        (
+            "s <- 0\nfor (x in 1:n) s <- s + x\nfor (y in as.numeric(1:n) / 2) s <- s + y\ns",
+            "(n = 600L)",
+            false,
+        ),
         // A promise forced by a load whose type guard then fails keeps the visibility it set.
         (
             "wv <- function(x) .Internal(withVisible(x))\nseen <- 0L\nfor (i in 1:n) if (wv(if (i < 400L) i else y <- 2.5)$visible) seen <- seen + 1L\nseen",

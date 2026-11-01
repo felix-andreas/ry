@@ -251,9 +251,9 @@ impl<'a> State<'a> {
         state
     }
 
-    /// Forgets every variable, after code that may have rebound any of them ran.
-    /// Forgets every variable's value but keeps its type, which a reload whose instruction
-    /// has no feedback yet speculates on (and checks).
+    /// Forgets every variable's value, after code that may have rebound any of them ran, but
+    /// keeps its type, which a reload whose instruction has no feedback yet speculates on (and
+    /// checks).
     fn forget_slots(&mut self) {
         for slot in &mut self.slots {
             slot.status = status::NOT_LOADED;
@@ -518,8 +518,10 @@ pub enum Action<'a> {
     /// Nothing: the instruction is unreachable or folds away.
     Skip,
     /// Stores `NULL` into registers whose values are dead, so the collector can reclaim them.
+    /// `register` and the registers in `range`.
     Clear {
-        registers: Vec<usize>,
+        register: usize,
+        range: (usize, usize),
     },
     Constant {
         dst: usize,
@@ -1576,14 +1578,17 @@ impl<'a> Builder<'a> {
                     | Ty::Dbl
                     | Ty::Lgl => None,
                     _ => {
-                        if self.never_ran(inst.pc) {
-                            return Err(Refusal(if self.patient {
-                                COLD
-                            } else {
-                                "a for loop that has never run"
-                            }));
-                        }
-                        let speculated = self.feedback_at(inst.pc);
+                        let speculated = if !self.never_ran(inst.pc) {
+                            self.feedback_at(inst.pc)
+                        } else if self.patient {
+                            return Err(Refusal(COLD));
+                        } else {
+                            // A loop that has not run yet, in a body compiled for another hot
+                            // loop or after waiting long enough: refusing would give up on the
+                            // whole body, so the loop guesses the most common sequence, `1:n`,
+                            // and a wrong guess deoptimizes and recompiles with real feedback.
+                            Ty::IntVec
+                        };
                         if !matches!(
                             speculated,
                             Ty::IntVec
@@ -1663,15 +1668,15 @@ impl<'a> Builder<'a> {
             // clears the finished statement's registers too, or they would keep its temporaries
             // alive until the function returns.
             Op::EndStatement => {
-                let registers: Vec<usize> = std::iter::once(operand(0))
-                    .chain(operand(1)..operand(2))
-                    .collect();
-                for &register in &registers {
+                for register in std::iter::once(operand(0)).chain(operand(1)..operand(2)) {
                     if let Some(ty) = state.registers.get_mut(register) {
                         *ty = Ty::Boxed;
                     }
                 }
-                Action::Clear { registers }
+                Action::Clear {
+                    register: operand(0),
+                    range: (operand(1), operand(2)),
+                }
             }
             Op::Closure => {
                 state.visible = Some(true);

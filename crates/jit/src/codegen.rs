@@ -61,8 +61,8 @@ const ATTRIB: i32 = 8;
 const LENGTH: i32 = 16;
 const DATA: i32 = VECTOR_DATA_OFFSET as i32;
 const ALTREP_FLAG: i64 = 1 << 1;
-/// ry's `Array<T>`: strict operator and indexing rules that the specialized paths do not apply,
-/// so an Array fails every type guard and runs on the generic path.
+/// ry's `Array<T>`: its own JIT types (`Ty::IntArr` and so on), and it fails every guard for a
+/// plain vector, whose operator and indexing rules differ.
 const ARRAY_FLAG: i64 = 1 << 4;
 const OBJECT_FLAG: i64 = 1 << 0;
 
@@ -400,12 +400,12 @@ impl<'p, 'b> Translator<'p, 'b> {
         let pc = inst.pc;
         match action {
             Action::Skip | Action::FallThrough => {}
-            Action::Clear { registers } => {
+            Action::Clear { register, range } => {
                 let nil = self
                     .builder
                     .ins()
                     .iconst(I64, interp::heap().known().nil.as_ptr() as i64);
-                for register in registers {
+                for register in std::iter::once(register).chain(range.0..range.1) {
                     self.store_register(register, nil);
                 }
             }
