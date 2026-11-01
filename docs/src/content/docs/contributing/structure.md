@@ -117,13 +117,13 @@ The library root is `src/ry.rs`, and the binary root is `src/main.rs`.
 - **`stats.rs`**: the performance diagnosis behind `ry debug analysis-stats`.
 - **`repl_completer.rs`**: completion for the interactive console.
 - **`load.rs`**: package loading in R sessions: the `.Call` routines and file watcher behind
-  `ry repl`, the plan emitter behind the hidden `ry load --emit-plan`, and the R code that installs the
+  the `ry R` console, the plan emitter behind the hidden `ry load --emit-plan`, and the R code that installs the
   runtime, byte-compiled once and cached.
 
 ## `repl`
 
-The crate root is `src/repl.rs`. This crate backs `ry repl` and `ry run`, and it finds and loads the
-system's R at runtime. That is why the rest of the workspace builds, and analyzes R, on a machine
+The crate root is `src/repl.rs`. This crate backs `ry run` and `ry R`, and it finds and loads the
+system's R, or ry's runtime library, at runtime. That is why the rest of the workspace builds, and analyzes R, on a machine
 with no R installed.
 
 - **`repl.rs`**: the session, with evaluation, the read-eval-print loop, and the exit codes.

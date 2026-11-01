@@ -4,14 +4,16 @@
 //! Base R's R code is read from the user's GNU R installation, never vendored (see
 //! `decisions.md`, "runtime licensing").
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    conditions, eval, interp, print, scope,
-    unwind::{Jump, R, Unwind, error},
-    values::{self, base_env, base_namespace, global_env, length, nil},
-    write_console,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        conditions, eval, interp, print, scope,
+        unwind::{Jump, R, Unwind, error},
+        values::{self, base_env, base_namespace, global_env, length, nil},
+        write_console,
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[internal("mkUnbound", 1, do_mk_unbound).invisible()];
 
@@ -69,11 +71,17 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     if options.user_profile {
         // A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
         // points it at its own profile).
-        let user = match std::env::var("R_PROFILE_USER").ok().filter(|path| !path.is_empty()) {
+        let user = match std::env::var("R_PROFILE_USER")
+            .ok()
+            .filter(|path| !path.is_empty())
+        {
             Some(path) => Some(crate::connections::expand_path(&path)),
-            None => [".Rprofile".to_owned(), crate::connections::expand_path("~/.Rprofile")]
-                .into_iter()
-                .find(|path| std::path::Path::new(path).exists()),
+            None => [
+                ".Rprofile".to_owned(),
+                crate::connections::expand_path("~/.Rprofile"),
+            ]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists()),
         };
         if let Some(user) = user.filter(|path| std::path::Path::new(path).exists()) {
             source_file(&user, global_env())?;
@@ -271,7 +279,10 @@ unsafe fn keep_source() -> bool {
 /// With `halt_on_error`, the console is GNU R's non-interactive one (`R < file`, or callr
 /// driving `R` over a pipe): the first error ends the session with `Execution halted`, unless
 /// `options(error =)` holds a handler.
-pub unsafe fn run_console(mut read: impl FnMut(&str) -> Option<String>, halt_on_error: bool) -> Outcome {
+pub unsafe fn run_console(
+    mut read: impl FnMut(&str) -> Option<String>,
+    halt_on_error: bool,
+) -> Outcome {
     let mut buffer = String::new();
     loop {
         let prompt = if buffer.is_empty() { "> " } else { "+ " };

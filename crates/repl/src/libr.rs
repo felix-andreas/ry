@@ -2,17 +2,23 @@
 //! Symbols resolve eagerly so a missing one fails at startup by name; constant
 //! globals are only valid after `setup_Rmainloop`.
 
-use crate::ReplError;
-use libloading::Library;
-use std::env;
-use std::ffi::{CStr, CString, c_char, c_int, c_uchar, c_void};
 #[cfg(unix)]
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::ptr;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use {
+    crate::ReplError,
+    libloading::Library,
+    std::{
+        env,
+        ffi::{CStr, CString, c_char, c_int, c_uchar, c_void},
+        path::{Path, PathBuf},
+        process::Command,
+        ptr,
+        sync::{
+            OnceLock,
+            atomic::{AtomicPtr, Ordering},
+        },
+    },
+};
 
 /// Fill `buffer` (capacity `length`, NUL-terminated, newline included) and
 /// return 1, or return 0 for EOF.
@@ -322,21 +328,26 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        interactive: bool,
+        arguments: &[String],
     ) -> Result<(), ReplError> {
+        let trailing = trailing_arguments(arguments)?;
         // R re-derives R_HOME through its own lookup; export ours so both agree.
         unsafe { env::set_var("R_HOME", &self.r_home) };
         export_wrapper_path_vars(&self.r_home);
 
-        let mut argv: Vec<*mut c_char> = [
-            c"repl",
-            c"--interactive",
-            c"--no-save",
-            c"--no-restore-data",
-        ]
-        .iter()
-        .chain(quiet.then_some(&c"--quiet"))
-        .map(|argument| argument.as_ptr() as *mut c_char)
-        .collect();
+        let mut argv: Vec<*mut c_char> = [c"repl", c"--no-save", c"--no-restore-data"]
+            .iter()
+            .chain(interactive.then_some(&c"--interactive"))
+            // `--no-echo` also keeps R from ending the session with a newline of its own.
+            .chain(quiet.then_some(&c"--no-echo"))
+            .map(|argument| argument.as_ptr() as *mut c_char)
+            .chain(
+                trailing
+                    .iter()
+                    .map(|argument| argument.as_ptr() as *mut c_char),
+            )
+            .collect();
 
         unsafe {
             *self.running_as_main_program = 1;
@@ -344,7 +355,8 @@ impl RApi {
             // terminal state and our SIGINT-to-flag translation.
             *self.signal_handlers = 0;
             (self.initialize)(argv.len() as c_int, argv.as_mut_ptr());
-            *self.interactive = 1;
+            // A script reports `interactive()` as FALSE, as under Rscript; a console, TRUE.
+            *self.interactive = c_int::from(interactive);
             // NULL console files route all output through the hooks below.
             *self.consolefile = ptr::null_mut();
             *self.outputfile = ptr::null_mut();
@@ -367,9 +379,18 @@ impl RApi {
         read_console: ReadConsole,
         write_console_ex: WriteConsoleEx,
         quiet: bool,
+        interactive: bool,
+        arguments: &[String],
     ) -> Result<(), ReplError> {
         unsafe { env::set_var("R_HOME", &self.r_home) };
-        let mut argv = [c"ry".as_ptr() as *mut c_char];
+        let trailing = trailing_arguments(arguments)?;
+        let mut argv: Vec<*mut c_char> = std::iter::once(c"ry".as_ptr() as *mut c_char)
+            .chain(
+                trailing
+                    .iter()
+                    .map(|argument| argument.as_ptr() as *mut c_char),
+            )
+            .collect();
 
         let rhome = CString::new(self.r_home.to_string_lossy().into_owned())
             .map_err(|_| ReplError("R_HOME contains a NUL byte".to_owned()))?;
@@ -397,8 +418,9 @@ impl RApi {
                         .to_owned(),
                 ));
             }
-            start.r_interactive = 1;
+            start.r_interactive = c_int::from(interactive);
             start.r_quiet = c_int::from(quiet);
+            start.r_no_echo = c_int::from(quiet);
             start.restore_action = SA_NORESTORE;
             start.save_action = SA_NOSAVE;
             start.rhome = rhome.as_ptr() as *mut c_char;
@@ -688,10 +710,26 @@ pub unsafe fn prompt_text(prompt: *const c_char) -> String {
         .into_owned()
 }
 
+/// `--args` and then `arguments`, which R hands to `commandArgs(trailingOnly = TRUE)` without
+/// reading them as options. R copies the command line while it initializes, so the strings
+/// need to outlive only that call.
+fn trailing_arguments(arguments: &[String]) -> Result<Vec<CString>, ReplError> {
+    if arguments.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::iter::once(Ok(c"--args".to_owned()))
+        .chain(
+            arguments
+                .iter()
+                .map(|argument| CString::new(argument.as_bytes())),
+        )
+        .collect::<Result<Vec<CString>, _>>()
+        .map_err(|_| ReplError("an argument contains a NUL byte".to_owned()))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
-    use super::*;
-    use std::process;
+    use {super::*, std::process};
 
     #[test]
     fn missing_r_is_an_actionable_error() {

@@ -16,6 +16,49 @@ n <- Result.and_then(parse("4"), function(x) if (x > 0L) :Ok(x) else :Err(:Inval
 parse: fn(text: character) -> Result<integer, :InvalidNumStr>
 n: :Ok(integer) | :Err(:InvalidNumStr)
 
+#---- and_then_widens_the_error
+n <- Result.and_then(Str.to_integer("4"), function(x) if (x > 0L) :Ok(x) else :Err(:NotPositive))
+#++++
+n: :Ok(integer) | :Err(:InvalidNumStr | :NotPositive)
+
+#---- and_then_with_a_step_that_never_fails
+n <- Result.and_then(Str.to_integer("4"), function(x) :Ok(x + 1L))
+#++++
+n: :Ok(integer) | :Err(:InvalidNumStr)
+
+#---- and_then_keeps_an_outer_step_open
+g <- function(r, step) Result.and_then(r, step)
+#++++
+g: <T, U, V, W> fn(r: :Ok(T) | :Err(U), step: fn(T) -> :Ok(V) | :Err(W)) -> :Ok(V) | :Err(U | W)
+
+#---- an_open_parameter_filled_by_an_argument_is_kept
+pick <- function(xs) Find(function(x) TRUE, xs)
+v <- pick(list("a", "b"))
+w <- if (!is.null(v)) Str.trim(v) else ""
+#++++
+pick: <T> fn(xs: list[T] | T[]) -> T | NULL
+v: character | NULL
+w: character
+
+#---- a_return_only_parameter_is_kept
+#: <T> fn(name: character) -> T | NULL
+lookup <- function(name) NULL
+v <- lookup("a")
+w <- if (!is.null(v)) Str.trim(v) else ""
+#++++
+lookup: <T> fn(name: character) -> T | NULL
+v: Unknown
+w: character
+
+#---- and_then_meets_a_widened_annotation
+#: @param text {character}
+#: @return {Result<integer, :InvalidNumStr | :NotPositive>}
+positive <- function(text) {
+  Result.and_then(Str.to_integer(text), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+}
+#++++
+positive: fn(text: character) -> Result<integer, :InvalidNumStr | :NotPositive>
+
 #---- map_err_replaces_the_error
 r <- Result.map_err(Str.to_double("x"), function(e) "not a number")
 #++++
@@ -36,6 +79,11 @@ parse: fn(text: character) -> Result<integer, :InvalidNumStr>
 check <- function(x) if (x > 0L) :Good(x) else :Bad
 #++++
 check: fn(x: integer) -> Result<integer>
+
+#---- map2_joins_both_errors
+r <- Result.map2(Str.to_integer("2"), Str.to_double("3"), function(a, b) a * b)
+#++++
+r: :Ok(double) | :Err(:InvalidNumStr)
 
 #==== list
 #---- from_vector_keeps_the_element_type
@@ -89,6 +137,29 @@ n <- List.len(c(1, 2))
 n: Unknown
 14..21 error[type-mismatch] expected `list[T]`, found `double[]`
 
+#---- walk_try_returns_the_state_or_the_error
+r <- List.walk_try(list(1L, 2L), 0L, function(s, x) if (x > 0L) :Ok(s + x) else :Err(:Negative))
+#++++
+r: :Ok(integer) | :Err(:Negative)
+
+#---- replace_returns_the_list_and_the_old_value
+r <- List.replace(list("a", "b"), 1L, "z")
+#++++
+r: Record{list: list[character], value: character}
+
+#---- sort_asc_needs_numbers
+a <- List.sort_asc(list(3L, 1L))
+b <- List.sort_asc(list("b", "a"))
+#++++
+a: list[integer]
+b: Unknown
+52..66 error[type-mismatch] expected `list[T]`, found `list{character, character}`
+
+#---- for_each_returns_null
+n <- List.for_each(list(1L), function(x) x)
+#++++
+n: NULL
+
 #==== str
 #---- split_on_returns_a_list_of_strings
 words <- Str.split_on("a b", " ")
@@ -108,6 +179,11 @@ n <- Str.trim(1L)
 n: Unknown
 14..16 error[type-mismatch] expected `character`, found `integer`
 
+#---- walk_utf8_folds_bytes
+total <- Str.walk_utf8("abc", 0L, function(s, b) s + b)
+#++++
+total: integer
+
 #==== num
 #---- checked_addition_keeps_the_number_type
 sum <- Num.add_checked(1L, 2L)
@@ -118,6 +194,20 @@ sum: :Ok(integer) | :Err(:Overflow)
 order <- Num.compare(1, 2)
 #++++
 order: :LT | :EQ | :GT
+
+#---- rounding_keeps_the_number_type
+a <- Num.round(2.5)
+b <- Num.floor(3L)
+c <- Num.to_integer_checked(2.9)
+#++++
+a: double
+b: integer
+c: :Ok(integer) | :Err(:OutOfBounds)
+
+#---- approx_eq_takes_optional_tolerances
+same <- Num.is_approx_eq(1, 1.05, rtol = 0.1)
+#++++
+same: logical
 
 #==== dict_and_set
 #---- dict_from_list_infers_key_and_value
@@ -156,6 +246,11 @@ n <- length(s)
 #++++
 s: Set<character>
 n: integer
+
+#---- join_map_changes_key_and_value_types
+d <- Dict.join_map(Dict.single("a", 1L), function(k, v) Dict.single(v, k))
+#++++
+d: Dict<integer, character>
 
 #==== conversions
 #---- lists_convert_to_ry_values

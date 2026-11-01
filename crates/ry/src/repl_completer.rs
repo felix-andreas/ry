@@ -1,10 +1,13 @@
 //! Completion over the session-as-script: accepted lines form a script document.
 
-use repl::reedline::{Span, Suggestion};
-use salsa::Setter;
-use semantics::stubs::install_shipped_stubs;
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use syntax::TextSize;
+use {
+    repl::reedline::{Span, Suggestion},
+    salsa::Setter,
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile, stubs::install_shipped_stubs,
+    },
+    syntax::TextSize,
+};
 
 pub struct AnalysisCompleter {
     db: RootDatabase,
@@ -82,8 +85,7 @@ impl repl::SessionCompleter for AnalysisCompleter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use repl::SessionCompleter;
+    use {super::*, repl::SessionCompleter};
 
     #[test]
     fn stdlib_names_complete_with_types() {

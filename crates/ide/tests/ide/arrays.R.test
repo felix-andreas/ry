@@ -1,0 +1,90 @@
+#==== arrays
+#---- hover_on_an_array
+x$0s <- [1, 2, 3]
+#++++
+hover 0..2: xs: Array<double>
+hover-definition: global 0..2
+definition 0..2
+references: 0..2*
+rename: 1 edit(s)
+type-definition: stub source 11 at `Array`
+signature: none
+action: Add inferred type annotation for `xs`
+  edit 0..0 -> "#: Array<double>\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Array<double>\n"
+completion (29): xs, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
+hint @2: Array<double>
+
+#---- hover_on_an_item_read
+xs <- [1L, 2L]
+first <- x$0s[[1]]
+#++++
+hover 24..26: xs: Array<integer>
+hover-definition: global 0..2
+definition 0..2
+references: 0..2*, 24..26
+rename: 2 edit(s)
+type-definition: stub source 11 at `Array`
+signature: none
+action: Add inferred type annotation for `first`
+  edit 15..15 -> "#: integer\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Array<integer>\n"
+  edit 15..15 -> "#: integer\n"
+completion (29): xs, X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs
+hint @2: Array<integer>
+hint @20: integer
+
+#---- hover_on_an_array_of_records
+po$0ints <- [(x = 1, y = 2), (x = 3, y = 4)]
+#++++
+hover 0..6: points: Array<Record{x: double, y: double}>
+hover-definition: global 0..6
+definition 0..6
+references: 0..6*
+rename: 1 edit(s)
+type-definition: stub source 11 at `Array`
+signature: none
+action: Add inferred type annotation for `points`
+  edit 0..0 -> "#: Array<Record{x: double, y: double}>\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: Array<Record{x: double, y: double}>\n"
+completion (19): points, points.default, poisson, poisson.test, poly, polygon, polym, polypath
+hint @6: Array<Record{x: double, y: double}>
+
+#---- completion_of_the_array_type
+#: Arr$0
+xs <- [1, 2]
+#++++
+hover 3..6: Arr
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): Array
+
+#---- signature_picks_the_array_overload
+doubled <- List.map([1, 2], f$0)
+#++++
+hover 28..29: f: Unknown
+definition: none
+references: none
+rename: none
+signature: fn(list: Array<double>, f: fn(double) -> T) -> Array<T> (active)
+parameters: list: Array<double> | [f: fn(double) -> T]
+signature: <T, U> fn(list: list[T], f: fn(T) -> U) -> list[U]
+parameters: list: list[T] | [f: fn(T) -> U]
+completion (102): F, FALSE, for, function, factanal, factor, factor.scope, factorial
+
+#---- hover_on_the_for_variable
+for (item in ["a", "b"]) print(it$0em)
+#++++
+hover 31..35: item: character
+hover-definition: local 5..9
+definition 5..9
+references: 5..9*, 31..35
+rename: 2 edit(s)
+signature: fn(x: character, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> character
+parameters: [x: character] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+completion (1): item

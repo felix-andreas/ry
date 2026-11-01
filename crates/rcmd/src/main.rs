@@ -25,11 +25,15 @@ fn main() -> ExitCode {
         };
     }
     let Some(home) = std::env::var_os("R_HOME").map(PathBuf::from) else {
-        eprintln!("ry-rcmd: R_HOME is not set; run it through bin/R of an R home that `rcmd::assemble` created");
+        eprintln!(
+            "ry-rcmd: R_HOME is not set; run it through bin/R of an R home that `rcmd::assemble` created"
+        );
         return ExitCode::from(2);
     };
     let result = match arguments.split_first() {
-        Some((front, rest)) if front == "R" => rcmd::r_command_line(rest).and_then(|session| run_r(&home, &session)),
+        Some((front, rest)) if front == "R" => {
+            rcmd::r_command_line(rest).and_then(|session| run_r(&home, &session))
+        }
         Some((front, rest)) if front == "Rscript" => {
             rcmd::rscript_command_line(rest).and_then(|session| run_r(&home, &session))
         }
@@ -65,7 +69,11 @@ fn assemble(arguments: &[String]) -> rcmd::Result<PathBuf> {
         };
         *slot = rest.next().map(PathBuf::from);
     }
-    let usage = || rcmd::Error::Usage("usage: ry-rcmd assemble ROOT --include DIR --libr FILE [--gnu-r-home DIR]".into());
+    let usage = || {
+        rcmd::Error::Usage(
+            "usage: ry-rcmd assemble ROOT --include DIR --libr FILE [--gnu-r-home DIR]".into(),
+        )
+    };
     let (Some(root), Some(include), Some(libr)) = (root, include, libr) else {
         return Err(usage());
     };
@@ -75,12 +83,16 @@ fn assemble(arguments: &[String]) -> rcmd::Result<PathBuf> {
             let output = std::process::Command::new("R")
                 .arg("RHOME")
                 .output()
-                .map_err(|error| rcmd::Error::Usage(format!("cannot run `R RHOME` to find GNU R: {error}")))?;
+                .map_err(|error| {
+                    rcmd::Error::Usage(format!("cannot run `R RHOME` to find GNU R: {error}"))
+                })?;
             PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
         }
     };
-    let rcmd = std::env::current_exe().map_err(|error| rcmd::Error::Io(PathBuf::from("ry-rcmd"), error))?;
-    let absolute = |path: PathBuf| std::path::absolute(&path).map_err(|error| rcmd::Error::Io(path, error));
+    let rcmd = std::env::current_exe()
+        .map_err(|error| rcmd::Error::Io(PathBuf::from("ry-rcmd"), error))?;
+    let absolute =
+        |path: PathBuf| std::path::absolute(&path).map_err(|error| rcmd::Error::Io(path, error));
     let root = absolute(root)?;
     rcmd::assemble(
         &root,
@@ -98,7 +110,8 @@ fn assemble(arguments: &[String]) -> rcmd::Result<PathBuf> {
 /// Runs a session on ry's runtime, the `libR.so` of the R home, which also holds the
 /// interpreter.
 fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
-    let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session {
+    let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session
+    {
         rcmd::Session::Print(text) => {
             print!("{text}");
             return Ok(0);
@@ -114,7 +127,14 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
             default_packages,
             site_profile,
             user_profile,
-        } => (file, expressions, arguments, default_packages, *site_profile, *user_profile),
+        } => (
+            file,
+            expressions,
+            arguments,
+            default_packages,
+            *site_profile,
+            *user_profile,
+        ),
     };
     if let Some(packages) = default_packages {
         // SAFETY: no other thread exists yet.
@@ -131,22 +151,47 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
             libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL,
         )
     }
-    .map_err(|error| rcmd::Error::Usage(format!("cannot load ry's runtime {}: {error}", library_path.display())))?;
-    type Run = unsafe extern "C" fn(*const c_char, *const c_char, c_int, *const *const c_char, c_int) -> c_int;
+    .map_err(|error| {
+        rcmd::Error::Usage(format!(
+            "cannot load ry's runtime {}: {error}",
+            library_path.display()
+        ))
+    })?;
+    type Run = unsafe extern "C" fn(
+        *const c_char,
+        *const c_char,
+        c_int,
+        *const *const c_char,
+        c_int,
+    ) -> c_int;
     let run = unsafe { library.get::<Run>(b"ry_run\0") }
         .map(|symbol| *symbol)
-        .map_err(|error| rcmd::Error::Usage(format!("{} is not ry's runtime: {error}", library_path.display())))?;
+        .map_err(|error| {
+            rcmd::Error::Usage(format!(
+                "{} is not ry's runtime: {error}",
+                library_path.display()
+            ))
+        })?;
     let text = |value: &str| {
-        CString::new(value).map_err(|_| rcmd::Error::Usage("an argument contains a NUL byte".into()))
+        CString::new(value)
+            .map_err(|_| rcmd::Error::Usage("an argument contains a NUL byte".into()))
     };
     let file = file.as_deref().map(text).transpose()?;
     let input = input.as_deref().map(text).transpose()?;
-    let arguments = arguments.iter().map(|argument| text(argument)).collect::<rcmd::Result<Vec<_>>>()?;
+    let arguments = arguments
+        .iter()
+        .map(|argument| text(argument))
+        .collect::<rcmd::Result<Vec<_>>>()?;
     let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
-    let pointer = |value: &Option<CString>| value.as_ref().map_or(std::ptr::null(), |value| value.as_ptr());
+    let pointer = |value: &Option<CString>| {
+        value
+            .as_ref()
+            .map_or(std::ptr::null(), |value| value.as_ptr())
+    };
     // Inline annotations are checked and the object systems are on, as in `ry run`'s defaults;
     // the profiles follow the command line. The bits are libr's `RUN_FLAG_*` constants.
-    let flags = 0b11 | if site_profile { 1 << 2 } else { 0 } | if user_profile { 1 << 3 } else { 0 };
+    let flags =
+        0b11 | if site_profile { 1 << 2 } else { 0 } | if user_profile { 1 << 3 } else { 0 };
     let status = unsafe {
         run(
             pointer(&file),

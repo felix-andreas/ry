@@ -6,11 +6,7 @@ pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
 pub use reedline;
-
-use std::error::Error;
-use std::fmt;
-use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::{error::Error, fmt, io::IsTerminal, path::PathBuf};
 
 #[derive(Debug)]
 pub struct ReplError(pub String);
@@ -78,6 +74,8 @@ pub struct RunOptions {
     /// End the session when the script is consumed; a top-level error quits with
     /// a failing status.
     pub batch: bool,
+    /// What the script reads with `commandArgs(trailingOnly = TRUE)`.
+    pub arguments: Vec<String>,
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
     pub filter: Option<Box<dyn InputFilter>>,
@@ -153,23 +151,60 @@ impl RuntimeFlags {
     }
 }
 
-/// Runs the interactive console on ry's own runtime instead of GNU R. Only the editor, the
-/// completer and the filter of `options` apply: ry's runtime has no `.Call` routines to register
-/// and runs no startup code.
+/// Runs the interactive console on ry's own runtime instead of GNU R. The runtime attaches the
+/// package loader and evaluates `startup` before the first prompt, and before each command it
+/// reloads a loaded package whose sources changed, so it brings its own `hooks` and refuses
+/// a caller's. `routines` does not apply: ry's runtime has no `.Call` routines to register.
 pub fn run_console_on_ry_runtime(
-    options: RunOptions,
+    mut options: RunOptions,
     flags: RuntimeFlags,
 ) -> Result<i32, ReplError> {
-    use std::ffi::{c_char, c_int, c_uchar};
+    use std::ffi::{CString, c_char, c_int, c_uchar};
+    if options.hooks.is_some() {
+        return Err(ReplError(
+            "ry's runtime watches for reloads itself and takes no console hooks".into(),
+        ));
+    }
     let library = ry_runtime()?;
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
-    type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
+    type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
-    console::install_for_ry_runtime(options)?;
-    if std::io::stdin().is_terminal() {
-        eprintln!("ry console on ry's runtime. Type q() or Ctrl-D to quit.");
+    let changed = runtime_entry::<unsafe extern "C" fn() -> c_int>(library, "ry_loader_changed")?;
+    let startup = match options.startup.is_empty() {
+        true => None,
+        false => Some(
+            CString::new(options.startup.join("\n"))
+                .map_err(|_| ReplError("the startup code contains a NUL byte".into()))?,
+        ),
+    };
+    options.hooks = Some(Box::new(RuntimeReloadWatcher { changed }));
+    let banner = std::io::stdin()
+        .is_terminal()
+        .then(|| "ry console on ry's runtime. Type q() or Ctrl-D to quit.".to_owned());
+    console::install_for_ry_runtime(options, banner)?;
+    Ok(unsafe {
+        repl(
+            console::ry_read_console,
+            startup
+                .as_ref()
+                .map_or(std::ptr::null(), |startup| startup.as_ptr()),
+            flags.bits(),
+        )
+    })
+}
+
+/// Asks ry's runtime whether a loaded package changed on disk, and reloads it if so.
+struct RuntimeReloadWatcher {
+    changed: unsafe extern "C" fn() -> std::ffi::c_int,
+}
+
+impl ConsoleHooks for RuntimeReloadWatcher {
+    fn before_command(&mut self) -> Option<String> {
+        // SAFETY: the runtime is loaded for the life of the process, and the console calls its
+        // hooks on the runtime's thread between commands.
+        let changed = unsafe { (self.changed)() } != 0;
+        changed.then(|| ".ry_autoreload()".to_owned())
     }
-    Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
 }
 
 fn ry_runtime() -> Result<&'static libloading::os::unix::Library, ReplError> {
@@ -218,7 +253,7 @@ fn ry_runtime_library() -> Result<PathBuf, ReplError> {
         }
     }
     Err(ReplError(format!(
-        "ry's runtime (libR.so) was not found beside {}; build it with `cargo build -p libr` or set RY_LIBR",
+        "ry's runtime (libR.so) was not found beside {}; build it with `just build` or `cargo build -p libr`, or set RY_LIBR to its path",
         executable.display()
     )))
 }

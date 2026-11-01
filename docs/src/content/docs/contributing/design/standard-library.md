@@ -72,7 +72,7 @@ Two things do change, and both are deliberate:
   fallback takes the other branch. That is the same as running it under a newer R that added the
   name.
 - GNU R does not have them. A script that calls `List.map` and checks clean still fails with "could
-  not find function" under `ry run` without `--runtime ry`, because GNU R is that command's default.
+  not find function" under `ry R`, which runs GNU R.
   Records, tags and `match` have the same split. Until ry's runtime is the default, this is a
   documented limitation rather than a diagnostic.
 
@@ -95,12 +95,12 @@ that exists only for Roc's type system or memory model.
 
 | Module | Functions |
 | --- | --- |
-| `Result` | `is_ok`, `is_err`, `with_default`, `map`, `map_err`, `map_both`, `and_then`, `on_err` |
-| `List` | `len`, `is_empty`, `get`, `set`, `update`, `append`, `prepend`, `concat`, `single`, `repeat`, `reverse`, `join`, `map`, `map_with_index`, `map2`, `join_map`, `keep_if`, `drop_if`, `keep_oks`, `keep_errs`, `map_try`, `walk`, `walk_backwards`, `walk_until`, `any`, `all`, `contains`, `count_if`, `find_first`, `find_last`, `find_first_index`, `find_last_index`, `first`, `last`, `take_first`, `take_last`, `drop_first`, `drop_last`, `drop_at`, `sublist`, `split_at`, `chunks_of`, `intersperse`, `sort_with`, `sum`, `product`, `min`, `max`, `starts_with`, `ends_with` |
-| `Str` | `is_empty`, `concat`, `join_with`, `split_on`, `repeat`, `starts_with`, `ends_with`, `contains`, `trim`, `trim_start`, `trim_end`, `drop_prefix`, `drop_suffix`, `with_prefix`, `replace_each`, `replace_first`, `replace_last`, `split_first`, `split_last`, `count_utf8_bytes`, `to_utf8`, `from_utf8`, `to_integer`, `to_double`, `with_ascii_lowercased`, `with_ascii_uppercased` |
-| `Num` | `to_str`, `compare`, `min`, `max`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `add_checked`, `sub_checked`, `mul_checked`, `div_checked`, `div_trunc_checked`, `rem_checked`, `sqrt_checked`, `log_checked` |
-| `Dict` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all` |
-| `Set` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `map`, `keep_if`, `drop_if` |
+| `Result` | `is_ok`, `is_err`, `with_default`, `map`, `map_err`, `map_both`, `map2`, `and_then`, `on_err` |
+| `List` | `len`, `is_empty`, `get`, `set`, `update`, `append`, `prepend`, `concat`, `single`, `repeat`, `reverse`, `join`, `map`, `map_with_index`, `map2`, `map3`, `map4`, `join_map`, `keep_if`, `drop_if`, `keep_oks`, `keep_errs`, `map_try`, `walk`, `walk_backwards`, `walk_until`, `walk_backwards_until`, `walk_with_index`, `walk_with_index_until`, `walk_from`, `walk_from_until`, `walk_try`, `for_each`, `for_each_try`, `any`, `all`, `contains`, `count_if`, `find_first`, `find_last`, `find_first_index`, `find_last_index`, `first`, `last`, `take_first`, `take_last`, `drop_first`, `drop_last`, `drop_at`, `sublist`, `split_at`, `split_first`, `split_last`, `split_on`, `split_on_list`, `chunks_of`, `intersperse`, `sort_with`, `sort_asc`, `sort_desc`, `swap`, `replace`, `append_if_ok`, `prepend_if_ok`, `concat_utf8`, `with_capacity`, `reserve`, `sum`, `product`, `min`, `max`, `starts_with`, `ends_with` |
+| `Str` | `is_empty`, `concat`, `join_with`, `split_on`, `repeat`, `starts_with`, `ends_with`, `contains`, `trim`, `trim_start`, `trim_end`, `drop_prefix`, `drop_suffix`, `with_prefix`, `replace_each`, `replace_first`, `replace_last`, `split_first`, `split_last`, `count_utf8_bytes`, `to_utf8`, `from_utf8`, `from_utf8_lossy`, `with_ascii_lowercased`, `with_ascii_uppercased`, `caseless_ascii_equals`, `walk_utf8`, `walk_utf8_with_index` |
+| `Num` | `to_str`, `compare`, `min`, `max`, `is_lt`, `is_gt`, `is_lte`, `is_gte`, `is_approx_eq`, `is_zero`, `is_positive`, `is_negative`, `is_even`, `is_odd`, `is_multiple_of`, `is_finite`, `is_infinite`, `abs`, `abs_diff`, `neg`, `ceiling`, `floor`, `round`, `pow`, `sin`, `cos`, `tan`, `atan`, `add_checked`, `sub_checked`, `mul_checked`, `add_saturated`, `sub_saturated`, `mul_saturated`, `div_checked`, `div_trunc_checked`, `div_ceil_checked`, `rem_checked`, `sqrt_checked`, `log_checked` |
+| `Dict` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `get`, `contains`, `insert`, `remove`, `update`, `keys`, `values`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `insert_all`, `keep_shared`, `remove_all`, `reserve`, `clear` |
+| `Set` | `empty`, `single`, `from_list`, `to_list`, `len`, `is_empty`, `contains`, `insert`, `remove`, `union`, `intersection`, `difference`, `walk`, `walk_until`, `map`, `join_map`, `keep_if`, `drop_if`, `reserve` |
 
 ### Added or changed on the way
 
@@ -122,6 +122,18 @@ that exists only for Roc's type system or memory model.
   `:LogNeedsPositive`. `Num.compare` and `List.sort_with` use `:LT | :EQ | :GT`.
 - **`List.split_at(list, count)` takes a count**, so `before` holds the first `count` elements and
   `others` the rest, which reads the same in 1-based and 0-based terms.
+- **`Result.and_then` widens the error:** it returns `Result<B, E | F>`, so a step may fail with a
+  tag of its own, as Roc's `Result.try` allows through open tag unions.
+- **`Num.ceiling`, `Num.floor` and `Num.round` keep the number type.** Roc's return an integer, but
+  R's `integer` is 32-bit, so a rounded double stays a `double` and `Num.to_integer_checked`
+  converts it, returning `:Err(:OutOfBounds)` when it does not fit. `round` rounds half away from
+  zero, as Roc does, not half to even as R's `round` does.
+- **`Num.add_saturated` and its siblings clamp an integer to plus or minus 2147483647**, because
+  R's smallest integer is `NA`. On doubles they are plain arithmetic.
+- **`Num.pow`, `Num.sin`, `Num.cos`, `Num.tan` and `Num.atan` return a `double`**, because R has no
+  wider integer for `pow` to stay in.
+- **`List.sort_asc` and `List.sort_desc` take numbers only**, as Roc's do; `List.sort_with` sorts
+  anything.
 
 Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_rev` here as
 `walk`, `walk_until` and `walk_backwards`, `map_ok` as `map`, `ok_or` as `with_default`, `rev` as
@@ -134,8 +146,21 @@ Readers who know Roc's newer builtins will find `fold`, `fold_until` and `fold_r
   heap decides by itself, and the others exist to serve Roc's abilities, which ry does not have
   (traits are declined). R's `print`, `format` and `serialize` play the inspection and encoding
   roles.
-- **Capacity functions** (`List.with_capacity`, `List.reserve`, `List.release_excess_capacity`):
-  R values are not grown in place, so there is no capacity to manage.
+- **`List.release_excess_capacity` and capacity queries**: ry's heap decides when a resizable
+  vector shrinks. `List.with_capacity`, `List.reserve`, `Dict.reserve` and `Set.reserve` are taken,
+  because updates now happen in place (see "Running it"). `Dict.with_capacity` and
+  `Set.with_capacity` are not: an empty collection has no key vector until its first key fixes the
+  key type, so there is nothing to size. Roc's `Str` capacity functions are skipped because a
+  string is an immutable `CHARSXP`.
+- **Bitwise operations, shifts and wrapping arithmetic** (`bitwise_and`, `shift_left_by`,
+  `add_wrap` and the rest): R's 32-bit integer reserves its smallest value for `NA`, so wrapping
+  has no total definition, and R's `bitwAnd` family already covers the bit operations.
+  `Num.pow_int` is skipped for the same overflow reason; `Num.pow` returns a double.
+- **Unchecked `sqrt` and `log`, and `asin`, `acos` and `is_nan`**: they produce `NaN` for part of
+  their domain, which the library never returns. `Num.sqrt_checked` and `Num.log_checked` remain,
+  and R's own functions cover the rest.
+- **`Num.pi`, `Num.tau` and `Num.e`**: R's `pi` and `exp(1)` already exist, and a constant is not a
+  function the stub could type as one.
 - **An `Option` module**: Roc has none, and returns a `Result` with a descriptive error tag instead
   (`:Err(:ListWasEmpty)`). Code that wants an optional value writes `:Some(x) | :None` directly.
 - **`List.range` and `Str.len`**: R's `seq_len` and `seq` already build ranges. A string length
@@ -217,19 +242,24 @@ message naming the parameter and the value it needs.
 
 `Dict` and `Set` hash their keys into an open-addressing index stored in an integer vector next to
 the keys, so a lookup is a hash and a probe, and the collector traces the index like any other
-vector. Values are immutable, so `Dict.insert` copies the keys, values and index, which makes a loop
-of `d <- Dict.insert(d, k, v)` quadratic. Building a large dictionary therefore goes through
-`Dict.from_list` or `Dict.insert_all`, which hash every key once. The built-in table's `:=` updates
-in place because it is a special form that owns its target binding; an ordinary function call
-cannot know that its caller is about to overwrite the argument's binding, so reusing the frame's
-reference-count-one path needs either a special form or the compiler's last-use analysis.
+vector.
+
+Updates happen in place when nothing else can observe the value, the way Roc and Koka reuse a
+uniquely held value. For `x <- f(x, ...)` where `f` is flagged `reusing_first_argument`, the
+evaluator checks that the binding being reassigned holds the value's only reference and that no
+other argument is the same value, and passes it as `Call::reusable`. A temporary with reference
+count zero is reusable as well. A dictionary's and a set's key and value vectors are resizable and
+double when full, so a loop of `d <- Dict.insert(d, k, v)` costs amortized constant time per
+insert. Any other holder (a second binding, a list, a closure's environment) makes the function
+copy first, so value semantics never change.
 
 ## Open questions
 
-- `Result.and_then` keeps one error type: a step that fails with a different tag is a type
-  mismatch, because a generic's tag union does not widen across calls.
-- In-place `Dict.insert` and `List.append` inside a loop, through last-use analysis in the compiler.
-- Whether GNU R should get a pure-R build of the functions that touch no ry values (`Str`, `Num`),
-  which would remove the runtime split for those modules.
 - A diagnostic when a project that targets GNU R calls a library function, once a project can
-  declare its runtime.
+  declare its runtime. A pure-R build for GNU R was declined: many functions return result tags,
+  which GNU R cannot represent, and a partial build would split the library into two dialects.
+- Reuse covers only the `x <- f(x, ...)` form. A nested update such as
+  `state$seen <- Dict.insert(state$seen, k, v)` copies, because the list element is a second
+  holder. Inside a helper, the first update of a parameter copies (the caller's binding still holds
+  the value) and later ones reuse the copy; skipping that first copy needs last-use analysis in
+  the compiler.

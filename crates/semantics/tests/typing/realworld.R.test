@@ -225,8 +225,8 @@ apply_op <- function(op, a, b) {
 
 run <- function() apply_op("add", 3L, 4L)
 #++++
-apply_op: <T, U: numeric> fn(op: T, [a]: U, [b]: U) -> Unknown
-run: fn() -> Unknown
+apply_op: <T, U: numeric> fn(op: T, [a]: U, [b]: U) -> Any
+run: fn() -> Any
 
 #---- mutual_recursion_is_clean
 is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
@@ -553,7 +553,7 @@ broken <- function() {
 #++++
 map_option: <T, U> fn(value: T | NULL, transform: fn(T) -> U) -> U | NULL
 broken: Unknown
-203..221 error[type-mismatch] this function is passed `character`, but its parameter `n` is used as a numeric value (`integer` or `double`)
+215..216 error[type-mismatch] `n` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
 
 #==== optional_callbacks
 #---- optional_callback_annotation_is_writable_and_narrows
@@ -1065,7 +1065,7 @@ count_positive <- function() {
 }
 #++++
 count_positive: Unknown
-143..150 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+124..129 error[type-mismatch] `count` is used as a numeric value (`integer` or `double`) here, but the call passes this function `character` for it
 
 #==== text_processing
 #---- word_statistics_is_clean

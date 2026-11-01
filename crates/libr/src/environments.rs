@@ -1,14 +1,16 @@
 //! Environments and variable lookup.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, enter, error},
-    eval::force_promise,
-    runtime,
-    strings::utf8_text,
+use {
+    crate::{
+        Rboolean,
+        boundary::{ApiResult, enter, error},
+        eval::force_promise,
+        runtime,
+        strings::utf8_text,
+    },
+    heap::object::{Sexp, SexpType, gp},
+    std::ffi::c_int,
 };
-use heap::object::{Sexp, SexpType, gp};
-use std::ffi::c_int;
 
 unsafe fn environment(object: Sexp, what: &str) -> ApiResult<Sexp> {
     match object.kind() {

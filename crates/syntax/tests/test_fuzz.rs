@@ -1,12 +1,17 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
-use std::panic::catch_unwind;
-use syntax::literate::r_source_of_literate;
-use syntax::testing::{
-    SplitMix64, check_parse_invariants as check_invariants, corpus_sample, fuzz_iterations,
-    mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
+use {
+    std::panic::catch_unwind,
+    syntax::{
+        TextRange, TextSize, lex,
+        literate::r_source_of_literate,
+        parse, reparse,
+        testing::{
+            SplitMix64, check_parse_invariants as check_invariants, corpus_sample, fuzz_iterations,
+            mutate_bytes, mutate_seed, program_corpus_sources, random_bytes, token_soup,
+        },
+    },
 };
-use syntax::{TextRange, TextSize, lex, parse, reparse};
 
 const SEEDS: &[&str] = &[
     "x <- 1L",
@@ -59,6 +64,8 @@ const SEEDS: &[&str] = &[
     "alias Point = list{\n  x: double, # across\n  y: double,\n}\np: @new Point <- list(x = 1, y = 2)",
     "x: @trust integer <- f(); y: @if-unknown character | NULL <- g()",
     "type <- \"a\"; alias(type = 1); type\nX <- 2",
+    "a <- [1, 2, 3]; e <- []; n <- [[1L], [2L, 3L]]; a[[1L]]; a[2]\n[4]",
+    "xs: Array<double> <- -[1.5, 2] * [3, 4][1L]; (x\n[1]); f([x, y],)",
 ];
 
 const ALPHABET: &[&str] = &[
@@ -152,6 +159,11 @@ const ALPHABET: &[&str] = &[
     ":Some(",
     "Record{",
     "Tuple{",
+    "[",
+    "[[",
+    "]",
+    "]]",
+    "Array<",
 ];
 
 fn iterations() -> usize {

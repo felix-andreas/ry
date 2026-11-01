@@ -3,18 +3,22 @@
 //! the same type lowering into the same `Annotation`, so the checker sees one shape whichever
 //! way a type was written.
 
-use crate::Db;
-use crate::diagnostics::TypeRenderer;
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField, RestParameter, Ty,
-    TyKind, TypeScheme, any, column_type, conflicting_tags, native_record, null, scalar,
-    substitute_rigid, union_of, unknown,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::mem::take;
-use syntax::{
-    GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
-    matching_nodes,
+use {
+    crate::{
+        Db,
+        diagnostics::TypeRenderer,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, Name, NativeField, Parameter, RecordField,
+            RestParameter, Ty, TyKind, TypeScheme, any, column_type, conflicting_tags,
+            native_record, null, scalar, substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::mem::take,
+    syntax::{
+        GreenRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast, is_green_inline_annotation,
+        matching_nodes,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
@@ -1371,10 +1375,15 @@ impl<'db> Lowering<'db> {
                             .map_or(0, |semicolon| {
                                 fields
                                     .iter()
-                                    .filter(|(_, field)| field.text_range().end() <= semicolon.text_range().start())
+                                    .filter(|(_, field)| {
+                                        field.text_range().end() <= semicolon.text_range().start()
+                                    })
                                     .count()
                             });
-                        Some(FrameKind::GroupBy { lazy, keys: keys as u32 })
+                        Some(FrameKind::GroupBy {
+                            lazy,
+                            keys: keys as u32,
+                        })
                     }
                     other => other,
                 };
@@ -1386,7 +1395,11 @@ impl<'db> Lowering<'db> {
                             .unwrap_or_else(|| unknown(self.db));
                         RecordField {
                             name: Name::new(self.db, name),
-                            ty: if frame.is_some() { column_type(self.db, ty) } else { ty },
+                            ty: if frame.is_some() {
+                                column_type(self.db, ty)
+                            } else {
+                                ty
+                            },
                             optional: false,
                         }
                     })
@@ -1431,6 +1444,24 @@ impl<'db> Lowering<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
+                // An Array is one-dimensional and NA-free, so a vector, list, `NULL` or function
+                // item would make it ragged or missing.
+                if text == "Array"
+                    && let [item] = arguments.as_slice()
+                    && !array_item_annotation(self.db, *item)
+                    && let Some(argument) = node
+                        .children()
+                        .find(|c| c.kind() == SyntaxKind::TYPE_ARG_LIST)
+                        .and_then(|list| list.children().find(|c| is_type_kind(c.kind())))
+                {
+                    self.errors.push((
+                        format!(
+                            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+                            argument.text().to_string().trim()
+                        ),
+                        argument.text_range(),
+                    ));
+                }
                 if let Some(range) = reference {
                     self.applied_references.push((text, arguments.len(), range));
                 }
@@ -1496,10 +1527,28 @@ impl<'db> Lowering<'db> {
             "DataFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None)),
             "LazyFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None)),
             "GroupBy" => {
-                return Ty::new(self.db, TyKind::Frame(FrameKind::GroupBy { lazy: false, keys: 0 }, None));
+                return Ty::new(
+                    self.db,
+                    TyKind::Frame(
+                        FrameKind::GroupBy {
+                            lazy: false,
+                            keys: 0,
+                        },
+                        None,
+                    ),
+                );
             }
             "LazyGroupBy" => {
-                return Ty::new(self.db, TyKind::Frame(FrameKind::GroupBy { lazy: true, keys: 0 }, None));
+                return Ty::new(
+                    self.db,
+                    TyKind::Frame(
+                        FrameKind::GroupBy {
+                            lazy: true,
+                            keys: 0,
+                        },
+                        None,
+                    ),
+                );
             }
             _ => {}
         }
@@ -1577,5 +1626,26 @@ impl<'db> Lowering<'db> {
                 ret,
             }),
         )
+    }
+}
+
+/// Whether an annotation may name `item` as an Array's item type. A type name, a type parameter or
+/// a union of tags may; an R vector, list, `NULL`, function, `complex` or `raw` may not.
+fn array_item_annotation(db: &dyn Db, item: Ty<'_>) -> bool {
+    match item.kind(db) {
+        TyKind::Scalar(atomic) => !matches!(atomic, Atomic::Complex | Atomic::Raw),
+        TyKind::Union(members) => members.iter().all(|&member| {
+            !matches!(member.kind(db), TyKind::Null) && array_item_annotation(db, member)
+        }),
+        TyKind::Vector(_)
+        | TyKind::NamedVector(_)
+        | TyKind::List(_)
+        | TyKind::NamedList(_)
+        | TyKind::Tuple(_)
+        | TyKind::Record(_)
+        | TyKind::Frame(..)
+        | TyKind::Function(_)
+        | TyKind::Null => false,
+        _ => true,
     }
 }

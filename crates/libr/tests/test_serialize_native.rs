@@ -4,12 +4,14 @@
 
 mod harness;
 
-use harness::*;
-use std::{
-    ffi::c_int,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::OnceLock,
+use {
+    harness::*,
+    std::{
+        ffi::c_int,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::OnceLock,
+    },
 };
 
 fn serialtest(r: &R) {
@@ -42,7 +44,10 @@ fn unhex(text: &str) -> Vec<u8> {
 /// base R the session runs, as in GNU R.
 fn session_writer_version() -> i32 {
     let version = interp::system::r_version();
-    let mut minor = version.minor.split('.').map(|part| part.parse::<i32>().unwrap_or(0));
+    let mut minor = version
+        .minor
+        .split('.')
+        .map(|part| part.parse::<i32>().unwrap_or(0));
     let major: i32 = version.major.parse().unwrap_or(0);
     major * 65536 + minor.next().unwrap_or(0) * 256 + minor.next().unwrap_or(0)
 }
@@ -95,7 +100,9 @@ fn recorded_streams_round_trip_through_native_streams() {
         }
         let stream = unhex(fields[3]);
         // Base R's ALTREP objects survive a version-3 round trip as themselves.
-        let expected = with_session_writer_version(&if fields[4].is_empty() || (version == "3" && name.starts_with("altrep")) {
+        let expected = with_session_writer_version(&if fields[4].is_empty()
+            || (version == "3" && name.starts_with("altrep"))
+        {
             stream.clone()
         } else {
             unhex(fields[4])

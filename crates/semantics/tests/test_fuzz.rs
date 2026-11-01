@@ -1,15 +1,17 @@
 //! Fuzz harness for the semantic pipeline. `FUZZ_ITERS` scales the per-generator budget;
 //! runs are deterministic per seed.
 
-use salsa::Setter as _;
-use semantics::diagnostics::file_diagnostics;
-use semantics::stubs::install_shipped_stubs;
-use semantics::testing::{
-    check_semantics_input, check_semantics_invariants, render_semantics as render,
+use {
+    salsa::Setter as _,
+    semantics::{
+        DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        diagnostics::file_diagnostics,
+        stubs::install_shipped_stubs,
+        testing::{check_semantics_input, check_semantics_invariants, render_semantics as render},
+    },
+    std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    syntax::testing::{SplitMix64, fuzz_iterations, program_corpus_sources},
 };
-use semantics::{DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use syntax::testing::{SplitMix64, fuzz_iterations, program_corpus_sources};
 
 const NAMES: &[&str] = &["a", "b", "f", "g", "x", "helper"];
 
@@ -70,6 +72,18 @@ const TEMPLATES: &[&str] = &[
     "#: fn(o: :Some(integer) | :None) -> integer\n{n} <- function(o) match (o) {\n  :Some(v) => v\n}",
     "#: fn(r: :Ok(integer) | ..) -> integer\n{n} <- function(r) match (r) {\n  :Ok(v) => v\n  _ => {m}\n}",
     "#: @alias Shape {:Circle(radius: double) | :Empty}\n\n#: Shape\n{n} <- :Circle(radius = {m})",
+    "{n} <- [{m}, 1, 2]",
+    "{n} <- []",
+    "#: Array<integer>\n{n} <- [1L, {m}]",
+    "{n} <- [{m}] + [1] * {m}",
+    "{n} <- !([{m}] > 1) & [TRUE]",
+    "{n} <- {m}[[1]] + {m}[[{m}]]",
+    "{n} <- {m}[{m} > 0]",
+    "for (i in [{m}, 2L]) {n} <- i",
+    "{n} <- List.map([{m}], \\(v) v * 2)",
+    "{n} <- as.Array({m})",
+    "{n} <- [({m}, 1L), (2L, {m})]",
+    "#: Array<double[]>\n{n} <- [{m}]",
 ];
 
 const DIRECTIVES: &[&str] = &[
@@ -82,7 +96,8 @@ const DIRECTIVES: &[&str] = &[
 const SOUP: &[&str] = &[
     "x", "f", "(", ")", "{", "}", "[", "[[", "]", ",", "\n", " ", "<-", "+", "if", "else",
     "function", "1L", "\"s\"", "%in%", "|>", "~", "$", "::", "#:", "@type", "fn", "list{", "NULL",
-    "...", ":=", "<<-", "\\", "@new", "match", "=>", ":Some", ":None", "_", "..", "|",
+    "...", ":=", "<<-", "\\", "@new", "match", "=>", ":Some", ":None", "_", "..", "|", "Array<",
+    ">", "as.Array", "[1, 2]",
 ];
 
 fn iterations() -> usize {

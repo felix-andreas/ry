@@ -1,17 +1,19 @@
 //! Constructing and reading R values. Every constructor here roots what it allocates in the
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
-use crate::{
-    interp, records, standard_library,
-    unwind::{R, error},
+use {
+    crate::{
+        interp, records, standard_library,
+        unwind::{R, error},
+    },
+    heap::{
+        Heap, Marker,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+        records::NativeKind,
+        strings::Encoding,
+    },
+    std::borrow::Cow,
 };
-use heap::{
-    Heap, Marker,
-    records::NativeKind,
-    object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    strings::Encoding,
-};
-use std::borrow::Cow;
 
 /// Symbols the interpreter compares against, installed once.
 pub struct Symbols {
@@ -307,6 +309,14 @@ pub unsafe fn alloc(kind: SexpType, length: usize) -> R<Sexp> {
     Ok(object)
 }
 
+/// [`alloc`] without zeroing a numeric vector's elements; the caller writes all of them.
+pub unsafe fn alloc_uninit(kind: SexpType, length: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let object = heap.alloc_vector_uninit(kind, length)?;
+    heap.root(object);
+    Ok(object)
+}
+
 pub unsafe fn cons(car: Sexp, cdr: Sexp) -> R<Sexp> {
     let heap = crate::heap();
     let object = heap.cons(car, cdr)?;
@@ -477,7 +487,11 @@ pub unsafe fn named_list(items: &[(&str, Sexp)]) -> R<Sexp> {
 pub unsafe fn pairlist(items: &[(Sexp, Sexp)], kind: SexpType) -> R<Sexp> {
     let mut list = nil();
     for (position, &(tag, value)) in items.iter().enumerate().rev() {
-        let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+        let cell_kind = if position == 0 {
+            kind
+        } else {
+            SexpType::Pairlist
+        };
         list = triple(cell_kind, value, list, tag)?;
     }
     Ok(list)
@@ -608,6 +622,14 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
     if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
         return false;
     }
+    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
+    // their bytes, which keeps `x == "a"` from decoding every element.
+    if [gp::LATIN1, gp::UTF8]
+        .iter()
+        .all(|&bit| left.has_gp(bit) == right.has_gp(bit))
+    {
+        return false;
+    }
     char_str(left) == char_str(right)
 }
 
@@ -657,10 +679,7 @@ pub unsafe fn is_function(object: Sexp) -> bool {
 }
 
 pub unsafe fn is_numeric_type(kind: SexpType) -> bool {
-    matches!(
-        kind,
-        SexpType::Logical | SexpType::Integer | SexpType::Real
-    )
+    matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real)
 }
 
 pub fn is_na_int(value: i32) -> bool {
@@ -855,8 +874,18 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
         return None;
     }
     match dim.kind() {
-        SexpType::Integer => Some(ints(dim).iter().map(|&value| value.max(0) as usize).collect()),
-        SexpType::Real => Some(reals(dim).iter().map(|&value| value.max(0.0) as usize).collect()),
+        SexpType::Integer => Some(
+            ints(dim)
+                .iter()
+                .map(|&value| value.max(0) as usize)
+                .collect(),
+        ),
+        SexpType::Real => Some(
+            reals(dim)
+                .iter()
+                .map(|&value| value.max(0.0) as usize)
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -865,13 +894,27 @@ pub unsafe fn dims(object: Sexp) -> Option<Vec<usize>> {
 
 /// A deep copy, as `duplicate()` makes: vectors and pairlists are copied all the way down, while
 /// environments, symbols, promises and external objects are shared.
+///
+/// The copy of an Array is a plain R vector. Whoever copies is about to write, and a builtin or C
+/// code may write a missing value or an attribute that an Array cannot hold, so only the Array
+/// code (which checks every write) puts the bit back. Arrays nested inside a copied list keep it,
+/// because the copy does not write into them.
 pub unsafe fn duplicate(object: Sexp) -> R<Sexp> {
-    duplicate_with(object, true)
+    let copy = duplicate_with(object, true)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
 }
 
-/// A copy of the top level only: list elements and attribute values are shared.
+/// A copy of the top level only: list elements and attribute values are shared. Like
+/// [`duplicate`], it drops the Array bit.
 pub unsafe fn shallow_duplicate(object: Sexp) -> R<Sexp> {
-    duplicate_with(object, false)
+    let copy = duplicate_with(object, false)?;
+    if copy.is_array() {
+        copy.set_array(false);
+    }
+    Ok(copy)
 }
 
 unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
@@ -896,17 +939,29 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 cell.kind(),
                 SexpType::Pairlist | SexpType::Language | SexpType::Dots
             ) {
-                let value = if deep { duplicate(cell.car())? } else { cell.car() };
+                let value = if deep {
+                    duplicate_with(cell.car(), true)?
+                } else {
+                    cell.car()
+                };
                 items.push((cell.tag(), value, cell.attrib()));
                 cell = cell.cdr();
             }
             let mut list = nil();
             for (position, (tag, value, attributes)) in items.into_iter().enumerate().rev() {
-                let cell_kind = if position == 0 { kind } else { SexpType::Pairlist };
+                let cell_kind = if position == 0 {
+                    kind
+                } else {
+                    SexpType::Pairlist
+                };
                 list = triple(cell_kind, value, list, tag)?;
                 // The head cell's attributes and flags are the object's, copied below.
                 if position != 0 && attributes != nil() {
-                    let attributes = if deep { duplicate(attributes)? } else { attributes };
+                    let attributes = if deep {
+                        duplicate_with(attributes, true)?
+                    } else {
+                        attributes
+                    };
                     heap.set_attrib(list, attributes);
                 }
             }
@@ -936,7 +991,11 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
                 SexpType::List | SexpType::Expression => {
                     for index in 0..count {
                         let element = source.element(index);
-                        let element = if deep { duplicate(element)? } else { element };
+                        let element = if deep {
+                            duplicate_with(element, true)?
+                        } else {
+                            element
+                        };
                         heap.set_element(copy, index, element);
                     }
                 }
@@ -951,15 +1010,26 @@ unsafe fn duplicate_with(object: Sexp, deep: bool) -> R<Sexp> {
     };
     if object.attrib() != nil() {
         let attributes = if deep {
-            duplicate(object.attrib())?
+            duplicate_with(object.attrib(), true)?
         } else {
-            shallow_duplicate(object.attrib())?
+            duplicate_with(object.attrib(), false)?
         };
         heap.set_attrib(copy, attributes);
     }
     copy.set_object(object.is_object());
+    copy.set_array(object.is_array());
     copy.set_gp(object.gp() & (gp::S4_OBJECT));
     Ok(copy)
+}
+
+/// `object` as a plain R vector: an Array becomes a copy without the Array bit, and anything else
+/// is returned as is. R's own conversions (`as.double`, `as.vector`, `as.list`) go through here,
+/// so they hand back an ordinary vector that `identical()` equates with `c(...)`.
+pub unsafe fn plain(object: Sexp) -> R<Sexp> {
+    if !object.is_array() {
+        return Ok(object);
+    }
+    shallow_duplicate(object)
 }
 
 /// `MAYBE_SHARED`: more than one reference, so a modification must copy first.

@@ -7,24 +7,26 @@
 //! shared library exports, in-process. It is one process-wide session, so every test takes the
 //! session lock.
 
-use R::{
-    runtime,
-    serialize::{
-        Format, LazyLoadCompression, PersistHook, from_bytes, header_of, lazyload_fetch, read_rds,
-        to_bytes,
+use {
+    R::{
+        runtime,
+        serialize::{
+            Format, LazyLoadCompression, PersistHook, from_bytes, header_of, lazyload_fetch,
+            read_rds, to_bytes,
+        },
     },
+    heap::{
+        GcStress,
+        object::{NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp},
+        strings::Encoding,
+    },
+    std::{
+        path::Path,
+        process::Command,
+        sync::{Mutex, MutexGuard},
+    },
+    syntax::testing::{SplitMix64, fuzz_iterations},
 };
-use heap::{
-    GcStress,
-    object::{NA_INTEGER, NA_REAL, Rcomplex, Sexp, SexpType, gp},
-    strings::Encoding,
-};
-use std::{
-    path::Path,
-    process::Command,
-    sync::{Mutex, MutexGuard},
-};
-use syntax::testing::{SplitMix64, fuzz_iterations};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -640,7 +642,15 @@ fn persistence_hooks_replace_and_restore_objects() {
             Ok(())
         };
         let hook: PersistHook = &mut name_env;
-        R::serialize::serialize(list, Format::Xdr, 3, &mut sink, Some(hook), R::serialize::Chunking::Buffered).expect("written");
+        R::serialize::serialize(
+            list,
+            Format::Xdr,
+            3,
+            &mut sink,
+            Some(hook),
+            R::serialize::Chunking::Buffered,
+        )
+        .expect("written");
         assert_eq!(named, 2, "the hook names every occurrence, as in GNU R");
         assert!(from_bytes(&bytes).is_err(), "restoring needs a hook");
         let mut restored = 0;

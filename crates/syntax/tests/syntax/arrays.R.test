@@ -1,0 +1,255 @@
+#==== arrays
+#---- array_literal
+[1, 2, 3]
+#++++
+SOURCE_FILE@0..9
+  ARRAY_EXPR@0..9
+    ARGUMENT_LIST@0..9
+      L_BRACKET@0..1 "["
+      ARGUMENT@1..2
+        LITERAL@1..2
+          DOUBLE@1..2 "1"
+      COMMA@2..3 ","
+      WHITESPACE@3..4 " "
+      ARGUMENT@4..5
+        LITERAL@4..5
+          DOUBLE@4..5 "2"
+      COMMA@5..6 ","
+      WHITESPACE@6..7 " "
+      ARGUMENT@7..8
+        LITERAL@7..8
+          DOUBLE@7..8 "3"
+      R_BRACKET@8..9 "]"
+
+#---- empty_array
+x <- []
+#++++
+SOURCE_FILE@0..7
+  BINARY_EXPR@0..7
+    NAME@0..1
+      IDENT@0..1 "x"
+    WHITESPACE@1..2 " "
+    LESS_MINUS@2..4 "<-"
+    WHITESPACE@4..5 " "
+    ARRAY_EXPR@5..7
+      ARGUMENT_LIST@5..7
+        L_BRACKET@5..6 "["
+        R_BRACKET@6..7 "]"
+
+#---- nested_arrays_split_double_bracket
+[[1, 2], [3]]
+#++++
+SOURCE_FILE@0..13
+  ARRAY_EXPR@0..13
+    ARGUMENT_LIST@0..13
+      L_BRACKET@0..1 "["
+      ARGUMENT@1..7
+        ARRAY_EXPR@1..7
+          ARGUMENT_LIST@1..7
+            L_BRACKET@1..2 "["
+            ARGUMENT@2..3
+              LITERAL@2..3
+                DOUBLE@2..3 "1"
+            COMMA@3..4 ","
+            WHITESPACE@4..5 " "
+            ARGUMENT@5..6
+              LITERAL@5..6
+                DOUBLE@5..6 "2"
+            R_BRACKET@6..7 "]"
+      COMMA@7..8 ","
+      WHITESPACE@8..9 " "
+      ARGUMENT@9..12
+        ARRAY_EXPR@9..12
+          ARGUMENT_LIST@9..12
+            L_BRACKET@9..10 "["
+            ARGUMENT@10..11
+              LITERAL@10..11
+                DOUBLE@10..11 "3"
+            R_BRACKET@11..12 "]"
+      R_BRACKET@12..13 "]"
+
+#---- indexing_stays_r
+x[1]; x[[1]]; x [1]
+#++++
+SOURCE_FILE@0..19
+  SUBSET_EXPR@0..4
+    NAME@0..1
+      IDENT@0..1 "x"
+    ARGUMENT_LIST@1..4
+      L_BRACKET@1..2 "["
+      ARGUMENT@2..3
+        LITERAL@2..3
+          DOUBLE@2..3 "1"
+      R_BRACKET@3..4 "]"
+  SEMICOLON@4..5 ";"
+  WHITESPACE@5..6 " "
+  SUBSET2_EXPR@6..12
+    NAME@6..7
+      IDENT@6..7 "x"
+    ARGUMENT_LIST@7..12
+      L_BRACKET2@7..9 "[["
+      ARGUMENT@9..10
+        LITERAL@9..10
+          DOUBLE@9..10 "1"
+      R_BRACKET@10..11 "]"
+      R_BRACKET@11..12 "]"
+  SEMICOLON@12..13 ";"
+  WHITESPACE@13..14 " "
+  SUBSET_EXPR@14..19
+    NAME@14..15
+      IDENT@14..15 "x"
+    WHITESPACE@15..16 " "
+    ARGUMENT_LIST@16..19
+      L_BRACKET@16..17 "["
+      ARGUMENT@17..18
+        LITERAL@17..18
+          DOUBLE@17..18 "1"
+      R_BRACKET@18..19 "]"
+
+#---- array_as_index
+x[[1, 2]]
+#++++
+SOURCE_FILE@0..9
+  SUBSET2_EXPR@0..9
+    NAME@0..1
+      IDENT@0..1 "x"
+    ARGUMENT_LIST@1..9
+      L_BRACKET2@1..3 "[["
+      ARGUMENT@3..4
+        LITERAL@3..4
+          DOUBLE@3..4 "1"
+      COMMA@4..5 ","
+      WHITESPACE@5..6 " "
+      ARGUMENT@6..7
+        LITERAL@6..7
+          DOUBLE@6..7 "2"
+      R_BRACKET@7..8 "]"
+      R_BRACKET@8..9 "]"
+
+#---- newline_inside_parens_keeps_indexing
+(x
+[1])
+#++++
+SOURCE_FILE@0..7
+  PAREN_EXPR@0..7
+    L_PAREN@0..1 "("
+    SUBSET_EXPR@1..6
+      NAME@1..2
+        IDENT@1..2 "x"
+      NEWLINE@2..3 "\n"
+      ARGUMENT_LIST@3..6
+        L_BRACKET@3..4 "["
+        ARGUMENT@4..5
+          LITERAL@4..5
+            DOUBLE@4..5 "1"
+        R_BRACKET@5..6 "]"
+    R_PAREN@6..7 ")"
+
+#---- newline_at_top_level_starts_literal
+x
+[1]
+#++++
+SOURCE_FILE@0..5
+  NAME@0..1
+    IDENT@0..1 "x"
+  NEWLINE@1..2 "\n"
+  ARRAY_EXPR@2..5
+    ARGUMENT_LIST@2..5
+      L_BRACKET@2..3 "["
+      ARGUMENT@3..4
+        LITERAL@3..4
+          DOUBLE@3..4 "1"
+      R_BRACKET@4..5 "]"
+
+#---- trailing_comma
+[
+  1,
+  2,
+]
+#++++
+SOURCE_FILE@0..13
+  ARRAY_EXPR@0..13
+    ARGUMENT_LIST@0..13
+      L_BRACKET@0..1 "["
+      NEWLINE@1..2 "\n"
+      WHITESPACE@2..4 "  "
+      ARGUMENT@4..5
+        LITERAL@4..5
+          DOUBLE@4..5 "1"
+      COMMA@5..6 ","
+      NEWLINE@6..7 "\n"
+      WHITESPACE@7..9 "  "
+      ARGUMENT@9..10
+        LITERAL@9..10
+          DOUBLE@9..10 "2"
+      COMMA@10..11 ","
+      NEWLINE@11..12 "\n"
+      R_BRACKET@12..13 "]"
+
+#---- array_after_operators
+-[1] + [2] * f([3])
+#++++
+SOURCE_FILE@0..19
+  BINARY_EXPR@0..19
+    UNARY_EXPR@0..5
+      MINUS@0..1 "-"
+      ARRAY_EXPR@1..4
+        ARGUMENT_LIST@1..4
+          L_BRACKET@1..2 "["
+          ARGUMENT@2..3
+            LITERAL@2..3
+              DOUBLE@2..3 "1"
+          R_BRACKET@3..4 "]"
+      WHITESPACE@4..5 " "
+    PLUS@5..6 "+"
+    WHITESPACE@6..7 " "
+    BINARY_EXPR@7..19
+      ARRAY_EXPR@7..10
+        ARGUMENT_LIST@7..10
+          L_BRACKET@7..8 "["
+          ARGUMENT@8..9
+            LITERAL@8..9
+              DOUBLE@8..9 "2"
+          R_BRACKET@9..10 "]"
+      WHITESPACE@10..11 " "
+      STAR@11..12 "*"
+      WHITESPACE@12..13 " "
+      CALL_EXPR@13..19
+        NAME@13..14
+          IDENT@13..14 "f"
+        ARGUMENT_LIST@14..19
+          L_PAREN@14..15 "("
+          ARGUMENT@15..18
+            ARRAY_EXPR@15..18
+              ARGUMENT_LIST@15..18
+                L_BRACKET@15..16 "["
+                ARGUMENT@16..17
+                  LITERAL@16..17
+                    DOUBLE@16..17 "3"
+                R_BRACKET@17..18 "]"
+          R_PAREN@18..19 ")"
+
+#---- function_body_array
+function(x) [x, x]
+#++++
+SOURCE_FILE@0..18
+  FUNCTION_DEF@0..18
+    FUNCTION_KW@0..8 "function"
+    PARAMETER_LIST@8..11
+      L_PAREN@8..9 "("
+      PARAMETER@9..10
+        IDENT@9..10 "x"
+      R_PAREN@10..11 ")"
+    WHITESPACE@11..12 " "
+    ARRAY_EXPR@12..18
+      ARGUMENT_LIST@12..18
+        L_BRACKET@12..13 "["
+        ARGUMENT@13..14
+          NAME@13..14
+            IDENT@13..14 "x"
+        COMMA@14..15 ","
+        WHITESPACE@15..16 " "
+        ARGUMENT@16..17
+          NAME@16..17
+            IDENT@16..17 "x"
+        R_BRACKET@17..18 "]"

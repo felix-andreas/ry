@@ -1,37 +1,44 @@
-use crate::annotations::{
-    Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind, lower_annotation,
-    lower_inline_annotation, statement_inline_site,
+use {
+    crate::{
+        AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
+        annotations::{
+            Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_type_kind,
+            lower_annotation, lower_inline_annotation, statement_inline_site,
+        },
+        check::{
+            ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError,
+            TypeErrorKind, column_element,
+        },
+        exhaustiveness::{MatchFinding, MatchFindingKind},
+        file_syntax_sites, file_type_definitions,
+        hir::{ExprId, ExpressionKind, Symbol},
+        infer::{FunctionMismatch, RecordMismatch, apply_definition},
+        inline_annotations_enabled, item_check, item_hir, item_name_range, item_naming, item_spans,
+        item_tree,
+        lints::LintConfig,
+        metadata::{
+            declared_dependency, imported_by_name, imports_every_name, is_own_package,
+            native_symbol,
+        },
+        naming::{BindingKind, ItemNaming, NamespaceRead},
+        parse, project_type_definitions, statement_annotations,
+        stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs},
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
+            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, map_child_types,
+            substitute_rigid, union_of,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        mem,
+    },
+    syntax::{
+        SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind, is_syntactic_name,
+        paired_comment_definition,
+    },
 };
-use crate::check::{
-    ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
-    column_element,
-};
-use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
-use crate::hir::{ExprId, ExpressionKind, Symbol};
-use crate::infer::apply_definition;
-use crate::infer::{FunctionMismatch, RecordMismatch};
-use crate::lints::LintConfig;
-use crate::metadata::{
-    declared_dependency, imported_by_name, imports_every_name, is_own_package, native_symbol,
-};
-use crate::naming::{BindingKind, ItemNaming, NamespaceRead};
-use crate::stubs::{CONDITIONAL_NAMESPACES, namespace_exports, namespace_known, stubs};
-use crate::types::{
-    Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField, RecordField, Ty, TyKind,
-    TypeScheme, map_child_types, substitute_rigid, union_of,
-};
-use crate::{
-    AnnotationTarget, Db, DocumentKind, ItemKind, ProjectFiles, SiteRole, SourceFile,
-    file_syntax_sites, file_type_definitions, inline_annotations_enabled, item_check, item_hir,
-    item_name_range, item_naming, item_spans, item_tree, parse, project_type_definitions,
-    statement_annotations,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
-use syntax::SyntaxNode;
-use syntax::ast::is_expression_kind;
-use syntax::{SyntaxKind, TextRange, TextSize, is_syntactic_name, paired_comment_definition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, salsa::SalsaValue)]
 pub enum Severity {
@@ -169,6 +176,7 @@ fn ry_syntax_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let (what, range) = match node.kind() {
                 SyntaxKind::RECORD_EXPR => ("record", node.text_range()),
                 SyntaxKind::TUPLE_EXPR => ("tuple", node.text_range()),
+                SyntaxKind::ARRAY_EXPR => ("Array", node.text_range()),
                 SyntaxKind::TAG_EXPR => ("tag", node.text_range()),
                 // The arms can be long, so the head `match (x)` stands for the expression.
                 _ => {
@@ -563,7 +571,7 @@ fn classify_non_local_read(
     });
     if crate::package_scheme_exists(db, name)
         || test_files.is_some_and(|_| {
-            let binding = crate::test_name(db, Name::new(db, name));
+            let binding = crate::test_name(db, QueryName::new(db, Name::new(db, name)));
             binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
         || super_globals(db, file).contains(name)
@@ -592,7 +600,8 @@ fn classify_non_local_read(
         return NonLocalRead::Tolerated;
     }
     NonLocalRead::Unresolved {
-        suggestion: project_typo.or_else(|| typo_suggestion(db, Name::new(db, name))),
+        suggestion: project_typo
+            .or_else(|| typo_suggestion(db, QueryName::new(db, Name::new(db, name)))),
     }
 }
 
@@ -1837,10 +1846,10 @@ fn project_typo_suggestion<'db>(
 
 /// Memoized per name: the scan over the whole stub corpus is the expensive part.
 #[salsa::tracked(returns(clone))]
-fn typo_suggestion<'db>(db: &'db dyn Db, name: Name<'db>) -> Option<String> {
+fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String> {
     let library = stubs(db)?;
     nearest_name(
-        name.text(db),
+        name.name(db).text(db),
         library
             .schemes
             .keys()
@@ -2200,11 +2209,24 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     let mut renderer = TypeRenderer::default();
     match &error.kind {
-        TypeErrorKind::Mismatch { expected, found } => format!(
-            "expected `{}`, found `{}`",
-            renderer.render(db, *expected),
-            renderer.render(db, *found)
-        ),
+        TypeErrorKind::Mismatch { expected, found } => {
+            let mut message = format!(
+                "expected `{}`, found `{}`",
+                renderer.render(db, *expected),
+                renderer.render(db, *found)
+            );
+            // An R vector never becomes an Array implicitly, because the conversion checks
+            // every item; say which call does it.
+            if array_element(db, *expected).is_some()
+                && matches!(
+                    found.kind(db),
+                    TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            {
+                message.push_str(". Convert an R vector with `as.Array()`");
+            }
+            message
+        }
         TypeErrorKind::AssignmentForRecord { field, expected } => format!(
             "expected `{}`, but `({field} = ...)` assigns to `{field}`, as it does in R. Write `({field} = ...,)` with a trailing comma to make a one-field record",
             renderer.render(db, *expected)
@@ -2312,6 +2334,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint_description(*constraint),
             renderer.render(db, *found)
         ),
+        TypeErrorKind::ContextualParameter {
+            name,
+            expected,
+            passed,
+        } => format!(
+            "`{name}` is used as {} here, but the call passes this function `{}` for it",
+            operand_description(*expected),
+            renderer.render(db, *passed)
+        ),
         TypeErrorKind::RecordShape { mismatch } => match mismatch.as_ref() {
             RecordMismatch::Field {
                 path,
@@ -2371,14 +2402,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 required,
                 returns,
                 constraint,
+                required_constraint,
             } => {
                 let required = renderer.render(db, *required);
-                match constraint {
-                    Some(constraint) => format!(
+                match (constraint, required_constraint) {
+                    (Some(constraint), _) => format!(
                         "this function must return `{required}`, but its body produces {}",
                         constraint_description(*constraint)
                     ),
-                    None => format!(
+                    (None, Some(required_constraint)) => format!(
+                        "this function must return {}, but it returns `{}`",
+                        constraint_description(*required_constraint),
+                        renderer.render(db, *returns)
+                    ),
+                    (None, None) => format!(
                         "this function must return `{required}`, but it returns `{}`",
                         renderer.render(db, *returns)
                     ),
@@ -2458,6 +2495,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::NotAnAggregation { column } => format!(
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),
+        TypeErrorKind::HeadInsideExpression { column } => format!(
+            "`Expr.head` gives several values of `{column}` per group, so `agg` accepts it only as a whole item. Compute the column first, as in `(col(\"{column}\") + 1) |> Expr.head(2L)`"
+        ),
         TypeErrorKind::ColumnNameCount { names, columns } => format!(
             "this frame has {columns} {}, but {names} {} given",
             if *columns == 1 { "column" } else { "columns" },
@@ -2531,22 +2571,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
             renderer.render(db, *found)
         ),
-        TypeErrorKind::InvalidOperand { expected, found } => {
-            let expected_description = match expected {
-                OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
-                OperandExpectation::ScalarNumeric => {
-                    "a scalar numeric value (`integer` or `double`)"
-                }
-                OperandExpectation::Logical => "a `logical` value",
-                OperandExpectation::Comparable => {
-                    "a comparable value (numeric, `character`, or `logical`)"
-                }
-            };
-            format!(
-                "expected {expected_description}, found `{}`",
-                renderer.render(db, *found)
-            )
-        }
+        TypeErrorKind::InvalidOperand { expected, found } => format!(
+            "expected {}, found `{}`",
+            operand_description(*expected),
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::UnsupportedOperandPair {
             operator,
             left,
@@ -2606,6 +2635,61 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
+            "this item is `{}`, but the Array's first item is `{}`. An Array's items share one type and are never converted into each other",
+            renderer.render(db, *found),
+            renderer.render(db, *first)
+        ),
+        TypeErrorKind::ArrayItemType { found } => format!(
+            "an Array cannot hold `{}`. Its items are single `logical`, `integer`, `double` or `character` values, or ry values such as records, tuples and tags",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ArrayOperands {
+            operator,
+            left,
+            right,
+        } => {
+            let head = format!(
+                "`{operator}` is not defined between `{}` and `{}`",
+                renderer.render(db, *left),
+                renderer.render(db, *right)
+            );
+            let is_r_vector = |ty: Ty<'_>| {
+                matches!(
+                    ty.kind(db),
+                    TyKind::Vector(_) | TyKind::NamedVector(_) | TyKind::List(_)
+                )
+            };
+            let reason = if is_r_vector(*left) || is_r_vector(*right) {
+                "Convert the R vector with `as.Array()` first"
+            } else if left == right
+                || array_element(db, *left) == Some(*right)
+                || array_element(db, *right) == Some(*left)
+            {
+                match *operator {
+                    "&" | "|" => "On Arrays it takes `logical` items",
+                    _ => "On Arrays it takes `integer` or `double` items",
+                }
+            } else {
+                "Both sides must have one item type, and `integer` and `double` are never converted into each other"
+            };
+            format!("{head}. {reason}")
+        }
+        TypeErrorKind::ArrayIndex { double, found } => {
+            let rule = if *double {
+                "`x[[i]]` on an Array takes one position, an `integer` or `double`"
+            } else {
+                "`x[i]` on an Array takes one index: positions, or a `logical` mask"
+            };
+            match found {
+                Some(found) => format!(
+                    "{rule}, but this index is `{}`. An Array has one dimension and no names",
+                    renderer.render(db, *found)
+                ),
+                None => format!("{rule}. An Array has one dimension and no names"),
+            }
+        }
+        TypeErrorKind::ArrayMissingValue => "an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned(),
         TypeErrorKind::ConflictingTags { first, second } => format!(
             "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",
             renderer.render(db, *first),
@@ -2847,6 +2931,15 @@ impl<'db> TypeRenderer<'db> {
     }
 }
 
+fn operand_description(expected: OperandExpectation) -> &'static str {
+    match expected {
+        OperandExpectation::Numeric => "a numeric value (`integer` or `double`)",
+        OperandExpectation::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        OperandExpectation::Logical => "a `logical` value",
+        OperandExpectation::Comparable => "a comparable value (numeric, `character`, or `logical`)",
+    }
+}
+
 fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
@@ -2856,6 +2949,9 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         }
         Constraint::Key => "a key (a `logical`, `integer`, `double` or `character` scalar)",
         Constraint::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
+        Constraint::ArrayItem => {
+            "an Array item (a single `logical`, `integer`, `double` or `character` value, or a ry value such as a record, tuple or tag)"
+        }
     }
 }
 
@@ -2872,8 +2968,7 @@ fn atomic_name(atomic: Atomic) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
+    use {super::*, crate::RootDatabase};
 
     fn render_all(db: &RootDatabase, file: SourceFile) -> Vec<String> {
         file_diagnostics(db, file)
@@ -2983,8 +3078,8 @@ mod tests {
     fn renderer_shares_names_across_both_sides() {
         let db = RootDatabase::default();
         let mut renderer = TypeRenderer::default();
-        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A".to_owned())));
-        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B".to_owned())));
+        let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A")));
+        let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B")));
         assert_eq!(renderer.render(&db, t), "T");
         assert_eq!(renderer.render(&db, u), "U");
         assert_eq!(renderer.render(&db, t), "T");

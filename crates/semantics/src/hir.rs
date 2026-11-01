@@ -1,14 +1,22 @@
 //! Spans are item-relative, so an edit elsewhere in the file reproduces an
 //! equal `Module` and salsa cuts off before naming or inference rerun.
 
-use rustc_hash::{FxHashMap, FxHasher};
-use std::cell::RefCell;
-use std::hash::{Hash, Hasher};
-use std::num::NonZeroU32;
-use std::sync::{LazyLock, Mutex};
-use std::{fmt, iter, ops};
-use syntax::ast::{BinaryExpr, Name, is_expression_kind};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
+use {
+    rustc_hash::{FxHashMap, FxHasher},
+    std::{
+        cell::RefCell,
+        fmt,
+        hash::{Hash, Hasher},
+        iter,
+        num::NonZeroU32,
+        ops,
+        sync::{LazyLock, Mutex},
+    },
+    syntax::{
+        SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
+        ast::{BinaryExpr, Name, is_expression_kind},
+    },
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
 pub struct ExprId(pub u32);
@@ -73,6 +81,12 @@ impl Symbol {
         );
         shard.insert(interned, symbol);
         symbol
+    }
+
+    /// The symbol's position in the table: stable for the process, but it depends on the
+    /// order in which threads first met each spelling.
+    pub fn index(self) -> u32 {
+        self.0.get()
     }
 
     pub fn as_str(self) -> &'static str {
@@ -452,6 +466,8 @@ pub enum ExpressionKind {
     Tuple(Box<[ExprId]>),
     /// `(x = 1, y = 2)`: a native record, fields in source order.
     Record(Box<[RecordField]>),
+    /// `[a, b]`: an Array literal.
+    Array(Box<[ExprId]>),
     /// `:Name` or `:Name(...)`. The payload is a `Tuple` or `Record` expression spanning the
     /// parenthesized list, so a payload types exactly like the matching literal.
     Tag {
@@ -570,7 +586,7 @@ impl ExpressionKind {
             ExpressionKind::Repeat { body } | ExpressionKind::Local { body } => vec![*body],
             ExpressionKind::Block { statements, .. } => statements.to_vec(),
             ExpressionKind::Paren(inner) => vec![*inner],
-            ExpressionKind::Tuple(items) => items.to_vec(),
+            ExpressionKind::Tuple(items) | ExpressionKind::Array(items) => items.to_vec(),
             ExpressionKind::Record(fields) => fields.iter().map(|field| field.value).collect(),
             ExpressionKind::Tag { payload, .. } => payload.iter().copied().collect(),
             ExpressionKind::Match { scrutinee, arms } => {
@@ -826,6 +842,20 @@ impl Module {
                 Some(list) => self.lower_items(&list, range),
                 None => self.missing(range),
             },
+            SyntaxKind::ARRAY_EXPR => {
+                let items = match node
+                    .children()
+                    .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+                {
+                    Some(list) => self
+                        .lower_arguments_of(&list, None)
+                        .into_iter()
+                        .filter_map(|argument| argument.value)
+                        .collect(),
+                    None => Box::default(),
+                };
+                self.allocate(ExpressionKind::Array(items), range)
+            }
             SyntaxKind::TAG_EXPR => {
                 let Some(name_node) = node
                     .children()

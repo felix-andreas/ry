@@ -3,27 +3,30 @@
 //! runtime's heap and registers the builtins that need this crate: `.Call`, `.External`, `.C`,
 //! `.Fortran` and the `dyn.load` family.
 
-use crate::{
-    Rboolean, Runtime,
-    boundary::{
-        ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report, with_native_scope,
+use {
+    crate::{
+        Rboolean, Runtime,
+        boundary::{
+            ApiResult, DlFunc, Unwind, call_native, enter, error, error_in, report,
+            with_native_scope,
+        },
+        dynload::{Dll, RoutineKind, find_routine},
+        globals::R_NamesSymbol,
+        runtime,
+        strings::utf8_text,
+        vectors::{format_real, xlength},
     },
-    dynload::{Dll, RoutineKind, find_routine},
-    globals::R_NamesSymbol,
-    runtime,
-    strings::utf8_text,
-    vectors::{format_real, xlength},
+    heap::{
+        object::{NA_INTEGER, Sexp, SexpType},
+        strings::Encoding,
+    },
+    interp::{
+        TaskCallbackRoutine, builtin_libraries,
+        builtins::{Arg, BuiltinDef, Call, builtin, internal},
+        native::Interface,
+    },
+    std::ffi::{c_char, c_int, c_void},
 };
-use heap::{
-    object::{NA_INTEGER, Sexp, SexpType},
-    strings::Encoding,
-};
-use interp::{
-    TaskCallbackRoutine, builtin_libraries,
-    builtins::{Arg, BuiltinDef, Call, builtin, internal},
-    native::Interface,
-};
-use std::ffi::{c_char, c_int, c_void};
 
 /// Installs the interpreter on the runtime's heap. The runtime must be at its final address.
 pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
@@ -75,7 +78,9 @@ impl Evaluator for Interpreter {
             .into_iter()
             .map(|line| line.unwrap_or_else(|| "NA".into()))
             .collect();
-        let Ok(expressions) = interp::lower::parse_with_srcfile(&lines.join("\n"), "<text>", srcfile) else {
+        let Ok(expressions) =
+            interp::lower::parse_with_srcfile(&lines.join("\n"), "<text>", srcfile)
+        else {
             return Ok(ParseOutcome {
                 expressions: runtime().nil(),
                 status: ParseStatus::Error,
@@ -131,7 +136,12 @@ impl Evaluator for Interpreter {
         };
         Ok(match index {
             0 => state.srcref,
-            _ => state.frames.iter().rev().nth(index - 1).map_or(runtime().nil(), |frame| frame.srcref),
+            _ => state
+                .frames
+                .iter()
+                .rev()
+                .nth(index - 1)
+                .map_or(runtime().nil(), |frame| frame.srcref),
         })
     }
 
@@ -261,11 +271,10 @@ unsafe fn task_callback_routine(routine: TaskCallbackRoutine, args: &[Sexp]) -> 
             unsafe extern "C" fn(Sexp, Sexp, Sexp, Sexp) -> Sexp,
             DlFunc,
         >(ry_add_r_task_callback),
-        TaskCallbackRoutine::Remove => {
-            std::mem::transmute::<unsafe extern "C" fn(Sexp) -> Sexp, DlFunc>(
-                ry_remove_r_task_callback,
-            )
-        }
+        TaskCallbackRoutine::Remove => std::mem::transmute::<
+            unsafe extern "C" fn(Sexp) -> Sexp,
+            DlFunc,
+        >(ry_remove_r_task_callback),
         TaskCallbackRoutine::Names => {
             std::mem::transmute::<unsafe extern "C" fn() -> Sexp, DlFunc>(ry_task_callback_names)
         }
@@ -508,13 +517,23 @@ impl crate::boundary::Handout for Option<Sexp> {
 // The builtins the interpreter calls native code through.
 
 const NATIVE_BUILTINS: &[BuiltinDef] = &[
-    builtin(".Call", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
-    builtin(".External", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".Call", -1, |call| unsafe {
+        dot_call(call, RoutineKind::Call)
+    }),
+    builtin(".External", -1, |call| unsafe {
+        dot_call(call, RoutineKind::External)
+    }),
     builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
-    builtin(".Call.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::Call) }),
-    builtin(".External.graphics", -1, |call| unsafe { dot_call(call, RoutineKind::External) }),
+    builtin(".Call.graphics", -1, |call| unsafe {
+        dot_call(call, RoutineKind::Call)
+    }),
+    builtin(".External.graphics", -1, |call| unsafe {
+        dot_call(call, RoutineKind::External)
+    }),
     builtin(".C", -1, |call| unsafe { dot_c(call, RoutineKind::C) }),
-    builtin(".Fortran", -1, |call| unsafe { dot_c(call, RoutineKind::Fortran) }),
+    builtin(".Fortran", -1, |call| unsafe {
+        dot_c(call, RoutineKind::Fortran)
+    }),
     internal("dyn.load", 4, |call| unsafe { do_dyn_load(call) }).invisible(),
     internal("dyn.unload", 1, |_| Ok(unsafe { runtime().nil() })),
     internal("getLoadedDLLs", 0, |_| unsafe { loaded_dlls() }),
@@ -572,7 +591,11 @@ fn tagged_values(call: &Call<'_>) -> Vec<(Sexp, Sexp)> {
 
 /// A native routine through `.Call`, `.External`, `.C` or `.Fortran`, with `external2` for an
 /// `.External` routine that `.External2` calls. The first argument is `.NAME`.
-unsafe fn native_call(builtin_call: &Call<'_>, kind: RoutineKind, external2: bool) -> ApiResult<Sexp> {
+unsafe fn native_call(
+    builtin_call: &Call<'_>,
+    kind: RoutineKind,
+    external2: bool,
+) -> ApiResult<Sexp> {
     let call = builtin_call.call;
     let arguments = &tagged_values(builtin_call);
     let what = kind.interface();
@@ -1013,7 +1036,8 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
             .find(|dll| std::ptr::eq(&***dll, address.cast::<Dll>()))
             .map(|dll| dll.name.clone())
             .or_else(|| {
-                interp::values::first_string(package.external_protected()).map(|text| text.into_owned())
+                interp::values::first_string(package.external_protected())
+                    .map(|text| text.into_owned())
             })
     } else {
         None
@@ -1025,10 +1049,16 @@ unsafe fn do_get_symbol_info(call: &Call<'_>) -> ApiResult<Sexp> {
     // `.Call("name")` by string, while `useDynLib(pkg, name)` resolves names through here.
     let packages: Vec<String> = match package_name {
         Some(package) => vec![package],
-        None => runtime().dlls.iter().rev().map(|dll| dll.name.clone()).collect(),
+        None => runtime()
+            .dlls
+            .iter()
+            .rev()
+            .map(|dll| dll.name.clone())
+            .collect(),
     };
     for package in packages {
-        let Some((kind, function, arity)) = crate::dynload::registered_routine(&name, &package) else {
+        let Some((kind, function, arity)) = crate::dynload::registered_routine(&name, &package)
+        else {
             continue;
         };
         let dll = runtime()
@@ -1084,6 +1114,9 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
     if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return 0;
     }
+    if report_missing_r_home() {
+        return 2;
+    }
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         site_profile: false,
@@ -1129,6 +1162,9 @@ pub unsafe extern "C" fn ry_run(
         command_args.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
     }
     runtime();
+    if report_missing_r_home() {
+        return 2;
+    }
     let options = interp::session::StartOptions {
         command_args,
         site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
@@ -1194,6 +1230,18 @@ pub unsafe extern "C" fn ry_run(
     }
 }
 
+/// Prints why no GNU R installation was found, and says whether one is missing. Base R's own R
+/// code comes from that installation, so a session cannot start without it.
+fn report_missing_r_home() -> bool {
+    match interp::system::missing_r_home() {
+        Some(message) => {
+            crate::boundary::write_console(message.as_bytes(), true);
+            true
+        }
+        None => false,
+    }
+}
+
 /// `ry_run` and `ry_repl` flag: inline type annotations become checks at function
 /// boundaries. Off when the project turns inline annotations off.
 pub const RUN_FLAG_ANNOTATION_CHECKS: c_int = 1 << 0;
@@ -1210,8 +1258,10 @@ pub const RUN_FLAG_SITE_PROFILE: c_int = 1 << 2;
 pub const RUN_FLAG_USER_PROFILE: c_int = 1 << 3;
 
 /// Every flag `ry_run` and `ry_repl` understand.
-pub const RUN_FLAGS: c_int =
-    RUN_FLAG_ANNOTATION_CHECKS | RUN_FLAG_OBJECT_SYSTEMS | RUN_FLAG_SITE_PROFILE | RUN_FLAG_USER_PROFILE;
+pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
+    | RUN_FLAG_OBJECT_SYSTEMS
+    | RUN_FLAG_SITE_PROFILE
+    | RUN_FLAG_USER_PROFILE;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
@@ -1224,12 +1274,19 @@ unsafe fn apply_flags(flags: c_int) {
 /// GNU R's `R_ReadConsole` hook without its history flag.
 pub type ReadConsole = unsafe extern "C" fn(*const c_char, *mut u8, c_int) -> c_int;
 
-/// Runs ry's runtime as an interactive console: starts the session, then reads input through
-/// `read` and evaluates it until the input ends. Returns 0, or 2 when the session could not
-/// start. This is `ry repl --runtime ry`'s entry point.
+/// Runs ry's runtime as an interactive console: starts the session, attaches the package
+/// loader as `tools:ry`, evaluates `startup` (null for none; an error in it is reported and the
+/// console still opens), then reads input through `read` and evaluates it until the input
+/// ends. Returns 0, or 2 when the session could not start. This is `ry run`'s console entry
+/// point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
+pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flags: c_int) -> c_int {
     apply_flags(flags);
+    if report_missing_r_home() {
+        return 2;
+    }
+    let startup = (!startup.is_null())
+        .then(|| String::from_utf8_lossy(crate::strings::c_bytes(startup)).into_owned());
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
         site_profile: true,
@@ -1241,41 +1298,62 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, flags: c_int) -> c_int {
         crate::boundary::write_console(b"ry: base R did not load\n", true);
         return 2;
     }
+    if let Err(unwind) = loader::ry_runtime::attach() {
+        interp::session::report_toplevel(unwind);
+        crate::boundary::write_console(b"ry: the package loader did not load\n", true);
+        return 2;
+    }
     install_interrupt_handler();
+    if let Some(startup) = &startup {
+        // `run_text` reports an error itself, and a failed startup load still leaves a console
+        // the user can fix the package from.
+        interp::session::run_text(startup, "<startup>");
+    }
     let mut buffer = vec![0u8; 64 * 1024];
-    interp::session::run_console(|prompt| {
-        use std::io::Write;
-        if let Err(error) = std::io::stdout().flush() {
-            crate::boundary::write_console(
-                format!("ry: cannot write output: {error}\n").as_bytes(),
-                true,
-            );
-        }
-        // A prompt never holds a NUL, so the empty fallback is unreachable.
-        let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
-        let mut input = Vec::new();
-        // A line longer than the buffer arrives in several chunks; only the last one ends the
-        // line, and the text is decoded once it is whole, so no character is split.
-        loop {
-            if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
-                return (!input.is_empty()).then(|| String::from_utf8_lossy(&input).into_owned());
+    interp::session::run_console(
+        |prompt| {
+            use std::io::Write;
+            if let Err(error) = std::io::stdout().flush() {
+                crate::boundary::write_console(
+                    format!("ry: cannot write output: {error}\n").as_bytes(),
+                    true,
+                );
             }
-            let end = buffer
-                .iter()
-                .position(|&byte| byte == 0)
-                .unwrap_or(buffer.len());
-            input.extend_from_slice(&buffer[..end]);
-            // A reader may stop one byte short of the contract's limit, so a chunk is taken as
-            // cut off whenever it comes within two bytes of the buffer's end.
-            if end + 2 < buffer.len() || input.ends_with(b"\n") {
-                return Some(String::from_utf8_lossy(&input).into_owned());
+            // A prompt never holds a NUL, so the empty fallback is unreachable.
+            let mut prompt = std::ffi::CString::new(prompt).unwrap_or_default();
+            let mut input = Vec::new();
+            // A line longer than the buffer arrives in several chunks; only the last one ends the
+            // line, and the text is decoded once it is whole, so no character is split.
+            loop {
+                if read(prompt.as_ptr(), buffer.as_mut_ptr(), buffer.len() as c_int) == 0 {
+                    return (!input.is_empty())
+                        .then(|| String::from_utf8_lossy(&input).into_owned());
+                }
+                let end = buffer
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(buffer.len());
+                input.extend_from_slice(&buffer[..end]);
+                // A reader may stop one byte short of the contract's limit, so a chunk is taken as
+                // cut off whenever it comes within two bytes of the buffer's end.
+                if end + 2 < buffer.len() || input.ends_with(b"\n") {
+                    return Some(String::from_utf8_lossy(&input).into_owned());
+                }
+                prompt = std::ffi::CString::default();
             }
-            prompt = std::ffi::CString::default();
-        }
-    }, false);
+        },
+        false,
+    );
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     0
+}
+
+/// Returns 1 when a package loaded in this session changed on disk since it was loaded, and 0
+/// otherwise. ry's console asks before each command and reloads with `.ry_autoreload()`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_loader_changed() -> c_int {
+    c_int::from(loader::ry_runtime::changed())
 }
 
 /// While the console reads input its terminal is raw, so Ctrl-C reaches the line editor; while

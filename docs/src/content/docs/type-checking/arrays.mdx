@@ -1,0 +1,126 @@
+---
+title: Arrays
+description: ry's strict typed vector, written [1, 2, 3]
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+An R vector bends to fit: `c(1, "a")` quietly becomes a character vector, `c(1, 2) + c(1, 2, 3, 4)`
+recycles, and any element may be `NA`. ry's Array is the vector that does none of that. You write
+one as `[1, 2, 3]`, its type is `Array<double>`, and the checker holds it to one item type with no
+missing values, no names and no recycling:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+average <- function(xs: Array<double>) -> double sum(xs) / length(xs)
+
+average([1, 2, 3])
+average(c(1, 2, 3))
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(xs: Array<double>) -> double
+average <- function(xs) sum(xs) / length(xs)
+
+average([1, 2, 3])
+average(c(1, 2, 3))
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `Array<double>`, found `double[]`. Convert an R vector with `as.Array()`
+```
+
+At run time an Array is the R vector it looks like, with the same unboxed storage, so `sum(xs)`
+works and C code reads it unchanged. That is also why it suits a [DataFrame](/type-checking/dataframes/)
+column: `DataFrame(price = [12.5, 9.99, 20])` checks each price as a `double` with no `NA`, and
+the frame stores the column as the plain vector, so its schema is `DataFrame{price: double[]}`. The `[...]`
+literal is ry syntax, so it has one spelling; the type is written `Array<double>` in both
+annotation styles.
+
+## The rules
+
+Every item has the same type, and items are never converted into each other:
+
+```r
+prices <- [12.5, "free", 20]
+```
+
+```text
+type-mismatch
+
+  x this item is `character`, but the Array's first item is `double`. An Array's items share one type and are never converted into each other
+```
+
+An item is a single `logical`, `integer`, `double` or `character` value, or one of ry's own values:
+a record, tuple, tag, dictionary, set or another Array. So `[(x = 1, y = 2), (x = 3, y = 4)]` is an
+`Array<Record{x: double, y: double}>`, and `[[1, 2], [3]]` is an `Array<Array<double>>`.
+
+An Array holds no missing values. Model a value that may be missing with a tag:
+
+```r
+readings <- [1.5, NA, 3]
+```
+
+```text
+type-mismatch
+
+  x an Array holds no missing values. Mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`
+```
+
+Operators work item by item on two Arrays of the same length, or on an Array and a single value.
+Both sides need the same item type, because `integer` and `double` are not mixed either:
+
+```r
+counts <- [1L, 2L, 3L]
+scaled <- counts * 1.5
+```
+
+```text
+type-mismatch
+
+  x `*` is not defined between `Array<integer>` and `double`. Both sides must have one item type, and `integer` and `double` are never converted into each other
+```
+
+Arithmetic needs numbers and gives an Array of the same item type, except `/` and `^`, which give
+`Array<double>`. A comparison gives an `Array<logical>`, and `&`, `|` and `!` need logical items.
+When the program runs, the same rules hold: Arrays of different lengths are an error rather than
+recycled, and a result that would be `NA`, such as an integer overflow, stops with an error.
+
+## Indexing
+
+`xs[[i]]` is one item, typed as the item type. `xs[i]` is an Array again, selected by positions or
+by a logical mask such as `xs[xs > 1]`, and a negative position leaves an item out as in R. A
+position outside the Array is an error when the code runs, never an `NA`.
+
+`x[[...]]` directly after a value keeps its R meaning, so index with an Array of positions through a
+variable: `positions <- [1L, 3L]; xs[positions]`.
+
+## Arrays and R code
+
+Because an Array is an R vector underneath, it passes wherever R expects one: an `Array<double>` fits
+a `double[]` parameter, and an Array of records fits a `list[...]`. The other direction needs a
+conversion, which checks the rules:
+
+```r
+xs <- as.Array(c(1, 2, 3))   # Array<double>
+as.vector(xs)                # the plain double vector again
+is.Array(xs)                 # TRUE
+```
+
+`as.Array()` refuses a vector with an `NA` or a class, and drops names. Setting an attribute on an
+Array, such as `names(xs) <- ...`, turns it into a plain R vector, and so does R code that assigns
+an `NA` or an R vector into an Array it received, so base functions keep working on Arrays. The standard library's `List`
+functions accept an Array and return one, so `List.map([1, 2, 3], function(x) x * 2)` is
+`[2, 4, 6]`.
+
+The typing contract is the reference section [Arrays](/reference/type-system/#arrays).

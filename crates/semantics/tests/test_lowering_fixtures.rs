@@ -2,11 +2,16 @@
 //! happens to type the same.
 //! `RY_BLESS=1` accepts new output; `FIXTURE_FILTER=group__case` runs one case.
 
-use semantics::hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind};
-use semantics::testing::with_fixture_project;
-use semantics::{DocumentKind, item_hir, item_tree};
-use std::path::PathBuf;
-use syntax::testing::run_fixture_suite;
+use {
+    semantics::{
+        DocumentKind,
+        hir::{Argument, ExprId, ExpressionKind, Module, PatId, PatternKind},
+        item_hir, item_tree,
+        testing::with_fixture_project,
+    },
+    std::path::PathBuf,
+    syntax::testing::run_fixture_suite,
+};
 
 #[test]
 fn lowering_fixtures() {
@@ -96,6 +101,7 @@ fn render_expression(output: &mut String, module: &Module, id: ExprId, depth: us
         ExpressionKind::Break => "Break".to_owned(),
         ExpressionKind::Next => "Next".to_owned(),
         ExpressionKind::Tuple(_) => "Tuple".to_owned(),
+        ExpressionKind::Array(_) => "Array".to_owned(),
         ExpressionKind::Record(fields) => {
             let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
             format!("Record({})", names.join(", "))

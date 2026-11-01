@@ -2,16 +2,21 @@
 //! slot only when a write can reach it; an unassignable slot does not shadow, so lookup
 //! falls outward exactly like R's runtime.
 
-use crate::hir::{
-    Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module, PatId,
-    PatternKind, Symbol, UnaryOperator, destructure_leaves,
+use {
+    crate::{
+        hir::{
+            Argument, AssignSpelling, ExprId, ExpressionKind, LiteralKind, MatchArm, Module, PatId,
+            PatternKind, Symbol, UnaryOperator, destructure_leaves,
+        },
+        sorted::{SortedMap, SortedSet},
+    },
+    rustc_hash::FxHashMap,
+    std::{
+        collections::{BTreeMap, BTreeSet, btree_map::Entry},
+        mem,
+    },
+    syntax::TextRange,
 };
-use crate::sorted::{SortedMap, SortedSet};
-use rustc_hash::FxHashMap;
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
-use syntax::TextRange;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BindingId(pub u32);
@@ -403,10 +408,7 @@ impl Context<'_> {
                     BinaryOperator::Tilde | BinaryOperator::Help => {}
                     // Operands of unmodeled operators still resolve (for IDE navigation), but
                     // unresolved reads stay quiet: the construct is opaque to the checker.
-                    BinaryOperator::And
-                    | BinaryOperator::Or
-                    | BinaryOperator::Pipe
-                    | BinaryOperator::Special => {
+                    BinaryOperator::Pipe | BinaryOperator::Special => {
                         self.quiet_depth += 1;
                         self.resolve(*lhs);
                         self.resolve(*rhs);
@@ -689,7 +691,7 @@ impl Context<'_> {
                 }
             }
             ExpressionKind::Paren(inner) => self.resolve(*inner),
-            ExpressionKind::Tuple(items) => {
+            ExpressionKind::Tuple(items) | ExpressionKind::Array(items) => {
                 for &item in items {
                     self.resolve(item);
                 }
@@ -1491,8 +1493,7 @@ fn refuses_assignment(kind: &ExpressionKind) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::hir::lower_item;
+    use {super::*, crate::hir::lower_item};
 
     fn naming_of(source: &str) -> ItemNaming {
         let parse = syntax::parse(source);

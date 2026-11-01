@@ -2,18 +2,24 @@
 //! the member-wise `T | NULL` vs `U | NULL` case. Directional member-wise logic
 //! belongs in compatibility checking, never here.
 
-use crate::Db;
-use crate::annotations::NamedDefinition;
-use crate::diagnostics::nearest_name;
-use crate::stubs::stubs;
-use crate::types::{
-    FrameKind,
-    Atomic, Constraint, FunctionType, InferenceVar, Name, Ty, TyKind, for_each_child_type,
-    map_child_types, scalar, substitute_rigid, union_of, unknown,
+use {
+    crate::{
+        Db,
+        annotations::NamedDefinition,
+        diagnostics::nearest_name,
+        stubs::stubs,
+        types::{
+            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, Ty, TyKind,
+            array_element, for_each_child_type, is_ry_value_type, map_child_types, scalar,
+            substitute_rigid, union_of, unknown,
+        },
+    },
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{Cell, RefCell},
+        mem,
+    },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{Cell, RefCell};
-use std::mem;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry<'db> {
@@ -90,6 +96,12 @@ impl<'db> InferenceTable<'db> {
     pub fn fresh_ty(&mut self, db: &'db dyn Db, constraint: Constraint) -> Ty<'db> {
         let var = self.fresh(constraint);
         Ty::new(db, TyKind::Var(var))
+    }
+
+    /// The id the next fresh variable gets, so a caller can tell the variables it creates
+    /// from here on.
+    pub fn next_var(&self) -> InferenceVar {
+        InferenceVar(self.entries.len() as u32)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -389,9 +401,8 @@ impl<'db> InferenceTable<'db> {
                 Err(UnifyError::Mismatch(a, b))
             }
             // A frame whose columns are unknown makes no claim to check.
-            (TyKind::Frame(_, None), TyKind::Frame(..)) | (TyKind::Frame(..), TyKind::Frame(_, None)) => {
-                Ok(())
-            }
+            (TyKind::Frame(_, None), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None)) => Ok(()),
             (TyKind::Frame(_, Some(left)), TyKind::Frame(_, Some(right))) => {
                 if left.len() != right.len() {
                     return Err(UnifyError::Mismatch(a, b));
@@ -852,6 +863,20 @@ impl<'db> InferenceTable<'db> {
             {
                 true
             }
+            // An Array is an R vector at run time: a scalar item type makes it an atomic vector
+            // and a ry-value item type a list, so it passes to R code as one, never the reverse.
+            (
+                TyKind::Named(..),
+                TyKind::Vector(expected_element) | TyKind::List(expected_element),
+            ) if array_element(db, actual).is_some() => {
+                let element = array_element(db, actual).map(|element| self.resolve(db, element));
+                let Some(element) = element else {
+                    return false;
+                };
+                let atomic = !is_ry_value_type(db, element);
+                atomic == matches!(expected.kind(db), TyKind::Vector(_))
+                    && self.compatible_probe(db, element, *expected_element, depth + 1)
+            }
             // Only the projection direction: structural into nominal happens only via `@new`.
             (TyKind::Named(actual_name, actual_arguments), _) => {
                 match self.representation(db, *actual_name, actual_arguments) {
@@ -906,9 +931,8 @@ impl<'db> InferenceTable<'db> {
             {
                 false
             }
-            (TyKind::Frame(_, None), TyKind::Frame(..)) | (TyKind::Frame(..), TyKind::Frame(_, None)) => {
-                true
-            }
+            (TyKind::Frame(_, None), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None)) => true,
             (TyKind::Frame(_, Some(actual_columns)), TyKind::Frame(_, Some(expected_columns)))
                 if actual_columns.len() == expected_columns.len() =>
             {
@@ -935,19 +959,24 @@ impl<'db> InferenceTable<'db> {
             }
             // `as.list` turns a frame into the list of its columns, which is how `lapply`,
             // `Map` and `Filter` iterate one. A plan or a grouping is not a list of columns.
-            (TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _), TyKind::List(_) | TyKind::NamedList(_)) => false,
+            (
+                TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _),
+                TyKind::List(_) | TyKind::NamedList(_),
+            ) => false,
             (TyKind::Frame(_, None), TyKind::List(_) | TyKind::NamedList(_)) => true,
-            (TyKind::Frame(_, Some(columns)), TyKind::List(element) | TyKind::NamedList(element))
-                if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
-            {
+            (
+                TyKind::Frame(_, Some(columns)),
+                TyKind::List(element) | TyKind::NamedList(element),
+            ) if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) => {
                 let joined = union_of(db, columns.iter().map(|column| column.ty));
                 self.unify(db, *element, joined).is_ok()
             }
-            (TyKind::Frame(_, Some(columns)), TyKind::List(element) | TyKind::NamedList(element)) => {
-                columns
-                    .iter()
-                    .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
-            }
+            (
+                TyKind::Frame(_, Some(columns)),
+                TyKind::List(element) | TyKind::NamedList(element),
+            ) => columns
+                .iter()
+                .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1)),
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
             // to the first item and reject the rest. An empty `list()` says nothing about `T`,
             // so it leaves `T` open; binding it to the empty join would fail every constraint
@@ -1072,9 +1101,11 @@ impl<'db> InferenceTable<'db> {
         }
         if !self.compatible(db, actual.ret, expected.ret) {
             let returns = self.resolve(db, actual.ret);
+            let required = self.resolve(db, expected.ret);
             return Some(FunctionMismatch::Return {
-                required: self.resolve(db, expected.ret),
+                required,
                 constraint: self.variable_constraint(db, returns),
+                required_constraint: self.variable_constraint(db, required),
                 returns,
             });
         }
@@ -1224,7 +1255,10 @@ pub enum FunctionMismatch<'db> {
     Return {
         required: Ty<'db>,
         returns: Ty<'db>,
+        /// The constraint the function's own result type carries.
         constraint: Option<Constraint>,
+        /// The constraint the expected result type carries, such as `item` on `List.map`'s `B`.
+        required_constraint: Option<Constraint>,
     },
 }
 
@@ -1534,15 +1568,28 @@ fn constraint_rejects<'db>(
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
         },
+        Constraint::ArrayItem => match ty.kind(db) {
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Character,
+            )
+            | TyKind::Any
+            | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => is_ry_value_type(db, ty),
+        },
     };
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
-    use crate::types::{Parameter, null, scalar};
+    use {
+        super::*,
+        crate::{
+            RootDatabase,
+            types::{Parameter, null, scalar},
+        },
+    };
 
     #[test]
     fn unify_binds_and_resolves() {
@@ -1678,7 +1725,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: int,
                     optional: false,
                     default: None,
@@ -1705,9 +1752,18 @@ mod tests {
 fn same_frame_kind(left: FrameKind, right: FrameKind) -> bool {
     match (left, right) {
         (
-            FrameKind::GroupBy { lazy: left_lazy, keys: left_keys },
-            FrameKind::GroupBy { lazy: right_lazy, keys: right_keys },
-        ) => left_lazy == right_lazy && (left_keys == right_keys || left_keys == 0 || right_keys == 0),
+            FrameKind::GroupBy {
+                lazy: left_lazy,
+                keys: left_keys,
+            },
+            FrameKind::GroupBy {
+                lazy: right_lazy,
+                keys: right_keys,
+            },
+        ) => {
+            left_lazy == right_lazy
+                && (left_keys == right_keys || left_keys == 0 || right_keys == 0)
+        }
         _ => left == right,
     }
 }

@@ -1,19 +1,117 @@
-use rustc_hash::FxHashMap;
-use std::iter;
+use {
+    crate::{Db, hir::Symbol},
+    hashbrown::HashTable,
+    rustc_hash::{FxBuildHasher, FxHashMap},
+    std::{
+        fmt,
+        hash::{BuildHasher, Hash, Hasher},
+        iter,
+        marker::PhantomData,
+        mem,
+        sync::{LazyLock, Mutex},
+    },
+};
 
-use crate::Db;
-
-#[salsa::interned(debug, revisions = usize::MAX)]
+/// A name in a type (a type name, a field, a tag, a type parameter). It is a process-wide
+/// [`Symbol`], so equality is an index comparison and no database is consulted. The lifetime
+/// only keeps the API of a database-scoped handle.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Name<'db> {
-    #[returns(deref)]
-    pub text: String,
+    symbol: Symbol,
+    db: PhantomData<&'db ()>,
 }
 
-#[salsa::interned(debug, revisions = usize::MAX)]
-pub struct Ty<'db> {
-    #[returns(ref)]
-    pub kind: TyKind<'db>,
+impl<'db> Name<'db> {
+    pub fn new<D: ?Sized>(_db: &'db D, text: impl AsRef<str>) -> Name<'db> {
+        Name {
+            symbol: Symbol::new(text.as_ref()),
+            db: PhantomData,
+        }
+    }
+
+    pub fn text<D: ?Sized>(self, _db: &D) -> &'static str {
+        self.symbol.as_str()
+    }
 }
+
+/// A type, hash-consed process-wide: structurally equal kinds share one immortal allocation,
+/// so equality and hashing compare pointers and `kind` is a plain read. The checker builds
+/// and compares types far more often than anything else, and salsa interning put a table
+/// lookup, a dependency edge and shared atomics on each of those operations. The lifetime is
+/// phantom: no type borrows from a database, which is what lets the table outlive them all.
+#[derive(Clone, Copy)]
+pub struct Ty<'db> {
+    entry: &'static TypeEntry,
+    db: PhantomData<&'db ()>,
+}
+
+/// A hash-consed type with the facts derived from its structure at construction, while its
+/// children's facts are at hand.
+struct TypeEntry {
+    kind: TyKind<'static>,
+    /// Nodes in the type tree, capped at [`TYPE_SIZE_CEILING`].
+    size: u64,
+}
+
+/// A name as the key of a tracked function: salsa keys a one-argument query by one of its
+/// own structs, and [`Name`] lives outside every database.
+#[salsa::interned(revisions = usize::MAX)]
+pub struct QueryName<'db> {
+    pub name: Name<'db>,
+}
+
+impl<'db> Ty<'db> {
+    pub fn new<D: ?Sized>(_db: &'db D, kind: TyKind<'db>) -> Ty<'db> {
+        // SAFETY: `'db` appears in `TyKind` only through `Ty` and `Name`, whose lifetimes are
+        // phantom, so the value borrows nothing and is valid for any lifetime.
+        let kind: TyKind<'static> = unsafe { mem::transmute(kind) };
+        Ty {
+            entry: intern_type(kind),
+            db: PhantomData,
+        }
+    }
+
+    pub fn kind<D: ?Sized>(self, _db: &D) -> &'db TyKind<'db> {
+        &self.entry.kind
+    }
+}
+
+impl PartialEq for Ty<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.entry, other.entry)
+    }
+}
+
+impl Eq for Ty<'_> {}
+
+impl Hash for Ty<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.entry, state);
+    }
+}
+
+impl Hash for Name<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.symbol.index().hash(state);
+    }
+}
+
+impl fmt::Debug for Ty<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.entry.kind, formatter)
+    }
+}
+
+impl fmt::Debug for Name<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.symbol.as_str(), formatter)
+    }
+}
+
+// SAFETY: both point into process-wide tables that never free or move an entry, so a value
+// from an older revision stays valid in every later one.
+unsafe impl salsa::SalsaValue for Ty<'_> {}
+unsafe impl salsa::SalsaValue for Name<'_> {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum TyKind<'db> {
@@ -66,7 +164,10 @@ pub enum FrameKind {
     LazyFrame,
     /// `DataFrame.group_by` or `LazyFrame.group_by`. The first `keys` columns are the group keys,
     /// rendered before a `;`, and the rest are the columns `GroupBy.agg` aggregates.
-    GroupBy { lazy: bool, keys: u32 },
+    GroupBy {
+        lazy: bool,
+        keys: u32,
+    },
     /// A data.table whose columns are known, from `fread` and the rest of data.table's readers.
     DataTable,
 }
@@ -87,8 +188,14 @@ impl FrameKind {
         Some(match head {
             "DataFrame" => FrameKind::DataFrame,
             "LazyFrame" => FrameKind::LazyFrame,
-            "GroupBy" => FrameKind::GroupBy { lazy: false, keys: 0 },
-            "LazyGroupBy" => FrameKind::GroupBy { lazy: true, keys: 0 },
+            "GroupBy" => FrameKind::GroupBy {
+                lazy: false,
+                keys: 0,
+            },
+            "LazyGroupBy" => FrameKind::GroupBy {
+                lazy: true,
+                keys: 0,
+            },
             "data.table" => FrameKind::DataTable,
             _ => return None,
         })
@@ -168,16 +275,20 @@ pub enum Constraint {
     /// runtime's collections use.
     Key,
     ScalarNumeric,
+    /// What an Array can hold: a `logical`, `integer`, `double` or `character` scalar, or a ry
+    /// value (a record, tuple, tag, Array, `Dict` or `Set`).
+    ArrayItem,
 }
 
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 4] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 5] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
+        ("item", Constraint::ArrayItem),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -201,7 +312,9 @@ impl Constraint {
             (a, b) if a == b => a,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
             (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
-            (Key, AtomicElement) | (AtomicElement, Key) => Key,
+            (Key, AtomicElement | ArrayItem) | (AtomicElement | ArrayItem, Key) => Key,
+            (ArrayItem, AtomicElement) | (AtomicElement, ArrayItem) => Key,
+            (ArrayItem, Numeric) | (Numeric, ArrayItem) => ScalarNumeric,
             _ => unreachable!("all constraint pairs are covered"),
         }
     }
@@ -248,6 +361,53 @@ pub fn null(db: &dyn Db) -> Ty<'_> {
 
 pub fn scalar(db: &dyn Db, atomic: Atomic) -> Ty<'_> {
     Ty::new(db, TyKind::Scalar(atomic))
+}
+
+/// `Array<element>`, ry's strict typed vector.
+pub fn array<'db>(db: &'db dyn Db, element: Ty<'db>) -> Ty<'db> {
+    Ty::new(db, TyKind::Named(Name::new(db, "Array"), vec![element]))
+}
+
+/// The item type of the standard library's `Array<T>`, and `None` for any other type, including a
+/// project's own type that happens to be called `Array`.
+pub fn array_element<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    match ty.kind(db) {
+        TyKind::Named(name, arguments)
+            if arguments.len() == 1
+                && name.text(db) == "Array"
+                && crate::stubs::is_ry_type(db, "Array") =>
+        {
+            Some(arguments[0])
+        }
+        _ => None,
+    }
+}
+
+/// Whether every value of `ty` is a tag, so that two such types join into one tag union.
+pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Tag(..) | TyKind::OtherTags => true,
+        TyKind::Union(members) => members.iter().all(|&member| is_tag_type(db, member)),
+        _ => false,
+    }
+}
+
+/// Whether every value of `ty` is one of ry's own values (a record, tuple, tag, or a standard
+/// library collection), which an Array stores boxed in a list rather than unboxed.
+pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::NativeRecord(_) | TyKind::NativeTuple(_) | TyKind::Tag(..) | TyKind::OtherTags => {
+            true
+        }
+        TyKind::Named(name, _) => {
+            matches!(name.text(db), "Array" | "Dict" | "Set")
+                && crate::stubs::is_ry_type(db, name.text(db))
+        }
+        TyKind::Union(members) => {
+            !members.is_empty() && members.iter().all(|&member| is_ry_value_type(db, member))
+        }
+        _ => false,
+    }
 }
 
 /// Sorts by name in byte order, the one order a record's fields are stored and printed in.
@@ -307,7 +467,13 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     match ty.kind(db) {
         TyKind::Scalar(_) => Ty::new(db, TyKind::Vector(ty)),
         TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
-        _ => ty,
+        // A frame stores an Array column as the plain R vector underneath it.
+        _ => match array_element(db, ty) {
+            Some(element) if matches!(element.kind(db), TyKind::Scalar(_)) => {
+                Ty::new(db, TyKind::Vector(element))
+            }
+            _ => ty,
+        },
     }
 }
 
@@ -401,17 +567,10 @@ fn merge_tags<'db>(db: &'db dyn Db, first: Ty<'db>, second: Ty<'db>) -> Ty<'db> 
 }
 
 /// Node count of `ty` as a tree (each path counted separately), saturating at
-/// [`TYPE_SIZE_CEILING`]. Interning makes types DAGs, so a self-referential
-/// record's tree grows exponentially while its distinct nodes stay few.
-#[salsa::tracked(returns(clone))]
-pub fn type_size<'db>(db: &'db dyn Db, ty: Ty<'db>) -> u64 {
-    let mut total: u64 = 1;
-    for_each_child_type(db, ty, &mut |child| {
-        total = total
-            .saturating_add(type_size(db, child))
-            .min(TYPE_SIZE_CEILING);
-    });
-    total
+/// [`TYPE_SIZE_CEILING`] and stored when the type is built. Hash-consing makes types DAGs, so a
+/// self-referential record's tree grows exponentially while its distinct nodes stay few.
+pub fn type_size<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> u64 {
+    ty.entry.size
 }
 
 /// Far above any type real code produces, far below what a self-referential value reaches.
@@ -485,15 +644,18 @@ fn mapped_kind<'db>(
         )),
         TyKind::Tag(name, payload) => Some(TyKind::Tag(*name, payload.map(&mut *map))),
         TyKind::Frame(_, None) => None,
-        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(*kind, Some(
-            columns
-                .iter()
-                .map(|column| RecordField {
-                    ty: map(column.ty),
-                    ..column.clone()
-                })
-                .collect(),
-        ))),
+        TyKind::Frame(kind, Some(columns)) => Some(TyKind::Frame(
+            *kind,
+            Some(
+                columns
+                    .iter()
+                    .map(|column| RecordField {
+                        ty: map(column.ty),
+                        ..column.clone()
+                    })
+                    .collect(),
+            ),
+        )),
         TyKind::Function(function) => Some(TyKind::Function(FunctionType {
             positional: function.positional.iter().map(|&ty| map(ty)).collect(),
             named: function
@@ -521,7 +683,11 @@ fn mapped_kind<'db>(
 
 /// The reading counterpart of [`map_child_types`].
 pub fn for_each_child_type<'db>(db: &'db dyn Db, ty: Ty<'db>, visit: &mut impl FnMut(Ty<'db>)) {
-    match ty.kind(db) {
+    for_each_child(ty.kind(db), visit);
+}
+
+fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
+    match kind {
         TyKind::Any
         | TyKind::Unknown
         | TyKind::Null
@@ -611,10 +777,41 @@ pub fn erase_vars<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
     map_child_types(db, ty, &mut |child| erase_vars(db, child))
 }
 
+/// The top six bits of a hash pick the shard.
+const TYPE_SHARDS: usize = 64;
+
+/// Every type ever built, sharded by hash so parallel checkers rarely contend. Entries are
+/// leaked, so a `&'static` to one is the type's identity.
+static TYPES: LazyLock<[Mutex<HashTable<&'static TypeEntry>>; TYPE_SHARDS]> =
+    LazyLock::new(|| std::array::from_fn(|_| Mutex::new(HashTable::new())));
+
+fn intern_type(kind: TyKind<'static>) -> &'static TypeEntry {
+    let hash = FxBuildHasher.hash_one(&kind);
+    let rehash = |entry: &&'static TypeEntry| FxBuildHasher.hash_one(&entry.kind);
+    // The table picks buckets from the low bits, so the shard comes from the high ones.
+    let shard = &TYPES[(hash >> 58) as usize];
+    // A poisoned shard means another thread died mid-insert; the table still holds only
+    // complete, leaked types, so keep serving it.
+    let mut shard = shard
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match shard.find(hash, |entry| entry.kind == kind) {
+        Some(&interned) => interned,
+        None => {
+            let mut size: u64 = 1;
+            for_each_child(&kind, &mut |child| {
+                size = size.saturating_add(child.entry.size).min(TYPE_SIZE_CEILING);
+            });
+            let interned: &'static TypeEntry = Box::leak(Box::new(TypeEntry { kind, size }));
+            shard.insert_unique(hash, interned, rehash);
+            interned
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::RootDatabase;
+    use {super::*, crate::RootDatabase};
 
     #[test]
     fn size_counts_the_tree_not_the_shared_graph() {
@@ -651,7 +848,7 @@ mod tests {
             TyKind::Function(FunctionType {
                 positional: Vec::new(),
                 named: vec![Parameter {
-                    name: Name::new(&db, "x".to_owned()),
+                    name: Name::new(&db, "x"),
                     ty: scalar(&db, Atomic::Integer),
                     optional: true,
                     default: Some(var),

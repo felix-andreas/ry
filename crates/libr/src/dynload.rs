@@ -4,18 +4,22 @@
 //! its registration tables. `.Call` resolves a routine by name through the registered tables
 //! first and then, when the library allows it, through the dynamic symbol table.
 
-use crate::{
-    Rboolean,
-    boundary::{ApiResult, DlFunc, enter, error, ry_call_dlopen, ry_call_init, with_native_scope},
-    globals::{R_ClassSymbol, R_NamesSymbol},
-    runtime,
-    strings::c_bytes,
+use {
+    crate::{
+        Rboolean,
+        boundary::{
+            ApiResult, DlFunc, enter, error, ry_call_dlopen, ry_call_init, with_native_scope,
+        },
+        globals::{R_ClassSymbol, R_NamesSymbol},
+        runtime,
+        strings::c_bytes,
+    },
+    heap::{
+        object::{Sexp, SexpType},
+        strings::Encoding,
+    },
+    std::ffi::{CStr, CString, c_char, c_int, c_void},
 };
-use heap::{
-    object::{Sexp, SexpType},
-    strings::Encoding,
-};
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 /// What GNU R calls `DllInfo`. Packages only hold pointers to it, so its layout is ry's.
 pub struct Dll {

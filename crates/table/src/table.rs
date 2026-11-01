@@ -15,19 +15,21 @@ pub mod ffi;
 mod group;
 pub mod io;
 mod join;
-pub mod lazy;
 mod kernel;
+pub mod lazy;
 pub mod ops;
 pub mod query;
 
-use convert::RVector;
-use ops::sort_frame;
-use polars::prelude::{
-    ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr, Series,
-};
-use std::fmt;
-
 pub use polars;
+use {
+    convert::RVector,
+    ops::sort_frame,
+    polars::prelude::{
+        ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr,
+        Series,
+    },
+    std::fmt,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
