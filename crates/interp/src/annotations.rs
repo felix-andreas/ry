@@ -226,11 +226,38 @@ pub unsafe fn enter(call: Sexp, function: Sexp, env: Sexp, depth: usize) -> R<Op
 }
 
 /// How a closure call's arguments meet the closure's annotations.
+#[derive(Clone, Copy, Debug)]
 pub enum Entry {
     /// [`enter`] checks the arguments bound in the new frame.
     Unchecked,
     /// The caller already checked them; holds the signature, `None` for an untyped closure.
     Checked(Option<Sexp>),
+}
+
+/// Decides ahead of time what a call binding arguments of storage types `kinds` positionally to
+/// a closure's leading formals needs checked, for a compiler that knows those types before the
+/// call runs (`None` is a type it does not know). [`Entry::Unchecked`] means the checks must
+/// run with the values.
+pub unsafe fn entry_for(function: Sexp, kinds: &[Option<SexpType>]) -> Entry {
+    let Some(signature) = signature_of(function) else {
+        return Entry::Checked(None);
+    };
+    let masks = signature.element(MASKS);
+    let mut formal = function.car();
+    let mut slot = FIRST_FORMAL_SLOT;
+    while formal.kind() == SexpType::Pairlist {
+        let mask = mask_at(masks, slot);
+        if mask != 0 {
+            match kinds.get(slot - FIRST_FORMAL_SLOT) {
+                Some(&Some(kind))
+                    if formal.tag() != values::symbols().dots && mask & bit(kind) != 0 => {}
+                _ => return Entry::Unchecked,
+            }
+        }
+        formal = formal.cdr();
+        slot += 1;
+    }
+    Entry::Checked(Some(signature))
 }
 
 /// Checks the plain values a call binds to a closure's leading formals in order, as a direct

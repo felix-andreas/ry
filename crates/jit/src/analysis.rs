@@ -26,6 +26,7 @@ use {
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
+        annotations::{self, Entry},
         bytecode::{self, ARITHS, Arith, FEEDBACK, OPS, Op, feedback, operand_count},
         values,
     },
@@ -542,6 +543,8 @@ pub enum Action<'a> {
         function: Sexp,
         call: Sexp,
         args: &'a [Argument],
+        /// The callee's annotation checks, decided from the arguments' compile-time types.
+        entry: Entry,
         dst: (usize, Ty),
     },
     /// Runs the instruction in tier 0, then refines its destination register.
@@ -1044,7 +1047,7 @@ impl<'a> Builder<'a> {
         if !self.never_ran(pc) {
             return self.feedback_at(pc);
         }
-        match interp::annotations::declared_return_type(function) {
+        match annotations::declared_return_type(function) {
             Some(SexpType::Real) => Ty::Dbl,
             Some(SexpType::Integer) => Ty::Int,
             Some(SexpType::Logical) => Ty::Lgl,
@@ -1774,11 +1777,22 @@ impl<'a> Builder<'a> {
         after.visible = None;
         after.registers[dst.0] = dst.1;
         *state = after;
+        let kinds: SmallVec<[Option<SexpType>; 4]> = args
+            .iter()
+            .map(|argument| match *argument {
+                Argument::Unboxed { ty: Ty::Dbl, .. } => Some(SexpType::Real),
+                Argument::Unboxed { ty: Ty::Int, .. } => Some(SexpType::Integer),
+                Argument::Unboxed { ty: Ty::Lgl, .. } => Some(SexpType::Logical),
+                _ => None,
+            })
+            .collect();
+        let entry = annotations::entry_for(function, &kinds);
         Some(Action::Call {
             steps: lowering.steps.leak(),
             function,
             call,
             args: args.leak(),
+            entry,
             dst,
         })
     }

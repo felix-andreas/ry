@@ -36,6 +36,7 @@ use {
     cranelift_module::{Module, default_libcall_names},
     heap::object::{NA_INTEGER, NA_REAL_BITS, REFCOUNT_MAX, Sexp, SexpType, VECTOR_DATA_OFFSET},
     interp::{
+        annotations,
         bytecode::{Arith, Op},
         values,
     },
@@ -471,9 +472,10 @@ impl<'p, 'b> Translator<'p, 'b> {
                 function,
                 call,
                 args,
+                entry,
                 dst,
             } => {
-                self.direct_call(position, before, steps, function, call, &args, dst)?;
+                self.direct_call(position, before, steps, function, call, &args, entry, dst)?;
             }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
             Action::Move { dst, src, ty } => {
@@ -847,6 +849,7 @@ impl<'p, 'b> Translator<'p, 'b> {
         function: Sexp,
         call: Sexp,
         args: &[Argument],
+        entry: annotations::Entry,
         dst: (usize, Ty),
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
@@ -908,12 +911,26 @@ impl<'p, 'b> Translator<'p, 'b> {
         let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
         let count = iconst(&mut self.builder, args.len());
         let register = iconst(&mut self.builder, dst.0);
+        let signature = match entry {
+            annotations::Entry::Unchecked => std::ptr::null_mut(),
+            annotations::Entry::Checked(None) => values::nil().as_ptr(),
+            annotations::Entry::Checked(Some(signature)) => signature.as_ptr(),
+        };
+        let signature = self.builder.ins().iconst(I64, signature as i64);
         let result = self
             .call(
                 runtime::jit_call as *const () as usize,
-                &[I64, I64, I64, I64, I64, I64],
+                &[I64, I64, I64, I64, I64, I64, I64],
                 Some(I32),
-                &[self.activation, function, call, pointer, count, register],
+                &[
+                    self.activation,
+                    function,
+                    call,
+                    pointer,
+                    count,
+                    signature,
+                    register,
+                ],
             )
             .ok_or(Refusal("a helper without a result"))?;
         let after = self.after_with_boxed(position, Some(dst.0))?;

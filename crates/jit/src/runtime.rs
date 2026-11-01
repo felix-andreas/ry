@@ -10,7 +10,8 @@ use {
     crate::analysis::{Speculation, resolve_function},
     heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real},
     interp::{
-        annotations, arith,
+        annotations::{self, Entry},
+        arith,
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
         eval, heap,
@@ -363,6 +364,7 @@ pub unsafe extern "C" fn jit_call(
     call: *mut Header,
     arguments: *const i64,
     count: i64,
+    signature: *mut Header,
     dst: i64,
 ) -> i32 {
     unsafe {
@@ -392,10 +394,20 @@ pub unsafe extern "C" fn jit_call(
                         value,
                     });
                 }
-                // The values are at hand, so a typed callee's argument checks read them here
-                // instead of looking each formal up again in the new frame.
-                let values: SmallVec<[Sexp; 4]> = args.iter().map(|arg| arg.value).collect();
-                let entry = annotations::enter_positional(call, function, &values)?;
+                // `signature` is what the compiler decided about the callee's annotation checks:
+                // null when they depend on the values, `NULL` for an untyped callee, otherwise
+                // the signature of a typed callee whose arguments' types already satisfy it.
+                let entry = match Sexp::from_raw(signature) {
+                    None => {
+                        // The values are at hand, so the checks read them here instead of
+                        // looking each formal up again in the new frame.
+                        let values: SmallVec<[Sexp; 4]> =
+                            args.iter().map(|arg| arg.value).collect();
+                        annotations::enter_positional(call, function, &values)?
+                    }
+                    Some(signature) if signature == values::nil() => Entry::Checked(None),
+                    Some(signature) => Entry::Checked(Some(signature)),
+                };
                 // The frame records no argument list: only `nargs`, method dispatch and
                 // `standardGeneric` read it, and a frame-safe callee calls none of them.
                 let env = eval::bind_arguments(call, function, &args, None)?;
