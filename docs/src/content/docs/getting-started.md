@@ -78,9 +78,22 @@ type-mismatch
 1 problem in 1 file
 ```
 
+## Run it
+
+`ry run` runs a script on ry's own runtime, and `ry run` alone opens a console whose completion
+comes from the type checker. `ry R` does the same on the GNU R installed on your machine. ry's
+runtime is still incomplete, so use `ry R` for code that needs something it lacks:
+
+```sh
+ry run script.R   # on ry's runtime
+ry R script.R     # on GNU R
+ry R              # a GNU R console with typed completion
+```
+
 ## Next
 
 - [Checking code](/guides/checking): every kind of finding, and how to silence one
+- [Console](/guides/console): running code, and what completion knows
 - [Type checking](/type-checking/overview): how inference and `#:` annotations work
 - [Inline annotations](/type-checking/inline-annotations): step 3, types written in the code itself
 - [Records and tags](/type-checking/records-and-tags) and [strict mode](/type-checking/strict-mode):

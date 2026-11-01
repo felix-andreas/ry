@@ -41,8 +41,8 @@ illegal dependency unrepresentable.
 - **`oracle`** is the differential test harness for the R runtime: it runs one R file under GNU R
   and under another engine and compares the observable results. It depends on nothing else in the
   workspace.
-- **`repl`** is the R console behind `ry repl` and `ry run`. It loads R at run time, so no crate,
-  `repl` included, needs R to build. With `--runtime ry` it loads ry's `libR.so` instead of GNU R's,
+- **`repl`** is the R console behind `ry run` and `ry R`. It loads R at run time, so no crate,
+  `repl` included, needs R to build. For `ry run` it loads ry's `libR.so` instead of GNU R's,
   and `ry` itself does not link `interp` or `libr`.
 - **`heap`** is the R runtime's object model and garbage collector: the `SEXP` object layout,
   allocation, the non-moving generational collector and its roots, `CHARSXP` interning, symbols,
@@ -224,6 +224,13 @@ slots. Both are tiny tracked queries whose values survive an edit that only shif
 typical keystroke therefore leaves them unchanged, and the project-wide graph walks stay green
 instead of running again.
 
+The walks reach those projections through one tracked memo per file (`file_definitions`,
+`file_interface_reads`, `file_conditional_writers`), never directly. After a keystroke salsa must
+confirm that a project-wide map is still valid, and it does so by checking the map's dependencies.
+Read per file, that is about 500 memos on a 300,000-line project, and every one outside the edited
+file passes on durability alone (see "The language server"). Read per item, it was about 56,000
+memos, which cost every editor request about 35 ms right after a keystroke.
+
 A check never reads a project-wide map either. Each lookup it makes across items goes through a
 firewall keyed by one name or one item: `package_name` gives a name's winner and its conditional
 writers, `interface_group` gives an item's cyclic group, and `frame_binder` gives the file-local
@@ -290,16 +297,31 @@ and all the documents, and the database handle deliberately never leaves it.
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
 - **Idle work has an order.** The worker first serves any settled publish it owes for the most
-  recently edited file. With nothing owed, it warms up the rest of the workspace one file at a time
-  and never publishes that work. Idle work that gets cancelled is requeued.
+  recently edited file. Next it lowers the durability of documents opened since (see below). With
+  nothing else to do, it warms up the rest of the workspace one file at a time and never publishes
+  that work. Idle work that gets cancelled is requeued.
+- **A request preempts idle work.** A request is queued first and then cancels the idle unit in
+  flight, if any, so a hover never waits for a background file to finish. A request never cancels
+  another request or a sync.
 - **A coherence failure panics.** A failed document sync is unrecoverable, and a panic that escapes a
   worker job terminates the process deterministically rather than going on to serve corrupted state.
   An IDE feature lookup, by contrast, must never panic.
 - **Only edited files change at low durability.** A workspace file enters the database at
-  `Durability::MEDIUM`, its first `didChange` lowers it to `LOW`, and closing it restores `MEDIUM`.
-  An edit then revalidates every memo that reads only other files by durability alone, without
-  walking its dependencies, which took a fifth off the settled re-check on the benchmark code
-  bases. A `test_incremental.rs` case pins that an edit never revisits the other files' trees.
+  `Durability::MEDIUM`, an open document is lowered to `LOW`, and closing it restores `MEDIUM`. The
+  stubs, settings, package metadata and data-file inputs are `MEDIUM` too, because a memo is only
+  as durable as its least durable input and nearly every memo reads the stubs. An edit then
+  revalidates every memo that reads only other files by durability alone, without walking its
+  dependencies. `test_incremental.rs` pins that an edit never revisits the other files' trees or
+  items.
+- **The project file list is `LOW` from the start.** Salsa never backdates a memo whose durability
+  drops, so if the project-wide maps started at `MEDIUM`, a file's first `LOW` write would change
+  them, then every `package_name`, then every item check in the project (about 2 s on a
+  300,000-line project). They read `ProjectFiles`, so a `LOW` list keeps them `LOW` throughout, and
+  the first edit re-derives only the edited file's own memos. `didOpen` leaves text that matches
+  the disk untouched, which would otherwise be a `MEDIUM` write that invalidates the whole project,
+  and idle time rewrites it at `LOW` so that the first keystroke does not pay for that file's share.
+  A setter that names no durability keeps the field's current one, so every write to a source file
+  names it.
 - **Positions convert only at the protocol edge**, against the target document's own text, in the
   negotiated encoding. That is UTF-16 by default, and UTF-8 when the client offers it. Signature-help
   label offsets are always UTF-16, as the LSP specification requires.

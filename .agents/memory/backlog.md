@@ -35,12 +35,12 @@ The quality bar is four things.
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guides/loading-packages.md`). Gaps, roughly in order of how often a real package hits them:
 
-- **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run --runtime ry`,
+- **Compiled code builds with GNU R's toolchain under `ry load`**: on `ry run`,
   `R.home()` is GNU R's, so `R CMD SHLIB` (pkgbuild via callr) runs GNU R's `bin/R` and links
   GNU R's `libR.so`. It loads because ry's `libR.so` already holds that soname. Running the
   loader from `crates/rcmd`'s R home (`.corpus/ry-home`, `just ry-home`), where `bin/R` runs
   on ry, would make the build ry's own.
-- **Strict mode guards only `ry load`'s first load.** The package load `ry repl` makes at startup,
+- **Strict mode guards only `ry load`'s first load.** The package load the `ry R` console makes at startup,
   and a `load_all()` reload, run unchecked; the reload could check only the files the plan changed.
 - **Lazily loaded definitions keep no source references**, so `print(f)` deparses and tracebacks
   name no file. The loader has the byte range of every definition, so a srcref could be built from
@@ -418,7 +418,11 @@ only, so a strict file whose top level calls `print(scale(3))` and `cat("loaded\
   overload set for `seq` and `seq_len` would remove that.
 - **The REPL pty end-to-end tests are flaky under CPU load** (`multiline_input_continues_and_defines`
   and `reloads_survive_a_custom_prompt_and_skip_readline_answers` in
-  `crates/ry/tests/test_repl_e2e.rs`). They pass alone; their timeouts need headroom.
+  `crates/ry/tests/test_repl_e2e.rs`, and `errors_come_back_on_the_error_stream`). They pass alone.
+  The load comes from the ry-runtime cases running beside them, each of which spends about 2.8 s of
+  CPU starting a debug `libR.so`; input typed while a console is still starting arrives as one
+  paste. Waiting for the prompt instead of the banner (ry's console now prints its banner at the
+  first prompt), or serializing the ry-runtime cases, would remove it.
 
 ## Open: data-oriented layouts and explicit allocators
 
@@ -481,20 +485,6 @@ change that does not pay.
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
 container with other work running, so treat each as an upper bound. Every in-container timing is
 effectively a two-core number.
-
-### Project-wide aggregates verify every item after each keystroke (unverified here, reported by the IDE responsiveness work)
-
-- On the finance benchmark, any editor request right after a keystroke costs about 45 ms at p50,
-  against 0.5 to 1 ms settled, and edited-file diagnostics cost about 56 ms with no item rechecked.
-  The time is salsa deep verification under `item_check`.
-- Cause: `conditional_slot_items`, `interface_sccs`, `package_definitions` and
-  `project_arithmetic_classes` read per-item memos across all files directly. The edited file's
-  items make each aggregate `LOW`, so verifying it walks about 56K edges.
-- Fix shape: fold per-file tracked memos (for example `file_conditional_writers`,
-  `file_definitions`, `file_interface_reads`, `file_arithmetic_classes`), so an aggregate reads
-  about 500 file memos that verify at `MEDIUM` by durability and only the edited file's memo
-  re-verifies. Pin it in `test_incremental.rs` by counting edges re-verified after an edit. Keep
-  `ry check`'s naming pass warming these per item in parallel.
 
 ### Writes inside a test block enter the package namespace, and that is a correctness question
 
@@ -614,15 +604,6 @@ ordinary functions such as `setattr`, `setnames` and `stopf`, tied into one cycl
 `utils.R`. The fix is to make conditional writers nodes of the static graph, with an edge from a
 reader to each writer of a name that has no winner, so these cycles route through `scc_schemes` like
 any other. Extend `test_incremental.rs` with a statement-item cycle when it lands.
-
-### A read waits for the idle job in flight
-
-Only a notification (an open, edit, save or watched-file change) cancels in-flight work; a request
-never does (`ServerState::notify` against `ServerState::read` in `crates/ry/src/server.rs`). A hover
-or completion that arrives while the worker warms a file therefore waits for that one file's
-analysis to finish, because idle work runs one file per job. Measure the
-worst single-file warm-up on a large package before adding read preemption; if it is well under the
-keystroke budget, delete this entry.
 
 ### Judged fast enough, so do not invent work here
 
@@ -1934,7 +1915,7 @@ tagging fences `r` for Zed if that proves distant.
 
 ## Open: REPL
 
-The REPL ships behind `ry repl`, and `contributing/design/repl.md` holds the architecture and the
+The console ships behind `ry run` (ry's runtime) and `ry R` (GNU R), with `ry repl` kept as a hidden alias, and `contributing/design/repl.md` holds the architecture and the
 two pty-harness requirements. R is loaded at runtime with no build-time link, so the workspace builds
 without R everywhere. The console is reedline inside the `ReadConsole` hook, with lexer
 highlighting, conservative completeness backed by R's continuation as the safety net, and SIGINT
@@ -1956,8 +1937,8 @@ is a fourth, and the design record describes the versioned mirror structs it nee
 version handshake, sibling-DLL preloading, the RGui-to-LinkDLL switch, and the UserBreak plus
 deferred-interrupt pair. It is compile-verified and clippy-verified against
 `x86_64-pc-windows-gnu`, and no Windows machine with R has ever executed it. The smoke test is
-`ry repl`, checking the prompt, evaluation, Ctrl-C and vi mode, and `ry run`, checking output and
-exit codes 0 and 1. One known caveat to watch is terminal VT input handling in the editor layer.
+`ry R`, checking the prompt, evaluation, Ctrl-C and vi mode, and `ry R script.R`, checking output
+and exit codes 0 and 1. One known caveat to watch is terminal VT input handling in the editor layer.
 
 ## Open: what the rename to `ry` left for the user
 
@@ -2099,8 +2080,9 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   constant or a symbol is not checked. The `ry run` preflight analyzes the
   script alone, so in strict mode `ry run R/b.R` inside a package refuses a name another package
   file defines, which `ry check` accepts.
-- **`ry repl --runtime ry` starts bare**: no `tools:ry` environment, no `.Call` routines and no
-  package autoload, because the loader's R code targets the GNU R backend.
+- **ry's console (`ry run` with no script) starts bare**: no `tools:ry` environment, no `.Call`
+  routines, no `load_all()` and no package autoload, because `repl::ry_repl` does not attach the
+  loader the way `ry run script.R` does. `--no-load` is therefore hidden on `ry run`.
 - **ry's console evaluates a chunk only once all of it parses** (`interp::session::run_console`): a
   `-f` script that ends inside an unfinished expression runs none of its complete expressions until
   the user finishes it, where GNU R runs each expression as soon as it is complete.
@@ -2248,7 +2230,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 
 - **`ry load` on ry's own runtime.** Lazy bindings are promises over the analysis's syntax trees, both runtimes apply the same plan, and `test_load.rs` runs on both. `decisions.md`, "the loader on ry's runtime".
 - **The runtime's object model, collector and `libR` skeleton.** `crates/heap` and `crates/libr` run brio and `rytest` built against ry's headers and GNU R's. `decisions.md` has the record.
-- **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry repl` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
+- **Inline annotations at run time.** Boundary checks on ry's runtime, erasure for GNU R, and the `ry run`/`ry R` preflight for the annotation warnings and strict mode. `decisions.md` has the record.
 - **Inline type annotations, the comment-agreement warning, and strict mode's untyped parameters.** `name: TYPE <- value`, typed parameters, `-> TYPE` and `function<T>`, sharing the `#:` grammar and lowering, with `annotation-mismatch`, `[check] inline-annotations`, and erasure to plain R. `decisions.md` has the record.
 
 - **`declares_arithmetic` is computed from the project as well as the stubs.** It consulted the stub
@@ -2887,14 +2869,17 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
-## Open: editor gaps on ry's own syntax
+## Open: editor latency at 300,000 lines
 
-- **Hover still shows impossible vector members.** The inlay hint and the "add annotation" action
-  drop `Position[]` from `list[Position] | Position[]` (`without_impossible_vectors` in
-  `crates/ide/src/ide.rs`), but hover prints the full inferred union.
-- **Completion of a field name inside a record literal** offers R globals; it should offer the
-  expected record's missing fields.
-- **No payload-field completion in a tag constructor** such as `:Circle(ra|)`; patterns have it.
+Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .bench/finbench
+--quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
+table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
+about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
+
+- **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
+  lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
+  lints when the project is still cold, but that changes the two-wave contract on the architecture
+  page, so weigh it against making the cold naming pass faster.
 
 ## Open: false errors on real CRAN code
 

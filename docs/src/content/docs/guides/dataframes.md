@@ -7,7 +7,7 @@ A `DataFrame` is ry's built-in table. You query it with the same verbs as
 [Polars](https://pola.rs): `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
 `join` and `head`, with column expressions written as `col("x")`. Each query runs inside the Polars
 engine instead of as R code, and the type checker knows every column's type at every step.
-DataFrames need ry's own runtime, so run scripts that use them with `ry run --runtime ry script.R`.
+DataFrames need ry's own runtime, so run scripts that use them with `ry run script.R`.
 
 ```r
 sales <- DataFrame(
@@ -207,7 +207,7 @@ and costs only the new column.
 
 ### Existing data.table code
 
-Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
+Code written for data.table runs unchanged under `ry run`, and most queries on a
 `data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
 behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
 when it can produce exactly what data.table would, meaning the same values, attributes, printing
@@ -251,6 +251,6 @@ Key: <g>
 
 `tools/bench/table/` times db-benchmark's group-by and join questions, `:=` update loops and a keyed
 rolling join, written once for data.table under GNU R and once for DataFrames under
-`ry run --runtime ry`, and `tools/bench/table/ops.R` times data.table's own functions (`fread`,
+`ry run`, and `tools/bench/table/ops.R` times data.table's own functions (`fread`,
 `setkey`, `rbindlist`, `melt` and the rest), which run data.table's C code through ry's C API. The
 [design notes](/contributing/design/r-runtime/#7-the-table-type) have the results.
