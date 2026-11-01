@@ -1155,35 +1155,6 @@ rewording a message now invalidates only the samples that quote it. Those sample
 re-captured in the same change. There is no harness for that yet, so it is a manual pass over the
 pages named in the next item.
 
-## Open: nothing verifies the rendered samples in the docs
-
-Many blocks show real tool output. They live across `getting-started`, `guides/`, `type-checking/`,
-`reference/cli`, `reference/configuration`, `reference/diagnostic-codes`, `index.astro` and the
-README's generated `.github/diagnostic.svg`. Nothing checks them, so they drift silently and
-the drift is only ever found when someone re-captures by hand.
-
-Two things this proves rather than predicts.
-
-- A reporter change left every one of them stale for days, and the cost of re-capturing them by hand
-  is most of what made that change expensive to land.
-- A parser change, narrowing an unterminated argument list's boundary, silently falsified the
-  headline missing-comma sample in `features.md`. That is the very example chosen to show off the
-  parser. Nobody noticed until the sample was re-run for an unrelated reason, and `main` had shipped
-  it wrong. This is the failure the "run the tool before claiming what it does" rule exists to
-  prevent, and that rule does not scale to prose that was true when it was written.
-
-**Shape of the fix.** Each sample needs its project, meaning a `ry.toml` and one or more source
-files, and its command recorded next to it, so a harness can rebuild the project, run the command
-and diff the captured block. There are two candidate homes. One is a fixture-suite-style directory
-whose renderer output is the docs block. The other is front matter or an HTML comment in the page
-naming a fixture directory. Prefer whichever keeps the docs readable as prose, because the samples
-are teaching material rather than test data. A block that excerpts one finding out of several needs
-a way to say so, through a first-N-findings selector or a filter by code, because several pages
-legitimately do that.
-
-Until it exists, treat "changed a message or a blame range" as implying a manual sweep of the pages
-above, and say in the commit which ones were re-run.
-
 ## Open: findings from the second simulated-user round
 
 Five simulated users each worked on a distinct project of their own writing, learned the tool from
@@ -1894,13 +1865,14 @@ tagging fences `r` for Zed if that proves distant.
 ## Open: website and docs
 
 - **There is no one-line installer.** The non-Rust route today is downloading a tarball from
-  Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one. The
-  installation page states this is planned with no date, so if the plan changes that claim has to
-  change with it.
+  Releases. There is no `curl ... | sh`, Homebrew or winget path, and both uv and Ruff ship one.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
-  rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
+  rather than the newest build, and the installation page names the tag in each URL. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 2,700 lines.
+- **The README's diagnostic image is not checked.** `docs/` samples are tests (`test_docs`), but
+  `.github/diagnostic.svg` is rendered by `scripts/render-diagnostic-svg.rs` and goes stale when a
+  message or blame range changes; re-run it after such a change.
+- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 3,500 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 
