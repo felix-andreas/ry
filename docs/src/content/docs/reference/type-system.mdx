@@ -2049,7 +2049,10 @@ Arguments are checked for compatibility, not exact equality:
   `apply(m, 1, "mean")` idiomatic. At the base helpers that call `match.fun`, such as `lapply`,
   `sapply`, `vapply`, `Map`, `Filter`, `Reduce`, `do.call`, and `apply`, a string literal that names a
   known function is checked as that function, so `lapply(list(1, 2), "sqrt")` is `list[double]`.
-  Any other string is accepted unchecked.
+  Any other string is accepted unchecked. `match.fun` also looks a bare name up as a function, past
+  a binding that holds something else, so after a mocking placeholder such as `nchar <- NULL`,
+  `vapply(words, nchar, integer(1))` calls the library's `nchar`. A name the library does not
+  export is still checked as the value it holds.
 - At a parameter of type `T | NULL` with `T` still open, which is what a callee that tests
   `is.null(x)` infers, `T` binds to the argument's non-`NULL` part. Passing a value there says that
   the callee tolerates `NULL`, not that the caller's value may be `NULL`, so with
@@ -2156,7 +2159,9 @@ join does not merge or coerce branch types beyond unification; it records the al
 - A branch whose type is still undetermined is never pinned by the other branch.
   `function(flag, x) if (flag) x else "s"` is `<T> fn(flag: logical, [x]: T) -> T | character`, not
   `fn(flag: logical, x: character)`, because unifying would make a caller wrong because of a line
-  that is not wrong.
+  that is not wrong. The same holds for a variable nested inside a branch, so
+  `if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)` is
+  `list{character[], character[]} | list{T, T}`.
 - A branch whose variable the body has already constrained may unify with the other branch, because
   that adds nothing the program did not already require. That is how the recursive `fact` above
   converges to `fn(n: integer) -> integer`.

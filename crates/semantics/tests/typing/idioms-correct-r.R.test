@@ -1030,3 +1030,30 @@ labelled <- sub(":x", list(1), ":x done")
 #++++
 labelled: Unknown
 12..41 error[type-mismatch] no overload of `sub` matches these arguments. I tried all 2 declared signatures; the first candidate fails with: expected `character`, found `list{double}`
+
+#---- a_match_fun_helper_skips_a_mocking_placeholder
+nchar <- NULL
+widths <- function(words) vapply(words, nchar, integer(1))
+#++++
+nchar: NULL
+widths: <T> fn(words: list[T] | T[]) -> integer[]
+
+#---- a_placeholder_that_names_no_library_function_is_still_not_a_function
+my_helper <- NULL
+widths <- function(words) vapply(words, my_helper, integer(1))
+#++++
+my_helper: NULL
+widths: Unknown
+44..80 error[type-mismatch] no overload of `vapply` matches these arguments. I tried all 4 declared signatures; the first candidate fails with: expected `fn(T) -> logical`, found `NULL`
+
+#---- a_branch_with_an_open_variable_inside_a_list_is_not_pinned_by_the_other_branch
+split_deps <- function(dp) if (identical(dp, FALSE)) list(character(), character()) else list(dp, dp)
+none <- split_deps(FALSE)
+#++++
+split_deps: <T> fn(dp: T) -> list{character[], character[]} | list{T, T}
+none: list{character[], character[]} | list{logical, logical}
+
+#---- a_list_branch_whose_variable_is_constrained_still_unifies
+pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
+#++++
+pair: fn(dp: integer) -> list{integer, integer}

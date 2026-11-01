@@ -9461,6 +9461,28 @@ impl<'db> Checker<'db, '_> {
                 continue;
             };
             let resolved = self.table.resolve(self.db, ty);
+            // `match.fun` looks a bare name up with `mode = "function"`, past a binding that
+            // holds no function, so sessioninfo's mocking placeholder `getNamespaceVersion <-
+            // NULL` leaves `vapply(pkgs, getNamespaceVersion, "")` calling base's function.
+            if let ExpressionKind::NameRef(name) = self.module.kind(value)
+                && !self.naming.resolutions.contains_key(&value)
+                && !matches!(
+                    resolved.kind(self.db),
+                    TyKind::Function(_) | TyKind::Var(_) | TyKind::Any | TyKind::Unknown
+                )
+            {
+                // An export the stubs list without a type is still a function.
+                if let Some(mut candidates) = self
+                    .globals
+                    .and_then(|globals| globals.library_candidates(name.as_str()))
+                {
+                    argument.named_function = Some(match candidates.pop() {
+                        Some(scheme) => self.instantiate(&scheme),
+                        None => unknown(self.db),
+                    });
+                }
+                continue;
+            }
             if !is_character(self.db, resolved) {
                 continue;
             }
@@ -12513,8 +12535,16 @@ impl<'db> Checker<'db, '_> {
                 right_resolved
             };
             // Only an unconstrained variable is protected: pinning an already-restricted one
-            // adds no new requirement and lets recursion converge.
-            if self.table.open_constraint(self.db, open) == Some(Constraint::Unconstrained) {
+            // adds no new requirement and lets recursion converge. One nested in a list is
+            // protected too, so sessioninfo's `if (identical(dp, FALSE)) list(character(),
+            // character()) else list(dp, dp)` leaves `dp` open.
+            let mut vars = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, open, &mut vars);
+            if vars.into_iter().any(|var| {
+                self.table
+                    .open_constraint(self.db, Ty::new(self.db, TyKind::Var(var)))
+                    == Some(Constraint::Unconstrained)
+            }) {
                 return union_of(self.db, [left_resolved, right_resolved]);
             }
         }
