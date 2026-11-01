@@ -48,10 +48,14 @@ impl Mode {
     }
 }
 
-/// Calls a body makes before it compiles, in the default mode.
-const ENTRY_THRESHOLD: i32 = 10;
-/// Backward jumps a body takes before a loop compiles, in the default mode.
-const BACK_EDGE_THRESHOLD: i32 = 500;
+/// Calls a body makes before it compiles, in the default mode. Compiling a body costs about as
+/// much as interpreting it a few thousand times, and loading a package runs many bodies (the
+/// methods package's, for each `setClass`) only a few dozen times: at 10 calls, compiling them
+/// took half the time of a large package's S4 definitions. Code that is really hot passes 1000
+/// calls within milliseconds, so the benchmarks lose nothing.
+const ENTRY_THRESHOLD: i32 = 1000;
+/// Backward jumps a body takes before a loop compiles, in the default mode, for the same reason.
+const BACK_EDGE_THRESHOLD: i32 = 10_000;
 
 thread_local! {
     static ENTRY_LIMIT: Cell<i32> = const { Cell::new(ENTRY_THRESHOLD) };
@@ -68,13 +72,7 @@ pub fn install_mode(mode: Mode) {
             bytecode::set_tier(None);
             return;
         }
-        Mode::On => std::env::var("RY_JIT_THRESHOLDS")
-            .ok()
-            .and_then(|text| {
-                let (entries, back_edges) = text.split_once(',')?;
-                Some((entries.parse().ok()?, back_edges.parse().ok()?))
-            })
-            .unwrap_or((ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD)),
+        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
         Mode::Force => (2, 1),
