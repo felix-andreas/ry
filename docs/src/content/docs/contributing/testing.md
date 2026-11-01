@@ -356,6 +356,12 @@ its replay command, and `just fuzz-differential` and `just gc-torture` are the l
 `RY_GC_STRESS=1` stresses from the script's start and `RY_GC_STRESS=startup` from the first
 allocation, which is too slow for a debug build today.
 
+`crates/interp/tests/test_debugger.rs` drives the debug adapter (`interp::debugger`) in-process.
+Scripted sessions pin breakpoints, stepping, the stack, variables, `evaluate`, `browser()` and
+uncaught errors as transcripts, and a seeded simulator plays a client that sends random, sometimes
+invalid, requests at every stop. Every request must get exactly one response, the session must end,
+and the interpreter must be left clean. `DEBUGGER_SEED=<seed>` replays a failing session.
+
 ### The table engine
 
 `crates/table/tests/test_table.rs` drives the engine from Rust. Every expected value that encodes

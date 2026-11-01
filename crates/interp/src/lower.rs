@@ -678,6 +678,30 @@ pub unsafe fn lower_node(node: &SyntaxNode) -> R<Sexp> {
     lower(node, None)
 }
 
+/// Lowers `node` like [`lower_node`], keeping source references against `srcfile`, a srcfile
+/// environment for `text`, the whole text of the node's tree.
+pub unsafe fn lower_node_in_file(node: &SyntaxNode, text: &str, srcfile: Sexp) -> R<Sexp> {
+    let source = SourceMap::new(text, 0, srcfile)?;
+    lower(node, Some(&source))
+}
+
+/// A srcfile environment for the whole of a file, as GNU R's `srcfilecopy` makes one, so source
+/// references name the file and count lines from its start.
+pub unsafe fn file_srcfile(path: &str, text: &str) -> R<Sexp> {
+    let heap = crate::heap();
+    let srcfile = values::new_env(values::empty_env())?;
+    heap.root(srcfile);
+    let lines: Vec<&str> = text.lines().collect();
+    heap.define(srcfile, install("filename")?, values::scalar_string(path)?)?;
+    heap.define(srcfile, install("lines")?, values::string_vector(&lines)?)?;
+    values::set_attr(
+        srcfile,
+        symbols().class,
+        values::string_vector(&["srcfilecopy", "srcfile"])?,
+    )?;
+    Ok(srcfile)
+}
+
 pub(crate) fn is_skipped(node: &SyntaxNode) -> bool {
     matches!(
         node.kind(),

@@ -1226,28 +1226,8 @@ pub unsafe extern "C" fn ry_run(
         let argument = *arguments.add(index);
         command_args.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
     }
-    runtime();
-    if report_missing_r_home() {
+    if !start_script_session(command_args, flags) {
         return 2;
-    }
-    let options = interp::session::StartOptions {
-        command_args,
-        site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
-        user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
-        interactive: false,
-    };
-    if let Err(unwind) = interp::session::start(options) {
-        interp::session::report_toplevel(unwind);
-        crate::boundary::write_console(b"ry: base R did not load\n", true);
-        return 2;
-    }
-    if let Err(unwind) = loader::ry_runtime::attach() {
-        interp::session::report_toplevel(unwind);
-        crate::boundary::write_console(b"ry: the package loader did not load\n", true);
-        return 2;
-    }
-    if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
-        runtime().heap.policy_mut().stress = heap::GcStress::EveryAllocation;
     }
     let mut outcome = interp::session::Outcome::Completed;
     if let Some(input) = &input {
@@ -1289,14 +1269,162 @@ pub unsafe extern "C" fn ry_run(
             }
         };
     }
+    finish_script_session();
+    match outcome {
+        interp::session::Outcome::Completed => 0,
+        interp::session::Outcome::Failed => 1,
+    }
+}
+
+/// Starts the session a script runs in: base R and the default packages, then the package
+/// loader as `tools:ry`. Reports why and returns false when either does not load.
+unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool {
+    runtime();
+    if report_missing_r_home() {
+        return false;
+    }
+    let options = interp::session::StartOptions {
+        command_args,
+        site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
+        user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
+        interactive: false,
+    };
+    if let Err(unwind) = interp::session::start(options) {
+        interp::session::report_toplevel(unwind);
+        crate::boundary::write_console(b"ry: base R did not load\n", true);
+        return false;
+    }
+    if let Err(unwind) = loader::ry_runtime::attach() {
+        interp::session::report_toplevel(unwind);
+        crate::boundary::write_console(b"ry: the package loader did not load\n", true);
+        return false;
+    }
+    if heap::gc_stress_requested() == Some(heap::GcStressStart::Script) {
+        runtime().heap.policy_mut().stress = heap::GcStress::EveryAllocation;
+    }
+    true
+}
+
+unsafe fn finish_script_session() {
     interp::session::finish();
     crate::boundary::run_pending_finalizers();
     crate::extptr::R_RunExitFinalizers();
     use std::io::Write;
     drop(std::io::stdout().flush());
-    match outcome {
-        interp::session::Outcome::Completed => 0,
-        interp::session::Outcome::Failed => 1,
+}
+
+/// Reads the client's next message for [`ry_debug_adapter`]: with `wait` nonzero it blocks,
+/// otherwise it returns at once. Returns a pointer to the message's JSON text, valid until the
+/// next call, and stores its length in `length`; null means no message is waiting, or with
+/// `wait`, that the client is gone.
+pub type DebugReceive =
+    unsafe extern "C" fn(c_int, *mut usize, *mut std::ffi::c_void) -> *const c_char;
+
+/// Sends one message's JSON text, of the given length, to the client.
+pub type DebugSend = unsafe extern "C" fn(*const c_char, usize, *mut std::ffi::c_void);
+
+/// Runs a Debug Adapter Protocol server on ry's runtime. `receive` and `send` carry the
+/// protocol's messages as JSON text without their wire framing, and `data` is passed back to
+/// both. The adapter answers the client until it launches a program, starts the session the
+/// way [`ry_run`] does with the launch's arguments, runs the program under the debugger with
+/// console output sent as `output` events, and returns the program's exit status once the client
+/// disconnects: 2 when the session could not start or no program was launched. `flags` are the
+/// [`RUN_FLAGS`] bits. This is the entry point of `ry debug-adapter`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ry_debug_adapter(
+    receive: DebugReceive,
+    send: DebugSend,
+    data: *mut std::ffi::c_void,
+    flags: c_int,
+) -> c_int {
+    apply_flags(flags);
+    let channel = DebugChannel {
+        receive,
+        send,
+        data,
+        seq: std::rc::Rc::new(std::cell::Cell::new(0)),
+    };
+    let mut console = channel.clone();
+    runtime().console = Box::new(move |text: &[u8], is_error: bool| {
+        let category = if is_error { "stderr" } else { "stdout" };
+        let output = String::from_utf8_lossy(text);
+        interp::debugger::Transport::send(
+            &mut console,
+            serde_json::json!({
+                "type": "event",
+                "event": "output",
+                "body": { "category": category, "output": output },
+            }),
+        );
+    });
+    let mut adapter = Box::new(interp::debugger::Adapter::new(Box::new(channel)));
+    let Some(launch) = adapter.configure() else {
+        runtime().console = Box::new(crate::boundary::default_console);
+        return 2;
+    };
+    let mut command_args = vec![
+        "ry".to_owned(),
+        format!("--file={}", launch.program.display()),
+        "--args".to_owned(),
+    ];
+    command_args.extend(launch.args.iter().cloned());
+    if !start_script_session(command_args, flags) {
+        adapter.fail("ry's runtime did not start");
+        runtime().console = Box::new(crate::boundary::default_console);
+        return 2;
+    }
+    let status = adapter.run(&launch);
+    finish_script_session();
+    // The console wrote through the host's `data`, which is only valid until this returns.
+    runtime().console = Box::new(crate::boundary::default_console);
+    status
+}
+
+/// The host's callbacks as the adapter's transport. Console output is sent through a copy, so
+/// the copies share the message numbering.
+#[derive(Clone)]
+struct DebugChannel {
+    receive: DebugReceive,
+    send: DebugSend,
+    data: *mut std::ffi::c_void,
+    seq: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+impl interp::debugger::Transport for DebugChannel {
+    fn receive(&mut self, wait: bool) -> Option<serde_json::Value> {
+        loop {
+            let mut length = 0;
+            // SAFETY: the host promised a callback with this contract, valid for the session.
+            let text = unsafe { (self.receive)(c_int::from(wait), &mut length, self.data) };
+            if text.is_null() {
+                return None;
+            }
+            // SAFETY: the callback returned `length` readable bytes at `text`.
+            let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) };
+            match serde_json::from_slice(bytes) {
+                Ok(message) => return Some(message),
+                // A message that is not JSON cannot be answered, since it has no `seq` to
+                // answer; the client sees no response, as for any lost message.
+                Err(error) => {
+                    let message = format!("ry: the debug client sent malformed JSON: {error}\n");
+                    crate::boundary::default_console(message.as_bytes(), true);
+                    if !wait {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn send(&mut self, mut message: serde_json::Value) {
+        let seq = self.seq.get() + 1;
+        self.seq.set(seq);
+        if let Some(object) = message.as_object_mut() {
+            object.insert("seq".to_owned(), serde_json::json!(seq));
+        }
+        let text = message.to_string();
+        // SAFETY: as for `receive`.
+        unsafe { (self.send)(text.as_ptr().cast(), text.len(), self.data) }
     }
 }
 

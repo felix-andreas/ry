@@ -1693,7 +1693,10 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index + 1);
         }
-        let result = eval(arg.value, call.env);
+        let result = match interp().debugger.is_some() {
+            true => crate::debugger::statement().and_then(|()| eval(arg.value, call.env)),
+            false => eval(arg.value, call.env),
+        };
         interp().srcref = saved;
         crate::heap().release_handles(mark);
         match result {
@@ -3087,7 +3090,12 @@ pub unsafe fn eval_all(expressions: Sexp, env: Sexp) -> R<Sexp> {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index);
         }
-        let result = eval(expressions.element(index), env);
+        let result = match interp().debugger.is_some() {
+            true => {
+                crate::debugger::statement().and_then(|()| eval(expressions.element(index), env))
+            }
+            false => eval(expressions.element(index), env),
+        };
         interp().srcref = saved;
         crate::heap().release_handles(mark);
         match result {
