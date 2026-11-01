@@ -245,9 +245,10 @@ paste0 : fn(...: Any, [sep]: character, [collapse]: character | NULL, [recycle0]
 
 # `sprintf`/`format`/`gettextf` take a leading required argument then variadic extras. Formals before
 # the `...` fill positionally (and by name), formals after it by name only, matching R. `format`'s
-# post-dots formals cover the common `format.default` controls.
-sprintf : fn(fmt: character, ...: Any) -> character
-gettextf : fn(fmt: character, ...: Any, [domain]: Any) -> character
+# post-dots formals cover the common `format.default` controls. Both vectorize over `fmt`; the result
+# keeps the scalar claim.
+sprintf : fn(fmt: character[], ...: Any) -> character
+gettextf : fn(fmt: character[], ...: Any, [domain]: Any) -> character
 format : fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
 formatC : fn(x: Any, [width]: Any, [digits]: Any, [format]: character, [flag]: character, [mode]: character, [big.mark]: character, [small.mark]: character, [decimal.mark]: character, [preserve.width]: character, [zero.print]: Any) -> character
 prettyNum : fn(x: Any, [big.mark]: character, ...: Any) -> character
@@ -267,7 +268,7 @@ regmatches : Any
 strtoi : fn(x: Any, [base]: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
-strsplit : fn(x: Any, split: character, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
+strsplit : fn(x: Any, split: character[], [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
 
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
@@ -654,7 +655,7 @@ path.expand : fn(path: Any) -> character
 list.files : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: logical) -> character[]
 dir : fn([path]: Any, [pattern]: Any, [all.files]: logical, [full.names]: logical, [recursive]: logical, [ignore.case]: logical, [include.dirs]: logical, [no..]: logical) -> character[]
 list.dirs : fn([path]: Any, [full.names]: logical, [recursive]: logical) -> character[]
-tempfile : fn([pattern]: character, [tmpdir]: character, [fileext]: character) -> character
+tempfile : fn([pattern]: character[], [tmpdir]: character[], [fileext]: character[]) -> character
 tempdir : fn([check]: logical) -> character
 
 # Reading, writing, and serialization. Connection constructors return connection objects the grammar

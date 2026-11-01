@@ -324,3 +324,12 @@ run: fn() -> fn(...: Any) -> logical
 ascii <- function(fields) !vapply(fields, is.character, TRUE)
 #++++
 ascii: <T> fn(fields: list[T] | T[]) -> logical[]
+
+#---- vectorized_string_helpers_take_vector_arguments
+headers <- function(fmt, names) sprintf(c("# %s", fmt), names)
+pieces <- function(x) strsplit(x, c(",", ";"))
+temps <- function(n) tempfile(rep("file", n))
+#++++
+headers: <T, U> fn(fmt: T, names: U) -> character
+pieces: <T> fn(x: T) -> list[character[]]
+temps: <T> fn(n: T) -> character
