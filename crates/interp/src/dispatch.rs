@@ -348,7 +348,14 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     let object = if call.len() >= 2 {
         eval::eval(call.arg(1), env)?
     } else {
-        dispatch_object(function, env)?
+        match dispatch_object(function, env)? {
+            // GNU R's `GetObject` falls back to the first supplied argument when the first
+            // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
+            object if object == nil() && first_formal_missing(function, env) => {
+                first_supplied(promargs)?
+            }
+            object => object,
+        }
     };
     let def_env = match lookup_generic_definition(&generic_name, env, sys_parent)? {
         Some(definition) if definition.kind() == SexpType::Closure => definition.tag(),
@@ -437,6 +444,30 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
         return Ok(nil());
     }
     value_of(value)
+}
+
+unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> bool {
+    let formals = function.car();
+    formals.kind() == SexpType::Pairlist
+        && formals.tag() != symbols().dots
+        && crate::heap()
+            .frame_cell(env, formals.tag())
+            .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
+}
+
+/// The value of the first supplied argument among a call's matched arguments.
+unsafe fn first_supplied(mut promargs: Sexp) -> R<Sexp> {
+    while promargs.kind() == SexpType::Pairlist {
+        let value = promargs.car();
+        if value.kind() == SexpType::Dots {
+            return value_of(value.car());
+        }
+        if value != missing_arg() {
+            return value_of(value);
+        }
+        promargs = promargs.cdr();
+    }
+    Ok(nil())
 }
 
 unsafe fn apply_method(

@@ -554,7 +554,13 @@ impl Zone {
                 return instant - correction + fraction - shift;
             }
             AmbiguousOffset::Gap { before, after } => if isdst == 0 { before } else { after },
-            AmbiguousOffset::Fold { before, after } => if isdst == 0 { after } else { before },
+            // glibc's `mktime` resolves a repeated time with the offset in force at the wall
+            // clock read as UTC, so Berlin's 02:30 reads as CET and New York's 01:30 as EDT.
+            AmbiguousOffset::Fold { before, after } => match isdst {
+                0 => after,
+                1 => before,
+                _ => self.rules.to_offset(timestamp(local)),
+            },
         };
         local.floor() - offset.seconds() as f64 + fraction - shift
     }
@@ -1248,7 +1254,7 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<Pa
         year = century * 100 + year.rem_euclid(100);
     }
     let mut hour = fields.hour;
-    if let Some(afternoon) = fields.afternoon {
+    if let (Some(afternoon), true) = (fields.afternoon, fields.twelve_hour) {
         hour = hour % 12 + if afternoon { 12 } else { 0 };
     }
     let (mut month, mut day) = (fields.month.unwrap_or(this_month), fields.day.unwrap_or(this_day));
@@ -1293,6 +1299,8 @@ struct Parsed {
     second: f64,
     yearday: Option<i64>,
     afternoon: Option<bool>,
+    /// `%p` adjusts only an hour read with `%I` or `%l`.
+    twelve_hour: bool,
     offset: Option<i64>,
 }
 
@@ -1314,13 +1322,8 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
         if spec == 'E' || spec == 'O' {
             let base = characters.next()?;
             if spec == 'O' && base == 'S' {
-                // `%OS` reads seconds with an optional fraction, and `%OSn` reads the same.
-                if characters
-                    .as_str()
-                    .starts_with(|digit: char| digit.is_ascii_digit())
-                {
-                    characters.next();
-                }
+                // `%OS` reads seconds with an optional fraction; `%OSn` is for output only, so on
+                // input its digit is a literal the text must contain.
                 let trimmed = input.trim_start();
                 let integer = trimmed
                     .chars()
@@ -1359,9 +1362,13 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             'C' => fields.century = Some(number(input, 2)?),
             'm' => fields.month = Some(number(input, 2)?),
             'd' | 'e' => fields.day = Some(number(input, 2)?),
-            'H' | 'k' => fields.hour = number(input, 2)?,
+            'H' | 'k' => {
+                fields.hour = number(input, 2)?;
+                fields.twelve_hour = false;
+            }
             'I' | 'l' => {
                 fields.hour = number(input, 2)?;
+                fields.twelve_hour = true;
                 if !(1..=12).contains(&fields.hour) {
                     return None;
                 }
@@ -1482,6 +1489,12 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let zone = resolve_zone(&tz);
     let name = if tz.is_empty() { session_zone_name() } else { tz.clone() };
     let utc = name == "UTC" || name == "GMT";
+    for index in 0..length(formats) {
+        let format = values::string_at(formats, index).unwrap_or_default();
+        if format.replace("%%", "").contains("%Z") {
+            return Err(call.error("use of %Z for input is not supported"));
+        }
+    }
     let mut parsed = Vec::with_capacity(count);
     let mut warnings = Vec::new();
     for index in 0..count {
