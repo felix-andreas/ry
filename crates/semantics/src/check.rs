@@ -1953,47 +1953,45 @@ impl<'db> Checker<'db, '_> {
     }
 
     fn read_non_local(&mut self, id: ExprId) -> Ty<'db> {
+        // Unresolved reads stay a silent `Unknown` (naming owns that diagnostic). A guard
+        // may have refined this name earlier; reading the binding again would discard it.
+        if let Some(name) = self.naming.non_locals.get(&id)
+            && let Some(&slot) = self.non_local_slots.get(name)
+            && let Some(EnvEntry::Mono(refined)) = self.environment.get(slot)
         {
-            // Unresolved reads stay a silent `Unknown` (naming owns that diagnostic). A guard
-            // may have refined this name earlier; reading the binding again would discard it.
-            if let Some(name) = self.naming.non_locals.get(&id)
-                && let Some(&slot) = self.non_local_slots.get(name)
-                && let Some(EnvEntry::Mono(refined)) = self.environment.get(slot)
-            {
-                return refined;
-            }
-            let naming = self.naming;
-            if let Some(name) = naming.non_locals.get(&id)
-                && let Some(scheme) = self.globals.and_then(|globals| {
-                    globals.scheme(name, naming.deferred_non_locals.contains(&id))
-                })
-            {
-                let instantiated = self.instantiate(&scheme);
-                // A project-defined name owns its `Unknown` at its defining site, so reading it
-                // propagates rather than re-originating.
-                let deferred = self.naming.deferred_non_locals.contains(&id);
-                if matches!(
-                    self.table.resolve(self.db, instantiated).kind(self.db),
-                    TyKind::Unknown
-                ) && !self
-                    .globals
-                    .is_some_and(|globals| globals.defined_in_project(name, deferred))
-                {
-                    self.record_strict_origin(
-                        id,
-                        StrictOriginKind::UndeterminedReference(name.to_string()),
-                    );
-                }
-                return instantiated;
-            }
-            if self.query_depth > 0
-                && let Some(name) = naming.quiet_reads.get(&id)
-                && let Some(ty) = self.quiet_global_read(id, name)
-            {
-                return ty;
-            }
-            unknown(self.db)
+            return refined;
         }
+        let naming = self.naming;
+        if let Some(name) = naming.non_locals.get(&id)
+            && let Some(scheme) = self
+                .globals
+                .and_then(|globals| globals.scheme(name, naming.deferred_non_locals.contains(&id)))
+        {
+            let instantiated = self.instantiate(&scheme);
+            // A project-defined name owns its `Unknown` at its defining site, so reading it
+            // propagates rather than re-originating.
+            let deferred = self.naming.deferred_non_locals.contains(&id);
+            if matches!(
+                self.table.resolve(self.db, instantiated).kind(self.db),
+                TyKind::Unknown
+            ) && !self
+                .globals
+                .is_some_and(|globals| globals.defined_in_project(name, deferred))
+            {
+                self.record_strict_origin(
+                    id,
+                    StrictOriginKind::UndeterminedReference(name.to_string()),
+                );
+            }
+            return instantiated;
+        }
+        if self.query_depth > 0
+            && let Some(name) = naming.quiet_reads.get(&id)
+            && let Some(ty) = self.quiet_global_read(id, name)
+        {
+            return ty;
+        }
+        unknown(self.db)
     }
 
     /// The value `slot` holds at the read `id`.
@@ -10237,7 +10235,6 @@ fn alias_cycle_walk<'db>(
     }
 }
 
-/// With no stub corpus installed validation is impossible, so every qualified read resolves.
 /// Whether `pkg::name` can reach the project's own bindings: only for the project's package.
 fn namespace_reaches_project(db: &dyn Db, package: &Option<Symbol>) -> bool {
     package
@@ -10245,6 +10242,9 @@ fn namespace_reaches_project(db: &dyn Db, package: &Option<Symbol>) -> bool {
         .is_none_or(|package| is_own_package(db, package.as_str()))
 }
 
+/// The name a qualified read resolves to, or `None` when the package is known not to export
+/// it. A package the stub corpus does not know, or no corpus at all, cannot be validated, so
+/// every such read resolves.
 fn validated_namespace_name(
     db: &dyn Db,
     internal: bool,

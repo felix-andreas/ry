@@ -343,7 +343,12 @@ pub fn matching_nodes(
             red: None,
         });
         if accepted {
-            matches.push(materialize(&mut stack));
+            // Every green node here was reached through its parent's children, so its red
+            // node exists; a miss is a broken tree, not an input the caller can handle.
+            let Some(node) = materialize(&mut stack) else {
+                panic!("matching_nodes: a green node at {start:?} has no red counterpart");
+            };
+            matches.push(node);
         }
     }
     matches
@@ -384,18 +389,12 @@ impl GreenFrame<'_> {
 }
 
 /// The red node for the top frame, building only the ancestors no earlier match built.
-fn materialize(stack: &mut [GreenFrame<'_>]) -> SyntaxNode {
-    let built = stack
-        .iter()
-        .rposition(|frame| frame.red.is_some())
-        .expect("the root frame always holds its red node");
-    for depth in built + 1..stack.len() {
-        let (ancestors, rest) = stack.split_at_mut(depth);
-        let parent = ancestors[depth - 1]
-            .red
-            .as_ref()
-            .expect("ancestors are built before their children");
-        let frame = &mut rest[0];
+/// `None` only if a green child had no red counterpart under its red parent, which would
+/// mean the two trees disagree.
+fn materialize(stack: &mut [GreenFrame<'_>]) -> Option<SyntaxNode> {
+    let built = stack.iter().rposition(|frame| frame.red.is_some())?;
+    let mut parent = stack[built].red.clone()?;
+    for frame in &mut stack[built + 1..] {
         let range = TextRange::at(frame.start, frame.green.text_len());
         // A binary search by range finds the child unless it is empty, when its range
         // is shared with a neighbor.
@@ -403,19 +402,17 @@ fn materialize(stack: &mut [GreenFrame<'_>]) -> SyntaxNode {
             .child_or_token_at_range(range)
             .and_then(SyntaxElement::into_node)
             .filter(|node| !range.is_empty() && ptr::eq(&*node.green(), frame.green));
-        let node = found.unwrap_or_else(|| {
-            parent
+        let node = match found {
+            Some(node) => node,
+            None => parent
                 .children_with_tokens()
                 .nth(frame.index)
-                .and_then(SyntaxElement::into_node)
-                .expect("the green child is a node of the red parent")
-        });
-        frame.red = Some(node);
+                .and_then(SyntaxElement::into_node)?,
+        };
+        frame.red = Some(node.clone());
+        parent = node;
     }
-    stack
-        .last()
-        .and_then(|frame| frame.red.clone())
-        .expect("the top frame was just built")
+    Some(parent)
 }
 
 /// `deleted` is a range in `old`'s text and `inserted` the replacement's length
