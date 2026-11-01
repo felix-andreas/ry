@@ -1552,7 +1552,12 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     let formats = call.arg(1);
     let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
     let seconds = posixlt_seconds(list)?;
-    let count = seconds.len();
+    // A longer `format` recycles the times, as in GNU R.
+    let count = if seconds.is_empty() {
+        0
+    } else {
+        seconds.len().max(length(formats))
+    };
     let result = alloc(SexpType::String, count)?;
     let tzone = get_attr(list, values::install("tzone")?);
     let field = |index: usize| {
@@ -1563,7 +1568,8 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         }
     };
     let (isdst, zones, offsets) = (field(8), field(9), field(10));
-    for (index, &value) in seconds.iter().enumerate() {
+    for index in 0..count {
+        let value = seconds[index % seconds.len()];
         if is_na_real(value) {
             values::set_elt(result, index, values::na_string());
             continue;
@@ -1626,7 +1632,16 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
         }
         values::set_elt(result, index, values::mkchar(&text)?);
     }
-    set_names_from_year(list, result)?;
+    let year_names = values::names(field(5));
+    if count > seconds.len() && year_names != nil() {
+        let recycled = alloc(SexpType::String, count)?;
+        for position in 0..count {
+            values::set_elt(recycled, position, year_names.element(position % length(year_names)));
+        }
+        values::set_attr(result, symbols().names, recycled)?;
+    } else {
+        set_names_from_year(list, result)?;
+    }
     Ok(result)
 }
 

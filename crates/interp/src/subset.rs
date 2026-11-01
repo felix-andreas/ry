@@ -1,6 +1,7 @@
 //! Subsetting and subassignment (`[`, `[[`, `$`, `@` and their replacement forms), `c` and
 //! `unlist`, lengths, names, dims, and attributes.
 
+use rustc_hash::FxHashSet;
 use crate::{
     builtins::{
         Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, present, special,
@@ -2319,7 +2320,16 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
 
 unsafe fn do_set_levels(call: &Call<'_>) -> R<Sexp> {
     let object = modifiable(call.arg(0))?;
-    values::set_attr(object, symbols().levels, call.arg(1))?;
+    let levels = call.arg(1);
+    if levels.kind() == SexpType::String {
+        let mut seen = FxHashSet::default();
+        for index in 0..length(levels) {
+            if !seen.insert(levels.element(index)) {
+                return Err(call.error(format!("factor level [{}] is duplicated", index + 1)));
+            }
+        }
+    }
+    values::set_attr(object, symbols().levels, levels)?;
     Ok(object)
 }
 
