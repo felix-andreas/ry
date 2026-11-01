@@ -87,6 +87,9 @@ The values are `on`, `off`, and `strict` (which also requires a type everywhere,
 [strict mode](/type-checking/strict-mode)), so you can switch type checking on file by file, or keep
 it on for the project and switch it off where a file is not ready.
 
+To silence one type finding, name its code in a comment on the line, as in
+`# ry: allow(type-mismatch)` ([Silencing one finding](/guides/checking#silencing-one-finding)).
+
 ## What is not checked
 
 What ry cannot model, such as `data.frame` columns and R6 objects, gets the type `Unknown`, which is

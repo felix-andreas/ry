@@ -117,8 +117,9 @@ definition and warns when the two disagree.
 
 ## R6 and S4 objects
 
-For shared mutable state, inheritance, or method dispatch, R6 and S4 are still the tools, and their
-objects are `Unknown`. To check who receives one, give it a nominal type over `Any` and wrap its
+Existing R6 and S4 classes keep working, but their objects are `Unknown`, and ry warns on each
+class definition (`object-system`) because [records and tags](/type-checking/records-and-tags)
+model data with every field checked. To check who receives one, give it a nominal type over `Any` and wrap its
 constructor:
 
 <Tabs syncKey="annotation-style">

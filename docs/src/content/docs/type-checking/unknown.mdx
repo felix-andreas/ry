@@ -35,8 +35,30 @@ amount: double <- df$amount
 </TabItem>
 </Tabs>
 
-[Annotations](/type-checking/annotations) shows `@if-unknown` and `@trust` for the cases where a
-checked annotation does not fit.
+## Overriding inference
+
+A plain annotation is checked against the value. Two forms give a type without that check, and
+inline they go between a binding's `:` and its type, as in `amount: @if-unknown double <- df$amount`.
+
+`#: @if-unknown TYPE` types an `Unknown` value, such as a data frame column, and becomes an error
+once ry can infer the type, so it never goes stale:
+
+```r
+#: @if-unknown double
+amount <- df$amount
+
+#: @if-unknown double
+n <- 1.5
+```
+
+```text
+type-mismatch
+
+  x `@if-unknown` applies only where the type is unknown, and this is already `double`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
+```
+
+A value declared `Any`, such as the result of `readRDS()`, takes a plain annotation instead.
+`#: @trust TYPE` overrides a type ry did infer, for the cases where you know better.
 
 ## `Any`
 

@@ -36,6 +36,19 @@ reports an assignment that nothing reads, a top-level name defined twice in a pa
 keeps one of them), `pkg::name` where the package does not export `name`, and a `NAMESPACE` that
 imports or exports a name that does not exist.
 
+Every file outside `R/` is analyzed on its own, seeing its own definitions plus the package's.
+`source()` is not followed, so a function from a sourced file is reported as unresolved where you
+call it, and as unused where you define it. Moving shared helpers
+into `R/` makes them visible to every script.
+
+Files directly under `tests/testthat/` see the package's definitions and the `helper-*.R` and
+`setup-*.R` files' definitions, but add nothing to the package, so a variable a test assigns never
+changes what a name means under `R/`. Each test file's own bindings stay in that file, as they do
+when testthat runs it.
+
+`ry check` reads the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents, but the language server does
+not analyze them and `ry fmt` skips them.
+
 One gap matters from the start: after `library()` of a package ry knows nothing about, any bare name
 might be one of its exports, so ry stops reporting unresolved names in the whole project.
 [Package stubs](/type-checking/stubs) shows how to turn the check back on.
@@ -114,6 +127,8 @@ Every finding carries a code, and naming it in a comment silences it:
 ```r
 y = 3L  # ry: allow(assignment-operator)
 ```
+
+Type findings work the same way, as in `# ry: allow(type-mismatch)`.
 
 A suppression covers its own line and the line below, so it can sit at the end of the line or above
 it. To turn a check off everywhere, set it in [`ry.toml`](/reference/configuration).

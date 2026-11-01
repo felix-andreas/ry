@@ -23,21 +23,6 @@ section lists the places where ry reports correct code instead.
 - **A project's own `%op%` operators**, because one may quote its right operand instead of
   evaluating it, as magrittr's `%>%` does.
 
-## What is analyzed together
-
-Files under `R/` share one namespace, and every other file is analyzed on its own, seeing its own
-definitions plus the package's. `source()` is not followed, so a function from a sourced file is
-reported as unresolved where you call it, and as unused where you define it. Moving shared helpers
-into `R/` makes them visible to every script.
-
-Files directly under `tests/testthat/` see the package's definitions and the `helper-*.R` and
-`setup-*.R` files' definitions, but add nothing to the package, so a variable a test assigns never
-changes what a name means under `R/`. Each test file's own bindings stay in that file, as they do
-when testthat runs it.
-
-`ry check` reads the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents, but the language server does
-not analyze them and `ry fmt` skips them.
-
 ## Where correct code is reported
 
 These are known bugs, not design decisions:

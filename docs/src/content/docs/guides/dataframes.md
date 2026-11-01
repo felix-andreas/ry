@@ -45,6 +45,48 @@ Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, a
 it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
 method dispatch: `DataFrame.filter` always means the same function.
 
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
+`data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
+behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
+when it can produce exactly what data.table would, meaning the same values, attributes, printing
+and warnings. Otherwise data.table answers it. These go to data.table:
+
+- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
+- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
+- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
+  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
+- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a query that warns or fails.
+
+Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
+`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
+every query to data.table.
+
+```r
+library(data.table)
+options(ry.datatable.trace = TRUE)
+dt <- data.table(g = c("a", "b", "a"), x = 1:3)
+dt[x > 1L, .(n = .N), by = g]
+setkey(dt, g)
+dt[x > 1L]
+```
+
+```text
+[ry] dt[x > 1L, .(n = .N), by = g]
+        g     n
+   <char> <int>
+1:      b     1
+2:      a     1
+[data.table] dt[x > 1L]
+Key: <g>
+        g     x
+   <char> <int>
+1:      a     3
+2:      b     2
+```
+
 ## Building a DataFrame
 
 - `DataFrame(name = value, ...)` builds one from vectors. A length-one value is recycled.
@@ -212,48 +254,6 @@ of the bracket syntax.
 Unlike data.table, a DataFrame follows R's copy-on-modify rule, so `df[, y := value]` leaves a copy
 you took earlier unchanged. When nothing else refers to the DataFrame, the update happens in place
 and costs only the new column.
-
-### Existing data.table code
-
-Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
-`data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
-behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
-when it can produce exactly what data.table would, meaning the same values, attributes, printing
-and warnings. Otherwise data.table answers it. These go to data.table:
-
-- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
-- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
-- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
-  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
-- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
-- a query that warns or fails.
-
-Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
-`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
-every query to data.table.
-
-```r
-library(data.table)
-options(ry.datatable.trace = TRUE)
-dt <- data.table(g = c("a", "b", "a"), x = 1:3)
-dt[x > 1L, .(n = .N), by = g]
-setkey(dt, g)
-dt[x > 1L]
-```
-
-```text
-[ry] dt[x > 1L, .(n = .N), by = g]
-        g     n
-   <char> <int>
-1:      b     1
-2:      a     1
-[data.table] dt[x > 1L]
-Key: <g>
-        g     x
-   <char> <int>
-1:      a     3
-2:      b     2
-```
 
 ## Speed
 

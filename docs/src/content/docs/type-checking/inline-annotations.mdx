@@ -46,75 +46,13 @@ type-mismatch
   x expected `double`, found `character`
 ```
 
-A variable takes its type the same way:
+Every typed page of this guide already shows this spelling in its Inline tab, and it shares one
+type language with `#:` comments, so this page covers only what changes when you switch. Deleting
+each inline annotation turns a file into the plain R program it means.
 
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-person: list{name: character, age: integer} <- readRDS("person.rds")
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: list{name: character, age: integer}
-person <- readRDS("person.rds")
-```
-
-</TabItem>
-</Tabs>
-
-Inline annotations and `#:` comments share one type language and mean the same thing. Deleting each
-inline annotation turns a file into the plain R program it means.
-
-## Type definitions
-
-`type` and `alias` define a type at the top level of a file, and `@Name(value)` creates a value of
-a nominal type:
-
-<Tabs syncKey="annotation-style">
-<TabItem label="Inline">
-
-```r
-type UserId = integer
-
-user_id <- function(raw: integer) -> UserId @UserId(raw)
-
-lookup <- function(id: UserId) -> character "ada"
-
-lookup(5L)
-```
-
-</TabItem>
-<TabItem label="Comments">
-
-```r
-#: @type UserId {integer}
-
-#: fn(raw: integer) -> UserId
-user_id <- function(raw) {
-  #: @new UserId
-  raw
-}
-
-#: fn(id: UserId) -> character
-lookup <- function(id) "ada"
-
-lookup(5L)
-```
-
-</TabItem>
-</Tabs>
-
-```text
-type-mismatch
-
-  x expected `UserId`, found `integer`. The value has the right shape, but `UserId` is a nominal type, so only `@UserId(...)` or `#: @new UserId` creates one
-```
-
-A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
+Definitions are spelled `type UserId = integer` and `alias Row = list{id: integer}`, and
+`@UserId(raw)` creates a value of a nominal type, as [custom types](/type-checking/custom-types)
+shows. A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
 `id: @new UserId <- 5L`. `type` and `alias` are definitions only when a name follows them on the
 same line, so R code that uses them as ordinary names keeps working.
 

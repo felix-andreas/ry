@@ -28,7 +28,6 @@ results:
 
 | program | GNU R, untyped | ry, untyped | ry, typed and strict | ry vs GNU R |
 | --- | ---: | ---: | ---: | ---: |
-| --- | ---: | ---: | ---: | ---: |
 | closures | 0.818 s | 0.395 s | 0.397 s | 2.1x |
 | drawdown | 0.314 s | 0.024 s | 0.023 s | 13.1x |
 | fib | 0.080 s | 0.094 s | 0.109 s | 0.9x |
@@ -174,7 +173,7 @@ non-exhaustive-match
    |   ^^^^^^^^^^^^^^^
 ```
 
-[Strict mode](/type-checking/strict-mode) (`strict = true`) finishes the move: a value ry cannot
+[Strict mode](/type-checking/strict-mode) (`strict = true`, kept beside `typing = true`) finishes the move: a value ry cannot
 type, or a parameter nothing constrains, is an error, and `ry run` refuses to run code that has one.
 `object-systems = false` additionally rejects new S4, R6 and Reference Classes:
 
