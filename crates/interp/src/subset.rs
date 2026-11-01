@@ -783,12 +783,15 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     let index = values::materialize(indices[0])?;
     let count = length(index);
     if count > 1 && matches!(object.kind(), SexpType::List | SexpType::Expression) {
-        // Recursive indexing: each subscript goes one level deeper.
+        // Recursive indexing: each subscript goes one level deeper, through calls and
+        // pairlists as well as lists, as GNU R's `isPairList` lets it.
         let mut current = object;
         for position in 0..count {
             let single = vector_element(index, position)?;
-            if !matches!(current.kind(), SexpType::List | SexpType::Expression)
-                && position + 1 < count
+            if !matches!(
+                current.kind(),
+                SexpType::List | SexpType::Expression | SexpType::Pairlist | SexpType::Language
+            ) && position + 1 < count
             {
                 return Err(crate::unwind::error_in(call, "subscript out of bounds"));
             }

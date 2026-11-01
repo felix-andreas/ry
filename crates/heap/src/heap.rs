@@ -71,6 +71,8 @@ pub struct Heap {
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
     /// environments knows it is still valid when the epoch is unchanged.
     binding_epoch: u64,
+    /// Set while a major collection marks, which is when bytecode inline caches are emptied.
+    major_marking: bool,
 }
 
 /// The objects every R session has, created with the heap.
@@ -305,6 +307,7 @@ impl Heap {
             ready_to_finalize: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
+            major_marking: false,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
             layouts: Layouts::default(),
@@ -863,12 +866,25 @@ impl Heap {
             }
             self.store(symbol, cell, self.known.nil);
             symbol.set_cdr_unbarriered(self.known.nil);
+            self.clear_removed_cell(cell);
             return Ok(true);
         }
         if env == self.known.empty_env {
             return Ok(false);
         }
-        Ok((*env.frame_ptr()).remove(symbol).is_some())
+        let Some(cell) = (*env.frame_ptr()).remove(symbol) else {
+            return Ok(false);
+        };
+        self.clear_removed_cell(cell);
+        Ok(true)
+    }
+
+    /// An inline cache can still hold a removed cell until the code next runs, and the value
+    /// must not stay reachable through it: `rm(x); gc()` has to let a finalizer on `x` run.
+    unsafe fn clear_removed_cell(&mut self, cell: Sexp) {
+        let unbound = self.known.unbound;
+        self.store(cell, cell.cdr(), unbound);
+        cell.set_cdr_unbarriered(unbound);
     }
 
     /// See the field: an unchanged epoch means no binding outside a function frame appeared or
@@ -1079,6 +1095,7 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        self.major_marking = kind == Collection::Major;
         if kind == Collection::Major {
             self.clear_marks();
         } else if self.policy.verify {
@@ -1119,6 +1136,7 @@ impl Heap {
         }
         self.drain();
         self.process_weak_refs();
+        self.major_marking = false;
         // Before the sweep, while a mark still means "survives".
         self.escaped.retain(|object| object.is_marked());
         match kind {
@@ -1226,7 +1244,21 @@ impl Heap {
             Shape::Triple => {
                 self.mark(object.car());
                 self.mark(object.cdr());
-                self.mark(object.tag());
+                let tag = object.tag();
+                // A bytecode object's tag holds its inline caches: the environment each lookup
+                // started from and the binding cell it found. They are only a speed-up, but
+                // traced they would keep an environment alive for as long as the code lives,
+                // such as an R6 object whose methods a clone shares. A major collection empties
+                // them instead, and the next lookup refills them.
+                if self.major_marking
+                    && object.kind() == SexpType::Bytecode
+                    && tag.kind() == SexpType::List
+                {
+                    for index in 0..tag.length() as usize {
+                        tag.set_element_unbarriered(index, self.known.nil);
+                    }
+                }
+                self.mark(tag);
             }
             Shape::Environment => {
                 self.mark(object.enclosure());

@@ -1975,17 +1975,17 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
-    full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
-    was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
-  - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
-    `rm()` and `gc()`, so it is finalized in a later block.
-  - `getParseData` returns `NULL` (see the source-references item below), and cli's
-    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
-  - Regular expressions fancy-regex cannot compile: rcmdcheck's `(?<q>...)\g{q}` backreference,
-    and lubridate's quantified lookahead `(?=\D+)?`. A non-constant-size pattern runs on
-    fancy-regex's backtracking VM because of `leftmost_longest`; a DFA leftmost-longest search
-    (regex-automata's `MatchKind::All`, anchored at the leftmost-first start) would avoid it.
+  - cli's "message if there is a sink" test: `sink(con, type = "message")` does not divert
+    stderr to the connection, and writes to a file connection are not flushed before it closes.
+    Both belong to the move of connection builtins onto `libr::connections`.
+  - `.Internal(inspect(x))` is missing.
+  - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
+    that hard-codes an id would differ (none in the corpus does).
+  - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
+    ry's environments and bytecode have their own layout. Only relative comparisons are portable.
+  - The JIT treats `Op::EndStatement` as a no-op, so a body hot enough to compile may keep a
+    statement's dropped values until it returns (`decisions.md`, "What keeps a dropped object
+    alive"). Unchecked: no corpus test has shown it yet.
   - Two unserializers: `interp::serialize`'s reader and libr's `R_Unserialize`. The writer is
     already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
     same way.
@@ -1997,10 +1997,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
       reports an error; quantified lookarounds and lookarounds in non-capturing groups.
     - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
-  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
-    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
-  - withr: `RNGkind` lacks "Marsaglia-Multicarry", "Buggy Kinderman-Ramage" and "Rounding", and
-    the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
   - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
     Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
     asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
@@ -2015,8 +2011,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
   `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
   values agree to about seven digits only.
-- **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
-  stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
+- **Source references differ in console srcfiles.** In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
   expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
   the column of a second expression after `;` differ. `.Internal(.traceback(x))`, the helper

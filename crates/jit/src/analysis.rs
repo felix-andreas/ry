@@ -783,6 +783,9 @@ impl Builder<'_> {
             }
             // The interpreter's own step sets the current srcref; it touches no register.
             Op::SetSrcref => Action::Step { effect: Effect::Pure, objects: Vec::new(), dst: None },
+            // Compiled code keeps its values in its own frame rather than the register file, so
+            // there is nothing for it to clear.
+            Op::EndStatement => Action::Skip,
             Op::Closure => {
                 state.visible = Some(true);
                 state.registers[operand(0)] = Ty::Boxed;
@@ -1056,7 +1059,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
             kill(operand(0), live);
             gen_(operand(1), live);
         }
-        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref => {}
+        Op::Guard | Op::Jump | Op::Invisible | Op::Visible | Op::SetSrcref | Op::EndStatement => {}
         Op::JumpUnless | Op::Return => gen_(operand(0), live),
         Op::Arithmetic => {
             kill(operand(1), live);
