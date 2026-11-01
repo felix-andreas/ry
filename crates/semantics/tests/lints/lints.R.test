@@ -109,3 +109,15 @@ p <- new("Person")
 q <- Queue$new()
 #++++
 clean
+
+#---- class_union_warns
+setClassUnion("NumberOrNull", c("numeric", "NULL"))
+#++++
+0..13 warning[object-system] `setClassUnion` defines an S4 class union. ry recommends a record or a tagged union instead
+
+#---- a_file_defining_its_own_set_class_is_clean
+setClass <- function(name) name
+setClass("Mine")
+methods::setClass("Theirs")
+#++++
+58..66 warning[object-system] `setClass` defines an S4 class. ry recommends a record or a tagged union instead

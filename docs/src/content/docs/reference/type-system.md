@@ -626,7 +626,8 @@ their R meaning. A literal is all fields or all items, and a repeated field name
   the reverse does not fit either.
 - `point$x` and `point[["x"]]` type as the field's type, and a field the record lacks is a
   `type-mismatch`. `pair[[1L]]` with a literal index types as that item, and an index past the end
-  is a `type-mismatch`. A computed index types as the union of the item types.
+  is a `type-mismatch`. On a record, a position counts the fields in their sorted order. A computed
+  index types as the union of the item or field types.
 - `point$x <- value` rebinds `point` to a copy with that field replaced, and naming a field the
   record lacks is an error when the code runs. The checker does not yet check such an assignment:
   it reports neither the missing field nor a value of a different type.
@@ -675,7 +676,8 @@ so every R use of `base::match` keeps its meaning. An arm is `PATTERN => EXPR` o
 The type of a `match` is the join of its arm types, as for `if`. A pattern that cannot match the
 scrutinee's type, such as a tag a closed union does not list or a field the record lacks, is a
 `type-mismatch` at the pattern. A scrutinee whose type is not yet known takes its shape from the
-patterns: the arms' tags form a closed union, or an open one when a catch-all arm exists. Pattern
+patterns: the arms' tags form a closed union. A catch-all arm accepts a value of any type, so with
+one the scrutinee is not shaped by the patterns. Pattern
 names are bound in the current environment, so after the `match` a name that only some arms bind
 types like a variable assigned in only some branches of an `if`.
 
@@ -687,7 +689,10 @@ the cases the type has:
 - a closed tag union has one case per tag, and an open union adds an "other tags" case that only a
   catch-all arm covers;
 - a tuple or a record is one case, with its items or fields checked in turn;
-- a scalar `logical` has three cases, `TRUE`, `FALSE` and `NA`;
+- a scalar `logical` has three cases, `TRUE`, `FALSE` and `NA`. Coverage trusts the scalar claim,
+  so a value typed scalar that holds several elements, such as `v[-1L]` (see
+  [`[` on vectors](#-on-vectors-1)), matches no literal arm and stops with an error when the code
+  runs;
 - `NULL` is one case, and a union has the cases of each member;
 - every other type has unboundedly many values, so only a binding or `_` covers it.
 

@@ -175,6 +175,12 @@ impl Module {
         &self.patterns[id.0 as usize]
     }
 
+    /// Whether a tag payload pattern is a bare `..`, as in `:Tag(..)`, which matches the tag
+    /// with any payload or none.
+    pub fn is_any_payload(&self, payload: PatId) -> bool {
+        matches!(&self.pattern(payload).kind, PatternKind::Record { fields, rest: true } if fields.is_empty())
+    }
+
     /// The names a pattern binds, as `NameRef` expressions, in source order.
     pub fn pattern_bindings(&self, pattern: PatId) -> Vec<ExprId> {
         let mut bindings = Vec::new();
@@ -298,7 +304,7 @@ pub enum LiteralKind {
     /// Source text is kept for literal index positions and the literal-as-integer courtesy.
     Integer(Box<str>),
     Double(Box<str>),
-    Complex,
+    Complex(Box<str>),
     String(Box<str>),
     Logical(bool),
     Null,
@@ -1292,7 +1298,7 @@ fn literal_kind(node: &SyntaxNode) -> LiteralKind {
     match token.kind() {
         SyntaxKind::INTEGER => LiteralKind::Integer(token.text().into()),
         SyntaxKind::DOUBLE => LiteralKind::Double(token.text().into()),
-        SyntaxKind::COMPLEX => LiteralKind::Complex,
+        SyntaxKind::COMPLEX => LiteralKind::Complex(token.text().into()),
         SyntaxKind::STRING | SyntaxKind::RAW_STRING => {
             LiteralKind::String(string_value(token.text()).into())
         }

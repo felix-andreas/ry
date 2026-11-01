@@ -88,13 +88,12 @@ p: record{x: double, y: integer}
 y: Unknown
 29..34 error[type-mismatch] field `why` does not exist in `record{x: double, y: integer}`
 
-#---- record_has_no_positions
+#---- record_reads_a_position_in_sorted_field_order
 p <- (x = 1, y = 2L)
 y <- p[[1L]]
 #++++
 p: record{x: double, y: integer}
-y: Unknown
-29..31 error[type-mismatch] expected `character`, found `double`
+y: double
 
 #---- tuple_reads_by_literal_position
 t <- (1L, "a")
@@ -364,7 +363,7 @@ g <- function(r) {
 #++++
 g: <T, U> fn(r: :Ok(T) | :Err(U)) -> T | double
 
-#---- catch_all_makes_the_shape_open
+#---- catch_all_leaves_the_scrutinee_unshaped
 g <- function(r) {
   match (r) {
     :Ok(v) => v
@@ -372,7 +371,7 @@ g <- function(r) {
   }
 }
 #++++
-g: <T> fn(r: :Ok(T) | ..) -> T | integer
+g: <T> fn(r: T) -> Unknown
 
 #---- tuple_patterns_shape_a_tuple
 g <- function(pair) {
@@ -528,3 +527,20 @@ f <- function(o) {
 #++++
 f: fn(o: :Some(integer) | :None) -> integer
 94..99 error[type-mismatch] expected `logical`, found `character`
+
+#---- record_position_past_the_end
+p <- (y = "a", x = 1)
+z <- p[[3L]]
+#++++
+p: record{x: double, y: character}
+z: Unknown
+30..32 error[type-mismatch] position 3 does not exist in `record{x: double, y: character}`
+
+#---- catch_all_accepts_values_that_are_not_tags
+h <- function(x) match (x) { :A => 1; _ => 2 }
+a <- h(5)
+b <- h("s")
+#++++
+h: <T> fn(x: T) -> double
+a: double
+b: double

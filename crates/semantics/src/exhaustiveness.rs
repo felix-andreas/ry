@@ -425,7 +425,9 @@ fn lower<'db>(db: &'db dyn Db, module: &Module, pattern: PatId, ty: Ty<'db>) -> 
                 LiteralKind::Logical(false) => Constructor::False,
                 LiteralKind::Na(_) => Constructor::Na,
                 LiteralKind::Null => Constructor::Null,
-                LiteralKind::Integer(text) | LiteralKind::Double(text) => {
+                LiteralKind::Integer(text)
+                | LiteralKind::Double(text)
+                | LiteralKind::Complex(text) => {
                     let value = text.trim_end_matches('L');
                     Constructor::Literal(if *negative {
                         format!("-{value}")
@@ -434,13 +436,26 @@ fn lower<'db>(db: &'db dyn Db, module: &Module, pattern: PatId, ty: Ty<'db>) -> 
                     })
                 }
                 LiteralKind::String(text) => Constructor::Literal(format!("{text:?}")),
-                LiteralKind::Complex => Constructor::Literal("complex".to_owned()),
                 LiteralKind::Inf => {
                     Constructor::Literal(if *negative { "-Inf" } else { "Inf" }.to_owned())
                 }
                 LiteralKind::NaN => Constructor::Literal("NaN".to_owned()),
             };
             Pat::Constructed(constructor, Vec::new())
+        }
+        PatternKind::Tag {
+            name,
+            payload: Some(payload),
+            ..
+        } if module.is_any_payload(*payload) => {
+            let tag = |payload| Constructor::Tag {
+                name: name.as_str().to_owned(),
+                payload,
+            };
+            Pat::Or(vec![
+                Pat::Constructed(tag(false), Vec::new()),
+                Pat::Constructed(tag(true), vec![Pat::Wild]),
+            ])
         }
         PatternKind::Tag { name, payload, .. } => {
             let constructor = Constructor::Tag {

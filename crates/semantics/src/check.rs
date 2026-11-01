@@ -1595,7 +1595,7 @@ impl<'db> Checker<'db, '_> {
         match literal {
             LiteralKind::Integer(_) => scalar(self.db, Atomic::Integer),
             LiteralKind::Double(_) => scalar(self.db, Atomic::Double),
-            LiteralKind::Complex => scalar(self.db, Atomic::Complex),
+            LiteralKind::Complex(_) => scalar(self.db, Atomic::Complex),
             LiteralKind::String(_) => scalar(self.db, Atomic::Character),
             LiteralKind::Logical(_) => scalar(self.db, Atomic::Logical),
             LiteralKind::Null => null(self.db),
@@ -2338,8 +2338,9 @@ impl<'db> Checker<'db, '_> {
     }
 
     /// The type an unannotated scrutinee must have for its patterns to make sense, as
-    /// `is.null(x)` shapes `x`: the arms' tags form a union that is open when a catch-all arm
-    /// exists, and tuple or record patterns give a tuple or record of fresh variables.
+    /// `is.null(x)` shapes `x`: the arms' tags form a closed union, and tuple or record
+    /// patterns give a tuple or record of fresh variables. A catch-all arm accepts a value of
+    /// any type, so it leaves the scrutinee unshaped.
     fn scrutinee_shape(&mut self, arms: &[MatchArm]) -> Option<Ty<'db>> {
         let module = self.module;
         let mut tops = Vec::new();
@@ -2353,6 +2354,9 @@ impl<'db> Checker<'db, '_> {
                     PatternKind::Wildcard | PatternKind::Bind(_)
                 )
         });
+        if catch_all {
+            return None;
+        }
         let shaped: Vec<PatId> = tops
             .into_iter()
             .filter(|&pattern| {
@@ -2379,9 +2383,6 @@ impl<'db> Checker<'db, '_> {
                         self.db,
                         TyKind::Tag(Name::new(self.db, name.as_str().to_owned()), payload),
                     ));
-                }
-                if catch_all {
-                    members.push(Ty::new(self.db, TyKind::OtherTags));
                 }
                 let union = union_of(self.db, members);
                 conflicting_tags(self.db, union).is_none().then_some(union)
@@ -2507,7 +2508,8 @@ impl<'db> Checker<'db, '_> {
                 }
             }
             PatternKind::Tag { payload, .. } => {
-                let Some(payload) = *payload else {
+                let Some(payload) = payload.filter(|&payload| !module.is_any_payload(payload))
+                else {
                     return;
                 };
                 let payload_ty =
@@ -2600,6 +2602,7 @@ impl<'db> Checker<'db, '_> {
                 TyKind::Tag(subject_name, subject_payload) => {
                     subject_name.text(self.db) == name.as_str()
                         && match (payload, subject_payload) {
+                            (Some(payload), _) if self.module.is_any_payload(*payload) => true,
                             (None, None) => true,
                             (Some(payload), Some(subject_payload)) => {
                                 self.pattern_admits(*payload, *subject_payload)
@@ -6262,7 +6265,7 @@ impl<'db> Checker<'db, '_> {
                 },
                 None => Ok(union_of(self.db, items.iter().copied())),
             },
-            // A record has no positions: its fields are sorted by name, not written order.
+            // A position counts fields in their sorted order, as the runtime stores them.
             TyKind::NativeRecord(fields) => match literal_name {
                 Some(name) => match fields.iter().find(|field| field.name.text(self.db) == name) {
                     Some(field) => Ok(field.ty),
@@ -6278,14 +6281,19 @@ impl<'db> Checker<'db, '_> {
                         },
                     }),
                 },
-                None if literal_position.is_some() => Err(TypeError {
-                    range: key_range,
-                    kind: TypeErrorKind::Mismatch {
-                        expected: scalar(self.db, Atomic::Character),
-                        found: scalar(self.db, Atomic::Double),
+                None => match literal_position {
+                    Some(position) => match fields.get(position) {
+                        Some(field) => Ok(field.ty),
+                        None => Err(TypeError {
+                            range: key_range,
+                            kind: TypeErrorKind::PositionDoesNotExist {
+                                position: position + 1,
+                                container: subject,
+                            },
+                        }),
                     },
-                }),
-                None => Ok(union_of(self.db, fields.iter().map(|field| field.ty))),
+                    None => Ok(union_of(self.db, fields.iter().map(|field| field.ty))),
+                },
             },
             TyKind::Tuple(items) => match literal_position {
                 Some(position) => match items.get(position) {

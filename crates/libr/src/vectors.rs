@@ -19,7 +19,6 @@ pub fn sexp_type(code: SEXPTYPE) -> ApiResult<SexpType> {
     SexpType::from_code(code).ok_or_else(|| error(format!("invalid type code {code}")))
 }
 
-/// The length of a vector, `LENGTH`'s and `XLENGTH`'s answer.
 /// Refuses a ry record, tuple or tag. C code sees such a value as an opaque object of type 27:
 /// it can move the handle through a list, but every accessor that would read it as R data
 /// raises the conversion error instead.
@@ -31,6 +30,7 @@ pub unsafe fn refuse_native(object: Sexp) -> ApiResult<()> {
     Ok(())
 }
 
+/// The length of a vector, `LENGTH`'s and `XLENGTH`'s answer.
 pub unsafe fn xlength(object: Sexp) -> ApiResult<R_xlen_t> {
     refuse_native(object)?;
     if object.is_altrep() {

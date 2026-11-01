@@ -796,11 +796,27 @@ unsafe fn do_as_tuple(call: &Call<'_>) -> R<Sexp> {
 /// positional items.
 unsafe fn do_as_tag(call: &Call<'_>) -> R<Sexp> {
     let (matched, _) = call.match_args(&["name", "payload"])?;
-    let Some(name) = matched.first().copied().flatten() else {
+    let Some(mut name) = matched.first().copied().flatten() else {
         return Err(call.error("`as.tag()` needs a name"));
     };
+    let mut payload = matched.get(1).copied().flatten().unwrap_or_else(nil);
+    // `as.list()` gives a tag as `list(tag = , payload = )`, so that list converts back.
+    if name.kind() == SexpType::List && matched.get(1).copied().flatten().is_none() {
+        let names = values::names(name);
+        let element = |wanted: &[u8]| {
+            (0..length(name))
+                .find(|&index| names != nil() && names.element(index).bytes() == wanted)
+                .map(|index| name.element(index))
+        };
+        let Some(tag) = element(b"tag") else {
+            return Err(call.error(
+                "`as.tag()` needs a name, or a list with a `tag` element as `as.list()` gives",
+            ));
+        };
+        payload = element(b"payload").unwrap_or_else(nil);
+        name = tag;
+    }
     let tag = tag_id(name).map_err(|message| call.error(format!("`as.tag()`: {message}")))?;
-    let payload = matched.get(1).copied().flatten().unwrap_or_else(nil);
     if !matches!(payload.kind(), SexpType::List | SexpType::Nil) {
         return Err(call.error("`as.tag()` needs the payload as a list"));
     }

@@ -143,6 +143,11 @@ const PRINTS: &[(&str, &str)] = &[
     ("as.tuple(list(1, 2L))", "(1, 2L)\n"),
     ("as.tag(\"Ok\", list(value = 3))", ":Ok(value = 3)\n"),
     ("as.tag(\"None\")", ":None\n"),
+    (
+        "as.tag(as.list(:Circle(radius = 2)))",
+        ":Circle(radius = 2)\n",
+    ),
+    ("as.tag(as.list(:None))", ":None\n"),
     ("identical(as.record(as.list(point)), point)", "[1] TRUE\n"),
     // A list of records works, because storing a value does not look inside it.
     ("list(point, pair)[[2]]", "(1L, \"a\")\n"),

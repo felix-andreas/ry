@@ -106,7 +106,7 @@ an error, because a tag without a payload is written `:Some`.
 
 Two places need care, because the leading colon meets R's binary `:` and `::`. A parameter or
 binding annotated with a tag type needs a space after its own colon (`x: :None`), because `x::None`
-is namespace access; ry reports `x::None` in a parameter list with that fix. And inside `( )` or
+is namespace access, and `function(x::None)` is a syntax error. And inside `( )` or
 `[ ]`, where R ignores newlines, a tag at the start of a continuation line continues the previous
 line instead, so `f(y\n  :None)` is `f(y:None)`, exactly as R reads it.
 
@@ -250,8 +250,8 @@ An arm with a guard counts for reachability but not for coverage. Two findings c
 A pattern that cannot match the scrutinee's type is a `type-mismatch` at the pattern, such as a tag
 the closed union does not list, a payload of the wrong length, or a field the record lacks. A
 scrutinee whose type is still an unbound inference variable takes its shape from the patterns, as
-`is.null` shapes an unannotated parameter (`decisions.md`): the arms' tags form a closed union, or an
-open one when a catch-all arm exists. So an unannotated `function(r) match (r) { :Ok(v) => v; :Err(e)
+`is.null` shapes an unannotated parameter (`decisions.md`): the arms' tags form a closed union. A
+catch-all arm accepts a value of any type, so with one the patterns do not shape the scrutinee. So an unannotated `function(r) match (r) { :Ok(v) => v; :Err(e)
 => 0 }` infers `fn(r: :Ok(T) | :Err(U)) -> T | double`.
 
 ## Runtime representation

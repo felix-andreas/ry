@@ -280,3 +280,26 @@ f <- function(x) {
 #++++
 f: <T> fn(x: T) -> integer
 49..50 warning[unreachable-pattern] this arm is unreachable: the arms above it already match every value its pattern matches
+
+#---- complex_literals_are_distinct_cases
+#: fn(z: complex) -> character
+f <- function(z) {
+  match (z) {
+    1i => "one"
+    2i => "two"
+    _ => "other"
+  }
+}
+#++++
+f: fn(z: complex) -> character
+
+#---- rest_only_payload_matches_a_tag_with_or_without_a_payload
+#: fn(z: :A | :B(integer)) -> double
+f <- function(z) {
+  match (z) {
+    :A(..) => 1
+    :B(..) => 2
+  }
+}
+#++++
+f: fn(z: :A | :B(integer)) -> double
