@@ -582,7 +582,7 @@ change that does not pay.
    interpreter's call path, lookups and allocation").
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
-- **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
+- **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
 
 ## Open: performance and memory
 
