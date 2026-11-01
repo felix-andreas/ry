@@ -3884,16 +3884,21 @@ explicit allocators".
   (code, constants, caches, feedback pointer), so a simple instruction costs no call; type
   feedback writes through a raw pointer that is null when no tier is collecting it. This cut
   `mean.default` by about a quarter of its instructions.
-- **`GetFun` carries a `probe` operand**: 0 when the compiler knows the frame cannot bind the head
-  symbol (`Compiler::frame_may_bind`), and then the lookup starts in the enclosure's cached cell
-  instead of scanning the local frame. A cached hit that is a forced promise is unwrapped before
-  the function check.
+- **`GetFun` always looks in the local frame first.** Starting a function lookup in the
+  enclosure's cached cell when the compiler sees no local binding of the name was tried and
+  rejected: a frame gains bindings the compiler cannot see (`assign(..., envir =
+  parent.frame())` as zeallot's `%<-%` does, `<-` inside a default argument, `base::assign`, the
+  locals `UseMethod` copies into a method's frame), and a frame binding does not move the symbol
+  epoch that guards the cache. `Guard` keeps that shortcut for operators only, as GNU R's
+  compiler does.
 - **S3 dispatch allocates no implicit class vector**: `Globals::implicit_classes` caches one shared
   (not-mutable) vector per dimension shape and type, except for calls and records, whose class
   depends on the value. Method names are built in a stack buffer and interned directly.
 - **A `.Call` routine's external pointer holds the `Routine` entry's address**, so `try_call`
   finds the implementation by index in a table built once; a pointer that comes back null from
-  serialization falls back to the lookup by name.
+  serialization falls back to the lookup by name. C code that calls `R_ExternalPtrAddr` on such
+  a symbol gets that entry's address, not a function, but it got null before, which fails the
+  same way; every libr foreign-call path goes through `try_call` first.
 - **`c()` of untagged, unnamed atomic vectors copies slice by slice** into the result
   (`combine_unnamed_atomic`), because the general path records every element and its name first
   and was the largest source of Rust allocations in `sd()`.

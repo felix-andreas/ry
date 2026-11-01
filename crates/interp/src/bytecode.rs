@@ -298,8 +298,7 @@ pub enum Op {
     GetVar,
     /// `symbol src`: a local `<-`.
     SetVar,
-    /// `dst symbol cache call probe`: `probe` is 0 when the frame cannot bind `symbol`, so the
-    /// lookup starts in the enclosure.
+    /// `dst symbol cache`
     GetFun,
     /// `function target`: jumps unless the function is a builtin (whose arguments are values).
     BranchUnlessBuiltin,
@@ -1521,8 +1520,7 @@ impl Compiler {
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
-        let probe = self.frame_may_bind(head) as u32;
-        self.emit(Op::GetFun, &[function, symbol, cache, call_constant, probe]);
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
         let generic = self.emit_patchable(Op::BranchUnlessPrimitive, &[function, expected, 0]);
         let base = self.next_register;
         for _ in args {
@@ -1567,8 +1565,7 @@ impl Compiler {
         let cache = self.cache();
         let mark = self.next_register;
         let function = self.allocate();
-        let probe = self.frame_may_bind(head) as u32;
-        self.emit(Op::GetFun, &[function, symbol, cache, call_constant, probe]);
+        self.emit(Op::GetFun, &[function, symbol, cache, call_constant]);
         let args = values::pairlist_items(call.cdr());
         // A register holds an argument's value without counting as a reference, so a later
         // argument that modifies a variable in place would change an earlier argument's value.
@@ -1622,7 +1619,7 @@ pub fn operand_count(op: Op) -> usize {
     match op {
         Op::Constant => 2,
         Op::GetVar => 3,
-        Op::GetFun => 5,
+        Op::GetFun => 4,
         Op::SetVar => 2,
         Op::BranchUnlessBuiltin => 2,
         Op::CallBuiltin => 5,
@@ -1924,11 +1921,7 @@ unsafe fn step(
         Op::GetFun => {
             let symbol = constants.element(operand(1));
             let call = constants.element(operand(3));
-            let function = if operand(4) == 0 {
-                lookup_enclosing_function(symbol, env, constants, caches, operand(2), call)?
-            } else {
-                lookup_function(symbol, env, constants, caches, operand(2), call)?
-            };
+            let function = lookup_function(symbol, env, constants, caches, operand(2), call)?;
             set(operand(0), function);
         }
         Op::BranchUnlessBuiltin => {
@@ -1982,7 +1975,7 @@ unsafe fn step(
             let call = constants.element(operand(2));
             let target = constants.element(operand(3));
             let value = eval::tail_update(call, function, target, env)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::BranchUnlessPrimitive => {
@@ -2027,7 +2020,7 @@ unsafe fn step(
             let symbol = constants.element(operand(0));
             let expected = constants.element(operand(1));
             let found = if operand(3) == 0 {
-                lookup_enclosing_function(symbol, env, constants, caches, operand(2), unbound())
+                lookup_enclosing_function(symbol, env, constants, caches, operand(2))
             } else {
                 lookup_function(symbol, env, constants, caches, operand(2), unbound())
             };
@@ -2409,7 +2402,6 @@ unsafe fn lookup_enclosing_function(
     constants: Sexp,
     caches: Sexp,
     slot: usize,
-    call: Sexp,
 ) -> R<Sexp> {
     let enclosure = env.enclosure();
     if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
@@ -2423,7 +2415,7 @@ unsafe fn lookup_enclosing_function(
             return Ok(value);
         }
     }
-    lookup_function(symbol, env, constants, caches, slot, call)
+    lookup_function(symbol, env, constants, caches, slot, unbound())
 }
 
 #[inline]
