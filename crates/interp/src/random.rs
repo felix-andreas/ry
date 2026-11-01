@@ -12,9 +12,9 @@ use crate::{
     builtins::{BuiltinDef, Call, internal},
     coerce::{coerce_vector, type_name},
     conditions::warning,
-    rmath::qnorm,
     eval::{define, eval, find_var_in_frame},
     interp,
+    rmath::qnorm,
     unwind::{R, error},
     values::{
         alloc, as_integer_scalar, as_logical_scalar, as_real_scalar, global_env, integer_vector,
@@ -953,7 +953,11 @@ fn mersenne_twister(position: &mut i32, words: &mut [u32; TWISTER_WORDS]) -> f64
             words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT]);
         }
         for index in TWISTER_WORDS - TWISTER_SHIFT..last {
-            words[index] = twist(words[index], words[index + 1], words[index + TWISTER_SHIFT - TWISTER_WORDS]);
+            words[index] = twist(
+                words[index],
+                words[index + 1],
+                words[index + TWISTER_SHIFT - TWISTER_WORDS],
+            );
         }
         words[last] = twist(words[last], words[0], words[TWISTER_SHIFT - 1]);
         *position = 0;
@@ -1027,7 +1031,11 @@ fn kinderman_ramage(state: &mut State) -> f64 {
             let u3 = next_uniform(state);
             let tail = A * A - 2.0 * u3.ln();
             if u2 * u2 < (A * A) / tail {
-                return if u1 < 0.986655477086949 { tail.sqrt() } else { -tail.sqrt() };
+                return if u1 < 0.986655477086949 {
+                    tail.sqrt()
+                } else {
+                    -tail.sqrt()
+                };
             }
         }
     }

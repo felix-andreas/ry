@@ -226,6 +226,28 @@ fn strict_mode_refuses_an_untyped_package_on_both_runtimes() {
 }
 
 #[test]
+fn a_loaded_package_cannot_define_classes_when_object_systems_are_off() {
+    if !r_available() {
+        return;
+    }
+    let root = package(&[
+        ("DESCRIPTION", "Package: classless\nVersion: 1.0\n"),
+        ("ry.toml", "[check]\nobject-systems = false\n"),
+        ("R/a.R", "make_account <- function() setRefClass(\"Account\")\n"),
+    ]);
+    let output = ry_load(root.path(), &["cat(\"loaded\\n\")", "make_account()"]);
+    let printed = text(&output);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    assert!(printed.contains("loaded"), "{printed}");
+    assert!(
+        printed.contains(
+            "Reference Classes are turned off in this project (`[check] object-systems = false`), so `setRefClass` cannot define a Reference Class"
+        ),
+        "{printed}"
+    );
+}
+
+#[test]
 fn a_failing_statement_names_its_file_and_line() {
     if !r_available() {
         return;

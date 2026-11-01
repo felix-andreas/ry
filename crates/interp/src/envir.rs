@@ -1932,6 +1932,9 @@ unsafe fn loaded_namespace(package: Sexp) -> R<Option<Sexp>> {
         return Ok(None);
     };
     let registry = crate::heap().known().namespace_registry;
-    let namespace = value_of(find_var_in_frame(values::install(&package_name)?, registry)?)?;
+    let namespace = value_of(find_var_in_frame(
+        values::install(&package_name)?,
+        registry,
+    )?)?;
     Ok((namespace.kind() == SexpType::Environment).then_some(namespace))
 }

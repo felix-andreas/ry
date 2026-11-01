@@ -45,8 +45,8 @@ use table::{
     ColumnType, Schema, Table,
     convert::{self, RVector},
     polars::prelude::{
-        ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries, NewChunkedArray, PlSmallStr, Series,
-        StringChunked,
+        ChunkTake, DataFrame, DataType, IdxCa, IdxSize, IntoColumn, IntoSeries, NewChunkedArray,
+        PlSmallStr, Series, StringChunked,
     },
     query::{self, Output, Query, Rows, Select},
 };
@@ -109,21 +109,28 @@ pub unsafe fn query(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     };
     if option_is_true("ry.datatable.trace") {
         let engine = if value.is_some() { "ry" } else { "data.table" };
-        crate::write_console(format!("[{engine}] {}\n", crate::deparse::deparse_one_line(call)).as_bytes(), true);
+        crate::write_console(
+            format!("[{engine}] {}\n", crate::deparse::deparse_one_line(call)).as_bytes(),
+            true,
+        );
     }
     Ok(value)
 }
 
 unsafe fn option_is_true(name: &str) -> bool {
     let option = crate::envir::get_option(name);
-    option.kind() == SexpType::Logical && length(option) == 1 && values::as_logical_scalar(option) == 1
+    option.kind() == SexpType::Logical
+        && length(option) == 1
+        && values::as_logical_scalar(option) == 1
 }
 
 /// Whether `options(ry.datatable = FALSE)` is unset. `options(ry.datatable.trace = TRUE)` reports
 /// on standard error which engine answered each query.
 unsafe fn enabled() -> bool {
     let option = crate::envir::get_option("ry.datatable");
-    !(option.kind() == SexpType::Logical && length(option) == 1 && values::as_logical_scalar(option) == 0)
+    !(option.kind() == SexpType::Logical
+        && length(option) == 1
+        && values::as_logical_scalar(option) == 0)
 }
 
 /// Whether `subject` is a data.table classed `data.table` and `data.frame` alone, with no key and
@@ -134,13 +141,20 @@ unsafe fn is_plain(subject: Sexp) -> bool {
         return false;
     }
     let class = values::get_attr(subject, symbols().class);
-    if values::strings(class).iter().map(Option::as_deref).ne([Some("data.table"), Some("data.frame")]) {
+    if values::strings(class)
+        .iter()
+        .map(Option::as_deref)
+        .ne([Some("data.table"), Some("data.frame")])
+    {
         return false;
     }
     let mut attribute = subject.attrib();
     while attribute.kind() == SexpType::Pairlist {
         let name = values::symbol_name(attribute.tag());
-        if !matches!(name.as_ref(), "names" | "row.names" | "class" | ".internal.selfref" | "index") {
+        if !matches!(
+            name.as_ref(),
+            "names" | "row.names" | "class" | ".internal.selfref" | "index"
+        ) {
             return false;
         }
         attribute = attribute.cdr();
@@ -155,7 +169,11 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     let Some((columns, height)) = subject_columns(subject)? else {
         return Ok(None);
     };
-    let schema = Schema::new(columns.iter().map(|column| (column.name.clone(), column.kind)));
+    let schema = Schema::new(
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.kind)),
+    );
     let parts = frame::parse_parts(call, env, true)?;
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
@@ -170,7 +188,11 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         strict: true,
     };
     let grouped = parts.by.is_some();
-    let assigning = parts.j.as_ref().and_then(Piece::expression).is_some_and(|j| is_call(j, ":="));
+    let assigning = parts
+        .j
+        .as_ref()
+        .and_then(Piece::expression)
+        .is_some_and(|j| is_call(j, ":="));
     if let Some(j) = parts.j.as_ref().and_then(Piece::expression)
         && !reductions_agree(j, grouped && !assigning, &schema)
     {
@@ -215,7 +237,13 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     } else {
         Shape::Selected
     };
-    let sorted = parts.keyed.then(|| query.by.iter().map(|(name, _)| name.to_string()).collect::<Vec<_>>());
+    let sorted = parts.keyed.then(|| {
+        query
+            .by
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>()
+    });
     let Some(output) = run(&mut table, query)? else {
         return Ok(None);
     };
@@ -239,10 +267,16 @@ unsafe fn auto_indexes(i: Sexp, schema: &Schema) -> bool {
     let arguments = values::pairlist_items(i.cdr());
     match (values::symbol_name(i.car()).as_ref(), arguments.as_slice()) {
         ("(", [(_, inner)]) => auto_indexes(*inner, schema),
-        ("&", [(_, left), (_, right)]) => auto_indexes(*left, schema) && auto_indexes(*right, schema),
+        ("&", [(_, left), (_, right)]) => {
+            auto_indexes(*left, schema) && auto_indexes(*right, schema)
+        }
         ("==" | "%in%" | "%chin%", [(_, left), (_, right)]) => {
             let is_column = |side: Sexp| {
-                side.kind() == SexpType::Symbol && schema.columns.iter().any(|(name, _)| name.as_str() == values::symbol_name(side))
+                side.kind() == SexpType::Symbol
+                    && schema
+                        .columns
+                        .iter()
+                        .any(|(name, _)| name.as_str() == values::symbol_name(side))
             };
             is_column(*left) || is_column(*right)
         }
@@ -265,7 +299,11 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
     if gforce && let Some(terms) = gforce_terms(j, schema) {
         return terms.iter().all(|term| match term {
             Term::Count => true,
-            Term::Reduce { function, column, extra } => term_agrees(function, *column, *extra),
+            Term::Reduce {
+                function,
+                column,
+                extra,
+            } => term_agrees(function, *column, *extra),
         });
     }
     !reduces(j)
@@ -274,19 +312,31 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
 /// One term of a `j` that data.table's GForce runs: `.N`, or `function(column, ...)`.
 enum Term {
     Count,
-    Reduce { function: String, column: ColumnType, extra: bool },
+    Reduce {
+        function: String,
+        column: ColumnType,
+        extra: bool,
+    },
 }
 
 /// The terms of `j` when it has data.table's GForce form: `.N`, a single `f(column)` term, a
 /// `list()` or `.()` of them, or `lapply(.SD, f)`, which data.table expands to such a list.
 /// `f` is one of data.table's `gfuns`, and a term may add only `na.rm`.
 unsafe fn gforce_terms(j: Sexp, schema: &Schema) -> Option<Vec<Term>> {
-    const FUNCTIONS: [&str; 14] =
-        ["[", "[[", "head", "tail", "first", "last", "sum", "mean", "median", "min", "max", "var", "sd", "prod"];
+    const FUNCTIONS: [&str; 14] = [
+        "[", "[[", "head", "tail", "first", "last", "sum", "mean", "median", "min", "max", "var",
+        "sd", "prod",
+    ];
     let column_type = |symbol: Sexp| {
         (symbol.kind() == SexpType::Symbol)
             .then(|| values::symbol_name(symbol))
-            .and_then(|name| schema.columns.iter().find(|(column, _)| column.as_str() == name).map(|(_, kind)| *kind))
+            .and_then(|name| {
+                schema
+                    .columns
+                    .iter()
+                    .find(|(column, _)| column.as_str() == name)
+                    .map(|(_, kind)| *kind)
+            })
     };
     let term = |q: Sexp| -> Option<Term> {
         if q.kind() == SexpType::Symbol && values::symbol_name(q) == ".N" {
@@ -299,13 +349,23 @@ unsafe fn gforce_terms(j: Sexp, schema: &Schema) -> Option<Vec<Term>> {
         let arguments = values::pairlist_items(q.cdr());
         let (_, first) = arguments.first()?;
         let column = column_type(*first)?;
-        if !FUNCTIONS.contains(&function.as_str()) || matches!(function.as_str(), "head" | "tail" | "[" | "[[") {
+        if !FUNCTIONS.contains(&function.as_str())
+            || matches!(function.as_str(), "head" | "tail" | "[" | "[[")
+        {
             return None;
         }
         match arguments.as_slice() {
-            [_] => Some(Term::Reduce { function, column, extra: false }),
+            [_] => Some(Term::Reduce {
+                function,
+                column,
+                extra: false,
+            }),
             [_, (tag, _)] if !is_nil(*tag) && values::symbol_name(*tag).starts_with("na") => {
-                Some(Term::Reduce { function, column, extra: true })
+                Some(Term::Reduce {
+                    function,
+                    column,
+                    extra: true,
+                })
             }
             _ => None,
         }
@@ -314,13 +374,19 @@ unsafe fn gforce_terms(j: Sexp, schema: &Schema) -> Option<Vec<Term>> {
         return term(j).map(|term| vec![term]);
     }
     match values::symbol_name(j.car()).as_ref() {
-        "list" | "." => values::pairlist_items(j.cdr()).into_iter().map(|(_, item)| term(item)).collect(),
+        "list" | "." => values::pairlist_items(j.cdr())
+            .into_iter()
+            .map(|(_, item)| term(item))
+            .collect(),
         "lapply" => {
             let arguments = values::pairlist_items(j.cdr());
             let [(_, sd), (_, function), rest @ ..] = arguments.as_slice() else {
                 return None;
             };
-            if sd.kind() != SexpType::Symbol || values::symbol_name(*sd) != ".SD" || function.kind() != SexpType::Symbol {
+            if sd.kind() != SexpType::Symbol
+                || values::symbol_name(*sd) != ".SD"
+                || function.kind() != SexpType::Symbol
+            {
                 return None;
             }
             let function = values::symbol_name(*function).into_owned();
@@ -328,7 +394,11 @@ unsafe fn gforce_terms(j: Sexp, schema: &Schema) -> Option<Vec<Term>> {
                 return None;
             }
             // The columns `.SD` covers are not known here, so every column counts as a double.
-            Some(vec![Term::Reduce { function, column: ColumnType::Double, extra: !rest.is_empty() }])
+            Some(vec![Term::Reduce {
+                function,
+                column: ColumnType::Double,
+                extra: !rest.is_empty(),
+            }])
         }
         _ => term(j).map(|term| vec![term]),
     }
@@ -341,11 +411,17 @@ unsafe fn reduces(expression: Sexp) -> bool {
     }
     let head = expression.car();
     if head.kind() == SexpType::Symbol
-        && matches!(values::symbol_name(head).as_ref(), "sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply")
+        && matches!(
+            values::symbol_name(head).as_ref(),
+            "sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply"
+        )
     {
         return true;
     }
-    reduces(head) || values::pairlist_items(expression.cdr()).into_iter().any(|(_, item)| reduces(item))
+    reduces(head)
+        || values::pairlist_items(expression.cdr())
+            .into_iter()
+            .any(|(_, item)| reduces(item))
 }
 
 unsafe fn is_call(expression: Sexp, name: &str) -> bool {
@@ -368,17 +444,30 @@ unsafe fn update(subject: Sexp, mut table: Table, query: Query, call: Sexp) -> R
     };
     let positions = match &query.rows {
         Rows::All => None,
-        Rows::Filter(condition) => Some(frame::selected_positions(&mut table, Rows::Filter(condition.clone()), call)?),
+        Rows::Filter(condition) => Some(frame::selected_positions(
+            &mut table,
+            Rows::Filter(condition.clone()),
+            call,
+        )?),
         _ => return Ok(None),
     };
     let deletes = assignments.iter().any(|(_, value)| value.is_none());
     if deletes && (positions.is_some() || !query.by.is_empty()) {
         return Ok(None);
     }
-    let existing: Vec<String> = values::strings(values::names(subject)).into_iter().flatten().collect();
-    let added = assignments.iter().filter(|(name, _)| !existing.iter().any(|column| column == name.as_str())).count();
+    let existing: Vec<String> = values::strings(values::names(subject))
+        .into_iter()
+        .flatten()
+        .collect();
+    let added = assignments
+        .iter()
+        .filter(|(name, _)| !existing.iter().any(|column| column == name.as_str()))
+        .count();
     if added > 0 {
-        let room = helper(".datatable_room", &[subject, values::scalar_integer(added as i32)?])?;
+        let room = helper(
+            ".datatable_room",
+            &[subject, values::scalar_integer(added as i32)?],
+        )?;
         if values::as_logical_scalar(room) != 1 {
             return Ok(None);
         }
@@ -405,8 +494,14 @@ unsafe fn update(subject: Sexp, mut table: Table, query: Query, call: Sexp) -> R
                 let taken = series
                     .take_slice(positions)
                     .map_err(|failure| error(failure.to_string()))?;
-                let rows: Vec<i32> = positions.iter().map(|&position| position as i32 + 1).collect();
-                (Some(values::integer_vector(&rows)?), frame::column_value(&taken.into_column())?)
+                let rows: Vec<i32> = positions
+                    .iter()
+                    .map(|&position| position as i32 + 1)
+                    .collect();
+                (
+                    Some(values::integer_vector(&rows)?),
+                    frame::column_value(&taken.into_column())?,
+                )
             }
             _ => (None, frame::column_value(column)?),
         };
@@ -414,7 +509,10 @@ unsafe fn update(subject: Sexp, mut table: Table, query: Query, call: Sexp) -> R
     }
     for (name, rows, value) in writes {
         let j = values::scalar_string(name)?;
-        helper(".datatable_set", &[subject, rows.unwrap_or(nil()), j, value])?;
+        helper(
+            ".datatable_set",
+            &[subject, rows.unwrap_or(nil()), j, value],
+        )?;
     }
     helper(".datatable_updated", &[subject])?;
     interp().visible = true;
@@ -453,9 +551,9 @@ unsafe fn selects_columns(select: &Select, j: Option<Sexp>) -> bool {
     };
     let listed = j.is_some_and(|j| is_call(j, "list") || is_call(j, "."));
     !listed
-        && columns
-            .iter()
-            .all(|(name, expr)| matches!(expr, table::query::Expr::Column(column) if column == name))
+        && columns.iter().all(
+            |(name, expr)| matches!(expr, table::query::Expr::Column(column) if column == name),
+        )
 }
 
 /// `result` as a new data.table, keyed by `sorted` when the query was a `keyby`.
@@ -472,7 +570,15 @@ unsafe fn result_table(result: &Table, shape: Shape, sorted: Option<&[String]>) 
         Some(names) if !names.is_empty() => values::string_vector(names)?,
         _ => nil(),
     };
-    helper(".datatable_result", &[columns, names, sorted, values::scalar_integer(shape as i32 + 1)?])
+    helper(
+        ".datatable_result",
+        &[
+            columns,
+            names,
+            sorted,
+            values::scalar_integer(shape as i32 + 1)?,
+        ],
+    )
 }
 
 /// One column of the subject, typed without reading its data.
@@ -523,10 +629,17 @@ unsafe fn subject_columns(subject: Sexp) -> R<Option<(Vec<SubjectColumn>, usize)
 }
 
 /// The engine table of `columns`, keeping only those in `needed` when it is given.
-unsafe fn import(columns: &[SubjectColumn], height: usize, needed: Option<HashSet<PlSmallStr>>) -> R<Table> {
+unsafe fn import(
+    columns: &[SubjectColumn],
+    height: usize,
+    needed: Option<HashSet<PlSmallStr>>,
+) -> R<Table> {
     let mut imported = Vec::with_capacity(columns.len());
     for column in columns {
-        if needed.as_ref().is_some_and(|needed| !needed.contains(&column.name)) {
+        if needed
+            .as_ref()
+            .is_some_and(|needed| !needed.contains(&column.name))
+        {
             continue;
         }
         imported.push(import_column(column)?.into_column());
@@ -567,7 +680,9 @@ unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
             let indices = if has_na {
                 IdxCa::from_iter_options(
                     PlSmallStr::EMPTY,
-                    indices.into_iter().map(|index| (index != IdxSize::MAX).then_some(index)),
+                    indices
+                        .into_iter()
+                        .map(|index| (index != IdxSize::MAX).then_some(index)),
                 )
             } else {
                 IdxCa::from_vec(PlSmallStr::EMPTY, indices)
@@ -597,7 +712,11 @@ unsafe fn import_column(column: &SubjectColumn) -> R<Series> {
 /// Whether `column` is a factor with only its levels and the class `"factor"`.
 unsafe fn is_plain_factor(column: Sexp) -> bool {
     let class = values::get_attr(column, symbols().class);
-    if values::strings(class).iter().map(Option::as_deref).ne([Some("factor")]) {
+    if values::strings(class)
+        .iter()
+        .map(Option::as_deref)
+        .ne([Some("factor")])
+    {
         return false;
     }
     let mut attribute = column.attrib();
@@ -616,7 +735,14 @@ unsafe fn to_series(name: PlSmallStr, vector: RVector) -> R<Series> {
 
 /// Calls the helper `name` of the `ry` namespace.
 unsafe fn helper(name: &str, arguments: &[Sexp]) -> R<Sexp> {
-    let namespace = NAMESPACE.with(Cell::get).ok_or_else(|| error("the ry namespace is not attached"))?;
+    let namespace = NAMESPACE
+        .with(Cell::get)
+        .ok_or_else(|| error("the ry namespace is not attached"))?;
     let function = eval::find_var_in_frame(install(name)?, namespace)?;
-    eval::apply(nil(), function, &eval::value_args(arguments), values::base_env())
+    eval::apply(
+        nil(),
+        function,
+        &eval::value_args(arguments),
+        values::base_env(),
+    )
 }

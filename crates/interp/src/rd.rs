@@ -36,7 +36,8 @@ use heap::object::{Sexp, SexpType};
 pub unsafe fn parse_rd(call: &NativeCall<'_>) -> R<Sexp> {
     let text = connections::read_all_text(call.arg(0))?;
     let srcfile = call.arg(1);
-    let basename = values::first_string(call.arg(4)).map_or_else(String::new, |name| name.into_owned());
+    let basename =
+        values::first_string(call.arg(4)).map_or_else(String::new, |name| name.into_owned());
     let fragment = values::as_logical_scalar(call.arg(5)) == 1;
     let warning_calls = values::as_logical_scalar(call.arg(6)) != 0;
     let macros = call.arg(7);
@@ -100,10 +101,15 @@ pub unsafe fn deparse_rd(call: &NativeCall<'_>) -> R<Sexp> {
     const LATEX_LIKE: i32 = 2;
     const VERBATIM: i32 = 3;
     const COMMENT: i32 = 5;
-    let element = values::first_string(call.arg(0)).map_or_else(String::new, |text| text.into_owned());
+    let element =
+        values::first_string(call.arg(0)).map_or_else(String::new, |text| text.into_owned());
     let state_object = crate::coerce::coerce_vector(call.arg(1), SexpType::Integer)?;
     let mut state = [0i32; 5];
-    for (index, slot) in state.iter_mut().enumerate().take(values::length(state_object)) {
+    for (index, slot) in state
+        .iter_mut()
+        .enumerate()
+        .take(values::length(state_object))
+    {
         *slot = values::ints(state_object)[index];
     }
     let [mut depth, mut in_string, mode, in_equation, quote_braces] = state;
@@ -117,8 +123,7 @@ pub unsafe fn deparse_rd(call: &NativeCall<'_>) -> R<Sexp> {
                 output.push(character);
             }
             '{' | '}'
-                if !in_equation
-                    && (mode == VERBATIM || (mode == R_LIKE && in_string == 0)) =>
+                if !in_equation && (mode == VERBATIM || (mode == R_LIKE && in_string == 0)) =>
             {
                 if character == '{' {
                     depth += 1;
@@ -255,8 +260,9 @@ fn builtin_shape(name: &str) -> Option<Shape> {
         "link" => Shape::OptionThenOne(Latex),
         "code" | "donttest" | "dontshow" | "testonly" | "special" => Shape::One(RCode),
         "Sexpr" => Shape::OptionThenOne(RCode),
-        "env" | "kbd" | "option" | "preformatted" | "samp" | "url" | "verb" | "dontrun"
-        | "out" => Shape::One(Verbatim),
+        "env" | "kbd" | "option" | "preformatted" | "samp" | "url" | "verb" | "dontrun" | "out" => {
+            Shape::One(Verbatim)
+        }
         "enc" | "method" | "S3method" | "S4method" | "tabular" | "subsection" | "if" => {
             Shape::Several(&[Latex, Latex])
         }
@@ -299,8 +305,16 @@ impl Input {
             characters: text.chars().collect(),
             index: 0,
             pushback: Vec::new(),
-            next_position: Position { line: 1, byte: 1, column: 1 },
-            last_position: Position { line: 1, byte: 0, column: 0 },
+            next_position: Position {
+                line: 1,
+                byte: 1,
+                column: 1,
+            },
+            last_position: Position {
+                line: 1,
+                byte: 0,
+                column: 0,
+            },
             at_line_start: true,
         }
     }
@@ -314,7 +328,9 @@ impl Input {
     }
 
     fn starts_with(&self, text: &str) -> bool {
-        text.chars().enumerate().all(|(offset, character)| self.peek(offset) == Some(character))
+        text.chars()
+            .enumerate()
+            .all(|(offset, character)| self.peek(offset) == Some(character))
     }
 
     fn next(&mut self) -> Option<char> {
@@ -325,7 +341,11 @@ impl Input {
                 self.index += 1;
                 self.last_position = self.next_position;
                 self.next_position = if character == '\n' {
-                    Position { line: self.next_position.line + 1, byte: 1, column: 1 }
+                    Position {
+                        line: self.next_position.line + 1,
+                        byte: 1,
+                        column: 1,
+                    }
                 } else {
                     Position {
                         line: self.next_position.line,
@@ -379,12 +399,16 @@ impl Parser {
     fn warn(&mut self, message: impl std::fmt::Display) {
         self.warn_newline_in_string();
         let line = self.input.next_position.line;
-        self.warnings.push(format!("{}:{line}: {message}", self.basename));
+        self.warnings
+            .push(format!("{}:{line}: {message}", self.basename));
     }
 
     fn warn_newline_in_string(&mut self) {
         if let Some(line) = self.newline_in_string {
-            self.warnings.push(format!("newline within quoted string at {}:{line}", self.basename));
+            self.warnings.push(format!(
+                "newline within quoted string at {}:{line}",
+                self.basename
+            ));
         }
     }
 
@@ -401,8 +425,14 @@ impl Parser {
         let text = std::mem::take(&mut run.text);
         self.last_text.clone_from(&text);
         nodes.push(Node {
-            span: Some(Span { first, last: self.input.last_position }),
-            kind: NodeKind::Leaf { tag: mode.leaf_tag(), text },
+            span: Some(Span {
+                first,
+                last: self.input.last_position,
+            }),
+            kind: NodeKind::Leaf {
+                tag: mode.leaf_tag(),
+                text,
+            },
         });
     }
 
@@ -452,7 +482,9 @@ impl Parser {
                         current_call(),
                         format!(
                             "Unexpected end of input (in {quote} quoted string opened at {}:{}:{})",
-                            self.basename, quote_start.line, quote_start.column + 1
+                            self.basename,
+                            quote_start.line,
+                            quote_start.column + 1
                         ),
                     ));
                 }
@@ -466,7 +498,8 @@ impl Parser {
                 '%' if mode != Mode::RawVerbatim && !in_comment => {
                     self.flush(&mut run, mode, &mut nodes);
                     if quote.is_some() {
-                        self.newline_in_string.get_or_insert(self.input.next_position.line);
+                        self.newline_in_string
+                            .get_or_insert(self.input.next_position.line);
                     }
                     let comment = self.comment();
                     nodes.push(comment);
@@ -479,7 +512,8 @@ impl Parser {
                             if !in_comment
                                 && next.is_some_and(|next| {
                                     next.is_ascii_alphabetic()
-                                        && (quote.is_none() || (!escaped && matches!(next, 'l' | 'v')))
+                                        && (quote.is_none()
+                                            || (!escaped && matches!(next, 'l' | 'v')))
                                 }) =>
                         {
                             self.flush(&mut run, mode, &mut nodes);
@@ -551,7 +585,10 @@ impl Parser {
                     self.input.next();
                     let children = self.content(Mode::Latex, Close::Brace, false)?;
                     nodes.push(Node {
-                        span: Some(Span { first, last: self.input.last_position }),
+                        span: Some(Span {
+                            first,
+                            last: self.input.last_position,
+                        }),
                         kind: NodeKind::List {
                             tag: Some("LIST".to_string()),
                             option: None,
@@ -602,7 +639,8 @@ impl Parser {
                     escaped = false;
                     if character == '\n' {
                         if quote.is_some() {
-                            self.newline_in_string.get_or_insert(self.input.last_position.line);
+                            self.newline_in_string
+                                .get_or_insert(self.input.last_position.line);
                         }
                         in_comment = false;
                         self.flush(&mut run, mode, &mut nodes);
@@ -621,8 +659,14 @@ impl Parser {
         }
         self.last_text.clone_from(&text);
         Node {
-            span: Some(Span { first, last: self.input.last_position }),
-            kind: NodeKind::Leaf { tag: "COMMENT", text },
+            span: Some(Span {
+                first,
+                last: self.input.last_position,
+            }),
+            kind: NodeKind::Leaf {
+                tag: "COMMENT",
+                text,
+            },
         }
     }
 
@@ -630,7 +674,11 @@ impl Parser {
     /// `#endif`.
     unsafe fn conditional(&mut self, mode: Mode) -> R<Node> {
         let first = self.input.next_position;
-        let tag = if self.input.starts_with("#ifdef") { "#ifdef" } else { "#ifndef" };
+        let tag = if self.input.starts_with("#ifdef") {
+            "#ifdef"
+        } else {
+            "#ifndef"
+        };
         for _ in 0..tag.len() {
             self.input.next();
         }
@@ -664,7 +712,10 @@ impl Parser {
             }
         }
         Ok(Node {
-            span: Some(Span { first, last: self.input.last_position }),
+            span: Some(Span {
+                first,
+                last: self.input.last_position,
+            }),
             kind: NodeKind::List {
                 tag: Some(tag.to_string()),
                 option: None,
@@ -692,7 +743,11 @@ impl Parser {
         }
         if name == "RdOpts" {
             if top && !self.fragment {
-                return Ok(Some(self.macro_node(first, tag, Shape::One(Mode::Verbatim))?));
+                return Ok(Some(self.macro_node(
+                    first,
+                    tag,
+                    Shape::One(Mode::Verbatim),
+                )?));
             }
             self.warn("unexpected RDOPTS '\\RdOpts'");
             return Ok(None);
@@ -720,8 +775,14 @@ impl Parser {
                 }
                 self.last_text.clone_from(&tag);
                 Ok(Some(Node {
-                    span: Some(Span { first, last: self.input.last_position }),
-                    kind: NodeKind::Leaf { tag: "UNKNOWN", text: tag },
+                    span: Some(Span {
+                        first,
+                        last: self.input.last_position,
+                    }),
+                    kind: NodeKind::Leaf {
+                        tag: "UNKNOWN",
+                        text: tag,
+                    },
                 }))
             }
         }
@@ -769,8 +830,15 @@ impl Parser {
         };
         self.item = saved_item;
         Ok(Node {
-            span: Some(Span { first, last: self.input.last_position }),
-            kind: NodeKind::List { tag: Some(tag), option, children },
+            span: Some(Span {
+                first,
+                last: self.input.last_position,
+            }),
+            kind: NodeKind::List {
+                tag: Some(tag),
+                option,
+                children,
+            },
         })
     }
 
@@ -801,7 +869,10 @@ impl Parser {
         self.input.next();
         nodes.pop().unwrap_or(Node {
             span: None,
-            kind: NodeKind::Leaf { tag: "TEXT", text: String::new() },
+            kind: NodeKind::Leaf {
+                tag: "TEXT",
+                text: String::new(),
+            },
         })
     }
 
@@ -818,7 +889,8 @@ impl Parser {
         let definition = values::first_string(values::get_attr(value, install("definition")?))
             .map_or_else(String::new, |text| text.into_owned());
         let arguments = (values::as_integer_scalar(value) - COMMAND_BASE).clamp(0, 9) as usize;
-        self.macros.insert(tag.to_string(), (arguments, definition.clone()));
+        self.macros
+            .insert(tag.to_string(), (arguments, definition.clone()));
         Ok(Some((arguments, definition)))
     }
 
@@ -860,9 +932,15 @@ impl Parser {
                 _ => expansion.push(character),
             }
         }
-        let span = Span { first, last: self.input.last_position };
+        let span = Span {
+            first,
+            last: self.input.last_position,
+        };
         self.input.push_back(&expansion);
-        Ok(Node { span: Some(span), kind: NodeKind::UserMacro { name, values } })
+        Ok(Node {
+            span: Some(span),
+            kind: NodeKind::UserMacro { name, values },
+        })
     }
 
     /// `\newcommand{\name}{definition}` or `\renewcommand`.
@@ -885,10 +963,19 @@ impl Parser {
             .map(|pair| usize::from(pair[1] - b'0'))
             .max()
             .unwrap_or(0);
-        self.macros.insert(name.clone(), (arguments, definition.clone()));
+        self.macros
+            .insert(name.clone(), (arguments, definition.clone()));
         Node {
-            span: Some(Span { first, last: self.input.last_position }),
-            kind: NodeKind::Command { tag, name, arguments, definition },
+            span: Some(Span {
+                first,
+                last: self.input.last_position,
+            }),
+            kind: NodeKind::Command {
+                tag,
+                name,
+                arguments,
+                definition,
+            },
         }
     }
 
@@ -934,7 +1021,11 @@ impl Parser {
 fn argument_list(children: Vec<Node>) -> Node {
     Node {
         span: None,
-        kind: NodeKind::List { tag: None, option: None, children },
+        kind: NodeKind::List {
+            tag: None,
+            option: None,
+            children,
+        },
     }
 }
 
@@ -979,7 +1070,11 @@ impl Builder {
                 self.attach_srcref(object, node.span)?;
                 Ok((object, 0))
             }
-            NodeKind::List { tag, option, children } => {
+            NodeKind::List {
+                tag,
+                option,
+                children,
+            } => {
                 let object = alloc(SexpType::List, children.len())?;
                 let mut flag = match tag.as_deref() {
                     Some("#ifdef" | "#ifndef") => 1,
@@ -1004,7 +1099,12 @@ impl Builder {
                 }
                 Ok((object, flag))
             }
-            NodeKind::Command { tag, name, arguments, definition } => {
+            NodeKind::Command {
+                tag,
+                name,
+                arguments,
+                definition,
+            } => {
                 let object = scalar_integer(COMMAND_BASE + *arguments as i32)?;
                 values::set_attr(object, self.rd_tag, scalar_string(tag)?)?;
                 values::set_attr(object, self.definition, scalar_string(definition)?)?;
@@ -1012,7 +1112,10 @@ impl Builder {
                 define(install(name)?, object, self.env)?;
                 Ok((object, 0))
             }
-            NodeKind::UserMacro { name, values: macro_values } => {
+            NodeKind::UserMacro {
+                name,
+                values: macro_values,
+            } => {
                 let object = string_vector(macro_values)?;
                 values::set_attr(object, self.rd_tag, scalar_string("USERMACRO")?)?;
                 self.attach_srcref(object, node.span)?;
@@ -1026,7 +1129,14 @@ impl Builder {
         let Some(Span { first, last }) = span else {
             return Ok(());
         };
-        let fields = [first.line, first.byte, last.line, last.byte, first.column, last.column];
+        let fields = [
+            first.line,
+            first.byte,
+            last.line,
+            last.byte,
+            first.column,
+            last.column,
+        ];
         values::set_attr(object, self.srcref, self.srcref_vector(fields)?)
     }
 

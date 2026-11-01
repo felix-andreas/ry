@@ -123,7 +123,10 @@ const PRINTS: &[(&str, &str)] = &[
     ("@OrderId(id = 3L,)", "(id = 3L,)\n"),
     ("@Pair(1L, \"a\")", "(1L, \"a\")\n"),
     ("@Point(x = 1, y = 2)$y", "[1] 2\n"),
-    ("{ p <- @Point(x = 1, y = 2); p$x <- 5; p }", "(x = 5, y = 2)\n"),
+    (
+        "{ p <- @Point(x = 1, y = 2); p$x <- 5; p }",
+        "(x = 5, y = 2)\n",
+    ),
     (
         "match (@Figure(:Circle(radius = 2))) { :Circle(radius = r) => r; :Empty => 0 }",
         "[1] 2\n",

@@ -190,10 +190,20 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
     let count = length(vector);
     match kind {
         SexpType::Logical | SexpType::Integer => {
-            return gather(kind, values::ints(vector), indices, NA_INTEGER, |result| values::ints_mut(result));
+            return gather(kind, values::ints(vector), indices, NA_INTEGER, |result| {
+                values::ints_mut(result)
+            });
         }
-        SexpType::Real => return gather(kind, values::reals(vector), indices, NA_REAL, |result| values::reals_mut(result)),
-        SexpType::Raw => return gather(kind, values::raws(vector), indices, 0, |result| values::raws_mut(result)),
+        SexpType::Real => {
+            return gather(kind, values::reals(vector), indices, NA_REAL, |result| {
+                values::reals_mut(result)
+            });
+        }
+        SexpType::Raw => {
+            return gather(kind, values::raws(vector), indices, 0, |result| {
+                values::raws_mut(result)
+            });
+        }
         _ => {}
     }
     let result = alloc(kind, indices.len())?;
@@ -507,7 +517,11 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     if names != nil() {
         let new_names = alloc(SexpType::String, indices.len())?;
         for (position, &index) in indices.iter().enumerate() {
-            let name = if index < count { names.element(index) } else { na_string() };
+            let name = if index < count {
+                names.element(index)
+            } else {
+                na_string()
+            };
             values::set_elt(new_names, position, name);
         }
         values::set_attr(result, symbols().names, new_names)?;
@@ -631,12 +645,19 @@ fn flat_offsets(selections: &[Vec<usize>], dims: &[usize]) -> Vec<usize> {
     let mut stride = 1usize;
     for (selection, &extent) in selections.iter().zip(dims) {
         let offset = |base: usize, position: usize| {
-            if base == NA_POSITION || position == NA_POSITION { NA_POSITION } else { base + position * stride }
+            if base == NA_POSITION || position == NA_POSITION {
+                NA_POSITION
+            } else {
+                base + position * stride
+            }
         };
         // A single offset so far (the first dimension, or a scalar index before this one) maps
         // straight over the selection, which is the shape of a row or column subscript.
         if let [base] = flat[..] {
-            flat = selection.iter().map(|&position| offset(base, position)).collect();
+            flat = selection
+                .iter()
+                .map(|&position| offset(base, position))
+                .collect();
             stride *= extent;
             continue;
         }
@@ -1253,7 +1274,10 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         let names = values::names(object);
         let index = indices.first().copied().unwrap_or(missing_arg());
         let (positions, _) = resolve(index, count, names, true, call)?;
-        let remove: std::collections::HashSet<usize> = positions.into_iter().filter(|&position| position != NA_POSITION).collect();
+        let remove: std::collections::HashSet<usize> = positions
+            .into_iter()
+            .filter(|&position| position != NA_POSITION)
+            .collect();
         let kept: Vec<usize> = (0..count)
             .filter(|position| !remove.contains(position))
             .collect();
@@ -1365,7 +1389,10 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         return Ok(result);
     }
     let (positions, new_names) = resolve(index, count, names, true, call)?;
-    let positions: Vec<usize> = positions.into_iter().filter(|&position| position != NA_POSITION).collect();
+    let positions: Vec<usize> = positions
+        .into_iter()
+        .filter(|&position| position != NA_POSITION)
+        .collect();
     if positions.is_empty() {
         return Ok(result);
     }

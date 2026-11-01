@@ -86,7 +86,10 @@ pub fn translate_regex(pattern: &str, extended: bool) -> String {
 
 unsafe fn do_paste(call: &Call<'_>) -> R<Sexp> {
     let separator = call.arg(1);
-    if separator.kind() != SexpType::String || length(separator) == 0 || separator.element(0) == na_string() {
+    if separator.kind() != SexpType::String
+        || length(separator) == 0
+        || separator.element(0) == na_string()
+    {
         return Err(error("invalid separator"));
     }
     paste(call, Some(separator.element(0)), call.arg(2), call.arg(3))
@@ -99,14 +102,22 @@ unsafe fn do_paste0(call: &Call<'_>) -> R<Sexp> {
 /// `paste` joins bytes, not text, because a native string may hold bytes that are not UTF-8.
 /// As in GNU R, the result is marked "bytes" when any piece is, UTF-8 when any piece is UTF-8
 /// or latin1 (which is translated), and native otherwise.
-unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycle_zero: Sexp) -> R<Sexp> {
+unsafe fn paste(
+    call: &Call<'_>,
+    separator: Option<Sexp>,
+    collapse: Sexp,
+    recycle_zero: Sexp,
+) -> R<Sexp> {
     let list = call.arg(0);
     if list.kind() != SexpType::List {
         return Err(error("invalid first argument"));
     }
     let collapse = if collapse == nil() {
         None
-    } else if collapse.kind() == SexpType::String && length(collapse) > 0 && collapse.element(0) != na_string() {
+    } else if collapse.kind() == SexpType::String
+        && length(collapse) > 0
+        && collapse.element(0) != na_string()
+    {
         Some(collapse.element(0))
     } else {
         return Err(error("invalid 'collapse' argument"));
@@ -144,7 +155,9 @@ unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycl
     for row in 0..count {
         let mut bytes = Vec::new();
         for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
-            if position > 0 && let Some(separator) = separator {
+            if position > 0
+                && let Some(separator) = separator
+            {
                 append(&mut bytes, separator);
             }
             if column_length > 0 {
@@ -207,7 +220,10 @@ unsafe fn do_nchar(call: &Call<'_>) -> R<Sexp> {
             na_count
         } else if invalid {
             if !allow_na {
-                return Err(error(format!("invalid multibyte string, element {}", index + 1)));
+                return Err(error(format!(
+                    "invalid multibyte string, element {}",
+                    index + 1
+                )));
             }
             NA_INTEGER
         } else {
@@ -1984,7 +2000,8 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("invalid 'offset' argument"));
     }
     let flag = |index: usize| values::as_logical_scalar(call.arg(index)) == 1;
-    let (ignore_case, fixed, value, all, mut invert) = (flag(3), flag(4), flag(5), flag(6), flag(7));
+    let (ignore_case, fixed, value, all, mut invert) =
+        (flag(3), flag(4), flag(5), flag(6), flag(7));
     if invert && !value {
         warning("argument 'invert = TRUE' will be ignored")?;
         invert = false;
@@ -2000,8 +2017,12 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
     } else {
         let text = translate_regex(&String::from_utf8_lossy(&needle), true);
         let flags = if ignore_case { "(?i-u)" } else { "(?-u)" };
-        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}"))
-            .map_err(|failure| call.error(format!("invalid regular expression '{}': {failure}", String::from_utf8_lossy(&needle))))?;
+        let compiled = regex::bytes::Regex::new(&format!("{flags}{text}")).map_err(|failure| {
+            call.error(format!(
+                "invalid regular expression '{}': {failure}",
+                String::from_utf8_lossy(&needle)
+            ))
+        })?;
         Some(compiled)
     };
     let find = |from: usize| -> Option<(usize, usize)> {
@@ -2009,7 +2030,9 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
             return None;
         }
         match &regex {
-            Some(regex) => regex.find_at(&haystack, from).map(|found| (found.start(), found.end())),
+            Some(regex) => regex
+                .find_at(&haystack, from)
+                .map(|found| (found.start(), found.end())),
             None if needle.is_empty() => Some((from, from)),
             None => haystack[from..]
                 .windows(needle.len())
@@ -2046,7 +2069,10 @@ unsafe fn do_grep_raw(call: &Call<'_>) -> R<Sexp> {
             None => raw(&haystack),
         },
         (true, false) => {
-            let pieces = matches.iter().map(|&(begin, end)| raw(&haystack[begin..end])).collect::<R<Vec<_>>>()?;
+            let pieces = matches
+                .iter()
+                .map(|&(begin, end)| raw(&haystack[begin..end]))
+                .collect::<R<Vec<_>>>()?;
             values::list_vector(&pieces)
         }
         (true, true) => {
@@ -2436,7 +2462,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
     // ignores minimal repetition, so such a pattern's `*?` matches as `*` does.
     let approximate = syntax == Syntax::Extended
         && (0..chars.len()).any(|index| {
-            (index == 0 || chars[index - 1] != '\\') && approximate_settings(&chars, index).is_some()
+            (index == 0 || chars[index - 1] != '\\')
+                && approximate_settings(&chars, index).is_some()
         });
     // Where each open group starts in `output`, and whether it is a lookaround assertion.
     let mut groups: Vec<(usize, bool)> = Vec::new();
@@ -2467,7 +2494,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
                 let (next, opens_group) = translate_group_prefix(&chars, index, &mut output);
                 if opens_group {
                     let lookaround = matches!(chars.get(index + 2), Some('=' | '!'))
-                        || (chars.get(index + 2) == Some(&'<') && matches!(chars.get(index + 3), Some('=' | '!')));
+                        || (chars.get(index + 2) == Some(&'<')
+                            && matches!(chars.get(index + 3), Some('=' | '!')));
                     groups.push((start, lookaround));
                 }
                 atom = None;
@@ -2478,7 +2506,8 @@ fn translate(pattern: &str, syntax: Syntax) -> Translation {
             // TRE reads `(?:...)` as a group that does not capture, and `(?i)` or `(?i:...)` as
             // a case-insensitive region, as PCRE does.
             '(' if syntax == Syntax::Extended && chars.get(index + 1) == Some(&'?') => {
-                let flags_end = (index + 2..chars.len()).find(|&position| !matches!(chars[position], 'i' | '-'));
+                let flags_end = (index + 2..chars.len())
+                    .find(|&position| !matches!(chars[position], 'i' | '-'));
                 match flags_end.map(|position| (position, chars[position])) {
                     Some((position, close @ (':' | ')'))) => {
                         output.extend(&chars[index..=position]);
