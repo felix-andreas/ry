@@ -2,14 +2,18 @@
 //! edits are random; `FUZZ_ITERS` scales the budget.
 
 use {
-    loader::testing::{check_load_index_input, check_random_reload},
+    loader::{
+        Loader,
+        testing::{ReloadLoaders, check_load_index_input, check_random_reload},
+    },
     syntax::testing::{SplitMix64, fuzz_iterations, mutate_seed, random_bytes},
 };
 
 #[test]
 fn a_reload_matches_a_fresh_load() {
+    let mut loaders = ReloadLoaders::default();
     for seed in 0..fuzz_iterations(400) as u64 {
-        check_random_reload(&mut SplitMix64(seed));
+        check_random_reload(&mut loaders, &mut SplitMix64(seed));
     }
 }
 

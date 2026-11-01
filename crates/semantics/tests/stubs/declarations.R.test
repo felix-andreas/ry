@@ -100,3 +100,30 @@ pi : double
 length : fn(x: Any) -> integer
 pi : double
 line 1: this line is not a declaration (`name : TYPE`).
+
+#==== purity
+#---- pure_marker_declares_the_name_pure
+nchar : @pure fn(x: Any) -> integer
+cat : fn(...: Any) -> NULL
+#++++
+nchar : @pure fn(x: Any) -> integer
+cat : fn(...: Any) -> NULL
+
+#---- pure_and_masked_combine_in_either_order
+pick : @pure @masked fn(data: Any, ...: Any) -> Any
+keep : @masked @pure fn(data: Any, ...: Any) -> Any
+#++++
+pick : @pure @masked fn(data: Any, ...: Any) -> Any
+keep : @pure @masked fn(data: Any, ...: Any) -> Any
+
+#---- one_marked_candidate_marks_the_overload_set
+round : fn(x: integer) -> integer
+round : @pure fn(x: double) -> double
+#++++
+round : @pure fn(x: integer) -> integer
+round : @pure fn(x: double) -> double
+
+#---- a_marker_glued_to_the_type_is_not_a_marker
+odd : @purefn(x: Any) -> Any
+#++++
+line 0: this declaration does not load: `@purefn(x: Any) -> Any` is not a valid type.

@@ -319,7 +319,11 @@ and all the documents, and the database handle deliberately never leaves it.
   wait for it. After the warm-up the worker rescans the `library()` calls of any file whose scan a
   cancellation interrupted, because the edit that cancelled it may belong to another file and
   nothing else would rescan this one. Then it serves any settled publish it owes, most recently
-  edited file first. Next it lowers the durability of documents opened since (see below). With
+  edited file first. Then it re-derives `project_global_names`, the set goto-definition and
+  references consult on every library call, whenever the warm-up or a durability drop left it
+  stale: salsa never backdates across a durability drop, so the fold re-runs once per opened file
+  (about 20 ms at 300,000 lines) and would otherwise land on the first request. Next it lowers the
+  durability of documents opened since (see below). With
   nothing else to do, it checks the rest of the workspace in parallel batches and never publishes
   that work. Idle work that gets cancelled is requeued.
 - **Parallel idle work stops between files.** It runs on one cloned database handle per core, and

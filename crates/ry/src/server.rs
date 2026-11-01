@@ -46,6 +46,7 @@ use {
             parse_description_collate, parse_description_dependencies, parse_description_package,
             parse_namespace,
         },
+        project_global_names,
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
             shipped_stub_sources, stub_source_problems,
@@ -426,6 +427,8 @@ struct Worker {
     unwarmed: Vec<PathBuf>,
     /// Results are never published.
     prime_queue: Vec<PathBuf>,
+    /// Set when [`project_global_names`] must re-run before the next editor request.
+    editor_folds_stale: bool,
     /// Open documents whose text is still at MEDIUM durability. Salsa never backdates a memo
     /// whose durability drops, so the first LOW write to a file re-derives everything that
     /// depends on it. Idle time pays that once, so the first keystroke does not.
@@ -543,6 +546,7 @@ impl Worker {
             unscanned: Vec::new(),
             unwarmed: Vec::new(),
             prime_queue: Vec::new(),
+            editor_folds_stale: false,
             pending_lowering: Vec::new(),
             attached_by_file: HashMap::new(),
             pending_attached_scans: BTreeSet::new(),
@@ -797,6 +801,7 @@ impl Worker {
             || !self.pending_semantic_publishes.is_empty()
             || !self.pending_lowering.is_empty()
             || !self.prime_queue.is_empty()
+            || self.editor_folds_stale
     }
 
     fn run_idle_unit(&mut self) {
@@ -825,6 +830,21 @@ impl Worker {
             }
             return;
         }
+        if self.editor_folds_stale {
+            // Goto and references consult this fold for every library call. Lowering an open
+            // file drops its durability, and salsa never backdates across that drop, so the
+            // fold re-runs once (about 20 ms at 300,000 lines) and the first request would
+            // otherwise pay for it.
+            self.editor_folds_stale = false;
+            if let Some(files) = ProjectFiles::try_get(&self.db)
+                && self
+                    .cancellable(|worker| project_global_names(&worker.db, files).len())
+                    .is_err()
+            {
+                self.editor_folds_stale = true;
+            }
+            return;
+        }
         if let Some(path) = self.pending_lowering.pop() {
             if self.open_documents.contains(&path)
                 && let Some(&file) = self.files.get(&path)
@@ -834,6 +854,7 @@ impl Worker {
                     .with_durability(Durability::LOW)
                     .to(text);
                 self.defer_semantic_publish(&path);
+                self.editor_folds_stale = true;
             }
             return;
         }
@@ -892,6 +913,7 @@ impl Worker {
         );
         self.unwarmed = rest;
         if self.unwarmed.is_empty() {
+            self.editor_folds_stale = true;
             // Open files so far published only their parse diagnostics.
             self.refresh_all_diagnostics();
         }
@@ -1209,11 +1231,12 @@ impl Worker {
 
         let kind = document_kind(&path, &self.workspace_root);
         match self.files.get(&path) {
-            // Opening usually shows the text already on disk. Rewriting it anyway would be a
-            // MEDIUM write (a setter keeps the field's durability), which makes every memo in
-            // the project deep-verify before the first diagnostics.
+            // Opening usually shows the text already on disk, so lowering its durability
+            // waits for idle time: the drop defeats backdating, and everything derived from
+            // the file re-runs once. Before the warm-up has derived anything from it, the drop
+            // is cheap, and lowering at once spares a second check of the file.
             Some(&file) => {
-                if *file.text(&self.db) == params.text_document.text {
+                if *file.text(&self.db) == params.text_document.text && self.unwarmed.is_empty() {
                     self.pending_lowering.push(path.clone());
                 } else {
                     file.set_text(&mut self.db)
@@ -2204,7 +2227,10 @@ impl LanguageServer for ServerState {
                 let items = result
                     .items
                     .into_iter()
-                    .map(|item| convert_completion_item(item, worker.supports_snippets))
+                    .enumerate()
+                    .map(|(rank, item)| {
+                        convert_completion_item(item, rank, worker.supports_snippets)
+                    })
                     .collect();
                 lsp_types::CompletionResponse::List(lsp_types::CompletionList {
                     is_incomplete: result.is_incomplete,
@@ -2626,7 +2652,13 @@ fn lsp_document_symbol_kind(kind: DocumentSymbolKind) -> lsp_types::SymbolKind {
     }
 }
 
-fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::CompletionItem {
+/// `sort_text` carries ry's ranking: without it, clients order equally fuzzy-matched items by
+/// label, which puts `break` ahead of the local the user is about to type.
+fn convert_completion_item(
+    item: CompletionItem,
+    rank: usize,
+    snippets: bool,
+) -> lsp_types::CompletionItem {
     let kind = match item.kind {
         CompletionKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
         CompletionKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
@@ -2637,6 +2669,7 @@ fn convert_completion_item(item: CompletionItem, snippets: bool) -> lsp_types::C
     let mut converted = lsp_types::CompletionItem {
         label: item.label.clone(),
         kind: Some(kind),
+        sort_text: Some(format!("{rank:04}")),
         detail: item.detail,
         documentation: item.documentation.map(|documentation| {
             lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {

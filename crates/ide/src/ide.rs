@@ -9,12 +9,12 @@ use {
         check::{CalleeTarget, ItemCheck},
         diagnostics::TypeRenderer,
         file_type_definitions, global_scheme,
-        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind, Symbol},
         infer::apply_definition,
         item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
         item_naming, item_node, item_tree,
         naming::{BindingId, BindingKind, dot_dot_variable},
-        package_definitions, project_type_definitions,
+        package_definitions, project_global_names, project_type_definitions,
         stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
         types::{
             Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
@@ -176,9 +176,10 @@ pub fn hover(
     })
 }
 
-/// A name inside one of ry's own constructs that is not an expression of its own, so the
-/// expression-based hover would widen past it: a tag or a field in a `match` pattern, a field
-/// name in a record literal or tag payload, the field after `$`, and the column a `:=` writes.
+/// A name that is not an expression of its own, so the expression-based hover would widen past
+/// it: a parameter or loop variable where it is declared, a tag or a field in a `match` pattern,
+/// a field name in a record literal or tag payload, the field after `$`, and the column a `:=`
+/// writes.
 struct Member<'db> {
     /// Item-relative; a tag's range starts at its `:`.
     range: TextRange,
@@ -233,6 +234,38 @@ fn member_at<'db>(
             continue;
         }
         match &expression.kind {
+            ExpressionKind::Function { parameters, .. } => {
+                if let Some(parameter) = parameters
+                    .iter()
+                    .find(|parameter| parameter.range.contains_inclusive(relative))
+                {
+                    let TyKind::Function(function) =
+                        check.expression_types.get(&ExprId(index as u32))?.kind(db)
+                    else {
+                        return None;
+                    };
+                    let field = function
+                        .named
+                        .iter()
+                        .find(|field| field.name.text(db) == parameter.name.as_str())?;
+                    return Some(Member {
+                        range: parameter.range,
+                        label: Some(parameter.name.to_string()),
+                        ty: field.ty,
+                    });
+                }
+            }
+            ExpressionKind::For {
+                variable: Some(variable),
+                variable_range: Some(variable_range),
+                ..
+            } if variable_range.contains_inclusive(relative) => {
+                return Some(Member {
+                    range: *variable_range,
+                    label: Some(variable.to_string()),
+                    ty: *check.loop_variables.get(&ExprId(index as u32))?,
+                });
+            }
             ExpressionKind::Record(fields) => {
                 if let Some(field) = fields
                     .iter()
@@ -704,6 +737,21 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
             .collect();
 
         for (index, expression) in hir.expressions.iter().enumerate() {
+            if let ExpressionKind::For {
+                variable_range: Some(variable_range),
+                ..
+            } = &expression.kind
+            {
+                if let Some(&ty) = check.loop_variables.get(&ExprId(index as u32))
+                    && is_hintable(db, ty, false)
+                {
+                    hints.push(InlayHint {
+                        offset: variable_range.end() + node.text_range().start(),
+                        label: format!(": {}", TypeRenderer::default().render(db, ty)),
+                    });
+                }
+                continue;
+            }
             let ExpressionKind::Assign { target, value, .. } = &expression.kind else {
                 continue;
             };
@@ -1016,9 +1064,12 @@ pub enum CompletionKind {
 /// Variant order is the ranking order among items of equal match quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CompletionSource {
-    Keyword,
+    /// A parameter name of the call the cursor is an argument of, completed as `name = `.
+    Argument,
     Local,
     Global,
+    /// After project names: an empty or short prefix would otherwise lead with `break`.
+    Keyword,
     Stdlib,
     Field,
 }
@@ -1115,6 +1166,7 @@ pub fn completion(
                 })
                 .collect();
             items.extend(frame_query_completions(db, file, offset, &query));
+            items.extend(argument_name_completions(db, file, offset, &query));
             if let Some(position) = position_in_item(db, file, offset)
                 && let Some(naming) = item_naming(db, position.item)
                 && let Some(node) = item_node(db, position.item)
@@ -2555,31 +2607,38 @@ fn annotation_completion(
         })
         .collect();
     // The project table covers package files only, so a script's own declarations are added.
-    let mut definitions: Vec<(String, Ty<'_>)> = project_type_definitions(db, files)
-        .iter()
-        .map(|(name, definition)| (name.text(db).to_owned(), definition.body))
-        .collect();
+    let mut definitions: Vec<(String, Ty<'_>, CompletionSource)> =
+        project_type_definitions(db, files)
+            .iter()
+            .map(|(name, definition)| {
+                (
+                    name.text(db).to_owned(),
+                    definition.body,
+                    CompletionSource::Global,
+                )
+            })
+            .collect();
+    for definition in file_type_definitions(db, file) {
+        let label = definition.name.text(db).to_owned();
+        if !definitions.iter().any(|(name, _, _)| *name == label) {
+            definitions.push((label, definition.body, CompletionSource::Global));
+        }
+    }
     if let Some(library) = stubs(db) {
         for (name, definition) in &library.type_definitions {
             let label = name.text(db).to_owned();
-            if !definitions.iter().any(|(known, _)| *known == label) {
-                definitions.push((label, definition.body));
+            if !definitions.iter().any(|(known, _, _)| *known == label) {
+                definitions.push((label, definition.body, CompletionSource::Stdlib));
             }
-        }
-    }
-    for definition in file_type_definitions(db, file) {
-        let label = definition.name.text(db).to_owned();
-        if !definitions.iter().any(|(name, _)| *name == label) {
-            definitions.push((label, definition.body));
         }
     }
     items.extend(
         definitions
             .into_iter()
-            .filter(|(label, _)| search_match(label, query).is_some())
-            .map(|(label, body)| CompletionItem {
+            .filter(|(label, _, _)| search_match(label, query).is_some())
+            .map(|(label, body, source)| CompletionItem {
                 detail: Some(TypeRenderer::default().render(db, body)),
-                ..CompletionItem::new(label, CompletionKind::Variable, CompletionSource::Global)
+                ..CompletionItem::new(label, CompletionKind::Variable, source)
             }),
     );
     finish_completions(items, query)
@@ -3556,6 +3615,123 @@ fn finish_completions(items: Vec<CompletionItem>, query: &str) -> Option<Complet
     })
 }
 
+/// Offers `name = ` for each parameter of the enclosing call that no argument has claimed yet,
+/// following R's matching: named arguments claim their parameter, and positional ones fill the
+/// open parameters before `...` in order.
+fn argument_name_completions(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: TextSize,
+    query: &str,
+) -> Vec<CompletionItem> {
+    let Some(position) = position_in_item(db, file, offset) else {
+        return Vec::new();
+    };
+    let (Some(hir), Some(check)) = (
+        item_hir(db, position.item).as_ref(),
+        item_check(db, position.item),
+    ) else {
+        return Vec::new();
+    };
+    // `f(y = |)`: the cursor is the value of a named argument, which HIR leaves without a range.
+    let before = file
+        .text(db)
+        .get(..usize::from(offset))
+        .unwrap_or_default()
+        .trim_end_matches(|character: char| character.is_alphanumeric() || "._".contains(character))
+        .trim_end();
+    if before.ends_with('=') {
+        return Vec::new();
+    }
+    let relative = position.relative;
+    let call = hir
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            ExpressionKind::Call { callee, arguments }
+                if hir.expression(*callee).range.end() < relative
+                    && relative < expression.range.end() =>
+            {
+                Some((expression.range.len(), *callee, arguments))
+            }
+            _ => None,
+        })
+        .min_by_key(|(length, _, _)| *length);
+    let Some((_, callee, arguments)) = call else {
+        return Vec::new();
+    };
+    // The cursor is either on a bare name it is typing as a positional argument, or between
+    // arguments; anywhere inside an argument's own expression or name, a name would not fit.
+    let mut typed = None;
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument
+            .name_range
+            .is_some_and(|range| range.contains_inclusive(relative))
+        {
+            return Vec::new();
+        }
+        let Some(value) = argument.value else {
+            continue;
+        };
+        let expression = hir.expression(value);
+        if expression.range.contains_inclusive(relative) {
+            if argument.name.is_some() || !matches!(expression.kind, ExpressionKind::NameRef(_)) {
+                return Vec::new();
+            }
+            typed = Some(index);
+        }
+    }
+    let Some(ty) = check.expression_types.get(&callee) else {
+        return Vec::new();
+    };
+    let TyKind::Function(function) = ty.kind(db) else {
+        return Vec::new();
+    };
+    let claimed: HashSet<&str> = arguments
+        .iter()
+        .filter_map(|argument| argument.name.map(Symbol::as_str))
+        .collect();
+    let positional = arguments
+        .iter()
+        .enumerate()
+        .filter(|(index, argument)| {
+            argument.name.is_none() && argument.value.is_some() && typed != Some(*index)
+        })
+        .count();
+    let positional_slots = function
+        .variadic
+        .as_ref()
+        .map_or(function.named.len(), |rest| rest.preceding_named);
+    let mut skipped = 0;
+    function
+        .named
+        .iter()
+        .enumerate()
+        .filter(|(index, field)| {
+            let name = field.name.text(db);
+            if claimed.contains(name) {
+                return false;
+            }
+            if *index < positional_slots && skipped < positional {
+                skipped += 1;
+                return false;
+            }
+            search_match(name, query).is_some()
+        })
+        .map(|(_, field)| {
+            let name = field.name.text(db);
+            CompletionItem {
+                detail: Some(TypeRenderer::default().render(db, field.ty)),
+                ..CompletionItem::new(
+                    format!("{} = ", insertable_name(name)),
+                    CompletionKind::Variable,
+                    CompletionSource::Argument,
+                )
+            }
+        })
+        .collect()
+}
+
 fn scheme_completion(db: &dyn Db, label: String, scheme: &TypeScheme<'_>) -> CompletionItem {
     let kind = match scheme.body.kind(db) {
         TyKind::Function(_) => CompletionKind::Function,
@@ -4102,20 +4278,7 @@ fn target_at<'db>(
 /// Counts conditional top-level writes too, matching the occurrence walk's notion of a
 /// declaration.
 fn global_declaration_exists(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
-    files.files(db).iter().any(|file| {
-        item_tree(db, *file).iter().copied().any(|item| {
-            // A named definition declares its name even without a slot: `setGeneric("name", …)`
-            // binds through a string.
-            (matches!(*item.kind(db), ItemKind::Function | ItemKind::Value)
-                && item.name(db).as_deref() == Some(name))
-                || item_naming(db, item).as_ref().is_some_and(|naming| {
-                    naming
-                        .bindings
-                        .values()
-                        .any(|info| info.kind == BindingKind::TopLevel && info.name == name)
-                })
-        })
-    })
+    project_global_names(db, files).contains(&Symbol::new(name))
 }
 
 fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occurrence> {

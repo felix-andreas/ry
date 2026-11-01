@@ -73,6 +73,7 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     "is.expression",
     "is.recursive",
     "isS4",
+    "refcnt",
     // Store or pass a value along without looking inside it.
     "list",
     "invisible",
@@ -120,6 +121,9 @@ pub fn object_system_function(
         "setGeneric" => ("S4 classes", "an S4 generic", "methods"),
         "setMethod" => ("S4 classes", "an S4 method", "methods"),
         "setValidity" => ("S4 classes", "an S4 validity check", "methods"),
+        "setReplaceMethod" => ("S4 classes", "an S4 replacement method", "methods"),
+        "setOldClass" => ("S4 classes", "an S4 registration of an S3 class", "methods"),
+        "setAs" => ("S4 classes", "an S4 coercion", "methods"),
         "setRefClass" => ("Reference Classes", "a Reference Class", "methods"),
         "R6Class" => ("R6 classes", "an R6 class", "R6"),
         _ => return None,

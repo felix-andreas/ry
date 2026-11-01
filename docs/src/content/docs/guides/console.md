@@ -8,12 +8,12 @@ time you edit a file, the next command sees the change without a `load_all()` or
 
 ```text
 $ ry run
-Loaded tally: 1 function bound lazily, 0 top-level statements run, in 5 ms.
+Loaded tally: 1 definition bound lazily, 0 top-level statements run, in 5 ms.
 ry console on ry's runtime. Type q() or Ctrl-D to quit.
 > count_words("the  quick fox")
 [1] 4
 > count_words("the  quick fox")     # after editing R/count.R
-Reloaded tally: 1 function rebound, in 3 ms.
+Reloaded tally: 1 definition rebound, in 3 ms.
 [1] 3
 ```
 

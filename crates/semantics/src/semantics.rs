@@ -11,6 +11,7 @@ pub mod naming;
 pub mod sorted;
 pub mod stubs;
 pub mod testing;
+pub mod top_level;
 pub mod types;
 
 use {
@@ -849,6 +850,27 @@ pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
         || conditional_slot_items(db, files).contains_key(name)
 }
 
+/// Every name a project file of any kind declares at top level: its named definitions and its
+/// other top-level writes. Editor requests consult it before treating a name as a stub's, and it
+/// folds the per-file memos the cold check already derives, so a lookup is one hash probe.
+#[salsa::tracked(returns(ref))]
+pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbol> {
+    let mut names = FxHashSet::default();
+    for &file in files.files(db) {
+        names.extend(
+            file_definitions(db, file)
+                .iter()
+                .map(|(name, _)| Symbol::new(name)),
+        );
+        names.extend(
+            file_conditional_writers(db, file)
+                .iter()
+                .map(|&(name, _)| name),
+        );
+    }
+    names
+}
+
 /// Items writing a top-level name other than their own (conditionally, or nested as in
 /// `y <- (x <- 1L)`); cross-item reads with no unconditional winner join their types.
 #[salsa::tracked(returns(ref))]
@@ -895,14 +917,24 @@ pub fn file_conditional_writers<'db>(
 ) -> Vec<(Symbol, Item<'db>)> {
     let mut writers = Vec::new();
     for &item in item_tree(db, file) {
-        let own_name = item.name(db).clone();
-        for &name in item_top_level_names(db, item) {
-            if own_name.as_deref() != Some(name.as_str()) {
-                writers.push((name, item));
-            }
-        }
+        writers.extend(
+            item_side_names(db, item)
+                .into_iter()
+                .map(|name| (name, item)),
+        );
     }
     writers
+}
+
+/// The top-level names an item binds besides its own, such as the bindings a branch or a loop
+/// leaves behind.
+fn item_side_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<Symbol> {
+    let own_name = item.name(db);
+    item_top_level_names(db, item)
+        .iter()
+        .copied()
+        .filter(|name| own_name.as_deref() != Some(name.as_str()))
+        .collect()
 }
 
 /// A per-name projection of the project-wide maps, so a check depends only on the names
@@ -1169,11 +1201,7 @@ pub fn item_interface_reads<'db>(db: &'db dyn Db, item: Item<'db>) -> InterfaceR
     );
     let globals = SalsaGlobals::for_item(db, item, None);
     // A side binding a branch or loop may leave unwritten reads the earlier binding.
-    let own_name = item.name(db);
-    for &name in item_top_level_names(db, item) {
-        if own_name.as_deref() == Some(name.as_str()) {
-            continue;
-        }
+    for name in item_side_names(db, item) {
         match globals.frame_definition(types::Name::new(db, name.as_str()), false) {
             Some(binder) => push_unique(&mut reads.frame, binder),
             None => {
@@ -1236,6 +1264,21 @@ fn layer_source<'a, 'db>(
 
 #[salsa::tracked(returns(ref))]
 pub fn item_top_level_names<'db>(db: &'db dyn Db, item: Item<'db>) -> BTreeSet<Symbol> {
+    // `name <- function(...)` binds only its own name at top level, since the body is a scope
+    // of its own, so it needs no naming pass. Most items are functions, and skipping them keeps
+    // whole-project walks, such as the loader's strict-mode classification, from naming
+    // everything.
+    if *item.kind(db) == ItemKind::Function
+        && item_syntax(db, item)
+            .is_some_and(|syntax| syntax.syntax_node().kind() == SyntaxKind::BINARY_EXPR)
+    {
+        return item
+            .name(db)
+            .as_deref()
+            .map(Symbol::new)
+            .into_iter()
+            .collect();
+    }
     let Some(naming) = item_naming(db, item) else {
         return BTreeSet::new();
     };
@@ -2275,6 +2318,7 @@ mod tests {
             expression_types: Default::default(),
             pattern_types: Default::default(),
             literal_expectations: Default::default(),
+            loop_variables: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),

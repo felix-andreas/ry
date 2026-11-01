@@ -119,6 +119,12 @@ on purpose.
   and `match`, and shows that literals are still typed while `match` coverage is not checked.
 - **`crates/semantics/tests/typing-strict`**: the strict stream. After the ordinary rendering, each
   case appends the file's typing mode and its `strict` diagnostics.
+- **`crates/semantics/tests/top-level`**: what a package file's top level runs under strict mode.
+  A case lists files with `#~~~~` separators, so `R/` files are library files and `tests/` or root
+  files are entries. Each case loads the shipped stubs and renders, per file, every top-level item
+  as `definition`, `constant` or `effect`, with ` (pure)` when the item declares its function pure,
+  followed by the file's top-level `strict` diagnostics. Run it with
+  `cargo test -p semantics --test test_typing_fixtures top_level_fixtures`.
 - **`crates/semantics/tests/typing-imports`**: package metadata. A leading `#namespace ` line supplies
   the case's `NAMESPACE` source and a `#description ` line its `DESCRIPTION` source, and both are
   installed as the `PackageMetadata` input before rendering. The directive lines stay in the analyzed
@@ -134,8 +140,8 @@ on purpose.
 - **`crates/semantics/tests/load_index`**: the package-load index. A case lists `R/` files, and
   optionally `NAMESPACE` and `DESCRIPTION`, with `#~~~~` separators, and renders the package's name,
   the `NAMESPACE` directives a load honors, and, per file, each item's position and whether it is
-  bound lazily or runs eagerly, with what it writes, what it reads while running, and the
-  registrations it makes. Run it with `cargo test -p semantics --test test_load_index_fixtures`.
+  bound lazily (as a function or, in a strict file, a constant) or runs eagerly, with what it writes,
+  what it reads while running, and the registrations it makes. Run it with `cargo test -p semantics --test test_load_index_fixtures`.
 - **`crates/loader/tests/reload`**: reload plans. A file headed `#~~~~ before <path>` or
   `#~~~~ after <path>` exists on that side only, so the same path on both sides is an edit and one
   side alone is an addition or a deletion, while a plain `#~~~~ <path>` is unchanged. The case loads

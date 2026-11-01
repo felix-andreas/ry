@@ -2,7 +2,7 @@ use {
     salsa::{Database, Durability, Setter},
     semantics::{
         AnalysisSettings, DataFiles, DocumentKind, Item, ProjectFiles, RootDatabase, SourceFile,
-        diagnostics::{derive_from_syntax, file_diagnostics},
+        diagnostics::{derive_from_syntax, file_diagnostics, top_level_diagnostics},
         global_scheme, interface_sccs, item_naming, item_tree, limit_resident_trees,
         lints::{LintConfig, lint_file},
         load_index::{PackageFile, PackageSources, package_index},
@@ -52,6 +52,59 @@ fn a_body_edit_keeping_the_scheme_rechecks_only_the_edited_item() {
     db.edit(files[0], "x <- function() 2L\n".to_owned());
     settle(&db, &files);
     assert_eq!(db.checked_since(), ["x"]);
+}
+
+fn settle_top_level(db: &ProbeDatabase, files: &[SourceFile]) {
+    settle(db, files);
+    for &file in files {
+        top_level_diagnostics(db, file);
+    }
+}
+
+#[test]
+fn an_effect_added_to_a_pure_function_reclassifies_only_that_function() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "#: @pure\nscale <- function(x) x * 2\n",
+        "scaled <- scale(2)\n",
+    ]);
+    settle_top_level(&db, &files);
+    db.executions_since(&[]);
+
+    db.edit(
+        files[0],
+        "#: @pure\nscale <- function(x) {\n  cat(x)\n  x * 2\n}\n".to_owned(),
+    );
+    settle_top_level(&db, &files);
+    assert_eq!(
+        db.executions_since(&["item_top_level", "item_declared_pure", "item_check"]),
+        [1, 0, 1],
+        "the edited body is reclassified, its unchanged `#: @pure` block is not reread, and \
+         the caller's classification stays memoized"
+    );
+}
+
+#[test]
+fn removing_a_purity_marker_reclassifies_its_callers() {
+    let mut db = ProbeDatabase::default();
+    let files = db.project(&[
+        "#: @pure\nscale <- function(x) x * 2\n",
+        "scaled <- scale(2)\n",
+        "other <- 1\n",
+    ]);
+    settle_top_level(&db, &files);
+    db.executions_since(&[]);
+
+    assert!(top_level_diagnostics(&db, files[1]).is_empty());
+    db.executions_since(&[]);
+    db.edit(files[0], "scale <- function(x) x * 2\n".to_owned());
+    settle_top_level(&db, &files);
+    assert_eq!(top_level_diagnostics(&db, files[1]).len(), 1);
+    assert_eq!(
+        db.executions_since(&["item_top_level"]),
+        [1],
+        "only the caller is reclassified: `scale`'s HIR, which has no annotations, is unchanged"
+    );
 }
 
 #[test]
@@ -326,9 +379,10 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_items() {
     settle(&db, &files);
     assert_eq!(
         db.validations_since(&["item_interface_reads", "item_top_level_names"]),
-        [1, 1],
+        [1, 0],
         "the project-wide name maps fold per-file memos, so an edit verifies only the edited \
-         file's one item and none of the five in the untouched files"
+         file's one item and none of the five in the untouched files, and a function item \
+         writes only its own name, so the conditional writers never name it"
     );
 }
 
@@ -467,6 +521,7 @@ fn package(
         files,
         namespace.to_owned(),
         "Package: demo\nVersion: 1.0\n".to_owned(),
+        false,
     );
     (sources, handles)
 }

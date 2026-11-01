@@ -257,7 +257,8 @@ pub fn is_green_inline_annotation(kind: SyntaxKind, parent: Option<SyntaxKind>) 
         SyntaxKind::TYPE_ASCRIPTION
         | SyntaxKind::RETURN_TYPE
         | SyntaxKind::TYPE_DEFINITION
-        | SyntaxKind::NEW_TYPE => true,
+        | SyntaxKind::NEW_TYPE
+        | SyntaxKind::PURE_MARKER => true,
         SyntaxKind::TYPE_BINDER_LIST => parent == Some(SyntaxKind::FUNCTION_DEF),
         _ => false,
     }

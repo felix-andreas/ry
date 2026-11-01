@@ -274,3 +274,73 @@ cached <- middle()
 source R/a.R
 bind deepest from R/a.R:1:11
 run R/a.R:3 cached <- middle()
+
+#==== strict_constants
+#---- editing_a_pure_function_rebinds_the_constants_that_call_it
+#~~~~ before R/a.R
+# typing: strict
+#: @pure
+twice <- function(x) x * 2
+doubled <- twice(21)
+label <- "fixed"
+#~~~~ after R/a.R
+# typing: strict
+#: @pure
+twice <- function(x) x * 3
+doubled <- twice(21)
+label <- "fixed"
+#++++
+source R/a.R
+bind twice from R/a.R:3:9
+bind doubled from R/a.R:4:11
+
+#---- a_statement_reading_a_rebound_constant_reruns
+#~~~~ before R/a.R
+# typing: strict
+#: @pure
+twice <- function(x) x * 2
+doubled <- twice(21)
+#~~~~ after R/a.R
+# typing: strict
+#: @pure
+twice <- function(x) x * 3
+doubled <- twice(21)
+#~~~~ R/b.R
+.onLoad <- function(libname, pkgname) NULL
+setClass("Box", representation(size = "numeric"), prototype(size = doubled))
+#++++
+source R/a.R
+bind twice from R/a.R:3:9
+bind doubled from R/a.R:4:11
+run R/b.R:2 setClass("Box", representation(size = "numeric"), prototype(size = doubled))
+
+#---- a_constant_that_became_impure_runs_eagerly
+#~~~~ before R/a.R
+# typing: strict
+version <- "1.0"
+#~~~~ after R/a.R
+# typing: strict
+version <- Sys.getenv("VERSION")
+#++++
+source R/a.R
+run R/a.R:2 version <- Sys.getenv("VERSION")
+
+#---- a_constant_reading_a_name_written_again_later_turns_eager
+#~~~~ R/a.R
+# typing: strict
+z <- 1
+#~~~~ R/b.R
+# typing: strict
+y <- z + 1
+#~~~~ before R/c.R
+# typing: strict
+w <- 3
+#~~~~ after R/c.R
+# typing: strict
+z <- 2
+#++++
+source R/c.R
+remove w
+run R/a.R:2 z <- 1
+run R/b.R:2 y <- z + 1
+run R/c.R:2 z <- 2

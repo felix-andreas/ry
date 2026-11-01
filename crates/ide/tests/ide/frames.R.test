@@ -61,7 +61,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: DataFrame{team: character[], amount: double[]}\n"
-completion (82): T, t, TRUE, team, t.data.frame, t.default, t.test, table
+completion (82): T, t, team, TRUE, t.data.frame, t.default, t.test, table
 hint @5: DataFrame{team: character[], amount: double[]}
 
 #---- hover_on_a_column_named_by_a_string

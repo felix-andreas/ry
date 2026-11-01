@@ -21,9 +21,10 @@ fn home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ry-home");
+        let libr = library_path();
         // `ry-rcmd` is another package's binary, so it is built here rather than by cargo test,
         // in the profile directory the test itself runs from.
-        let profile_directory = harness::profile_dir();
+        let profile_directory = profile_directory();
         let mut build = Command::new(env!("CARGO"));
         build.args(["build", "-q", "-p", "rcmd", "--bin", "ry-rcmd"]);
         if profile_directory
@@ -41,7 +42,7 @@ fn home() -> &'static PathBuf {
             &root,
             &rcmd::HomeSources {
                 include: &Path::new(env!("CARGO_MANIFEST_DIR")).join("include"),
-                libr: &harness::library_dir().join("libR.so"),
+                libr: &libr,
                 rcmd: &rcmd,
                 gnu_r_home: &gnu_r_home(),
                 toolchain: rcmd::Toolchain::default(),
