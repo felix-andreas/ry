@@ -5137,7 +5137,9 @@ impl<'db> Checker<'db, '_> {
             match self.callable(ty) {
                 Callable::No => continue,
                 _ if ambiguous => return FunctionLookup::Undetermined,
-                _ if nearest_callable == Callable::Untyped => return FunctionLookup::Found(nearest),
+                _ if nearest_callable == Callable::Untyped => {
+                    return FunctionLookup::Found(nearest);
+                }
                 _ => {
                     self.callee_targets.insert(callee, CalleeTarget::Slot(slot));
                     return FunctionLookup::Found(self.record(callee, ty));

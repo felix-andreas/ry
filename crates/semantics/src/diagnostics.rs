@@ -575,8 +575,8 @@ fn classify_non_local_read(
     });
     if crate::package_scheme_exists(db, name)
         || test_files.is_some_and(|files| {
-            crate::test_definitions(db, files).contains_key(name)
-                || crate::test_conditional_slot_items(db, files).contains_key(name)
+            let binding = crate::test_name(db, files, Name::new(db, name));
+            binding.winner.is_some() || !binding.conditional_writers.is_empty()
         })
         || super_globals(db, file).contains(name)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
@@ -589,16 +589,7 @@ fn classify_non_local_read(
     // checked before the stub corpus because it is the likelier intent.
     let project_typo = files
         .and_then(|files| {
-            let test_names = test_files
-                .into_iter()
-                .flat_map(|files| crate::test_definitions(db, files).keys());
-            nearest_name(
-                name,
-                crate::package_definitions(db, files)
-                    .keys()
-                    .chain(test_names)
-                    .map(String::as_str),
-            )
+            project_typo_suggestion(db, files, Name::new(db, name), test_files.is_some())
         })
         .or_else(|| {
             nearest_name(
@@ -1839,6 +1830,28 @@ fn display_name(name: &str) -> String {
     } else {
         format!("`{name}`")
     }
+}
+
+/// A per-name firewall over the project-wide definition maps: a new definition elsewhere
+/// re-runs this, but a reading file re-checks only when its suggestion changes.
+#[salsa::tracked(returns(clone))]
+fn project_typo_suggestion<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: Name<'db>,
+    tests: bool,
+) -> Option<String> {
+    let test_names = tests
+        .then(|| crate::test_definitions(db, files).keys())
+        .into_iter()
+        .flatten();
+    nearest_name(
+        name.text(db),
+        crate::package_definitions(db, files)
+            .keys()
+            .chain(test_names)
+            .map(String::as_str),
+    )
 }
 
 /// Memoized per name: the scan over the whole stub corpus is the expensive part.
