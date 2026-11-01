@@ -17,9 +17,8 @@
 //!   `data.frame` alone, with no key or index (whose upkeep is data.table's), and columns that are
 //!   attribute-free logical, integer, double or character vectors, or plain factors.
 //! - Only code data.table itself treats as data.table-aware qualifies (data.table's `cedta`):
-//!   anything outside a namespace, and namespaces that import data.table or set
-//!   `.datatable.aware`. data.table's own namespace does not, so its internals keep their
-//!   semantics.
+//!   anything outside a namespace, namespaces that import data.table or set `.datatable.aware`,
+//!   and data.table's own namespace, though from there only a grouped query without `:=`.
 //!
 //! A result is built as data.table builds its own: the columns as a list, then data.table's
 //! `setattr` and `setalloccol`, so printing, `.internal.selfref` and over-allocation are
@@ -39,7 +38,7 @@ use {
         unwind::{R, Unwind, error},
         values::{self, install, is_nil, length, nil, symbols},
     },
-    heap::object::{Sexp, SexpType},
+    heap::object::{NA_INTEGER, Sexp, SexpType},
     rustc_hash::FxHashSet,
     std::{cell::Cell, collections::HashSet},
     table::{
@@ -53,12 +52,13 @@ use {
 /// R helpers in the `ry` namespace. They call into data.table, which may not be installed, so
 /// they are only called once a data.table exists.
 const HELPERS: &str = r#"
-.datatable_aware <- function(env) {
+.datatable_caller <- function(env) {
   ns <- topenv(env)
-  if (!isNamespace(ns)) return(TRUE)
-  name <- getNamespaceName(ns)
-  name != "data.table" &&
-    ("data.table" %in% names(getNamespaceImports(ns)) || isTRUE(get0(".datatable.aware", ns, inherits = FALSE)))
+  if (!isNamespace(ns)) return(1L)
+  if (getNamespaceName(ns) == "data.table") return(2L)
+  aware <- "data.table" %in% names(getNamespaceImports(ns)) ||
+    isTRUE(get0(".datatable.aware", ns, inherits = FALSE))
+  if (aware) 1L else 0L
 }
 .datatable_result <- function(columns, names, sorted, shape) {
   rows <- c(NA_integer_, -(if (length(columns)) length(columns[[1L]]) else 0L))
@@ -162,9 +162,11 @@ unsafe fn is_plain(subject: Sexp) -> bool {
 }
 
 unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
-    if values::as_logical_scalar(helper(".datatable_aware", &[env])?) != 1 {
-        return Ok(None);
-    }
+    let internal = match values::as_integer_scalar(helper(".datatable_caller", &[env])?) {
+        1 => false,
+        2 => true,
+        _ => return Ok(None),
+    };
     let Some((columns, height)) = subject_columns(subject)? else {
         return Ok(None);
     };
@@ -173,7 +175,7 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
             .iter()
             .map(|column| (column.name.clone(), column.kind)),
     );
-    let parts = frame::parse_parts(call, env, true)?;
+    let mut parts = frame::parse_parts(call, env, true)?;
     if let Some(i) = parts.i.as_ref().and_then(Piece::expression)
         && auto_indexes(i, &schema)
     {
@@ -186,12 +188,20 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         call,
         strict: true,
     };
+    if let Some(j) = parts.j.as_mut() {
+        j.expand_eval(&lowering)?;
+    }
     let grouped = parts.by.is_some();
     let assigning = parts
         .j
         .as_ref()
         .and_then(Piece::expression)
         .is_some_and(|j| is_call(j, ":="));
+    // Inside data.table, only grouped aggregations are worth the engine (`dcast` aggregates this
+    // way). Its internal row and column picks are vector copies its C does faster.
+    if internal && (!grouped || assigning || parts.each_i) {
+        return Ok(None);
+    }
     if let Some(j) = parts.j.as_ref().and_then(Piece::expression)
         && !reductions_agree(j, grouped && !assigning, &schema)
     {
@@ -217,14 +227,36 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
         by,
         keyed: parts.keyed,
     };
-    // Only the columns the query reads enter the engine, because importing a character column
-    // converts every string.
-    let mut table = import(&columns, height, query::referenced_columns(&query))?;
+    let referenced = query::referenced_columns(&query);
+    if grouped
+        && !assigning
+        && parts
+            .j
+            .as_ref()
+            .and_then(Piece::expression)
+            .and_then(|j| gforce_terms(j, &schema))
+            .is_some_and(|terms| {
+                terms
+                    .iter()
+                    .any(|term| matches!(term, Term::Reduce { function, .. } if function == "sum"))
+            })
+        && !running_sums_fit(&columns, referenced.as_ref())
+    {
+        return Ok(None);
+    }
     if assigns {
+        // Only the columns the query reads enter the engine, because importing a character
+        // column converts every string.
+        let table = import(&columns, height, referenced)?;
         return update(subject, table, query, call);
     }
     // `x[]` returns `x` itself, which only data.table can do.
     if parts.i.is_none() && parts.j.is_none() {
+        return Ok(None);
+    }
+    // Picking whole columns of every row computes nothing: data.table copies the vectors, while
+    // the engine would convert each string column in and back out.
+    if query.by.is_empty() && matches!(query.rows, Rows::All) && picks_columns(&query.select) {
         return Ok(None);
     }
     let shape = if !query.by.is_empty() {
@@ -236,6 +268,7 @@ unsafe fn attempt(call: Sexp, subject: Sexp, env: Sexp) -> R<Option<Sexp>> {
     } else {
         Shape::Selected
     };
+    let mut table = import(&columns, height, referenced)?;
     let sorted = parts.keyed.then(|| {
         query
             .by
@@ -305,7 +338,41 @@ unsafe fn reductions_agree(j: Sexp, gforce: bool, schema: &Schema) -> bool {
             } => term_agrees(function, *column, *extra),
         });
     }
-    !reduces(j)
+    !reduces(j, schema)
+}
+
+/// Whether no running total of an integer column the query reads can leave the integer range,
+/// because its absolute values add up to at most `INT_MAX`. data.table's GForce `sum` widens a
+/// group's integer sum to a double, with a warning, as soon as its running total in row order
+/// leaves the range, even when the final total fits, while the engine widens on the final total.
+/// `referenced` is `None` when the query reads every column.
+unsafe fn running_sums_fit(
+    columns: &[SubjectColumn],
+    referenced: Option<&HashSet<PlSmallStr>>,
+) -> bool {
+    columns
+        .iter()
+        .filter(|column| column.kind == ColumnType::Integer)
+        .filter(|column| referenced.is_none_or(|names| names.contains(&column.name)))
+        .all(|column| {
+            let mut total = 0i64;
+            for chunk in values::ints(column.vector).chunks(4096) {
+                total += chunk
+                    .iter()
+                    .map(|&value| {
+                        if value == NA_INTEGER {
+                            0
+                        } else {
+                            i64::from(value).abs()
+                        }
+                    })
+                    .sum::<i64>();
+                if total > i64::from(i32::MAX) {
+                    return false;
+                }
+            }
+            true
+        })
 }
 
 /// One term of a `j` that data.table's GForce runs: `.N`, or `function(column, ...)`.
@@ -404,23 +471,33 @@ unsafe fn gforce_terms(j: Sexp, schema: &Schema) -> Option<Vec<Term>> {
 }
 
 /// Whether `expression` calls one of the reductions whose rounding depends on how they sum.
-unsafe fn reduces(expression: Sexp) -> bool {
+/// `sum` of one integer or logical column adds exactly in any order, so it is not one of them.
+unsafe fn reduces(expression: Sexp, schema: &Schema) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
     }
-    let head = expression.car();
-    if head.kind() == SexpType::Symbol
-        && matches!(
-            values::symbol_name(head).as_ref(),
-            "sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply"
-        )
-    {
-        return true;
+    match frame::call_head(expression).as_deref() {
+        Some("sum") if sums_exactly(expression, schema) => return false,
+        Some("sum" | "mean" | "median" | "var" | "sd" | "prod" | "lapply") => return true,
+        _ => {}
     }
-    reduces(head)
+    reduces(expression.car(), schema)
         || values::pairlist_items(expression.cdr())
             .into_iter()
-            .any(|(_, item)| reduces(item))
+            .any(|(_, item)| reduces(item, schema))
+}
+
+/// Whether `call` is `sum(column)` of an integer or logical column.
+unsafe fn sums_exactly(call: Sexp, schema: &Schema) -> bool {
+    let [(tag, argument)] = values::pairlist_items(call.cdr())[..] else {
+        return false;
+    };
+    is_nil(tag)
+        && argument.kind() == SexpType::Symbol
+        && matches!(
+            schema.column(&values::symbol_name(argument)),
+            Some(ColumnType::Integer | ColumnType::Logical)
+        )
 }
 
 unsafe fn is_call(expression: Sexp, name: &str) -> bool {
@@ -553,6 +630,18 @@ unsafe fn selects_columns(select: &Select, j: Option<Sexp>) -> bool {
         && columns.iter().all(
             |(name, expr)| matches!(expr, table::query::Expr::Column(column) if column == name),
         )
+}
+
+/// Whether `select` takes columns as they are, under their own names or new ones, or one column
+/// as a vector.
+fn picks_columns(select: &Select) -> bool {
+    match select {
+        Select::All | Select::Value(table::query::Expr::Column(_)) => true,
+        Select::Columns(columns) => columns
+            .iter()
+            .all(|(_, expr)| matches!(expr, table::query::Expr::Column(_))),
+        _ => false,
+    }
 }
 
 /// `result` as a new data.table, keyed by `sorted` when the query was a `keyby`.

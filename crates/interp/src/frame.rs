@@ -28,7 +28,7 @@ use {
     },
     heap::object::{NA_INTEGER, Sexp, SexpType},
     rustc_hash::FxHashSet,
-    std::{cell::Cell, ffi::c_void},
+    std::{borrow::Cow, cell::Cell, ffi::c_void},
     table::{
         ColumnType, Table,
         convert::{self, RVector, is_na_real},
@@ -1121,6 +1121,31 @@ impl Piece {
         matches!(self.source, Source::Missing)
     }
 
+    /// Replaces `eval(e)` by the call or symbol `e` evaluates to, the way data.table's `[`
+    /// expands `j = eval(e)`: it evaluates `e` in the caller's frame and runs the result as `j`.
+    /// data.table matches `eval` by name, so a local `eval` does not stop the expansion.
+    pub(crate) unsafe fn expand_eval(&mut self, lowering: &Lowering) -> R<()> {
+        let Some((expression, env)) = self.unevaluated() else {
+            return Ok(());
+        };
+        if expression.kind() != SexpType::Language
+            || expression.car().kind() != SexpType::Symbol
+            || symbol_name(expression.car()) != "eval"
+            || length(expression) != 2
+            || !is_nil(expression.cdr().tag())
+        {
+            return Ok(());
+        }
+        let mut value = lowering.evaluate_in(expression.cdr().car(), env)?;
+        if value.kind() == SexpType::Expression && length(value) == 1 {
+            value = values::list_elt(value, 0);
+        }
+        if matches!(value.kind(), SexpType::Language | SexpType::Symbol) {
+            self.source = Source::Expression(value, env);
+        }
+        Ok(())
+    }
+
     /// The expression [`Piece::value`] would evaluate and its environment, when it has not been
     /// evaluated yet.
     fn unevaluated(&self) -> Option<(Sexp, Sexp)> {
@@ -2032,11 +2057,9 @@ impl Lowering<'_> {
     }
 
     unsafe fn call_expr(&self, expression: Sexp) -> R<Option<Expr>> {
-        let head = expression.car();
-        if head.kind() != SexpType::Symbol {
+        let Some(name) = call_head(expression) else {
             return Ok(None);
-        }
-        let name = symbol_name(head);
+        };
         let items = values::pairlist_items(expression.cdr());
         let positional: Vec<Sexp> = items
             .iter()
@@ -2202,6 +2225,17 @@ fn is_special_symbol(name: &str) -> bool {
         name,
         ".N" | ".SD" | ".I" | ".GRP" | ".BY" | ".NGRP" | ".SDcols"
     )
+}
+
+/// The name of the function `call` calls: its head symbol, or the name of a primitive object
+/// that code building calls spliced in, as `dcast` builds `list(v1 = .Primitive("sum")(v1))`.
+pub(crate) unsafe fn call_head<'a>(call: Sexp) -> Option<Cow<'a, str>> {
+    let head = call.car();
+    match head.kind() {
+        SexpType::Symbol => Some(symbol_name(head)),
+        SexpType::Builtin | SexpType::Special => Some(Cow::Borrowed(values::primitive_name(head))),
+        _ => None,
+    }
 }
 
 unsafe fn is_call_to(expression: Sexp, name: &str) -> bool {

@@ -53,10 +53,16 @@ behavior: `:=` still updates it in place, and every alias sees the change. ry an
 when it can produce exactly what data.table would, meaning the same values, attributes, printing
 and warnings. Otherwise data.table answers it. These go to data.table:
 
-- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
+- a keyed table, and a table with extra attributes or classes;
+- code inside data.table's own namespace, except a grouped query without `:=`, which is how
+  `dcast` aggregates;
+- a `j` that only picks whole columns of every row, such as `x[, .(a, b)]` or
+  `x[, cols, with = FALSE]`, because data.table copies them faster;
 - a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
 - `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
-  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
+  summation order, such as a sum of doubles without `by` or a mean with `na.rm = TRUE` on doubles;
+- a grouped `sum` of an integer column whose values could overflow while they add up, because
+  data.table then returns doubles even when each group's total fits;
 - a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
 - a query that warns or fails.
 
