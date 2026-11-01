@@ -103,6 +103,10 @@ False reports on correct R, worst first:
 
 Smaller gaps:
 
+- Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
+  unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
+  message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
+  "did you mean".
 - After a `for` loop, the loop variable reads as `Unknown` (R keeps its last value), with no strict
   finding.
 - An unresolved `pkg::name` under strict mode is reported twice, as `unresolved` and as `strict`.

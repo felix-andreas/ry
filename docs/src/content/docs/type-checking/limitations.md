@@ -13,6 +13,7 @@ section lists the places where ry reports correct code instead.
   passes even if the column does not exist. A [frame](/reference/type-system#frames) types its
   columns.
 - **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
+  Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
 - **S4 and R6 objects** are `Unknown`, and calls to an S3 generic that dispatches through
   `UseMethod()` return `Any`. Operator methods such as `+.Date` and methods called directly are
   checked. [Custom types](/type-checking/custom-types#r6-and-s4-objects) shows how to check who
