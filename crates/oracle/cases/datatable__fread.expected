@@ -1,0 +1,151 @@
+[stdout]
+|          id           n           v        flag           s       empty 
+| "character"   "integer"   "numeric"   "logical" "character"   "logical" 
+| list(id = c("a", "b", "c"), n = c(1L, NA, 3L), v = c(0.5, 1000, 
+| -2.25), flag = c(TRUE, FALSE, NA), s = c("x", "", NA), empty = c(NA, 
+| NA, NA))
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    id  n       v  flag    s empty
+| 1:  a  1    0.50  TRUE    x    NA
+| 2:  b NA 1000.00 FALSE         NA
+| 3:  c  3   -2.25    NA <NA>    NA
+|           g         big       small 
+| "character" "integer64"   "integer" 
+| list(g = c("k", "l"), big = structure(c(1.48219693752374e-314, 
+| 4.94065645841247e-324), class = "integer64"), small = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    g           big small
+| 1: k 1.482197e-314     1
+| 2: l 4.940656e-324     2
+|          day            v 
+| "IDate/Date"    "integer" 
+| list(day = structure(19724:19725, class = c("IDate", "Date")), 
+|     v = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|           day v
+| 1: 2024-01-02 1
+| 2: 2024-01-03 2
+|             when                v 
+| "POSIXct/POSIXt"        "integer" 
+| list(when = structure(c(1704189600, 1704279600), class = c("POSIXct", 
+| "POSIXt"), tzone = "UTC"), v = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|                   when v
+| 1: 2024-01-02 10:00:00 1
+| 2: 2024-01-03 11:00:00 2
+|        name           v 
+| "character"   "integer" 
+| list(name = c("quoted, comma", "plain"), v = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|             name v
+| 1: quoted, comma 1
+| 2:         plain 2
+|        name           v 
+| "character"   "integer" 
+| list(name = c("padded", "plain"), v = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|      name v
+| 1: padded 1
+| 2:  plain 2
+|      code         v 
+| "integer" "integer" 
+| list(code = c(7L, 10L), v = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    code v
+| 1:    7 1
+| 2:   10 2
+|           x           y 
+| "character"   "integer" 
+| list(x = c("T", "F"), y = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    x y
+| 1: T 1
+| 2: F 2
+|         x         y 
+| "logical" "integer" 
+| list(x = c(TRUE, FALSE), y = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|        x y
+| 1:  TRUE 1
+| 2: FALSE 2
+|         x         y 
+| "numeric" "numeric" 
+| list(x = c(Inf, -Inf), y = c(1, NaN))
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|       x   y
+| 1:  Inf   1
+| 2: -Inf NaN
+|           x           y 
+|   "numeric" "character" 
+| list(x = c(1, 2.5, 3), y = c("a", "b", "c"))
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|      x y
+| 1: 1.0 a
+| 2: 2.5 b
+| 3: 3.0 c
+|           x           y 
+| "character" "character" 
+| list(x = c("1-2", "3-4"), y = c("a", "b"))
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|      x y
+| 1: 1-2 a
+| 2: 3-4 b
+|      only 
+| "integer" 
+| list(only = 1:2)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    only
+| 1:    1
+| 2:    2
+|         x         x 
+| "integer" "integer" 
+| list(x = 1L, x = 2L)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    x x
+| 1: 1 2
+|         x        V2 
+| "integer" "integer" 
+| list(x = 1L, V2 = 2L)
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+| NULL
+|    x V2
+| 1: 1  2
+|    x
+| 1: 1
+[messages]
+[warnings]
+- Some columns are type 'integer64' but package bit64 is not installed. Those columns will print as strange looking floating point data. There is no need to reload the data. Simply install.packages('bit64') to obtain the integer64 print method and print the data again. (in require_bit64_if_needed(ans))
+- Some columns are type 'integer64' but package bit64 is not installed. Those columns will print as strange looking floating point data. There is no need to reload the data. Simply install.packages('bit64') to obtain the integer64 print method and print the data again. (in require_bit64_if_needed(x))
+[errors]
+[value]
+integer
+| 0L
