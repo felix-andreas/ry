@@ -430,7 +430,7 @@ NULL
 accepts <- function(value) TRUE
 for (item in list(a = 1L, b = "two")) accepts(item)
 #++++
-accepts: fn([value]: integer | character) -> logical
+accepts: fn(value: integer | character) -> logical
 NULL
 
 #---- for_element_union_rejected_at_member_parameter

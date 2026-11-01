@@ -167,7 +167,7 @@ double_count: fn(count: integer) -> integer
 #: @param count {integer}
 log_count <- function(count) { }
 #++++
-log_count: fn([count]: integer) -> NULL
+log_count: fn(count: integer) -> NULL
 
 #---- expanded_optional_param
 #: @param count {integer}
@@ -354,13 +354,13 @@ f: fn(count: integer, [label]: character) -> integer
 #: @return {T}
 keep_left <- function(left, right) left
 #++++
-keep_left: <T, U> fn(left: T, [right]: U) -> T
+keep_left: <T, U> fn(left: T, right: U) -> T
 
 #---- compact_forall_two_params
 #: <T, U> fn(left: T, right: U) -> T
 keep_left <- function(left, right) left
 #++++
-keep_left: <T, U> fn(left: T, [right]: U) -> T
+keep_left: <T, U> fn(left: T, right: U) -> T
 
 #---- checked_named_vector_into_array
 #: integer[]

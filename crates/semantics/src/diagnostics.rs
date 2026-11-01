@@ -2240,15 +2240,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
                 None => String::new(),
             };
-            if names.len() == 1 {
-                format!(
-                    "this call leaves out {listed}, which has no default and which the function uses"
-                )
-            } else {
-                format!(
-                    "this call leaves out {listed}, which have no default and which the function uses"
-                )
-            }
+            // A declared required parameter need not be read, so the reason is the
+            // signature's, not the body's.
+            format!("this call leaves out {listed}, which the function requires")
         }
         TypeErrorKind::NamedArgumentMismatch {
             argument,

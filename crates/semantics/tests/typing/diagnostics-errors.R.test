@@ -14,7 +14,7 @@ add(1L)
 #++++
 add: fn(a: integer, b: integer) -> integer
 integer
-69..72 error[type-mismatch] this call leaves out `b`, which has no default and which the function uses
+69..72 error[type-mismatch] this call leaves out `b`, which the function requires
 
 #---- call_named_arg_not_in_interface
 mirror <- function(x) x
@@ -440,7 +440,7 @@ f: fn() -> list[integer]
 #: <T> fn(value: T) -> T
 f <- function(value) 1L
 #++++
-f: <T> fn([value]: T) -> T
+f: <T> fn(value: T) -> T
 46..48 error[type-mismatch] expected `T`, found `integer`
 
 #---- generic_body_constrains_param_is_rejected

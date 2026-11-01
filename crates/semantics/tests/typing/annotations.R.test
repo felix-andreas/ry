@@ -474,14 +474,14 @@ h: double
 #: fn(x: Person[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn([x]: Person[]) -> NULL
+f: fn(x: Person[]) -> NULL
 51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
 
 #---- structural_vector_element_is_refused
 #: fn(x: list{name: character}[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn([x]: list{name: character}[]) -> NULL
+f: fn(x: list{name: character}[]) -> NULL
 9..32 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `list{name: character}`. For a list of these, write `list[list{name: character}]`
 
 #---- atomic_alias_and_binder_vector_elements_are_fine
@@ -490,7 +490,7 @@ f: fn([x]: list{name: character}[]) -> NULL
 #: <T> fn(x: T[], y: Id[]) -> integer[]
 f <- function(x, y) y
 #++++
-f: <T> fn([x]: T[], y: Id[]) -> integer[]
+f: <T> fn(x: T[], y: Id[]) -> integer[]
 
 #==== declared_shape
 #---- declared_optional_requires_an_actual_default

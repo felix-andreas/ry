@@ -159,7 +159,7 @@ capf: <T: numeric> fn(x: T) -> T
 render <- function(n) "ok"
 wrap <- function(x) render(x)
 #++++
-render: fn([n]: integer) -> character
+render: fn(n: integer) -> character
 wrap: fn(x: integer) -> character
 
 #---- nested_let_generalization

@@ -10,8 +10,8 @@ describe <- function(x: Any) cat("value\n")
 #: fn(y: Any) -> NULL
 describe_too <- function(y) cat("value\n")
 #++++
-describe: fn([x]: Any) -> NULL
-describe_too: fn([y]: Any) -> NULL
+describe: fn(x: Any) -> NULL
+describe_too: fn(y: Any) -> NULL
 
 #---- a_type_variable_shared_with_the_return_is_generic
 identity2 <- function(x) x

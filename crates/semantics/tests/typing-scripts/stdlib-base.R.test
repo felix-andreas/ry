@@ -787,7 +787,7 @@ connection
 check_factor <- function(x) TRUE
 check_factor(as.factor("a"))
 #++++
-check_factor: fn([x]: factor) -> logical
+check_factor: fn(x: factor) -> logical
 logical
 
 #---- stub_nominals_are_distinct
@@ -795,7 +795,7 @@ logical
 check_factor <- function(x) TRUE
 check_factor(Sys.Date())
 #++++
-check_factor: fn([x]: factor) -> logical
+check_factor: fn(x: factor) -> logical
 logical
 74..84 error[type-mismatch] expected `factor`, found `Date`
 
@@ -870,7 +870,7 @@ join2("a")
 #++++
 join2: <T, U> fn(left: T, right: U) -> character
 character
-57..62 error[type-mismatch] this call leaves out `right`, which has no default and which the function uses
+57..62 error[type-mismatch] this call leaves out `right`, which the function requires
 
 #---- negated_missing_test_also_marks_optional
 pick <- function(x) {

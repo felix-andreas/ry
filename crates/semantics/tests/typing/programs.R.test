@@ -127,16 +127,16 @@ RemoteInput <- function(url) {
 run: fn(options: Options) -> Result
 local_provider: fn(input: LocalInput, options: Options) -> Result
 remote_provider: fn(input: RemoteInput, options: Options) -> Result
-csv_provider: fn(input: LocalInput, [options]: Options) -> Result
-tsv_provider: fn(input: LocalInput, [options]: Options) -> Result
-http_provider: fn(input: RemoteInput, [options]: Options) -> Result
-grpc_provider: fn(input: RemoteInput, [options]: Options) -> Result
+csv_provider: fn(input: LocalInput, options: Options) -> Result
+tsv_provider: fn(input: LocalInput, options: Options) -> Result
+http_provider: fn(input: RemoteInput, options: Options) -> Result
+grpc_provider: fn(input: RemoteInput, options: Options) -> Result
 run_local: fn(input: LocalInput, getItems: fn() -> list[Item], read: fn(LocalInput) -> Result, step: fn(Result, Item) -> Result, [finalize]: fn(Result) -> Result) -> Result
 run_remote: fn(input: RemoteInput, getItems: fn() -> list[Item], evaluate: fn(RemoteInput, Item) -> Result) -> Result
 default_items: fn() -> list[Item]
 read_local: fn(input: LocalInput) -> Result
 step_one: fn(result: Result, item: Item) -> Result
-eval_remote: fn(input: RemoteInput, [item]: Item) -> Result
+eval_remote: fn(input: RemoteInput, item: Item) -> Result
 identity_finalize: fn(result: Result) -> Result
 Result: fn([label]: character, [count]: integer) -> Result
 LocalInput: fn(path: character) -> LocalInput
@@ -237,13 +237,13 @@ identity_finalize: fn(result: Result) -> Result
 Result: fn([label]: character) -> Result
 LocalInput: fn(path: character) -> LocalInput
 RemoteInput: fn(url: character) -> RemoteInput
-read_wrong_return: fn([input]: LocalInput) -> Item
+read_wrong_return: fn(input: LocalInput) -> Item
 missing_required: Unknown
 wrong_shape: Unknown
 wrong_return: Unknown
 wrong_nominal: Unknown
 wrong_optional: Unknown
-1702..1711 error[type-mismatch] this call leaves out `step`, which has no default and which the function uses
+1702..1711 error[type-mismatch] this call leaves out `step`, which the function requires
 1867..1899 error[type-mismatch] expected `fn(LocalInput) -> Result`, found `fn([a]: T, b: character) -> Result`
 2031..2048 error[type-mismatch] this function must return `Result`, but it returns `Item`
 2181..2203 error[type-mismatch] expected `LocalInput`, found `RemoteInput`

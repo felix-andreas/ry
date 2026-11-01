@@ -1666,8 +1666,8 @@ Calling a function looked up in a list, as in `handlers[[name]](...)`, has this 
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
 [named and positional parameter rules](#named-and-positional-parameters) apply throughout. A missing
-named argument is reported by name, as in "this call leaves out `y`, which has no default and which
-the function uses", and too many arguments are counted as the positional arguments against the
+named argument is reported by name, as in "this call leaves out `y`, which the function requires",
+and too many arguments are counted as the positional arguments against the
 positional slots that named arguments left open.
 
 #### Matching arguments to parameters
@@ -1921,7 +1921,9 @@ The details:
 
 R evaluates an argument only when the body forces it, and omitting an argument is an error only at
 that moment. A formal without a default is therefore required at call sites only when the body may
-force it, so `function(x, unused) x` may be called as `f(1)`. A read forces the formal, with these
+force it, so `function(x, unused) x` may be called as `f(1)`. This relaxes only an inferred
+signature. An annotation is honored as written, so under `#: fn(a: integer, b: character) -> integer`,
+`function(a, b) a` still requires `b`, and to let callers omit it the annotation says `[b]`. A read forces the formal, with these
 exceptions and additions:
 
 - A read guarded by `missing(name)` does not make the formal required; see below.

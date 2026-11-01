@@ -148,7 +148,7 @@ nullable_callback <- NULL
 returns_nullable <- function(x) NULL
 #++++
 nullable_callback: (fn(integer) -> character) | NULL
-returns_nullable: fn([x]: integer) -> character | NULL
+returns_nullable: fn(x: integer) -> character | NULL
 
 #==== returns
 #---- early_return_unions

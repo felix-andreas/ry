@@ -4645,7 +4645,8 @@ impl<'db> Checker<'db, '_> {
         self.collect_formal_uses(*body, &mut uses);
         self.collect_forced_default_uses(parameters, &mut uses);
         // A call may omit a formal the body never forces, but only a default or a
-        // `missing()` test makes optionality part of the formal's contract.
+        // `missing()` test makes optionality part of the formal's contract. Laziness only
+        // relaxes what nothing declares: a declared required parameter stays required.
         let is_optional =
             |parameter: &Formal| parameter.default.is_some() || uses.makes_optional(parameter.name);
         let is_declared_optional = |parameter: &Formal| {
@@ -4677,27 +4678,33 @@ impl<'db> Checker<'db, '_> {
                 formal_types.push((self.fresh(Constraint::Unconstrained), false));
                 continue;
             }
-            let declared_ty = if let Some(index) = declared
+            // A disagreeing declaration is reported below, and the definition wins: a declared
+            // `[name]` over a forced formal stays required, a declared required parameter over
+            // a defaulted or `missing()`-tested formal stays optional.
+            let (declared_ty, optional) = if let Some(index) = declared
                 .named
                 .iter()
                 .position(|field| field.name.text(self.db) == parameter.name)
             {
                 used_named[index] = true;
-                Some(declared.named[index].ty)
+                let field = &declared.named[index];
+                let optional =
+                    is_declared_optional(parameter) || field.optional && is_optional(parameter);
+                (Some(field.ty), optional)
             } else if positional_index < declared.positional.len() {
                 let ty = declared.positional[positional_index];
                 positional_index += 1;
-                Some(ty)
+                (Some(ty), is_declared_optional(parameter))
             } else {
                 // Partial annotation: an unannotated formal infers from its uses as if unannotated.
-                None
+                (None, is_optional(parameter))
             };
             let parameter_ty = declared_ty.unwrap_or_else(|| self.fresh(Constraint::Unconstrained));
             formal_types.push((parameter_ty, declared_ty.is_some()));
             signature.named.push(Parameter {
                 name: Name::new(self.db, parameter.name.as_str()),
                 ty: parameter_ty,
-                optional: is_optional(parameter),
+                optional,
                 default: parameter.default.map(|default| self.infer(default)),
             });
         }

@@ -125,7 +125,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-50..51 error[type-mismatch] this call leaves out `y`, which has no default and which the function uses
+50..51 error[type-mismatch] this call leaves out `y`, which the function requires
 
 #---- an_unread_formal_without_a_default_may_be_omitted
 g <- function(envs, names) envs
@@ -157,7 +157,7 @@ f <- function() g()
 #++++
 g: <T> fn(x: T) -> fn() -> T
 f: Unknown
-46..47 error[type-mismatch] this call leaves out `x`, which has no default and which the function uses
+46..47 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- a_formal_read_by_a_forced_default_is_required
 g <- function(x, y = x) y
@@ -165,7 +165,7 @@ f <- function() g()
 #++++
 g: <T, U> fn(x: T, [y]: U) -> U
 f: Unknown
-42..43 error[type-mismatch] this call leaves out `x`, which has no default and which the function uses
+42..43 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- substitute_does_not_force_a_formal
 g <- function(x) deparse(substitute(x))
@@ -180,7 +180,7 @@ f <- function() g(b = 2)
 #++++
 g: <T> fn(a: T, [b]: T | NULL) -> T
 f: Unknown
-68..69 error[type-mismatch] this call leaves out `a`, which has no default and which the function uses
+68..69 error[type-mismatch] this call leaves out `a`, which the function requires
 
 #---- an_overflow_counts_only_positional_arguments
 g <- function(x, y) x + y
@@ -206,8 +206,17 @@ three <- function(a, b, c) a
 
 use <- function() three(1L, TRUE, b = "x")
 #++++
-three: fn(a: integer, [b]: character, [c]: logical) -> integer
+three: fn(a: integer, b: character, c: logical) -> integer
 use: fn() -> integer
+
+#---- a_declared_required_formal_stays_required_when_unread
+#: fn(a: integer, b: character) -> integer
+three <- function(a, b) a
+use <- function() three(1L)
+#++++
+three: fn(a: integer, b: character) -> integer
+use: Unknown
+87..92 error[type-mismatch] this call leaves out `b`, which the function requires
 
 #---- a_named_callback_lets_a_positional_reach_the_later_formal
 # The real-world shape: `FUN` is given by name, so `character(1)` fills
@@ -308,8 +317,8 @@ both <- function(v) {
   second(v)
 }
 #++++
-first: fn([x]: integer | character) -> logical
-second: fn([x]: logical | character) -> logical
+first: fn(x: integer | character) -> logical
+second: fn(x: logical | character) -> logical
 both: Unknown
 177..178 error[type-mismatch] expected `logical | character`, found `integer | character`
 
@@ -323,8 +332,8 @@ both <- function(v) {
   first(v)
 }
 #++++
-first: fn([x]: integer | logical) -> logical
-second: fn([x]: character | logical) -> logical
+first: fn(x: integer | logical) -> logical
+second: fn(x: character | logical) -> logical
 both: Unknown
 175..176 error[type-mismatch] expected `integer | logical`, found `character | logical`
 
@@ -338,8 +347,8 @@ both <- function(v) {
   first(v)
 }
 #++++
-first: fn([x]: integer | character) -> logical
-second: fn([x]: logical | character) -> logical
+first: fn(x: integer | character) -> logical
+second: fn(x: logical | character) -> logical
 both: fn(v: logical | character) -> logical
 
 #---- vapply_checks_the_callback_against_its_template
@@ -773,7 +782,7 @@ f <- function() 2 |> scale_by(factor = _)
 #++++
 scale_by: <T: numeric> fn(value: T, factor: T) -> T
 f: Unknown
-72..80 error[type-mismatch] this call leaves out `value`, which has no default and which the function uses
+72..80 error[type-mismatch] this call leaves out `value`, which the function requires
 
 #---- pipe_into_a_namespaced_callee
 f <- function(x) x |> stats::sd()
