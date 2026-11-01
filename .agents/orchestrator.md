@@ -70,7 +70,7 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## In flight
 
 - Base R round 3 (session_0111kWqCeajgVo7m8XVxpfDk, Opus): serialize arity, time zones, nlm, parse_Rd, nlminb PORT, file.copy, bzip2/xz, graphics devices that draw. PR #120 (stats natives, srcrefs, connections) merged as 25a05fb.
-- Typed table (session_0111kWqB9LKMquDanx18xVTC, Opus): precise checker types for every table operation, plus the x.-column, .EACHI-aggregate and string-into-number gaps. PR #119 (non-equi joins, .EACHI, warnings) merged as f6c1374.
+- Table beyond queries (session_0111kWqB9LKMquDanx18xVTC, Opus): typing gaps (factors, .SDcols variables), then fread/fwrite, setkey, rbindlist, dcast/melt, shift, fifelse and friends, each typed and benchmarked. PR #124 (typed frame queries) merged as 6070d14.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
