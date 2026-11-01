@@ -2035,14 +2035,29 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
 
 The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by package in
 `builtin_libraries::implementation`. Each behavior was derived from GNU R's documentation and its
-observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
-never from its C source.
+observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
+`utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **The session has only the null device.** `dev.cur()` is device 1, `.Device` and `.Devices` are
-  bound at startup, and every grDevices or graphics routine without an entry in the tables fails
-  with "graphics devices are not supported in ry yet" (`graphics::no_devices` is the fallback, so a
-  new routine needs no stub). `cairoProps` reports no cairo, so the default device is `pdf` and
-  `bitmapType` is `"Xlib"`, as in a headless build. A real device is a later step.
+- **Devices draw nothing and keep only observable state.** Every file device (pdf, postscript,
+  xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device` holding its size,
+  point size and the base graphics parameters, and creates an empty output file so `file.exists`
+  agrees with GNU R. Drawing routines check their arguments and a started plot, then return. A real
+  renderer would slot in behind the same table; nothing else reads pixels today.
+- **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
+  and `.Device` in base are rebound after every change, and any routine that needs a device opens
+  `getOption("device")` first, which is how a script with no device gets `pdf("Rplots.pdf")`.
+- **One copy of `par`.** GNU R keeps default and current parameters so a high-level call's inline
+  parameters apply for its duration; ry reads inline parameters from the call instead, so a single
+  `Pars` is the source of truth.
+- **Regions remember the unit they were set in** (`Margins`, `OuterMargins`, `PlotRegion`,
+  `FigureRegion` enums). Base graphics recomputes the others from that one when the device, `cex`,
+  `mex` or the layout changes, so `par(mai = ...)` followed by `par(cex = 2)` keeps the inches and
+  moves `mar`, and storing all units would let them drift apart.
+- **Text metrics are Helvetica's published AFM widths** (regular and bold; the oblique faces share
+  them) at the nearest whole point size, with the cap height for `strheight`. That matches the pdf
+  device's numbers exactly; bitmap devices in GNU R measure with cairo fonts and can differ.
+- **`cairoProps` reports cairo**, so `capabilities()` lists png, jpeg and tiff and the bitmap
+  devices take the cairo path, which needs no display.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
   low byte), because only the colour routines read it and the interpreter is single-threaded.
 - **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`

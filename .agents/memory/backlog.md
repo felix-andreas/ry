@@ -1827,9 +1827,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics devices.** The interpreter's session has only the null device, so plotting and opening
-  any device fail with a clear error (`decisions.md`, "the default packages' utils, tools,
-  grDevices and graphics routines"). `stem()` fails too: its layout rules are not derived yet.
+- **Graphics devices draw nothing** (`decisions.md`, "the default packages' utils, tools,
+  grDevices and graphics routines"). Missing: rendering output files, GNU R's `R_pretty` warnings
+  on subnormal axis ranges, cairo font metrics for bitmap devices, plotmath sizes (an expression is
+  measured as its deparsed text), and `stem()` beyond the empty case.
+- **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources). reg-plot,
+  reg-plot-latin1 and reg-S4-examples run to the end; the rest stop at large missing pieces:
+  stats natives `loess_raw` (reg-tests-1b), `nlm` (demos2), the PORT routines behind `nlminb`
+  (reg-examples2), qbeta's precision (p-qbeta-strict-tst), and tools' Rd and LaTeX parsers
+  (reg-tests-1c, reg-tests-3, reg-examples1). Ascii `save()` is also missing.
 - **Default-package routines still failing on purpose:** tools' `parse_Rd`, `deparseRd` and
   `parseLatex`, the help server, utils' sockets and `internal` download method. `Rprof` and
   `Rprofmem` warn and do nothing.
