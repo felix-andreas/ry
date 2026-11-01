@@ -4160,3 +4160,38 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - **JIT function speculation skips frame-bound symbols**: a call of a symbol the frame can bind (a formal or a local assignment) is never speculated from the enclosure, because a formal holding a function shadows a global of the same name (`uniroot(f, ...)` with a global `f`). Pinned by `formal_shadows_enclosing_function` in `crates/jit/tests/test_tiers.rs`.
 - **One implementation where two were written in parallel.** `sum` over doubles totals each argument in the long double model, rounds it to a double, and adds it to a long double total, which is what GNU R's observed results across arguments need; main's compensated sum was removed. Parse data comes from `crates/interp/src/parse_data.rs`, which replays GNU R's lexer contexts, instead of a second builder in `lower.rs`. A frame's hash chains are replayed in one place (`Frame::hash_chains` in `crates/heap/src/env.rs`), which both `env.profile` and the listing order read. Graphics devices keep the graphics engine's implementations.
 - **Impact:** no effect on static analysis. Each behavior has one implementation in `crates/interp`, and the GNU test runner (`contributing/corpus-and-oracle.md`) is the regression check.
+
+## A fix says whether it may be applied unseen
+
+- `Fix.applicability` (`diagnostics.rs`) is `Safe` when the edit keeps what the code means (the lint
+  rewrites, syncing a `#:` comment to the inline type that governs, removing an unreachable arm) and
+  `Unsafe` when it guesses intent or silences a finding without handling it (spelling suggestions,
+  `stop()` arms for missing cases). It follows ruff's model. `ry check --fix`, the editor's preferred
+  quick fix and the `source.fixAll` action apply only safe fixes, because nobody reviews those edits;
+  `--unsafe-fixes` and a click opt into the rest. The fix lives on the diagnostic, so the CLI and the
+  server share one source of truth (`applicable_fixes`, `apply_fixes`).
+- `ry check --fix` re-analyzes and repeats until no fix changes a file (at most `MAX_FIX_PASSES`),
+  because overlapping fixes are skipped within a pass and one fix can expose another. It refuses
+  to write a file whose text on disk no longer matches the analyzed text, and leaves a file with a
+  syntax error alone.
+- Safe means safe in context, not by syntax alone: `boolean-shorthand` holds only while the file
+  binds no `T`/`F` (it rides the lints' `unless_redefined` channel), and the `#:` comment fix is
+  withheld when the inline type names a type parameter the comment would not bind.
+- The server keeps each open document's settled fix-bearing findings with the text they were computed
+  for (`published_fixes` in `server.rs`). `codeAction` reuses them while the text matches, so a
+  request per cursor move costs no analysis, and the offered fixes are the findings on screen.
+
+## Parameter hints and call hierarchy follow R's own call rules
+
+- Parameter-name inlay hints (`inlay_hints` in `ide.rs`) map arguments to parameters with the
+  checker's own `argument_targets` (`check.rs`), so the hint and the type check never disagree on
+  where an argument goes. Hints stop at a forwarded `...` and skip a piped value. They show only in calls with at least two positional arguments, and skip one-letter
+  parameters and arguments whose text already names the parameter (`years` or `x$years`), because a
+  hint that repeats what is on screen is noise.
+- The call hierarchy is limited to project top-level functions (the `package_definitions` index),
+  because those are the items a reader navigates between and the index is already per-name tracked.
+  Only call heads count as calls, so passing `f` to `lapply` is a reference, not a call. A caller
+  that is a top-level statement is grouped as "(top level)". The server re-resolves a function item from
+  its uri and selection start instead of serializing ids into `data`, so a stale item never names
+  a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
+  statement calls first.
