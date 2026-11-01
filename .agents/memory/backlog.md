@@ -2139,14 +2139,11 @@ The end-to-end guard rests on the corpus suites.
   `melt` with mixed measure types does not warn as data.table does; `dcast` gives a frame with
   unknown columns (the spread columns are data values); a data path resolves against the project
   root only, because `SourceFile` carries no path.
-- **`dcast` with an aggregate runs at data.table's speed, not faster** (`crates/table/benches/ops_benchmark.rs`
-  against `tools/bench/table/ops.R`, 1e7 rows): almost all of it is the grouped query, which goes
-  through Polars' `group_by_stable`. A dense-key path that accumulates each cell straight from
-  `ops::key_digits`, as `unique` does, would skip the general grouping.
-- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `dcast` takes 0.030 to
-  0.035 s against 0.025 to 0.028 s, and `CJ` 0.038 s against 0.016 s; their C parts (forder,
-  bmerge, dogroups) run at GNU R's speed, so the gap is the interpreter running data.table's R.
-  `setkey` is at parity (0.026 s on both).
+- **data.table's R code runs slower under ry than under GNU R.** At 1e6 rows `CJ(id3, id4)`
+  (10,000 by 100) takes 0.013 s against 0.007 s at best of 10. The first two `dcast` calls of a
+  session take 0.06 to 0.07 s against about 0.045 s, and later ones 0.018 s against 0.027 s, so
+  `tools/bench/table/ops.R`, which times two runs, still shows `dcast` behind at 1e6 (0.048 s
+  against 0.026 s) and at parity at 1e7 (0.197 s against 0.196 s). Profile the warm-up.
 - **Uninitialized vector payloads are read through `&mut [T]`.** `alloc_vector_uninit` (and
   `Rf_allocVector`, which uses it) hands out numeric payloads that callers such as
   `crates/libr/src/frame_altrep.rs` and `crates/interp/src/values.rs` fill through `slice_mut`,
@@ -2157,12 +2154,6 @@ The end-to-end guard rests on the corpus suites.
   and 0.76 s against 0.94 s. The difference is the heap the earlier questions leave behind, so
   profile with them in place. `fwrite` varies by 2x between runs on both engines. `unique`,
   `uniqueN`, `between` and `chin` are at parity within noise.
-- **The `[` bridge loses to data.table's C on string group keys with many groups.** At 1e6 rows
-  `by = id3` (100,000 groups) takes 0.021 s against 0.017 s, and `by = c("id1", "id4")` 0.025 s
-  against 0.018 s; numeric keys win 4 times. Strings group through Polars, because the kernels'
-  digits cover factors, integers and logicals only. A string digit from `ops::string_ranks` was
-  tried and was slower (ranking sorts the distinct strings), so a digit needs first-appearance
-  numbers taken during import, where each distinct CHARSXP is already numbered.
 - **Reader gaps:** integer64 reads as double, dates as character; no `dec = ","`, no `strip.white`
   on character columns, and a ragged line is an error rather than fread's fill.
 - **Checker:** a `:=` error makes the updated frame `Unknown` for the rest of the item, as every
