@@ -348,20 +348,20 @@ worse: Unknown
 57..60 error[type-mismatch] expected `integer`, found `character`
 
 #---- dollar_field_does_not_exist
-x <- list(a = 1L)
-x$b
+x <- list(value = 1L)
+x$valeu
 #++++
-x: list{a: integer}
+x: list{value: integer}
 Unknown
-20..21 error[type-mismatch] field `b` does not exist in `list{a: integer}`
+24..29 error[type-mismatch] field `valeu` does not exist in `list{value: integer}`. Did you mean `value`?
 
 #---- double_bracket_field_does_not_exist
-x <- list(a = 1L)
-x[["b"]]
+x <- list(value = 1L)
+x[["valeu"]]
 #++++
-x: list{a: integer}
+x: list{value: integer}
 Unknown
-21..24 error[type-mismatch] field `b` does not exist in `list{a: integer}`
+25..32 error[type-mismatch] field `valeu` does not exist in `list{value: integer}`. Did you mean `value`?
 
 #---- dollar_on_non_list
 x <- 1L

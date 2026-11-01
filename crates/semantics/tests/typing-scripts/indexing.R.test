@@ -34,11 +34,10 @@ list(foo = 1L, bar = "foo")[["bar"]]
 #++++
 character
 
-#---- record_missing_field_is_rejected
+#---- record_missing_field_reads_null
 list(foo = 1L)[["bar"]]
 #++++
-Unknown
-16..21 error[type-mismatch] field `bar` does not exist in `list{foo: integer}`
+NULL
 
 #---- array_like_list_double_bracket_returns_element
 #: list[integer]

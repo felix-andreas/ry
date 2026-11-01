@@ -8570,20 +8570,21 @@ impl<'db> Checker<'db, '_> {
                     Some(name) => {
                         match fields.iter().find(|field| field.name.text(self.db) == name) {
                             Some(field) => Ok(field.ty),
-                            None => {
-                                let suggestion = nearest_name(
-                                    &name,
-                                    fields.iter().map(|field| field.name.text(self.db)),
-                                );
-                                Err(TypeError {
+                            // `[[` reads an absent name as `NULL`, like `$` without partial matching.
+                            None => match nearest_name(
+                                &name,
+                                fields.iter().map(|field| field.name.text(self.db)),
+                            ) {
+                                Some(suggestion) => Err(TypeError {
                                     range: key_range,
                                     kind: TypeErrorKind::FieldDoesNotExist {
-                                        suggestion,
+                                        suggestion: Some(suggestion),
                                         field: name,
                                         container: subject,
                                     },
-                                })
-                            }
+                                }),
+                                None => Ok(null(self.db)),
+                            },
                         }
                     }
                 }
@@ -8811,20 +8812,29 @@ impl<'db> Checker<'db, '_> {
                     }),
                 }
             }
+            // An R list is open: `$` partially matches a unique prefix (`fit$coef` reads
+            // `coefficients`) and answers `NULL` for a name it lacks, which is how code
+            // fills a list after building it. Only a near miss of a known field reads as a typo.
             TyKind::Record(fields) => {
-                match fields.iter().find(|field| field.name.text(self.db) == name) {
-                    Some(field) => Ok(field.ty),
-                    None => Err(TypeError {
+                if let Some(field) = fields.iter().find(|field| field.name.text(self.db) == name) {
+                    return Ok(field.ty);
+                }
+                let mut prefixed = fields
+                    .iter()
+                    .filter(|field| field.name.text(self.db).starts_with(name));
+                if let (Some(field), None) = (prefixed.next(), prefixed.next()) {
+                    return Ok(field.ty);
+                }
+                match nearest_name(name, fields.iter().map(|field| field.name.text(self.db))) {
+                    Some(suggestion) => Err(TypeError {
                         range: name_range,
                         kind: TypeErrorKind::FieldDoesNotExist {
-                            suggestion: nearest_name(
-                                name,
-                                fields.iter().map(|field| field.name.text(self.db)),
-                            ),
+                            suggestion: Some(suggestion),
                             field: name.to_owned(),
                             container: subject,
                         },
                     }),
+                    None => Ok(null(self.db)),
                 }
             }
             TyKind::NativeRecord(fields) => {
@@ -10327,11 +10337,11 @@ mod tests {
             out_of_range.errors
         );
         let missing_field =
-            check_source(&db, "f <- function() {\n  p <- list(a = 1L)\n  p$oops\n}");
+            check_source(&db, "f <- function() {\n  p <- list(value = 1L)\n  p$valeu\n}");
         assert!(
             missing_field.errors.iter().any(|error| matches!(
                 &error.kind,
-                TypeErrorKind::FieldDoesNotExist { field, .. } if field == "oops"
+                TypeErrorKind::FieldDoesNotExist { field, .. } if field == "valeu"
             )),
             "{:?}",
             missing_field.errors

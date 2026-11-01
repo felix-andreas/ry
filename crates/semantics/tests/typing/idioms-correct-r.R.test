@@ -264,3 +264,14 @@ friendly("text")
 #++++
 friendly: fn(x: Unknown) -> character
 character
+
+#---- a_list_answers_null_for_a_field_it_lacks_and_matches_prefixes
+fit <- list(coefficients = c(1, 2), rank = 2L)
+fit$coef
+fit$residuals
+fit[["df"]]
+#++++
+fit: list{coefficients: double[], rank: integer}
+double[]
+NULL
+NULL

@@ -122,11 +122,10 @@ list(foo = 1L, bar = "x")[["foo"]]
 #++++
 integer
 
-#---- double_bracket_record_missing_name_rejected
+#---- double_bracket_record_missing_name_reads_null
 list(foo = 1L)[["missing"]]
 #++++
-Unknown
-16..25 error[type-mismatch] field `missing` does not exist in `list{foo: integer}`
+NULL
 
 #---- double_bracket_array_list
 #: list[integer]
@@ -192,11 +191,16 @@ list(foo = 1L, bar = "x")$foo
 #++++
 integer
 
-#---- dollar_missing_record_field_rejected
+#---- dollar_missing_record_field_reads_null
 list(foo = 1L)$bar
 #++++
+NULL
+
+#---- dollar_near_miss_record_field_rejected
+list(value = 1L)$valeu
+#++++
 Unknown
-15..18 error[type-mismatch] field `bar` does not exist in `list{foo: integer}`
+17..22 error[type-mismatch] field `valeu` does not exist in `list{value: integer}`. Did you mean `value`?
 
 #---- dollar_tuple_list_rejected
 list(1L, 2L)$foo

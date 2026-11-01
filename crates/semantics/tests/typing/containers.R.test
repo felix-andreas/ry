@@ -264,12 +264,12 @@ f: Unknown
 
 #---- field_does_not_exist
 f <- function() {
-  p <- list(a = 1L)
-  p$oops
+  p <- list(value = 1L)
+  p$valeu
 }
 #++++
 f: Unknown
-42..46 error[type-mismatch] field `oops` does not exist in `list{a: integer}`
+46..51 error[type-mismatch] field `valeu` does not exist in `list{value: integer}`. Did you mean `value`?
 
 #---- a_field_only_some_shapes_carry_reads_as_nullable
 # The accumulator idiom: R answers NULL for a name a list does not carry, so a
