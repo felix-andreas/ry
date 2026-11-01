@@ -1747,6 +1747,15 @@ condition, a vector operand is accepted unless it is a `c()` call with two or mo
 `v && TRUE` on a `logical[]` passes, while `c(TRUE, FALSE) && TRUE` and `TRUE || c(FALSE, TRUE)` are
 type errors.
 
+### Elementwise operators `&` and `|`
+
+Each operand is a `logical`, `integer`, or `double` scalar or vector, and the result is `logical`.
+It is a scalar when both operands are scalars, and `logical[]` otherwise, so `a > 0 & b > 0` on two
+`double[]` parameters is `logical[]`. An operand whose type is `Any` makes the result `Any`, and
+one whose type is `Unknown` makes it `Unknown`, which strict mode reports where the operand's type
+was lost. An operand with no type yet, such as an unannotated parameter, could be a scalar or a
+vector, so the operator gives `Unknown` and strict mode reports it; annotate the parameter.
+
 ## Calls
 
 ### Function calls
@@ -1940,8 +1949,9 @@ both diverge. A diverging branch contributes neither its value nor the state of 
 `x <- if (c) return(NULL) else 5` gives `x` the type `double`, and a variable written inside a
 diverging branch does not join into the state after the `if`.
 
-A call that never returns has no bottom type of its own: `function() stop("no")` is
-`fn() -> Unknown`. `stop(...)` is recognized by its bare name, as `local` and `return` are, so
+A call that never returns has no bottom type of its own. A `stop(...)` call types as `Any`, which
+fits every context and which strict mode does not report, so `function() stop("no")` is
+`fn() -> Any`. `stop(...)` is recognized by its bare name, as `local` and `return` are, so
 rebinding `stop` is not modelled.
 
 ### Guard narrowing
@@ -2552,7 +2562,7 @@ bottom, so its top level is one sequential lexical scope, like a function body:
   enclosing statement's own binding, so self-recursion resolves.
 - A conditional top-level write creates the document's variable slot exactly as in package files.
 - A masked read, from `with` or from data.table indexing, and a read inside an opaque operator, which
-  is `&`, a user `%op%`, or a pipe R would reject, are never reported as unresolved. Each still counts
+  is a user `%op%` or a pipe R would reject, are never reported as unresolved. Each still counts
   as a use for the unused check, and navigation connects it.
 
 Scripts are type-checked like package files, against the package-global values and project-global

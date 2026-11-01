@@ -77,10 +77,9 @@ An unresolved name, normally a warning, becomes an error.
 
 An annotation clears the finding, because the value now has a type. A value declared `Any`, or a
 call that returns `Any` (`readRDS()`, `eval()`, and S3 generics that dispatch through `UseMethod()`),
-is a deliberate opt-out, so strict mode does not report it.
+is a deliberate opt-out, so strict mode does not report it. A call to `stop()` never returns, so it
+types as `Any` too, and a guard such as `if (x < 0) stop("negative")` is not reported.
 
 ## Known gaps
 
-Strict mode does not yet report R6 objects or bare names from packages ry knows only by name, and it
-wrongly reports a `stop()` guard such as `if (x < 0) stop("negative")`. `# ry: allow(strict)` on that
-line silences it.
+Strict mode does not yet report R6 objects or bare names from packages ry knows only by name.
