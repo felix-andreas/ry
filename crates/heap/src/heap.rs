@@ -133,7 +133,8 @@ pub enum GcStress {
 }
 
 pub struct GcPolicy {
-    /// Bytes of young allocation that trigger a minor collection.
+    /// Bytes of young allocation that trigger a minor collection while the old generation is
+    /// small; past twice this size, half the old generation's bytes trigger one instead.
     pub young_limit: usize,
     /// Old-generation bytes that trigger a major collection after a minor one.
     pub old_limit: usize,
@@ -767,6 +768,25 @@ impl Heap {
         }
     }
 
+    /// Ends every escape once the outermost native call returns. Native code may store through
+    /// a writable element pointer only while the call that took it runs (GNU R's collector never
+    /// sees those stores at all), so each escaped vector that is old is remembered instead: the
+    /// next minor collection rescans it once, catching the stores made meanwhile, and from then
+    /// on it is an ordinary object whose stores go through the barrier. Without this a column a
+    /// package touched once would be rescanned by every minor collection for the rest of the
+    /// session.
+    pub unsafe fn retire_escaped(&mut self) {
+        let mut escaped = std::mem::take(&mut self.escaped);
+        for vector in escaped.drain(..) {
+            vector.set_gc_bit(gc_bits::ESCAPED, false);
+            if vector.gc_bits() & (gc_bits::MARK | gc_bits::REMEMBERED) == gc_bits::MARK {
+                vector.set_gc_bit(gc_bits::REMEMBERED, true);
+                self.remembered.push(vector);
+            }
+        }
+        self.escaped = escaped;
+    }
+
     // Environments.
 
     fn is_symbol_frame(&self, env: Sexp) -> bool {
@@ -1028,7 +1048,10 @@ impl Heap {
                 self.collect_keeping(kind, keep);
             }
             GcStress::Off => {
-                if self.young_bytes + request > self.policy.young_limit {
+                // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect
+                // on every large vector a big session allocates, rescanning the young ones each time.
+                let budget = self.policy.young_limit.max(self.old_bytes / 2);
+                if self.young_bytes + request > budget {
                     self.collect_keeping(Collection::Minor, keep);
                     if self.old_bytes > self.policy.old_limit {
                         self.collect_keeping(Collection::Major, keep);
@@ -1063,9 +1086,27 @@ impl Heap {
                 let parent = self.remembered[index];
                 self.mark_stack.push(parent);
             }
+            // An escaped character vector can only have come to hold CHARSXPs, which point at
+            // nothing, so marking every young CHARSXP covers whatever native code stored into it
+            // without rereading its elements, each a cache miss on another object's header. A
+            // young CHARSXP that is in fact garbage survives until the next major collection.
+            let mut escaped_strings = false;
             for index in 0..self.escaped.len() {
                 let parent = self.escaped[index];
-                self.mark_stack.push(parent);
+                if parent.kind() == SexpType::String && !parent.is_altrep() && parent.is_marked() {
+                    escaped_strings = true;
+                    self.mark(parent.attrib());
+                } else {
+                    self.mark_stack.push(parent);
+                }
+            }
+            if escaped_strings {
+                for index in 0..self.young.len() {
+                    let object = self.young[index];
+                    if object.kind() == SexpType::Char {
+                        self.mark(object);
+                    }
+                }
             }
         }
         self.drain();

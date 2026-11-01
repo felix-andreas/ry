@@ -192,6 +192,9 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
     );
     let runtime = runtime();
     runtime.native_depth -= 1;
+    if runtime.native_depth == 0 {
+        runtime.heap.retire_escaped();
+    }
     let exit_depth = runtime.heap.roots.protect.leave(saved_base);
     runtime.arena.reset(watermark);
     runtime.heap.release_handles(mark);
@@ -269,6 +272,9 @@ pub unsafe fn with_native_scope(call: impl FnOnce() -> c_int) -> ApiResult<()> {
     let status = call();
     let runtime = runtime();
     runtime.native_depth -= 1;
+    if runtime.native_depth == 0 {
+        runtime.heap.retire_escaped();
+    }
     runtime.heap.roots.protect.leave(saved_base);
     runtime.arena.reset(watermark);
     runtime.heap.release_handles(mark);

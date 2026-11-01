@@ -114,29 +114,30 @@ are faster on every group-by question (2 to 39 times), every join (2 to 4 times)
 added-column `:=` loops (5 to 6 times), a filtered `:=` loop (1.4 times) and the keyed rolling
 join (2 times). The [design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
 
-`tools/bench/table/ops.R` and the `ops_benchmark` bench in `crates/table` time data.table's helpers
-on the db-benchmark group-by file (10 million rows, 4 threads), and both give the same checksums.
-The table engine's numbers are measured from Rust: calls from R reach these kernels only once the
-runtime routes data.table's functions to them, which it does not do yet. Times are in seconds.
+Calls to data.table's other functions (`fread`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`
+and the rest) run data.table's own C code through ry's C API, so their results are data.table's by
+construction. `tools/bench/table/ops.R` times them on the db-benchmark group-by file (10 million
+rows, 4 threads), once under GNU R and once under `ry run --runtime ry`, and both runs give the same
+checksums. Times are in seconds.
 
-| Operation | data.table | ry |
+| Operation | GNU R | ry |
 |---|---|---|
-| `fread` | 2.92 | 1.39 |
-| `fwrite` | 0.87 | 0.70 |
-| `setkey` | 0.42 | 0.46 |
-| `setorder` | 0.97 | 0.69 |
-| `unique` | 0.10 | 0.09 |
-| `uniqueN` | 0.13 | 0.10 |
-| `rbindlist` | 0.88 | 0.29 |
-| `melt` | 1.20 | 0.39 |
-| `dcast` | 0.26 | 0.26 |
-| `shift` | 0.024 | 0.004 |
-| `fifelse` | 0.084 | 0.050 |
-| `fcoalesce` | 0.059 | 0.047 |
-| `nafill` | 0.081 | 0.042 |
-| `rleid` | 0.026 | 0.011 |
-| `between` | 0.018 | 0.013 |
-| `%chin%` | 0.049 | 0.036 |
-| `tstrsplit` | 5.17 | 1.86 |
+| `fread` | 3.09 | 2.32 |
+| `fwrite` | 0.76 | 1.27 |
+| `setkey` | 0.43 | 0.45 |
+| `setorder` | 0.88 | 0.95 |
+| `unique` | 0.073 | 0.121 |
+| `uniqueN` | 0.11 | 0.15 |
+| `rbindlist` | 0.85 | 1.22 |
+| `melt` | 1.21 | 1.56 |
+| `dcast` | 0.20 | 0.21 |
+| `shift` | 0.024 | 0.024 |
+| `fifelse` | 0.086 | 0.081 |
+| `fcoalesce` | 0.062 | 0.065 |
+| `nafill` | 0.082 | 0.083 |
+| `rleid` | 0.025 | 0.025 |
+| `between` | 0.016 | 0.021 |
+| `%chin%` | 0.077 | 0.092 |
+| `tstrsplit` | 5.79 | 6.59 |
 
 Each cell is the faster of two runs.
