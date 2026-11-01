@@ -2232,13 +2232,26 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
-  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
-  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
-  (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
-  ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
-  layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
-  case, and contour label placement, which picks slightly different positions than GNU R.
+- **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
+  packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
+  oracle cases; what is left:
+  - The built-in devices have no patterns, gradients, clipping paths, masks or groups (device
+    version 0), so grid's `clippaths`, `patterns`, `compositing`, `groups` and `paths` tests differ
+    from GNU R's pdf output, and compound paths fill their holes.
+  - Built-in devices ignore raster interpolation, and PostScript paints semi-transparent colours
+    opaque (its prolog ignores the PDF `gs` opacity), where GNU R leaves them out with a warning.
+  - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
+    with cairo's font, so `strwidth` on `png()` differs slightly.
+  - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey
+    fonts fall back to ordinary text, and the Adobe symbol conversions pass text through.
+  - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
+    points); open splines match GNU R value for value.
+  - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
+    (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
+  - Bitmap pages are written when the device closes rather than per page.
+  - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
+    warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
+  - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
   GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
   (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an

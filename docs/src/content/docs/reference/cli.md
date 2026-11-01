@@ -72,9 +72,9 @@ The runtimes differ in what they do with the annotations. ry's runtime turns the
 function boundaries](/type-checking/inline-annotations#running-annotated-code), and GNU R runs the
 script with them erased. ry's runtime is under construction: a script that calls something it
 lacks stops with an error naming it, such as a missing `.Internal` or a native routine of a default
-package. Base graphics draws into `pdf`, `svg`, `png`, `bmp` and `tiff` files, which are written
-when the device closes or the script ends; `jpeg` and `postscript` devices open but write no image
-yet. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
+package. Base graphics, grid and device packages such as ragg draw as they do on GNU R. The
+built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and `tiff` devices write their files when
+the device closes or the script ends. A script sees `interactive()` as `FALSE` on both runtimes, as under `Rscript`, and a console
 sees `TRUE`.
 
 The console completes names with Tab, and `--keybindings vi` switches it to vi keys. [The console

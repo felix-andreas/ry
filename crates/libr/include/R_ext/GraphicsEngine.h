@@ -1,5 +1,5 @@
 /*
- * ry's declaration of R's graphics engine API, source- and layout-compatible with R 4.6.
+ * ry's declaration of R's graphics engine API, source- and layout-compatible with R 4.3 to 4.6.
  *
  * Devices such as ragg and svglite fill in these structures and pass them to the engine, so the
  * struct layouts, enum values and constants are a binary interface and match GNU R's exactly.
@@ -8,6 +8,8 @@
  */
 #ifndef R_GRAPHICSENGINE_H_
 #define R_GRAPHICSENGINE_H_
+
+#include <Rversion.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,7 +24,14 @@ extern "C" {
 #define R_GE_group 15
 #define R_GE_glyphs 16
 #define R_GE_fontVar 17
+
+/* The version follows the R release the headers present, as GNU R's does, so a device built
+   here and a binary built for that release expect the same engine. */
+#if R_VERSION >= R_Version(4, 6, 0)
 #define R_GE_version R_GE_fontVar
+#else
+#define R_GE_version R_GE_glyphs
+#endif
 
 int R_GE_getVersion(void);
 void R_GE_checkVersionOrDie(int version);
@@ -84,7 +93,6 @@ typedef R_GE_gcontext *pGEcontext;
 }
 #endif
 
-#include <Rversion.h>
 #include <R_ext/GraphicsDevice.h>
 
 #ifdef __cplusplus
