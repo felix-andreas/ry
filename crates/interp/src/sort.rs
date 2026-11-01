@@ -437,7 +437,9 @@ unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
 /// `"max"`.
 unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     let x = values::materialize(call.arg(0))?;
-    if x.kind() == SexpType::Raw {
+    // A classed raw vector is ranked by its bytes, which is what `xtfrm` and so `order` and
+    // `sort` rely on; GNU R refuses only a bare raw vector.
+    if x.kind() == SexpType::Raw && !x.is_object() {
         return Err(error("raw vectors cannot be sorted"));
     }
     let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
@@ -869,6 +871,7 @@ enum Column<'a> {
     Integer(&'a [i32]),
     Real(&'a [f64]),
     Complex(&'a [Rcomplex]),
+    Raw(&'a [u8]),
     String(Vec<Option<Cow<'a, str>>>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
@@ -881,6 +884,7 @@ unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
         SexpType::Logical | SexpType::Integer => Some(Column::Integer(values::ints(vector))),
         SexpType::Real => Some(Column::Real(values::reals(vector))),
         SexpType::Complex => Some(Column::Complex(values::complexes(vector))),
+        SexpType::Raw => Some(Column::Raw(values::raws(vector))),
         SexpType::String => Some(Column::String(
             (0..length(vector))
                 .map(|index| string_at(vector, index))
@@ -916,7 +920,7 @@ impl Column<'_> {
             Column::Real(items) => items[index].is_nan(),
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
             Column::String(items) => items[index].is_none(),
-            Column::Grouped(_) => false,
+            Column::Grouped(_) | Column::Raw(_) => false,
         }
     }
 
@@ -925,6 +929,7 @@ impl Column<'_> {
         match self {
             Column::Integer(items) => items[left].cmp(&items[right]),
             Column::Grouped(items) => items[left].cmp(&items[right]),
+            Column::Raw(items) => items[left].cmp(&items[right]),
             Column::Real(items) => items[left]
                 .partial_cmp(&items[right])
                 .unwrap_or(Ordering::Equal),

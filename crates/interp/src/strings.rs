@@ -965,7 +965,7 @@ fn general_form(magnitude: f64, precision: usize, alternate: bool) -> String {
 }
 
 /// C's `%a`: a hexadecimal significand with one leading digit and a binary exponent.
-fn hexadecimal_form(magnitude: f64, precision: Option<usize>, alternate: bool) -> String {
+pub fn hexadecimal_form(magnitude: f64, precision: Option<usize>, alternate: bool) -> String {
     const FRACTION_DIGITS: usize = 13;
     let bits = magnitude.to_bits();
     let biased = ((bits >> 52) & 0x7ff) as i32;

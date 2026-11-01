@@ -233,9 +233,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("enc2native", 1, |call| unsafe { Ok(call.arg(0)) }),
     builtin("enc2utf8", 1, |call| unsafe { Ok(call.arg(0)) }),
     internal("iconv", 6, do_iconv),
-    internal("validUTF8", 1, |call| unsafe {
-        map_strings_bool(call, |_| true)
-    }),
+    internal("validUTF8", 1, do_valid_utf8),
     internal("validEnc", 1, |call| unsafe {
         map_strings_bool(call, |_| true)
     }),
@@ -362,6 +360,20 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
             None => values::na_string(),
         };
         values::set_elt(result, index, charsxp);
+    }
+    Ok(result)
+}
+
+unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
+    let strings = call.arg(0);
+    if strings.kind() != SexpType::String {
+        return Err(error("invalid 'x' argument"));
+    }
+    let count = length(strings);
+    let result = alloc(SexpType::Logical, count)?;
+    for index in 0..count {
+        values::ints_mut(result)[index] =
+            std::str::from_utf8(strings.element(index).bytes()).is_ok() as i32;
     }
     Ok(result)
 }
@@ -1666,6 +1678,12 @@ fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> Option<(f
 unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     let texts = call.arg(0);
     let formats = call.arg(1);
+    if texts.kind() != SexpType::String {
+        return Err(error("invalid 'x' argument"));
+    }
+    if formats.kind() != SexpType::String || length(formats) == 0 {
+        return Err(error("invalid 'format' argument"));
+    }
     let tz = values::first_string(call.arg(2))
         .map(|text| text.into_owned())
         .unwrap_or_default();

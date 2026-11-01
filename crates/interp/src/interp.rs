@@ -353,7 +353,8 @@ unsafe fn default_write_console(text: &[u8], is_error: bool) {
 /// the terminal.
 pub fn write_console(text: &[u8], is_error: bool) {
     if is_error {
-        write_terminal(text, true);
+        // SAFETY: the connection table only holds connections of this session.
+        unsafe { connections::write_message(text) }
     } else {
         // SAFETY: the sink table only holds connections of this session.
         unsafe { connections::write_output(text) }

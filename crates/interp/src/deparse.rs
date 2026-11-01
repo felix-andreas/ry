@@ -5,7 +5,7 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    format, records, standard_library,
+    format, records, standard_library, strings,
     unwind::R,
     values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
 };
@@ -1187,6 +1187,12 @@ impl Deparser {
                         } else {
                             "NA".to_owned()
                         }
+                    } else if self.opts & options::HEX_NUMERIC != 0 && value.is_finite() {
+                        let sign = if value.is_sign_negative() { "-" } else { "" };
+                        format!(
+                            "{sign}{}",
+                            strings::hexadecimal_form(value.abs(), None, false)
+                        )
                     } else {
                         if self.opts & options::DIGITS17 != 0 {
                             format::c_general(value, 17, false)

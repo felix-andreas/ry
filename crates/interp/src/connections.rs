@@ -223,6 +223,9 @@ pub struct Table {
     entries: Vec<Option<Entry>>,
     /// Innermost last.
     sinks: Vec<Sink>,
+    /// The connection messages, warnings and errors go to: `stderr` unless
+    /// `sink(type = "message")` diverted them. Unlike output, these diversions do not nest.
+    message_slot: usize,
 }
 
 struct Entry {
@@ -279,6 +282,7 @@ impl Table {
         Table {
             entries,
             sinks: Vec::new(),
+            message_slot: 2,
         }
     }
 
@@ -380,6 +384,30 @@ pub fn count() -> usize {
 }
 
 /// Writes standard output: to the console, or to where `sink` diverts it.
+/// Writes a message, warning or error where `sink(type = "message")` sends them, flushing so
+/// that a file sees each one at once, as GNU R does.
+pub unsafe fn write_message(bytes: &[u8]) {
+    let slot = interp().connections.message_slot;
+    let target = match entry(slot) {
+        Some(entry) if slot > 2 && (*entry.con).isopen != 0 => entry.con,
+        _ => {
+            write_terminal(bytes, true);
+            return;
+        }
+    };
+    if let Err(unwind) = method_print(target, bytes).and_then(|()| method_fflush(target)) {
+        let message = match unwind {
+            Unwind::Error(failure) => failure.message,
+            _ => "the message connection could not be written".to_owned(),
+        };
+        write_terminal(
+            format!("Error writing to the message connection: {message}\n").as_bytes(),
+            true,
+        );
+        write_terminal(bytes, true);
+    }
+}
+
 pub unsafe fn write_output(bytes: &[u8]) {
     let Some(sink) = interp().connections.sinks.last() else {
         write_terminal(bytes, false);
@@ -1363,6 +1391,18 @@ unsafe fn do_sink(call: &Call<'_>) -> R<Sexp> {
     let messages = values::require_flag(call.arg(2), "type")?;
     let split = values::require_flag(call.arg(3), "split")?;
     if messages {
+        let slot = if values::inherits(target, "connection") {
+            resolve_con(target)?.0
+        } else {
+            match values::as_integer_scalar(target) {
+                slot if slot < 0 => 2,
+                slot => slot as usize,
+            }
+        };
+        if entry(slot).is_none() {
+            return Err(error("invalid connection"));
+        }
+        interp().connections.message_slot = slot;
         return Ok(nil());
     }
     if !values::inherits(target, "connection") && values::as_integer_scalar(target) < 0 {
@@ -1409,7 +1449,7 @@ unsafe fn do_sink_number(call: &Call<'_>) -> R<Sexp> {
     if values::as_logical_scalar(call.arg(0)) == 1 {
         scalar_integer(interp().connections.sinks.len() as i32)
     } else {
-        scalar_integer(2)
+        scalar_integer(interp().connections.message_slot as i32)
     }
 }
 
@@ -3285,7 +3325,8 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             Ok(bytes.len())
         }
         Device::Standard(Standard::Error) => {
-            write_terminal(bytes, true);
+            // `stderr()` is where messages go, so it follows `sink(type = "message")`.
+            write_message(bytes);
             Ok(bytes.len())
         }
         Device::File(file) => match &mut file.stream {

@@ -815,6 +815,21 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
         return Ok(nil());
     }
+    if matches!(object.kind(), SexpType::List | SexpType::Expression) && length(index) == 1 {
+        // A list gives `NULL` for a missing or infinite subscript, where an atomic vector
+        // reports it out of bounds; a large finite subscript is out of bounds for both.
+        let absent = match index.kind() {
+            SexpType::Integer | SexpType::Logical => values::ints(index)[0] == NA_INTEGER,
+            SexpType::Real => {
+                let value = values::reals(index)[0];
+                value.is_nan() || value == f64::INFINITY
+            }
+            _ => false,
+        };
+        if absent {
+            return Ok(nil());
+        }
+    }
     let position = single_position(index, length(object), names, exact, call)?;
     element_or_value(object, position)
 }
@@ -858,22 +873,52 @@ unsafe fn single_position(
                 None => Err(crate::unwind::error_in(call, "subscript out of bounds")),
             }
         }
-        SexpType::Integer | SexpType::Real | SexpType::Logical => {
-            let value = numeric_element(index, 0);
+        SexpType::Integer | SexpType::Logical => {
+            let value = values::ints(index)[0];
+            if value == NA_INTEGER {
+                return Err(crate::unwind::error_in(call, "subscript out of bounds"));
+            }
+            if value < 0 && extent == 2 && value >= -2 {
+                return Ok(if value == -1 { 1 } else { 0 });
+            }
+            if value <= 0 {
+                let amount = if value < 0 && extent > 1 {
+                    "more"
+                } else {
+                    "less"
+                };
+                return Err(crate::unwind::error_in(
+                    call,
+                    format!("attempt to select {amount} than one element in integerOneIndex"),
+                ));
+            }
+            if value as usize > extent {
+                return Err(crate::unwind::error_in(call, "subscript out of bounds"));
+            }
+            Ok(value as usize - 1)
+        }
+        SexpType::Real => {
+            let value = values::reals(index)[0];
             if value.is_nan() {
                 return Err(crate::unwind::error_in(call, "subscript out of bounds"));
             }
             let value = value.trunc();
             if value < 0.0 {
-                if extent == 2 && (value == -1.0 || value == -2.0) {
+                if extent == 2 && value >= -2.0 {
                     return Ok(if value == -1.0 { 1 } else { 0 });
                 }
                 return Err(crate::unwind::error_in(
                     call,
-                    format!("invalid negative subscript in get1index <real>"),
+                    "invalid negative subscript in get1index <real>",
                 ));
             }
-            if value == 0.0 || value as usize > extent {
+            if value == 0.0 {
+                return Err(crate::unwind::error_in(
+                    call,
+                    "attempt to select less than one element in get1index <real>",
+                ));
+            }
+            if value > extent as f64 {
                 return Err(crate::unwind::error_in(call, "subscript out of bounds"));
             }
             Ok(value as usize - 1)
@@ -2391,9 +2436,15 @@ unsafe fn do_set_attributes(call: &Call<'_>) -> R<Sexp> {
         return Err(call.error("attempt to set an attribute on NULL"));
     }
     let object = modifiable(object)?;
+    let was_s4 = object.has_gp(gp::S4_OBJECT);
     values::clear_attributes(object);
     if attributes == nil() {
         return Ok(object);
+    }
+    // GNU R drops the S4 bit only when no attributes remain, so `structure()` on an S4
+    // object keeps it an S4 object.
+    if was_s4 && length(attributes) > 0 {
+        object.set_gp_bits(gp::S4_OBJECT, true);
     }
     if attributes.kind() != SexpType::List {
         return Err(call.error("attributes must be a list or NULL"));
