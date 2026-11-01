@@ -15,20 +15,12 @@ use crate::{
 use heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp};
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    builtin("[", -1, do_subset)
-        .generic(Generic::Internal)
-        .keep_missing(),
-    builtin("[[", -1, do_subset2)
-        .generic(Generic::Internal)
-        .keep_missing(),
+    special("[", -1, do_subset).dispatch_or_eval(),
+    special("[[", -1, do_subset2).dispatch_or_eval(),
     special("$", 2, do_dollar),
     special("@", 2, do_at),
-    builtin("[<-", -1, do_subassign)
-        .generic(Generic::Internal)
-        .keep_missing(),
-    builtin("[[<-", -1, do_subassign2)
-        .generic(Generic::Internal)
-        .keep_missing(),
+    special("[<-", -1, do_subassign).dispatch_or_eval(),
+    special("[[<-", -1, do_subassign2).dispatch_or_eval(),
     special("$<-", 3, do_dollar_assign),
     special("@<-", 3, do_at_assign),
     builtin(".subset", -1, do_subset).keep_missing(),

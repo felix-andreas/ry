@@ -281,6 +281,12 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
     match function.kind() {
         SexpType::Special => {
             let definition = builtin_def(function)?;
+            if definition.is_dispatch_or_eval() {
+                return match dispatch::dispatch_or_eval(definition, call, function, arguments, env)? {
+                    Ok(value) => Ok(value),
+                    Err(args) => call_builtin(definition, call, function, &args, env),
+                };
+            }
             let args: Vec<Arg> = values::pairlist_items(arguments)
                 .into_iter()
                 .map(|(tag, value)| Arg { tag, value })
@@ -483,8 +489,19 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
     };
     match function.kind() {
         SexpType::Closure => apply_closure(call, function, args, env, None),
-        SexpType::Builtin => {
+        SexpType::Builtin | SexpType::Special => {
             let definition = builtin_def(function)?;
+            if function.kind() == SexpType::Special && !definition.is_dispatch_or_eval() {
+                // A special needs expressions; quote the values so they evaluate to themselves.
+                let mut quoted = Vec::with_capacity(args.len());
+                for arg in args {
+                    quoted.push(Arg {
+                        tag: arg.tag,
+                        value: quote_value(value_of(arg.value)?)?,
+                    });
+                }
+                return call_builtin(definition, call, function, &quoted, env);
+            }
             let mut forced = Vec::with_capacity(args.len());
             for arg in args {
                 let value = if arg.value == missing_arg() {
@@ -503,18 +520,6 @@ pub unsafe fn apply(call: Sexp, function: Sexp, args: &[Arg], env: Sexp) -> R<Se
                 return Ok(value);
             }
             call_builtin(definition, call, function, &forced, env)
-        }
-        SexpType::Special => {
-            // A special needs expressions; quote the values so they evaluate to themselves.
-            let definition = builtin_def(function)?;
-            let mut quoted = Vec::with_capacity(args.len());
-            for arg in args {
-                quoted.push(Arg {
-                    tag: arg.tag,
-                    value: quote_value(value_of(arg.value)?)?,
-                });
-            }
-            call_builtin(definition, call, function, &quoted, env)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
