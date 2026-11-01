@@ -890,6 +890,9 @@ impl Compiler {
             {
                 return self.field(call, head, primitive, dst, *subject, *field);
             }
+            if name == "$" {
+                return self.general_call(call, head, dst);
+            }
             if self.eager_subject(primitive, &args)? {
                 return self.subject_call(call, head, primitive, dst, &args);
             }
@@ -1060,6 +1063,7 @@ impl Compiler {
                 | "[[<-"
                 | ".Internal"
                 | "local"
+                | "$"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
