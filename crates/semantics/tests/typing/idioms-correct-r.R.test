@@ -722,3 +722,13 @@ empty <- function() quo()
 enquo: <T> fn([arg]: T) -> Any
 quo: <T> fn([expr]: T) -> Any
 empty: fn() -> Any
+
+#---- sorting_with_index_return_gives_the_values_and_the_permutation
+first_indices <- function(n) {
+  sorted <- sort(c(3, 1, 2), index.return = TRUE)
+  sorted$ix[1:n]
+}
+plain <- function() sort(c(3, 1, 2), decreasing = TRUE)
+#++++
+first_indices: <T: scalar numeric> fn(n: T) -> integer[]
+plain: fn() -> double[]
