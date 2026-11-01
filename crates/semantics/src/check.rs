@@ -4822,6 +4822,30 @@ impl<'db> Checker<'db, '_> {
         {
             return;
         }
+        // A `NULL` member is the "not supplied" path of an optional value, and R code tests such
+        // a value once it holds one, so a union is a condition when its other members are. Its
+        // open members (a parameter rebound on one path) are bound to `logical` as a lone open
+        // value would be.
+        if let TyKind::Union(members) = resolved.kind(self.db) {
+            let members = members.clone();
+            let values: Vec<_> = members
+                .iter()
+                .copied()
+                .filter(|&member| !matches!(member.kind(self.db), TyKind::Null))
+                .collect();
+            if !values.is_empty()
+                && values.iter().all(|&member| {
+                    self.condition_coerces(member) || self.is_open_parameter(member)
+                })
+            {
+                for member in values {
+                    if !self.condition_coerces(member) {
+                        self.unify_or_report(condition_range, scalar(self.db, Atomic::Logical), member);
+                    }
+                }
+                return;
+            }
+        }
         // A value already required to be numeric (`if (n %% 2L)`) coerces like a number, so the
         // condition must not pin it to `logical`.
         let constraint = match resolved.kind(self.db) {

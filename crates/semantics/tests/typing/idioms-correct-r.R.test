@@ -387,3 +387,37 @@ flip <- function(phi, flag, m) {
 }
 #++++
 flip: <T, U> fn(phi: T, flag: logical, m: U) -> Unknown
+
+#---- a_condition_accepts_an_optional_logical
+pluck <- function(config, key) {
+  if (is.null(config)) NULL else isTRUE(config[[key]])
+}
+if (pluck(list(a = TRUE), "a")) print("yes")
+#++++
+pluck: <T, U> fn(config: T | NULL, [key]: U) -> logical | NULL
+character | NULL
+
+#---- a_condition_accepts_a_parameter_rebound_on_one_path
+fifo <- function(read = NULL, write = NULL) {
+  if (is.null(read)) read <- !isTRUE(write)
+  if (is.null(write)) write <- !read
+  if (read && write) stop("not both")
+  read
+}
+#++++
+fifo: <T, U> fn([read]: T | NULL, [write]: U | NULL) -> Unknown
+
+#---- a_condition_rejects_a_bare_null
+if (NULL) print("never")
+#++++
+character | NULL
+4..8 error[type-mismatch] expected `logical`, found `NULL`
+
+#---- a_condition_accepts_an_optional_value_of_open_type
+get_flag <- function(config, default = NULL) {
+  if (is.null(config)) default else config
+}
+use <- function(config) if (get_flag(config, default = FALSE)) "on" else "off"
+#++++
+get_flag: <T> fn(config: T | NULL, [default]: T) -> T
+use: fn(config: logical) -> character
