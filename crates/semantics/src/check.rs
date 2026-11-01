@@ -8975,6 +8975,14 @@ impl<'db> Checker<'db, '_> {
                 .iter()
                 .any(|(_, _, results)| results.iter().any(|&result| !self.is_list_result(result)))
         {
+            // A declared `Any` is the author's opt-out, so the call it leaves ambiguous opts out
+            // too, as in mypy; only an argument whose type inference lost stays `Unknown`. A
+            // forwarded `...` counts as `Any`, the element type of a `...` formal.
+            if call_arguments.iter().all(|argument| {
+                argument.forwards_dots || argument.ty.is_none_or(|ty| !self.is_inferred_unknown(ty))
+            }) {
+                return any(self.db);
+            }
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }
@@ -9102,16 +9110,28 @@ impl<'db> Checker<'db, '_> {
 
     /// `c(x, unknown)` is as unchecked as `unknown` itself: its element type fits every
     /// candidate too.
+    /// Like `is_unchecked`, but only for `Unknown`: a type inference could not determine.
+    fn is_inferred_unknown(&mut self, ty: Ty<'db>) -> bool {
+        let element = self.unchecked_candidate(ty);
+        matches!(element.kind(self.db), TyKind::Unknown)
+    }
+
     fn is_unchecked(&mut self, ty: Ty<'db>) -> bool {
+        let element = self.unchecked_candidate(ty);
+        matches!(element.kind(self.db), TyKind::Unknown | TyKind::Any)
+    }
+
+    /// The type that decides whether `ty` is unchecked: itself, or the element of a vector or
+    /// list of it.
+    fn unchecked_candidate(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let resolved = self.table.shallow_resolve(self.db, ty);
-        let ty = match resolved.kind(self.db) {
+        match resolved.kind(self.db) {
             TyKind::Vector(element)
             | TyKind::NamedVector(element)
             | TyKind::List(element)
             | TyKind::NamedList(element) => self.table.shallow_resolve(self.db, *element),
             _ => resolved,
-        };
-        matches!(ty.kind(self.db), TyKind::Unknown | TyKind::Any)
+        }
     }
 
     /// Whether every specific fit still fits when each unchecked argument is replaced by a

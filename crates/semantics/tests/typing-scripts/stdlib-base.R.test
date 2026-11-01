@@ -376,10 +376,12 @@ rep(0, n)
 n: Any
 double[]
 
-#---- unchecked_arguments_the_specific_fits_disagree_on_stay_unknown
+#---- unchecked_arguments_the_specific_fits_disagree_on_pick_no_candidate
+# `nrow` returns `Any`, which fits every `seq` candidate, and the candidates disagree, so the
+# call opts out like its argument rather than taking the first candidate's `integer[]`.
 seq(nrow(matrix(0, 2L, 2L)))
 #++++
-Unknown
+Any
 
 #==== precise_strings
 #---- trimws_is_character

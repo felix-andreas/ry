@@ -193,6 +193,20 @@ earliest: fn() -> Any
 367..373 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 
+#---- an_overload_left_ambiguous_by_a_declared_any_is_any
+# Every `sum` candidate accepts an `Any`, and they disagree on the result. The `Any` is the
+# author's own opt-out, so the call opts out too instead of becoming a strict finding; a
+# forwarded `...` is `Any` the same way.
+#~~~~ R/main.R
+#: fn(x: Any) -> double
+total <- function(x) sum(x)
+#: fn(...: Any) -> Any
+first <- function(...) utils::head(...)
+#++++
+== R/main.R
+total: fn(x: Any) -> double
+first: fn(...: Any) -> Any
+
 #---- stop_is_strict_clean_in_either_position
 #~~~~ R/main.R
 #: fn(x: double) -> double
