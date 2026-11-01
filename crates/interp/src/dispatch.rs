@@ -215,7 +215,10 @@ pub unsafe fn lookup_method(name: Sexp, call_env: Sexp, def_env: Sexp) -> R<Opti
         }
         env = env.enclosure();
     }
-    Ok(None)
+    match crate::standard_library::builtins_env() {
+        Some(env) => function_in_frame(name, env),
+        None => Ok(None),
+    }
 }
 
 unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {

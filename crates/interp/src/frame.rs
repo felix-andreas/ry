@@ -95,9 +95,10 @@ const ATTACH: &str = r#"
 local({
   ns <- asNamespace("ry")
   library <- as.environment("package:ry")
-  for (name in ls(library, all.names = TRUE)) assign(name, get(name, envir = library), envir = ns)
+  builtins <- ls(library, all.names = TRUE)
+  for (name in builtins) assign(name, get(name, envir = library), envir = ns)
   detach("package:ry", character.only = TRUE)
-  functions <- ls(ns)
+  functions <- union(ls(ns), builtins)
   exports <- new.env(hash = TRUE, parent = baseenv())
   for (name in functions) assign(name, name, envir = exports)
   assign("exports", exports, envir = ns[[".__NAMESPACE__."]])
