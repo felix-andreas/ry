@@ -1113,14 +1113,18 @@ impl Heap {
         for index in 0..self.roots.handles.len() {
             self.mark(self.roots.handles[index]);
         }
-        let precious: Vec<Sexp> = self.roots.precious.keys().copied().collect();
-        for object in precious {
-            self.mark(object);
-        }
-        let symbols: Vec<Sexp> = self.symbols.values().copied().collect();
-        for symbol in symbols {
-            self.mark(symbol);
-        }
+        // Marking only touches the mark stack, so the tables can be borrowed beside it instead of
+        // copied out on every collection; a package with tens of thousands of symbols made that
+        // copy a large part of each minor collection.
+        let mark_stack = &mut self.mark_stack;
+        let mut mark = |object: Sexp| {
+            if !object.is_marked() {
+                object.set_gc_bit(gc_bits::MARK, true);
+                mark_stack.push(object);
+            }
+        };
+        self.roots.precious.keys().for_each(|&object| mark(object));
+        self.symbols.values().for_each(|&symbol| mark(symbol));
         let sources: Vec<Rc<dyn RootSource>> = self
             .sources
             .iter()
@@ -1417,7 +1421,11 @@ impl Heap {
         }
         let slot_size = SLOT_SIZES[class as usize];
         let memory = NonNull::new_unchecked(object.as_ptr().cast::<u8>());
-        std::ptr::write_bytes(memory.as_ptr(), POISON, slot_size);
+        // Poisoning makes a use after free fail loudly, but costs a store per byte of every
+        // freed slot, so only debug builds pay for it.
+        if cfg!(debug_assertions) {
+            std::ptr::write_bytes(memory.as_ptr(), POISON, slot_size);
+        }
         // The kind and collector bytes stay meaningful: a free slot reads as `FREESXP` and unmarked.
         *memory.as_ptr() = SexpType::Free as u8;
         *memory.as_ptr().add(1) = 0;

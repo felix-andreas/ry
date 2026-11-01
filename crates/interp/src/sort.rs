@@ -56,24 +56,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// for the scripts R code commonly sorts: spaces, then punctuation and symbols, then digits, then
 /// letters compared without case or accents; ties go to accents, then lowercase before uppercase.
 pub fn collate(left: &str, right: &str) -> Ordering {
-    if c_collation() {
+    if c_collation() || left == right {
         return left.cmp(right);
     }
-    let primary = |text: &str| text.chars().map(primary_weight).collect::<Vec<_>>();
-    let secondary = |text: &str| {
-        text.chars()
-            .map(|character| base_letter(character).1)
-            .collect::<Vec<_>>()
-    };
-    let tertiary = |text: &str| {
-        text.chars()
-            .map(|character| character.is_uppercase())
-            .collect::<Vec<_>>()
-    };
-    primary(left)
-        .cmp(&primary(right))
-        .then_with(|| secondary(left).cmp(&secondary(right)))
-        .then_with(|| tertiary(left).cmp(&tertiary(right)))
+    // Each level compares lazily, so the common case of strings that differ early never looks
+    // past the first differing character.
+    let accent = |character| base_letter(character).1;
+    (left.chars().map(primary_weight))
+        .cmp(right.chars().map(primary_weight))
+        .then_with(|| left.chars().map(accent).cmp(right.chars().map(accent)))
+        .then_with(|| {
+            (left.chars().map(char::is_uppercase)).cmp(right.chars().map(char::is_uppercase))
+        })
         .then_with(|| left.cmp(right))
 }
 
@@ -92,13 +86,46 @@ fn c_collation() -> bool {
 
 /// The root collation's primary weight of a character, as a (group, value) pair.
 fn primary_weight(character: char) -> (u8, u32) {
-    // The punctuation and symbols of ASCII, in the order the root collation sorts them.
-    const PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+    match ASCII_PRIMARY_WEIGHTS.get(character as usize) {
+        Some(&weight) => weight,
+        None => non_ascii_primary_weight(character),
+    }
+}
+
+/// The punctuation and symbols of ASCII, in the order the root collation sorts them.
+const PUNCTUATION: &[u8] = b"_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+
+/// `primary_weight` of every ASCII character, because sorting is dominated by ASCII text.
+const ASCII_PRIMARY_WEIGHTS: [(u8, u32); 128] = {
+    let mut table = [(0u8, 0u32); 128];
+    let mut code = 0;
+    while code < 128 {
+        let byte = code as u8;
+        table[code] = if byte.is_ascii_whitespace() || byte == 0x0b {
+            (0, code as u32)
+        } else if byte.is_ascii_digit() {
+            (3, (byte - b'0') as u32)
+        } else if byte.is_ascii_alphabetic() {
+            (4, byte.to_ascii_lowercase() as u32)
+        } else {
+            let mut position = 0;
+            while position < PUNCTUATION.len() && PUNCTUATION[position] != byte {
+                position += 1;
+            }
+            if position < PUNCTUATION.len() {
+                (1, position as u32)
+            } else {
+                (2, code as u32)
+            }
+        };
+        code += 1;
+    }
+    table
+};
+
+fn non_ascii_primary_weight(character: char) -> (u8, u32) {
     if character.is_whitespace() {
         return (0, character as u32);
-    }
-    if let Some(position) = PUNCTUATION.find(character) {
-        return (1, position as u32);
     }
     if let Some(digit) = character.to_digit(10) {
         return (3, digit);
@@ -115,6 +142,9 @@ fn primary_weight(character: char) -> (u8, u32) {
 
 /// A Latin letter without its accent, and an accent rank (0 for none).
 fn base_letter(character: char) -> (char, u32) {
+    if character.is_ascii() {
+        return (character, 0);
+    }
     const ACCENTED: [(&str, char); 14] = [
         ("àáâãäåāăą", 'a'),
         ("ÀÁÂÃÄÅĀĂĄ", 'A'),
