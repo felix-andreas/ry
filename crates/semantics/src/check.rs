@@ -28,6 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use syntax::TextRange;
+use syntax::native_values::accepts_native;
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct TypeError<'db> {
@@ -162,6 +163,23 @@ pub enum TypeErrorKind<'db> {
         first: Ty<'db>,
         second: Ty<'db>,
     },
+    /// A record, tuple or tag passed to an R function that refuses one at run time.
+    NativeValueToR {
+        function: String,
+        kind: NativeValueKind,
+    },
+    /// `point$z <- value` on a record without a field `z`: a record's fields are fixed.
+    FieldCannotBeAdded {
+        field: String,
+        container: Ty<'db>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum NativeValueKind {
+    Record,
+    Tuple,
+    Tag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -1220,8 +1238,10 @@ impl<'db> Checker<'db, '_> {
                 self.infer_binary(id, range, operator, special_name.as_deref(), lhs, rhs)
             }
             ExpressionKind::Call { callee, arguments } => {
-                let arguments = arguments.clone();
-                self.infer_call_expression(id, range, *callee, &arguments)
+                let (callee, arguments) = (*callee, arguments.clone());
+                let ty = self.infer_call_expression(id, range, callee, &arguments);
+                self.check_native_arguments(callee, &arguments);
+                ty
             }
             ExpressionKind::Index {
                 double,
@@ -1444,6 +1464,51 @@ impl<'db> Checker<'db, '_> {
             self.apply_expression_annotation(id, id, ty)
         };
         self.record(id, ty)
+    }
+
+    /// R functions and C code refuse a record, tuple or tag at run time, apart from the few in
+    /// [`accepts_native`], so passing one to a function that is not the project's own is an
+    /// error here too. A value only some of whose types are native may be R data at run time,
+    /// so it is not reported.
+    fn check_native_arguments(&mut self, callee: ExprId, arguments: &[Argument]) {
+        let function = match &self.module.expression(callee).kind {
+            ExpressionKind::NameRef(name) => {
+                let deferred = self.naming.deferred_non_locals.contains(&callee);
+                if self.naming.resolutions.contains_key(&callee)
+                    || self
+                        .globals
+                        .is_some_and(|globals| globals.defined_in_project(name, deferred))
+                {
+                    return;
+                }
+                name.as_str()
+            }
+            ExpressionKind::Namespace {
+                name: Some(name), ..
+            } => name.as_str(),
+            _ => return,
+        };
+        if accepts_native(function) {
+            return;
+        }
+        for argument in arguments {
+            let Some(value) = argument.value else {
+                continue;
+            };
+            let Some(&ty) = self.recorded.get(&value) else {
+                continue;
+            };
+            let resolved = self.table.resolve(self.db, ty);
+            if let Some(kind) = native_value_kind(self.db, resolved) {
+                self.errors.push(TypeError {
+                    range: self.blame_range(value),
+                    kind: TypeErrorKind::NativeValueToR {
+                        function: function.to_owned(),
+                        kind,
+                    },
+                });
+            }
+        }
     }
 
     /// `@trust` and `@if-unknown` do not check the value, and `@new` mints a nominal
@@ -2154,6 +2219,41 @@ impl<'db> Checker<'db, '_> {
                         optional: false,
                     }]),
                 ),
+                // A ry record's fields are fixed, so the write is checked against the field and
+                // the record keeps its type.
+                TyKind::NativeRecord(fields) => {
+                    match fields
+                        .iter()
+                        .find(|field| field.name.text(self.db) == field_name)
+                    {
+                        Some(field) => {
+                            if !matches!(value.kind(self.db), TyKind::Unknown)
+                                && !self.table.compatible(self.db, value, field.ty)
+                            {
+                                let range = self.blame_range(value_expression);
+                                let kind = self.type_mismatch(range, field.ty, value, None).kind;
+                                self.errors.push(TypeError { range, kind });
+                            }
+                        }
+                        None => {
+                            let range = match kind {
+                                ExpressionKind::Field {
+                                    name_range: Some(name_range),
+                                    ..
+                                } => *name_range,
+                                _ => module.expression(lhs).range,
+                            };
+                            self.errors.push(TypeError {
+                                range,
+                                kind: TypeErrorKind::FieldCannotBeAdded {
+                                    field: field_name,
+                                    container: prior,
+                                },
+                            });
+                        }
+                    }
+                    prior
+                }
                 // A nominal's representation is fixed (that makes `@type` an invariant), so the
                 // write is checked against it and the value keeps its nominal type.
                 TyKind::Named(..) => {
@@ -7878,5 +7978,20 @@ mod tests {
         );
         assert!(check.errors.is_empty(), "{:?}", check.errors);
         assert!(check.scheme.is_some());
+    }
+}
+
+/// The kind of ry value `ty` is, when every value it describes is one.
+fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {
+    match ty.kind(db) {
+        TyKind::NativeRecord(_) => Some(NativeValueKind::Record),
+        TyKind::NativeTuple(_) => Some(NativeValueKind::Tuple),
+        TyKind::Tag(..) | TyKind::OtherTags => Some(NativeValueKind::Tag),
+        TyKind::Union(members) => {
+            let mut kinds = members.iter().map(|&member| native_value_kind(db, member));
+            let first = kinds.next()??;
+            kinds.all(|kind| kind == Some(first)).then_some(first)
+        }
+        _ => None,
     }
 }

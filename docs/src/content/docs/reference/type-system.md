@@ -628,9 +628,9 @@ their R meaning. A literal is all fields or all items, and a repeated field name
   `type-mismatch`. `pair[[1L]]` with a literal index types as that item, and an index past the end
   is a `type-mismatch`. On a record, a position counts the fields in their sorted order. A computed
   index types as the union of the item or field types.
-- `point$x <- value` rebinds `point` to a copy with that field replaced, and naming a field the
-  record lacks is an error when the code runs. The checker does not yet check such an assignment:
-  it reports neither the missing field nor a value of a different type.
+- `point$x <- value` and `point[["x"]] <- value` rebind `point` to a copy with that field replaced,
+  and the record keeps its type. The value must be compatible with the field's type, and a field the
+  record lacks is a `type-mismatch`, because a record's fields are fixed.
 
 ### Tag types
 
@@ -703,8 +703,14 @@ the arms above it already cover is an `unreachable-pattern` warning.
 ### Crossing into R
 
 R functions and C code do not know these values. `as.list()` converts a record, tuple or tag to a
-list, and `as.record()`, `as.tuple()` and `as.tag()` convert back. Passing one to any other R
-function is an error when the code runs. The checker does not report it yet.
+list, and `as.record()`, `as.tuple()` and `as.tag()` convert back.
+
+Passing one to an R function that is not the project's own is a `type-mismatch` at the argument. The
+exceptions are the functions the runtime lets them through: those that understand them (`format`,
+`print`, `identical`, `length`, `[[`, the conversions), those that only ask what a value is
+(`is.null`, `class`, `inherits`), and those that store a value without looking inside it (`list`,
+`lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
+`record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
 ## Function types
 

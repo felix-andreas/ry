@@ -544,3 +544,87 @@ b <- h("s")
 h: <T> fn(x: T) -> double
 a: double
 b: double
+
+#==== native_values_meet_r
+#---- r_functions_refuse_records_tuples_and_tags
+p <- (x = 1, y = 2)
+s <- sum(p)
+b <- base::paste(p)
+n <- nchar((1L, "a"))
+u <- toupper(:Some(1L))
+#++++
+p: record{x: double, y: double}
+s: Unknown
+b: Unknown
+n: Unknown
+u: Unknown
+29..30 error[type-mismatch] `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+49..50 error[type-mismatch] `paste` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+63..72 error[type-mismatch] `nchar` is an R function, and this value is a ry tuple, not an R object. Convert it with `as.list()` first
+87..96 error[type-mismatch] `toupper` is an R function, and this value is a ry tag, not an R object. Convert it with `as.list()` first
+
+#---- functions_that_accept_them_are_clean
+p <- (x = 1, y = 2)
+a <- length(p)
+b <- as.list(p)
+c <- format(p)
+d <- identical(p, p)
+e <- list(p, :None)
+print(p)
+#++++
+p: record{x: double, y: double}
+a: integer
+b: list[Any]
+c: character
+d: logical
+e: list{record{x: double, y: double}, :None}
+record{x: double, y: double}
+
+#---- the_project_s_own_functions_take_them
+keep <- function(v) v
+k <- keep((x = 1,))
+sum <- function(v) 0
+s <- sum((x = 1,))
+#++++
+keep: <T> fn(v: T) -> T
+k: record{x: double}
+sum: <T> fn(v: T) -> double
+s: double
+
+#---- a_value_that_may_be_r_data_is_not_reported
+f <- function(flag: logical) {
+  v <- if (flag) (x = 1,) else NULL
+  is.null(v)
+  paste(v)
+}
+#++++
+f: fn(flag: logical) -> character
+
+#==== record_writes
+#---- write_checks_the_field_type
+p <- (x = 1, y = 2)
+p$x <- "a"
+#++++
+p: record{x: double, y: double}
+character
+27..30 error[type-mismatch] expected `double`, found `character`
+
+#---- write_cannot_add_a_field
+p <- (x = 1, y = 2)
+p$z <- 3
+q <- (x = 1,)
+q[["w"]] <- 1
+#++++
+p: record{x: double, y: double}
+double
+q: record{x: double}
+double
+22..23 error[type-mismatch] field `z` does not exist in `record{x: double, y: double}`, and assigning to it cannot add it, because a record's fields are fixed
+43..51 error[type-mismatch] field `w` does not exist in `record{x: double}`, and assigning to it cannot add it, because a record's fields are fixed
+
+#---- write_of_a_compatible_value_keeps_the_type
+p <- (x = 1, y = 2)
+p$x <- 3L
+#++++
+p: record{x: double, y: double}
+integer

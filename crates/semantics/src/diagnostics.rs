@@ -2,7 +2,9 @@ use crate::annotations::{
     Annotation, NamedDefinition, Slot, comment_slots, inline_slots, is_inline_site,
     lower_annotation, lower_inline_annotation, statement_inline_site,
 };
-use crate::check::{ItemCheck, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind};
+use crate::check::{
+    ItemCheck, NativeValueKind, OperandExpectation, StrictOriginKind, TypeError, TypeErrorKind,
+};
 use crate::exhaustiveness::{MatchFinding, MatchFindingKind};
 use crate::hir::{ExprId, ExpressionKind, Symbol};
 use crate::infer::apply_definition;
@@ -2081,6 +2083,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::PatternNeverMatches { found } => format!(
             "this pattern can never match: the value is `{}`",
             renderer.render(db, *found)
+        ),
+        TypeErrorKind::NativeValueToR { function, kind } => {
+            let kind = match kind {
+                NativeValueKind::Record => "record",
+                NativeValueKind::Tuple => "tuple",
+                NativeValueKind::Tag => "tag",
+            };
+            format!(
+                "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `as.list()` first"
+            )
+        }
+        TypeErrorKind::FieldCannotBeAdded { field, container } => format!(
+            "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
+            renderer.render(db, *container)
         ),
         TypeErrorKind::ConflictingTags { first, second } => format!(
             "these branches build `{}` and `{}`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart",

@@ -12,6 +12,7 @@ use crate::{
     values::{self, nil},
 };
 use heap::object::{Sexp, SexpType};
+use syntax::native_values::ACCEPTS_NATIVE;
 
 /// How a builtin is called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,7 +78,7 @@ pub struct BuiltinDef {
     /// needs for `x[, 1]`.
     pub keep_missing: bool,
     /// Whether a ry record, tuple or tag may reach the builtin as a top-level argument; set at
-    /// registration from [`crate::records::ACCEPTS_NATIVE`].
+    /// registration from [`ACCEPTS_NATIVE`].
     pub accepts_native: bool,
     pub function: BuiltinFn,
     pub object: Option<Sexp>,
@@ -204,7 +205,7 @@ pub(crate) unsafe fn install_all() {
         }
         register(table);
     }
-    for name in crate::records::ACCEPTS_NATIVE {
+    for name in ACCEPTS_NATIVE {
         assert!(
             seen.contains(&(*name, false)) || seen.contains(&(*name, true)),
             "`{name}` is listed as accepting ry values but is not a builtin"
@@ -222,7 +223,7 @@ pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
             let existing = &mut state.builtins[index as usize];
             let object = existing.object;
             *existing = definition.copy();
-            existing.accepts_native = crate::records::ACCEPTS_NATIVE.contains(&definition.name);
+            existing.accepts_native = ACCEPTS_NATIVE.contains(&definition.name);
             existing.object = object;
             continue;
         }
@@ -245,7 +246,7 @@ pub(crate) unsafe fn register(definitions: &[BuiltinDef]) {
                 .unwrap_or_else(|failure| panic!("cannot bind `{}`: {failure}", definition.name));
         }
         let mut entry = definition.copy();
-        entry.accepts_native = crate::records::ACCEPTS_NATIVE.contains(&definition.name);
+        entry.accepts_native = ACCEPTS_NATIVE.contains(&definition.name);
         entry.object = Some(object);
         state.builtins.push(entry);
         state.builtin_index.insert(key, index);
@@ -348,7 +349,9 @@ pub unsafe fn match_builtin_args(
                 if matched[formal_index].is_some() {
                     return Err(error_in(
                         call,
-                        format!("formal argument \"{formal}\" matched by multiple actual arguments"),
+                        format!(
+                            "formal argument \"{formal}\" matched by multiple actual arguments"
+                        ),
                     ));
                 }
                 matched[formal_index] = Some(args[arg_index].value);

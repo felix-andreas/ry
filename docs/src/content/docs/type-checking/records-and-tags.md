@@ -60,8 +60,9 @@ type-mismatch
     |                 ^^
 ```
 
-A record has value semantics. `p$x <- 3` changes a copy that only `p` sees, and it cannot add a field
-that the record does not have.
+A record has value semantics. `p$x <- 3` changes a copy that only `p` sees. The new value must fit
+the field's type, and assigning to a field that the record does not have is an error, because a
+record's fields are fixed.
 
 ## Tags
 
@@ -143,8 +144,22 @@ are turned off.
 
 ## Passing them to R
 
-R functions and C code do not know these values, so passing one to them is an error when the code
-runs, with the fix in the message:
+R functions and C code do not know these values, so passing one to an R function is an error:
+
+```r
+point <- (x = 1, y = 2)
+sum(point)
+```
+
+```text
+type-mismatch
+
+  x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+```
+
+A few R functions do accept them, such as `length()`, `print()`, `format()`, `identical()` and
+`list()`, and so do the functions your own project defines. If the checker misses a case, the code
+still stops when it runs, with the same fix in the message:
 
 ```text
 Error in sum(point) :
@@ -152,8 +167,7 @@ Error in sum(point) :
 ```
 
 Convert explicitly at the boundary: `as.list()` turns a record, tuple or tag into a list, and
-`as.record()`, `as.tuple()` and `as.tag()` turn a list back. The checker does not yet report the
-mistake before the code runs.
+`as.record()`, `as.tuple()` and `as.tag()` turn a list back.
 
 ## Instead of S4, R6 and Reference Classes
 
