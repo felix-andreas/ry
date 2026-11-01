@@ -494,13 +494,21 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
-- **Compiled-to-compiled calls.** `fib` in `tools/bench/why` now runs about 1.2 times faster
-  than GNU R: a hot body whose call results have not returned yet refuses to compile as cold and
-  waits (`decisions.md`, "Cold refusals"), and a frame-safe direct call binds its arguments as plain
-  values. A call still allocates an environment, a binding cell per formal and the boxed arguments,
-  and reading a formal (`jit_load`) costs about 440 instructions. A call from compiled code should
-  enter the callee's compiled code directly, with unboxed arguments and no environment when the
-  callee's frame cannot escape.
+- **Compiled-to-compiled calls of general functions.** A closure whose body is scalar arithmetic,
+  comparisons, `if` and calls to other such closures compiles to a frameless native function
+  (`decisions.md`, "Native scalar functions"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
+  Every other call from compiled code still goes through `jit_call`: an environment, a binding cell
+  per formal and the boxed arguments, and about 440 instructions per formal read (`jit_load`).
+  Next: widen natives to vectors, loops and local closures (`Ty::Closure` is only inlined today),
+  then give non-native compiled callees a direct entry with no environment when their frame cannot
+  escape.
+- **Records, tuples and tagged unions in native functions.** `Intrinsic::Field` reads a field from
+  compiled bodies; natives refuse them. A layout id fixes kind, field names, order and slot count,
+  but whether a slot is stored unboxed is per object (only length-1, attribute-free, non-ALTREP
+  double, integer or logical values, and never slots at index 64 or above). Key a native on layout
+  id plus per-slot feedback and guard each read on the mask bit at `RECORD_UNBOXED_OFFSET` and the
+  NaN-box prefix, as `Intrinsic::Field` does. Records are immutable (`$<-` copies), so one guard
+  holds for the object's lifetime.
 - **Calls dominate the benchmark packages' test suites.** A `perf` profile of full-size dsbench's
   testthat suites (JIT on) puts 12% of samples under `jit::`, and about 85% of that is
   `jit::runtime::jit_step` handing a call back to tier 0. Each closure call there still matches
@@ -520,10 +528,10 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   direct call's result type comes from the callee's declared return type when the call site has no
   feedback yet (`call_result_at` in `crates/jit/src/analysis.rs`), so typed `fib` compiles on its
   first try, and typed Arrays compile to direct item loads and stores (`decisions.md`, "Arrays are
-  their own JIT types"). Typed and untyped code now run within measurement noise of each other, but
-  every call still runs the argument and return checks (`annotations::enter`, `check_return`). Next: skip a direct call's argument checks when the
-  compile-time argument types already satisfy the callee's masks, and the return check when the
-  compiled body provably returns the declared type.
+  their own JIT types"). A native call skips the argument and return checks because its
+  parameter types satisfy the callee's masks at compile time (`annotations::return_admits`); other
+  compiled calls still run `annotations::enter` and `check_return`. Typed and untyped code run
+  equally fast: the profile proves the same facts the annotations do.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
