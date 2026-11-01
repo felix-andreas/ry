@@ -241,6 +241,14 @@ pub enum Intrinsic {
     IntegerDivide(Numeric),
 }
 
+/// Where a directly called closure's argument comes from.
+#[derive(Clone, Copy, Debug)]
+pub enum Argument {
+    Unboxed { register: usize, ty: Ty },
+    /// A loaded variable whose boxed value is in its slot cell.
+    Slot(usize),
+}
+
 /// What compiled code does at one instruction.
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -264,6 +272,9 @@ pub enum Action {
     Peek { slot: usize, ty: Ty },
     /// Copies an unboxed scalar between registers.
     Move { dst: usize, src: usize, ty: Ty },
+    /// Calls a closure known at compile time with arguments evaluated by `steps`, binding each
+    /// to a promise that already holds its value, then refines the result to `dst`'s type.
+    Call { steps: Vec<(Action, State)>, function: Sexp, call: Sexp, args: Vec<Argument>, dst: (usize, Ty) },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step { effect: Effect, objects: Vec<usize>, dst: Option<(usize, Ty)> },
     /// The instruction's check always passes, so control falls through.
@@ -293,11 +304,6 @@ pub struct Speculation {
     /// The binding cell the lookup found.
     pub cell: Sexp,
     pub function: Sexp,
-    /// Function frames the lookup passed through, whose bindings come and go without moving
-    /// the heap's binding epoch.
-    pub frames: Vec<Sexp>,
-    /// The function frame holding `cell`, whose bindings can be removed without moving the epoch.
-    pub home: Option<Sexp>,
 }
 
 pub struct Block {
@@ -361,6 +367,9 @@ struct Lowering {
     next: usize,
     /// The formals of the closure being inlined and the registers holding their arguments.
     scope: Vec<(Sexp, usize)>,
+    /// The environment of the closure being inlined when it is not this activation's, in
+    /// which case its body sees only its formals and the functions of that environment.
+    closed: Option<Sexp>,
 }
 
 impl Lowering {
@@ -406,6 +415,7 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         speculations: Vec::new(),
         registers,
         defaulted: defaulted_formals(formals),
+        hints: Vec::new(),
     };
     builder.collect_slots();
     let (mut blocks, block_at, successors, loop_headers) = builder.blocks();
@@ -487,6 +497,9 @@ struct Builder<'a> {
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
     defaulted: FxHashSet<Sexp>,
+    /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
+    /// compiled code has not loaded.
+    hints: Vec<Ty>,
 }
 
 impl Builder<'_> {
@@ -509,6 +522,12 @@ impl Builder<'_> {
                 if !self.slot_of.contains_key(&symbol) {
                     self.slot_of.insert(symbol, self.slots.len());
                     self.slots.push(symbol);
+                    self.hints.push(Ty::Bottom);
+                }
+                let bits = self.feedback.get(inst.pc).copied().unwrap_or(0);
+                if inst.op == Op::GetVar && bits != 0 {
+                    let slot = self.slot_of[&symbol];
+                    self.hints[slot] = self.hints[slot].join(from_feedback(bits));
                 }
             }
         }
@@ -771,7 +790,10 @@ impl Builder<'_> {
             Op::CallGeneric => {
                 let call = self.constant(operand(2));
                 let inlined = match state.registers[operand(1)] {
-                    Ty::Closure(formals, body) => self.inline(state, call, formals, body, operand(0)),
+                    Ty::Closure(formals, body) => self.inline(state, call, formals, body, None, operand(0)),
+                    Ty::Fun(function) if function.kind() == SexpType::Closure => self
+                        .inline(state, call, function.car(), bytecode::closure_body(function), Some(function.tag()), operand(0))
+                        .or_else(|| self.direct_call(state, call, function, (operand(0), self.feedback_at(inst.pc)))),
                     _ => None,
                 };
                 match inlined {
@@ -912,9 +934,9 @@ impl Builder<'_> {
     /// the body, which R's lazy evaluation cannot observe because nothing in between has an
     /// effect, and an argument that would fail or is not a plain scalar hands the whole call
     /// back to tier 0, which then evaluates it lazily.
-    unsafe fn inline(&mut self, state: &mut State, call: Sexp, formals: Sexp, body: Sexp, dst: usize) -> Option<Action> {
-        let mut lowering = Lowering { state: state.clone(), steps: Vec::new(), next: self.registers, scope: Vec::new() };
-        let result = self.lower_call(&mut lowering, call, formals, body, 0)?;
+    unsafe fn inline(&mut self, state: &mut State, call: Sexp, formals: Sexp, body: Sexp, closed: Option<Sexp>, dst: usize) -> Option<Action> {
+        let mut lowering = Lowering { state: state.clone(), steps: Vec::new(), next: self.registers, scope: Vec::new(), closed: None };
+        let result = self.lower_call(&mut lowering, call, formals, body, closed, 0)?;
         let ty = lowering.state.registers[result];
         lowering.push(Action::Move { dst, src: result, ty });
         let mut after = lowering.state;
@@ -927,7 +949,42 @@ impl Builder<'_> {
         Some(Action::Inline { steps: lowering.steps })
     }
 
-    unsafe fn lower_call(&mut self, lowering: &mut Lowering, call: Sexp, formals: Sexp, body: Sexp, depth: usize) -> Option<usize> {
+    /// Calls `function` directly when every argument is a scalar computed without effects or a
+    /// variable, which then need no promise to evaluate: each is bound to a promise that
+    /// already holds its value, so `substitute` still sees the argument's expression.
+    unsafe fn direct_call(&mut self, state: &mut State, call: Sexp, function: Sexp, dst: (usize, Ty)) -> Option<Action> {
+        let mut lowering = Lowering { state: state.clone(), steps: Vec::new(), next: self.registers, scope: Vec::new(), closed: None };
+        let mut args = Vec::new();
+        for (tag, expression) in values::pairlist_items(call.cdr()) {
+            if tag != values::nil() || expression == values::missing_arg() || expression == values::symbols().dots {
+                return None;
+            }
+            if expression.kind() == SexpType::Symbol
+                && let Some(slot) = self.peek_slot(&mut lowering, expression, true)
+                && !lowering.state.slots[slot].ty.is_unboxed()
+            {
+                args.push(Argument::Slot(slot));
+                continue;
+            }
+            let register = self.lower_expression(&mut lowering, expression, 0)?;
+            args.push(Argument::Unboxed { register, ty: lowering.state.registers[register] });
+        }
+        let mut after = lowering.state;
+        for register in self.registers..after.registers.len() {
+            after.registers[register] = Ty::Bottom;
+        }
+        // The callee may reach this frame through `parent.frame()`, so the call writes the
+        // variables back and forgets them like any opaque step.
+        after.flushed();
+        after.forget_slots();
+        after.visible = None;
+        after.registers[dst.0] = dst.1;
+        *state = after;
+        Some(Action::Call { steps: lowering.steps, function, call, args, dst })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn lower_call(&mut self, lowering: &mut Lowering, call: Sexp, formals: Sexp, body: Sexp, closed: Option<Sexp>, depth: usize) -> Option<usize> {
         if depth > MAX_INLINE_DEPTH {
             return None;
         }
@@ -952,8 +1009,10 @@ impl Builder<'_> {
             }
         }
         lowering.scope = formals.iter().map(|(symbol, _)| *symbol).zip(scope).collect();
+        let outer_closed = std::mem::replace(&mut lowering.closed, closed);
         let result = self.lower_expression(lowering, body, depth);
         lowering.scope = outer;
+        lowering.closed = outer_closed;
         result
     }
 
@@ -977,7 +1036,10 @@ impl Builder<'_> {
                 if let Some(&(_, register)) = lowering.scope.iter().find(|(symbol, _)| *symbol == expression) {
                     return Some(register);
                 }
-                let slot = self.peek_slot(lowering, expression)?;
+                if lowering.closed.is_some() {
+                    return None;
+                }
+                let slot = self.peek_slot(lowering, expression, false)?;
                 let ty = lowering.state.slots[slot].ty;
                 if !ty.is_unboxed() {
                     return None;
@@ -998,15 +1060,23 @@ impl Builder<'_> {
                 if args.contains(&values::missing_arg()) {
                     return None;
                 }
-                if !lowering.scope.iter().any(|(symbol, _)| *symbol == head)
+                if lowering.scope.iter().any(|(symbol, _)| *symbol == head) {
+                    return None;
+                }
+                if lowering.closed.is_none()
                     && let Some(&slot) = self.slot_of.get(&head)
                 {
                     // A closure this activation made, called from inlined code: inline it too.
-                    self.peek_slot(lowering, head)?;
+                    self.peek_slot(lowering, head, false)?;
                     let Ty::Closure(formals, body) = lowering.state.slots[slot].ty else { return None };
-                    return self.lower_call(lowering, expression, formals, body, depth + 1);
+                    return self.lower_call(lowering, expression, formals, body, None, depth + 1);
                 }
-                let name = self.base_builtin(lowering, head)?;
+                let function = self.resolve_head(lowering, head)?;
+                if function.kind() == SexpType::Closure {
+                    let body = bytecode::closure_body(function);
+                    return self.lower_call(lowering, expression, function.car(), body, Some(function.tag()), depth + 1);
+                }
+                let name = base_builtin(function, head)?;
                 let registers = args.iter().map(|&arg| self.lower_expression(lowering, arg, depth)).collect::<Option<Vec<usize>>>()?;
                 let types: Vec<Ty> = registers.iter().map(|&register| lowering.state.registers[register]).collect();
                 match (name.as_str(), registers.as_slice()) {
@@ -1049,34 +1119,39 @@ impl Builder<'_> {
 
     /// Makes sure `symbol`'s slot is loaded in inlined code, peeking at it when it may not be,
     /// and returns the slot.
-    unsafe fn peek_slot(&mut self, lowering: &mut Lowering, symbol: Sexp) -> Option<usize> {
+    /// A variable compiled code has not loaded is assumed to have the type tier 0 saw at its
+    /// loads, which the peek checks. Only a `boxed` peek may find a boxed value.
+    unsafe fn peek_slot(&mut self, lowering: &mut Lowering, symbol: Sexp, boxed: bool) -> Option<usize> {
         let slot = *self.slot_of.get(&symbol)?;
         if self.defaulted.contains(&symbol) {
             return None;
         }
         let current = lowering.state.slots[slot];
         if current.may_be(status::NOT_LOADED) {
-            if !current.may_be(status::LOADED) || current.ty == Ty::Bottom || current.ty == Ty::Boxed {
+            let ty = if current.may_be(status::LOADED) { current.ty } else { self.hints[slot] };
+            if ty == Ty::Bottom || (ty == Ty::Boxed && !boxed) {
                 return None;
             }
-            lowering.push(Action::Peek { slot, ty: current.ty });
-            lowering.state.slots[slot] = Slot { status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING, ty: current.ty };
+            lowering.push(Action::Peek { slot, ty });
+            lowering.state.slots[slot] = Slot { status: (current.status & status::LOADED) | status::LOCAL | status::ENCLOSING, ty };
         }
         Some(slot)
     }
 
-    /// The name of the base builtin `symbol` calls from inlined code, which must not be
-    /// shadowed by a formal of an inlined closure or a variable of this activation.
-    unsafe fn base_builtin(&mut self, lowering: &Lowering, symbol: Sexp) -> Option<String> {
-        if lowering.scope.iter().any(|(formal, _)| *formal == symbol) || self.slot_of.contains_key(&symbol) {
-            return None;
+    /// The function `symbol` calls from inlined code that is not a formal of the closure being
+    /// inlined, found from that closure's environment and recorded as a speculation.
+    unsafe fn resolve_head(&mut self, lowering: &Lowering, symbol: Sexp) -> Option<Sexp> {
+        match lowering.closed {
+            None if self.slot_of.contains_key(&symbol) => None,
+            None => self.speculate(symbol),
+            Some(env) if env == self.enclosure => self.speculate(symbol),
+            Some(env) => {
+                let speculation = resolve_function(symbol, env)?;
+                let function = speculation.function;
+                self.speculations.push(speculation);
+                Some(function)
+            }
         }
-        let function = self.speculate(symbol)?;
-        if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
-            return None;
-        }
-        let name = interp::eval::builtin_def(function).ok()?.name;
-        (values::symbol_name(symbol) == name).then(|| name.to_string())
     }
 
     /// A tier-0 step whose destination is refined to `dst`'s type afterwards.
@@ -1175,12 +1250,20 @@ impl Builder<'_> {
     }
 }
 
+/// The name of the base builtin `function`, when `symbol` names it.
+unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
+    if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
+        return None;
+    }
+    let name = interp::eval::builtin_def(function).ok()?.name;
+    (values::symbol_name(symbol) == name).then(|| name.to_string())
+}
+
 /// Walks from `enclosure` to the binding a function lookup of `symbol` finds, as tier 0 does,
 /// but gives up instead of forcing a promise or calling an active binding.
 pub unsafe fn resolve_function(symbol: Sexp, mut env: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let empty = heap.known().empty_env;
-    let mut frames = Vec::new();
     while env != empty {
         if let Some(cell) = heap.frame_cell(env, symbol) {
             if cell.has_gp(gp::ACTIVE_BINDING) {
@@ -1194,12 +1277,8 @@ pub unsafe fn resolve_function(symbol: Sexp, mut env: Sexp) -> Option<Speculatio
                 value = value.car();
             }
             if values::is_function(value) {
-                let home = env.has_gp(gp::FUNCTION_FRAME).then_some(env);
-                return Some(Speculation { symbol, cell, function: value, frames, home });
+                return Some(Speculation { symbol, cell, function: value });
             }
-        }
-        if env.has_gp(gp::FUNCTION_FRAME) {
-            frames.push(env);
         }
         env = env.enclosure();
     }

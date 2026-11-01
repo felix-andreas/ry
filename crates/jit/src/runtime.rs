@@ -11,6 +11,7 @@ use heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real};
 use interp::{
     arith,
     bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
+    builtins::Arg,
     eval, heap,
     unwind::{R, Unwind, error},
     values,
@@ -95,36 +96,21 @@ pub struct Compiled {
     pub osr: Vec<usize>,
 }
 
-/// Whether every function lookup compiled code assumed still resolves the same way.
+/// Whether every function lookup compiled code assumed still resolves the same way. Every
+/// change that could alter such a lookup moves the binding epoch (see `gp::WATCHED`), so an
+/// unchanged epoch proves the lookups without walking them.
 pub unsafe fn valid(compiled: &Compiled) -> bool {
-    let heap = heap();
-    let epoch = heap.binding_epoch();
-    if epoch != compiled.epoch.get() {
-        for speculation in &compiled.speculations {
-            match resolve_function(speculation.symbol, compiled.enclosure) {
-                Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
-                _ => return false,
-            }
-        }
-        compiled.epoch.set(epoch);
+    let epoch = heap().binding_epoch();
+    if epoch == compiled.epoch.get() {
+        return true;
     }
     for speculation in &compiled.speculations {
-        let mut value = speculation.cell.cdr();
-        if value.kind() == SexpType::Promise {
-            value = value.car();
-        }
-        if value != speculation.function {
-            return false;
-        }
-        if speculation.frames.iter().any(|&frame| heap.frame_cell(frame, speculation.symbol).is_some()) {
-            return false;
-        }
-        if let Some(home) = speculation.home
-            && heap.frame_cell(home, speculation.symbol) != Some(speculation.cell)
-        {
-            return false;
+        match resolve_function(speculation.symbol, compiled.enclosure) {
+            Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
+            _ => return false,
         }
     }
+    compiled.epoch.set(epoch);
     true
 }
 
@@ -319,6 +305,64 @@ pub unsafe extern "C" fn jit_closure_matches(activation: *mut Activation, value:
                 && value.tag() == machine(activation).env
                 && bytecode::closure_body(value) == body;
             matches as i32
+        })
+    }
+}
+
+/// Calls the closure `function` for `call` with arguments compiled code evaluated, and puts the
+/// result in register `dst`. `arguments` holds a representation and its bits for each argument
+/// (see [`representation`]); an argument whose expression is code is bound to a promise that
+/// already holds its value, so the callee cannot tell it was evaluated early.
+pub unsafe extern "C" fn jit_call(
+    activation: *mut Activation,
+    function: *mut Header,
+    call: *mut Header,
+    arguments: *const i64,
+    count: i64,
+    dst: i64,
+) -> i32 {
+    unsafe {
+        checked(activation, outcome::FAILED, |activation| {
+            let (Some(function), Some(call)) = (Sexp::from_raw(function), Sexp::from_raw(call)) else {
+                park(activation, error("compiled code passed a null call"));
+                return outcome::FAILED;
+            };
+            let machine = machine(activation);
+            let arguments = std::slice::from_raw_parts(arguments, 2 * count as usize);
+            let result = scoped(|| -> R<Sexp> {
+                let heap = heap();
+                let mut args = Vec::with_capacity(count as usize);
+                let mut expressions = call.cdr();
+                for pair in arguments.chunks_exact(2) {
+                    let (kind, bits) = (pair[0] as i32, pair[1]);
+                    let value = match kind {
+                        representation::INTEGER => values::scalar_integer(bits as i32)?,
+                        representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
+                        representation::LOGICAL => values::scalar_logical(bits as i32)?,
+                        _ => Sexp::from_raw(bits as *mut Header).ok_or_else(|| error("compiled code passed a null argument"))?,
+                    };
+                    heap.root(value);
+                    let expression = expressions.car();
+                    let value = match expression.kind() {
+                        SexpType::Symbol | SexpType::Language => eval::forced_promise(expression, value)?,
+                        _ => value,
+                    };
+                    heap.root(value);
+                    args.push(Arg { tag: values::nil(), value });
+                    expressions = expressions.cdr();
+                }
+                eval::apply_closure(call, function, &args, machine.env, None)
+            });
+            match result {
+                Err(unwind) => {
+                    park(activation, unwind);
+                    outcome::FAILED
+                }
+                Ok(value) => {
+                    *activation.registers.add(dst as usize) = value;
+                    if !valid(compiled(activation)) { outcome::INVALIDATED } else { outcome::OK }
+                }
+            }
         })
     }
 }

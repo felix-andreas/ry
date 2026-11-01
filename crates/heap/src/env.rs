@@ -8,19 +8,22 @@
 
 use crate::object::Sexp;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 /// Frames this small are scanned; larger ones keep a hash index beside the cells.
 const INDEX_THRESHOLD: usize = 8;
 
 #[derive(Default)]
 pub struct Frame {
-    cells: Vec<Sexp>,
-    index: Option<FxHashMap<Sexp, u32>>,
+    /// Most closure frames bind a few arguments, which fit inline without a malloc.
+    cells: SmallVec<[Sexp; 3]>,
+    /// Boxed so the frame stays small enough to live inside its environment object.
+    index: Option<Box<FxHashMap<Sexp, u32>>>,
 }
 
 impl Frame {
     pub fn with_capacity(bindings: usize) -> Frame {
-        Frame { cells: Vec::with_capacity(bindings), index: None }
+        Frame { cells: SmallVec::with_capacity(bindings), index: None }
     }
 
     pub fn cells(&self) -> &[Sexp] {
@@ -63,7 +66,7 @@ impl Frame {
                     .enumerate()
                     .map(|(position, cell)| (unsafe { cell.car() }, position as u32))
                     .collect();
-                self.index = Some(index);
+                self.index = Some(Box::new(index));
             }
             None => {}
         }

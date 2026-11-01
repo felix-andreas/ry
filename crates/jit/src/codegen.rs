@@ -13,13 +13,13 @@
 //! instruction already ran).
 
 use crate::{
-    analysis::{Action, Effect, Intrinsic, Numeric, Plan, Refusal, State, Ty, jump_target, status},
+    analysis::{Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, State, Ty, jump_target, status},
     runtime::{self, Activation, offset, outcome, reason, representation},
 };
 use cranelift_codegen::{
 
     ir::{
-        AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, Type, Value,
+        AbiParam, Block as Label, InstBuilder, MemFlagsData, SigRef, Signature, StackSlotData, StackSlotKind, Type, Value,
         condcodes::{FloatCC, IntCC},
         immediates::Ieee64,
         types::{F64, I8, I32, I64},
@@ -104,6 +104,9 @@ fn new_module() -> Result<JITModule, Refusal> {
         flags.set("opt_level", "speed")?;
         flags.set("use_colocated_libcalls", "false")?;
         flags.set("is_pic", "false")?;
+        // The verifier rechecks every function's IR and costs as much as the rest of
+        // compilation, so only debug builds, where the tests run, pay for it.
+        flags.set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })?;
         Ok(())
     };
     configure(&mut flags).map_err(|_| Refusal("Cranelift rejected the settings"))?;
@@ -295,7 +298,6 @@ impl<'p, 'b> Translator<'p, 'b> {
     /// Translates one instruction; returns whether it emitted the block's terminator.
     unsafe fn instruction(&mut self, position: usize) -> Result<bool, Refusal> {
         let plan = self.plan;
-        let inst = &plan.insts[position];
         let Some(before) = plan.before[position].clone() else {
             return Ok(false);
         };
@@ -368,6 +370,9 @@ impl<'p, 'b> Translator<'p, 'b> {
                     self.action(position, state, step)?;
                 }
                 self.set_visible(&before, true);
+            }
+            Action::Call { steps, function, call, args, dst } => {
+                self.direct_call(position, before, steps, function, call, &args, dst)?;
             }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
             Action::Move { dst, src, ty } => {
@@ -619,6 +624,60 @@ impl<'p, 'b> Translator<'p, 'b> {
         if let Some((register, ty)) = dst {
             self.refine(register, ty, next, after, next_live);
         }
+        Ok(())
+    }
+
+    /// Calls a closure with arguments evaluated in compiled code. The callee may reach this
+    /// frame, so the variables are written back before the call and forgotten after it.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn direct_call(&mut self, position: usize, before: State, steps: Vec<(Action, State)>, function: Sexp, call: Sexp, args: &[Argument], dst: (usize, Ty)) -> Result<(), Refusal> {
+        let pc = self.plan.insts[position].pc;
+        for (step, state) in steps {
+            self.action(position, state, step)?;
+        }
+        let failed = self.deopt(pc, before.clone(), self.plan.live[position].clone(), reason::PENDING);
+        self.flush_all(&before, failed);
+        let buffer = self.builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (16 * args.len().max(1)) as u32, 3));
+        for (index, argument) in args.iter().enumerate() {
+            let (kind, bits) = match *argument {
+                Argument::Slot(slot) => (representation::BOXED, self.load_slot_cell(slot)),
+                Argument::Unboxed { register, ty } => {
+                    let value = self.use_register(register, ty);
+                    let (kind, bits) = match ty {
+                        Ty::Dbl => (representation::DOUBLE, self.builder.ins().bitcast(I64, MemFlagsData::new(), value)),
+                        Ty::Int => (representation::INTEGER, self.builder.ins().sextend(I64, value)),
+                        _ => (representation::LOGICAL, self.builder.ins().sextend(I64, value)),
+                    };
+                    (kind, bits)
+                }
+            };
+            let kind = self.builder.ins().iconst(I64, kind as i64);
+            self.builder.ins().stack_store(I64, kind, buffer, (16 * index) as i32);
+            self.builder.ins().stack_store(I64, bits, buffer, (16 * index + 8) as i32);
+        }
+        let pointer = self.builder.ins().stack_addr(I64, buffer, 0);
+        let function = self.builder.ins().iconst(I64, function.as_ptr() as i64);
+        let call = self.builder.ins().iconst(I64, call.as_ptr() as i64);
+        let count = iconst(&mut self.builder, args.len());
+        let register = iconst(&mut self.builder, dst.0);
+        let result = self
+            .call(runtime::jit_call as *const () as usize, &[I64, I64, I64, I64, I64, I64], Some(I32), &[self.activation, function, call, pointer, count, register])
+            .ok_or(Refusal("a helper without a result"))?;
+        let after = self.after_with_boxed(position, Some(dst.0))?;
+        let next = self.next_pc(position)?;
+        let next_live = self.plan.live.get(position + 1).cloned().unwrap_or_default();
+        let invalidated = self.deopt(next, after.clone(), next_live.clone(), reason::SPECULATION);
+        let ok = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
+        let continued = self.builder.create_block();
+        let problem = self.builder.create_block();
+        self.builder.ins().brif(ok, continued, &[], problem, &[]);
+        self.builder.switch_to_block(problem);
+        self.builder.set_cold_block(problem);
+        let errored = self.builder.ins().icmp_imm_s(IntCC::Equal, result, outcome::FAILED as i64);
+        self.builder.ins().brif(errored, failed, &[], invalidated, &[]);
+        self.builder.switch_to_block(continued);
+        self.forget_slots();
+        self.refine(dst.0, dst.1, next, after, next_live);
         Ok(())
     }
 
