@@ -219,7 +219,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: integer\n"
-completion (32): for, fortune, forwarded, force, forceAndCall, formalArgs, Formaldehyde, formals
+completion (32): fortune, forwarded, for, force, forceAndCall, formalArgs, Formaldehyde, formals
 hint @9: integer
 
 #---- no_matching_prefix

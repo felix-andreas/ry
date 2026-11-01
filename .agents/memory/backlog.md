@@ -292,6 +292,11 @@ type-level function the annotation language does not have.
   be `Unknown`.
 - The add-annotation code action writes a `#:` comment even in a project that uses inline
   annotations. It could offer the inline form where inline annotations are on.
+- Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
+  pins what works). `data.frame()` hovers `Unknown` and `df$` completes nothing, for the reason in
+  the `data.frame()` item above. `matrix()` hovers `Any` because ry has no array type. A local whose
+  type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
+  because a bare `T` without its binder would mislead.
 - `contributing/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
@@ -2863,7 +2868,7 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-- Goto-definition, references and rename have a p99 of 15 to 25 ms (p50 about 1 ms) on all three benches, on main as before. The slow positions are calls to stub globals (`seq_len`, `factor`, `vapply`). `stub_declaration` is a map lookup, so the cost sits elsewhere on that path (the item check, `position_in_item`, or the server's `stub_location`); profile it before guessing.
+- A file opened at startup settles about 450 ms after the open (target 200 ms). On dsbench with 4 cores the time goes to the attach scan (about 110 ms, mostly parsing all 1,006 files), project naming (about 290 ms: `item_hir` lowering and `resolve_item`), then the file's own check (about 60 ms). The settled wave waits for all naming because `conditional_slot_items` (lints through `s3_generics`, and `package_name`) needs every item's top-level writes. In samples of the naming pass, about a fifth of helper time spins on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs` in `function/sync.rs`, taken twice per query execution) and another fifth is in mimalloc's page slow path. Levers: fewer tracked queries per item on the cold path, a cheaper source for the top-level writes than full naming, or a sharded claim table upstream.
 
 ## Open: false errors on real CRAN code
 

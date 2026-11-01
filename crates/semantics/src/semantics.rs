@@ -850,6 +850,27 @@ pub fn package_binds(db: &dyn Db, files: ProjectFiles, name: &str) -> bool {
         || conditional_slot_items(db, files).contains_key(name)
 }
 
+/// Every name a project file of any kind declares at top level: its named definitions and its
+/// other top-level writes. Editor requests consult it before treating a name as a stub's, and it
+/// folds the per-file memos the cold check already derives, so a lookup is one hash probe.
+#[salsa::tracked(returns(ref))]
+pub fn project_global_names(db: &dyn Db, files: ProjectFiles) -> FxHashSet<Symbol> {
+    let mut names = FxHashSet::default();
+    for &file in files.files(db) {
+        names.extend(
+            file_definitions(db, file)
+                .iter()
+                .map(|(name, _)| Symbol::new(name)),
+        );
+        names.extend(
+            file_conditional_writers(db, file)
+                .iter()
+                .map(|&(name, _)| name),
+        );
+    }
+    names
+}
+
 /// Items writing a top-level name other than their own (conditionally, or nested as in
 /// `y <- (x <- 1L)`); cross-item reads with no unconditional winner join their types.
 #[salsa::tracked(returns(ref))]
@@ -2297,6 +2318,7 @@ mod tests {
             expression_types: Default::default(),
             pattern_types: Default::default(),
             literal_expectations: Default::default(),
+            loop_variables: Default::default(),
             errors: Vec::new(),
             strict_origins: Vec::new(),
             scheme: Some(types::TypeScheme::monomorphic(integer)),
