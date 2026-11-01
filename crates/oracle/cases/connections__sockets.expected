@@ -1,0 +1,44 @@
+[stdout]
+| [1] "servsockconn" "connection"  
+|    description          class           mode           text         opened 
+|    "localhost" "servsockconn"           "a+"         "text"       "opened" 
+|       can read      can write 
+|          "yes"          "yes" 
+| [1] TRUE
+| [1] "sockconn"   "connection"
+| [1] "->127.0.0.1:41873"
+| [1] "<-localhost:41873"
+| [1] "a+"
+| [1] TRUE TRUE
+| [1] FALSE FALSE
+| character(0)
+| [1] TRUE
+| [1] TRUE TRUE
+| [1] TRUE
+| character(0)
+| [1] TRUE
+| [1] "partial line" "next"        
+| [1] TRUE
+| [1] "reply" "two"  
+| [1] 60
+| [1] 5
+| [1] "not a list of sockets"
+| [1] "not a socket connection"
+| [1] "not a socket connection"
+| [1] "'socket' is not a servsockconn"
+| [1] "invalid 'socket' argument"
+| [1] "invalid 'socket' argument"
+| [1] "invalid 'port' argument"
+| [1] "creation of server socket failed: port 41873 cannot be opened"
+| [1] "invalid 'host' argument"
+| [1] "'getc' not enabled for this connection"
+| [1] "printing not enabled for this connection"
+| [1] TRUE
+| character(0)
+| [1] "127.0.0.1:41873 cannot be opened"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "127.0.0.1:41873 cannot be opened"

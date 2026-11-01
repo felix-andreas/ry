@@ -84,7 +84,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("file.choose", 1, |call| {
         Err(call.error("file.choose() needs an interactive session"))
     }),
-    internal("curlVersion", 0, |_| unsafe { scalar_string("") }),
+    internal("curlVersion", 0, |_| unsafe { curl_version() }),
     internal("curlGetHeaders", 5, do_curl_get_headers),
     internal("curlDownload", 6, do_curl_download),
     internal("machine", 0, |_| unsafe { scalar_string("Unix") }),
@@ -2804,6 +2804,30 @@ unsafe fn do_capabilities(_call: &Call<'_>) -> R<Sexp> {
     let names = string_vector(&names)?;
     values::set_attr(result, symbols().names, names)?;
     Ok(result)
+}
+
+/// `libcurlVersion()`'s internal. ry's transfers do not use libcurl, so the version is the
+/// libcurl release whose behavior they follow, which keeps version checks in packages
+/// passing, and the attributes describe what ry really uses: rustls, no SSH, and the
+/// protocols `url()` and `download.file()` handle.
+unsafe fn curl_version() -> R<Sexp> {
+    let version = scalar_string("8.5.0")?;
+    values::set_attr(
+        version,
+        values::install("ssl_version")?,
+        scalar_string("rustls")?,
+    )?;
+    values::set_attr(
+        version,
+        values::install("libssh_version")?,
+        scalar_string("")?,
+    )?;
+    values::set_attr(
+        version,
+        values::install("protocols")?,
+        string_vector(&["file", "http", "https"])?,
+    )?;
+    Ok(version)
 }
 
 /// `curlDownload(url, destfile, quiet, mode, cacheOK, headers)`: fetches each URL into its
