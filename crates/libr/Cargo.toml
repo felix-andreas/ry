@@ -30,6 +30,9 @@ unicode-width.workspace = true
 stacker.workspace = true
 table = { path = "../table" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+dirs = "6"
+
 [build-dependencies]
 cc = "1.2"
 

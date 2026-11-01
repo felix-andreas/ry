@@ -2,6 +2,9 @@
 //! symbol at runtime, so nothing here needs R at build time.
 
 pub mod console;
+// The GNU R installations ry's runtime searches too; `repl` does not link the interpreter.
+#[path = "../../interp/src/gnu_r_home.rs"]
+mod gnu_r_home;
 pub mod libr;
 
 // Re-exported so hosts implement `SessionCompleter` against the same reedline version.
@@ -227,8 +230,10 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
 #[cfg(unix)]
 fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
     let library_path = ry_runtime_library()?;
-    // Compiled packages record `libR.so` as a needed library; loading ry's globally lets the
-    // dynamic linker satisfy them from it.
+    // On Linux, compiled packages record `libR.so` as a needed library, and loading ry's globally
+    // lets the dynamic linker satisfy them from it. On macOS, `libr`'s loader rebinds GNU R's
+    // package binaries to this library's install name, and packages ry builds look R's API up in
+    // the flat namespace that RTLD_GLOBAL populates.
     let library = unsafe {
         RuntimeLibrary::open(
             Some(&library_path),
@@ -254,10 +259,12 @@ fn ry_runtime() -> Result<&'static RuntimeLibrary, ReplError> {
 
 /// The identity of the sources `ry` was built from, which `libR.so` must have been built from
 /// too (`crates/libr/build_identity.rs` defines it).
+#[cfg(unix)]
 const RUNTIME_ID: &str = env!("RY_RUNTIME_ID");
 
 /// `None` for a library that exports no identity, which predates the check.
-fn runtime_id(library: &'static libloading::os::unix::Library) -> Option<String> {
+#[cfg(unix)]
+fn runtime_id(library: &'static RuntimeLibrary) -> Option<String> {
     type RuntimeId = unsafe extern "C" fn() -> *const std::ffi::c_char;
     let id = runtime_entry::<RuntimeId>(library, "ry_runtime_id").ok()?;
     let pointer = unsafe { id() };
@@ -268,6 +275,7 @@ fn runtime_id(library: &'static libloading::os::unix::Library) -> Option<String>
     })
 }
 
+#[cfg(unix)]
 fn stale_runtime_message(library_path: &std::path::Path, built_from: Option<&str>) -> String {
     format!(
         "ry's runtime ({}) is out of date: it has build {}, but this ry is build {RUNTIME_ID}; rebuild it with `just build` or `cargo build -p libr` (same profile as ry)",

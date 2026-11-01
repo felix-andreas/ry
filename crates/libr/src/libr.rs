@@ -41,6 +41,7 @@ pub mod hashtab;
 pub mod legacy;
 pub mod linpack;
 pub mod lists;
+pub mod macho;
 pub mod memory;
 pub mod rmath;
 pub mod serialize;

@@ -27,9 +27,11 @@ ry looks for its runtime beside the executable and in `../lib/ry/`, so an instal
 a GNU R installation built as a shared library, because ry's runtime reads base R from it. `ry
 check`, `ry fmt` and `ry server` need nothing else.
 
-The Linux archives are built on Ubuntu 22.04, so they need glibc 2.35 or newer. On macOS, the
-runtime is built but untested, and `crates/libr/build.rs` applies its symbol exports, soname and
-compression libraries on Linux only, so compiled packages are not expected to load there.
+The Linux archives are built on Ubuntu 22.04, so they need glibc 2.35 or newer. On macOS, `libR.dylib`
+has the install name `@rpath/libR.dylib` and exports the same names as the Linux library, which is
+checked by cross-compiling from Linux (`contributing/design/r-runtime.md`, section 11). The smoke
+test's `RY_SMOKE_PACKAGES` step, which loads a CRAN binary of jsonlite under `ry run`, is the first
+run on a real Mac.
 
 The VS Code extension is published once per platform, each copy bundling that platform's `ry`,
 plus one copy without a binary for every other platform. The Zed extension ships no binary: it

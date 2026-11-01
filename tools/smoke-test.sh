@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs a release archive into a scratch directory and checks that what a user runs first works:
 # the version, `ry check`, `ry fmt`, the language server's handshake, and, where GNU R is installed,
-# `ry run` on ry's runtime and `ry R` on GNU R.
+# `ry run` on ry's runtime and `ry R` on GNU R. With RY_SMOKE_PACKAGES set, it also installs a
+# compiled package from CRAN with GNU R and loads it under `ry run`.
 #
 #   tools/smoke-test.sh release/0.4.0-beta/ry-x86_64-unknown-linux-gnu.tar.gz
 set -euo pipefail
@@ -81,6 +82,22 @@ if command -v R >/dev/null 2>&1 || [ -n "${R_HOME:-}" ]; then
 	fi
 	output=$("$ry" R sum.R 2>&1 | tr -d '\r') || true
 	if [ "$output" = "55 " ]; then pass "ry R on GNU R"; else fail "ry R: $output"; fi
+
+	# A package with compiled code, installed by GNU R (a CRAN binary on macOS, built from source
+	# on Linux), must load under ry's runtime and call its C routines there. On macOS this is
+	# what proves ry rebinds the package's libR reference to its own runtime. It downloads from
+	# CRAN, so it runs only when asked.
+	if [ -n "${RY_SMOKE_PACKAGES:-}" ] && { [ -e "$scratch/install/libR.so" ] || [ -e "$scratch/install/libR.dylib" ]; }; then
+		mkdir -p "$scratch/library"
+		Rscript -e "install.packages('jsonlite', lib = '$scratch/library', repos = 'https://cloud.r-project.org', quiet = TRUE)" >/dev/null 2>&1 || true
+		printf 'library(jsonlite, lib.loc = "%s")\ncat(toJSON(list(a = 1:3)), "\\n")\n' "$scratch/library" >package.R
+		output=$("$ry" run package.R 2>&1 | tr -d '\r') || true
+		if [ "$output" = '{"a":[1,2,3]} ' ]; then
+			pass "ry run loads a compiled package GNU R installed"
+		else
+			fail "ry run with jsonlite: $output"
+		fi
+	fi
 else
 	echo "skip  ry run and ry R (GNU R is not installed)"
 fi

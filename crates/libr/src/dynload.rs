@@ -130,7 +130,12 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
     if let Some(dll) = runtime.dlls.iter_mut().find(|dll| dll.path == canonical) {
         return Ok(&mut **dll);
     }
-    let c_path = CString::new(canonical.clone()).map_err(|_| error("invalid library path"))?;
+    // On macOS a binary GNU R linked names GNU R's libR; ry loads a copy rebound to its own.
+    #[cfg(target_os = "macos")]
+    let opened = rebound_copy(&canonical)?.unwrap_or_else(|| canonical.clone());
+    #[cfg(not(target_os = "macos"))]
+    let opened = canonical.clone();
+    let c_path = CString::new(opened).map_err(|_| error("invalid library path"))?;
     let visibility = if local {
         libc::RTLD_LOCAL
     } else {
@@ -173,6 +178,95 @@ pub unsafe fn load_library(path: &str, local: bool) -> ApiResult<*mut Dll> {
         with_native_scope(|| ry_call_init(init, dll.cast()))?;
     }
     Ok(dll)
+}
+
+/// A copy of the library at `path` whose libR reference names ry's runtime, or `None` when
+/// the library references no libR and loads as it is (`macho.rs` explains the rewrite).
+///
+/// The copy lives in ry's cache under a key made of the original's path, size and
+/// modification time, so a package is read, rewritten and re-signed once, a reinstalled package
+/// gets a new copy, and a load that hits the cache costs two `stat` calls. A library that
+/// needs no rewrite leaves an empty marker, so it is not read again either. The copy keeps its
+/// file name, because the name decides `R_init_<name>`.
+#[cfg(target_os = "macos")]
+fn rebound_copy(path: &str) -> ApiResult<Option<String>> {
+    use std::{hash::Hasher, os::unix::fs::MetadataExt, path::Path};
+    let failed = |failure: String| {
+        error(format!(
+            "unable to load shared object '{path}':\n  {failure}"
+        ))
+    };
+    let metadata = std::fs::metadata(path).map_err(|failure| failed(failure.to_string()))?;
+    let mut key = Fnv(0xcbf2_9ce4_8422_2325);
+    key.write(path.as_bytes());
+    key.write_u64(metadata.size());
+    key.write_i64(metadata.mtime());
+    key.write_i64(metadata.mtime_nsec());
+    let cache = dirs::cache_dir()
+        .ok_or_else(|| failed("cannot rebind it to ry's runtime: no cache directory".into()))?
+        .join("ry")
+        .join("rebound")
+        .join(format!("{:016x}", key.finish()));
+    let file_name = Path::new(path).file_name().unwrap_or_default();
+    let target = cache.join(file_name);
+    let unchanged = cache.join(".unchanged");
+    if target.exists() {
+        return Ok(Some(target.to_string_lossy().into_owned()));
+    }
+    if unchanged.exists() {
+        return Ok(None);
+    }
+    let mut image = std::fs::read(path).map_err(|failure| failed(failure.to_string()))?;
+    let rewritten = crate::macho::rebind_libr(&mut image).map_err(failed)?;
+    std::fs::create_dir_all(&cache).map_err(|failure| failed(failure.to_string()))?;
+    if rewritten == 0 {
+        std::fs::write(&unchanged, b"").map_err(|failure| failed(failure.to_string()))?;
+        return Ok(None);
+    }
+    // Written and signed under a temporary name, then renamed, so a concurrent session never
+    // loads a half-written or unsigned copy.
+    let staging = cache.join(format!(
+        ".{}.{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::write(&staging, &image).map_err(|failure| failed(failure.to_string()))?;
+    let signed = std::process::Command::new("codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&staging)
+        .output()
+        .map_err(|failure| {
+            failed(format!(
+                "cannot run codesign to re-sign the rebound copy: {failure}"
+            ))
+        })?;
+    if !signed.status.success() {
+        drop(std::fs::remove_file(&staging));
+        return Err(failed(format!(
+            "codesign could not re-sign the rebound copy: {}",
+            String::from_utf8_lossy(&signed.stderr).trim()
+        )));
+    }
+    std::fs::rename(&staging, &target).map_err(|failure| failed(failure.to_string()))?;
+    Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+/// FNV-1a, which is stable across builds and runs, unlike the standard library's hasher, so
+/// the cache key survives a rebuild of ry.
+#[cfg(target_os = "macos")]
+struct Fnv(u64);
+
+#[cfg(target_os = "macos")]
+impl std::hash::Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
 }
 
 /// The `DLLInfo` object `dyn.load` returns: a list of the library's name and path.
