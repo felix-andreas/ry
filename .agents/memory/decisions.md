@@ -3165,6 +3165,19 @@ first lines R had already read, leaving R mid-command.
 - **Semantic tokens are an `ide` query** (`semantic_tokens`, `classify_type_token`), and the server
   only maps `SemanticClass` to its legend. Before this the classification lived in the server and
   covered annotations only, which left `match`, `=>` and tags uncolored.
+- **Semantic tokens also color R names an R grammar cannot classify**: parameters (declarations and
+  reads that resolve to a parameter binding), call heads as functions, the package of `pkg::name` as a
+  namespace, and the left side of a function assignment. Everything else stays with the editor's R
+  grammar, so tokens add facts rather than replace the grammar. The server also answers range
+  requests, so a large file only pays for the viewport.
+- **A quick fix lives on the diagnostic** (`Diagnostic.fix` in `crates/semantics/src/diagnostics.rs`,
+  `push_lint`'s fix argument in `lints.rs`). Before this, a fix would have had to re-derive the
+  finding in `ide`, a second source of truth that drifts. The server reads fixes from the diagnostics
+  it publishes, after suppressions, so a suppressed finding offers no fix. `ry check --fix` can reuse
+  the same field.
+- **Outline sections and folds come from RStudio section comments** (a comment alone on its line
+  ending in four or more `-`, `=` or `#`). A section ends at the next header of the same or a higher
+  level in the same block, which matches RStudio's outline, so files written there look the same.
 - **An inlay hint states what the code does not.** A payload-free tag or an `@Name(...)` constructor
   already spells its type, so it gets no hint and no "add annotation" action, and a vector of
   records, tuples or tags (`Position[]`) is dropped from a hinted union because no such value exists.
@@ -4008,6 +4021,32 @@ explicit allocators".
   rewriting. Exports come from a generated `.def` file, `LibExtern` becomes
   `__declspec(dllimport) extern` under `_WIN32`, and package DLLs load with `LoadLibraryExW`.
   The interpreter's Unix-only libc use is the gap (`contributing/design/r-runtime.md`, section 11).
+
+# Decision record: a new top-level name costs one project fold
+
+- **Before.** A name being typed is a new top-level definition on every keystroke. That re-ran
+  `package_definitions` and `duplicate_binding_map`, two folds over every package file's
+  definitions keyed by `String`; `item_interface_edges` read the project-wide maps directly, so
+  every item whose check was demanded afterwards re-derived its edges; and the unresolved-name
+  typo suggestion collected the characters of every project name before checking its length.
+  `examples/keystroke_probe.rs` measured 23 to 27 ms per new-name edit on dsbench and finbench.
+- **What was structurally weak.** Two folds of the same data, and a per-item query reading
+  project-wide maps despite the per-name firewall (`package_name`) built for exactly that.
+- **Shape.** `package_definition_index` folds once into the winners and the duplicated names;
+  `package_definitions` is a plain borrow of its winners, and `duplicate_binding_map` a tracked copy
+  of its duplicates, empty in a healthy project, which keeps the per-file duplicate check firewalled.
+  `item_interface_edges` reads `package_name` and `test_name`. Map keys are `Symbol`, whose hash
+  is the spelling's FxHash computed once at interning (not the index, so iteration order does not
+  depend on which thread interned a spelling first, which the robustness contract forbids from
+  reaching output; this replaces an earlier index hash, which saved only the read of the stored
+  hash from the symbol table); `Symbol` therefore no longer implements
+  `Borrow<str>`, and a lookup by text interns first (`Symbol::new`). The symbol table also stores
+  each spelling's character count, which the typo scan filters on before reading any spelling.
+- **Impact.** New-name edits take about 4 to 6 ms on dsbench and finbench, body edits about 2 ms
+  (unchanged). Pinned by `a_new_definition_rebuilds_no_other_files_interface_edges` in
+  `crates/semantics/tests/test_incremental.rs`. The probe's earlier 60 to 74 ms figure was an
+  artifact: it edited a digit inside an identifier, which renamed an item, and it entered the
+  stubs at `LOW` durability, which made every keystroke deep-verify about 51,000 memos.
 
 ## The runtime emulates the GNU R version it loads base R from
 

@@ -3009,13 +3009,24 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
+## Open: editor parity
+
+- `ry check --fix` that applies `Diagnostic.fix` from the command line.
+- More quick fixes: an unused binding (remove or prefix), a missing `library()` for a namespaced name,
+  and an annotation that disagrees with the inline one.
+- Semantic tokens: a `defaultLibrary` modifier for stub-declared functions, and coloring of
+  `$` fields and frame columns.
+- The outline does not show sections inside function bodies (folding does).
+- `code_action` recomputes the file's diagnostics and suppressions on every request, and editors send
+  one per cursor move. Reuse the last published set for the document instead.
+
 ## Open: editor latency at 300,000 lines
 
 Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .bench/finbench
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-- `package_definitions` re-executes on every body edit in `examples/keystroke_probe.rs` (dsbench), so some file's `file_definitions` does not backdate across a body edit. Find which, since every name lookup in the project hangs off that map.
+- A new top-level name still re-runs `package_definition_index` (one pass over every file's definitions), the `package_name` projections the edited file reads, and `project_typo_suggestion` for each unresolved name a re-checked file has (a scan of every project name of a similar length). About 4 to 6 ms on dsbench in `examples/keystroke_probe.rs`. Chunked per-file-group indexes would make the fold proportional to one chunk.
 - A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions.md`, "a file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
 
 ## Open: false errors on real CRAN code

@@ -157,6 +157,11 @@ on purpose.
   A target inside the stub corpus renders the token its range covers, as in
   ``declared in stub source 0 at `print` ``, rather than a byte offset, because an offset shifts
   whenever an unrelated declaration is added, while the token proves the range is right.
+- **`crates/ide/tests/structure`**: whole-file editor features. Each case renders the outline
+  (nested by indentation), the folds as zero-based inclusive line ranges, the semantic tokens for
+  R names, the quick fixes the diagnostics and default lints offer, and, when the source has a `$0`
+  marker, every step of selection expansion from it. Run it with
+  `cargo test -p ide --test test_ide_fixtures structure`.
 
 ## Fuzzing and property tests
 

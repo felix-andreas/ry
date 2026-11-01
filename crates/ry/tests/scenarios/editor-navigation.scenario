@@ -1,0 +1,50 @@
+# A package author finds their way around a file and lets the editor fix small mistakes.
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file NAMESPACE
+| export(balance)
+file R/ledger.R
+| # Accounts ----
+| balance <- function(entries, opening = 0) {
+|   total <- function(values) sum(values)
+|   opening + total(entries)
+| }
+|
+| # Reports ----
+| report <- function(entries) {
+|   ok = T
+|   balance(entries, opening = 1)
+| }
+
+open R/ledger.R
+
+# The outline nests functions under their section and helpers under their function.
+expect symbol R/ledger.R "Accounts/balance"
+expect symbol R/ledger.R "Accounts/balance/total"
+expect symbol R/ledger.R "Reports/report"
+expect workspace-symbol "rep" R/ledger.R report
+
+# A section folds up to the next header, a function body up to its closing brace.
+expect fold R/ledger.R "# Accounts" "}"
+expect fold R/ledger.R "report <- function" "  balance(entries"
+
+# Selection grows from an argument to the whole argument list.
+expect selection R/ledger.R "opening = 1" "entries, opening = 1"
+
+# Signature help follows the named argument.
+expect signature R/ledger.R after "balance(entries, opening = " "[opening: U = 0]"
+
+# Lint fixes come from the diagnostics they resolve.
+expect diagnostics R/ledger.R "Use TRUE, not T"
+fix R/ledger.R "T\n" "Change to `TRUE`"
+fix R/ledger.R "= TRUE" "Change to `<-`"
+expect buffer R/ledger.R "ok <- TRUE"
+expect no diagnostic R/ledger.R "Use TRUE"
+
+# A misspelled name offers the spelling it was probably meant to be.
+replace R/ledger.R "balance(entries, opening = 1)" "balanse(entries, opening = 1)"
+expect diagnostics R/ledger.R "Did you mean `balance`?"
+fix R/ledger.R "balanse" "Change to `balance`"
+expect buffer R/ledger.R "  balance(entries, opening = 1)"
