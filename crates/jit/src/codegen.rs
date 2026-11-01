@@ -2521,7 +2521,7 @@ fn reads(inst: &crate::analysis::Inst) -> Vec<usize> {
         Op::CallBuiltin => std::iter::once(operand(1))
             .chain(operand(3)..operand(3) + operand(4))
             .collect(),
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate => vec![operand(1)],
+        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => vec![operand(1)],
         Op::BranchUnlessBuiltin | Op::BranchUnlessPrimitive | Op::BranchIfObject => {
             vec![operand(0)]
         }

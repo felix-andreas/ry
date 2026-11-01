@@ -298,6 +298,36 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
     with_slot(object, index, value)
 }
 
+/// The `shape` cache of a site that never saw a record.
+pub const NO_LAYOUT: i32 = -1;
+
+/// `object$name` through a site's `shape` cache (`bytecode::Op::Field`): the cached slot when
+/// `object` is a record of the cached layout, and otherwise the field's slot, which the cache
+/// then remembers. `None` when `object` is not a record with that field, for `$`'s own path,
+/// which dispatches or raises the error.
+pub unsafe fn cached_field(object: Sexp, name: Sexp, shape: Sexp) -> R<Option<Sexp>> {
+    if object.kind() != SexpType::Record || object.is_object() {
+        return Ok(None);
+    }
+    let id = object.record_layout();
+    let cache = values::ints_mut(shape);
+    if cache[0] as u32 == id {
+        return slot_value(object, cache[1] as usize).map(Some);
+    }
+    let Some(layout) = crate::heap().layouts.get(id) else {
+        panic!("a record refers to layout {id}, which was never interned");
+    };
+    if layout.kind() != NativeKind::Record {
+        return Ok(None);
+    }
+    let Some(index) = layout.names().iter().position(|&field| field == name) else {
+        return Ok(None);
+    };
+    cache[0] = id as i32;
+    cache[1] = index as i32;
+    slot_value(object, index).map(Some)
+}
+
 unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
     let layout = layout(object);
     let text = String::from_utf8_lossy(name);

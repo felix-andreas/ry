@@ -1133,7 +1133,7 @@ impl Builder<'_> {
                     Action::BranchIfObject { src: operand(0) }
                 }
             }
-            Op::CallTailUpdate => self.opaque_step(
+            Op::CallTailUpdate | Op::Field => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 Vec::new(),
@@ -2339,7 +2339,7 @@ fn apply_liveness(inst: &Inst, live: &mut [bool]) {
                 gen_(register, live);
             }
         }
-        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate => {
+        Op::CallGeneric | Op::CallRebinding | Op::CallTailUpdate | Op::Field => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

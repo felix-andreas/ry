@@ -616,6 +616,12 @@ impl Sexp {
         unsafe { self.set_flag(flag_bits::OBJECT, on) }
     }
 
+    /// Whether the object's fields count as references to what they hold (see
+    /// `flag_bits::UNTRACKED`).
+    pub unsafe fn tracks_references(self) -> bool {
+        unsafe { self.header().flags.get() & flag_bits::UNTRACKED == 0 }
+    }
+
     pub unsafe fn is_array(self) -> bool {
         unsafe { self.header().flags.get() & flag_bits::ARRAY != 0 }
     }

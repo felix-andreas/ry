@@ -962,7 +962,7 @@ pub unsafe fn run_closure(
     sys_parent: Sexp,
     promargs: Sexp,
 ) -> R<Sexp> {
-    moves::entering_closure(env)?;
+    moves::entering_closure(function, env)?;
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(error_in(
@@ -1845,6 +1845,7 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     if srcref != nil() {
         values::set_attr(closure, symbols().srcref, srcref)?;
     }
+    moves::created_closure(closure)?;
     Ok(closure)
 }
 

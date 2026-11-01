@@ -286,6 +286,28 @@ const PRINTS: &[(&str, &str)] = &[
         "{ l <- list(:Circle(radius = 3)); gc(); l[[1]] }",
         ":Circle(radius = 3)\n",
     ),
+    // A compiled `$` site caches the record layout it last saw; closures compile on their third
+    // call, so each loop below runs the cached path.
+    (
+        "{ gx <- function(r) r$x; s <- 0; for (i in 1:5) s <- s + gx((x = i, y = 0)); s }",
+        "[1] 15\n",
+    ),
+    (
+        "{ gx <- function(r) r$x; out <- NULL; for (r in list((x = 1, y = 2), (x = 10,), (a = 0, x = 100), (x = 2L, y = 0), (x = \"s\",))) out <- c(out, gx(r)); out }",
+        "[1] \"1\"   \"10\"  \"100\" \"2\"   \"s\"  \n",
+    ),
+    (
+        "{ gx <- function(r) r$x; c(gx((x = 1,)), gx((x = 2,)), gx((x = 3,)), gx(list(x = 4)), gx((x = 5,))) }",
+        "[1] 1 2 3 4 5\n",
+    ),
+    (
+        "{ `$.thing` <- function(x, name) 42; gx <- function(r) r$x; o <- list(x = 1); class(o) <- \"thing\"; c(gx((x = 1,)), gx((x = 2,)), gx((x = 3,)), gx(o)) }",
+        "[1]  1  2  3 42\n",
+    ),
+    (
+        "{ ge <- function(e) e$x; mk <- function() { x <- 7; g <- function() parent.frame(); g() }; e <- mk(); c(ge(e), ge(e), ge(e), ge((x = 8,))) }",
+        "[1] 7 7 7 8\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.
@@ -300,6 +322,14 @@ const ERRORS: &[(&str, &str)] = &[
         "the record has no field `al`; its fields are `alpha`",
     ),
     ("pair$x", "a tuple has no field `x`"),
+    (
+        "{ gx <- function(r) r$x; gx((x = 1,)); gx((x = 1,)); gx((x = 1,)); gx((y = 1,)) }",
+        "the record has no field `x`; its fields are `y`",
+    ),
+    (
+        "{ gx <- function(r) r$x; gx((x = 1,)); gx((x = 1,)); gx((x = 1,)); gx(:Circle(radius = 1)) }",
+        "a tag has no fields; read its payload with `match`",
+    ),
     (
         "circle$radius",
         "a tag has no fields; read its payload with `match`",
