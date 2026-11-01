@@ -26,7 +26,7 @@ use crate::{
     item_name_range, item_naming, item_spans, item_tree, parse, project_type_definitions,
     statement_annotations,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use syntax::SyntaxNode;
@@ -645,27 +645,9 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     let definitions = visible_type_definitions(db, file);
     // Names declared more than once have no winning definition; the
     // duplicate-declaration error reports them instead.
-    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
-    if let Some(files) = ProjectFiles::try_get(db) {
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for &project_file in files.files(db) {
-            if *project_file.kind(db) != DocumentKind::Package {
-                continue;
-            }
-            for (name, _) in type_declaration_sites(db, project_file) {
-                *counts.entry(name.as_str()).or_default() += 1;
-            }
-        }
-        ambiguous.extend(
-            counts
-                .into_iter()
-                .filter(|(_, count)| *count >= 2)
-                .map(|(name, _)| name.to_owned()),
-        );
-    }
-    let stub_nominals: BTreeSet<String> = stubs(db)
-        .map(|library| library.nominals.iter().cloned().collect())
-        .unwrap_or_default();
+    let ambiguous = ProjectFiles::try_get(db).map(|files| duplicate_type_map(db, files));
+    let no_nominals = FxHashSet::default();
+    let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
 
     for annotation in file_annotation_references(db, file) {
         for (message, range) in &annotation.typing_errors {
@@ -677,7 +659,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             ));
         }
         for (element, range) in &annotation.vector_elements {
-            if vector_element_atomic(db, *element, &definitions, &stub_nominals) {
+            if vector_element_atomic(db, *element, &definitions, stub_nominals) {
                 continue;
             }
             let mut renderer = TypeRenderer::default();
@@ -746,7 +728,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             }
         }
         if let Some((name, range)) = &annotation.new_nominal
-            && !ambiguous.contains(name.text(db))
+            && !ambiguous.is_some_and(|ambiguous| ambiguous.contains_key(name.text(db)))
             && definitions
                 .get(name.text(db))
                 .is_some_and(|definition| definition.alias)
@@ -1349,7 +1331,7 @@ fn vector_element_atomic<'db>(
     db: &'db dyn Db,
     element: Ty<'db>,
     definitions: &BTreeMap<String, NamedDefinition<'db>>,
-    stub_nominals: &BTreeSet<String>,
+    stub_nominals: &FxHashSet<String>,
 ) -> bool {
     let mut expanding: Vec<String> = Vec::new();
     let mut current = element;
