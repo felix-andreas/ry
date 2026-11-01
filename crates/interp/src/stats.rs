@@ -397,6 +397,13 @@ unsafe fn correlation(call: &NativeCall<'_>, correlate: bool) -> R<Sexp> {
     if x_argument == values::nil() {
         return Err(call.error("'x' is NULL"));
     }
+    if [x_argument, y_argument].iter().any(|argument| {
+        argument.kind() == SexpType::Integer && values::inherits(*argument, "factor")
+    }) {
+        return Err(call.error(
+            "Calling var(x) on a factor x is defunct.\n  Use something like 'all(duplicated(x)[-1L])' to test for a constant vector.",
+        ));
+    }
     let x = real_values(x_argument)?;
     let (n, x_columns) = matrix_shape(x_argument);
     if length(x_argument) == 0 {

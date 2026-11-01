@@ -405,6 +405,12 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         crate::heap().root(value);
         let last = values::install(".Last.value")?;
         crate::heap().define(base_env(), last, value)?;
+        // GNU R's `.Last.value` does not count as a reference, so a value the user just
+        // bound stays unshared and `.Internal(refcnt())` reports what the user's own
+        // bindings hold.
+        if let Some(cell) = crate::heap().frame_cell(base_env(), last) {
+            crate::heap().untrack_references(cell);
+        }
         if interp().visible {
             print::print_value_top(value, global_env())?;
         }

@@ -997,7 +997,16 @@ pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
         SexpType::List | SexpType::Expression => {
             let names = values::names(object);
             match match_name(names, name.bytes(), Some(false))? {
-                Some(position) => Ok(object.element(position)),
+                Some(position) => {
+                    let value = object.element(position);
+                    // A complex assignment through a partial name, `v$mi[[1]] <- 2`, assigns
+                    // a new `mi` element, so the `misc` element it read must not be modified
+                    // in place.
+                    if names.element(position).bytes() != name.bytes() {
+                        value.mark_not_mutable();
+                    }
+                    Ok(value)
+                }
                 None => Ok(nil()),
             }
         }
