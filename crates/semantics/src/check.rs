@@ -241,6 +241,10 @@ pub enum OperandExpectation {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct ItemCheck<'db> {
     pub expression_types: ExpressionTypes<'db>,
+    /// The type of the value each `match` pattern sees, narrowed to the members it can match,
+    /// so a tag or field inside a pattern hovers as the case it names. Indexed by pattern id;
+    /// a pattern that cannot match records nothing.
+    pub pattern_types: PatternTypes<'db>,
     pub errors: Vec<TypeError<'db>>,
     pub strict_origins: Vec<StrictOrigin>,
     pub scheme: Option<TypeScheme<'db>>,
@@ -284,6 +288,15 @@ pub struct ExpressionTypes<'db>(Box<[Option<Ty<'db>>]>);
 impl<'db> ExpressionTypes<'db> {
     pub fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
         self.0.get(id.0 as usize)?.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, salsa::SalsaValue)]
+pub struct PatternTypes<'db>(Box<[Option<Ty<'db>>]>);
+
+impl<'db> PatternTypes<'db> {
+    pub fn get(&self, id: PatId) -> Option<Ty<'db>> {
+        *self.0.get(id.0 as usize)?
     }
 }
 
@@ -389,6 +402,7 @@ pub fn check_item_with_annotation<'db>(
         environment: Environment::default(),
         scheme_arena: Vec::new(),
         recorded: FxHashMap::default(),
+        recorded_patterns: FxHashMap::default(),
         selected_overloads: FxHashMap::default(),
         callee_targets: FxHashMap::default(),
         masked_reads: FxHashSet::default(),
@@ -548,6 +562,13 @@ pub fn check_item_with_annotation<'db>(
         *slot = Some(context.table.resolve(context.db, ty));
     }
     let expression_types = ExpressionTypes(expression_types.into_boxed_slice());
+    let mut pattern_types = vec![None; module.patterns.len()];
+    for (&id, &ty) in &context.recorded_patterns {
+        if let Some(slot) = pattern_types.get_mut(id.0 as usize) {
+            *slot = Some(context.table.resolve(context.db, ty));
+        }
+    }
+    let pattern_types = PatternTypes(pattern_types.into_boxed_slice());
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
     // the item read them as absent facts rather than cascading.
@@ -585,6 +606,7 @@ pub fn check_item_with_annotation<'db>(
     ItemCheck {
         match_findings,
         expression_types,
+        pattern_types,
         errors,
         strict_origins: context.strict_origins,
         scheme,
@@ -787,6 +809,7 @@ struct Checker<'db, 'a> {
     environment: Environment<'db>,
     scheme_arena: Vec<TypeScheme<'db>>,
     recorded: FxHashMap<ExprId, Ty<'db>>,
+    recorded_patterns: FxHashMap<PatId, Ty<'db>>,
     selected_overloads: FxHashMap<ExprId, usize>,
     callee_targets: FxHashMap<ExprId, CalleeTarget>,
     masked_reads: FxHashSet<ExprId>,
@@ -1333,6 +1356,14 @@ impl<'db> Checker<'db, '_> {
         let expected = self.table.resolve(self.db, expected);
         let found = self.table.resolve(self.db, found);
         let Some(mismatch) = self.table.explain_record_mismatch(self.db, found, expected) else {
+            if let Some((component, expected, found)) =
+                value.and_then(|value| self.native_component_mismatch(value, expected, found))
+            {
+                return TypeError {
+                    range: self.blame_range(component),
+                    kind: TypeErrorKind::Mismatch { expected, found },
+                };
+            }
             return TypeError {
                 range,
                 kind: TypeErrorKind::Mismatch { expected, found },
@@ -1347,6 +1378,106 @@ impl<'db> Checker<'db, '_> {
                 mismatch: Box::new(mismatch),
             },
         }
+    }
+
+    /// Follows a native record, tuple or tag literal down to the one component whose type
+    /// differs from what is expected, so the mismatch blames that value rather than the whole
+    /// literal. `None` when the value is not such a literal or more than one component differs.
+    fn native_component_mismatch(
+        &mut self,
+        value: ExprId,
+        expected: Ty<'db>,
+        found: Ty<'db>,
+    ) -> Option<(ExprId, Ty<'db>, Ty<'db>)> {
+        let module = self.module;
+        let mut value = value;
+        while let ExpressionKind::Paren(inner) = &module.expression(value).kind {
+            value = *inner;
+        }
+        let found = self.table.resolve(self.db, found);
+        let expected = self.structural(expected);
+        // Of a union such as `record{...} | NULL`, only a member of the literal's own shape can
+        // be the one the literal was meant to be.
+        let candidates: Vec<Ty<'db>> = match expected.kind(self.db) {
+            TyKind::Union(members) => members.clone(),
+            _ => vec![expected],
+        };
+        let (component, expected, found) = match &module.expression(value).kind {
+            ExpressionKind::Record(fields) => {
+                let TyKind::NativeRecord(found_fields) = found.kind(self.db).clone() else {
+                    return None;
+                };
+                let expected_fields = unique_member(self.db, &candidates, |kind| match kind {
+                    TyKind::NativeRecord(fields) => Some(fields.clone()),
+                    _ => None,
+                })?;
+                if expected_fields.len() != found_fields.len() {
+                    return None;
+                }
+                let mut differing = Vec::new();
+                for found_field in &found_fields {
+                    let expected_field = expected_fields
+                        .iter()
+                        .find(|field| field.name == found_field.name)?;
+                    let expected_ty = self.table.resolve(self.db, expected_field.ty);
+                    let found_ty = self.table.resolve(self.db, found_field.ty);
+                    if expected_ty != found_ty {
+                        let component = fields
+                            .iter()
+                            .find(|field| field.name.as_str() == found_field.name.text(self.db))?
+                            .value;
+                        differing.push((component, expected_ty, found_ty));
+                    }
+                }
+                single(differing)?
+            }
+            ExpressionKind::Tuple(items) => {
+                let TyKind::NativeTuple(found_items) = found.kind(self.db).clone() else {
+                    return None;
+                };
+                let expected_items = unique_member(self.db, &candidates, |kind| match kind {
+                    TyKind::NativeTuple(items) => Some(items.clone()),
+                    _ => None,
+                })?;
+                if expected_items.len() != found_items.len() || items.len() != found_items.len() {
+                    return None;
+                }
+                let mut differing = Vec::new();
+                for ((&item, &expected_ty), &found_ty) in
+                    items.iter().zip(&expected_items).zip(&found_items)
+                {
+                    let expected_ty = self.table.resolve(self.db, expected_ty);
+                    let found_ty = self.table.resolve(self.db, found_ty);
+                    if expected_ty != found_ty {
+                        differing.push((item, expected_ty, found_ty));
+                    }
+                }
+                single(differing)?
+            }
+            // A tag's payload is itself a record or tuple literal, matched against the payload
+            // of the expected tag of the same name.
+            ExpressionKind::Tag {
+                name,
+                payload: Some(payload),
+                ..
+            } => {
+                let TyKind::Tag(_, Some(found_payload)) = found.kind(self.db) else {
+                    return None;
+                };
+                let expected_payload = unique_member(self.db, &candidates, |kind| match kind {
+                    TyKind::Tag(tag, Some(payload)) if tag.text(self.db) == name.as_str() => {
+                        Some(*payload)
+                    }
+                    _ => None,
+                })?;
+                return self.native_component_mismatch(*payload, expected_payload, *found_payload);
+            }
+            _ => return None,
+        };
+        Some(
+            self.native_component_mismatch(component, expected, found)
+                .unwrap_or((component, expected, found)),
+        )
     }
 
     /// Walks the path against the `list(...)` call that produced the record; `None`
@@ -3051,9 +3182,9 @@ impl<'db> Checker<'db, '_> {
                 members.retain(|member| !matches!(member.kind(self.db), TyKind::OtherTags));
             }
             if members.is_empty() {
-                let hint = self.pattern_mismatch_hint(pattern, subject);
+                let (hint, blamed) = self.pattern_mismatch_hint(pattern, subject).unzip();
                 self.errors.push(TypeError {
-                    range: node.range,
+                    range: blamed.flatten().unwrap_or(node.range),
                     kind: TypeErrorKind::PatternNeverMatches {
                         found: subject,
                         hint,
@@ -3071,9 +3202,9 @@ impl<'db> Checker<'db, '_> {
             return self.check_pattern_components(pattern, narrowed, bindings);
         }
         if !self.pattern_admits(pattern, subject) {
-            let hint = self.pattern_mismatch_hint(pattern, subject);
+            let (hint, blamed) = self.pattern_mismatch_hint(pattern, subject).unzip();
             self.errors.push(TypeError {
-                range: node.range,
+                range: blamed.flatten().unwrap_or(node.range),
                 kind: TypeErrorKind::PatternNeverMatches {
                     found: subject,
                     hint,
@@ -3085,8 +3216,19 @@ impl<'db> Checker<'db, '_> {
         self.check_pattern_components(pattern, subject, bindings);
     }
 
-    fn pattern_mismatch_hint(&self, pattern: PatId, subject: Ty<'db>) -> Option<String> {
-        let PatternKind::Tag { name, payload, .. } = &self.module.pattern(pattern).kind else {
+    /// The hint, and the part of the pattern it is about when that is narrower than the whole
+    /// pattern: a misspelled tag or field name.
+    fn pattern_mismatch_hint(
+        &self,
+        pattern: PatId,
+        subject: Ty<'db>,
+    ) -> Option<(String, Option<TextRange>)> {
+        let PatternKind::Tag {
+            name,
+            name_range,
+            payload,
+        } = &self.module.pattern(pattern).kind
+        else {
             return None;
         };
         let subject = self.table.resolve(self.db, subject);
@@ -3103,13 +3245,20 @@ impl<'db> Checker<'db, '_> {
             .collect();
         let found = tags.iter().find(|(tag, _)| *tag == name.as_str());
         if let Some((_, None)) = found {
-            return Some(format!("`:{}` carries no payload.", name.as_str()));
+            return Some((format!("`:{}` carries no payload.", name.as_str()), None));
         }
         let Some((_, Some(tag_payload))) = found else {
             let nearest = nearest_name(name.as_str(), tags.iter().map(|(tag, _)| *tag))?;
-            return Some(format!(
-                "The value has no tag `:{}`. Did you mean `:{nearest}`?",
-                name.as_str()
+            let tag_range = name_range
+                .start()
+                .checked_sub(TextSize::from(1))
+                .map(|start| TextRange::new(start, name_range.end()));
+            return Some((
+                format!(
+                    "The value has no tag `:{}`. Did you mean `:{nearest}`?",
+                    name.as_str()
+                ),
+                tag_range,
             ));
         };
         let payload = (*payload)?;
@@ -3129,10 +3278,13 @@ impl<'db> Checker<'db, '_> {
         let suggestion = nearest_name(unknown.name.as_str(), known.iter().copied())
             .map(|nearest| format!(" Did you mean `{nearest}`?"))
             .unwrap_or_default();
-        Some(format!(
-            "`:{}` has no field `{}`.{suggestion}",
-            name.as_str(),
-            unknown.name.as_str()
+        Some((
+            format!(
+                "`:{}` has no field `{}`.{suggestion}",
+                name.as_str(),
+                unknown.name.as_str()
+            ),
+            Some(unknown.name_range),
         ))
     }
 
@@ -3144,6 +3296,7 @@ impl<'db> Checker<'db, '_> {
     ) {
         let module = self.module;
         let node = module.pattern(pattern);
+        self.recorded_patterns.insert(pattern, subject);
         match &node.kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => {}
             PatternKind::Bind(leaf) => {
@@ -10011,6 +10164,26 @@ impl<'db> Checker<'db, '_> {
         }
         substitute_rigid(self.db, scheme.body, &substitution)
     }
+}
+
+/// The one member of a union `select` accepts; `None` when none or several do.
+fn unique_member<'db, T>(
+    db: &'db dyn Db,
+    members: &[Ty<'db>],
+    select: impl Fn(&TyKind<'db>) -> Option<T>,
+) -> Option<T> {
+    single(
+        members
+            .iter()
+            .filter_map(|member| select(member.kind(db)))
+            .collect(),
+    )
+}
+
+fn single<T>(items: Vec<T>) -> Option<T> {
+    let mut items = items.into_iter();
+    let first = items.next()?;
+    items.next().is_none().then_some(first)
 }
 
 fn combine_operand_atomic<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Atomic> {

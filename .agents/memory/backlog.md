@@ -2690,8 +2690,9 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - **A tag payload prints its fields in sorted order.** `:Rect(width: double, height: double)` is shown
   as `:Rect(height: double, width: double)` in `type-mismatch` and `non-exhaustive-match` messages,
   which makes a diagnostic differ from the user's own definition. Show the declaration order.
-- **`@Money(list(amount = "x", ...))` blames the whole `list(...)` call.** The wrong field's value is
-  the precise range.
+- **`@Money(list(amount = 1, ...))` is a kind mismatch with no hint.** A `list(...)` never fits a
+  record, so blaming the whole call is right, but the message should suggest the native literal
+  `(amount = 1, ...)`.
 - **A join column missing from both frames is reported twice at one range**, once per frame
   (`sales[ids, on = "teem"]`). One finding naming both frames would be quieter.
 - **Strict mode reports an `if (x < 0) stop(...)` guard** as an undetermined type (already on
@@ -2700,11 +2701,14 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   against 0.7 s on GNU R), so the JIT could not be checked in this pass; run the docs' runtime claims
   against a release build.
 
-## Open: findings from the developer-workflow round
+## Open: editor gaps on ry's own syntax
 
-- **Inlay hint for an untyped parameter shows a union with an array form.** In `summarise <-
-  function(positions) vapply(positions, position_value, ...)` the hint reads `list[Position] |
-  Position[]`; the second member is the vector view of the same element type and adds noise.
+- **Hover still shows impossible vector members.** The inlay hint and the "add annotation" action
+  drop `Position[]` from `list[Position] | Position[]` (`without_impossible_vectors` in
+  `crates/ide/src/ide.rs`), but hover prints the full inferred union.
+- **Completion of a field name inside a record literal** offers R globals; it should offer the
+  expected record's missing fields.
+- **No payload-field completion in a tag constructor** such as `:Circle(ra|)`; patterns have it.
 
 ## Open: false errors on real CRAN code
 

@@ -3,7 +3,7 @@
 point <- (x = 1, y = "a")
 point$y$0
 #++++
-hover 26..33: character
+hover 32..33: y: character
 definition: none
 references: none
 rename: none
@@ -18,8 +18,8 @@ some <- :So$0me(5L)
 #++++
 hover 8..17: :Some(integer)
 definition: none
-references: none
-rename: none
+references: 9..13
+rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `some`
   edit 0..0 -> "#: :Some(integer)\n"
@@ -43,7 +43,7 @@ definition 87..92
 references: 87..92*, 97..102
 rename: 2 edit(s)
 signature: none
-completion (11): value, VADeaths, validEnc, validObject, validSlotNames, validUTF8, vapply, var
+completion: none
 
 #---- hover_on_a_pattern_binding_use
 #: fn(o: :Some(integer) | :None) -> integer
@@ -84,7 +84,7 @@ f <- function() {
   point$wi$0
 }
 #++++
-hover 55..63: Unknown
+hover 61..63: wi: Unknown
 definition: none
 references: none
 rename: none
@@ -120,8 +120,8 @@ f <- function(o) {
 #++++
 hover 92..94: Unknown
 definition: none
-references: none
-rename: none
+references: 93..94
+rename: 1 edit(s)
 signature: none
 completion (1): Pending
 
@@ -139,4 +139,202 @@ definition 104..109
 references: 104..109*, 114..119
 rename: 2 edit(s)
 signature: none
-completion (16): label, La.svd, La_library, La_version, labels, labels.default, lag, lag.plot
+completion: none
+
+#---- hover_on_a_tag_in_a_pattern_shows_its_narrowed_case
+#: fn(o: :Some(integer) | :None) -> integer
+f <- function(o) {
+  match (o) {
+    :So$0me(value) => value
+    :None => 0L
+  }
+}
+#++++
+hover 81..86: :Some(integer)
+definition: none
+references: 10..14, 82..86
+rename: 2 edit(s)
+signature: none
+completion (1): Some
+
+#---- hover_on_a_nested_tag_in_a_pattern
+#: fn(r: :Ok(integer) | :Err(:Missing | :Invalid)) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(value) => value
+    :Err(:Miss$0ing) => 0L
+    :Err(:Invalid) => -1L
+  }
+}
+#++++
+hover 128..136: :Missing
+definition: stub source 11 at `Missing`
+references: 30..37, 129..136
+rename: none
+signature: none
+completion (1): Missing
+
+#---- hover_on_a_record_pattern_field_name
+#: fn(s: :Circle(radius: double) | :Empty) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(rad$0ius = r) => r
+    :Empty => 0
+  }
+}
+#++++
+hover 101..107: radius: double
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): radius
+
+#---- hover_on_a_record_literal_field_name
+point <- (x$0 = 1, y = "a")
+#++++
+hover 10..11: x: double
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `point`
+  edit 0..0 -> "#: record{x: double, y: character}\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: record{x: double, y: character}\n"
+completion (28): X11, x11, X11.options, X11Font, X11Fonts, xedit, xemacs, xfig
+hint @5: record{x: double, y: character}
+
+#---- hover_on_a_tag_payload_field_name
+shape <- :Circle(rad$0ius = 2)
+#++++
+hover 17..23: radius: double
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotation for `shape`
+  edit 0..0 -> "#: :Circle(radius: double)\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: :Circle(radius: double)\n"
+completion (98): .radialGradientPattern, upgrade, .linearGradientPattern, randu, range.Date, range.default, read.csv, read.csv2
+hint @5: :Circle(radius: double)
+
+#---- tag_references_and_rename_cover_values_patterns_and_types
+alias Shape = :Circle(radius: double) | :Empty
+#: fn(s: Shape) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => r
+    :Empty => 0
+  }
+}
+empty <- :Emp$0ty
+#++++
+hover 169..175: :Empty
+definition 41..46
+references: 41..46*, 143..148, 170..175
+rename: 3 edit(s)
+signature: none
+completion (2): Empty, ListWasEmpty
+
+#---- library_tag_is_not_renamed
+#: fn(x: integer) -> :Ok(integer) | :Err(character)
+check <- function(x) :O$0k(x)
+#++++
+hover 73..79: :Ok(integer)
+definition: stub source 11 at `Ok`
+references: 22..24, 74..76
+rename: none
+signature: none
+completion (3): Ok, OutOfBounds, Overflow
+
+#---- completion_in_a_payload_offers_its_record_fields
+#: fn(s: :Circle(radius: double) | :Rect(width: double, height: double)) -> double
+area <- function(s) {
+  match (s) {
+    :Circle(radius = r) => r
+    :Rect(width = w, $0) => w
+  }
+}
+#++++
+hover 107..179: double
+definition: none
+references: none
+rename: none
+signature: none
+completion (1): height
+
+#---- completion_after_a_nested_colon_offers_the_payload_tags
+#: fn(r: :Ok(integer) | :Err(:Missing | :Invalid)) -> integer
+f <- function(r) {
+  match (r) {
+    :Ok(value) => value
+    :Err(:$0) => 0L
+  }
+}
+#++++
+hover 83..140: integer
+definition: none
+references: none
+rename: none
+signature: none
+completion (2): Invalid, Missing
+
+#---- completion_after_a_colon_in_a_value_offers_known_tags
+status <- :Pending
+other <- :Pe$0
+#++++
+hover 28..31: :Pe
+definition: none
+references: 29..31
+rename: 1 edit(s)
+signature: none
+completion (1): Pending
+
+#---- completion_after_a_range_colon_is_not_a_tag
+n <- 3L
+values <- 1:$0
+#++++
+hover 18..20: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: integer\n"
+completion: none
+hint @1: integer
+
+#---- completion_after_dollar_on_a_tuple_offers_nothing
+pair <- (1L, "x")
+named <- (first = 1L,)
+pair$$0
+#++++
+hover 41..46: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: tuple{integer, character}\n"
+  edit 18..18 -> "#: record{first: integer}\n"
+completion: none
+hint @4: tuple{integer, character}
+hint @23: record{first: integer}
+
+#---- no_hint_restates_a_payload_free_tag
+nothing <- :None
+some <- :Some(1L)
+no$0thing
+#++++
+hover 35..42: nothing: :None
+hover-definition: global 0..7
+definition 0..7
+references: 0..7*, 35..42
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 17..17 -> "#: :Some(integer)\n"
+completion (6): nothing, nobs, noquote, norm, normalizePath, nottem
+hint @21: :Some(integer)

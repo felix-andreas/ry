@@ -47,13 +47,13 @@ type-definition 9..14
 signature: none
 completion (1): Money
 
-#---- type_parameter_is_not_a_navigable_type
+#---- type_parameter_navigates_to_its_binder
 pick <- function<T>(x: $0T) -> T x
 #++++
-hover 23..24: T
-definition: none
-references: none
-rename: none
+hover 23..24: type parameter T
+definition 17..18
+references: 17..18*, 23..24, 29..30
+rename: 3 edit(s)
 signature: none
 completion (14): Any, character, complex, double, fn, integer, list, logical
 
@@ -112,3 +112,13 @@ action: Add inferred type annotations for the whole file
   edit 61..61 -> "  #: integer\n"
 completion (1): other
 hint @68: integer
+
+#---- function_type_parameter_renames_in_scope
+identity <- function<T>(x: T) -> $0T x
+#++++
+hover 33..34: type parameter T
+definition 21..22
+references: 21..22*, 27..28, 33..34
+rename: 3 edit(s)
+signature: none
+completion (14): Any, character, complex, double, fn, integer, list, logical

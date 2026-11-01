@@ -1,0 +1,93 @@
+#==== frames
+#---- completion_in_a_query_offers_columns
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+totals <- sales[, .(total = sum(am$0)), by = team]
+#++++
+hover 85..87: am: Unknown
+definition: none
+references: none
+rename: none
+signature: fn(...: integer[] | logical[], [na.rm]: logical) -> integer (active)
+parameters: [...: integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: double[] | integer[] | logical[], [na.rm]: logical) -> double
+parameters: [...: double[] | integer[] | logical[]] | [na.rm]: logical
+signature: fn(...: difftime, [na.rm]: logical) -> difftime
+parameters: [...: difftime] | [na.rm]: logical
+signature: fn(...: data.frame | frame | matrix, [na.rm]: logical) -> double
+parameters: [...: data.frame | frame | matrix] | [na.rm]: logical
+signature: fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex
+parameters: [...: complex[] | double[] | integer[] | logical[]] | [na.rm]: logical
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{team: character[], amount: double[]}\n"
+completion (1): amount
+hint @5: frame{team: character[], amount: double[]}
+
+#---- completion_in_a_query_offers_query_symbols
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+counts <- sales[, .(n = .$0), by = team]
+#++++
+hover 77..78: .: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{team: character[], amount: double[]}\n"
+completion (128+): .BY, .GRP, .I, .N, .NGRP, .SD, ...elt, ...length
+hint @5: frame{team: character[], amount: double[]}
+
+#---- completion_outside_the_brackets_offers_no_columns
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+amou$0
+#++++
+hover 53..57: amou: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{team: character[], amount: double[]}\n"
+completion (4): as.data.frame.noquote, as.matrix.noquote, .amatch_bounds, nameOfClass.default
+hint @5: frame{team: character[], amount: double[]}
+
+#---- hover_on_an_updated_column
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales[, t$0ax := amount * 0.2]
+#++++
+hover 61..64: tax: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{team: character[], amount: double[]}\n"
+completion (82): T, t, TRUE, team, t.data.frame, t.default, t.test, table
+hint @5: frame{team: character[], amount: double[]}
+
+#---- hover_on_a_column_named_by_a_string
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales[, c("t$0ax", "net") := list(amount * 0.2, amount * 0.8)]
+#++++
+hover 63..68: tax: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{team: character[], amount: double[]}\n"
+completion: none
+hint @5: frame{team: character[], amount: double[]}
+
+#---- hover_on_a_column_after_dollar
+sales <- frame(team = c("a", "b"), amount = c(1, 2))
+sales$amo$0unt
+#++++
+hover 59..65: amount: double[]
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: frame{team: character[], amount: double[]}\n"
+completion (1): amount
+hint @5: frame{team: character[], amount: double[]}

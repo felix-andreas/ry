@@ -2849,3 +2849,29 @@ first lines R had already read, leaving R mid-command.
   - `pkg::name` on a shipped namespace is accepted without attaching it, since R's `::` loads without attaching.
 - **Why `Unknown` rather than `NULL` for an absent field.** `NULL` is precise only when the literal is the whole value; in real packages the literal is a default that callers and later code extend, and a `NULL` type then spreads into `if` and arithmetic as false errors. `Unknown` keeps the read quiet and makes strict mode name it.
 - **Impact.** The corpus count fell to 650 (`backlog.md`, "what `ry check` still reports on the GNU R corpus"). Correctness: fewer true positives on literal-only lists and qualified typos of inactive namespaces, both recorded as gaps. Incremental analysis is unchanged: every rule reads the item's own body or per-name projections.
+
+# Decision record: editor features for ry's own syntax
+
+- **The checker records pattern types.** `ItemCheck::pattern_types` maps each `match` pattern to
+  the type of the value it is matched against, filled while the arms are checked. Before this the
+  IDE had no type for a pattern, so hover and completion there had nothing to read. It is a
+  per-item query result, so it adds no project-wide dependency.
+- **A tag is a project-wide structural symbol.** Tags have no single declaration: `:Ok` in one type
+  and `:Ok` in another are the same tag. References and rename therefore cover every spelling of the
+  name in the project, and go-to-definition goes to its listing in a named type definition, or in
+  the standard library stubs. A tag the standard library
+  spells (in `types/ry.Rtypes`) refuses to rename, because the stub would no longer match.
+- **Type parameters navigate to their binder**, scoped to the definition or function that binds
+  them, so `T` in two functions is two symbols.
+- **Semantic tokens are an `ide` query** (`semantic_tokens`, `classify_type_token`), and the server
+  only maps `SemanticClass` to its legend. Before this the classification lived in the server and
+  covered annotations only, which left `match`, `=>` and tags uncolored.
+- **An inlay hint states what the code does not.** A payload-free tag or an `@Name(...)` constructor
+  already spells its type, so it gets no hint and no "add annotation" action, and a vector of
+  records, tuples or tags (`Position[]`) is dropped from a hinted union because no such value exists.
+- **A type error on a native literal blames the one differing component** (`native_component_mismatch`
+  in `crates/semantics/src/check.rs`), recursing into nested literals and tag payloads, and keeps the
+  whole literal when more than one component differs, because then no single spot is the cause.
+- **Impact:** every feature reads per-item query results, so incremental analysis is unchanged; the
+  fixtures in `crates/ide/tests/ide/records-and-tags.R.test`, `frames.R.test` and the typing suite's
+  `mismatch_blame` group pin the behavior.
