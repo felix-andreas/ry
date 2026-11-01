@@ -694,6 +694,13 @@ pub extern "C" fn jit_handlers_present() -> i32 {
     interp::interp().handlers.is_some() as i32
 }
 
+/// How many closure calls may still nest before R's expression depth limit, which a native
+/// function call counts down instead of pushing frames.
+pub extern "C" fn jit_depth_budget() -> i64 {
+    let state = interp::interp();
+    i64::from(state.max_depth) - state.frames.len() as i64
+}
+
 /// `^` on doubles, as tier 0 computes it.
 pub extern "C" fn jit_power(base: f64, exponent: f64) -> f64 {
     if exponent == 2.0 && !is_na_real(base) {

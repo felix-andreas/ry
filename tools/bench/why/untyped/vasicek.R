@@ -4,7 +4,8 @@ vasicek_paths <- function(paths = 200L, steps = 2000L, r0 = 0.03, kappa = 0.5, t
   rates <- matrix(r0, nrow = steps + 1L, ncol = paths)
   for (t in seq_len(steps)) {
     shock <- stats::rnorm(paths)
-    rates[t + 1L, ] <- rates[t, ] + kappa * (theta - rates[t, ]) * dt + sigma * sqrt(dt) * shock
+    previous <- rates[t, ]
+    rates[t + 1L, ] <- previous + kappa * (theta - previous) * dt + sigma * sqrt(dt) * shock
   }
   rates
 }

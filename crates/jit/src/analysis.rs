@@ -23,6 +23,7 @@
 //! can change it, so code outside the compiled body never sees the difference.
 
 use {
+    crate::native::{self, Native},
     bumpalo::Bump,
     heap::object::{Sexp, SexpType, gp},
     interp::{
@@ -58,7 +59,7 @@ unsafe impl Allocator for Arena<'_> {
 }
 
 /// What compiled code knows about a value, which decides its machine representation.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     /// No value: the register is dead or not yet written.
     Bottom,
@@ -591,6 +592,14 @@ pub enum Action<'a> {
         entry: Entry,
         dst: (usize, Ty),
     },
+    /// Calls a native scalar function with the unboxed arguments `steps` leave in `args`, and
+    /// puts its unboxed value in `dst`. When the function fails, tier 0 runs the call instead.
+    NativeCall {
+        steps: &'a [(Action<'a>, StateId)],
+        native: &'static Native,
+        args: &'a [usize],
+        dst: usize,
+    },
     /// Runs the instruction in tier 0, then refines its destination register.
     Step {
         effect: Effect,
@@ -819,6 +828,7 @@ impl Plan<'_> {
                     action,
                     Action::Inline { .. }
                         | Action::Call { .. }
+                        | Action::NativeCall { .. }
                         | Action::Arithmetic { .. }
                         | Action::Comparison { .. }
                         | Action::Intrinsic { .. }
@@ -1856,9 +1866,6 @@ impl<'a> Builder<'a> {
         function: Sexp,
         dst: (usize, Ty),
     ) -> Option<Action<'a>> {
-        if !self.frame_safe(function) {
-            return None;
-        }
         let mut lowering = Lowering {
             state: state.clone(),
             steps: List::new_in(self.arena),
@@ -1890,6 +1897,36 @@ impl<'a> Builder<'a> {
         let mut after = lowering.state;
         for register in self.registers..after.registers.len() {
             after.registers[register] = Ty::Bottom;
+        }
+        let unboxed: Option<SmallVec<[(usize, Ty); 4]>> = args
+            .iter()
+            .map(|argument| match *argument {
+                Argument::Unboxed { register, ty } if ty.is_unboxed() => Some((register, ty)),
+                _ => None,
+            })
+            .collect();
+        if let Some(unboxed) = unboxed {
+            let types: SmallVec<[Ty; 4]> = unboxed.iter().map(|&(_, ty)| ty).collect();
+            if let Some(native) = native::native_for(function, &types) {
+                // The native function reads nothing of this frame, so the variables stay as
+                // they are.
+                after.visible = Some(true);
+                after.registers[dst.0] = native.result;
+                *state = after;
+                self.speculations
+                    .extend(native.speculations.iter().cloned());
+                let mut registers = List::new_in(self.arena);
+                registers.extend(unboxed.iter().map(|&(register, _)| register));
+                return Some(Action::NativeCall {
+                    steps: lowering.steps.leak(),
+                    native,
+                    args: registers.leak(),
+                    dst: dst.0,
+                });
+            }
+        }
+        if !self.frame_safe(function) {
+            return None;
         }
         // The callee may reach this frame through `parent.frame()`, so the call writes the
         // variables back and forgets them like any opaque step.
@@ -2561,7 +2598,7 @@ unsafe fn safe_expression(expression: Sexp, function: Sexp, found: &mut List<Spe
 }
 
 /// The name of the base builtin `function`, when `symbol` names it.
-unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
+pub(crate) unsafe fn base_builtin(function: Sexp, symbol: Sexp) -> Option<String> {
     if !matches!(function.kind(), SexpType::Builtin | SexpType::Special) {
         return None;
     }
@@ -2601,7 +2638,7 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
     None
 }
 
-unsafe fn constant_type(value: Sexp) -> Ty {
+pub(crate) unsafe fn constant_type(value: Sexp) -> Ty {
     match bytecode::value_kind(value) {
         feedback::INTEGER_SCALAR => Ty::Int,
         feedback::DOUBLE_SCALAR => Ty::Dbl,

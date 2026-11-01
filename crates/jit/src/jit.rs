@@ -14,6 +14,7 @@
 
 mod analysis;
 mod codegen;
+mod native;
 mod runtime;
 
 use {

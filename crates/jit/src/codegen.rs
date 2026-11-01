@@ -18,6 +18,7 @@ use {
             Action, Argument, Effect, Intrinsic, Numeric, Plan, Refusal, StateId, StateRef, Ty,
             jump_target, status,
         },
+        native,
         runtime::{self, Activation, offset, outcome, reason, representation},
     },
     cranelift_codegen::{
@@ -41,6 +42,7 @@ use {
         values,
     },
     rustc_hash::FxHashMap,
+    smallvec::SmallVec,
     std::{cell::RefCell, sync::atomic::AtomicBool},
 };
 
@@ -106,6 +108,19 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Entry, Refusal> {
         let pointer = module.get_finalized_function(id);
         // SAFETY: the function was built with exactly this signature.
         Ok(unsafe { std::mem::transmute::<*const u8, Entry>(pointer) })
+    })
+}
+
+/// Runs `f` with the session's code module, creating it on first use.
+pub(crate) fn with_module<T>(
+    f: impl FnOnce(&mut JITModule) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    MODULE.with(|cell| {
+        let mut module_slot = cell.borrow_mut();
+        if module_slot.is_none() {
+            *module_slot = Some(new_module()?);
+        }
+        f(module_slot.as_mut().ok_or(Refusal("no code module"))?)
     })
 }
 
@@ -488,6 +503,52 @@ impl<'p, 'b> Translator<'p, 'b> {
                 dst,
             } => {
                 self.direct_call(position, before, steps, function, call, &args, entry, dst)?;
+            }
+            Action::NativeCall {
+                steps,
+                native,
+                args,
+                dst,
+            } => {
+                for &(step, state) in steps {
+                    self.action(position, self.plan.state(state), step)?;
+                }
+                let budget = self
+                    .call(
+                        runtime::jit_depth_budget as *const () as usize,
+                        &[],
+                        Some(I64),
+                        &[],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let mut values: SmallVec<[Value; 5]> = SmallVec::new();
+                values.push(budget);
+                for (&register, &ty) in args.iter().zip(&native.params) {
+                    values.push(self.use_register(register, ty));
+                }
+                let signature = self.builder.import_signature(native::signature(
+                    &native.params,
+                    native.result,
+                    self.call_conv,
+                ));
+                let address = self.builder.ins().iconst(I64, native.address as i64);
+                let call = self
+                    .builder
+                    .ins()
+                    .call_indirect(signature, address, &values);
+                let &[status, value] = self.builder.inst_results(call) else {
+                    return Err(Refusal("a native call without a status and a value"));
+                };
+                // Nothing the native function did is visible, so tier 0 runs the call again
+                // and reports what went wrong.
+                let failed = self.deopt(inst.pc, before.id, None, position, reason::HANDOFF);
+                let ok = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, status, native::OK);
+                self.guard(ok, failed);
+                self.def_register(dst, native.result, value);
+                self.set_visible(&before, true);
             }
             Action::Peek { slot, ty } => self.peek(position, &before, slot, ty)?,
             Action::Move { dst, src, ty } => {

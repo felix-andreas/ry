@@ -8,7 +8,7 @@ and why. Built so far are the object model and collector in `crates/heap`, the C
 in `crates/libr` (the whole measured surface, ALTREP and connections), package installation in
 `crates/rcmd`, an interpreter in `crates/interp` with a tier-0 bytecode (`ry run`),
 a first Cranelift JIT in `crates/jit` (section 5, "What tier 1 does today"), and a table engine in
-`crates/table`. Not built are direct calls between compiled functions, ry's own base R (base R's R
+`crates/table`. Not built are compiled-to-compiled calls of general (non-scalar) functions, ry's own base R (base R's R
 code still comes from a GNU R installation), and the table type's use from the interpreter. `ry run`
 runs on ry's runtime, and `ry R` drives GNU R. The C API measurements in section 2 are real and
 reproducible. Where section 4 describes something built, `.agents/memory/decisions.md` ("the runtime's object model, collector and native
@@ -567,7 +567,13 @@ ahead. The JIT is on by default, and `RY_JIT=off` turns it off.
   and defaults call only itself and a fixed list of base builtins, and assign only its own locals.
   The call goes through tier 0 instead when a calling handler is established, because a handler
   could run R code in between. A call of a small closure defined in the same body, which computes a scalar
-  from scalars without effects, is inlined on unboxed registers. Function bindings are speculated
+  from scalars without effects, is inlined on unboxed registers. A closure whose whole body is
+  such a computation, branches, locals and calls of itself or other such closures included, is
+  compiled once per argument type to a native function on unboxed values with no frame
+  (`crates/jit/src/native.rs`), so a recursive scalar function runs entirely in machine code. It
+  counts the expression-depth limit down itself, and anything that would warn or raise returns a
+  failure status before anything visible happens, so tier 0 reruns the call. A typed closure's
+  checks are decided when its native function compiles. Function bindings are speculated
   against one global binding epoch, which the heap bumps whenever a watched binding changes or a
   watched name is defined in a function frame.
 - **Speculation and deoptimization.** A guard checks each fed-back type, and a function lookup is

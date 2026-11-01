@@ -257,6 +257,105 @@ fn seeds_agree_across_tiers() {
     });
 }
 
+#[test]
+fn native_functions_agree_across_tiers() {
+    // Scalar functions called with unboxed arguments run as native functions, recursion
+    // included, and every way R would warn or fail leaves the call to tier 0. Each case defines
+    // its functions globally, then runs a body that calls them in a loop.
+    let cases = [
+        (
+            "fi <- function(x) if (x < 2L) x else fi(x - 1L) + fi(x - 2L)",
+            "s <- 0L\nfor (i in 1:n) s <- s + fi(i %% 15L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "g <- function(x) if (x > 0L) x * x else -x",
+            "s <- 0\nfor (i in 1:n) s <- s + g(i * 100L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "g <- function(x) if (x > 1) x else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + g(if (i == 400L) NA_real_ else i)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "deep <- function(x) if (x <= 0) 0 else 1 + deep(x - 1)",
+            "s <- 0\nfor (i in 1:n) s <- s + deep(if (i == 500L) 1e5 else 3)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "r <- function(x) if (x > -1000) sqrt(x) + log(x + 400) else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + r(i - 300L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "h <- function(x) { y <- x * 2; if (y > 900) return(y - 1); z <- 0; if (y > 400) z <- 1; y + z }",
+            "s <- 0\nfor (i in 1:n) s <- s + h(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "q <- function(x) (x > 3L) || (x < 0L)\np <- function(x) if (x > 3 && x < 8) 1L else 2L",
+            "s <- 0L\nfor (i in 1:n) s <- s + q(i - 300L) + p(i %% 10L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "q <- function(x) (x > 3L) && (x < 500L)",
+            "s <- 0L\nfor (i in 1:n) s <- s + q(if (i == 450L) NA_integer_ else i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "half <- function(a: double) -> double if (a > 0) a / 2 else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + half(i)\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "bad <- function(a: double) -> integer if (a > 0) a / 2 else 0",
+            "s <- 0\nfor (i in 1:n) s <- s + bad(i)\ns",
+            "(n = 600L)",
+            true,
+        ),
+        (
+            "sq <- function(x) if (x > 0) x * x else 0L\nh2 <- function(x) if (x > 1) sq(x) + 1 else 0",
+            "sq <<- function(x) if (x > 0) x * x else 0L\ns <- 0\nfor (i in 1:n) { if (i == 400L) sq <<- function(x) if (x > 0) -x else 1L; s <- s + h2(i) }\ns",
+            "(n = 600L)",
+            false,
+        ),
+        (
+            "m <- function(x, y) if (x > y) x %/% y + x %% y + 0.5 else floor(y / 3) + abs(x) - !x",
+            "s <- 0\nfor (i in 1:n) s <- s + m(i, 7L) + m(-i, 1000L)\ns",
+            "(n = 600L)",
+            false,
+        ),
+    ];
+    with_interpreter(|| {
+        for (case, (definitions, body, call, fails)) in cases.iter().enumerate() {
+            // SAFETY: the interpreter is installed.
+            let (reference, compiled) = unsafe {
+                run(definitions);
+                outcomes(2_000_000 + case, body, call)
+            };
+            assert_eq!(reference == "error", *fails, "case {case} gave {reference}");
+            for (run, outcome) in compiled.iter().enumerate() {
+                assert_eq!(
+                    &reference,
+                    outcome,
+                    "case {case}, call {}: f{call} after\n{definitions}\nwith body\n{body}",
+                    run + 1
+                );
+            }
+        }
+    });
+}
+
 /// The outcome of four calls of a closure with `body` under tier 0, and of four calls of a
 /// fresh closure with the same body under the forced JIT. Each closure is new, so the JIT's run
 /// starts from its own profile and compiles from the second call on.
