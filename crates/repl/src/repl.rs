@@ -157,13 +157,18 @@ impl RuntimeFlags {
 
 /// Runs the interactive console on ry's own runtime instead of GNU R. The runtime attaches the
 /// package loader and evaluates `startup` before the first prompt, and before each command it
-/// reloads a loaded package whose sources changed, so `hooks` is replaced by that watcher.
-/// `routines` does not apply: ry's runtime has no `.Call` routines to register.
+/// reloads a loaded package whose sources changed, so it brings its own `hooks` and refuses
+/// a caller's. `routines` does not apply: ry's runtime has no `.Call` routines to register.
 pub fn run_console_on_ry_runtime(
     mut options: RunOptions,
     flags: RuntimeFlags,
 ) -> Result<i32, ReplError> {
     use std::ffi::{CString, c_char, c_int, c_uchar};
+    if options.hooks.is_some() {
+        return Err(ReplError(
+            "ry's runtime watches for reloads itself and takes no console hooks".into(),
+        ));
+    }
     let library = ry_runtime()?;
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
     type Repl = unsafe extern "C" fn(ReadConsole, *const c_char, c_int) -> c_int;

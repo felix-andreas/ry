@@ -250,8 +250,10 @@ fn the_package_in_the_working_directory_loads_and_edits_reload_before_the_next_c
             "greet <- function() \"second, edited version\"\n",
         )
         .expect("write");
-        session.send("greet()\r");
+        // A command that does not parse still gets the reload in front of it.
+        session.send("1 +* 2\r");
         session.expect("Reloaded replpkg: 1 function rebound");
+        session.send("greet()\r");
         session.expect("second, edited version");
         // Nothing changed since, so the next command runs without a reload.
         session.send("cat(\"no\", \"reload\\n\")\r");

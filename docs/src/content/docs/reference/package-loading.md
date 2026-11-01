@@ -46,6 +46,11 @@ A reload works out which top-level items changed and touches only those:
 - A `NAMESPACE` change rebuilds the imports or resyncs the exports, `.onLoad` runs again when you
   changed it, and a deleted S4 method or class is removed.
 
+A console reloads before a command when the names, sizes or modification times of `DESCRIPTION`,
+`NAMESPACE` or the files in `R/` changed since the last load, so it never reads a file to find out.
+An edit under `src/` is not noticed, and neither is anything in a package whose first load failed:
+call `load_all()` after either.
+
 ## Limits
 
 - `system.file()` does not map a source package's `inst/` directory, and datasets in `data/` are not
@@ -54,8 +59,8 @@ A reload works out which top-level items changed and touches only those:
 - testthat helpers are not sourced; `testthat::test_dir()` sources them itself.
 - Rebuilding compiled code unloads the old library first, as `load_all()` does, so an object that
   still points into it must not be used afterwards.
-- On ry's own runtime (`ry load`, the `ry run` console, and `load_all()` in a `ry run` script), functions carry no source
-  references. Load in `ry R` when you need them.
+- On ry's own runtime (`ry load`, the `ry run` console, and `load_all()` in a `ry run` script),
+  functions carry no source references. Load in `ry R` when you need them.
 - Compiled code is built with GNU R's toolchain on either runtime, because `R.home()` still names
   GNU R's installation. The library loads into ry because it links `libR.so` by its soname, which
   ry's own `libR.so` already provides.

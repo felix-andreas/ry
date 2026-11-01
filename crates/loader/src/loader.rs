@@ -27,7 +27,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use syntax::Parse;
 
 /// One process's loader. It keeps one analysis database for every package it loads, so a
@@ -62,8 +62,9 @@ struct LoadedPackage {
     committed: Option<LoadState>,
     /// The state a plan was made for, until the backend confirms it applied.
     pending: Option<LoadState>,
-    /// [`source_fingerprint`] of what is loaded, and of what the pending plan read.
+    /// [`source_fingerprint`] of what is loaded.
     committed_fingerprint: Option<u64>,
+    /// [`source_fingerprint`] of what the pending plan read.
     pending_fingerprint: Option<u64>,
 }
 
@@ -1183,7 +1184,7 @@ fn source_fingerprint(root: &Path) -> Option<u64> {
             let modified = metadata
                 .modified()
                 .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map_or(0, |duration| duration.as_nanos());
             records.push(format!(
                 "{}\0{}\0{modified}",
