@@ -259,6 +259,28 @@ distinctness, and no cascades outside the `@param` case. The gap is not the engi
 render the artifact unification left behind rather than the fact that failed, and the nominal story
 protects construction but nothing after it.
 
+## Open: the JIT
+
+`crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
+
+- **Direct calls between compiled closures, with promise elision.** `micro/closures` is slower
+  under the JIT than under tier 0 because each iteration's generic call writes `s` and `i` back and
+  reloads them, and fib and lapply gain nothing. A call to a speculated closure whose arguments are
+  effect-free should evaluate them eagerly and enter the callee's compiled code without a promise.
+- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Nothing
+  reads the checker's per-function summaries yet.
+- **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
+  and invalidated external pointers stay rooted.
+- **Builtin-bound benchmarks** (vector_arith, jackknife, log_rank, vasicek) are 2.5 to 3 times
+  slower than GNU R in tier 0 and the JIT alike; the cost is in the builtins, not the dispatch.
+- **Four oracle cases fail under both `ry` and `ry-jit`** (`attributes__data_frames`,
+  `factors__levels_and_tables`, `functions__on_exit_and_returns`, `na__containers_and_coercion`),
+  so they are tier-0 or base gaps, not JIT ones.
+- **Two unconfirmed review suspicions.** `box_slot` in `fill_edges` (`crates/jit/src/codegen.rs`)
+  may give an unshared fresh box `LOCAL` status that the inline element write then edits in place
+  while the environment still holds the old value; and an allocation failure inside `boxed()`
+  (`runtime.rs`) may go unnoticed by `jit_step`. Write a repro for each before changing code.
+
 ## Open: performance and memory
 
 An independent review profiled before it proposed. Every number below was taken on a 4-vCPU
@@ -1130,6 +1152,16 @@ The message says to add a type annotation, and no annotation form silences it. `
   idempotent, so it is deliberate, and it is undocumented.
 - **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
   annotations with a blank line" when there is only one annotation.**
+- **The deep formatter fuzz (`FUZZ_ITERS=300000`) still finds `l: :Sost$field`**, which the formatter
+  rewrites to `l::Sost$field`, turning two `:` tokens into one `::` and changing the code. The
+  default `fuzz_deep` budget passes.
+- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
+  definition may also be written inline as `type` or `alias`.
+- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+  accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
+  two spellings stay one grammar.
+- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
+  states the type.
 - **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
   missing fence.
 
@@ -1697,7 +1729,7 @@ tagging fences `r` for Zed if that proves distant.
 - **Every release is marked a pre-release**, so `releases/latest/` resolves to the old `0.1.1` tag
   rather than the newest build. The CI guide works around it by pinning an explicit tag. Promoting a
   release would let the docs recommend `latest` instead.
-- **Rework the typing reference's presentation.** `reference/type-system.md` runs about 2,700 lines.
+- **Rework the typing reference's presentation.** `reference/type-system.mdx` runs about 2,700 lines.
   It wants tables and short bullets instead of prose subsections, preserving every normative claim.
   This was deliberately deferred out of the docs restructure so the contract got a dedicated pass.
 
@@ -1780,12 +1812,17 @@ The end-to-end guard rests on the corpus suites.
 
 - **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
   `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
-- **Query features:** `.EACHI` and non-equi joins are not supported.
-- **No warning channel.** data.table warns when a value is truncated into an integer column and when
-  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Query gaps.** `j` cannot read `x.`-prefixed columns in a join. Under `.EACHI`, a column of `i`
+  inside an aggregate is the matched rows' values, where data.table gives the row's one value.
+  A non-equi join's extra condition columns are named `t.1` where data.table repeats `t`.
+- **Warnings:** a `:=` that coerces a string into a number column does not warn, where data.table
+  does; only number narrowing does.
+- **Checker:** a non-equi `on =` and `by = .EACHI` give `Unknown`; the engine's `result_type`
+  already knows both results.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
-- **Naming:** at runtime `frame()` clashes with `graphics::frame`.
+- **Naming:** the interpreter must bind `frame` as the delegating closure `decisions.md` describes
+  ("the built-in frame"), ahead of `package:graphics`.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.

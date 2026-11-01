@@ -1,0 +1,34 @@
+#==== inline_off_definitions
+#---- unpaired_definition_warns_and_still_declares_the_name
+type UserId = integer
+f <- function(id) id
+#: fn(id: UserId) -> UserId
+g <- function(id) id
+g(5L)
+#++++
+f: <T> fn(id: T) -> T
+g: fn(id: UserId) -> UserId
+UserId
+0..21 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
+94..96 error[type-mismatch] expected `UserId`, found `integer`
+
+#---- paired_definition_uses_the_comment
+#: @type Celsius {double}
+type Celsius = integer
+#: fn(x: Celsius) -> double
+f <- function(x) x
+#++++
+f: fn(x: Celsius) -> double
+26..48 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
+
+#---- nominal_constructor_warns_and_types_as_its_value
+x <- @UserId(5L)
+#++++
+x: integer
+5..12 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on
+
+#---- inline_coercion_warns
+x: @trust integer <- readRDS("x.rds")
+#++++
+x: Any
+1..17 warning[inline-annotation] inline type annotations are turned off (`[check] inline-annotations = false`), so this one is not checked. R itself cannot run this code: delete the annotation, or turn inline annotations back on

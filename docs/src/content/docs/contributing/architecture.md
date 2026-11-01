@@ -49,7 +49,7 @@ illegal dependency unrepresentable.
   environment frames and the `R_alloc` arena. It depends on nothing else in the workspace.
 - **`libr`** is R's C API, built as the shared library `libR.so` that compiled packages link
   against, with the C half of the native boundary and an R 4.6-compatible header set. It depends on
-  `heap` and `interp`. Its design is the draft at
+  `heap`, `interp` and `jit`. Its design is the draft at
   [`contributing/design/r-runtime.md`](/contributing/design/r-runtime/). Evaluation belongs to the
   interpreter, which plugs into it through the `Evaluator` hook in `eval.rs`.
 - **`interp`** is the R interpreter: the evaluator, the tier-0 bytecode, conditions, S3 and S4
@@ -57,6 +57,13 @@ illegal dependency unrepresentable.
   [inline annotations](/type-checking/inline-annotations) at function boundaries. It depends on
   `heap` and `syntax`, and `libr` installs it through the `Evaluator` hook, so it knows nothing
   about C.
+- **`jit`** is the runtime's optimizing tier: it compiles hot tier-0 bytecode to machine code with
+  Cranelift. Tier 0 calls it through the `Tier` hooks in `interp`'s `bytecode.rs` when a body has
+  been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
+  register window, so a failed speculation hands the activation back to the interpreter mid-body.
+  It depends on `heap` and `interp`, and `libr` installs it after the interpreter. `RY_JIT` picks
+  the mode: `on` (the default), `off`, or `force`, which the tier tests and the `ry-jit` oracle
+  engine use.
 - **`table`** is ry's built-in typed table: an engine over Polars with a query IR that lowers
   `tbl[i, j, by]` to a lazy plan. Its `runtime` feature, which links `libr` and `heap`, exposes
   columns to R as ALTREP vectors. No interpreter code calls it yet.

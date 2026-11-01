@@ -3,7 +3,13 @@ title: Inline annotations
 description: Types written in the code itself, and how they live next to #: comments
 ---
 
-You can write a type right after a name, and a function's return type after its parameters:
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This page covers the inline spelling and how it lives next to `#:` comments. You can write a type
+right after a name, and a function's return type after its parameters:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
 
 ```r
 apply_discount <- function(price: double, rate: double = 0.2) -> double {
@@ -13,23 +19,98 @@ apply_discount <- function(price: double, rate: double = 0.2) -> double {
 apply_discount("100")
 ```
 
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(price: double, [rate]: double) -> double
+apply_discount <- function(price, rate = 0.2) {
+  price * (1 - rate)
+}
+
+apply_discount("100")
+```
+
+</TabItem>
+</Tabs>
+
 ```text
 type-mismatch
 
   x expected `double`, found `character`
-   --[R/discount.R:5:16]
- 5 | apply_discount("100")
-   |                ^^^^^
 ```
 
 A variable takes its type the same way:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
 
 ```r
 person: list{name: character, age: integer} <- readRDS("person.rds")
 ```
 
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: list{name: character, age: integer}
+person <- readRDS("person.rds")
+```
+
+</TabItem>
+</Tabs>
+
 Inline annotations and `#:` comments share one type language and mean the same thing. Deleting each
 inline annotation turns a file into the plain R program it means.
+
+## Type definitions
+
+`type` and `alias` define a type at the top level of a file, and `@Name(value)` creates a value of
+a nominal type:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+type UserId = integer
+
+user_id <- function(raw: integer) -> UserId @UserId(raw)
+
+lookup <- function(id: UserId) -> character "ada"
+
+lookup(5L)
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: @type UserId {integer}
+
+#: fn(raw: integer) -> UserId
+user_id <- function(raw) {
+  #: @new UserId
+  raw
+}
+
+#: fn(id: UserId) -> character
+lookup <- function(id) "ada"
+
+lookup(5L)
+```
+
+</TabItem>
+</Tabs>
+
+```text
+type-mismatch
+
+  x expected `UserId`, found `integer`
+```
+
+A binding takes `@trust`, `@if-unknown` and `@new` between its `:` and its type, as in
+`id: @new UserId <- 5L`. `type` and `alias` are definitions only when a name follows them on the
+same line, so R code that uses them as ordinary names keeps working.
 
 ## When the two disagree
 
@@ -50,11 +131,27 @@ annotation-mismatch
    |                               ^^^^^^^
 ```
 
+A `#:` definition directly above an inline definition of the same name is the same definition
+written twice, so it is not a duplicate. ry uses the inline one and warns when the two differ:
+
+```r
+#: @type Celsius {double}
+type Celsius = integer
+```
+
+```text
+annotation-mismatch
+
+  ! the inline definition of `Celsius` says `integer`, but the `#:` comment says `double`. ry uses the inline definition; make the two agree, or delete one
+```
+
 ## Running annotated code
 
 `ry run` and `ry repl` run annotated code. On GNU R they run the plain program it means, and on
 ry's own runtime (`--runtime ry`) the annotations also become checks: an argument of the wrong kind
 fails where the function was called.
+
+Run-time checks are described in terms of inline annotations, so this example has a single spelling:
 
 ```r
 scale <- function(values: double, by: double) -> double values * by

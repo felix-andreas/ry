@@ -33,6 +33,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
         run_finalizers: || unsafe { crate::boundary::run_pending_finalizers() },
     };
     interp::install(&mut runtime.heap, hooks);
+    jit::install();
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
