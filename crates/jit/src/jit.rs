@@ -68,7 +68,13 @@ pub fn install_mode(mode: Mode) {
             bytecode::set_tier(None);
             return;
         }
-        Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD),
+        Mode::On => std::env::var("RY_JIT_THRESHOLDS")
+            .ok()
+            .and_then(|text| {
+                let (entries, back_edges) = text.split_once(',')?;
+                Some((entries.parse().ok()?, back_edges.parse().ok()?))
+            })
+            .unwrap_or((ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD)),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
         Mode::Force => (2, 1),
