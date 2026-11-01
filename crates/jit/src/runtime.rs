@@ -523,6 +523,13 @@ pub unsafe extern "C" fn jit_box_logical(activation: *mut Activation, value: i32
     unsafe { boxed(activation, || values::scalar_logical(value)) }
 }
 
+/// Releases the handles the activation pushed, as tier 0 does on every backward jump. Compiled
+/// code calls it on each loop back edge, where every boxed value it still needs is in the register
+/// window, so without it each object a loop allocates would stay rooted until the call returns.
+pub unsafe extern "C" fn jit_release_handles(activation: *mut Activation) {
+    unsafe { heap().release_handles(machine(&*activation).mark) }
+}
+
 /// Whether a calling handler is established, so a warning would run R code.
 pub extern "C" fn jit_handlers_present() -> i32 {
     interp::interp().handlers.is_some() as i32

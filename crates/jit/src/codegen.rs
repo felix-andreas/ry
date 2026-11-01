@@ -433,6 +433,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                     let interrupted = self.deopt(pc, before.clone(), plan.live[position].clone(), reason::INTERRUPT);
                     let calm = self.builder.ins().icmp_imm_s(IntCC::Equal, requested, 0);
                     self.guard(calm, interrupted);
+                    self.call(runtime::jit_release_handles as *const () as usize, &[I64], None, &[self.activation]);
                 }
                 let label = self.edge(position, target)?;
                 self.builder.ins().jump(label, &[]);
