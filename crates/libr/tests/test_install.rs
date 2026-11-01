@@ -181,7 +181,13 @@ fn a_binary_package_from_an_older_r_installs_unchanged() {
 
 /// A package with R code, an S4 class, documentation, lazy data, `sysdata.rda` and `inst/`
 /// files, written out as a source directory.
+/// The `rcode` source package, written once because several tests read it concurrently.
 fn rcode_source() -> PathBuf {
+    static SOURCE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(write_rcode_source).clone()
+}
+
+fn write_rcode_source() -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rcode-source");
     drop(std::fs::remove_dir_all(&root));
     for directory in ["R", "man", "data", "inst/extdata"] {
@@ -325,6 +331,24 @@ fn the_front_ends_run_r_code_on_ry() {
     let gnu_r = Command::new("R").args(["CMD", "Rdconv", "-t", "txt", &page]).output().expect("GNU R's Rdconv");
     assert_eq!(output, String::from_utf8_lossy(&gnu_r.stdout));
     assert!(output.contains("Says hello."), "{output}");
+}
+
+/// The headers, `R.version` and `R --version` present the version of the base R the
+/// interpreter runs, so a package's C code and its R code take the same version branches.
+#[test]
+fn the_headers_and_the_runtime_present_the_base_r_version() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let script = "cat(format(getRversion()) == format(packageVersion('base')), format(getRversion()), R.version$`svn rev`)";
+    let output = run_home("Rscript", &["-e", script], directory);
+    let fields: Vec<&str> = output.split(' ').collect();
+    let [same, version, revision] = fields[..] else { panic!("{output}") };
+    assert_eq!(same, "TRUE", "{output}");
+    assert!(revision.parse::<u32>().is_ok_and(|revision| revision >= rcmd::MINIMUM_SVN_REVISION), "{output}");
+    let header = std::fs::read_to_string(home().join("include").join("Rversion.h")).expect("Rversion.h");
+    let parts: Vec<&str> = version.split('.').collect();
+    assert!(header.contains(&format!("#define R_VERSION R_Version({})", parts.join(", "))), "{header}");
+    assert!(header.contains(&format!("#define R_SVN_REVISION {revision}\n")), "{header}");
+    assert!(run_home("R", &["--version"], directory).starts_with(&format!("R version {version} (")));
 }
 
 /// `callr::r_session` drives `R --slave` over a stdin pipe and attaches its

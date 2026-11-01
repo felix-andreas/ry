@@ -103,6 +103,10 @@ fn run_r(home: &Path, session: &rcmd::Session) -> rcmd::Result<i32> {
             print!("{text}");
             return Ok(0);
         }
+        rcmd::Session::Version => {
+            print!("{}", rcmd::version_text(home)?);
+            return Ok(0);
+        }
         rcmd::Session::Run {
             file,
             expressions,

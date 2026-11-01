@@ -224,8 +224,13 @@ pub const DEFAULT_VERSION: c_int = 3;
 /// What a version-3 stream records as the writer's native encoding.
 const NATIVE_ENCODING: &str = "UTF-8";
 
-/// `R_Version(4, 6, 2)`: ry presents itself as R 4.6.2.
-const WRITER_VERSION: c_int = r_version(4, 6, 2);
+/// The writer's R version, which is the version ry presents (`interp::system::r_version`).
+fn writer_version() -> c_int {
+    let version = interp::system::r_version();
+    let mut minor = version.minor.split('.').map(|part| part.parse().unwrap_or(0));
+    let major = version.major.parse().unwrap_or(0);
+    r_version(major, minor.next().unwrap_or(0), minor.next().unwrap_or(0))
+}
 
 const fn r_version(major: c_int, minor: c_int, patch: c_int) -> c_int {
     major * 65536 + minor * 256 + patch
@@ -487,7 +492,7 @@ impl Writer<'_, '_> {
             Format::Xdr => b"X\n",
         };
         self.write_bytes(magic)?;
-        for field in [self.version, WRITER_VERSION, min_reader_version(self.version)] {
+        for field in [self.version, writer_version(), min_reader_version(self.version)] {
             self.write_integer(field)?;
         }
         if self.version == 3 {
