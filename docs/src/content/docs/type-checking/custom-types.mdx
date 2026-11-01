@@ -67,7 +67,7 @@ type-mismatch
 A list with the right fields is still not a `Money`. Put `@Money(...)` in one constructor and
 nowhere else, and every `Money` in the program has passed its checks: `@Money(...)` checks the
 shape when ry analyzes the code, and `stop()` checks the values when it runs. At run time
-`@Money(x)` is just `(x)`.
+`@Money(x)` is just `x`.
 
 Scalars work the same way. With `type UserId = character` and `type Email = character`, passing an
 `Email` where a `UserId` is expected is an error, although both are strings at run time.
