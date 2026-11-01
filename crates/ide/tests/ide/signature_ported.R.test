@@ -8,8 +8,8 @@ hover 124..126: integer
 definition: none
 references: none
 rename: none
-signature: fn(count: integer, [label]: character) -> integer
-parameters: [count: integer] | [label]: character
+signature: fn(count: integer, label: character) -> integer
+parameters: [count: integer] | label: character
 action: Add inferred type annotation for `result`
   edit 92..92 -> "#: integer\n"
 action: Add inferred type annotations for the whole file
