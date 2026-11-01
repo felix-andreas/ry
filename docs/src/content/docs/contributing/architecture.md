@@ -292,14 +292,23 @@ and all the documents, and the database handle deliberately never leaves it.
   authoritative answer never degrades: pull diagnostics return a retryable `SERVER_CANCELLED` with
   `retriggerRequest: true`, and rename returns `CONTENT_MODIFIED`.
 - **Diagnostics are pushed in two waves.** On every sync the server immediately publishes the
-  parse-stage classes and the lints, tagged with the document version. At idle time it publishes the
-  settled full set, without a version. The settled set is a faithful superset of the first, so the
+  parse-stage classes and the lints, tagged with the document version. Until the startup warm-up
+  (below) ends, the first wave holds only the parse-stage classes, because the lints read the
+  project-wide name maps. At idle time it publishes the settled full set, without a version. The settled set is a faithful superset of the first, so the
   second wave only ever adds findings. A client that supports pull diagnostics gets no pushes at
   all, and instead receives result ids derived from a content hash, with unchanged reports.
-- **Idle work has an order.** The worker first serves any settled publish it owes for the most
-  recently edited file. Next it lowers the durability of documents opened since (see below). With
-  nothing else to do, it warms up the rest of the workspace one file at a time and never publishes
+- **Idle work has an order.** At startup the worker first runs the warm-up: across all cores, it
+  scans every file's `library()` and `require()` calls and applies the attached set once, then
+  derives every item's naming and the per-file folds behind the project-wide maps. Every semantic
+  wave reads those maps, and one thread would take seconds to derive them, so settled publishes
+  wait for it. After the warm-up the worker serves any settled publish it owes, most recently
+  edited file first. Next it lowers the durability of documents opened since (see below). With
+  nothing else to do, it checks the rest of the workspace in parallel batches and never publishes
   that work. Idle work that gets cancelled is requeued.
+- **Parallel idle work stops between files.** It runs on one cloned database handle per core, and
+  each thread checks before every file whether a job is queued. Cancelling the threads' salsa
+  tokens is not enough on its own, because salsa clears a handle's cancellation flag whenever a
+  top-level query returns, so a flip that lands at the end of a query is lost.
 - **A request preempts idle work.** A request is queued first and then cancels the idle unit in
   flight, if any, so a hover never waits for a background file to finish. A request never cancels
   another request or a sync.

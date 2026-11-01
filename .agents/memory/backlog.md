@@ -2870,11 +2870,7 @@ Measure with `python3 tools/bench/lsp_latency.py --ry target/release/ry --root .
 --quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
 table). Generate the code bases with `tools/bench/generate.py --lines 300000`. A `--quiet` under
 about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-
-- **Opening a file at startup waits about 1.5 s for its first diagnostics**, because the first wave's
-  lints need the cold project-wide naming pass. Parse-stage diagnostics could go out before the
-  lints when the project is still cold, but that changes the two-wave contract on the architecture
-  page, so weigh it against making the cold naming pass faster.
+- Goto-definition, references and rename have a p99 of 15 to 25 ms (p50 about 1 ms) on all three benches, on main as before. The slow positions are calls to stub globals (`seq_len`, `factor`, `vapply`). `stub_declaration` is a map lookup, so the cost sits elsewhere on that path (the item check, `position_in_item`, or the server's `stub_location`); profile it before guessing.
 
 ## Open: false errors on real CRAN code
 

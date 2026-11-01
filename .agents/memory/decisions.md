@@ -3185,6 +3185,30 @@ first lines R had already read, leaving R mid-command.
   right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
   finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
 
+# Decision record: a parallel startup warm-up in the server
+
+- **Previous shape.** The server primed the workspace one file at a time in idle units, and each
+  unit also scanned the file's `library()` calls and applied the grown attach union at once. The
+  first file's check derived every item's naming for the project-wide maps on one thread, about
+  1.3 s on a 300,000-line project, and the first wave's lints read those maps, so a file opened at
+  startup waited that long for any diagnostics. Each union change re-ran the open files'
+  diagnostics, so an open file was republished about six times, with counts that flickered.
+- **Target shape.** `Worker::warm_up` in `crates/ry/src/server.rs` runs before any other idle
+  work: it scans every file's attach facts across all cores and applies the union once, then
+  derives every item's naming and the per-file folds (`file_interface_reads`,
+  `file_conditional_writers`) across all cores, as `ry check` does. Until it ends, the first wave
+  holds only parse-stage diagnostics (the lints need the maps), pull diagnostics answer the same,
+  and settled publishes wait; its end refreshes every open file. The rest of the cold check runs
+  in parallel batches of 64 files. `Worker::in_parallel` is the one helper for both.
+- **Stopping parallel work.** The threads run on cloned handles whose tokens `CancelHandle`
+  cancels too, and they also poll a queued-job counter between files, because salsa resets a
+  handle's cancellation flag when a top-level query returns (`attach.rs`, `DbGuard::drop`), which
+  drops a flip that lands at a query's end. Without the counter an open sometimes waited for the
+  whole warm-up.
+- **Impact.** On dsbench a file opened at startup gets its first wave in under 15 ms (from about
+  1.3 s) and its settled diagnostics about 0.55 s after startup (from 1.3 to 1.9 s), published
+  once instead of six times. Analysis is unchanged; only the order and parallelism of work moved.
+
 # Decision record: data-oriented design and explicit allocators
 
 Performance comes first (user directive, `AGENTS.md` "Goals"), so hot data is laid out for the
