@@ -19,11 +19,10 @@ special <- function(a, b) a %undeclared% b
 formula_model <- function() y ~ x
 #++++
 special: <T, U> fn(a: T, b: U) -> Unknown
-formula_model: fn() -> Unknown
+formula_model: fn() -> formula
 20..21 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
 23..24 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 26..42 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
-71..76 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- a_corpus_declared_operator_is_typed_and_no_origin
 member <- function(a, b) a %in% b
@@ -192,6 +191,35 @@ earliest <- function() {
 earliest: fn() -> Any
 367..373 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
+
+#---- an_overload_left_ambiguous_by_a_declared_any_is_any
+# Every `sum` candidate accepts an `Any`, and they disagree on the result. The `Any` is the
+# author's own opt-out, so the call opts out too instead of becoming a strict finding; a
+# forwarded `...` is `Any` the same way.
+#~~~~ R/main.R
+#: fn(x: Any) -> double
+total <- function(x) sum(x)
+#: fn(...: Any) -> Any
+first <- function(...) utils::head(...)
+#++++
+== R/main.R
+total: fn(x: Any) -> double
+first: fn(...: Any) -> Any
+
+#---- calling_a_value_declared_any_is_any
+# A parameter or variable declared `Any` is the author's opt-out, so calling it is `Any`, while
+# its arguments are still checked. A stub declared bare `Any` stays a strict finding.
+#~~~~ R/main.R
+#: fn(callback: Any) -> Any
+run <- function(callback) callback(1 + "a")
+#: fn(m: matrix) -> Any
+joined <- function(m) merge(m, m)
+#++++
+== R/main.R
+run: fn(callback: Any) -> Any
+joined: fn(m: matrix) -> Any
+67..70 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+118..129 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #---- stop_is_strict_clean_in_either_position
 #~~~~ R/main.R

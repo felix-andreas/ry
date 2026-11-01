@@ -169,6 +169,48 @@ fn seeds_agree_across_tiers() {
             "(n = 4L)",
             false,
         ),
+        // Num and Str functions, which compiled code calls directly as leaves, and an
+        // unchecked division by zero, which is an error.
+        (
+            "s <- 0\nfor (i in 1:n) { s <- Num.add(s, Num.sqrt(i * 1)); if (Str.is_empty(\"\")) s <- Num.add(s, 1) }\nNum.div_trunc(s, 0L)",
+            "(n = 30L)",
+            true,
+        ),
+        (
+            "s <- 0L\nfor (i in 1:n) s <- Num.bitwise_xor(s, Num.shift_left_by(i, 2L))\ns",
+            "(n = 30L)",
+            false,
+        ),
+        // Record fields of every slot kind, which reach the field intrinsic.
+        (
+            "r <- (x = 1.5, y = 2L, z = TRUE, w = \"s\")\ns <- 0\nfor (i in 1:n) { s <- s + r$x * r$y; if (r$z) s <- s + 1 }\nlist(s, r$w)",
+            "(n = 50L)",
+            false,
+        ),
+        // A record of another layout mid-loop fails the layout guard.
+        (
+            "r <- (x = 1, y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 3L) r <- (y = 5, x = 10); s <- s + r$x }\ns",
+            "(n = 8L)",
+            false,
+        ),
+        // The same layout with an integer where a double was fails the slot check.
+        (
+            "r <- (x = 1, y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 3L) r <- (x = 4L, y = 2); s <- s + r$x }\ns",
+            "(n = 8L)",
+            false,
+        ),
+        // A list where a record was takes `$`'s own path.
+        (
+            "r <- (x = 1, y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 3L) r <- list(x = 7); s <- s + r$x }\ns",
+            "(n = 8L)",
+            false,
+        ),
+        // A boxed field, then a missing one, which is an error.
+        (
+            "r <- (x = c(1, 2), y = 2)\ns <- 0\nfor (i in 1:n) { if (i == 5L) r <- (y = 1,); s <- s + r$x[[1L]] }\ns",
+            "(n = 8L)",
+            true,
+        ),
         // An inlined typed closure keeps its checks: a call reached only after the loop compiled
         // fails on its argument, or on its value, exactly as in tier 0.
         (

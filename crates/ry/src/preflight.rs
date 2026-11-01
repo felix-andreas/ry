@@ -6,8 +6,9 @@ use {
     crate::{
         check_cache::CacheUse,
         cli::{
-            CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote, analyze_project,
-            render_findings, report, warn_config,
+            self, CommandError, MinSeverity, OutputFormat, ProjectAnalysis, RelatedNote,
+            analyze_project, collect_r_files, exclude_matcher, project_stub_paths, render_findings,
+            report, scan_data_files, warn_config,
         },
         config::Config,
         diagnostics::{apply_suppressions, document_diagnostics},
@@ -20,9 +21,12 @@ use {
         stubs::install_shipped_stubs,
     },
     std::{
-        fs,
+        env, fs,
+        hash::{DefaultHasher, Hash, Hasher},
+        io,
         path::{Path, PathBuf},
         thread,
+        time::UNIX_EPOCH,
     },
     syntax::{SyntaxNode, erase_inline_annotations, input_is_unfinished, is_inline_annotation},
 };
@@ -167,6 +171,14 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
     {
         return Ok(Verdict::Run);
     }
+    // A package that passed unchanged loads again without a second analysis, because the
+    // check is a function of these inputs and the ry binary alone.
+    let record = strict_fingerprint(root, config)?.zip(verdict_record(root));
+    if let Some((fingerprint, record)) = &record
+        && fs::read_to_string(record).is_ok_and(|stored| stored == *fingerprint)
+    {
+        return Ok(Verdict::Run);
+    }
     let analysis = thread::scope(|scope| {
         let worker = thread::Builder::new()
             .stack_size(crate::ANALYSIS_STACK_SIZE)
@@ -201,10 +213,104 @@ pub fn check_package(root: &Path, config: &Config) -> Result<Verdict, CommandErr
         );
     }
     if problems == 0 {
+        // A file saved while the analysis ran would leave the earlier contents marked clean
+        // although the analysis judged the later ones, so the verdict is kept only when the
+        // inputs still hash the same afterwards.
+        if let Some((fingerprint, record)) = record
+            && strict_fingerprint(root, config)?.as_ref() == Some(&fingerprint)
+        {
+            remember_clean(&record, &fingerprint);
+        }
         return Ok(Verdict::Run);
     }
     refuse(problems);
     Ok(Verdict::Refuse)
+}
+
+/// Hashes everything the strict check reads: the ry binary, the configuration, every R file
+/// the project analysis walks, the override stubs, the package metadata and the data files.
+/// Two independently seeded hashes give 128 bits, so a stale verdict needs a real collision.
+fn strict_fingerprint(root: &Path, config: &Config) -> Result<Option<String>, CommandError> {
+    let mut low = DefaultHasher::new();
+    let mut high = DefaultHasher::new();
+    "ry strict verdict, low".hash(&mut low);
+    "ry strict verdict, high".hash(&mut high);
+    let mut feed = |bytes: &[u8]| {
+        bytes.len().hash(&mut low);
+        low.write(bytes);
+        bytes.len().hash(&mut high);
+        high.write(bytes);
+    };
+    // Without a binary identity a verdict could outlive the ry that reached it, so none is kept.
+    let Ok(binary) = env::current_exe() else {
+        return Ok(None);
+    };
+    let Ok(metadata) = fs::metadata(&binary) else {
+        return Ok(None);
+    };
+    feed(binary.as_os_str().as_encoded_bytes());
+    feed(&metadata.len().to_le_bytes());
+    let Some(modified) = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+    else {
+        return Ok(None);
+    };
+    feed(&modified.as_nanos().to_le_bytes());
+    feed(env!("CARGO_PKG_VERSION").as_bytes());
+    feed(format!("{config:?}").as_bytes());
+    let exclude = exclude_matcher(config, root)?;
+    // An input that cannot be read cannot be fingerprinted, so that load keeps no verdict; the
+    // analysis itself reports the unreadable file.
+    for path in collect_r_files(root, exclude.as_ref())? {
+        let Ok(contents) = fs::read(&path) else {
+            return Ok(None);
+        };
+        feed(path.as_os_str().as_encoded_bytes());
+        feed(&contents);
+    }
+    for (path, stem) in project_stub_paths(root) {
+        let Ok(contents) = fs::read(&path) else {
+            return Ok(None);
+        };
+        feed(stem.as_bytes());
+        feed(&contents);
+    }
+    for name in ["DESCRIPTION", "NAMESPACE"] {
+        match fs::read(root.join(name)) {
+            Ok(contents) => feed(&contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => feed(b"absent"),
+            Err(_) => return Ok(None),
+        }
+    }
+    feed(format!("{:?}", scan_data_files(root)).as_bytes());
+    Ok(Some(format!("{:016x}{:016x}", low.finish(), high.finish())))
+}
+
+/// Where the last clean verdict for the package at `root` is kept: one small file per package
+/// in the user's cache directory, so the cache never grows with the number of edits.
+fn verdict_record(root: &Path) -> Option<PathBuf> {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    let directory = dirs::cache_dir()?.join("ry").join("strict");
+    Some(directory.join(format!("{:016x}", hasher.finish())))
+}
+
+/// A verdict that cannot be stored only costs the next load a fresh check, so failing to store
+/// it is reported and otherwise ignored.
+fn remember_clean(record: &Path, fingerprint: &str) {
+    let stored = record
+        .parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| fs::write(record, fingerprint));
+    if let Err(error) = stored {
+        cli::warn(&format!(
+            "cannot remember the strict check of this package in {}: {error}",
+            record.display()
+        ));
+    }
 }
 
 /// Each file's strict-mode errors, empty for a file outside `R/` or one that strict mode does

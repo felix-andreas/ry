@@ -1864,6 +1864,10 @@ may be `double`, so `1:TRUE` is `integer[]` and `1:n` on `n` of type `integer | 
 counts as `integer` here, matching what R does at run time, so `1:10` is `integer[]` and `1.5:3L` is
 `double[]`.
 
+Base R's `seq(from, to)` without `by` or `length.out` returns `from:to`, so it follows the same
+rule: `seq(1, 10)` is `integer[]`, and so is `seq(n)` with one argument, while `seq(0.5, 3)` and
+`seq(1, 10, by = 2)` are `double[]`. A project that defines its own `seq` gets its own typing.
+
 An unannotated operand, as in `1:n`, is required to be a scalar `integer` or `double`. Passing a
 numeric vector through the enclosing function is therefore a type error at the call, because R's
 warning about truncating the endpoint marks a bug. The result is `double[]`, because the endpoint may
@@ -1955,6 +1959,13 @@ It is a scalar when both operands are scalars, and `logical[]` otherwise, so `a 
 one whose type is `Unknown` makes it `Unknown`, which strict mode reports where the operand's type
 was lost. An operand with no type yet, such as an unannotated parameter, could be a scalar or a
 vector, so the operator gives `Unknown` and strict mode reports it; annotate the parameter.
+
+### Formula operator `~`
+
+A formula, one-sided (`~ x`) or two-sided (`y ~ x + z`), is the nominal type `formula`. Its operands
+name model variables, which are usually columns of a data frame rather than bindings in scope, so
+they are not checked: `y ~ undefined_name + "text"` reports nothing. Annotate a formula variable or
+parameter as `formula`.
 
 ## Calls
 
@@ -2120,8 +2131,20 @@ to such a name is resolved separately at each call site:
   and whatever it determines stands.
 - When several candidates fit only by narrowing the caller's undetermined types, the call keeps that
   narrowing only if they all narrow the same way. Otherwise the type becomes `Unknown`, and so does
-  the call: `function(xs) Filter(f, xs)` infers `fn(xs: Unknown) -> Unknown` and accepts both a vector
-  and a list. A function literal among the arguments does not belong to the caller, so narrowing its
+  the call: `function(xs) lapply(xs, f)` infers `fn(xs: Unknown) -> Unknown`, because `lapply`'s
+  candidates for a named list and for a vector return different shapes. One disagreement is
+  settled instead: when one candidate narrows to a scalar such as `character` and the others to
+  that atom's vector, which accepts the scalar, the scalar wins. `grepl` also takes a vector
+  `pattern`, yet `function(p, x) grepl(p, x)` infers `p: character`.
+- The exception is a set that preserves its argument. `Filter`, `head` and `unique` declare one
+  candidate per shape, and each returns exactly the shape it accepted. When every fitting candidate
+  other than an all-`Any` catch-all returns what it narrowed the same undetermined type to, the call
+  returns that type unchanged and leaves it undetermined. So `function(xs) Filter(f, xs)` is
+  `<T> fn(xs: T) -> T`, and passing it a `data.frame` gives back a `data.frame`. The same holds for a
+  declared `<T>`, so that signature can be written back as an annotation. A record passed through
+  such a function keeps its record type although `Filter` or `head` may drop fields; that misses an
+  error rather than reporting a false one.
+- A function literal among the arguments does not belong to the caller, so narrowing its
   parameters is no guess: that is how `lapply(xs, function(v) v + 1L)` gives `v` a type.
 - An argument whose type is not known statically fits every candidate, so the call does not guess
   among candidates whose results differ, and it is `Unknown`. So
@@ -2348,6 +2371,10 @@ exceptions and additions:
   `if (flag) x <- x + 1; x` requires `x`, and a write inside `local()` binds a new frame and covers
   nothing.
 - `x <<- 1` writes an enclosing frame, so it never assigns the formal `x`.
+- A function that writes a name with `<<-` reads that name as the binding it keeps updating, such
+  as a Reference Class field, never as the shipped function of the same name. In `t <<- t[-drop]`,
+  `t` is `Unknown` rather than base `t`, so indexing it reports nothing, and strict mode reports the
+  read. A project binding of that name still types the read.
 - A read inside a nested function forces the formal, because the closure may run, unless the
   nested function has its own parameter or assignment of that name.
 - When a forced formal has a default, the formals its default reads are forced too, so in

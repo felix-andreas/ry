@@ -35,17 +35,19 @@ complete.cases : @pure fn(...: Any) -> logical
 # positionally, `data`/`family` are real named formals, and every other keyword is absorbed by the
 # rest parameter (R forwards them to the fitting method).
 lm : fn(formula, [data]: Any, [subset]: Any, [weights]: Any, [na.action]: Any, ...: Any) -> Any
+# A family object is a list of link and variance functions; its fields depend on the family.
+binomial : @pure fn([link]: Any) -> Any
 glm : fn(formula, [family]: Any, [data]: Any, [subset]: Any, [weights]: Any, [na.action]: Any, ...: Any) -> Any
-nls : Any
+nls : fn(formula, [data]: Any, [start]: Any, [control]: Any, [algorithm]: character, [trace]: logical, ...: Any) -> Any
 loess : Any
 aov : Any
 anova : Any
-predict : Any
+predict : fn(object: Any, ...: Any) -> Any
 residuals : Any
-fitted : Any
-coef : Any
+fitted : fn(object: Any, ...: Any) -> Any
+coef : fn(object: Any, ...: Any) -> Any
 confint : Any
-formula : @pure Any
+formula : @pure fn(x: Any, ...: Any) -> formula
 as.formula : @pure Any
 aggregate : Any
 optim : Any
@@ -55,6 +57,10 @@ integrate : Any
 approx : Any
 density : Any
 ecdf : @pure Any
+# `power.t.test` solves for whichever of `n`, `delta`, `sd`, `power` and `sig.level` is left out, and
+# returns them all in a "power.htest" list.
+power.t.test : @pure fn([n]: Any, [delta]: Any, [sd]: Any, [sig.level]: Any, [power]: Any, [type]: character, [alternative]: character, [strict]: logical, [tol]: double) -> list{n: double, delta: double, sd: double, sig.level: double, power: double, alternative: character, note: character | NULL, method: character}
+p.adjust : @pure fn(p: Any, [method]: character, [n]: Any) -> double[]
 t.test : Any
 wilcox.test : Any
 chisq.test : Any
@@ -99,3 +105,12 @@ qt : @pure fn(p: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logic
 dchisq : @pure fn(x: Any, df: Any, [ncp]: Any, [log]: logical) -> double[]
 pchisq : @pure fn(q: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
 qchisq : @pure fn(p: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
+
+# Clustering. `dist` is a double vector of the lower triangle (class "dist"), and arithmetic on it
+# works as on any double vector. `cutree` returns one group per observation for a single `k` or `h`;
+# a vector of either gives a matrix, so that call falls back to `Any`.
+dist : @pure fn(x: Any, [method]: character, [diag]: logical, [upper]: logical, [p]: double) -> double[]
+hclust : @pure fn(d: Any, [method]: character, [members]: Any) -> list{merge: matrix, height: double[], order: integer[], labels: character[] | NULL, method: character, call: Any, dist.method: character | NULL}
+cutree : @pure fn(tree: Any, [k]: double | NULL, [h]: double | NULL) -> integer[]
+cutree : fn(tree: Any, [k]: Any, [h]: Any) -> Any
+kmeans : fn(x: Any, centers: Any, [iter.max]: double, [nstart]: double, [algorithm]: character, [trace]: logical | integer) -> list{cluster: integer[], centers: matrix, totss: double, withinss: double[], tot.withinss: double, betweenss: double, size: integer[], iter: integer, ifault: integer}

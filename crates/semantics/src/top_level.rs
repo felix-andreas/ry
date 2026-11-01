@@ -116,6 +116,11 @@ pub fn item_super_assigned_names<'db>(db: &'db dyn Db, item: Item<'db>) -> Vec<S
     let Some(module) = item_hir(db, item) else {
         return Vec::new();
     };
+    super_assigned_names(module)
+}
+
+/// The root names of every `<<-` target in `module`, sorted and without duplicates.
+pub fn super_assigned_names(module: &Module) -> Vec<Symbol> {
     let mut names: Vec<Symbol> = module
         .kinds()
         .iter()

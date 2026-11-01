@@ -2576,6 +2576,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
 - **Impact:** plain R is untouched, because every new form is a syntax error in R. Field reads with
   a known type compile to a slot load after one layout-id comparison, and tag tests are integer
   comparisons. The design draft is `docs/src/content/docs/contributing/design/records-and-tags.md`.
+- **Field read sites** (`bytecode::Op::Field`, `records::cached_field`). `x$name` with a symbol
+  field compiles to a `Field` instruction that carries a per-site shape constant, the integer
+  pair `[layout id, slot]` (`records::NO_LAYOUT` until a record is seen). Tier 0 compares the
+  layout id and reads the slot; any other object takes `subset::dollar_value`, `$`'s own path. The
+  JIT turns a filled cache into `Intrinsic::Field`: it guards record kind, no object flag and the
+  layout id, then loads the slot unboxed when the mask bit is set and the NaN-box prefix matches
+  the site's feedback, and hands off to tier 0 otherwise. `$` had to join `base_primitive`'s list,
+  or every site compiled as a general call. 5,000,000 iterations of `s <- s + p$x * p$y + p$z`
+  take 0.074 s on a record against 1.83 s on a list (0.055 s with locals), profiling build.
+  Tuple `[[i]]` and tag payloads read through `match` still take the generic path.
 - **Raw slots under NaN prefixes:** a raw integer or logical sits under its own quiet-NaN prefix, so
   the one-bit mask suffices and a slot read needs no layout lookup to know its storage. The object
   keeps its slot count in header padding, so the collector never reads the layout table.
@@ -2916,18 +2926,35 @@ first lines R had already read, leaving R mid-command.
   `NA`-free and reports failure as a tag was taken; the full list and the renames are in
   `contributing/design/standard-library.md`.
 - **Skipped, with the reason:**
-  - `Bool`, `Box`, `Encode`, `Decode`, `Hash`, `Inspect`: R covers booleans; the rest serve Roc's
-    memory layout or abilities, which ry does not have.
-  - Bitwise operations, shifts, `add_wrap`, `pow_int`: R's 32-bit integer reserves its minimum for
-    `NA`, so wrapping has no total definition and integer `pow` overflows almost at once.
-  - Unchecked `sqrt` and `log`, `asin`, `acos`, `is_nan`: they produce `NaN`, which the library
-    never returns.
-  - `pi`, `tau`, `e`: constants are not functions and R already has `pi`.
+  - `Box`, `Encode`, `Decode`, `Hash`, `Inspect`, and the `Eq` implementations (`Dict.is_eq`):
+    they serve Roc's memory layout or abilities, which ry does not have; `Bool.is_eq` compares any
+    two values by `identical()`.
+  - Wrapping arithmetic (`add_wrap` and the rest): R's 32-bit integer reserves its minimum for
+    `NA`, so wrapping would have to stop at that one value, and the code that wants wrapping
+    (hashing) wants it total.
+  - Per-width conversions and limits (`to_i8`, `min_i32`, `int_cast`, `f64_to_parts`, `Dec`):
+    R has one integer and one double type.
+  - Effectful `!` variants (`List.walk!`): R does not track effects; `List.for_each` covers them.
   - `release_excess_capacity`, capacity queries, `Str` capacity functions: the heap owns shrinking,
     and strings are immutable.
   - `List.range`: `seq_len` and `seq` cover it.
   - `Dict.with_capacity`, `Set.with_capacity`: an empty collection has no key vector until its
     first key fixes the key type.
+- **Unchecked operations error where Roc crashes or returns `NaN`.** `Num.add`, `div`, `sqrt`,
+  `log`, `asin`, `acos`, `pow_int` and the rest were first skipped because they produce `NaN` or
+  overflow for part of their domain. They are taken with an R error there that names the
+  `_checked` variant, so a step can be passed by name (`List.walk(xs, 0L, Num.add)`) and a domain
+  failure is still never a silent `NaN`. `Num.is_nan` is the one function that accepts `NaN`.
+- **Bit operations** (`bitwise_*`, shifts, bit counts) work on the 32-bit two's complement and
+  error only on the pattern `-2147483648`, which is `NA`. Shifts wrap as Roc's do.
+- **`Bool` and constants.** `Bool` was first skipped as redundant with `TRUE`, `!` and `&&`; it is
+  taken so boolean steps can be passed by name and Roc code reads the same. `Bool.true`,
+  `Bool.false`, `Num.pi`, `Num.tau` and `Num.e` are values in `standard_library::CONSTANTS`,
+  bound in `package:ry` by `standard_library::attach` and declared in the stub as plain types.
+  Under GNU R, `crates/ry/src/load.rs` reads which `ry.Rtypes` declarations are not function types
+  and binds each as an active binding that stops with the "only ry's runtime" error.
+- **UTF-16 and UTF-32** (`Str.to_utf16`, `from_utf16`, `to_utf32`, ...) follow Roc's newer `Str`
+  builtins, with `:BadUtf16` and `:BadUtf32`; NUL is bad because an R string cannot hold it.
 - **Changed:** `Num.ceiling`, `floor` and `round` keep the number type (R integers are 32-bit, so a
   rounded large double cannot become an integer); `Num.to_integer_checked` converts with
   `:Err(:OutOfBounds)`. Saturating integer arithmetic clamps to plus or minus 2147483647.
@@ -4180,8 +4207,29 @@ check` releases its trees once, and memoized records are compact" below).
   { d <- Dict.insert(d, k, k); d }` inside a function, 16.9 s before and 0.10 s after; at top
   level inside `system.time`, 16 s before the shared-start fix and 0.066 s after; with the tail
   form `add <- function(d, k) Dict.insert(d, k, k)`, 16.4 s before and 0.053 s after.
-- **Limits.** Lists are not moved, and the tail update covers only the last statement. Both are
-  in `backlog.md`.
+- **Lists.** A plain list (no attributes, not an Array) moves like a dictionary: `moves::extent`
+  gives its length as the journal's `entries`, and `List.set` and `List.swap` report replaced
+  elements to `moves::replacing`, so `original` rebuilds it. Growth past capacity copies and
+  leaves the original intact. 40,000 calls of `xs <- helper(xs, i)` with
+  `helper <- function(xs, i) List.append(xs, i)` take 0.046 s on the profiling build.
+- **Closure-creating helpers.** `movable` accepts a `function` literal whose defaults and body pass
+  the same check (`check_literal`) and returns those bodies. `eval::make_closure` reports every
+  closure to `moves::created_closure`, which marks it checked when its body is one of them, and
+  entering a checked closure no longer ends the move; its frame joins the move's tracked frames,
+  so forcing a promise made there is covered too. At return, `closures_dead` releases the
+  parameter only when no created closure is the result and each one's refcount is covered by the
+  tracked frames' own cells, which means none escaped. 40,000 calls of
+  `{ inc <- function(x) x + 1; xs <- List.append(xs, inc(i)); xs }` take 0.12 s, against 6.9 s
+  for the tail form, which still copies because `Op::CallTailUpdate` stays off for a body that
+  may capture its frame.
+- **Base replacements end the move.** `xs[[i]] <- v`, `xs$a <- v`, `xs[i] <- v` and nested forms
+  on a moved list modify it in place without reporting to the journal, so `subset::modifiable` and
+  complex assignment in `eval.rs` call `moves::modifying` first, which ends a move whose value is
+  the object being changed. It must run before the sharing check, because ending the move makes
+  the object shared again and forces the copy. A copied closure (`values` duplicate) is reported
+  to `created_closure` like a fresh one.
+- **Limits.** The tail update covers only the last statement and stays off in a body that creates
+  a closure. Both are in `backlog.md`.
 
 ## A key of the wrong type is an error, not a missing key
 
@@ -4273,6 +4321,28 @@ check` releases its trees once, and memoized records are compact" below).
   and `rep(unknown, 2)` a vector: the unknown argument was the one choosing the candidate. Rejected: taking the union of the fits' results. It is sound, but it
   turns silence into false operand errors downstream (operators do not dispatch per union member),
   against "the checker presumes R code is correct".
+- When the fits still disagree and no unchecked argument is an inferred `Unknown` (each is `Any`,
+  or a forwarded `...`, whose element type is `Any`), the call is `Any`, not `Unknown`, as in mypy:
+  the `Any` is an opt-out, and opting out of a call's argument opts out of the call. Strict mode
+  reports only `Unknown`, so `#: fn(x: Any) -> double` over `sum(x)`, and `utils::head(...)`, are
+  clean, while an `Unknown` argument still makes the call a strict finding. A stub's `Any` result
+  (`nrow`) was already silent when the stub has one signature, so this makes overloaded and plain
+  calls agree. An unannotated parameter is a type parameter, not an inferred `Unknown`, so
+  `t(m)` on an untyped `m` is `Any` too; strict mode already reports the parameter itself.
+- The cost is that an `Any` result hides a mismatch every candidate would share:
+  `#: fn(x: Any) -> character` over `sum(x)` is clean, though each `sum` candidate returns a number.
+  Rejected: joining the disagreeing results (`integer | double`), because the union then fails an
+  honest `-> double` annotation and operators do not dispatch per union member. Picking a common
+  family without a union would be the refinement, if the hidden mismatches turn out to matter.
+
+## A formula is the nominal `formula`, and its operands are not judged
+
+- `~` (unary and binary) types as `formula` (`infer_formula` in `check.rs`). Its operands are
+  inferred for hover and goto-definition, but their errors and strict origins are dropped, because
+  they name model variables (data-frame columns, `.`, `I(x^2)`) that are not bindings in scope.
+  Previously `~` was `Unknown`, so every model call and every `dcast(dt, id ~ n)` was a strict
+  finding that could not even be annotated inline. Rejected: typing operands as ordinary
+  expressions, which would report every column name as unresolved.
 
 ## `$`, `[` and `[[` dispatch to a class's subset method
 
@@ -4442,11 +4512,39 @@ check` releases its trees once, and memoized records are compact" below).
 - **`Tailcall` re-evaluates the call in the caller's frame without reusing it,** so it gives the
   right result but not constant stack depth; true tail calls are in `backlog.md`.
 
+## Typed checking costs per name, not per file
+
+- **Before.** Each file built `visible_type_definitions`, a merged map of every stub and project type
+  definition, so typed analysis paid files times types in time and memory: on typed finbench the
+  diagnostics stage took 2.5 s against 0.2 s untyped. Every `#:` block was also lowered again by each
+  diagnostic pass that read it (parse stage, dangling annotations, argument lists, agreement,
+  declaration sites), and the non-local read classification ran twice, once for the ordinary check
+  and once for strict mode.
+- **Now.** `TypeDefinitions` (`semantics.rs`) is a `Copy` view over one file that looks a name up in
+  that file (scripts, or no `ProjectFiles`), then in the tracked per-name projection
+  `project_type_definition(files, name)`, then in the stubs; nothing merges the sets. The unknown-type
+  check tests each reference by name and builds the full known set only to rank suggestions after a
+  miss. `file_comment_annotations` lowers each `#:` block once per file, keyed by start offset, and
+  `comment_annotation` finds one by binary search. `file_unresolved_non_locals` (`diagnostics.rs`)
+  memoizes the classification per item, keeping only reads that do not resolve.
+- **Impact.** Typed `ry check` on finbench went from 2.43 s / 831 MiB to about 1.9 s / 644 MiB
+  (untyped 1.65 s / 533 MiB). The per-name projection also means an edit to one type definition
+  re-verifies only the readers of that name.
+- **`ry load` remembers a clean strict verdict** (`preflight::check_package`). The pre-check cannot
+  share a database with the runtime's loader, which lives in `libR.so`, so instead a clean result is
+  stored in `<cache dir>/ry/strict/<hash of the package root>`, holding a 128-bit fingerprint (two
+  differently seeded SipHashes) of the ry binary's path, size and mtime, the configuration's `Debug`
+  form, every R file the project analysis walks, the override stubs, `DESCRIPTION`, `NAMESPACE` and the
+  data-file layouts. One record per package keeps the cache from growing with edits, and a refusal is
+  never stored, so its errors print every time. A first load still pays the check; running the check
+  inside the runtime loader's own analysis would remove that and was not done, because that loader
+  analyses only what purity needs.
+
 # Decision record: matching GNU R's own tests where its behavior is an artifact
 
 GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its implementation, not from the language. Each is reproduced from observed output (black-box against Rscript), never from GNU R's source.
 
-- **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes. On x86_64 the slice loops (`long_double::add_all`, `add_differences`, behind `sum`, `mean`, `cov` and `List.sum`) run on the x87 unit through inline assembly, which rounds identically because System V leaves x87 precision control at 64 bits; the software model is about 10x slower (13 ns an element) and stays the fallback on other targets and on Windows, whose x64 CRT sets x87 precision to 53 bits, and for values outside the x87 exponent range.
+- **x87 long double sums.** GNU R accumulates `sum`, `mean`, `rowSums`, `colMeans`, `var` and `cor` in an 80-bit long double. A software model (64-bit significand, round to nearest even, exact sqrt) replaced the compensated-sum stand-ins, because only an exact model agrees bit for bit (`mean(c(1:9, -1e300, 1e300))` is 0). The data.table bridge deliberately keeps plain double sums for GForce shapes. On x86_64 the slice loops (`long_double::add_all`, `add_differences`, `add_products`, behind `sum`, `mean`, `var`, `cov`, `cor` and `List.sum`) run on the x87 unit through inline assembly, which rounds identically because System V leaves x87 precision control at 64 bits; the software model is about 10x slower (13 ns an element) and stays the fallback on other targets and on Windows, whose x64 CRT sets x87 precision to 53 bits, and for values outside the x87 exponent range.
 - **`%%` and `%/%`** correct the remainder in extended precision, handle a divisor too large for the quotient, and warn past 2^63, matching GNU R's observed results on huge operands.
 - **Invalid UTF-8 bytes** survive text processing as private-use code points (one per byte) and print as `\xNN`; `useBytes` regex functions match byte by byte. A strings-as-bytes representation would touch every string consumer, so the stand-in keeps the change small. It is not lossless: a string that already holds a real U+F780..U+F7FF character is indistinguishable from an invalid byte and prints as `\xNN` (backlog: byte strings).
 - **`agrep` and `adist`** use an approximate-match NFA over edit costs; `adist`'s `counts` traceback prefers the order GNU R reports (observed, not derived).
@@ -4595,6 +4693,14 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   outside bodies, script files, and added and removed files
   (`cached_checks_match_fresh_checks_across_seeded_edits` in `cli.rs`).
 
+## Corpus-driven stub and overload fixes
+
+- A name the item writes with `<<-` reads as `Unknown` unless the project defines it (`read_non_local` in `check.rs`, via `top_level::super_assigned_names` over the item's own HIR, so no project-wide map is read). Before, openxlsx's Reference Class field `t <<- t[-inds]` resolved to base `t` and indexing it was a false report.
+- `grepl`, `grep`, `regexpr` and `gregexpr` take `pattern: character[]` as a second overload, not a union: a union parameter makes an untyped caller parameter infer the union, which then fails at `paste0(collapse = p)` (gt). `sub` and `gsub` keep `character` because no corpus code needed more.
+- Overload resolution settles one narrowing disagreement: a scalar narrowing wins over the same atom's vector. A general "most specific by `compatible`" rule was tried and rejected, because it picked list shapes (`list[named: ...]`) that later reads rejected, adding ten corpus false reports.
+- `menu`'s `choices` is one union including `list[Any]`, because a list and a character overload disagree and would make an untyped caller `Unknown`.
+- The cost of the second `grepl` candidate: `grepl(1L, x)` now reports "no overload matches" over the whole call instead of the argument.
+
 ## GNU R's public C API is a checked list, not a measured subset
 
 - **Previous shape.** `test_headers.rs` checked that what ry's headers declare is exported, so a
@@ -4654,3 +4760,27 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
 - `.Internal(Sys.which)` exists because GNU R's Windows base code calls it (Unix base R uses
   `command -v`); it searches `PATH` with `PATHEXT` and returns forward-slash paths.
 
+## A load holds back S4 definitions and caches its index across processes
+
+- **Deferred S4** (`loader::deferred_s4`, `.ry_force_s4` in `runtime.R`). Previously every top-level
+  `setClass`, `setGeneric`, `setMethod` and `setValidity` ran eagerly through the `methods` package,
+  about 300 ms on the 326,000-line bench package. On ry's runtime a package's S4 definitions are now
+  held back as one unit: each name they bind becomes a placeholder promise, and the interpreter's
+  class-cache miss and `R_getGeneric` hooks (`interp::methods`) force them. A force during the load
+  runs only the definitions before the current statement, so order is GNU R's. The unit is
+  all-or-nothing because S4 registration is global state (class tables, generic method tables) that
+  no per-name promise could reproduce; the rules that keep it eager (a method on a generic the package
+  does not define, a reference class, a definition reading a name bound later, a generator name that
+  is also written elsewhere) are listed in `reference/package-loading.md`, "S4 definitions", and
+  pinned in `crates/loader/tests/reload/deferred_s4.test`. GNU R's backend never defers, since it has
+  no hook to force on; `options(ry.load.lazy_s4 = FALSE)` turns it off.
+- **The load-index cache** (`index_cache`, `read_index_cache`, `write_index_cache` in `loader.rs`).
+  Previously every cold start parsed all files and derived their facts (about 280 ms on 4 cores).
+  The whole `PackageIndex` is now cached per package root, keyed by an xxh3-128 over the build id
+  and every input (strictness, DESCRIPTION, NAMESPACE, each path and text). The cache is package-level,
+  not per file, because the per-file salsa queries all chain off the parse and cannot be fed a stored
+  result without re-parsing; a hit therefore skips salsa analysis entirely and the runtime parses
+  each item's slice of text when it is first forced (`Source::Text`). The build id is a hash of the
+  analysis crates' sources from `crates/loader/build.rs`, so any change to the facts' derivation
+  invalidates old entries without a hand-maintained version number. A hit warms the salsa parse on a
+  detached, cancellable db clone so the first reload does not pay for it.

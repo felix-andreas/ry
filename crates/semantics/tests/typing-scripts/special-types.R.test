@@ -17,7 +17,7 @@ Any
 
 #---- any_annotation_accepts_unknown
 #: Any
-value <- 1L ~ 2L
+value <- 1L %undeclared% 2L
 value
 #++++
 value: Any
@@ -25,7 +25,7 @@ Any
 
 #---- unknown_only_coercion_accepts_unknown
 #: @if-unknown integer
-value <- 1L ~ 2L
+value <- 1L %undeclared% 2L
 value
 #++++
 value: integer
@@ -49,7 +49,7 @@ integer
 
 #---- checked_annotation_accepts_unknown
 #: integer
-value <- 1L ~ 2L
+value <- 1L %undeclared% 2L
 #++++
 value: integer
 11..16 warning[unused] `value` is assigned but never used.
@@ -81,7 +81,7 @@ value: integer
 
 #==== unknown_propagation
 #---- unknown_argument_is_accepted_without_cascading
-unsupported <- 1L ~ 2L
+unsupported <- 1L %undeclared% 2L
 
 #: fn(count: integer) -> integer
 double_count <- function(count) count + count
@@ -92,7 +92,7 @@ double_count: fn(count: integer) -> integer
 integer
 
 #---- unknown_callee_call_evaluates_to_unknown
-unsupported <- 1L ~ 2L
+unsupported <- 1L %undeclared% 2L
 unsupported(1L)
 #++++
 unsupported: Unknown
@@ -119,7 +119,7 @@ double_count: fn(count: integer) -> integer
 integer
 
 #---- unknown_in_arithmetic_stays_unknown
-unsupported <- 1L ~ 2L
+unsupported <- 1L %undeclared% 2L
 unsupported + 1L
 #++++
 unsupported: Unknown

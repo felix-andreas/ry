@@ -416,6 +416,41 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     SyntaxSites(sites)
 }
 
+/// Every `#:` block of the file lowered once, in source order. The diagnostics, the type
+/// declaration walks and the typing directive all read lowered blocks, and lowering is the
+/// costly step, so they share this memo instead of each lowering the same block again.
+#[salsa::tracked(returns(ref))]
+pub fn file_comment_annotations<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+) -> Vec<(u32, annotations::Annotation<'db>)> {
+    let root = parse(db, file).syntax_node();
+    file_syntax_sites(db, file)
+        .nodes(&root, SiteRole::Annotation)
+        .iter()
+        .map(|node| {
+            (
+                u32::from(node.text_range().start()),
+                annotations::lower_annotation(db, node),
+            )
+        })
+        .collect()
+}
+
+/// The lowering of a `#:` block from the file's own tree, through [`file_comment_annotations`].
+pub fn comment_annotation<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    node: &SyntaxNode,
+) -> Option<&'db annotations::Annotation<'db>> {
+    let annotations = file_comment_annotations(db, file);
+    let start = u32::from(node.text_range().start());
+    let index = annotations
+        .binary_search_by_key(&start, |(offset, _)| *offset)
+        .ok()?;
+    annotations.get(index).map(|(_, annotation)| annotation)
+}
+
 fn is_ry_syntax(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -871,7 +906,9 @@ pub fn file_typing_directives(
                 }
             }
             rowan::NodeOrToken::Node(node) if node.kind() == SyntaxKind::ANNOTATION => {
-                if let Some(strict) = annotations::lower_annotation(db, &node).strict {
+                if let Some(strict) =
+                    comment_annotation(db, file, &node).and_then(|annotation| annotation.strict)
+                {
                     mode = Some(if strict {
                         TypingMode::Strict
                     } else {
@@ -885,7 +922,7 @@ pub fn file_typing_directives(
     (mode, invalid)
 }
 
-#[salsa::tracked(returns(clone))]
+#[salsa::tracked(returns(ref))]
 pub fn file_type_definitions<'db>(
     db: &'db dyn Db,
     file: SourceFile,
@@ -897,7 +934,9 @@ pub fn file_type_definitions<'db>(
     for node in root.children() {
         match node.kind() {
             SyntaxKind::ANNOTATION => {
-                definitions.extend(annotations::lower_annotation(db, &node).definitions);
+                if let Some(annotation) = comment_annotation(db, file, &node) {
+                    definitions.extend(annotation.definitions.iter().cloned());
+                }
             }
             SyntaxKind::TYPE_DEFINITION => {
                 let enabled = *inline_enabled.get_or_insert_with(|| inline_annotations_enabled(db));
@@ -935,7 +974,7 @@ pub fn project_type_definitions<'db>(
             continue;
         }
         for definition in file_type_definitions(db, file) {
-            definitions.insert(definition.name, definition);
+            definitions.insert(definition.name, definition.clone());
         }
     }
     definitions
@@ -1934,27 +1973,53 @@ struct SalsaGlobals<'db, 'a> {
     test_names: RefCell<FxHashMap<types::Name<'db>, &'db PackageName<'db>>>,
 }
 
-/// A script's own declarations are visible to itself alone and shadow project names.
-/// Memoized per file so the merge runs once per file, not once per checked item.
-#[salsa::tracked(returns(ref))]
-pub fn visible_type_definitions<'db>(
-    db: &'db dyn Db,
+/// The type definitions a file sees, looked up one name at a time: a script's own
+/// declarations, which are visible to itself alone, shadow the project's, and the project's
+/// shadow the stubs'. A merged map per file would copy every visible definition into every
+/// file that reads one, which costs time and memory in proportion to files times types.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeDefinitions {
     file: SourceFile,
-) -> FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
-    let mut definitions = stubs::stubs(db)
-        .map(|library| library.type_definitions.clone())
-        .unwrap_or_default();
-    if let Some(files) = ProjectFiles::try_get(db) {
-        for (name, definition) in project_type_definitions(db, files) {
-            definitions.insert(*name, definition.clone());
-        }
+}
+
+impl TypeDefinitions {
+    pub fn of(file: SourceFile) -> Self {
+        Self { file }
     }
-    if *file.kind(db) != DocumentKind::Package {
-        for definition in file_type_definitions(db, file) {
-            definitions.insert(definition.name, definition);
+
+    pub fn get<'db>(
+        self,
+        db: &'db dyn Db,
+        name: types::Name<'db>,
+    ) -> Option<&'db annotations::NamedDefinition<'db>> {
+        let files = ProjectFiles::try_get(db);
+        // A package file's definitions are the project's, unless there is no project.
+        if (files.is_none() || *self.file.kind(db) != DocumentKind::Package)
+            && let Some(definition) = file_type_definitions(db, self.file)
+                .iter()
+                .rev()
+                .find(|definition| definition.name == name)
+        {
+            return Some(definition);
         }
+        if let Some(files) = files
+            && let Some(definition) = project_type_definition(db, files, name)
+        {
+            return Some(definition);
+        }
+        stubs::stubs(db)?.type_definitions.get(&name)
     }
-    definitions
+}
+
+/// One name's project definition, so that an edit to one `@type` re-verifies only the
+/// readers of that name.
+#[salsa::tracked(returns(as_ref))]
+fn project_type_definition<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: types::Name<'db>,
+) -> Option<annotations::NamedDefinition<'db>> {
+    project_type_definitions(db, files).get(&name).cloned()
 }
 
 #[salsa::tracked(returns(ref))]
@@ -1971,8 +2036,12 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> FxHashSet<String
 /// sets on a plain list, which no type tracks, so arithmetic on a list may be that method.
 #[salsa::tracked]
 fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
-    let definitions = visible_type_definitions(db, file);
-    let tracked = |class: &String| definitions.keys().any(|name| name.text(db) == class);
+    let definitions = TypeDefinitions::of(file);
+    let tracked = |class: &String| {
+        definitions
+            .get(db, types::Name::new(db, class.as_str()))
+            .is_some()
+    };
     let project_classes = ProjectFiles::try_get(db)
         .map(|files| project_arithmetic_classes(db, files))
         .unwrap_or_default();
@@ -2323,10 +2392,8 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
         Some(candidates.clone())
     }
 
-    fn type_definitions(
-        &self,
-    ) -> &'db FxHashMap<types::Name<'db>, annotations::NamedDefinition<'db>> {
-        visible_type_definitions(self.db, self.file)
+    fn type_definitions(&self) -> TypeDefinitions {
+        TypeDefinitions::of(self.file)
     }
 
     fn arithmetic_classes(&self) -> &'db FxHashSet<String> {

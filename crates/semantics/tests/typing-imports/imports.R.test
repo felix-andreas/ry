@@ -391,3 +391,14 @@ apply_twice <- function(path) path(path)
 #++++
 apply_twice: Unknown
 30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+
+#---- a_purrr_formula_lambda_is_accepted
+library(purrr)
+total <- reduce(list(1, 2, 3), ~ .x + .y)
+walk(1:3, ~ print(.x))
+safe_log <- safely(~ log(.x))
+#++++
+Any
+total: Any
+integer[]
+safe_log: fn(...: Any) -> list{result: Any, error: Any}
