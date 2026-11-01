@@ -265,6 +265,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     // ry has no interactive debugger, so `browser()` continues as it does in a
     // non-interactive GNU R session.
     special("browser", -1, |_| unsafe { Ok(nil()) }).invisible(),
+    internal("inspect", -1, do_inspect).invisible(),
     builtin("tracemem", 1, |call| unsafe {
         scalar_string(&format!("<{:p}>", call.arg(0).as_ptr()))
     }),
@@ -362,6 +363,96 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
         values::set_elt(result, index, charsxp);
     }
     Ok(result)
+}
+
+/// `.Internal(inspect(x))`: GNU R's dump of an object's internal structure, with the header
+/// layout GNU R prints. ry has no GC generations or reference counts to report, so those
+/// fields always read `g0c0 []`.
+unsafe fn do_inspect(call: &Call<'_>) -> R<Sexp> {
+    let object = call.arg(0);
+    let mut text = String::new();
+    inspect_into(&mut text, object, 0);
+    crate::write_console(text.as_bytes(), false);
+    Ok(object)
+}
+
+unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
+    use std::fmt::Write as _;
+    const SHOWN: usize = 5;
+    let indent = " ".repeat(depth * 2);
+    let kind = object.kind();
+    let header = format!(
+        "{indent}@{:x} {:02} {} g0c0 [] ",
+        object.as_ptr() as usize,
+        kind as u8,
+        kind.constant_name()
+    );
+    text.push_str(&header);
+    let count = if kind.is_vector() { length(object) } else { 0 };
+    match kind {
+        SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
+            let shown: Vec<String> = (0..count.min(SHOWN))
+                .map(|index| match kind {
+                    SexpType::Real => {
+                        crate::format::format_real_alone(values::reals(object)[index], 7)
+                    }
+                    SexpType::Complex => {
+                        crate::format::format_complex_alone(values::complexes(object)[index], 7)
+                    }
+                    _ => match values::ints(object)[index] {
+                        NA_INTEGER => "NA".to_owned(),
+                        value => value.to_string(),
+                    },
+                })
+                .collect();
+            let more = if count > SHOWN { ",..." } else { "" };
+            drop(writeln!(
+                text,
+                "(len={count}, tl=0) {}{more}",
+                shown.join(",")
+            ));
+        }
+        SexpType::Raw => {
+            drop(writeln!(text, "(len={count}, tl=0)"));
+        }
+        SexpType::Char => {
+            let ascii = if object.bytes().is_ascii() {
+                "[ASCII] "
+            } else {
+                ""
+            };
+            drop(writeln!(
+                text,
+                "{ascii}[cached] \"{}\"",
+                crate::format::encode_string(&String::from_utf8_lossy(object.bytes()), None)
+            ));
+        }
+        SexpType::Symbol => drop(writeln!(text, "\"{}\"", values::symbol_name(object))),
+        SexpType::String | SexpType::List | SexpType::Expression => {
+            drop(writeln!(text, "(len={count}, tl=0)"));
+            for index in 0..count {
+                inspect_into(text, object.element(index), depth + 1);
+            }
+        }
+        SexpType::Pairlist | SexpType::Language => {
+            text.push('\n');
+            let mut node = object;
+            while node != nil() && matches!(node.kind(), SexpType::Pairlist | SexpType::Language) {
+                if node.tag() != nil() {
+                    text.push_str(&format!("{indent}  TAG: "));
+                    inspect_into(text, node.tag(), 0);
+                }
+                inspect_into(text, node.car(), depth + 1);
+                node = node.cdr();
+            }
+        }
+        _ => text.push('\n'),
+    }
+    let attributes = object.attrib();
+    if attributes != nil() && kind != SexpType::Char {
+        text.push_str(&format!("{indent}ATTRIB:\n"));
+        inspect_into(text, attributes, depth + 1);
+    }
 }
 
 unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {

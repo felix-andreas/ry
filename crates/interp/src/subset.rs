@@ -1816,7 +1816,7 @@ impl Flattener {
                 copy_element(value, index, result, position)?;
             }
         }
-        if self.any_names && self.use_names {
+        if self.any_names && self.use_names && !self.values.is_empty() {
             let names = values::string_vector_na(&self.names)?;
             values::set_attr(result, symbols().names, names)?;
         }

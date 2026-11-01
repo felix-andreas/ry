@@ -740,6 +740,16 @@ pub unsafe fn try_builtin_dispatch(
             } else {
                 definition.name
             };
+            if generic == "c" {
+                // A `c` method never sees the `NULL` arguments after the first, as in GNU R.
+                let kept: Vec<Arg> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, arg)| *position == 0 || arg.value != nil())
+                    .map(|(_, arg)| *arg)
+                    .collect();
+                return internal_dispatch(generic, call, &kept, env);
+            }
             internal_dispatch(generic, call, args, env)
         }
         Generic::Ops | Generic::MatrixOps => {

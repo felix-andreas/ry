@@ -27,7 +27,7 @@ use crate::{
 use bzip2::{read::MultiBzDecoder, write::BzEncoder};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 use heap::{
-    object::{NA_INTEGER, Rcomplex, Sexp, SexpType},
+    object::{NA_INTEGER, NA_LOGICAL, Rcomplex, Sexp, SexpType},
     strings::Encoding,
 };
 use lzma_rust2::{XzOptions, XzReader, XzWriter};
@@ -58,6 +58,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("pipe", 3, do_pipe),
     internal("rawConnection", 3, do_raw_connection),
     internal("unz", 3, do_unz),
+    internal("gzcon", 4, do_gzcon),
     internal("rawConnectionValue", 1, |call| unsafe {
         raw_connection_value(call.arg(0))
     }),
@@ -289,17 +290,23 @@ impl Table {
     /// Marks the variables text output connections write to.
     pub(crate) unsafe fn trace(&self, marker: &mut heap::Marker<'_>) {
         for entry in self.entries.iter().flatten() {
-            if !entry.builtin {
-                continue;
-            }
-            let device = (*entry.con).private as *const Device;
-            if let Some(Device::TextOutput(TextOutput {
-                target: Some(target),
-                ..
-            })) = device.as_ref()
-            {
-                marker.mark(target.symbol);
-                marker.mark(target.env);
+            let (mut con, mut builtin) = (entry.con, entry.builtin);
+            while builtin {
+                let device = (*con).private as *const Device;
+                match device.as_ref() {
+                    Some(Device::TextOutput(TextOutput {
+                        target: Some(target),
+                        ..
+                    })) => {
+                        marker.mark(target.symbol);
+                        marker.mark(target.env);
+                        break;
+                    }
+                    Some(Device::Gzcon(gzcon)) => {
+                        (con, builtin) = (gzcon.inner, gzcon.inner_builtin)
+                    }
+                    _ => break,
+                }
             }
         }
     }
@@ -732,6 +739,77 @@ unsafe fn do_unz(call: &Call<'_>) -> R<Sexp> {
         position: 0,
     });
     new_builtin("unz", description.as_bytes(), &open, "r", device, |_| {})
+}
+
+/// `gzcon(con, level, allowNonCompressed, text)`: wraps `con` so that reads decompress gzip
+/// data and writes compress it. The wrapper takes over the slot (and the `conn_id`) of `con`,
+/// so every R object naming `con` now names the wrapper, as in GNU R.
+unsafe fn do_gzcon(call: &Call<'_>) -> R<Sexp> {
+    let object = call.arg(0);
+    let (slot, inner) = resolve_con(object)?;
+    let level = values::as_integer_scalar(call.arg(1));
+    if level == NA_INTEGER || !(0..=9).contains(&level) {
+        return Err(error("'level' must be one of 0 ... 9"));
+    }
+    let allow_plain = values::as_logical_scalar(call.arg(2));
+    if allow_plain == NA_LOGICAL {
+        return Err(error("'allowNonCompression' must be TRUE or FALSE"));
+    }
+    let text = values::as_logical_scalar(call.arg(3));
+    if text == NA_LOGICAL {
+        return Err(error("'text' must be TRUE or FALSE"));
+    }
+    if class_of(inner) == "gzcon" {
+        crate::conditions::warning("this is already a 'gzcon' connection")?;
+        return Ok(object);
+    }
+    let inner_mode = mode_of(inner);
+    let mode: &[u8] = if inner_mode.contains(&b'w') {
+        b"wb"
+    } else if inner_mode.contains(&b'a') {
+        b"ab"
+    } else {
+        b"rb"
+    };
+    if class_of(inner) == "file" && (inner_mode == b"r" || inner_mode == b"w") {
+        crate::conditions::warning("using a text-mode 'file' connection may not work correctly")?;
+    }
+    let inner_builtin = entry(slot)
+        .ok_or_else(|| error("invalid connection"))?
+        .builtin;
+    let description = format!("gzcon({})", description_of(inner));
+    let con = allocate_rconn(
+        b"gzcon",
+        description.as_bytes(),
+        mode,
+        &BUILTIN_METHODS,
+        default_vfprintf(),
+    );
+    (*con).private = Box::into_raw(Box::new(Device::Gzcon(GzconDevice {
+        inner,
+        inner_builtin,
+        level: level as u32,
+        allow_plain: allow_plain != 0,
+        data: Vec::new(),
+        position: 0,
+    })))
+    .cast();
+    (*con).canread = (*inner).canread;
+    (*con).canwrite = (*inner).canwrite;
+    (*con).text = text as Rboolean;
+    (*con).ex_ptr = (*inner).ex_ptr;
+    (*con).id = con.cast();
+    if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
+        id.set_external_address(con.cast());
+    }
+    if let Some(Some(slot_entry)) = entries().get_mut(slot) {
+        *slot_entry = Entry { con, builtin: true };
+    }
+    if (*inner).isopen != 0 {
+        open_con(con)?;
+    }
+    let result = connection_object(slot)?;
+    Ok(result)
 }
 
 /// `textConnection(nm, object, open, env, type)`: reads the lines of a character vector, or
@@ -1876,6 +1954,20 @@ unsafe fn close_slot(slot: usize) -> R<c_int> {
     };
     let status = (*con).status;
     let destroyed = method_destroy(con);
+    let wrapped = if builtin {
+        match ((*con).private as *const Device).as_ref() {
+            Some(Device::Gzcon(gzcon)) => Some((gzcon.inner, gzcon.inner_builtin)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some((inner, inner_builtin)) = wrapped {
+        // The wrapped connection shares the wrapper's `conn_id`, which is cleared below.
+        let destroyed = method_destroy(inner);
+        free_rconn(inner, inner_builtin);
+        destroyed?;
+    }
     if let Some(id) = Sexp::from_raw((*con).ex_ptr.cast()) {
         id.set_external_address(null_mut());
     }
@@ -2725,6 +2817,7 @@ enum Device {
     TextOutput(TextOutput),
     Pipe(PipeDevice),
     Zip(ZipDevice),
+    Gzcon(GzconDevice),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2813,6 +2906,17 @@ struct Inflate {
 }
 
 struct RawDevice {
+    data: Vec<u8>,
+    position: usize,
+}
+
+/// `gzcon()`: the connection it wraps, owned from then on. Reading decompresses the whole
+/// stream when the connection opens; writing collects the data and compresses it on close.
+struct GzconDevice {
+    inner: Rconnection,
+    inner_builtin: bool,
+    level: u32,
+    allow_plain: bool,
     data: Vec<u8>,
     position: usize,
 }
@@ -2995,6 +3099,46 @@ unsafe fn device_open(con: Rconnection) -> R<bool> {
             (*con).canread = 1;
             (*con).canwrite = 0;
             (*con).text = (!mode.binary) as Rboolean;
+            return Ok(true);
+        }
+        Device::Gzcon(gzcon) => {
+            let inner = gzcon.inner;
+            if (*inner).isopen == 0 {
+                set_mode(inner, &mode_bytes);
+                if !method_open(inner)? {
+                    return Ok(false);
+                }
+            }
+            gzcon.data.clear();
+            gzcon.position = 0;
+            if !mode.write {
+                let mut raw = Vec::new();
+                let mut chunk = vec![0u8; READ_CHUNK];
+                loop {
+                    let count = method_read(inner, &mut chunk)?;
+                    if count == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..count.min(chunk.len())]);
+                }
+                if raw.starts_with(&[0x1f, 0x8b]) {
+                    let mut decoder = MultiGzDecoder::new(raw.as_slice());
+                    if let Err(failure) = decoder.read_to_end(&mut gzcon.data) {
+                        crate::conditions::warning(format!(
+                            "invalid or incomplete compressed data: {failure}"
+                        ))?;
+                    }
+                } else if gzcon.allow_plain {
+                    gzcon.data = raw;
+                } else {
+                    crate::conditions::warning("file stream does not have gzip magic number")?;
+                }
+            }
+            (*con).canseek = 0;
+            (*con).isopen = 1;
+            (*con).canread = (!mode.write) as Rboolean;
+            (*con).canwrite = mode.write as Rboolean;
+            (*con).save = NO_SAVE;
             return Ok(true);
         }
         Device::Standard(_) | Device::TextInput(_) | Device::TextOutput(_) => {}
@@ -3186,6 +3330,27 @@ unsafe fn device_close(con: Rconnection) -> R<()> {
             zip.position = 0;
             Ok(())
         }
+        Device::Gzcon(gzcon) => {
+            let inner = gzcon.inner;
+            let data = std::mem::take(&mut gzcon.data);
+            gzcon.position = 0;
+            let written = if (*con).canwrite != 0 {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::new(gzcon.level));
+                encoder
+                    .write_all(&data)
+                    .and_then(|()| encoder.finish())
+                    .map_err(io_error)
+                    .and_then(|compressed| method_write(inner, &compressed).map(drop))
+            } else {
+                Ok(())
+            };
+            let closed = if (*inner).isopen != 0 {
+                method_close(inner)
+            } else {
+                Ok(())
+            };
+            written.and(closed)
+        }
         Device::Standard(_) | Device::Raw(_) | Device::TextInput(_) => Ok(()),
     }
 }
@@ -3219,7 +3384,8 @@ unsafe fn device_read(con: Rconnection, buffer: &mut [u8]) -> R<usize> {
         },
         Device::Raw(RawDevice { data, position })
         | Device::TextInput(TextInput { data, position })
-        | Device::Zip(ZipDevice { data, position, .. }) => {
+        | Device::Zip(ZipDevice { data, position, .. })
+        | Device::Gzcon(GzconDevice { data, position, .. }) => {
             let available = data.get(*position..).unwrap_or_default();
             let count = available.len().min(buffer.len());
             buffer[..count].copy_from_slice(&available[..count]);
@@ -3361,6 +3527,10 @@ unsafe fn device_write(con: Rconnection, bytes: &[u8], printing: bool) -> R<usiz
             Ok(bytes.len())
         }
         Device::TextInput(_) | Device::Zip(_) => Err(error("cannot write to this connection")),
+        Device::Gzcon(gzcon) => {
+            gzcon.data.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
         Device::TextOutput(_) if !printing => Err(missing("write")),
         Device::TextOutput(output) => {
             let mut completed = false;
@@ -3408,7 +3578,9 @@ unsafe fn device_seek(
 ) -> R<f64> {
     let query = position.is_nan();
     match device(con)? {
-        Device::Standard(_) | Device::Pipe(_) | Device::Zip(_) => Err(missing("seek")),
+        Device::Standard(_) | Device::Pipe(_) | Device::Zip(_) | Device::Gzcon(_) => {
+            Err(missing("seek"))
+        }
         Device::TextInput(_) | Device::TextOutput(_) => {
             if !query && position >= 0.0 {
                 return Err(error("seek is not relevant for text connection"));
