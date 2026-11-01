@@ -2071,7 +2071,7 @@ unsafe fn regexpr(call: &Call<'_>, global: bool) -> R<Sexp> {
                     table.push_none()
                 }
                 Some(element) => match search(&element, 0)? {
-                    Some(found) => table.push(&element, &found, report.bytes),
+                    Some(found) => table.push(&element, &found),
                     None => table.push_none(),
                 },
             }
@@ -2402,7 +2402,6 @@ unsafe fn na_match() -> R<Sexp> {
     Ok(positions)
 }
 
-/// The 0-based position of byte `offset` of `text`, in characters unless `bytes`.
 /// The character position of byte `offset` in `text`. With `useBytes = TRUE` the text holds one
 /// character per byte (see [`subject_at`]), so this counts bytes then.
 fn position_of(text: &str, offset: usize) -> i32 {

@@ -957,7 +957,6 @@ unsafe fn do_pdf(call: &NativeCall<'_>) -> R<Sexp> {
 /// ...)`.
 unsafe fn do_postscript(call: &NativeCall<'_>) -> R<Sexp> {
     let horizontal = values::as_logical_scalar(call.arg(8)) == 1;
-    let onefile = values::as_logical_scalar(call.arg(10)) != 0;
     let spec = DeviceSpec {
         name: "postscript",
         file: device_file(call.arg(0)),

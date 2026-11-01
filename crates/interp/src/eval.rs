@@ -1497,7 +1497,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("call", -1, do_call),
     special("expression", -1, do_expression),
     internal("all.names", 4, do_all_names),
-    internal("returnValue", 1, |call| unsafe {
+    internal("returnValue", 1, |call| {
         Ok(interp()
             .returned_values
             .last()

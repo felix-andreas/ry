@@ -25,10 +25,10 @@ const INLINE_CELLS: usize = 12;
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
 
-#[derive(Default)]
 /// The end of a bucket chain in `Frame::hash_chains`.
 const EMPTY_CHAIN: usize = usize::MAX;
 
+#[derive(Default)]
 pub struct Frame {
     /// Inline, because most frames are a call's few arguments and locals, and a closure call
     /// should not pay for a second allocation beside the frame's own.

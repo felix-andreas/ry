@@ -1,7 +1,7 @@
 //! What a graphics device draws and the files it writes. Base graphics records each page as a
 //! list of shapes in inches from the device's bottom-left corner, and closing the device
-//! renders the pages into its file format: PDF, PostScript and SVG as vector graphics, PNG,
-//! JPEG, BMP and TIFF as rasterized pixels.
+//! renders the pages into its file format: PDF and SVG as vector graphics, PNG, BMP and TIFF
+//! as rasterized pixels.
 
 use {
     crate::graphics::{Colour, text_width_ems},
@@ -72,28 +72,16 @@ pub struct Stroke {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Format {
     Pdf,
-    /// `onefile = FALSE` writes each page to its own file. On `paper` (inches), the page is
-    /// centred, and turned a quarter anticlockwise when `landscape`; without paper, as for
-    /// `paper = "special"`, the bounding box is the page itself.
-    Postscript {
-        onefile: bool,
-        paper: Option<[f64; 2]>,
-        landscape: bool,
-    },
     Svg,
     Png,
-    /// `quality` from 1 to 100.
-    Jpeg {
-        quality: u8,
-    },
     Bmp,
     Tiff,
     Jpeg,
     PostScript,
 }
 
-/// Renders `pages` of a device `size` inches across into one file for PDF and PostScript, or
-/// into one file per page for the others, naming page `n` by filling `file`'s `%d` conversion with `n`.
+/// Renders `pages` of a device `size` inches across into one file for PDF, or into one file
+/// per page for the others, naming page `n` by filling `file`'s `%d` conversion with `n`.
 /// Raster formats use `resolution` pixels per inch.
 pub fn write_pages(
     format: Format,
@@ -570,7 +558,7 @@ fn pdf_join(ljoin: i32) -> i32 {
     }
 }
 
-/// Text as a PDF or PostScript literal string in Latin-1: Latin-1 characters map to themselves and
+/// Text as a PDF literal string in WinAnsiEncoding: Latin-1 characters map to themselves and
 /// anything else becomes `?`.
 fn pdf_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -1104,28 +1092,6 @@ fn rgba_rows(pixmap: &tiny_skia::Pixmap) -> Vec<[u8; 4]> {
 
 /// An uncompressed 24-bit BMP, its rows bottom-up and padded to four bytes. Transparent
 /// pixels are composited on white, since the format has no alpha.
-/// A baseline JFIF file of the page composited on white, since JPEG has no alpha.
-fn jpeg(pixmap: &tiny_skia::Pixmap, quality: u8, resolution: f64) -> std::io::Result<Vec<u8>> {
-    let (Ok(width), Ok(height)) = (
-        u16::try_from(pixmap.width()),
-        u16::try_from(pixmap.height()),
-    ) else {
-        return Err(std::io::Error::other("the page is too large for JPEG"));
-    };
-    let pixels: Vec<u8> = rgba_rows(pixmap).into_iter().flat_map(on_white).collect();
-    let mut bytes = Vec::new();
-    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, quality);
-    let density = resolution.round().clamp(1.0, f64::from(u16::MAX)) as u16;
-    encoder.set_density(jpeg_encoder::Density::Inch {
-        x: density,
-        y: density,
-    });
-    encoder
-        .encode(&pixels, width, height, jpeg_encoder::ColorType::Rgb)
-        .map_err(|failure| std::io::Error::other(failure.to_string()))?;
-    Ok(bytes)
-}
-
 fn bmp(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
     let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
     let row_bytes = (3 * width).div_ceil(4) * 4;

@@ -554,7 +554,6 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         speculations: Vec::new(),
         registers,
         defaulted: defaulted_formals(formals),
-        locals,
         hints: Vec::new(),
         frame_safe: FxHashMap::default(),
     };
@@ -735,9 +734,6 @@ struct Builder<'a> {
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
     defaulted: FxHashSet<Sexp>,
-    /// The formals and every symbol the body binds. A call through one of them may find a local
-    /// function first, so its head cannot be speculated from the enclosure.
-    locals: FxHashSet<Sexp>,
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: Vec<Ty>,

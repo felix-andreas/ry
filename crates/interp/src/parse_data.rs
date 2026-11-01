@@ -26,7 +26,6 @@ use {
 /// such as a ry record literal.
 pub unsafe fn parse_data(root: &SyntaxNode, source: &SourceMap) -> R<Option<Sexp>> {
     let mut replay = Replay {
-        text: source.text,
         lexemes: Vec::new(),
         cursor: 0,
         lookahead: None,
@@ -142,8 +141,7 @@ struct Item {
 /// The node an expression reduced to, as an index into the replay's items.
 type ItemIndex = usize;
 
-struct Replay<'text> {
-    text: &'text str,
+struct Replay {
     lexemes: Vec<Lexeme>,
     cursor: usize,
     lookahead: Option<(Next, i32)>,
@@ -159,7 +157,7 @@ struct Replay<'text> {
     argument_start: bool,
 }
 
-impl Replay<'_> {
+impl Replay {
     /// The top-level statements.
     fn program(&mut self, root: &SyntaxNode) -> Option<Vec<ItemIndex>> {
         let mut statements = root.children().filter(|child| !is_skipped(child));

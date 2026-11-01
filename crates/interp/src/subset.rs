@@ -3482,27 +3482,6 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     Ok(result)
 }
 
-/// The unevaluated expressions behind the `...` arguments of the `cbind` or `rbind` closure
-/// whose environment is `env`, which `deparse.level` names untagged vectors after. A position
-/// with no expression to read (the internal called some other way) holds `NULL`.
-unsafe fn argument_expressions(env: Sexp, count: usize) -> R<Vec<Sexp>> {
-    let mut expressions = vec![nil(); count];
-    let dots = eval::find_var(symbols().dots, env)?;
-    if dots.kind() != SexpType::Dots || values::pairlist_length(dots) != count {
-        return Ok(expressions);
-    }
-    let mut cell = dots;
-    for expression in expressions.iter_mut() {
-        let mut value = cell.car();
-        while value.kind() == SexpType::Promise {
-            value = value.cdr();
-        }
-        *expression = value;
-        cell = cell.cdr();
-    }
-    Ok(expressions)
-}
-
 unsafe fn do_rev(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let count = length(object);

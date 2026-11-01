@@ -395,7 +395,6 @@ unsafe fn do_inspect(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
-    use std::fmt::Write as _;
     const SHOWN: usize = 5;
     let indent = " ".repeat(depth * 2);
     let kind = object.kind();
@@ -424,14 +423,10 @@ unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
                 })
                 .collect();
             let more = if count > SHOWN { ",..." } else { "" };
-            drop(writeln!(
-                text,
-                "(len={count}, tl=0) {}{more}",
-                shown.join(",")
-            ));
+            text.push_str(&format!("(len={count}, tl=0) {}{more}\n", shown.join(",")));
         }
         SexpType::Raw => {
-            drop(writeln!(text, "(len={count}, tl=0)"));
+            text.push_str(&format!("(len={count}, tl=0)\n"));
         }
         SexpType::Char => {
             let ascii = if object.bytes().is_ascii() {
@@ -439,15 +434,14 @@ unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
             } else {
                 ""
             };
-            drop(writeln!(
-                text,
-                "{ascii}[cached] \"{}\"",
+            text.push_str(&format!(
+                "{ascii}[cached] \"{}\"\n",
                 crate::format::encode_string(&String::from_utf8_lossy(object.bytes()), None)
             ));
         }
-        SexpType::Symbol => drop(writeln!(text, "\"{}\"", values::symbol_name(object))),
+        SexpType::Symbol => text.push_str(&format!("\"{}\"\n", values::symbol_name(object))),
         SexpType::String | SexpType::List | SexpType::Expression => {
-            drop(writeln!(text, "(len={count}, tl=0)"));
+            text.push_str(&format!("(len={count}, tl=0)\n"));
             for index in 0..count {
                 inspect_into(text, object.element(index), depth + 1);
             }
@@ -471,20 +465,6 @@ unsafe fn inspect_into(text: &mut String, object: Sexp, depth: usize) {
         text.push_str(&format!("{indent}ATTRIB:\n"));
         inspect_into(text, attributes, depth + 1);
     }
-}
-
-unsafe fn do_valid_utf8(call: &Call<'_>) -> R<Sexp> {
-    let strings = call.arg(0);
-    if strings.kind() != SexpType::String {
-        return Err(error("invalid 'x' argument"));
-    }
-    let count = length(strings);
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        values::ints_mut(result)[index] =
-            std::str::from_utf8(strings.element(index).bytes()).is_ok() as i32;
-    }
-    Ok(result)
 }
 
 unsafe fn map_strings_bool(call: &Call<'_>, function: impl Fn(&str) -> bool) -> R<Sexp> {
