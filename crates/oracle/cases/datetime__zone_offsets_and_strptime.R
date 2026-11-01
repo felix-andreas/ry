@@ -48,3 +48,11 @@ strptime(c("2020-10", "Oct-2020"), c("%Y-%m", "%b-%Y"), tz = "UTC")
 start <- as.POSIXct("2008-08-03", tz = "UTC")
 start + 2 * difftime(start + 86400, start)
 as.Date("2020-01-01") - as.difftime(3, units = "days")
+
+# A repeated fall-back time takes the offset in force at the wall clock read as UTC.
+format(as.POSIXct("2021-10-31 02:30:00", tz = "Europe/Berlin"), "%Z")
+format(as.POSIXct("2021-11-07 01:30:00", tz = "America/New_York"), "%Z")
+# %Z cannot be parsed, %OSn is output only, and %p adjusts only a 12-hour field.
+tryCatch(strptime("2020-01-01 UTC", "%Y-%m-%d %Z"), error = conditionMessage)
+strptime("12:00:00.123", "%H:%M:%OS3", tz = "UTC")$sec
+strptime("2020-01-01 5 pm", "%Y-%m-%d %H %p", tz = "UTC")

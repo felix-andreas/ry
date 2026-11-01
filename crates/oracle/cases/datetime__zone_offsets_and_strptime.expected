@@ -53,9 +53,16 @@
 | [1] NA NA
 | [1] "2008-08-05 UTC"
 | [1] "2019-12-29"
+| [1] "CET"
+| [1] "EDT"
+| [1] "use of %Z for input is not supported"
+| [1] NA
+| [1] "2020-01-01 05:00:00 UTC"
 [messages]
 [warnings]
 [errors]
 [value]
-double
-| structure(18259, class = "Date")
+list
+| structure(list(sec = 0, min = 0L, hour = 5L, mday = 1L, mon = 0L, 
+|     year = 120L, wday = 3L, yday = 0L, isdst = 0L, zone = "UTC", 
+|     gmtoff = 0L), class = c("POSIXlt", "POSIXt"), tzone = "UTC", balanced = TRUE)

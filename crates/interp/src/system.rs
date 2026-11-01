@@ -1492,7 +1492,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     for index in 0..length(formats) {
         let format = values::string_at(formats, index).unwrap_or_default();
         if format.replace("%%", "").contains("%Z") {
-            return Err(call.error("use of %Z for input is not supported"));
+            return Err(error("use of %Z for input is not supported"));
         }
     }
     let mut parsed = Vec::with_capacity(count);

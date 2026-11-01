@@ -2752,6 +2752,13 @@ first lines R had already read, leaving R mid-command.
   an `isdst` that contradicts the zone's rule shifts the reading by an hour, even in a zone with
   no daylight saving time, except for `"UTC"` and `"GMT"`, which GNU R converts itself; and a
   year outside jiff's range moves by whole 400-year cycles, which keeps the calendar and weekdays.
+- **A repeated (fall-back) wall time takes the offset in force at the wall time read as UTC**,
+  which is what glibc's `mktime` does with `isdst = -1`, so Berlin's 02:30 reads as CET while New
+  York's 01:30 reads as EDT. `strptime` keeps a spring-forward gap's wall-clock fields.
+- **The locale comes from the C library.** The session calls `setlocale` for the categories GNU R
+  sets at startup (numbers stay C), `Sys.setlocale`/`Sys.getlocale` go through it, and `sort()`
+  reads `LC_COLLATE` from it (`sort::refresh_collation`) instead of a fixed C.UTF-8 answer, which
+  is what withr's `local_locale` tests and C-collation sorts observe.
 - **`nlm`, `nlminb` and `polyroot` are written from the published algorithms**, not GNU R's code:
   Dennis and Schnabel's UNCMIN for `nlm`, a trust-region quasi-Newton method behind PORT's
   `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and

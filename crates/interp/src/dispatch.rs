@@ -351,7 +351,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
         match dispatch_object(function, env)? {
             // GNU R's `GetObject` falls back to the first supplied argument when the first
             // formal was not supplied, so `f(y = obj)` dispatches on `obj`.
-            object if object == nil() && first_formal_missing(function, env) => {
+            object if object == nil() && first_formal_missing(function, env)? => {
                 first_supplied(promargs)?
             }
             object => object,
@@ -446,13 +446,17 @@ unsafe fn dispatch_object(function: Sexp, env: Sexp) -> R<Sexp> {
     value_of(value)
 }
 
-unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> bool {
+unsafe fn first_formal_missing(function: Sexp, env: Sexp) -> R<bool> {
     let formals = function.car();
-    formals.kind() == SexpType::Pairlist
-        && formals.tag() != symbols().dots
-        && crate::heap()
-            .frame_cell(env, formals.tag())
-            .is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING))
+    if formals.kind() != SexpType::Pairlist || formals.tag() == symbols().dots {
+        return Ok(false);
+    }
+    let first = formals.tag();
+    if crate::heap().frame_cell(env, first).is_some_and(|cell| cell.has_gp(gp::BINDING_MISSING)) {
+        return Ok(true);
+    }
+    let value = eval::find_var_in_frame(first, env)?;
+    Ok(value == missing_arg() || value == unbound())
 }
 
 /// The value of the first supplied argument among a call's matched arguments.

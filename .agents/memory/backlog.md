@@ -1915,19 +1915,18 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
     same way.
   - Gaps a review of the date-time and regex work found, none yet hit by a corpus test:
-    - An ambiguous fall-back time in a zone east of UTC takes the daylight reading, where glibc's
-      `mktime` takes the offset in force at the wall time read as UTC (Berlin gives CET).
     - `as.POSIXct(lt)` ignores an explicit `isdst` when the zone has a single offset.
     - POSIX rule strings in `TZ` (`"EST5"`, `"JST-9"`, `"<+03>-3"`) and daylight rules after 2100.
-    - `strptime` input: `%Z` should error, `%OS3` and `%p` without `%I`, `%%` skipping blanks,
-      no warning for an out-of-range `%z`, and `format`/`strptime` do not recycle the format.
+    - `strptime` input: `%%` skipping blanks, no warning for an out-of-range `%z`, and
+      `format`/`strptime` do not recycle the format.
     - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
       reports an error; quantified lookarounds and lookarounds in non-capturing groups.
-    - `UseMethod` dispatches on NULL when the first formal is unsupplied; GNU R's `GetObject`
-      falls back to the first supplied argument (`f(y = obj)` dispatches on `obj`).
     - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
-  - Smaller classes: ALTREP in checkmate, fastmap's "Malformed keys" error, utf8's `utf8_encode`
-    on invalid UTF-8, pkgbuild's `is_gz_file`, shiny's `end_reporter`, `gsub` with a
+  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
+    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
+  - withr: `RNGkind` lacks "Marsaglia-Multicarry", "Buggy Kinderman-Ramage" and "Rounding", and
+    the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
+  - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
     Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
     asymptotic test, gmp's `factorialZ`, the C symbols of commonmark and git2r, the `parallel`
     package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
