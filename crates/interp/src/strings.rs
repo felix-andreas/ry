@@ -121,53 +121,65 @@ unsafe fn paste(call: &Call<'_>, separator: Option<Sexp>, collapse: Sexp, recycl
     if recycle_zero && lengths.contains(&0) {
         count = 0;
     }
-    let mut encoding = Encoding::Native;
-    let mut append = |bytes: &mut Vec<u8>, charsxp: Sexp| {
-        if charsxp == na_string() {
-            bytes.extend_from_slice(b"NA");
-        } else if charsxp.has_gp(gp::BYTES) {
-            encoding = Encoding::Bytes;
-            bytes.extend_from_slice(charsxp.bytes());
-        } else if charsxp.has_gp(gp::LATIN1) {
-            if encoding != Encoding::Bytes {
+    // As in GNU R, each result decides its encoding from all of its pieces before joining any,
+    // so a bytes piece keeps every other piece untranslated.
+    let encoding_of = |charsxps: &[Sexp]| {
+        let mut encoding = Encoding::Native;
+        for &charsxp in charsxps {
+            if charsxp == na_string() {
+                continue;
+            }
+            if charsxp.has_gp(gp::BYTES) {
+                return Encoding::Bytes;
+            }
+            if charsxp.has_gp(gp::LATIN1) || charsxp.has_gp(gp::UTF8) {
                 encoding = Encoding::Utf8;
             }
-            bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
-        } else {
-            if charsxp.has_gp(gp::UTF8) && encoding == Encoding::Native {
-                encoding = Encoding::Utf8;
-            }
-            bytes.extend_from_slice(charsxp.bytes());
         }
+        encoding
     };
-    let mut pieces = Vec::with_capacity(count);
-    for row in 0..count {
+    let join = |charsxps: &[Sexp], encoding: Encoding| {
         let mut bytes = Vec::new();
+        for &charsxp in charsxps {
+            if charsxp == na_string() {
+                bytes.extend_from_slice(b"NA");
+            } else if charsxp.has_gp(gp::LATIN1) && encoding != Encoding::Bytes {
+                bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
+            } else {
+                bytes.extend_from_slice(charsxp.bytes());
+            }
+        }
+        bytes
+    };
+    let result = alloc(SexpType::String, count)?;
+    let mut parts = Vec::new();
+    for row in 0..count {
+        parts.clear();
         for (position, (&column, &column_length)) in columns.iter().zip(&lengths).enumerate() {
             if position > 0 && let Some(separator) = separator {
-                append(&mut bytes, separator);
+                parts.push(separator);
             }
             if column_length > 0 {
-                append(&mut bytes, column.element(row % column_length));
+                parts.push(column.element(row % column_length));
             }
         }
-        pieces.push(bytes);
+        let encoding = encoding_of(&parts);
+        set_elt(result, row, values::mkchar_bytes(&join(&parts, encoding), encoding)?);
     }
-    if let Some(collapse) = collapse {
-        let mut joined = Vec::new();
-        for (index, piece) in pieces.iter().enumerate() {
-            if index > 0 {
-                append(&mut joined, collapse);
-            }
-            joined.extend_from_slice(piece);
+    let Some(collapse) = collapse else {
+        return Ok(result);
+    };
+    parts.clear();
+    for row in 0..count {
+        if row > 0 {
+            parts.push(collapse);
         }
-        pieces = vec![joined];
+        parts.push(result.element(row));
     }
-    let result = alloc(SexpType::String, pieces.len())?;
-    for (index, piece) in pieces.iter().enumerate() {
-        set_elt(result, index, values::mkchar_bytes(piece, encoding)?);
-    }
-    Ok(result)
+    let encoding = encoding_of(&parts);
+    let collapsed = alloc(SexpType::String, 1)?;
+    set_elt(collapsed, 0, values::mkchar_bytes(&join(&parts, encoding), encoding)?);
+    Ok(collapsed)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1195,8 +1195,18 @@ unsafe fn do_subassign(call: &Call<'_>) -> R<Sexp> {
 pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp) -> R<Sexp> {
     let object = values::materialize(object)?;
     let value = values::materialize(value)?;
-    // A pairlist value assigns its elements, as a list would.
+    // A pairlist value assigns its elements into a list, as a list would, but has no atomic
+    // counterpart to coerce to.
     let value = if value.kind() == SexpType::Pairlist {
+        if !matches!(
+            object.kind(),
+            SexpType::List | SexpType::Expression | SexpType::Pairlist | SexpType::Language | SexpType::Nil
+        ) {
+            return Err(error(format!(
+                "incompatible types (from pairlist to {}) in subassignment type fix",
+                crate::coerce::type_name(object)
+            )));
+        }
         values::pairlist_to_list(value)?
     } else {
         value
