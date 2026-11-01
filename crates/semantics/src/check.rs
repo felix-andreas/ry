@@ -9646,6 +9646,27 @@ impl<'db> Checker<'db, '_> {
         // A member that lacks the field reads it as `Unknown` (see the record arm); a field
         // no member carries is a typo, and `$` on an atomic member is always an error.
         if let TyKind::Union(members) = subject.kind(self.db) {
+            let lacks_field = |member: Ty<'db>| match member.kind(self.db) {
+                TyKind::Record(fields) => !fields
+                    .iter()
+                    .any(|field| field.name.text(self.db).starts_with(name)),
+                _ => is_empty_list(self.db, member),
+            };
+            if members.iter().all(|&member| lacks_field(member))
+                && let Some(suggestion) = nearest_name(
+                    name,
+                    union_field_names(self.db, subject).iter().map(String::as_str),
+                )
+            {
+                return Err(TypeError {
+                    range: name_range,
+                    kind: TypeErrorKind::FieldDoesNotExist {
+                        suggestion: Some(suggestion),
+                        field: name.to_owned(),
+                        container: subject,
+                    },
+                });
+            }
             let mut results = Vec::with_capacity(members.len());
             let mut absent: Option<TypeError<'db>> = None;
             let mut unfilled = false;

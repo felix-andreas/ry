@@ -364,3 +364,12 @@ last <- function() i
 #++++
 NULL
 last: fn() -> Unknown
+
+#---- a_union_of_lists_reports_a_misspelled_field
+pick <- function(flag) {
+  w <- if (flag) list(alpha = 1L) else list(beta = "x")
+  w$alpah
+}
+#++++
+pick: Unknown
+85..90 error[type-mismatch] field `alpah` does not exist in `list{alpha: integer} | list{beta: character}`. Did you mean `alpha`?
