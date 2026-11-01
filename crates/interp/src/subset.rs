@@ -2915,6 +2915,32 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             }
         }
     }
+    // An S4 argument hands the call to the methods package's hidden `cbind` or `rbind`, which
+    // dispatch on `cbind2` and `rbind2`.
+    if items.iter().any(|arg| coerce::is_s4(arg.value)) {
+        let registry = crate::heap().known().namespace_registry;
+        let methods = value_of(eval::find_var_in_frame(
+            values::install("methods")?,
+            registry,
+        )?)?;
+        if methods.kind() == SexpType::Environment {
+            let function = value_of(eval::find_var_in_frame(values::install(generic)?, methods)?)?;
+            if function.kind() == SexpType::Closure {
+                let mut arguments = Vec::with_capacity(items.len() + 1);
+                arguments.push(Arg {
+                    tag: values::install("deparse.level")?,
+                    value: level_value,
+                });
+                for (item, &expression) in items.iter().zip(&expressions) {
+                    arguments.push(Arg {
+                        tag: item.tag,
+                        value: eval::forced_promise(expression, item.value)?,
+                    });
+                }
+                return eval::apply(call.call, function, &arguments, call.env);
+            }
+        }
+    }
     let (items, expressions): (Vec<Arg>, Vec<Sexp>) = items
         .into_iter()
         .zip(expressions)

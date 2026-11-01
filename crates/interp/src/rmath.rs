@@ -4709,10 +4709,12 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
                 0.5
             };
         }
-        if p == 0.0 || p / q == f64::INFINITY {
+        // A vanishing first shape (relative to the second) puts all the mass at 0, and a
+        // vanishing second shape puts it at 1.
+        if p == 0.0 || q / p == f64::INFINITY {
             return 0.0;
         }
-        if q == 0.0 || q / p == f64::INFINITY {
+        if q == 0.0 || p / q == f64::INFINITY {
             return 1.0;
         }
         return 0.5;
@@ -4801,22 +4803,35 @@ pub fn qbeta(alpha: f64, p: f64, q: f64, lower: bool, log: bool) -> f64 {
     let quantile = if near_zero { t } else { 0.5 - t + 0.5 };
     // Newton's method converges in t, and turning a t near 1/2 into 1 - t rounds, so the
     // quantile can land a few doubles from the one whose probability is nearest the target.
-    // A short walk over neighbouring doubles settles it.
+    // A short walk over neighbouring doubles settles it. pbeta rounds to the same value over
+    // runs of adjacent doubles, so the walk looks a few doubles past a flat stretch.
+    const LOOKAHEAD: usize = 8;
     let miss = |x: f64| (pbeta(x, p, q, lower, log) - alpha).abs();
     let mut best = quantile;
     let mut best_miss = miss(best);
-    for step in [f64::next_up, f64::next_down] {
-        loop {
-            let candidate = step(best);
-            if !(candidate > 0.0 && candidate < 1.0) {
-                break;
+    // A quantile of exactly 0 or 1 is a tail probability below the double range, which no
+    // interior double improves on.
+    let directions: &[fn(f64) -> f64] = if quantile > 0.0 && quantile < 1.0 {
+        &[f64::next_up, f64::next_down]
+    } else {
+        &[]
+    };
+    for step in directions {
+        'walk: loop {
+            let mut candidate = best;
+            for _ in 0..LOOKAHEAD {
+                candidate = step(candidate);
+                if !(candidate > 0.0 && candidate < 1.0) {
+                    break 'walk;
+                }
+                let candidate_miss = miss(candidate);
+                if candidate_miss < best_miss {
+                    best = candidate;
+                    best_miss = candidate_miss;
+                    continue 'walk;
+                }
             }
-            let candidate_miss = miss(candidate);
-            if candidate_miss >= best_miss {
-                break;
-            }
-            best = candidate;
-            best_miss = candidate_miss;
+            break;
         }
     }
     best
@@ -4949,14 +4964,17 @@ fn discrete_quantile(
     maximum: f64,
     distribution: &dyn Fn(f64, bool, bool) -> f64,
 ) -> f64 {
-    let slack = 64.0 * DBL_EPSILON * p.abs();
+    // GNU R's search accepts a value within 8 epsilon of the target probability (2 on the log
+    // scale); a wider slack returns the quantile below when adjacent CDF values near 1 differ by
+    // a few ulps.
+    let slack = if log { 2.0 } else { 8.0 } * DBL_EPSILON * p.abs();
     let reached = |y: f64| {
         let value = distribution(y, lower, log);
         value.is_nan()
             || if lower {
                 value >= p - slack
             } else {
-                value <= p + slack
+                value < p + slack
             }
     };
     let normal = qnorm(p, 0.0, 1.0, lower, log);
@@ -5702,7 +5720,9 @@ pub fn qt(p: f64, ndf: f64, lower: bool, log: bool) -> f64 {
                 if !finite(x) || x.abs() <= 1e-14 * q.abs() {
                     break;
                 }
-                q += x * (1.0 + x * q * (ndf + 1.0) / (2.0 * (q * q + ndf)));
+                // q (q^2 + ndf)^-1 written as (q + ndf / q)^-1, because q^2 overflows when the
+                // tail probability is far below DBL_MIN's square root.
+                q += x * (1.0 + x * (ndf + 1.0) / (2.0 * (q + ndf / q)));
             }
         }
     }
@@ -5942,6 +5962,23 @@ pub fn pnchisq(x: f64, df: f64, ncp: f64, lower: bool, log: bool) -> f64 {
         dpois_raw(shape, half, true),
         |index| log_half - (df / 2.0 + index + 1.0).ln(),
     );
+    // A lower tail below the double range underflows in the linear sum; on the log scale it
+    // is summed term by term, each component's log probability coming straight from pgamma.
+    if lower && log && lower_sum < 1e-280 {
+        let mut total = f64::NEG_INFINITY;
+        let mut index = 0.0;
+        while index < 1e6 {
+            let term =
+                dpois_raw(index, rate, true) + pgamma(half, df / 2.0 + index, 1.0, true, true);
+            total = logspace_add(total, term);
+            // Past the Poisson mode the terms only shrink, so one far below the total ends it.
+            if index > rate && term < total - 40.0 {
+                break;
+            }
+            index += 1.0;
+        }
+        return total;
+    }
     mixture_tail(lower_sum, upper_sum, lower, log)
 }
 
@@ -6205,9 +6242,13 @@ fn pnbeta_both(x: f64, complement: f64, a: f64, b: f64, ncp: f64, lower: bool, l
     if error != 0 {
         precision_warning("pnbeta");
     }
-    let log_x = x.ln();
-    // x^s (1 - x)^b / (s B(s, b)) is the beta density times x (1 - x) / s.
-    let start_log_step = dbeta(x, shape, b, true) + log_x + complement.ln() - shape.ln();
+    // Near one, x itself rounds to 1 and only the complement keeps the distance from it.
+    let log_x = if x > 0.5 {
+        (-complement).ln_1p()
+    } else {
+        x.ln()
+    };
+    let start_log_step = shape * log_x + b * complement.ln() - lbeta(shape, b) - shape.ln();
     let (lower_sum, upper_sum) = poisson_mixture_tails(
         rate,
         mode,
