@@ -32,7 +32,7 @@ Result.with_default : <T, E> fn(result: Result<T, E>, default: T) -> T
 Result.map : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> B) -> Result<B, E>
 Result.map_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> B) -> Result<T, B>
 Result.map_both : <A, B, C, D> fn(result: Result<A, B>, on_ok: fn(A) -> C, on_err: fn(B) -> D) -> Result<C, D>
-Result.and_then : <A, B, E> fn(result: Result<A, E>, f: fn(A) -> Result<B, E>) -> Result<B, E>
+Result.and_then : <A, B, E, F> fn(result: Result<A, E>, f: fn(A) -> Result<B, F>) -> Result<B, E | F>
 Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> Result<T, B>
 
 # List

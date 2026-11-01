@@ -27,6 +27,7 @@ use crate::types::{
 use crate::{DataPath, Db, data_file_layout};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::mem;
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use syntax::native_values::accepts_native;
 use syntax::{TextRange, TextSize};
@@ -5831,6 +5832,8 @@ impl<'db> Checker<'db, '_> {
         callee: ExprId,
         arguments: &[Argument],
     ) -> Ty<'db> {
+        // The variables typing a named callee creates are its scheme's instantiated parameters.
+        let first_var = self.table.next_var().0;
         let looked_up = match self.function_lookup(callee) {
             FunctionLookup::Ordinary => None,
             FunctionLookup::Found(ty) => Some(ty),
@@ -5869,6 +5872,11 @@ impl<'db> Checker<'db, '_> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        let named_callee = matches!(
+            self.module.expression(callee).kind,
+            ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
+        );
+        let parameters = named_callee.then(|| first_var..self.table.next_var().0);
         if self.is_null_placeholder(self.table.resolve(self.db, callee_ty)) {
             self.infer_call_arguments(range, arguments);
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -5889,7 +5897,37 @@ impl<'db> Checker<'db, '_> {
         }
         let mut call_arguments = self.infer_call_arguments(range, arguments);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
-        self.dispatch_call(range, callee_range, callee_ty, &call_arguments)
+        let result = self.dispatch_call(range, callee_range, callee_ty, &call_arguments);
+        match parameters {
+            Some(parameters) if !parameters.is_empty() => {
+                self.drop_unconstrained_members(result, &parameters)
+            }
+            _ => result,
+        }
+    }
+
+    /// A type parameter of the called function that no argument constrained stands for no
+    /// value, so as a member of a union in the result it adds nothing: `Result.and_then`'s
+    /// `Result<B, E | F>` is `:Err(E)` when the step never fails. A union of nothing but such
+    /// parameters stays as it is.
+    fn drop_unconstrained_members(&mut self, result: Ty<'db>, parameters: &Range<u32>) -> Ty<'db> {
+        let db = self.db;
+        let table = &self.table;
+        let unconstrained = |member: Ty<'db>| match member.kind(db) {
+            TyKind::Var(var) => parameters.contains(&table.find(*var).0),
+            _ => false,
+        };
+        fn walk<'db>(db: &'db dyn Db, ty: Ty<'db>, unconstrained: &dyn Fn(Ty<'db>) -> bool) -> Ty<'db> {
+            let ty = map_child_types(db, ty, &mut |child| walk(db, child, unconstrained));
+            match ty.kind(db) {
+                TyKind::Union(members) if members.iter().any(|&member| !unconstrained(member)) => {
+                    union_of(db, members.iter().copied().filter(|&member| !unconstrained(member)))
+                }
+                _ => ty,
+            }
+        }
+        let resolved = self.table.resolve(db, result);
+        walk(db, resolved, &unconstrained)
     }
 
     /// R looks a called name up as a function: a binding that holds no function is skipped,

@@ -9,7 +9,13 @@
 //!
 //! A dictionary or set is a record object with a fixed layout (see `heap::records`): its keys as
 //! one atomic vector, a dictionary's values as a list, and an open-addressing hash index as an
-//! integer vector. The values are immutable, so every update builds a new object.
+//! integer vector.
+//!
+//! The values are immutable to the program, but an update reuses its first argument when nothing
+//! else can observe it: a temporary, or the value of `x` in `x <- Dict.insert(x, k, v)` when that
+//! binding holds the only reference (`Call::reusable`, set by `eval::rebind`). A builtin flagged
+//! with `reusing_first_argument` checks [`owned`] and then grows the value in place, so a loop
+//! that keeps inserting or appending costs amortized constant time per step, as in Roc.
 
 use crate::{
     builtins::{Arg, BuiltinDef, Call, builtin},
@@ -48,11 +54,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("List.len", list_len),
     library("List.is_empty", list_is_empty),
     library("List.get", list_get),
-    library("List.set", list_set),
+    library("List.set", list_set).reusing_first_argument(),
     library("List.update", list_update),
-    library("List.append", list_append),
+    library("List.append", list_append).reusing_first_argument(),
     library("List.prepend", list_prepend),
-    library("List.concat", list_concat),
+    library("List.concat", list_concat).reusing_first_argument(),
     library("List.single", list_single),
     library("List.repeat", list_repeat),
     library("List.reverse", list_reverse),
@@ -146,7 +152,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.is_empty", dict_is_empty),
     library("Dict.get", dict_get),
     library("Dict.contains", dict_contains),
-    library("Dict.insert", dict_insert),
+    library("Dict.insert", dict_insert).reusing_first_argument(),
     library("Dict.remove", dict_remove),
     library("Dict.update", dict_update),
     library("Dict.keys", dict_keys),
@@ -155,7 +161,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Dict.map", dict_map),
     library("Dict.keep_if", dict_keep_if),
     library("Dict.drop_if", dict_drop_if),
-    library("Dict.insert_all", dict_insert_all),
+    library("Dict.insert_all", dict_insert_all).reusing_first_argument(),
     library("Dict.keep_shared", dict_keep_shared),
     library("Dict.remove_all", dict_remove_all),
     library("Set.empty", set_empty),
@@ -165,9 +171,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Set.len", set_len),
     library("Set.is_empty", set_is_empty),
     library("Set.contains", set_contains),
-    library("Set.insert", set_insert),
+    library("Set.insert", set_insert).reusing_first_argument(),
     library("Set.remove", set_remove),
-    library("Set.union", set_union),
+    library("Set.union", set_union).reusing_first_argument(),
     library("Set.intersection", set_intersection),
     library("Set.difference", set_difference),
     library("Set.walk", set_walk),
@@ -611,6 +617,13 @@ unsafe fn list_get(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_set(call: &Call<'_>) -> R<Sexp> {
     let [list, index, value] = arguments(call, ["list", "index", "value"])?;
+    if owned_list(call, list) {
+        let index = whole(call, "index", index)?;
+        if let Some(at) = position(index, length(list)) {
+            crate::heap().set_element(list, at, value);
+        }
+        return Ok(list);
+    }
     let mut items = list_elements(call, "list", list)?;
     let index = whole(call, "index", index)?;
     if let Some(at) = position(index, items.len()) {
@@ -632,6 +645,9 @@ unsafe fn list_update(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_append(call: &Call<'_>) -> R<Sexp> {
     let [list, value] = arguments(call, ["list", "value"])?;
+    if owned_list(call, list) {
+        return extend_in_place(list, &[value]);
+    }
     let mut items = list_elements(call, "list", list)?;
     items.push(value);
     list_vector(&items)
@@ -646,6 +662,10 @@ unsafe fn list_prepend(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn list_concat(call: &Call<'_>) -> R<Sexp> {
     let [first, second] = arguments(call, ["first", "second"])?;
+    if owned_list(call, first) {
+        let added = list_elements(call, "second", second)?;
+        return extend_in_place(first, &added);
+    }
     let mut items = list_elements(call, "first", first)?;
     items.extend(list_elements(call, "second", second)?);
     list_vector(&items)
@@ -1646,6 +1666,162 @@ unsafe fn num_log_checked(call: &Call<'_>) -> R<Sexp> {
     ok(scalar_real(value.ln())?)
 }
 
+// In-place updates.
+
+/// Whether the call may update `value` in place: nothing else references it, because it is a
+/// temporary or because its only holder is the binding the result is assigned back to. This is
+/// reference counting's version of Roc's uniqueness check.
+unsafe fn owned(call: &Call<'_>, value: Sexp) -> bool {
+    !value.is_altrep()
+        && (value.refcount() == 0 || (call.reusable == Some(value) && value.refcount() == 1))
+}
+
+/// Whether `list` is a list the call owns. A list with attributes is copied instead, because the
+/// copy drops its names (see [`list_elements`]).
+unsafe fn owned_list(call: &Call<'_>, list: Sexp) -> bool {
+    list.kind() == SexpType::List && list.attrib() == nil() && owned(call, list)
+}
+
+/// Appends `items` to an owned list, within its capacity when it has room and otherwise in a
+/// resizable copy with twice the room, so repeated appends cost amortized constant time.
+unsafe fn extend_in_place(list: Sexp, items: &[Sexp]) -> R<Sexp> {
+    let heap = crate::heap();
+    let count = length(list);
+    let needed = count + items.len();
+    let list = if heap.is_resizable(list) && needed <= list.capacity() as usize {
+        list
+    } else {
+        with_capacity(list, needed.max(count * 2).max(4))?
+    };
+    heap.resize_vector(list, needed as isize)?;
+    for (offset, &item) in items.iter().enumerate() {
+        heap.set_element(list, count + offset, item);
+    }
+    Ok(list)
+}
+
+/// A fresh resizable vector of `kind` with room for `capacity` elements and length `count`.
+unsafe fn resizable(kind: SexpType, count: usize, capacity: usize) -> R<Sexp> {
+    let heap = crate::heap();
+    let vector = heap.alloc_resizable_vector(kind, capacity.max(count) as isize)?;
+    heap.root(vector);
+    heap.resize_vector(vector, count as isize)?;
+    Ok(vector)
+}
+
+/// A resizable copy of the atomic vector or list `vector` with room for `capacity` elements.
+unsafe fn with_capacity(vector: Sexp, capacity: usize) -> R<Sexp> {
+    let count = length(vector);
+    let grown = resizable(vector.kind(), count, capacity)?;
+    match vector.kind() {
+        SexpType::Real => grown.slice_mut::<f64>().copy_from_slice(values::reals(vector)),
+        SexpType::Integer | SexpType::Logical => {
+            grown.slice_mut::<i32>().copy_from_slice(values::ints(vector))
+        }
+        _ => {
+            for index in 0..count {
+                crate::heap().set_element(grown, index, vector.element(index));
+            }
+        }
+    }
+    Ok(grown)
+}
+
+/// Whether the call owns the dictionary or set `object` and every vector inside it, which only
+/// the collection holds, so [`insert_in_place`] may grow them. An empty collection has no key
+/// vector yet and is rebuilt instead.
+unsafe fn owned_collection(call: &Call<'_>, object: Sexp) -> bool {
+    if !owned(call, object) {
+        return false;
+    }
+    let heap = crate::heap();
+    let kind = records::native_kind(object);
+    let index = index_slot(kind);
+    (0..object.record_slot_count()).all(|slot| match object.record_slot(slot) {
+        Slot::Handle(part) => {
+            part != nil() && part.refcount() <= 1 && (slot == index || heap.is_resizable(part))
+        }
+        _ => false,
+    })
+}
+
+/// Whether the key vector of a collection holds keys of `kind` without changing its type: an
+/// integer joins double keys as a double, but a double turns integer keys into doubles, which
+/// [`Collection::insert`] does by rebuilding.
+unsafe fn keys_hold(object: Sexp, kind: KeyKind) -> bool {
+    let keys = object.record_handle(0);
+    match (keys.and_then(|keys| key_kind_of(keys)), kind) {
+        (Some(KeyKind::Double), KeyKind::Integer) => true,
+        (Some(stored), kind) => stored == kind,
+        (None, _) => false,
+    }
+}
+
+/// Inserts `key` (with `value` for a dictionary) into a collection the call owns, which
+/// [`owned_collection`] and [`keys_hold`] confirmed. The key and value vectors double their
+/// capacity when full, and the index is rebuilt at half load, as [`Collection`] does.
+unsafe fn insert_in_place(object: Sexp, key: Key, value: Sexp) -> R<()> {
+    let heap = crate::heap();
+    let kind = records::native_kind(object);
+    let is_dict = kind == NativeKind::Dict;
+    let index_at = index_slot(kind);
+    let (Some(mut keys), Some(index)) = (object.record_handle(0), object.record_handle(index_at))
+    else {
+        return Err(error("a dictionary or set lost its key vector"));
+    };
+    let slot = match probe(values::ints(index), key, |position| key_at(keys, position)) {
+        Ok(position) => {
+            if is_dict && let Some(stored) = object.record_handle(1) {
+                heap.set_element(stored, position, value);
+            }
+            return Ok(());
+        }
+        Err(slot) => slot,
+    };
+    let count = length(keys);
+    if count == keys.capacity() as usize {
+        let capacity = (count * 2).max(8);
+        keys = with_capacity(keys, capacity)?;
+        heap.set_record_slot(object, 0, keys);
+        if let Some(stored) = object.record_handle(1).filter(|_| is_dict) {
+            let grown = with_capacity(stored, capacity)?;
+            heap.set_record_slot(object, 1, grown);
+        }
+    }
+    heap.resize_vector(keys, count as isize + 1)?;
+    match (keys.kind(), key) {
+        (SexpType::Logical, Key::Logical(flag)) => keys.slice_mut::<i32>()[count] = i32::from(flag),
+        (SexpType::Integer, Key::Number(number)) => keys.slice_mut::<i32>()[count] = number as i32,
+        (SexpType::Real, Key::Number(number)) => keys.slice_mut::<f64>()[count] = number,
+        (SexpType::String, Key::Text(text)) => heap.set_element(keys, count, text),
+        _ => return Err(error("a key does not fit its collection's key vector")),
+    }
+    if let Some(stored) = object.record_handle(1).filter(|_| is_dict) {
+        heap.resize_vector(stored, count as isize + 1)?;
+        heap.set_element(stored, count, value);
+    }
+    let entries = count + 1;
+    if entries * 2 > length(index) {
+        let rebuilt = build_index(entries, |position| key_at(keys, position));
+        heap.set_record_slot(object, index_at, values::integer_vector(&rebuilt)?);
+    } else {
+        index.slice_mut::<i32>()[slot] = entries as i32;
+    }
+    Ok(())
+}
+
+/// The open-addressing index over `count` keys: a power of two at least twice the count, so it
+/// is never more than half full, whose entries are a key's position plus one.
+unsafe fn build_index(count: usize, key_at_position: impl Fn(usize) -> Key) -> Vec<i32> {
+    let mut index = vec![0; (count * 2).next_power_of_two().max(8)];
+    for position in 0..count {
+        if let Err(slot) = probe(&index, key_at_position(position), &key_at_position) {
+            index[slot] = position as i32 + 1;
+        }
+    }
+    index
+}
+
 // Dict and Set storage.
 
 /// A key or set element: a logical, a number (an integer and the equal double are one key, as
@@ -1872,13 +2048,7 @@ impl Collection {
     }
 
     unsafe fn rebuild_index(&mut self) {
-        let capacity = (self.keys.len() * 2).next_power_of_two().max(8);
-        self.index = vec![0; capacity];
-        for (position, &key) in self.keys.iter().enumerate() {
-            if let Err(slot) = probe(&self.index, key, |found| self.keys[found]) {
-                self.index[slot] = position as i32 + 1;
-            }
-        }
+        self.index = build_index(self.keys.len(), |position| self.keys[position]);
     }
 
     unsafe fn write(&self) -> R<Sexp> {
@@ -1886,14 +2056,14 @@ impl Collection {
         let keys = match self.key_kind {
             None => nil(),
             Some(KeyKind::Logical) => {
-                let vector = values::alloc(SexpType::Logical, count)?;
+                let vector = resizable(SexpType::Logical, count, count)?;
                 for (slot, key) in vector.slice_mut::<i32>().iter_mut().zip(&self.keys) {
                     *slot = i32::from(matches!(key, Key::Logical(true)));
                 }
                 vector
             }
             Some(KeyKind::Integer) => {
-                let vector = values::alloc(SexpType::Integer, count)?;
+                let vector = resizable(SexpType::Integer, count, count)?;
                 for (slot, key) in vector.slice_mut::<i32>().iter_mut().zip(&self.keys) {
                     if let Key::Number(number) = key {
                         *slot = *number as i32;
@@ -1902,7 +2072,7 @@ impl Collection {
                 vector
             }
             Some(KeyKind::Double) => {
-                let vector = values::alloc(SexpType::Real, count)?;
+                let vector = resizable(SexpType::Real, count, count)?;
                 for (slot, key) in vector.slice_mut::<f64>().iter_mut().zip(&self.keys) {
                     if let Key::Number(number) = key {
                         *slot = *number;
@@ -1911,7 +2081,7 @@ impl Collection {
                 vector
             }
             Some(KeyKind::Text) => {
-                let vector = values::alloc(SexpType::String, count)?;
+                let vector = resizable(SexpType::String, count, count)?;
                 for (position, key) in self.keys.iter().enumerate() {
                     if let Key::Text(text) = key {
                         crate::heap().set_element(vector, position, *text);
@@ -1922,7 +2092,11 @@ impl Collection {
         };
         let index = values::integer_vector(&self.index)?;
         let (fields, slots) = if self.kind == NativeKind::Dict {
-            (Fields::Dict, vec![keys, list_vector(&self.values)?, index])
+            let stored = resizable(SexpType::List, count, count)?;
+            for (position, &value) in self.values.iter().enumerate() {
+                crate::heap().set_element(stored, position, value);
+            }
+            (Fields::Dict, vec![keys, stored, index])
         } else {
             (Fields::Set, vec![keys, index])
         };
@@ -2163,8 +2337,13 @@ unsafe fn dict_contains(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn dict_insert(call: &Call<'_>) -> R<Sexp> {
     let [object, key, value] = arguments(call, ["dict", "key", "value"])?;
-    let mut collection = Collection::read(dict(call, object)?)?;
+    let object = dict(call, object)?;
     let (key, kind) = key_of(call, "key", key)?;
+    if owned_collection(call, object) && keys_hold(object, kind) {
+        insert_in_place(object, key, value)?;
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
     collection.insert(call, key, kind, value)?;
     collection.write()
 }
@@ -2277,9 +2456,23 @@ unsafe fn two_collections(call: &Call<'_>, kind: NativeKind) -> R<(Collection, C
     Ok((first, second))
 }
 
-/// Inserts every entry of `second` into `first`, whose values `second`'s replace.
+/// Inserts every entry of `second` into `first`, whose values `second`'s replace. An owned
+/// `first` whose keys hold `second`'s grows in place.
 unsafe fn merge(call: &Call<'_>, kind: NativeKind) -> R<Sexp> {
-    let (mut first, second) = two_collections(call, kind)?;
+    let [first_object, second_object] = arguments(call, ["first", "second"])?;
+    let first_object = collection(call, "first", first_object, kind)?;
+    let second_object = collection(call, "second", second_object, kind)?;
+    let second = Collection::read(second_object)?;
+    if owned_collection(call, first_object)
+        && second.key_kind.is_none_or(|second_kind| keys_hold(first_object, second_kind))
+    {
+        for (position, &key) in second.keys.iter().enumerate() {
+            let value = second.values.get(position).copied().unwrap_or_else(nil);
+            insert_in_place(first_object, key, value)?;
+        }
+        return Ok(first_object);
+    }
+    let mut first = Collection::read(first_object)?;
     let second_kind = second.key_kind.unwrap_or(KeyKind::Logical);
     for (position, &key) in second.keys.iter().enumerate() {
         let value = second.values.get(position).copied().unwrap_or_else(nil);
@@ -2375,8 +2568,13 @@ unsafe fn set_contains(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn set_insert(call: &Call<'_>) -> R<Sexp> {
     let [object, element] = arguments(call, ["set", "element"])?;
-    let mut collection = Collection::read(set(call, object)?)?;
+    let object = set(call, object)?;
     let (key, kind) = key_of(call, "element", element)?;
+    if owned_collection(call, object) && keys_hold(object, kind) {
+        insert_in_place(object, key, nil())?;
+        return Ok(object);
+    }
+    let mut collection = Collection::read(object)?;
     collection.insert(call, key, kind, nil())?;
     collection.write()
 }

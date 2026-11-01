@@ -2063,6 +2063,7 @@ unsafe fn cumulative(call: &Call<'_>, kind: Cumulative) -> R<Sexp> {
                 op: call.op,
                 args: &args,
                 env: call.env,
+            reusable: None,
             };
             return cumulative(&inner, kind);
         }
@@ -2377,6 +2378,7 @@ unsafe fn do_range(call: &Call<'_>) -> R<Sexp> {
         op: call.op,
         args: &args,
         env: call.env,
+        reusable: None,
     };
     let minimum = summary(&inner, Summary::Min)?;
     let maximum = summary(&inner, Summary::Max)?;
@@ -2778,6 +2780,7 @@ unsafe fn do_seq_int(call: &Call<'_>) -> R<Sexp> {
             op: call.op,
             args: &[Arg { tag: nil(), value }],
             env: call.env,
+            reusable: None,
         });
     }
     let from_value = one(from, "from")?;

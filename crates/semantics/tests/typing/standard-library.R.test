@@ -16,6 +16,25 @@ n <- Result.and_then(parse("4"), function(x) if (x > 0L) :Ok(x) else :Err(:Inval
 parse: fn(text: character) -> Result<integer, :InvalidNumStr>
 n: :Ok(integer) | :Err(:InvalidNumStr)
 
+#---- and_then_widens_the_error
+n <- Result.and_then(Str.to_integer("4"), function(x) if (x > 0L) :Ok(x) else :Err(:NotPositive))
+#++++
+n: :Ok(integer) | :Err(:InvalidNumStr | :NotPositive)
+
+#---- and_then_with_a_step_that_never_fails
+n <- Result.and_then(Str.to_integer("4"), function(x) :Ok(x + 1L))
+#++++
+n: :Ok(integer) | :Err(:InvalidNumStr)
+
+#---- and_then_meets_a_widened_annotation
+#: @param text {character}
+#: @return {Result<integer, :InvalidNumStr | :NotPositive>}
+positive <- function(text) {
+  Result.and_then(Str.to_integer(text), function(n) if (n > 0L) :Ok(n) else :Err(:NotPositive))
+}
+#++++
+positive: fn(text: character) -> Result<integer, :InvalidNumStr | :NotPositive>
+
 #---- map_err_replaces_the_error
 r <- Result.map_err(Str.to_double("x"), function(e) "not a number")
 #++++

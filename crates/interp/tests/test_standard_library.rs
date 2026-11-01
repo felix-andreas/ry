@@ -316,6 +316,51 @@ const PRINTS: &[(&str, &str)] = &[
         "[1] \"Key \\\"a\\\": target and current differ\"\n",
     ),
     ("all.equal.ry_set(Set.single(1L), Set.single(2L))", "[1] \"target and current hold different keys\"\n"),
+    // An update reuses its first argument only when nothing else can observe it.
+    (
+        "{ a <- Dict.from_list(list((\"x\", 1))); b <- a; a <- Dict.insert(a, \"y\", 2); c(Dict.len(a), Dict.len(b)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ p <- list(1L); q <- p; for (i in 1:3) p <- List.append(p, i); c(List.len(p), List.len(q)) }",
+        "[1] 4 1\n",
+    ),
+    (
+        "{ p <- list(1L); holder <- list(p); p <- List.append(p, 2L); c(List.len(p), List.len(holder[[1]])) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ p <- list(1L, 2L); q <- p; p <- List.set(p, 1L, 9L); c(p[[1]], q[[1]]) }",
+        "[1] 9 1\n",
+    ),
+    (
+        "{ p <- list(1L); for (i in 1:3) p <- List.concat(p, list(i, i)); List.to_vector(p) }",
+        "[1] 1 1 1 2 2 3 3\n",
+    ),
+    (
+        "{ grow <- function(n) { s <- Set.empty(); keep <- NULL; for (i in 1:n) { s <- Set.insert(s, i); if (i == 3L) keep <- s }; c(Set.len(s), Set.len(keep)) }; grow(10L); grow(10L) }",
+        "[1] 10  3\n",
+    ),
+    (
+        "{ g <- function(p) { p <- List.append(p, 0L); List.len(p) }; z <- list(1L); c(g(z), g(z), List.len(z)) }",
+        "[1] 2 2 1\n",
+    ),
+    (
+        "{ u <- Set.single(1L); v <- u; u <- Set.union(u, Set.single(2L)); c(Set.len(u), Set.len(v)) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ a <- Dict.single(\"k\", 1); a <- Dict.insert(a, \"self\", a); c(Dict.len(a), Dict.len(Result.with_default(Dict.get(a, \"self\"), NULL))) }",
+        "[1] 2 1\n",
+    ),
+    (
+        "{ e <- Dict.single(1L, \"a\"); e <- Dict.insert(e, 2L, \"b\"); e <- Dict.insert(e, 2.5, \"c\"); List.to_vector(Dict.keys(e)) }",
+        "[1] 1.0 2.0 2.5\n",
+    ),
+    (
+        "{ m <- Dict.empty(); for (i in 1:100) m <- Dict.insert(m, i %% 10L, i); List.to_vector(Dict.values(m)) }",
+        " [1]  91  92  93  94  95  96  97  98  99 100\n",
+    ),
 ];
 
 /// Each case's code and the error message it raises.
@@ -383,8 +428,9 @@ fn declarations() -> Vec<(String, Vec<String>)> {
     text.lines()
         .filter_map(|line| {
             let (name, signature) = line.split_once(" : ")?;
-            // The list conversions are base builtins, declared here only for the checker.
-            if name.starts_with("as.") {
+            // The list conversions are base builtins and `Ops.Expr` is an S3 method of a group
+            // generic, declared here only for the checker.
+            if name.starts_with("as.") || name.starts_with("Ops.") {
                 return None;
             }
             let parameters = &signature[signature.find("fn(")? + 3..];
