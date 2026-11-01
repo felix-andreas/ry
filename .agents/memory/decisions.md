@@ -3617,3 +3617,15 @@ explicit allocators".
   agree. Edits to crates `libr` does not link (the formatter, the IDE layer) leave it alone.
 - Not covered on purpose: `Cargo.toml` files (adding a test target must not look like a runtime
   change), `Cargo.lock` and the compiler version. A dependency bump alone does not trip the check.
+
+## The C headers declare the API of the presented R version
+
+- ry presents the R version of its base `DESCRIPTION` (4.3.3), and packages branch on `R_VERSION`
+  to backport newer API. If the headers declared every name ry implements, those backports would
+  collide (rlang's `ANY_ATTRIB`, `CLEAR_ATTRIB` and `R_mapAttrib`, yaml's `R_mkClosure`), and names
+  newer R removed would be missing (Rcpp's `VECTOR_PTR` below 4.5).
+- So every declaration GNU R added in 4.4, 4.5 or 4.6 sits behind `#if R_VERSION >= R_Version(...)`,
+  with the version taken from GNU R's own headers, and `VECTOR_PTR` is declared below 4.5. The
+  headers include `Rversion.h`, which `ry-rcmd assemble` generates for the home.
+- The crate's fallback `Rversion.h` says 4.6, so ry's own tests and code built straight against
+  `crates/libr/include` still see every name. `libR.so` exports all of them regardless.
