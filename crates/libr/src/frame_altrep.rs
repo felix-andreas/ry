@@ -23,38 +23,40 @@
 //! The functions here allocate on the R heap and must run on the thread that owns the runtime.
 //! Their results are rooted in the current handle scope, like any value an API function returns.
 
-use table::{
-    ColumnType, Table,
-    convert::{RVector, to_r, to_series},
-};
-use heap::{
-    object::{Header, NA_INTEGER, NA_REAL, Sexp, SexpType},
-    strings::Encoding,
-};
-use crate::{
-    R_xlen_t, Rboolean,
-    altrep::{
-        AltrepClass, R_altrep_inherits, R_make_altinteger_class, R_make_altlogical_class,
-        R_make_altreal_class, R_make_altstring_class, R_new_altrep, R_set_altinteger_Elt_method,
-        R_set_altinteger_Get_region_method, R_set_altinteger_No_NA_method,
-        R_set_altlogical_Elt_method, R_set_altreal_Elt_method, R_set_altreal_Get_region_method,
-        R_set_altreal_No_NA_method, R_set_altrep_Length_method, R_set_altstring_Elt_method,
-        R_set_altstring_No_NA_method, R_set_altvec_Dataptr_method,
-        R_set_altvec_Dataptr_or_null_method,
+use {
+    crate::{
+        R_xlen_t, Rboolean,
+        altrep::{
+            AltrepClass, R_altrep_inherits, R_make_altinteger_class, R_make_altlogical_class,
+            R_make_altreal_class, R_make_altstring_class, R_new_altrep,
+            R_set_altinteger_Elt_method, R_set_altinteger_Get_region_method,
+            R_set_altinteger_No_NA_method, R_set_altlogical_Elt_method, R_set_altreal_Elt_method,
+            R_set_altreal_Get_region_method, R_set_altreal_No_NA_method,
+            R_set_altrep_Length_method, R_set_altstring_Elt_method, R_set_altstring_No_NA_method,
+            R_set_altvec_Dataptr_method, R_set_altvec_Dataptr_or_null_method,
+        },
+        attributes::{class_gets, get_attrib, set_attrib},
+        boundary::{ApiResult, Unwind, enter, error},
+        globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol, R_RowNamesSymbol},
+        memory::alloc_vector,
+        runtime,
     },
-    attributes::{class_gets, get_attrib, set_attrib},
-    boundary::{ApiResult, Unwind, enter, error},
-    globals::{R_ClassSymbol, R_LevelsSymbol, R_NamesSymbol, R_RowNamesSymbol},
-    memory::alloc_vector,
-    runtime,
-};
-use polars::prelude::{
-    BooleanChunked, Float64Chunked, Int32Chunked, IntoSeries, PlSmallStr, Series, StringChunked,
-};
-use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
-use std::{
-    ffi::{c_int, c_void},
-    sync::OnceLock,
+    heap::{
+        object::{Header, NA_INTEGER, NA_REAL, Sexp, SexpType},
+        strings::Encoding,
+    },
+    polars::prelude::{
+        BooleanChunked, Float64Chunked, Int32Chunked, IntoSeries, PlSmallStr, Series, StringChunked,
+    },
+    polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+    std::{
+        ffi::{c_int, c_void},
+        sync::OnceLock,
+    },
+    table::{
+        ColumnType, Table,
+        convert::{RVector, to_r, to_series},
+    },
 };
 
 /// Exposes one column as an R vector.

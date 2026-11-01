@@ -4,11 +4,16 @@
 
 #![cfg(any(unix, windows))]
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{Read, Write};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-use std::{fs, thread};
+use {
+    portable_pty::{CommandBuilder, PtySize, native_pty_system},
+    std::{
+        fs,
+        io::{Read, Write},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    },
+};
 
 fn r_available() -> bool {
     let available = std::process::Command::new("R")

@@ -18,12 +18,14 @@
 //! root. Holding one across an allocation without rooting it is a bug, and the GC stress tests
 //! exist to catch it.
 
-use crate::env::Frame;
-use std::{
-    cell::{Cell, UnsafeCell},
-    ffi::c_void,
-    fmt,
-    ptr::NonNull,
+use {
+    crate::env::Frame,
+    std::{
+        cell::{Cell, UnsafeCell},
+        ffi::c_void,
+        fmt,
+        ptr::NonNull,
+    },
 };
 
 /// R's type codes, numbered exactly as GNU R numbers them because native code switches on them.

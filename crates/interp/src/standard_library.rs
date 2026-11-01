@@ -17,23 +17,27 @@
 //! with `reusing_first_argument` checks [`owned`] and then grows the value in place, so a loop
 //! that keeps inserting or appending costs amortized constant time per step, as in Roc.
 
-use crate::{
-    builtins::{Arg, BuiltinDef, Call, builtin},
-    eval, records, scope,
-    sort::{IdenticalFlags, identical},
-    unwind::{R, error},
-    values::{
-        self, char_str, length, list_vector, missing_arg, nil, scalar_bool, scalar_integer,
-        scalar_real, scalar_string,
+use {
+    crate::{
+        builtins::{Arg, BuiltinDef, Call, builtin},
+        eval, records, scope,
+        sort::{IdenticalFlags, identical},
+        unwind::{R, error},
+        values::{
+            self, char_str, length, list_vector, missing_arg, nil, scalar_bool, scalar_integer,
+            scalar_real, scalar_string,
+        },
+    },
+    heap::{
+        object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
+        records::{Fields, Layout, NativeKind},
+    },
+    rustc_hash::FxHasher,
+    std::{
+        cmp::Ordering,
+        hash::{Hash, Hasher},
     },
 };
-use heap::{
-    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot, is_na_real},
-    records::{Fields, Layout, NativeKind},
-};
-use rustc_hash::FxHasher;
-use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
 
 /// A builtin of the library: it takes its arguments by name or position and accepts ry values.
 const fn library(name: &'static str, function: crate::builtins::BuiltinFn) -> BuiltinDef {
@@ -2502,7 +2506,11 @@ unsafe fn build_index(
         .checked_mul(2)
         .and_then(usize::checked_next_power_of_two)
         .filter(|&size| size <= i32::MAX as usize)
-        .ok_or_else(|| error(format!("cannot index a collection with room for {room} keys")))?
+        .ok_or_else(|| {
+            error(format!(
+                "cannot index a collection with room for {room} keys"
+            ))
+        })?
         .max(8);
     let mut index = Vec::new();
     index

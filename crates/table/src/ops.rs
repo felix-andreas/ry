@@ -7,32 +7,36 @@
 //! column takes the widest type of its pieces, and a reshaped value column is coerced the same
 //! way, with a warning.
 
-use std::collections::HashMap;
-use std::mem::swap;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use polars::prelude::{
-    BooleanChunked, ChunkCompareEq, ChunkCompareIneq, ChunkFillNullValue, ChunkFull, Column,
-    DataFrame, DataType, FillNullStrategy, IdxCa, IdxSize, Int32Chunked, IntoColumn, NamedFrom,
-    NewChunkedArray, PlSmallStr, Series, SortMultipleOptions, SortOptions, StringChunked,
-    UniqueKeepStrategy,
-};
-use polars_arrow::array::Array;
-use polars_arrow::bitmap::{Bitmap, MutableBitmap};
-use polars_buffer::Buffer;
-use polars_core::runtime::THREAD_POOL;
-use rayon::prelude::*;
-use rustc_hash::FxHashSet;
-
-use crate::{
-    ColumnType, Error, Result, Table,
-    convert::{enum_dtype, factor_levels},
-    io::write_double,
-    kernel::{
-        CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
-        pack_map, pack_rows,
+use {
+    crate::{
+        ColumnType, Error, Result, Table,
+        convert::{enum_dtype, factor_levels},
+        io::write_double,
+        kernel::{
+            CHUNK_ROWS, CodeValues, Codes, PARALLEL_ROWS, Shared, Vector, fill, gather_column,
+            pack_map, pack_rows,
+        },
+        query::{Aggregate, Executed, Output, Query, Select, Warning, build, execute},
     },
-    query::{Aggregate, Executed, Output, Query, Select, Warning, build, execute},
+    polars::prelude::{
+        BooleanChunked, ChunkCompareEq, ChunkCompareIneq, ChunkFillNullValue, ChunkFull, Column,
+        DataFrame, DataType, FillNullStrategy, IdxCa, IdxSize, Int32Chunked, IntoColumn, NamedFrom,
+        NewChunkedArray, PlSmallStr, Series, SortMultipleOptions, SortOptions, StringChunked,
+        UniqueKeepStrategy,
+    },
+    polars_arrow::{
+        array::Array,
+        bitmap::{Bitmap, MutableBitmap},
+    },
+    polars_buffer::Buffer,
+    polars_core::runtime::THREAD_POOL,
+    rayon::prelude::*,
+    rustc_hash::FxHashSet,
+    std::{
+        collections::HashMap,
+        mem::swap,
+        sync::atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// The row number's share of a packed sort key: a table has fewer than 2^32 rows.

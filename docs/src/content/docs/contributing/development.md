@@ -20,6 +20,8 @@ The `justfile` at the repository root names every day-to-day action, and `just` 
 lists them all. The common ones:
 
 ```sh
+just ry check                       # build ry and its runtime if needed, then run `ry check`
+just build                          # every binary and ry's runtime (`just build --release`)
 just gate                           # tests, clippy -D warnings, and fmt --check
 just battery                        # all workspace tests, excluding zed_ry
 just fixture <group__case>          # one fixture case

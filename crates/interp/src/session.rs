@@ -4,14 +4,16 @@
 //! Base R's R code is read from the user's GNU R installation, never vendored (see
 //! `decisions.md`, "runtime licensing").
 
-use crate::{
-    builtins::{BuiltinDef, Call, internal},
-    conditions, eval, interp, print, scope,
-    unwind::{Jump, R, Unwind, error},
-    values::{self, base_env, base_namespace, global_env, length, nil},
-    write_console,
+use {
+    crate::{
+        builtins::{BuiltinDef, Call, internal},
+        conditions, eval, interp, print, scope,
+        unwind::{Jump, R, Unwind, error},
+        values::{self, base_env, base_namespace, global_env, length, nil},
+        write_console,
+    },
+    heap::object::{Sexp, SexpType},
 };
-use heap::object::{Sexp, SexpType};
 
 pub const BUILTINS: &[BuiltinDef] = &[internal("mkUnbound", 1, do_mk_unbound).invisible()];
 

@@ -2,28 +2,36 @@
 //! live in the server. Per-item query results carry item-relative ranges, while this API speaks
 //! file-absolute offsets (`semantics::item_node` anchors an item).
 
-use semantics::annotations::{block_refusal, statement_inline_site, type_definition_keyword};
-use semantics::check::{CalleeTarget, ItemCheck};
-use semantics::diagnostics::TypeRenderer;
-use semantics::hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind};
-use semantics::infer::apply_definition;
-use semantics::naming::{BindingId, BindingKind, dot_dot_variable};
-use semantics::stubs::{StubSources, declaring_namespace, stub_declaration, stubs};
-use semantics::types::{
-    Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme, contains_inference_var,
-};
-use semantics::{
-    Db, Item, ItemKind, ProjectFiles, SourceFile, file_type_definitions, global_scheme,
-    item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range, item_naming,
-    item_node, item_tree, package_definitions, project_type_definitions, visible_type_definitions,
-};
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::iter::once;
-use syntax::SyntaxKind::{self, *};
-use syntax::kind::KEYWORDS;
-use syntax::{
-    SyntaxElement, SyntaxNode, SyntaxToken, TextRange, TextSize, is_inline_annotation,
-    is_syntactic_name,
+use {
+    semantics::{
+        Db, Item, ItemKind, ProjectFiles, SourceFile,
+        annotations::{block_refusal, statement_inline_site, type_definition_keyword},
+        check::{CalleeTarget, ItemCheck},
+        diagnostics::TypeRenderer,
+        file_type_definitions, global_scheme,
+        hir::{Argument, ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
+        infer::apply_definition,
+        item_annotation_syntax, item_annotations, item_check, item_hir, item_name_range,
+        item_naming, item_node, item_tree,
+        naming::{BindingId, BindingKind, dot_dot_variable},
+        package_definitions, project_type_definitions,
+        stubs::{StubSources, declaring_namespace, stub_declaration, stubs},
+        types::{
+            Constraint, FunctionType, Name, RecordField, Ty, TyKind, TypeScheme,
+            contains_inference_var,
+        },
+        visible_type_definitions,
+    },
+    std::{
+        collections::{BTreeSet, HashMap, HashSet},
+        iter::once,
+    },
+    syntax::{
+        SyntaxElement,
+        SyntaxKind::{self, *},
+        SyntaxNode, SyntaxToken, TextRange, TextSize, is_inline_annotation, is_syntactic_name,
+        kind::KEYWORDS,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

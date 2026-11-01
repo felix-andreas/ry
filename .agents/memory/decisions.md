@@ -3186,9 +3186,21 @@ first lines R had already read, leaving R mid-command.
   a leading `|`, and use the fewest annotations that make the point. If a snippet needs a sentence
   to be understood, simplify the snippet instead.
 - **The checker tab opens untyped.** Plain R with a real `ry check` finding comes first, and an
-  Untyped/Typed toggle in the frame header adds one `#:` line that finds a second bug, with a
-  one-line caption saying R reads it as a comment. Each toolchain view ends with one quiet docs
-  link. Leading with annotations assumed the reader already knew what they were.
+  Untyped/Typed toggle in the frame header shows the same file with that bug fixed and one `#:`
+  line that finds the next, with a one-line caption saying R reads it as a comment. Each mode shows
+  exactly one diagnostic, so the two outputs are the same height. Each toolchain view ends with one
+  quiet docs link. Leading with annotations assumed the reader already knew what they were.
+- **Tabs in one frame share the tallest tab's height, so the content is balanced to make that
+  height small.** On wide screens a switch must not move the page, so a showcase's panels share one
+  grid cell. A short tab then leaves a visibly empty frame, so the snippets are sized to land near
+  the same height (toolchain tabs about 320px at 1440, typing steps within about 100px of each
+  other), and the language server's feature tabs sit in the frame's header row like the checker
+  toggle. At 900px and below, code and output stack and the heights differ by hundreds of pixels, so
+  there each frame fits its own panel and a switch may move the page.
+- **The landing Venn has a step indicator and a caption; why-ry's static copy does not.** Four
+  clickable bars repeat the step tabs for pointer users, and one plain caption per step says what
+  the highlighted region means, which also defines R++ and R-- in context. The Venn is centred
+  against the steps column.
 - **A tab appears only once its feature has a real snippet.** The runtime's Speed tab charts the
   why-ry Speed table as speedup over GNU R on one linear axis from zero with a 1x line, sorted so
   the strongest wins lead, and keeps every program, including the slowdown (drawn in grey), because
@@ -3373,3 +3385,13 @@ explicit allocators".
   memory. Incremental analysis is unaffected as long as memoized results stay owned and
   value-compared, which this rule requires. Each audit item is measured before and after, and a
   layout change that does not pay is reverted.
+
+## `just ry` builds ry's runtime; ry-lang does not depend on libr
+
+- `ry run` loads ry's runtime (`libR.so`) beside the executable at run time, and libr is a separate
+  cdylib, so `cargo run -p ry-lang` never builds it. `just ry` builds `-p ry-lang -p libr` first,
+  and `just build` builds the whole workspace; the not-found error names both.
+- A nightly artifact dependency (`artifact = "cdylib"`) was rejected: every `ry-lang` build,
+  including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
+  still lose the library, because the artifact path points into the build directory. Embedding
+  the library in the binary would double its size for users who never run code.

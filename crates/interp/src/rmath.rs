@@ -7775,4 +7775,3 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
     }
     bessel_jy_any(x, alpha).1
 }
-

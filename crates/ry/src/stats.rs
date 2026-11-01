@@ -1,27 +1,35 @@
 //! `ry debug analysis-stats`: where time and memory go across a workspace,
 //! measured through the same queries the language server uses.
 
-use crate::cli::{self, CommandError};
-use crate::config::Config;
-use crate::diagnostics::document_diagnostics;
-use salsa::{Durability, Setter};
-use semantics::check::CHECK_EXECUTIONS;
-use semantics::diagnostics::file_diagnostics;
-use semantics::infer::resolve_calls;
-use semantics::lints::lint_file;
-use semantics::metadata::{
-    PackageMetadata, attached_union, normalized_imports, parse_description_collate,
-    parse_description_dependencies, parse_namespace,
+use {
+    crate::{
+        cli::{self, CommandError},
+        config::Config,
+        diagnostics::document_diagnostics,
+    },
+    salsa::{Durability, Setter},
+    semantics::{
+        AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
+        check::CHECK_EXECUTIONS,
+        diagnostics::file_diagnostics,
+        infer::resolve_calls,
+        lints::lint_file,
+        metadata::{
+            PackageMetadata, attached_union, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_namespace,
+        },
+        stubs::{StubSources, shipped_export_manifests, shipped_stub_sources},
+    },
+    std::{
+        cmp::Reverse,
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    },
+    syntax::TextSize,
 };
-use semantics::stubs::{StubSources, shipped_export_manifests, shipped_stub_sources};
-use semantics::{AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile};
-use std::cmp::Reverse;
-use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-use syntax::TextSize;
 
 const SLOWEST_FILES: usize = 10;
 const TYPING_BURST: usize = 10;

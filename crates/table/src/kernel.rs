@@ -10,23 +10,27 @@
 //! An expression these kernels cannot evaluate makes them return `None`, and the caller falls
 //! back to the Polars plan, so both paths must agree on every result.
 
-use std::mem::MaybeUninit;
-
-use polars::prelude::{
-    BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
-    Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr, StringChunked,
-    UInt8Chunked, UInt16Chunked, UInt32Chunked,
+use {
+    crate::{
+        ColumnType, Error, Result, Schema,
+        convert::factor_levels,
+        query::{BinaryOp, Expr, Typer, UnaryOp, comparison},
+    },
+    polars::prelude::{
+        BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
+        Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, IntoSeries, PlSmallStr,
+        StringChunked, UInt8Chunked, UInt16Chunked, UInt32Chunked,
+    },
+    polars_arrow::{
+        array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray},
+        bitmap::{Bitmap, MutableBitmap},
+        datatypes::ArrowDataType,
+    },
+    polars_buffer::Buffer,
+    polars_core::runtime::THREAD_POOL,
+    rayon::prelude::*,
+    std::mem::MaybeUninit,
 };
-use polars_arrow::array::{Array, BooleanArray, PrimitiveArray, Utf8ViewArray};
-use polars_arrow::bitmap::{Bitmap, MutableBitmap};
-use polars_arrow::datatypes::ArrowDataType;
-use polars_buffer::Buffer;
-use polars_core::runtime::THREAD_POOL;
-use rayon::prelude::*;
-
-use crate::convert::factor_levels;
-use crate::query::{BinaryOp, Expr, Typer, UnaryOp, comparison};
-use crate::{ColumnType, Error, Result, Schema};
 
 /// Below this many rows a kernel runs on the calling thread, because handing work to the pool
 /// costs more than it saves.
@@ -1287,7 +1291,12 @@ fn pack_into<T: Copy>(out: &mut [MaybeUninit<u8>], values: &[T], test: impl Fn(T
 }
 
 /// [`pack_into`] for a test of two equally long slices, value by value.
-fn pack_pairs<T: Copy>(out: &mut [MaybeUninit<u8>], lhs: &[T], rhs: &[T], test: impl Fn(T, T) -> bool) {
+fn pack_pairs<T: Copy>(
+    out: &mut [MaybeUninit<u8>],
+    lhs: &[T],
+    rhs: &[T],
+    test: impl Fn(T, T) -> bool,
+) {
     let (left, left_rest) = lhs.as_chunks::<8>();
     let (right, right_rest) = rhs.as_chunks::<8>();
     for ((slot, lhs), rhs) in out.iter_mut().zip(left).zip(right) {
