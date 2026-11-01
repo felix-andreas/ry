@@ -72,7 +72,7 @@ Two things do change, and both are deliberate:
   fallback takes the other branch. That is the same as running it under a newer R that added the
   name.
 - GNU R does not have them. A script that calls `List.map` and checks clean still fails with "could
-  not find function" under `ry run` without `--runtime ry`, because GNU R is that command's default.
+  not find function" under `ry R`, which runs GNU R.
   Records, tags and `match` have the same split. Until ry's runtime is the default, this is a
   documented limitation rather than a diagnostic.
 

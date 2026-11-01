@@ -81,7 +81,7 @@ type Position = Record{x: double, y: double}
 position_value <- function(p) p$x
 summa$0rise <- function(positions) vapply(positions, position_value, numeric(1))
 #++++
-hover 108..117: summarise: fn(positions: list[Position] | Position[]) -> double[]
+hover 108..117: summarise: fn(positions: list[Position]) -> double[]
 hover-definition: global 108..117
 definition 108..117
 references: 108..117*

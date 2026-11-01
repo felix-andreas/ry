@@ -78,6 +78,8 @@ pub struct RunOptions {
     /// End the session when the script is consumed; a top-level error quits with
     /// a failing status.
     pub batch: bool,
+    /// What the script reads with `commandArgs(trailingOnly = TRUE)`.
+    pub arguments: Vec<String>,
     pub completer: Option<Box<dyn SessionCompleter>>,
     pub hooks: Option<Box<dyn ConsoleHooks>>,
     pub filter: Option<Box<dyn InputFilter>>,
@@ -165,10 +167,10 @@ pub fn run_console_on_ry_runtime(
     type ReadConsole = extern "C" fn(*const c_char, *mut c_uchar, c_int) -> c_int;
     type Repl = unsafe extern "C" fn(ReadConsole, c_int) -> c_int;
     let repl = runtime_entry::<Repl>(library, "ry_repl")?;
-    console::install_for_ry_runtime(options)?;
-    if std::io::stdin().is_terminal() {
-        eprintln!("ry console on ry's runtime. Type q() or Ctrl-D to quit.");
-    }
+    let banner = std::io::stdin()
+        .is_terminal()
+        .then(|| "ry console on ry's runtime. Type q() or Ctrl-D to quit.".to_owned());
+    console::install_for_ry_runtime(options, banner)?;
     Ok(unsafe { repl(console::ry_read_console, flags.bits()) })
 }
 

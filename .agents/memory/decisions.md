@@ -108,6 +108,41 @@ accepts `character`, which no numeric binder covers. Never say these functions h
 scheme. A gradual checker that cannot describe the standard library is not usable. A user's `#:` annotation stays pure
 Hindley-Milner, which is what keeps the user-facing promise honest.
 
+## ry has no macros
+
+This is a user directive: compile time and type-checking speed rank highest, so ry adds no macro
+system, syntactic or procedural.
+
+- **Why.** A macro makes what a file means depend on code that runs before checking. Every check
+  then pays for expansion, an item's names can no longer be read from its syntax, and an edit to a
+  macro invalidates every site that expands it, which defeats the per-item firewalls. Vx, which has
+  `macro_rules`, confines expansion to its own phase before name resolution so that it cannot break
+  parallel per-body checking, and its notes cite rustc, where macro expansion and name resolution
+  are still serial (`docs/language_rules_for_a_parallel_compiler.md` in vx-lang/Vx).
+- **R's own non-standard evaluation stays.** `quote`, `substitute`, `bquote`, `eval`, tidy
+  evaluation and data masks keep working, because existing R code must run unchanged. The checker
+  treats them as ordinary R calls (the recognized data masks read bare names as columns, and `eval()`
+  returns `Any`), and ry builds nothing on top of them.
+- **Prior art.** Roc's language reference describes no macros; it evaluates top-level constants at
+  compile time instead. Bend lists "no macros beyond compile-time templates" among its limitations.
+  goose's reference describes no macros; its `const for` copies a fragment once per field, variant
+  or type at specialization time, as its form of reflection. Vx has `macro_rules`, restricted as
+  above.
+- **What replaces common macro uses.**
+  - Derived behavior, such as Rust's `derive` for printing, equality or serialization, comes from
+    structural types: with no declaration, `print((x = 1, y = 2))` prints `(x = 1, y = 2)`, and
+    `identical()` compares two records by value.
+  - Boilerplate repeated over types is written once with generics (`<T> fn(...)`) and the standard
+    library's higher-order functions.
+  - Code generation happens outside the language, in a script that writes ordinary files the checker
+    reads, as `scripts/export-manifests.R` writes the export manifests; `.Rtypes` stubs declare what
+    R code cannot express.
+  - Values computed ahead of time are pure top-level constants, which strict mode's planned
+    definitions-only top level makes possible (`backlog.md`, "strict mode restricts what a file's
+    top level runs").
+- **Consequence.** Reject any proposal that expands or generates code before checking, including
+  generation driven by annotations inside the checker.
+
 ## An overload set is a bounded, ordered probe
 
 A function whose result type depends on the argument type gets an ordered overload set, on the stub
@@ -289,6 +324,14 @@ in both pipelines. The gates are already per file, and the directive is derived 
 incrementality holds.
 
 Refusing an unsupported construct loudly is acceptable policy. Mistyping one silently is not.
+
+`stop(...)` types as `Any`, not `NULL` or `Unknown`. There is no bottom type, and `Any` is the one
+type that fits every branch and return position without strict mode reporting it, so a
+`if (bad) stop(...)` guard costs strict users nothing. `&` and `|` are typed elementwise (logical
+scalar or vector) rather than opaque, so their operands resolve normally in naming. An operand
+whose type is still a variable is not unified with scalar `logical`, as `!`'s operand is, because
+`&` is mostly used on vectors and the unification made `h(c(TRUE, FALSE), TRUE)` an error; the
+operator is opaque for it instead.
 
 ## A reported column counts characters, and caret art counts terminal cells
 
@@ -1690,9 +1733,10 @@ ry is UPL-1.0, so no GPL code from GNU R is copied into the repository. The runt
 implementation are written independently.
 
 Base R's R-level sources (the open question in `contributing/design/r-runtime.md`, section 11) are
-GPL-2-or-later. The default is to load them at runtime from the user's own GNU R installation
-rather than vendor them, the way the `repl` crate already loads R at runtime. Relicensing the
-project is the owner's call and is not assumed.
+GPL-2-or-later. The owner confirmed the default: load them at runtime from the user's own GNU R
+installation rather than vendor them, the way the `repl` crate already loads R at runtime. ry
+therefore stays license-independent of GNU R and needs GNU R installed (`installation.md` says so).
+Relicensing the project is not assumed.
 
 # Decision record: the runtime's object model, collector and native boundary
 
@@ -1969,14 +2013,25 @@ primitives, and nothing built or installed packages.
 - **Header export coverage is checked by the compiler** (`-aux-info` and `-E` in
   `tests/test_headers.rs`), not by scanning header text, because rename macros and struct fields
   defeat a text scan.
-- **Package installation is the `rcmd` crate.** ry's R home has ry's headers and `libR.so`, an
-  `etc/Makeconf` written for ry, `share/make/shlib.mk`, and a `bin/R` that runs `ry-rcmd`, so
-  `configure` scripts asking `R CMD config` get ry's toolchain. A source install compiles `src/`
-  as `R CMD INSTALL` does and records `RyBuilt:`; the R-level half (lazy-load database, help,
-  `Meta/`) waits for the interpreter, so `R/` is kept as sources. `bin/Rscript`, and `bin/R`
-  for anything but `R CMD` and `R RHOME`, run GNU R for the R code configure scripts and
-  `Makevars` evaluate (`R -f tools/examples.R`): an explicit build-time delegation that the
-  interpreter replaces, not a fallback on failure.
+- **Package installation is the `rcmd` crate, and it runs on ry.** ry's R home has ry's
+  headers and `libR.so`, an `etc/Makeconf` written for ry and `share/make/shlib.mk`. It links
+  everything else from GNU R's home: the `library/` packages (base R's R code), `share/`,
+  `etc/` and the `R CMD` scripts in `bin/` (build, check, Rdconv, ...). Its own `bin/R`,
+  `bin/Rscript` and `bin/Rcmd` exec `ry-rcmd`, which answers `R CMD INSTALL|SHLIB|config` and
+  `R RHOME` in Rust and runs every other command line (`-e`, `-f`, a script, stdin) on ry's
+  interpreter by dlopening the home's `libR.so` and calling `ry_run`. GNU R's `R CMD` scripts
+  call back into `bin/R`, so they run on ry too; no GNU R process runs at install time.
+  - Install: Rust configures and compiles `src/`, then an embedded R driver
+    (`crates/rcmd/src/install.R`) runs the R-level half on ry with GNU R's own `tools`
+    functions, in `tools:::.install_packages`' order (DESCRIPTION and `Meta/`, collated code,
+    `sysdata`, lazy data, demos, `inst/`, the lazy-load database, Rd objects and help indices,
+    vignette index, `nsInfo`), then test-loads in a fresh ry process. Reusing `tools` keeps the
+    installed layout GNU R's byte for byte in structure, so GNU R can read what ry installs.
+  - **Nothing is byte-compiled.** ry compiles closures itself when they run, and GNU R
+    bytecode in a lazy-load database is read back as its source expression anyway, so a GNU R
+    compile step would only cost install time. `ByteCompile: yes` is ignored.
+  - The previous shape delegated `bin/R` and `bin/Rscript` to GNU R and kept `R/` as sources;
+    both are gone.
 - **Rmath, Applic, LINPACK and the Fortran helpers are Rust written from the published
   algorithms** (`rmath.rs`, `applic.rs`, `linpack.rs`, `utils.rs`), never translated from GNU R,
   which is GPL. The oracle is GNU R itself: `tests/data/rmath_cases.R` records answers and random
@@ -2633,10 +2688,47 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **The default mode compiles only bodies with loops.** Measured on `micro/closures`, compiling
-  `function(a, b) a + b` made each call slower, because entering compiled code and forcing two
-  promises through helpers cost more than tier 0's dispatch. Straight-line bodies wait for direct
-  calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
+- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
+  compiled code meant forcing every argument through a promise helper, which made
+  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
+  loop-only rule went with it.
+- **Function speculation is validated by the binding epoch alone.** Compiling marks each
+  speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
+  cell is assigned or a watched symbol is defined in any function frame (which could shadow the
+  speculated binding). A call site then checks one integer instead of re-walking the environment
+  chain. The cost is spurious invalidation when an unrelated frame defines a watched name, which is
+  rare, and recompiles are capped per body. When the epoch has moved, each speculation is
+  re-resolved from the environment its lookup started in, which for a function looked up inside an
+  inlined or directly called closure is that closure's environment, not the compiled body's.
+- **A call to a speculated closure is direct and passes forced promises.** Arguments that are
+  effect-free are evaluated eagerly in the caller, wrapped as already forced promises, and bound
+  positionally into a frame sized for the formals, skipping the matcher. Early evaluation is only
+  invisible when the callee cannot assign anything an argument reads before forcing it
+  (`g <- function(x) { assign("y", 99, envir = parent.frame()); x }`), so the callee must be
+  frame-safe (`analysis.rs`, `frame_safe`): it calls only itself and `FRAME_SAFE_BUILTINS`, each
+  lookup recorded as a speculation from the callee's environment, and the call defers to tier 0
+  while a calling handler is established. S3 dispatch from those builtins on a classed argument is
+  the one accepted hole. A promise object is still
+  allocated, because `substitute()` and `missing()` in the callee need one; eliding it entirely
+  needs compiled-to-compiled calls that know the callee never reflects.
+- **Small local closures inline.** A call of a closure defined by a function expression in the same
+  body, whose arguments and body compute a scalar from scalars without effects, runs inline on
+  unboxed registers. Any failed check hands the call back to tier 0, which evaluates it lazily.
+- **Environment frames live inline in the environment object.** Small binding sets are stored
+  without a separate allocation, which cut a call's allocations, the dominant per-call cost.
+- **A value boxed on an edge into a join is dirty.** A slot that is an unboxed local on one path and
+  boxed on another gets a fresh box the frame does not hold, so the slot must be written back before
+  an in-place element write is visible to the frame (`x[1] <- 9; get("x")`). The oracle case in
+  `bytecode__hot_loops.R` pins it.
+- **A helper that cannot allocate parks the error.** Compiled code does not branch on a nil box;
+  later helpers return their fallback while an error is parked, and the return from compiled code
+  raises it.
+- **Static types do not remove guards.** A static `double` still admits an integer or a logical
+  through promotion, and stubs claim scalar results for functions that can return vectors, so a
+  static type proves neither the storage type nor the length the compiled code specializes on.
+  Strict typing costs a little at run time instead (about 200 instructions per annotated call for
+  the boundary checks). Using types as early profiles, or as guarantees backed by boundary checks,
+  is still the plan in `r-runtime.md`.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
 
@@ -2681,6 +2773,7 @@ first lines R had already read, leaving R mid-command.
 
 - **Previous shape.** The four were builtins: every argument was evaluated before S3 dispatch. data.table's `[.data.table` needs `j` and `by` unevaluated (`.()`, `:=`, column names), so `dt[, .(x)]` failed with "could not find function `.`".
 - **Target shape.** GNU R's DispatchOrEval. The definition flag `BuiltinDef::dispatch_or_eval()` (a special with internal generic) makes `eval::apply_call` call `dispatch::dispatch_or_eval`: it evaluates only the first argument, and for an object passes the rest to the S4 method, or else the S3 method, as promises. Otherwise it evaluates them and calls the function with values, so the subset code itself never sees unevaluated arguments. A symbol bound to a missing argument evaluates to the empty argument, as GNU R's `R_isMissing` check does, so `f <- function(m, i, j) m[i, j]; f(m, , 2)` selects every row. `do.call` (`eval::apply`) hands such a special forced values.
+- **Bytecode.** A call of a dispatch-or-eval special (`bytecode.rs`, `subject_call`) evaluates the subject into a register, branches on `BranchIfObject` to `DispatchSubject` (which runs `dispatch::dispatch_evaluated_subject`, so a method still gets promises and the subject's expression), and otherwise evaluates the rest into registers and runs `CallBuiltin`, which the JIT turns into its element intrinsic. A `BranchUnlessPrimitive` guard sends a rebound `[` to the generic call. A formal in an index position takes the generic path too, because a register cannot hold the empty argument a missing formal stands for. Without this shape `x[i]` in a loop ran as a generic call and compiled loops fell to tier-0 speed.
 - **NextMethod.** As in GNU R, NextMethod reaching any primitive names the call `<generic>.default`, which error messages show and which a dispatching special reads as "do not dispatch again". Without that, `[.simple.list` re-dispatched to itself forever.
 
 ## libr reads options from base's `.Options`
@@ -2973,18 +3066,41 @@ first lines R had already read, leaving R mid-command.
   tabbed sections: one toolchain (type checker, formatter, language server: what works today), then
   the backwards-compatible runtime (tagged unions, nominal types, records, the standard library),
   then the migration as the closing pitch, with the Venn diagram ("from the blue bubble to the
-  purple one") above the four steps as tabs. A reader has to want the features before a path to
+  purple one"). On wide screens the four steps and the selected step's code fill the left column
+  and the diagram sits on the right, so the code stays directly under the step that chose it while
+  the diagram follows along; on phones the diagram comes first. A reader has to want the features before a path to
   them matters, which is why the migration is the last part of the sell and not the opening.
 - **The landing page carries almost no prose.** Each section is a headline, at most one sentence,
   and tabs of real code beside real output. No eyebrow labels, step labels, notes or hints, because
   people skim a landing page and the snippets carry the argument; detail lives in `why-ry.mdx`.
-- **A tab appears only once its feature has a real snippet.** The runtime section gets a benchmark
-  tab when the JIT benchmark table lands. The DataFrame tab shows the Polars-style API, never
+- **Motion shows the story; it never decorates.** The migration section sets the Venn beside the
+  step tabs, and each step moves a "your code" marker into its region and dims the others (the
+  `data-step` attribute on `Venn.astro`; without it the diagram stays static, as on `why-ry.mdx`).
+  Runtime and migration snippets reveal code first and output after, once on first view and again
+  on each tab switch, and one neutral pill slides between tabs (no colored outline or glow). Every
+  switch (pill, panel fade, line reveal, Venn marker) shares one symmetric ease-in-out curve and
+  duration from `--switch-ease` and `--switch-duration`, because an ease-out curve read as abrupt.
+  Every snippet function uses a `{}` body. All motion is off under `prefers-reduced-motion`.
+- **Each landing snippet teaches exactly its tab's concept.** It must pass two tests: an R user who
+  has never seen ry understands it in five seconds, and nothing besides the tab's concept makes a
+  newcomer stop and wonder. So snippets use `type`, never `alias` (the distinction lives in the
+  custom-types docs), avoid incidental syntax (`@new`, one-field records that need a trailing
+  comma, generics, open unions, `eval(parse())` tricks), lay unions out one variant per line with
+  a leading `|`, and use the fewest annotations that make the point. If a snippet needs a sentence
+  to be understood, simplify the snippet instead.
+- **The checker tab opens untyped.** Plain R with a real `ry check` finding comes first, and an
+  Untyped/Typed toggle in the frame header adds one `#:` line that finds a second bug, with a
+  one-line caption saying R reads it as a comment. Each toolchain view ends with one quiet docs
+  link. Leading with annotations assumed the reader already knew what they were.
+- **A tab appears only once its feature has a real snippet.** The runtime's Speed tab charts the
+  why-ry Speed table as speedup over GNU R on one linear axis from zero with a 1x line, sorted so
+  the strongest wins lead, and keeps every program, including the slowdown (drawn in grey), because
+  hiding a loss would cost more trust than it buys; it links to the full table and method. The DataFrame tab shows the Polars-style API, never
   data.table's `x[i, j, by]` (kept for compatibility only), with one line for the
   `tools/bench/table` result. No placeholder tabs.
 - **The migration has four steps, each with a real snippet and real output:** check the code you
-  have, add types as `#:` comments, switch to inline types, then move data to ry's records, tags
-  and tables under strict mode. Each step is optional and reversible, which is what makes adopting
+  have, add types as `#:` comments, switch to inline types (which ry also enforces at run time),
+  then go fully typed under strict mode. Each step is optional and reversible, which is what makes adopting
   ry safe for an existing code base. `why-ry.mdx` tells it in full.
 - **GNU R stays a first-class target.** `#:` comments keep a file plain R, so a team that keeps
   GNU R loses only the runtime features. The pitch says so in one sentence and does not dwell.
@@ -3054,3 +3170,112 @@ first lines R had already read, leaving R mid-command.
 - **One place enforces the rules.** `crates/interp/src/arrays.rs` validates construction, operators (`arith.rs` wraps each builtin in `strict`), indexing and replacement, then flags the result. The bytecode fast paths and the JIT's type guard refuse a flagged operand, so they can never skip a check; a dedicated Array feedback kind is backlog work.
 - **Checker.** `Array<T>` fits `T[]` (atomic items) or `list[T]` (ry-value items), never the reverse, so Arrays pass to R code and R vectors need `as.Array()`. A DataFrame stores an Array column as its plain vector, so `column_type` maps `Array<T>` to `T[]`.
 - **Impact.** No duplicated state: the flag is the single source of truth for strictness, and the checker's type and the runtime flag agree by construction. Pinned by `crates/semantics/tests/typing/arrays.R.test`, `crates/interp/tests/test_arrays.rs` (including a generated round trip) and Array seeds in both fuzzers.
+
+# Decision record: editor responsiveness at 300,000 lines
+
+- **Previous shape.** Completion walked every item in the project per request, reading each item's
+  salsa fields, re-walked every file's syntax tree for untyped `$` fields, resolved a scheme (and
+  so possibly a type check) for every matching global, and sorted every candidate with an
+  allocated key before keeping 128. References for a global named and lowered every item in the
+  project. On finbench that was 30 ms p50 for completion and 300 ms p99 for references.
+- **Target shape.** Two per-file tracked indexes in `crates/ide/src/ide.rs`: `global_names` (the
+  top-level names a file writes, with their item) and `spelled_names` (the names spelled after
+  `$`, `@` and `::`). They are derived from the item tree and the syntax, so they cannot drift, and
+  an edit recomputes only the edited file's entry. Ranking selects the top results with
+  `select_nth_unstable_by` and compares labels case-insensitively without allocating, and call
+  shapes are resolved only for the results returned. References and rename skip a file, then an
+  item, whose source text does not contain the name, because every occurrence spells it.
+- **Requests preempt idle work.** A request cancels the idle unit in flight once the request is
+  queued (`CancelHandle::preempt_idle` in `crates/ry/src/server.rs`); it never cancels a sync.
+- **Durability.** A setter that names no durability keeps the field's current one, so the old
+  `didOpen` rewrote every opened file at `MEDIUM` and invalidated every memo in the project. It now
+  skips text that matches the disk and lowers the file to `LOW` in idle time, because salsa never
+  backdates a memo whose durability drops, and the first `LOW` write therefore re-derives the
+  file's dependents once.
+- **Project-wide maps fold per-file memos.** `package_definitions`, `conditional_slot_items`,
+  `interface_sccs` and their test-file twins read every item's projections directly. Once the
+  edited file was `LOW`, each map was too, and confirming it after a keystroke checked about 56,000
+  item memos, about 35 ms before any request could answer. They now read `file_definitions`,
+  `file_interface_reads` and `file_conditional_writers` (`crates/semantics/src/semantics.rs`), so
+  the check touches about 500 file memos and every untouched one passes on durability.
+  `project_arithmetic_classes` needed no change: it reads only `package_definitions`.
+- **Every host input but the open documents and the file list is `MEDIUM`.** The server and
+  `analysis-stats` created the stubs, settings, metadata and data files at the default `LOW`, and
+  nearly every memo reads the stubs, so no memo was ever `MEDIUM` and the file durabilities had no
+  effect. With those inputs at `MEDIUM`, the maps must be `LOW` before any file's first edit, since
+  a memo whose durability drops cannot backdate and the drop would re-execute every item check
+  (about 2 s on finbench). `ProjectFiles` is therefore `LOW`, which keeps the maps `LOW`.
+  `test_incremental.rs` pins both: an edit verifies only the edited file's items, and a file's
+  first edit re-checks only its own.
+- **Impact.** Settled requests are about 1 ms p50 except completion at about 4 ms, and a request
+  right after a keystroke now costs about the same (0.5 ms hover p50 in `analysis-stats` on
+  finbench, from 30 ms). Edited-file diagnostics fell from 36 ms to 1.5 ms median.
+
+## ry run and ry R: the command chooses the runtime
+
+- **Previous shape.** Two commands each carried a `--runtime` flag with its own default: `ry run script.R` and the `ry repl` console defaulted to GNU R, `ry load` to ry's runtime, and `RY_RUNTIME` overrode all three. Which runtime ran a file depended on the command, a flag and an environment variable, and the docs showed `ry run --runtime ry` everywhere. `ry run` also took FILE as its own positional, so clap still parsed `--help` or `--no-load` written after it.
+- **Target shape.** The command names the runtime (`crates/ry/src/command_line.rs`). `ry run [FILE] [ARGS]` runs on ry's runtime, `ry R [FILE] [ARGS]` on GNU R, and without FILE each opens the console. `-i FILE` runs FILE and then opens the console, which is the home of `ry repl -f`. `ry R` alone has `--no-load`, because only GNU R's console loads the package yet (it is hidden on `ry run` for `--runtime gnu-r`). `Command::session` resolves every spelling to one `Session { runtime, mode }`, so `main` dispatches on what to run.
+- **Compatibility.** `ry repl` stays as a hidden alias with its GNU R default and its `-f`; `--runtime` on `run`, `repl` and `load` and `RY_RUNTIME` stay honoured but undocumented. The flag wins over the variable; `ry R` ignores the variable, because a command named after GNU R must run GNU R. Like every option, `--runtime` must come before FILE now: `ry run script.R --runtime gnu-r` hands `--runtime gnu-r` to the script on ry's runtime. That follows `Rscript` and was accepted deliberately.
+- **One trailing positional.** FILE and its arguments are one `trailing_var_arg` vector: clap stops reading options only once a trailing positional has its first value, so everything after FILE reaches the script verbatim, as with `Rscript`. On GNU R the arguments follow `--args` in the embedded argv, so `commandArgs(trailingOnly = TRUE)` reads them on both runtimes. `crates/ry/tests/test_command_line.rs` fuzzes the parser against this property. `--keybindings` and `--no-load` conflict with a script, because they would be silently ignored there.
+- **Exit codes.** 0 for success, 1 for a top-level error or a strict-mode refusal, 2 for a usage error, an unreadable script (read up front, before any R starts) or a runtime that cannot start; `q(status = n)` exits n. A batch run on GNU R starts R non-interactive with `--no-echo`, as `Rscript` does: a script sees `interactive()` as FALSE, a top-level error prints "Execution halted" and exits 1 through R's own path, and R prints no trailing newline when the session ends.
+- **`-i FILE`** is checked under its own name with the same `Preflight` the console then continues (`Preflight::rename`), so a refusal exits 1 before the console opens, later commands see the file's definitions, and the file is fed as already-checked console input.
+- **Impact.** One rule for users (the command is the runtime) and one resolution function, `resolve_runtime`, which `Command::session` and `ry load` both call; the property tests pin it. No analysis state changes.
+
+# Decision record: data-oriented design and explicit allocators
+
+Performance comes first (user directive, `AGENTS.md` "Goals"), so hot data is laid out for the
+cache and allocated in bulk. The open audit list is `backlog.md`, "Open: data-oriented layouts and
+explicit allocators".
+
+- **The rule.** Hot data is a set of dense arrays indexed by small `Copy` ids (`u32`), not a graph
+  of individually boxed nodes. Split a record into parallel arrays when a hot loop reads only some
+  of its fields, keep variable-length children in one flat side array addressed by ranges, and use
+  bitsets for per-element flags. Memory that lives exactly as long as one phase (one item check,
+  one parse, one JIT compilation, one query plan) comes from an arena or bump allocator that is
+  reset or dropped as a whole, so the phase pays neither per-node `malloc` nor per-node `free`.
+  Long-lived objects of one shape come from pools of that shape. A new hot structure that holds
+  `Box`, `Vec` or `String` per node needs a reason.
+- **Where it applies first.** The checker's per-item inference (types built mid-check), HIR
+  lowering, the JIT's analysis plan, and the heap's mark and sweep. The table engine already keeps
+  columns in Arrow buffers and accumulators as struct-of-arrays, so it changes only at the edges.
+- **Allocator API status (checked against the Rust docs, the tracking issue and releases.rs).**
+  `std::alloc::Allocator` was nightly-only (`allocator_api`, rust-lang/rust#32838) until
+  rust-lang/rust#156882 stabilized a subset for Rust 1.100.0: the `Allocator` trait, `Global`,
+  `System`, and the allocator parameter of `Box<T, A>` and `Vec<T, A>` with their `new_in` and
+  `with_capacity_in` families. 1.100.0 is scheduled for stable on 12 November 2026. The
+  `Store` API, `StaticAllocator`, and `Box::into_pin` with a custom allocator stay unstable, and
+  std's `HashMap`, `String`, `Rc` and `Arc` take no allocator parameter. CI builds with
+  `dtolnay/rust-toolchain@stable`, the dev container has rustc 1.97.0 (which rejects
+  `Vec::new_in`), and the nix flake uses the latest nightly. The workspace has no
+  `rust-toolchain` file and no `rust-version`.
+- **The route that works on every toolchain.** `allocator-api2` is the stable polyfill of the
+  trait and of `Vec`/`Box`, and `hashbrown` (already a `heap` dependency) accepts it for its maps.
+  `bumpalo` with its `allocator-api2` feature gives a bump arena those collections can allocate
+  in, so `hashbrown::HashMap::new_in(&bump)` and `allocator_api2::vec::Vec::new_in(&bump)` build and
+  run on stable rustc 1.97.0 (bumpalo 3.20, hashbrown 0.16, allocator-api2 0.2). Move to std's `Vec<T, A>` and
+  `Box<T, A>` once every toolchain the project builds with is 1.100 or newer; maps stay on
+  `hashbrown`. Whether `bumpalo` implements the stabilized std trait without its nightly
+  `allocator_api` feature is unverified.
+- **The global allocator stays mimalloc.** The `ry` binary sets it as `#[global_allocator]`
+  (default feature `mimalloc`, lazy arena commit in `crates/ry/src/main.rs`), and `libR.so` has its
+  own (`crates/libr/src/libr.rs`), pinned to `features = ["local_dynamic_tls", "v2"]`: the default
+  TLS model fails `dlopen`, and v3 crashes in `mi_thread_init` on the second thread that allocates
+  after the first one exits. Arenas sit on top of the global allocator, not in place of it.
+- **Salsa.** Values a tracked query returns, and interned data, must own their memory and compare
+  by value, because salsa stores them across revisions and backdates by equality. So an arena
+  never leaks into a memoized result: a query does its work in a scratch arena and copies the
+  result out into a compact owned form (boxed slices, dense tables indexed by `ExprId`). Interned
+  ids (`Ty`, `Name`) are already dense indices, but every intern goes through salsa's shared
+  table. Types an item check builds and throws away belong in a per-check store, and only
+  exported schemes and recorded expression types get interned.
+- **R's C API.** Every `SEXP` lives in `heap`'s collector, because native code holds it for an
+  unknown time, through `PROTECT`, preserved objects and external pointers, and R's semantics
+  decide when it dies. A phase arena must never back an R object that can escape to C. The heap's
+  own size-class pages are already per-shape pools, and data-oriented design applies inside it
+  (side mark bitmaps, allocation fast paths) as long as a `SEXP` stays a stable, non-moving
+  pointer to its header. `R_alloc` is the one arena R itself defines (`crates/heap/src/arena.rs`).
+  Arenas suit analysis, the parser, and the JIT's compile-time data.
+- **Impact.** Fewer allocations and frees per phase, smaller memos, and scans that read contiguous
+  memory. Incremental analysis is unaffected as long as memoized results stay owned and
+  value-compared, which this rule requires. Each audit item is measured before and after, and a
+  layout change that does not pay is reverted.

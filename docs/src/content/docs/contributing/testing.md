@@ -390,14 +390,22 @@ diff's ordering rules turns it red within a few hundred seeds.
 - per-file `# typing:` directives and suppression comments;
 - `NAMESPACE` validation, and project stub overrides including their loader-problem reports;
 - data-masked evaluation;
-- the formatter's `--check`, `--diff`, and in-place modes.
+- the formatter's `--check`, `--diff`, and in-place modes;
+- `ry run` and `ry R` without R: help output, usage errors, a missing script, and strict mode
+  refusing a script before any R starts.
+
+`crates/ry/tests/test_command_line.rs` property-tests and fuzzes argument parsing for `ry run`,
+`ry R` and the `ry repl` alias against a model: everything after the script reaches it verbatim,
+options resolve to the documented runtime and mode, and no argument vector panics the parser.
+`test_repl_e2e.rs` runs every entry point on both runtimes: script arguments, `-i`, piped consoles,
+and the earlier spellings (`--runtime`, `RY_RUNTIME`, `ry repl`).
 
 ### Package loading
 
 `crates/ry/tests/test_load.rs` runs `ry load` and plain `Rscript` against a real GNU R and checks
 the loaded result: `Collate` order, imports, S3 and S4 registration, `Depends`, `sysdata.rda`,
 source references, reloads that rebind, rerun and remove, undoing deleted S4 definitions, the error
-locations, and the `ry load --r-entry` entry point. `test_repl_e2e.rs` checks that `ry repl` loads
+locations, and the `ry load --r-entry` entry point. `test_repl_e2e.rs` checks that `ry R` loads
 the package it starts in and reloads an edit before the next command. Both skip without R.
 
 ### Native packages

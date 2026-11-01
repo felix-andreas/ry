@@ -5,8 +5,11 @@ description: Reject code whose types ry cannot determine
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-By default, ry checks what it can and lets the rest through as `Unknown`. Strict mode turns that
-around: every value ry cannot type, and every parameter nothing constrains, is an error.
+By default, ry checks what it can and lets the rest through as `Unknown`, so a clean `ry check`
+does not tell you how much was actually checked. Strict mode turns that around: every value ry
+cannot type, and every parameter nothing constrains, is an error. A clean run then means every value
+in the code has a known type, which is what you want before you let an agent change it. Strict mode is a check, so it needs
+nothing from ry's runtime: it works on plain R with `#:` comments, run on GNU R.
 
 ```toml
 [check]
@@ -14,11 +17,12 @@ typing = true
 strict = true
 ```
 
-A `# typing: strict` comment turns it on for a single file instead.
+Keep `typing = true` beside it: `strict = true` alone reports values with no type, but not type
+errors. A `# typing: strict` comment turns it on for a single file instead.
 
-Strict mode also guards running code. `ry run` prints the errors and exits with status 1 instead
-of running a script that has one, `ry load` does the same for a package whose `R/` files have one,
-and `ry repl` refuses each command that has one:
+Strict mode also guards running code. `ry run` and `ry R` print the errors and exit with status 1 instead of
+running a script that has one, `ry load` does the same for a package whose `R/` files have one,
+and the console refuses each command that has one:
 
 ```text
   x strict mode found 1 error, so this code does not run
@@ -75,8 +79,9 @@ An unresolved name, normally a warning, becomes an error.
 
 An annotation clears the finding, because the value now has a type. A value declared `Any`, or a
 call that returns `Any` (`readRDS()`, `eval()`, and S3 generics that dispatch through `UseMethod()`),
-is a deliberate opt-out, so strict mode does not report it.
+is a deliberate opt-out, so strict mode does not report it. A call to `stop()` never returns, so it
+types as `Any` too, and a guard such as `if (x < 0) stop("negative")` is not reported.
 
-Strict mode does not yet report R6 objects or bare names from packages ry knows only by name, and it
-wrongly reports a `stop()` guard such as `if (x < 0) stop("negative")`. `# ry: allow(strict)` on that
-line silences it.
+## Known gaps
+
+Strict mode does not yet report R6 objects or bare names from packages ry knows only by name.

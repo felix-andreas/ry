@@ -7,14 +7,16 @@
 //! and compiled code reacts by deoptimizing, which hands the unwind to the interpreter.
 
 use crate::analysis::{Speculation, resolve_function};
-use heap::object::{Header, NA_INTEGER, Sexp, SexpType, is_na_real};
+use heap::object::{Header, NA_INTEGER, Sexp, SexpType, gp, is_na_real};
 use interp::{
     arith,
     bytecode::{self, LoopState, Machine, PROFILE, TIER1, profile},
+    builtins::Arg,
     eval, heap,
     unwind::{R, Unwind, error},
     values,
 };
+use smallvec::SmallVec;
 use std::{
     any::Any,
     cell::Cell,
@@ -95,36 +97,21 @@ pub struct Compiled {
     pub osr: Vec<usize>,
 }
 
-/// Whether every function lookup compiled code assumed still resolves the same way.
+/// Whether every function lookup compiled code assumed still resolves the same way. Every
+/// change that could alter such a lookup moves the binding epoch (see `gp::WATCHED`), so an
+/// unchanged epoch proves the lookups without walking them.
 pub unsafe fn valid(compiled: &Compiled) -> bool {
-    let heap = heap();
-    let epoch = heap.binding_epoch();
-    if epoch != compiled.epoch.get() {
-        for speculation in &compiled.speculations {
-            match resolve_function(speculation.symbol, compiled.enclosure) {
-                Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
-                _ => return false,
-            }
-        }
-        compiled.epoch.set(epoch);
+    let epoch = heap().binding_epoch();
+    if epoch == compiled.epoch.get() {
+        return true;
     }
     for speculation in &compiled.speculations {
-        let mut value = speculation.cell.cdr();
-        if value.kind() == SexpType::Promise {
-            value = value.car();
-        }
-        if value != speculation.function {
-            return false;
-        }
-        if speculation.frames.iter().any(|&frame| heap.frame_cell(frame, speculation.symbol).is_some()) {
-            return false;
-        }
-        if let Some(home) = speculation.home
-            && heap.frame_cell(home, speculation.symbol) != Some(speculation.cell)
-        {
-            return false;
+        match resolve_function(speculation.symbol, speculation.env) {
+            Some(found) if found.cell == speculation.cell && found.function == speculation.function => {}
+            _ => return false,
         }
     }
+    compiled.epoch.set(epoch);
     true
 }
 
@@ -174,9 +161,11 @@ unsafe fn guarded<T>(activation: *mut Activation, fallback: T, body: impl FnOnce
 }
 
 /// Runs `body` with the handle stack restored afterwards. Tier 0 releases the handles an
-/// activation pushed on every backward jump; compiled loops have no such point, so each
-/// helper that can run interpreter code releases what it pushed. Anything still needed is
-/// held by a register or the environment by then.
+/// activation pushed on every backward jump; compiled loops have no such point, so every
+/// helper that can allocate releases what it pushed, including the boxing helpers, because
+/// each interpreter constructor roots its result. Anything still needed is held by a register
+/// or the environment by then: compiled code stores a helper's result in the register window
+/// before it allocates again.
 unsafe fn scoped<T>(body: impl FnOnce() -> T) -> T {
     let mark = heap().handle_mark();
     let value = body();
@@ -188,6 +177,20 @@ fn park(activation: &mut Activation, unwind: Unwind) {
     activation.pending = Some(unwind);
 }
 
+/// Like [`guarded`], but fails at once while an error is parked. A failed allocation in a box
+/// helper parks its error and hands compiled code `NULL`, which has no failure branch, so the
+/// next helper that would run interpreter code with that value fails instead and the error
+/// reaches tier 0. Write-back and deoptimization helpers use [`guarded`], because they must
+/// still run after an error to leave the frame as tier 0 expects it.
+unsafe fn checked<T>(activation: *mut Activation, fallback: T, body: impl FnOnce(&mut Activation) -> T) -> T {
+    unsafe {
+        if (*activation).pending.is_some() {
+            return fallback;
+        }
+        guarded(activation, fallback, body)
+    }
+}
+
 unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     unsafe { activation.registers.add(compiled(activation).registers + slot as usize) }
 }
@@ -195,7 +198,7 @@ unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
 /// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
 pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate: i32) -> i32 {
     unsafe {
-        guarded(activation, outcome::FAILED, |activation| {
+        checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
             match scoped(|| bytecode::step_one(machine, pc as usize)) {
                 Err(unwind) => {
@@ -212,7 +215,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
 /// Loads the variable `GetVar` at `pc` reads into its slot. Returns the slot's status.
 pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i64) -> i32 {
     unsafe {
-        guarded(activation, outcome::LOAD_FAILED, |activation| {
+        checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let loaded = scoped(|| bytecode::load_variable(machine.code, machine.env, pc as usize));
             finish_load(activation, slot, loaded)
@@ -223,7 +226,7 @@ pub unsafe extern "C" fn jit_load(activation: *mut Activation, pc: i64, slot: i6
 /// Loads a slot's variable for an element assignment, which has no inline cache.
 pub unsafe extern "C" fn jit_load_slot(activation: *mut Activation, slot: i64) -> i32 {
     unsafe {
-        guarded(activation, outcome::LOAD_FAILED, |activation| {
+        checked(activation, outcome::LOAD_FAILED, |activation| {
             let machine = machine(activation);
             let symbol = compiled(activation).slots[slot as usize];
             let loaded = scoped(|| {
@@ -251,6 +254,119 @@ unsafe fn finish_load(activation: &mut Activation, slot: i64, loaded: R<(Sexp, b
                 if local { 1 } else { 2 }
             }
         }
+    }
+}
+
+/// Loads a slot's variable for an inlined call without running any code: a promise must
+/// already be forced, and an active binding or a missing variable declines with
+/// [`outcome::LOAD_FAILED`], which hands the call back to tier 0.
+pub unsafe extern "C" fn jit_peek_slot(activation: *mut Activation, slot: i64) -> i32 {
+    unsafe {
+        checked(activation, outcome::LOAD_FAILED, |activation| {
+            let machine = machine(activation);
+            let symbol = compiled(activation).slots[slot as usize];
+            let heap = heap();
+            let empty = heap.known().empty_env;
+            let mut env = machine.env;
+            let mut local = true;
+            while env != empty {
+                if let Some(cell) = heap.frame_cell(env, symbol) {
+                    if cell.has_gp(gp::ACTIVE_BINDING) {
+                        return outcome::LOAD_FAILED;
+                    }
+                    let mut value = cell.cdr();
+                    if value.kind() == SexpType::Promise {
+                        if value.car() == values::unbound() {
+                            return outcome::LOAD_FAILED;
+                        }
+                        value = value.car();
+                    }
+                    if value == values::missing_arg() || value == values::unbound() {
+                        return outcome::LOAD_FAILED;
+                    }
+                    *slot_cell(activation, slot) = value;
+                    return if local { 1 } else { 2 };
+                }
+                local = false;
+                env = env.enclosure();
+            }
+            outcome::LOAD_FAILED
+        })
+    }
+}
+
+/// Whether `value` is a closure made from `formals` and `body` in the activation's
+/// environment, which is what an inlined call of it assumes.
+pub unsafe extern "C" fn jit_closure_matches(activation: *mut Activation, value: *mut Header, formals: *mut Header, body: *mut Header) -> i32 {
+    unsafe {
+        guarded(activation, 0, |activation| {
+            let (Some(value), Some(formals), Some(body)) = (Sexp::from_raw(value), Sexp::from_raw(formals), Sexp::from_raw(body)) else {
+                return 0;
+            };
+            let matches = value.kind() == SexpType::Closure
+                && value.car() == formals
+                && value.tag() == machine(activation).env
+                && bytecode::closure_body(value) == body;
+            matches as i32
+        })
+    }
+}
+
+/// Calls the closure `function` for `call` with arguments compiled code evaluated, and puts the
+/// result in register `dst`. `arguments` holds a representation and its bits for each argument
+/// (see [`representation`]); an argument whose expression is code is bound to a promise that
+/// already holds its value, so the callee cannot tell it was evaluated early.
+pub unsafe extern "C" fn jit_call(
+    activation: *mut Activation,
+    function: *mut Header,
+    call: *mut Header,
+    arguments: *const i64,
+    count: i64,
+    dst: i64,
+) -> i32 {
+    unsafe {
+        checked(activation, outcome::FAILED, |activation| {
+            let (Some(function), Some(call)) = (Sexp::from_raw(function), Sexp::from_raw(call)) else {
+                park(activation, error("compiled code passed a null call"));
+                return outcome::FAILED;
+            };
+            let machine = machine(activation);
+            let arguments = std::slice::from_raw_parts(arguments, 2 * count as usize);
+            let result = scoped(|| -> R<Sexp> {
+                let heap = heap();
+                let mut args: SmallVec<[Arg; 4]> = SmallVec::with_capacity(count as usize);
+                let mut expressions = call.cdr();
+                for pair in arguments.chunks_exact(2) {
+                    let (kind, bits) = (pair[0] as i32, pair[1]);
+                    let value = match kind {
+                        representation::INTEGER => values::scalar_integer(bits as i32)?,
+                        representation::DOUBLE => values::scalar_real(f64::from_bits(bits as u64))?,
+                        representation::LOGICAL => values::scalar_logical(bits as i32)?,
+                        _ => Sexp::from_raw(bits as *mut Header).ok_or_else(|| error("compiled code passed a null argument"))?,
+                    };
+                    heap.root(value);
+                    let expression = expressions.car();
+                    let value = match expression.kind() {
+                        SexpType::Symbol | SexpType::Language => eval::forced_promise(expression, value)?,
+                        _ => value,
+                    };
+                    heap.root(value);
+                    args.push(Arg { tag: values::nil(), value });
+                    expressions = expressions.cdr();
+                }
+                eval::apply_closure(call, function, &args, machine.env, None)
+            });
+            match result {
+                Err(unwind) => {
+                    park(activation, unwind);
+                    outcome::FAILED
+                }
+                Ok(value) => {
+                    *activation.registers.add(dst as usize) = value;
+                    if !valid(compiled(activation)) { outcome::INVALIDATED } else { outcome::OK }
+                }
+            }
+        })
     }
 }
 
@@ -322,7 +438,7 @@ pub unsafe extern "C" fn jit_deopt(activation: *mut Activation, pc: i64, why: i3
 /// `if (value)`: 1 or 0, or 2 after parking the error.
 pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut Header, call: *mut Header) -> i32 {
     unsafe {
-        guarded(activation, 2, |activation| {
+        checked(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
                 park(activation, error("compiled code passed a null condition"));
                 return 2;
@@ -341,7 +457,7 @@ pub unsafe extern "C" fn jit_condition(activation: *mut Activation, value: *mut 
 /// An operand of `&&` or `||` as a logical scalar, or 2 after parking the error.
 pub unsafe extern "C" fn jit_logic(activation: *mut Activation, value: *mut Header, call: *mut Header, is_and: i32, right: i32) -> i32 {
     unsafe {
-        guarded(activation, 2, |activation| {
+        checked(activation, 2, |activation| {
             let (Some(value), Some(call)) = (Sexp::from_raw(value), Sexp::from_raw(call)) else {
                 park(activation, error("compiled code passed a null operand"));
                 return 2;
@@ -366,7 +482,7 @@ pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, d
         guarded(activation, std::ptr::null_mut(), |activation| {
             let cell = slot_cell(activation, slot);
             let old = *cell;
-            match values::shallow_duplicate(old) {
+            match scoped(|| values::shallow_duplicate(old)) {
                 Ok(copy) => {
                     copy.increment_refcount();
                     *cell = copy;
@@ -386,7 +502,7 @@ pub unsafe extern "C" fn jit_duplicate(activation: *mut Activation, slot: i64, d
 
 unsafe fn boxed(activation: *mut Activation, make: impl FnOnce() -> R<Sexp>) -> *mut Header {
     unsafe {
-        guarded(activation, values::nil().as_ptr(), |activation| match make() {
+        guarded(activation, values::nil().as_ptr(), |activation| match scoped(make) {
             Ok(value) => value.as_ptr(),
             // Only an exhausted heap gets here. The next helper sees the parked error.
             Err(unwind) => {

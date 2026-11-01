@@ -40,8 +40,8 @@ closure installed into a GNU R library, and the differential oracle is the harne
 code under GNU R and under ry and compares the results (both from build step 1 of the runtime
 design). A package manager of ry's own (`ry add`, `ry sync`, a lockfile format) is a product question
 the runtime does not need answered, so it stays open. Only two pieces exist: `crates/rcmd` installs
-a package against ry's R home with `R CMD INSTALL` semantics, and `--runtime` (or `RY_RUNTIME`)
-picks the runtime explicitly. The rest is a proposal; the measurements are real.
+a package against ry's R home with `R CMD INSTALL` semantics, and the command picks the runtime
+explicitly: `ry run` and `ry load` run on ry's runtime, `ry R` on GNU R. The rest is a proposal; the measurements are real.
 
 ## The decisions
 
@@ -57,9 +57,10 @@ picks the runtime explicitly. The rest is a proposal; the measurements are real.
 - **Package management runs as R code at first.** `install.packages`, renv and pak are R code, and
   ry's runtime runs them like any other package, which keeps every existing workflow working. ry adds
   no installer of its own for the runtime's sake.
-- **The runtime is chosen by configuration, never by failure:** `[r] runtime = "gnu" | "ry"` in
-  `ry.toml`, `--runtime`, or `RY_RUNTIME`. GNU R is the default until ry's runtime passes the
-  benchmark, then ry. An explicitly requested R version other than 4.6 means GNU R.
+- **The runtime is chosen explicitly, never by failure.** The command names it: `ry run` is ry's
+  runtime and `ry R` is GNU R (decision record "ry run and ry R"). The hidden `--runtime` flag and
+  `RY_RUNTIME` remain for older scripts. An explicitly requested R version other than 4.6 means GNU
+  R; whether a version request should live on `ry R` alone is open.
 - **The corpus is pinned with renv**, which the benchmark already depends on, against a dated P3M
   snapshot, and installed under GNU R in build step 1.
 
@@ -119,8 +120,10 @@ cache exists (build step 5), ry's runtime loads an installed package the way GNU
 
 ## Choosing the runtime and the R version
 
-Two settings decide what `ry run`, `ry repl` and their worker processes start: the runtime and the R
-version. Each comes from, in order, a command-line flag (`--runtime ry`, `--r 4.5`), the environment
+This section predates the split into `ry run` (ry's runtime) and `ry R` (GNU R), which settled the
+runtime half: the command chooses it, and a `[r] runtime` key would only reintroduce a hidden switch.
+The version half is still open. Two settings decide what a session and its worker processes start:
+the runtime and the R version. Each comes from, in order, a command-line flag (`--runtime ry`, `--r 4.5`), the environment
 (`RY_RUNTIME`, `RY_R`), or the `[r]` table of `ry.toml`:
 
 ```toml

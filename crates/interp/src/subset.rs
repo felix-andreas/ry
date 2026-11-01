@@ -188,6 +188,14 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
         return select_elements(list, indices);
     }
     let count = length(vector);
+    match kind {
+        SexpType::Logical | SexpType::Integer => {
+            return gather(kind, values::ints(vector), indices, NA_INTEGER, |result| values::ints_mut(result));
+        }
+        SexpType::Real => return gather(kind, values::reals(vector), indices, NA_REAL, |result| values::reals_mut(result)),
+        SexpType::Raw => return gather(kind, values::raws(vector), indices, 0, |result| values::raws_mut(result)),
+        _ => {}
+    }
     let result = alloc(kind, indices.len())?;
     for (position, &index) in indices.iter().enumerate() {
         if index < count {
@@ -195,6 +203,21 @@ pub unsafe fn select_elements(vector: Sexp, indices: &[usize]) -> R<Sexp> {
         } else {
             set_na(result, position);
         }
+    }
+    Ok(result)
+}
+
+/// `source[indices]` for an atomic vector of plain elements, with NA past the end.
+unsafe fn gather<T: Copy + 'static>(
+    kind: SexpType,
+    source: &[T],
+    indices: &[usize],
+    missing: T,
+    output: impl Fn(Sexp) -> &'static mut [T],
+) -> R<Sexp> {
+    let result = values::alloc_uninit(kind, indices.len())?;
+    for (slot, &index) in output(result).iter_mut().zip(indices) {
+        *slot = source.get(index).copied().unwrap_or(missing);
     }
     Ok(result)
 }
@@ -223,8 +246,15 @@ pub unsafe fn dispatch_length(object: Sexp, env: Sexp) -> R<usize> {
 
 // Index resolution.
 
-/// One resolved subscript: a zero-based position (possibly past the end), or NA.
-type Position = Option<usize>;
+/// One resolved subscript: a zero-based position, possibly past the end. It is a plain `usize`
+/// with two reserved values rather than an `Option`, because subsetting a long vector resolves
+/// one position per element and the halved width and the lack of a conversion pass show up in
+/// vector code.
+type Position = usize;
+/// An `NA` subscript.
+const NA_POSITION: Position = usize::MAX;
+/// A character subscript that matches no name, outside assignment.
+const UNMATCHED: Position = usize::MAX - 1;
 
 /// Resolves a subscript against an extent. `names` are the names to match character
 /// subscripts against; unmatched names give positions past the end, with the names to give
@@ -237,7 +267,7 @@ unsafe fn resolve(
     call: Sexp,
 ) -> R<(Vec<Position>, Vec<Option<Sexp>>)> {
     if index == missing_arg() {
-        return Ok(((0..extent).map(Some).collect(), Vec::new()));
+        return Ok(((0..extent).collect(), Vec::new()));
     }
     let index = values::materialize(index)?;
     let index = if values::inherits(index, "factor") {
@@ -257,8 +287,8 @@ unsafe fn resolve(
             let mut positions = Vec::new();
             for position in 0..total {
                 match flags[position % count] {
-                    1 => positions.push(Some(position)),
-                    NA_LOGICAL => positions.push(None),
+                    1 => positions.push(position),
+                    NA_LOGICAL => positions.push(NA_POSITION),
                     _ => {}
                 }
             }
@@ -293,26 +323,17 @@ unsafe fn resolve(
                         keep[value - 1] = false;
                     }
                 }
-                let positions = keep
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, kept)| **kept)
-                    .map(|(position, _)| Some(position))
-                    .collect();
+                let mut positions = Vec::with_capacity(extent);
+                positions.extend((0..extent).filter(|&position| keep[position]));
                 return Ok((positions, Vec::new()));
             }
             let mut positions = Vec::with_capacity(count);
             for position in 0..count {
                 let value = numeric_element(index, position);
                 if value.is_nan() {
-                    positions.push(None);
+                    positions.push(NA_POSITION);
                 } else if value >= 1.0 {
-                    let position = value.trunc() as usize - 1;
-                    if position >= extent && !assigning && false {
-                        positions.push(None);
-                    } else {
-                        positions.push(Some(position));
-                    }
+                    positions.push(value.trunc() as usize - 1);
                 }
             }
             Ok((positions, Vec::new()))
@@ -333,7 +354,7 @@ unsafe fn resolve(
                     })
                 };
                 match found {
-                    Some(found) => positions.push(Some(found)),
+                    Some(found) => positions.push(found),
                     None => {
                         if assigning {
                             let existing = appended
@@ -346,9 +367,9 @@ unsafe fn resolve(
                                     extent + appended.len() - 1
                                 }
                             };
-                            positions.push(Some(slot));
+                            positions.push(slot);
                         } else {
-                            positions.push(Some(usize::MAX));
+                            positions.push(UNMATCHED);
                         }
                     }
                 }
@@ -484,29 +505,14 @@ pub unsafe fn subset(object: Sexp, indices: &[Sexp], drop: bool, call: Sexp) -> 
     }
     let count = length(object);
     let names = values::names(object);
-    let (positions, _) = resolve(index, count, names, false, call)?;
-    let indices: Vec<usize> = positions
-        .iter()
-        .map(|position| position.unwrap_or(usize::MAX))
-        .collect();
+    let (indices, _) = resolve(index, count, names, false, call)?;
     let result = select_elements(object, &indices)?;
     if names != nil() {
         let new_names = alloc(SexpType::String, indices.len())?;
         for (position, &index) in indices.iter().enumerate() {
-            let name = if index < count {
-                names.element(index)
-            } else if object.kind() == SexpType::List || object.kind() == SexpType::Expression {
-                if index == usize::MAX && positions[position].is_none() {
-                    na_string()
-                } else {
-                    na_string()
-                }
-            } else {
-                na_string()
-            };
+            let name = if index < count { names.element(index) } else { na_string() };
             values::set_elt(new_names, position, name);
         }
-        // An out-of-range name on a list subset becomes `NA`; character subscripts keep `NA`.
         values::set_attr(result, symbols().names, new_names)?;
     }
     // A one-dimensional array stays one when indexed.
@@ -555,37 +561,14 @@ unsafe fn array_subset(
         let mut selection = Vec::with_capacity(positions.len());
         for position in positions {
             match position {
-                Some(position) if position < extent => selection.push(position),
-                Some(_) => return Err(crate::unwind::error_in(call, "subscript out of bounds")),
-                None => selection.push(usize::MAX),
+                position if position < extent => selection.push(position),
+                NA_POSITION => selection.push(NA_POSITION),
+                _ => return Err(crate::unwind::error_in(call, "subscript out of bounds")),
             }
         }
         selections.push(selection);
     }
-    let total: usize = selections.iter().map(Vec::len).product();
-    let mut flat = Vec::with_capacity(total);
-    let mut counters = vec![0usize; dims.len()];
-    for _ in 0..total {
-        let mut offset = 0usize;
-        let mut stride = 1usize;
-        let mut na = false;
-        for (dimension, &counter) in counters.iter().enumerate() {
-            let position = selections[dimension][counter];
-            if position == usize::MAX {
-                na = true;
-            }
-            offset = offset.wrapping_add(position.wrapping_mul(stride));
-            stride *= dims[dimension];
-        }
-        flat.push(if na { usize::MAX } else { offset });
-        for (dimension, counter) in counters.iter_mut().enumerate() {
-            *counter += 1;
-            if *counter < selections[dimension].len() {
-                break;
-            }
-            *counter = 0;
-        }
-    }
+    let flat = flat_offsets(&selections, dims);
     let result = select_elements(object, &flat)?;
     let new_dims: Vec<usize> = selections.iter().map(Vec::len).collect();
     let new_dimnames: Vec<Sexp> = if dimnames.kind() == SexpType::List {
@@ -642,6 +625,32 @@ unsafe fn array_subset(
         values::set_attr(result, symbols().dimnames, list)?;
     }
     Ok(result)
+}
+
+/// The column-major offsets of every combination of `selections`, the first dimension varying
+/// fastest, with `NA_POSITION` wherever a selected position is `NA`.
+fn flat_offsets(selections: &[Vec<usize>], dims: &[usize]) -> Vec<usize> {
+    let mut flat = vec![0usize];
+    let mut stride = 1usize;
+    for (selection, &extent) in selections.iter().zip(dims) {
+        let offset = |base: usize, position: usize| {
+            if base == NA_POSITION || position == NA_POSITION { NA_POSITION } else { base + position * stride }
+        };
+        // A single offset so far (the first dimension, or a scalar index before this one) maps
+        // straight over the selection, which is the shape of a row or column subscript.
+        if let [base] = flat[..] {
+            flat = selection.iter().map(|&position| offset(base, position)).collect();
+            stride *= extent;
+            continue;
+        }
+        let mut next = Vec::with_capacity(flat.len() * selection.len());
+        for &position in selection {
+            next.extend(flat.iter().map(|&base| offset(base, position)));
+        }
+        flat = next;
+        stride *= extent;
+    }
+    flat
 }
 
 // `[[`.
@@ -1253,7 +1262,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         let names = values::names(object);
         let index = indices.first().copied().unwrap_or(missing_arg());
         let (positions, _) = resolve(index, count, names, true, call)?;
-        let remove: std::collections::HashSet<usize> = positions.into_iter().flatten().collect();
+        let remove: std::collections::HashSet<usize> = positions.into_iter().filter(|&position| position != NA_POSITION).collect();
         let kept: Vec<usize> = (0..count)
             .filter(|position| !remove.contains(position))
             .collect();
@@ -1324,7 +1333,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
             let mut selection = Vec::new();
             for position in positions {
                 match position {
-                    Some(position) if position < extent => selection.push(position),
+                    position if position < extent => selection.push(position),
                     _ => return Err(crate::unwind::error_in(call, "subscript out of bounds")),
                 }
             }
@@ -1343,23 +1352,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
                 "number of items to replace is not a multiple of replacement length",
             ));
         }
-        let mut counters = vec![0usize; dims.len()];
-        for position in 0..total {
-            let mut offset = 0usize;
-            let mut stride = 1usize;
-            for (dimension, &counter) in counters.iter().enumerate() {
-                offset += selections[dimension][counter] * stride;
-                stride *= dims[dimension];
-            }
-            assign_element(result, offset, value, position % value_count)?;
-            for (dimension, counter) in counters.iter_mut().enumerate() {
-                *counter += 1;
-                if *counter < selections[dimension].len() {
-                    break;
-                }
-                *counter = 0;
-            }
-        }
+        scatter(result, &flat_offsets(&selections, &dims), value)?;
         return Ok(result);
     }
     let index = indices.first().copied().unwrap_or(missing_arg());
@@ -1381,7 +1374,7 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
         return Ok(result);
     }
     let (positions, new_names) = resolve(index, count, names, true, call)?;
-    let positions: Vec<usize> = positions.into_iter().flatten().collect();
+    let positions: Vec<usize> = positions.into_iter().filter(|&position| position != NA_POSITION).collect();
     if positions.is_empty() {
         return Ok(result);
     }
@@ -1446,6 +1439,35 @@ unsafe fn grow(vector: Sexp, new_length: usize) -> R<Sexp> {
         values::set_attr(result, symbols().names, grown)?;
     }
     Ok(result)
+}
+
+/// `target[offsets] <- value`, recycling `value`, which is not empty.
+unsafe fn scatter(target: Sexp, offsets: &[usize], value: Sexp) -> R<()> {
+    let value = values::materialize(value)?;
+    let count = length(value);
+    if value != target && value.kind() == target.kind() {
+        match target.kind() {
+            SexpType::Real => {
+                recycle_into(values::reals_mut(target), offsets, values::reals(value));
+                return Ok(());
+            }
+            SexpType::Integer | SexpType::Logical => {
+                recycle_into(values::ints_mut(target), offsets, values::ints(value));
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    for (position, &offset) in offsets.iter().enumerate() {
+        assign_element(target, offset, value, position % count)?;
+    }
+    Ok(())
+}
+
+fn recycle_into<T: Copy>(target: &mut [T], offsets: &[usize], source: &[T]) {
+    for (&offset, &item) in offsets.iter().zip(source.iter().cycle()) {
+        target[offset] = item;
+    }
 }
 
 unsafe fn assign_element(target: Sexp, position: usize, value: Sexp, value_index: usize) -> R<()> {
@@ -2457,7 +2479,7 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
         for position in 0..total {
             set_na(result, position);
         }
-    } else {
+    } else if by_row || !fill_recycled(result, data) {
         for row in 0..rows {
             for col in 0..cols {
                 let target = row + col * rows;
@@ -2472,6 +2494,29 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
         set_dimnames(result, dimnames, call.call)?;
     }
     Ok(result)
+}
+
+/// Fills `result` with `data` recycled, when both are the same plain atomic type and `data` is
+/// not empty. Returns whether it did.
+unsafe fn fill_recycled(result: Sexp, data: Sexp) -> bool {
+    fn fill<T: Copy>(target: &mut [T], source: &[T]) {
+        if let [single] = source {
+            target.fill(*single);
+        } else {
+            for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
+                *slot = item;
+            }
+        }
+    }
+    if data.kind() != result.kind() || length(data) == 0 {
+        return false;
+    }
+    match data.kind() {
+        SexpType::Real => fill(values::reals_mut(result), values::reals(data)),
+        SexpType::Integer | SexpType::Logical => fill(values::ints_mut(result), values::ints(data)),
+        _ => return false,
+    }
+    true
 }
 
 unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
@@ -2489,11 +2534,13 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
         data.kind()
     };
     let result = alloc(kind, total)?;
-    for position in 0..total {
-        if count == 0 {
-            set_na(result, position);
-        } else {
-            copy_element(data, position % count, result, position)?;
+    if count == 0 || !fill_recycled(result, data) {
+        for position in 0..total {
+            if count == 0 {
+                set_na(result, position);
+            } else {
+                copy_element(data, position % count, result, position)?;
+            }
         }
     }
     let dims = values::duplicate(dims)?;

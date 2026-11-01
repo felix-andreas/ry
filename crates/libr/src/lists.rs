@@ -373,6 +373,7 @@ closure_reader!(PRVALUE, SexpType::Promise, car);
 closure_reader!(PRCODE, SexpType::Promise, cdr);
 closure_reader!(PRENV, SexpType::Promise, tag);
 closure_reader!(R_PromiseExpr, SexpType::Promise, cdr);
+closure_reader!(PREXPR, SexpType::Promise, cdr);
 
 macro_rules! promise_writer {
     ($name:ident, $setter:ident) => {

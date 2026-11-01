@@ -837,123 +837,84 @@ pub unsafe fn real_at(vector: Sexp, index: usize) -> f64 {
 }
 
 unsafe fn real_arithmetic(op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
-    let result = alloc(SexpType::Real, count)?;
+    let result = values::alloc_uninit(SexpType::Real, count)?;
     if count == 0 {
         return Ok(result);
     }
     let output = values::reals_mut(result);
-    let as_real = |value: i32| {
-        if value == NA_INTEGER {
-            NA_REAL
-        } else {
-            value as f64
+    let real = |value: f64| value;
+    match (left.kind(), right.kind()) {
+        (SexpType::Real, SexpType::Real) => {
+            real_kernel(op, values::reals(left), values::reals(right), output, real, real)
         }
-    };
-    match (
-        left.kind() == SexpType::Real,
-        right.kind() == SexpType::Real,
-    ) {
-        (true, true) => real_kernel(
-            op,
-            output,
-            values::reals(left),
-            values::reals(right),
-            |x| x,
-            |y| y,
-        ),
-        (true, false) => real_kernel(
-            op,
-            output,
-            values::reals(left),
-            values::ints(right),
-            |x| x,
-            as_real,
-        ),
-        (false, true) => real_kernel(
-            op,
-            output,
-            values::ints(left),
-            values::reals(right),
-            as_real,
-            |y| y,
-        ),
-        (false, false) => real_kernel(
-            op,
-            output,
-            values::ints(left),
-            values::ints(right),
-            as_real,
-            as_real,
-        ),
+        (SexpType::Real, _) => real_kernel(op, values::reals(left), values::ints(right), output, real, widen),
+        (_, SexpType::Real) => real_kernel(op, values::ints(left), values::reals(right), output, widen, real),
+        _ => real_kernel(op, values::ints(left), values::ints(right), output, widen, widen),
     }
     Ok(result)
 }
 
-/// Matches the operator once, outside the element loop, so each arm compiles to its own loop
-/// that the compiler can vectorize.
+/// An integer or logical element as a double.
+#[inline(always)]
+fn widen(value: i32) -> f64 {
+    if value == NA_INTEGER { NA_REAL } else { value as f64 }
+}
+
+/// Applies `op` elementwise with recycling. Each operator gets its own loop, so the common
+/// cases compile to straight-line vector code instead of a dispatch per element.
 #[inline(always)]
 fn real_kernel<A: Copy, B: Copy>(
     op: Op,
+    a: &[A],
+    b: &[B],
     output: &mut [f64],
-    left: &[A],
-    right: &[B],
-    left_real: impl Fn(A) -> f64 + Copy,
-    right_real: impl Fn(B) -> f64 + Copy,
+    left: impl Fn(A) -> f64,
+    right: impl Fn(B) -> f64,
 ) {
     match op {
-        Op::Add => recycle(output, left, right, |x, y| left_real(x) + right_real(y)),
-        Op::Subtract => recycle(output, left, right, |x, y| left_real(x) - right_real(y)),
-        Op::Multiply => recycle(output, left, right, |x, y| left_real(x) * right_real(y)),
-        Op::Divide => recycle(output, left, right, |x, y| left_real(x) / right_real(y)),
-        Op::Power => recycle(output, left, right, |x, y| {
-            power(left_real(x), right_real(y))
-        }),
-        Op::Modulo => recycle(output, left, right, |x, y| {
-            real_modulo(left_real(x), right_real(y))
-        }),
-        Op::IntegerDivide => recycle(output, left, right, |x, y| {
-            (left_real(x) / right_real(y)).floor()
-        }),
+        Op::Add => recycle(a, b, output, |x, y| left(x) + right(y)),
+        Op::Subtract => recycle(a, b, output, |x, y| left(x) - right(y)),
+        Op::Multiply => recycle(a, b, output, |x, y| left(x) * right(y)),
+        Op::Divide => recycle(a, b, output, |x, y| left(x) / right(y)),
+        Op::Power => recycle(a, b, output, |x, y| power(left(x), right(y))),
+        Op::Modulo => recycle(a, b, output, |x, y| real_modulo(left(x), right(y))),
+        Op::IntegerDivide => recycle(a, b, output, |x, y| (left(x) / right(y)).floor()),
     }
 }
 
-/// Fills `output` with `operation` applied to R's recycled pairs of `left` and `right`. The
-/// common shapes (equal lengths, or one scalar operand) get loops without index arithmetic,
-/// and the general case advances two wrapping indices instead of computing two remainders per
-/// element. Both operands must be non-empty unless `output` is.
+/// `output[i] = f(a[i % a.len()], b[i % b.len()])`, with the equal-length and scalar cases
+/// split out because they are almost every call and vectorize.
 #[inline(always)]
-fn recycle<A: Copy, B: Copy, T>(
-    output: &mut [T],
-    left: &[A],
-    right: &[B],
-    mut operation: impl FnMut(A, B) -> T,
-) {
+fn recycle<T: Copy, U: Copy, O>(a: &[T], b: &[U], output: &mut [O], f: impl Fn(T, U) -> O) {
     let count = output.len();
-    if left.len() == count && right.len() == count {
-        for ((slot, &x), &y) in output.iter_mut().zip(left).zip(right) {
-            *slot = operation(x, y);
+    if a.is_empty() || b.is_empty() {
+        return;
+    }
+    if a.len() == count && b.len() == count {
+        for ((slot, &x), &y) in output.iter_mut().zip(a).zip(b) {
+            *slot = f(x, y);
         }
-    } else if left.len() == count && right.len() == 1 {
-        let y = right[0];
-        for (slot, &x) in output.iter_mut().zip(left) {
-            *slot = operation(x, y);
+    } else if a.len() == count && b.len() == 1 {
+        let y = b[0];
+        for (slot, &x) in output.iter_mut().zip(a) {
+            *slot = f(x, y);
         }
-    } else if left.len() == 1 && right.len() == count {
-        let x = left[0];
-        for (slot, &y) in output.iter_mut().zip(right) {
-            *slot = operation(x, y);
+    } else if a.len() == 1 && b.len() == count {
+        let x = a[0];
+        for (slot, &y) in output.iter_mut().zip(b) {
+            *slot = f(x, y);
         }
     } else {
-        let (mut left_index, mut right_index) = (0, 0);
+        let (mut i, mut j) = (0, 0);
         for slot in output.iter_mut() {
-            *slot = operation(left[left_index], right[right_index]);
-            left_index += 1;
-            if left_index == left.len() {
-                left_index = 0;
+            *slot = f(a[i], b[j]);
+            i += 1;
+            if i == a.len() {
+                i = 0;
             }
-            right_index += 1;
-            if right_index == right.len() {
-                right_index = 0;
+            j += 1;
+            if j == b.len() {
+                j = 0;
             }
         }
     }
@@ -1036,66 +997,44 @@ pub fn real_modulo(a: f64, b: f64) -> f64 {
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
-    let result = alloc(SexpType::Integer, count)?;
-    let a = values::ints(left);
-    let b = values::ints(right);
-    let mut overflow = false;
+    let result = values::alloc_uninit(SexpType::Integer, count)?;
     if count == 0 {
         return Ok(result);
     }
+    let a = values::ints(left);
+    let b = values::ints(right);
     let output = values::ints_mut(result);
-    // An overflow is NA with a warning; R's own NA is the one value a checked result may not take.
-    let mut checked = |value: Option<i32>| match value {
+    let overflowed = std::cell::Cell::new(false);
+    let checked = |value: Option<i32>| match value {
         Some(value) if value != NA_INTEGER => value,
         _ => {
-            overflow = true;
+            overflowed.set(true);
             NA_INTEGER
         }
     };
     let either_na = |x: i32, y: i32| x == NA_INTEGER || y == NA_INTEGER;
     match op {
-        Op::Add => recycle(output, a, b, |x, y| {
-            if either_na(x, y) {
-                NA_INTEGER
-            } else {
-                checked(x.checked_add(y))
-            }
-        }),
-        Op::Subtract => recycle(output, a, b, |x, y| {
-            if either_na(x, y) {
-                NA_INTEGER
-            } else {
-                checked(x.checked_sub(y))
-            }
-        }),
-        Op::Multiply => recycle(output, a, b, |x, y| {
-            if either_na(x, y) {
-                NA_INTEGER
-            } else {
-                checked(x.checked_mul(y))
-            }
-        }),
-        Op::Modulo => recycle(output, a, b, |x, y| {
+        Op::Add => recycle(a, b, output, |x, y| if either_na(x, y) { NA_INTEGER } else { checked(x.checked_add(y)) }),
+        Op::Subtract => recycle(a, b, output, |x, y| if either_na(x, y) { NA_INTEGER } else { checked(x.checked_sub(y)) }),
+        Op::Multiply => recycle(a, b, output, |x, y| if either_na(x, y) { NA_INTEGER } else { checked(x.checked_mul(y)) }),
+        Op::Modulo => recycle(a, b, output, |x, y| {
             if either_na(x, y) || y == 0 {
                 NA_INTEGER
             } else {
                 x.rem_euclid(y) + if y < 0 && x.rem_euclid(y) != 0 { y } else { 0 }
             }
         }),
-        Op::IntegerDivide => recycle(output, a, b, |x, y| {
+        Op::IntegerDivide => recycle(a, b, output, |x, y| {
             if either_na(x, y) || y == 0 {
                 NA_INTEGER
             } else {
                 let value = (x as f64 / y as f64).floor() as i32;
-                if value == NA_INTEGER {
-                    NA_INTEGER
-                } else {
-                    value
-                }
+                if value == NA_INTEGER { NA_INTEGER } else { value }
             }
         }),
         Op::Divide | Op::Power => unreachable!(),
     }
+    let overflow = overflowed.get();
     if overflow {
         conditions::warning_call(call, "NAs produced by integer overflow")?;
     }
@@ -1297,7 +1236,7 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
-    let result = alloc(SexpType::Logical, count)?;
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
     // A list operand takes the other operand's type, element by element, as GNU R's `relop`
     // coerces it; two lists have no common type.
     let operand_kind = |value: Sexp| if value == nil() { SexpType::Logical } else { value.kind() };
@@ -1359,41 +1298,66 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 values::ints_mut(result)[index] = comparison.holds(a.cmp(&b)) as i32;
             }
         }
+        _ if count == 0 => {}
         SexpType::Integer | SexpType::Logical
-            if left.kind() != SexpType::Real && right.kind() != SexpType::Real =>
+            if matches!(left.kind(), SexpType::Integer | SexpType::Logical)
+                && matches!(right.kind(), SexpType::Integer | SexpType::Logical) =>
         {
-            let left = coerce_vector(left, SexpType::Integer)?;
-            let right = coerce_vector(right, SexpType::Integer)?;
-            let a = values::ints(left);
-            let b = values::ints(right);
-            for index in 0..count {
-                let x = a[index % left_length];
-                let y = b[index % right_length];
-                values::ints_mut(result)[index] = if x == NA_INTEGER || y == NA_INTEGER {
-                    NA_LOGICAL
-                } else {
-                    comparison.holds(x.cmp(&y)) as i32
-                };
-            }
+            let output = values::ints_mut(result);
+            compare_kernel(comparison, values::ints(left), values::ints(right), output, |x| x == NA_INTEGER, |x| x == NA_INTEGER, |x| x, |y| y);
         }
         _ => {
-            let left = coerce_vector(left, SexpType::Real)?;
-            let right = coerce_vector(right, SexpType::Real)?;
-            let a = values::reals(left);
-            let b = values::reals(right);
-            for index in 0..count {
-                let x = a[index % left_length];
-                let y = b[index % right_length];
-                values::ints_mut(result)[index] = if x.is_nan() || y.is_nan() {
-                    NA_LOGICAL
-                } else {
-                    comparison.holds(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)) as i32
-                };
+            let output = values::ints_mut(result);
+            let real = |value: f64| value;
+            let integer_na = |value: i32| value == NA_INTEGER;
+            let real_na = |value: f64| value.is_nan();
+            let left_integer = matches!(left.kind(), SexpType::Integer | SexpType::Logical);
+            let right_integer = matches!(right.kind(), SexpType::Integer | SexpType::Logical);
+            match (left_integer, right_integer, left.kind() == SexpType::Real && right.kind() == SexpType::Real) {
+                (_, _, true) => compare_kernel(comparison, values::reals(left), values::reals(right), output, real_na, real_na, real, real),
+                (false, true, _) if left.kind() == SexpType::Real => {
+                    compare_kernel(comparison, values::reals(left), values::ints(right), output, real_na, integer_na, real, widen)
+                }
+                (true, false, _) if right.kind() == SexpType::Real => {
+                    compare_kernel(comparison, values::ints(left), values::reals(right), output, integer_na, real_na, widen, real)
+                }
+                _ => {
+                    let left = coerce_vector(left, SexpType::Real)?;
+                    let right = coerce_vector(right, SexpType::Real)?;
+                    compare_kernel(comparison, values::reals(left), values::reals(right), output, real_na, real_na, real, real);
+                }
             }
         }
     }
     relational_attributes(call.arg(0), call.arg(1), result, call.call)?;
     Ok(result)
+}
+
+/// Compares elementwise with recycling, `NA` wherever either side is missing. Each operator
+/// gets its own loop for the same reason as [`real_kernel`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn compare_kernel<A: Copy, B: Copy, T: PartialOrd>(
+    comparison: Comparison,
+    a: &[A],
+    b: &[B],
+    output: &mut [i32],
+    left_na: impl Fn(A) -> bool,
+    right_na: impl Fn(B) -> bool,
+    left: impl Fn(A) -> T,
+    right: impl Fn(B) -> T,
+) {
+    let compare = |x: A, y: B, holds: fn(&T, &T) -> bool| {
+        if left_na(x) || right_na(y) { NA_LOGICAL } else { holds(&left(x), &right(y)) as i32 }
+    };
+    match comparison {
+        Comparison::Equal => recycle(a, b, output, |x, y| compare(x, y, T::eq)),
+        Comparison::NotEqual => recycle(a, b, output, |x, y| compare(x, y, T::ne)),
+        Comparison::Less => recycle(a, b, output, |x, y| compare(x, y, T::lt)),
+        Comparison::Greater => recycle(a, b, output, |x, y| compare(x, y, T::gt)),
+        Comparison::LessEqual => recycle(a, b, output, |x, y| compare(x, y, T::le)),
+        Comparison::GreaterEqual => recycle(a, b, output, |x, y| compare(x, y, T::ge)),
+    }
 }
 
 // Logic.
@@ -1429,6 +1393,15 @@ unsafe fn logical_at(vector: Sexp, index: usize) -> i32 {
     }
 }
 
+/// A vector's elements as logicals, borrowed when it already is one.
+unsafe fn logical_view<'a>(vector: Sexp) -> std::borrow::Cow<'a, [i32]> {
+    if vector.kind() == SexpType::Logical {
+        std::borrow::Cow::Borrowed(values::ints(vector))
+    } else {
+        std::borrow::Cow::Owned((0..length(vector)).map(|index| logical_at(vector, index)).collect())
+    }
+}
+
 unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     let left = values::materialize(call.arg(0))?;
     let right = values::materialize(call.arg(1))?;
@@ -1459,25 +1432,20 @@ unsafe fn logic(call: &Call<'_>, is_and: bool) -> R<Sexp> {
     let left_length = length(left);
     let right_length = length(right);
     let count = recycled_length(call.call, left_length, right_length)?;
-    let result = alloc(SexpType::Logical, count)?;
-    for index in 0..count {
-        let a = logical_at(left, index % left_length);
-        let b = logical_at(right, index % right_length);
-        values::ints_mut(result)[index] = if is_and {
-            if a == 0 || b == 0 {
-                0
-            } else if a == NA_LOGICAL || b == NA_LOGICAL {
-                NA_LOGICAL
-            } else {
-                1
-            }
-        } else if a == 1 || b == 1 {
-            1
-        } else if a == NA_LOGICAL || b == NA_LOGICAL {
-            NA_LOGICAL
+    let result = values::alloc_uninit(SexpType::Logical, count)?;
+    if count > 0 {
+        let (left_values, right_values) = (logical_view(left), logical_view(right));
+        let (a, b) = (left_values.as_ref(), right_values.as_ref());
+        let output = values::ints_mut(result);
+        if is_and {
+            recycle(a, b, output, |x, y| {
+                if x == 0 || y == 0 { 0 } else if x == NA_LOGICAL || y == NA_LOGICAL { NA_LOGICAL } else { 1 }
+            });
         } else {
-            0
-        };
+            recycle(a, b, output, |x, y| {
+                if x == 1 || y == 1 { 1 } else if x == NA_LOGICAL || y == NA_LOGICAL { NA_LOGICAL } else { 0 }
+            });
+        }
     }
     relational_attributes(left, right, result, call.call)?;
     Ok(result)
@@ -1520,6 +1488,8 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
             }
             Ok(result)
         }
+        // GNU R negates any empty vector, so `!character()` is `logical(0)`.
+        _ if count == 0 => alloc(SexpType::Logical, 0),
         _ => Err(call.error("invalid argument type")),
     }
 }
@@ -2120,14 +2090,33 @@ pub struct CompensatedSum {
 }
 
 impl CompensatedSum {
+    #[inline(always)]
     pub fn add(&mut self, value: f64) {
         let total = self.sum + value;
-        if self.sum.abs() >= value.abs() {
-            self.compensation += (self.sum - total) + value;
-        } else {
-            self.compensation += (value - total) + self.sum;
-        }
+        // Both corrections are computed and one is selected, which compiles to a branch-free
+        // blend instead of a mispredicted branch per element.
+        let (larger, smaller) = if self.sum.abs() >= value.abs() { (self.sum, value) } else { (value, self.sum) };
+        self.compensation += (larger - total) + smaller;
         self.sum = total;
+    }
+
+    /// Adds every value through four interleaved accumulators, which breaks the one long
+    /// dependency chain a single accumulator has and keeps the compensation per lane.
+    pub fn add_all(&mut self, values: &[f64]) {
+        let mut lanes: [CompensatedSum; 4] = Default::default();
+        let mut chunks = values.chunks_exact(4);
+        for chunk in &mut chunks {
+            for (lane, &value) in lanes.iter_mut().zip(chunk) {
+                lane.add(value);
+            }
+        }
+        for &value in chunks.remainder() {
+            self.add(value);
+        }
+        for lane in lanes {
+            self.add(lane.sum);
+            self.compensation += lane.compensation;
+        }
     }
 
     pub fn total(&self) -> f64 {
@@ -2178,24 +2167,31 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             if kind == SexpType::Real {
                 let mut total = CompensatedSum::default();
                 let mut na = false;
-                let mut add = |value: f64| {
-                    if value.is_nan() {
-                        if na_rm {
-                            return;
-                        }
-                        if is_na_real(value) {
-                            na = true;
-                        }
-                    }
-                    total.add(value);
-                };
                 for &item in &items {
-                    if item.kind() == SexpType::Real {
-                        values::reals(item).iter().for_each(|&value| add(value));
-                    } else {
-                        (0..length(item)).for_each(|index| add(real_at(item, index)));
+                    if item.kind() == SexpType::Real && !na_rm {
+                        // NA is a NaN payload, so the loop only adds, and the rare NaN total
+                        // rescans for NA below.
+                        total.add_all(values::reals(item));
+                        continue;
+                    }
+                    for index in 0..length(item) {
+                        let value = real_at(item, index);
+                        if value.is_nan() {
+                            if na_rm {
+                                continue;
+                            }
+                            if is_na_real(value) {
+                                na = true;
+                            }
+                        }
+                        total.add(value);
                     }
                 }
+                let na = na
+                    || (total.total().is_nan()
+                        && items.iter().any(|&item| {
+                            item.kind() == SexpType::Real && values::reals(item).iter().any(|&value| is_na_real(value))
+                        }));
                 return scalar_real(if na { NA_REAL } else { total.total() });
             }
             let mut total: i64 = 0;
@@ -2457,16 +2453,34 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
         SexpType::Real => {
             let data = values::reals(operand);
             let mut total = CompensatedSum::default();
-            for &value in data {
-                total.add(value);
+            total.add_all(data);
+            let mut mean = total.total() / count as f64;
+            // GNU R sums in long double, whose wider range keeps the mean of huge finite values
+            // finite; dividing each value first does the same in double.
+            if mean.is_infinite() && data.iter().all(|value| value.is_finite()) {
+                let mut scaled = CompensatedSum::default();
+                for &value in data {
+                    scaled.add(value / count as f64);
+                }
+                mean = scaled.total();
             }
-            let mean = total.total() / count as f64;
             if !mean.is_finite() {
                 return scalar_real(mean);
             }
+            // GNU R forms each deviation in long double, so it is exact; the deviation and its
+            // rounding error together are exact in double too.
             let mut correction = CompensatedSum::default();
-            for &value in data {
-                correction.add(value - mean);
+            for chunk in data.chunks(128) {
+                let mut deviations = [0.0; 256];
+                for (pair, &value) in deviations.chunks_exact_mut(2).zip(chunk) {
+                    // Knuth's two-sum of `value` and `-mean`.
+                    let deviation = value - mean;
+                    let negated_part = deviation - value;
+                    let value_part = deviation - negated_part;
+                    pair[0] = deviation;
+                    pair[1] = (value - value_part) + (-mean - negated_part);
+                }
+                correction.add_all(&deviations[..2 * chunk.len()]);
             }
             scalar_real(mean + correction.total() / count as f64)
         }

@@ -3,11 +3,17 @@ title: Working with DataFrames
 description: ry's built-in table, queried with a Polars-style API and run on the Polars engine
 ---
 
-A `DataFrame` is ry's built-in table. You query it with the same verbs as
-[Polars](https://pola.rs): `select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
-`join` and `head`, with column expressions written as `col("x")`. Each query runs inside the Polars
-engine instead of as R code, and the type checker knows every column's type at every step.
-DataFrames need ry's own runtime, so run scripts that use them with `ry run --runtime ry script.R`.
+A `DataFrame` is ry's built-in table, for code where data.table is too slow or too hard to read.
+Each query runs inside the [Polars](https://pola.rs) engine instead of as R code, which on
+db-benchmark's questions at a million rows takes about a tenth of the time data.table does
+([Speed](#speed)), and the type checker knows every column's type at every step, so a misspelled
+column is reported before the query runs. Code you already wrote for data.table keeps working, and
+most of its queries run on the same engine
+([Existing data.table code](#existing-datatable-code)).
+
+You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
+`join` and `head`) and column expressions written as `col("x")`. DataFrames need ry's own runtime,
+so run scripts that use them with `ry run script.R`:
 
 ```r
 sales <- DataFrame(
@@ -27,6 +33,7 @@ sales |>
 ```
 
 ```text
+$ ry run sales.R
    region revenue orders
    <char>   <num>  <int>
 1:     eu    10.5      2
@@ -37,6 +44,48 @@ sales |>
 Every function has a qualified name, such as `DataFrame.filter` or `Expr.sum`, and takes the value
 it works on as its first argument, so a query reads top to bottom with R's pipe `|>`. There is no
 method dispatch: `DataFrame.filter` always means the same function.
+
+## Existing data.table code
+
+Code written for data.table runs unchanged under `ry run`, and most queries on a
+`data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
+behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
+when it can produce exactly what data.table would, meaning the same values, attributes, printing
+and warnings. Otherwise data.table answers it. These go to data.table:
+
+- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
+- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
+- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
+  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
+- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
+- a query that warns or fails.
+
+Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
+`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
+every query to data.table.
+
+```r
+library(data.table)
+options(ry.datatable.trace = TRUE)
+dt <- data.table(g = c("a", "b", "a"), x = 1:3)
+dt[x > 1L, .(n = .N), by = g]
+setkey(dt, g)
+dt[x > 1L]
+```
+
+```text
+[ry] dt[x > 1L, .(n = .N), by = g]
+        g     n
+   <char> <int>
+1:      b     1
+2:      a     1
+[data.table] dt[x > 1L]
+Key: <g>
+        g     x
+   <char> <int>
+1:      a     3
+2:      b     2
+```
 
 ## Building a DataFrame
 
@@ -196,91 +245,21 @@ as.data.frame(sales)
 
 A DataFrame also answers data.table's `df[i, j, by]` queries, including `:=`, joins with `on =`,
 `.N` and `.SD`, so code written for data.table keeps working. This syntax is there for
-compatibility. New code should use the verbs above, which the checker and the editor understand
+compatibility, and the editor completes its query symbols (`.N`, `.SD`, `.I`, `.GRP`, `.NGRP` and
+`.BY`) inside the brackets. New code should use the verbs above, which the checker and the editor understand
 better and which read in the order they run. The
-[typing reference](/reference/type-system/#data-table-queries) lists what the checker understands
+[typing reference](/reference/type-system/#datatable-queries) lists what the checker understands
 of the bracket syntax.
 
 Unlike data.table, a DataFrame follows R's copy-on-modify rule, so `df[, y := value]` leaves a copy
 you took earlier unchanged. When nothing else refers to the DataFrame, the update happens in place
 and costs only the new column.
 
-### Existing data.table code
-
-Code written for data.table runs unchanged under `ry run --runtime ry`, and most queries on a
-`data.table` run on the same engine as DataFrames. A `data.table` keeps all of data.table's
-behavior: `:=` still updates it in place, and every alias sees the change. ry answers a query only
-when it can produce exactly what data.table would, meaning the same values, attributes, printing
-and warnings. Otherwise data.table answers it. These go to data.table:
-
-- a keyed table, a table with extra attributes or classes, and code inside data.table's own namespace;
-- a filter that data.table answers through an automatic index (`col == value`, `col %in% values`);
-- `sum`, `mean`, `median`, `var`, `sd` and `prod` where data.table's result depends on its own
-  summation order, such as a sum without `by` or a mean with `na.rm = TRUE` on doubles;
-- a join without `on =`, `x[]`, and any `i` or `j` that calls a function with side effects;
-- a query that warns or fails.
-
-Set `options(ry.datatable.trace = TRUE)` to see which engine answers each query: ry prints
-`[ry]` or `[data.table]` and the call on standard error. `options(ry.datatable = FALSE)` sends
-every query to data.table.
-
-```r
-library(data.table)
-options(ry.datatable.trace = TRUE)
-dt <- data.table(g = c("a", "b", "a"), x = 1:3)
-dt[x > 1L, .(n = .N), by = g]
-setkey(dt, g)
-dt[x > 1L]
-```
-
-```text
-[ry] dt[x > 1L, .(n = .N), by = g]
-        g     n
-   <char> <int>
-1:      b     1
-2:      a     1
-[data.table] dt[x > 1L]
-Key: <g>
-        g     x
-   <char> <int>
-1:      a     3
-2:      b     2
-```
-
 ## Speed
 
-`tools/bench/table/` runs db-benchmark's group-by and join questions, `:=` update loops and a
-keyed rolling join, written once for data.table under GNU R and once for DataFrames under
-`ry run --runtime ry`. At 1 million rows on 4 threads, the DataFrame version runs the whole set in
-2.4 s against data.table's 4.8 s, about twice as fast. It is ahead on most group-by and join
-questions and on the `:=` loops, and behind on the median-and-sd question (0.13 s against 0.08 s)
-and the keyed rolling join (0.03 s against 0.02 s). The
-[design notes](/contributing/design/r-runtime/#7-the-table-type) have the details.
-
-Calls to data.table's other functions (`fread`, `setkey`, `rbindlist`, `melt`, `dcast`, `shift`
-and the rest) run data.table's own C code through ry's C API, so their results are data.table's by
-construction. `tools/bench/table/ops.R` times them on the db-benchmark group-by file (10 million
-rows, 4 threads), once under GNU R and once under `ry run --runtime ry`, and both runs give the same
-checksums. Times are in seconds.
-
-| Operation | GNU R | ry |
-|---|---|---|
-| `fread` | 3.09 | 2.03 |
-| `fwrite` | 0.76 | 1.21 |
-| `setkey` | 0.43 | 0.40 |
-| `setorder` | 0.88 | 0.92 |
-| `unique` | 0.073 | 0.070 |
-| `uniqueN` | 0.11 | 0.12 |
-| `rbindlist` | 0.85 | 1.26 |
-| `melt` | 1.21 | 1.38 |
-| `dcast` | 0.20 | 0.19 |
-| `shift` | 0.024 | 0.024 |
-| `fifelse` | 0.086 | 0.088 |
-| `fcoalesce` | 0.062 | 0.061 |
-| `nafill` | 0.082 | 0.085 |
-| `rleid` | 0.025 | 0.026 |
-| `between` | 0.016 | 0.016 |
-| `%chin%` | 0.077 | 0.081 |
-| `tstrsplit` | 5.79 | 4.16 |
-
-Each cell is the fastest of at least four runs.
+db-benchmark's ten group-by and five join questions, three `:=` update loops and a keyed rolling
+join, at a million rows on 4 cores, take 0.6 s on DataFrames and 5.0 s on data.table using every
+thread, best of two runs each, with the same checksums, and DataFrames are faster on every
+question. data.table's own functions (`fread`, `setkey`, `rbindlist`,
+`melt` and the rest) run data.table's C code, at the speed they have under GNU R. The
+[design notes](/contributing/design/r-runtime/#7-the-table-type) describe the benchmark.

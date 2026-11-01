@@ -58,6 +58,7 @@ pub unsafe fn parse_rd(call: &NativeCall<'_>) -> R<Sexp> {
         last_text: String::new(),
         expansions: 0,
         warnings: Vec::new(),
+        newline_in_string: None,
     };
     let parsed = parser.content(Mode::Latex, Close::EndOfInput, true);
     let end = parser.input.next_position;
@@ -366,6 +367,9 @@ struct Parser {
     last_text: String,
     expansions: usize,
     warnings: Vec<String>,
+    /// The first line that ended inside an R string. GNU R mentions it only alongside a syntax
+    /// error, since a multi-line string is legal R.
+    newline_in_string: Option<i32>,
 }
 
 /// Expansions beyond this many mean a macro that expands to itself.
@@ -373,8 +377,15 @@ const MAX_EXPANSIONS: usize = 100_000;
 
 impl Parser {
     fn warn(&mut self, message: impl std::fmt::Display) {
+        self.warn_newline_in_string();
         let line = self.input.next_position.line;
         self.warnings.push(format!("{}:{line}: {message}", self.basename));
+    }
+
+    fn warn_newline_in_string(&mut self) {
+        if let Some(line) = self.newline_in_string {
+            self.warnings.push(format!("newline within quoted string at {}:{line}", self.basename));
+        }
     }
 
     fn begin(&self, run: &mut Run) {
@@ -436,11 +447,7 @@ impl Parser {
                 if let Some(quote) = quote {
                     // An R string still open at the end of the input is the one syntax error
                     // GNU R does not recover from.
-                    let line = self.input.last_position.line;
-                    self.warnings.push(format!(
-                        "newline within quoted string at {}:{line}",
-                        self.basename
-                    ));
+                    self.warn_newline_in_string();
                     return Err(error_in(
                         current_call(),
                         format!(
@@ -459,11 +466,7 @@ impl Parser {
                 '%' if mode != Mode::RawVerbatim && !in_comment => {
                     self.flush(&mut run, mode, &mut nodes);
                     if quote.is_some() {
-                        let line = self.input.next_position.line;
-                        self.warnings.push(format!(
-                            "newline within quoted string at {}:{line}",
-                            self.basename
-                        ));
+                        self.newline_in_string.get_or_insert(self.input.next_position.line);
                     }
                     let comment = self.comment();
                     nodes.push(comment);
@@ -471,10 +474,13 @@ impl Parser {
                 '\\' => {
                     let next = self.input.peek(1);
                     match mode {
+                        // Inside an R string only `\link` and `\var` are markup.
                         Mode::Latex | Mode::RCode
-                            if quote.is_none()
-                                && !in_comment
-                                && next.is_some_and(|next| next.is_ascii_alphabetic()) =>
+                            if !in_comment
+                                && next.is_some_and(|next| {
+                                    next.is_ascii_alphabetic()
+                                        && (quote.is_none() || (!escaped && matches!(next, 'l' | 'v')))
+                                }) =>
                         {
                             self.flush(&mut run, mode, &mut nodes);
                             if let Some(node) = self.macro_call(top)? {
@@ -520,6 +526,15 @@ impl Parser {
                                 Some(other) if quote.is_some() && other != '\n' => {
                                     // Inside an R string a backslash escapes the next
                                     // character for R, so an escaped quote never ends it.
+                                    self.input.next();
+                                    run.text.push('\\');
+                                    run.text.push(other);
+                                }
+                                // Outside a string GNU R keeps the escaped character as plain
+                                // text, so `\code{"\"}` opens no string at its second quote.
+                                Some(other @ ('"' | '\'' | '`'))
+                                    if mode == Mode::RCode && quote.is_none() && !in_comment =>
+                                {
                                     self.input.next();
                                     run.text.push('\\');
                                     run.text.push(other);
@@ -586,6 +601,9 @@ impl Parser {
                     }
                     escaped = false;
                     if character == '\n' {
+                        if quote.is_some() {
+                            self.newline_in_string.get_or_insert(self.input.last_position.line);
+                        }
                         in_comment = false;
                         self.flush(&mut run, mode, &mut nodes);
                     }
