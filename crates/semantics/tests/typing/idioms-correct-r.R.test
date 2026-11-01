@@ -250,8 +250,8 @@ lookup <- function(repo = NULL) {
 }
 lookup(lookup("."))
 #++++
-lookup: <T> fn([repo]: T | NULL) -> T | list{path: Unknown}
-character | list{path: Unknown}
+lookup: fn([repo]: Unknown) -> Unknown
+Unknown
 
 #---- a_type_test_narrows_an_untyped_parameter_without_constraining_it
 friendly <- function(x) {
@@ -262,5 +262,5 @@ friendly <- function(x) {
 }
 friendly("text")
 #++++
-friendly: <T> fn(x: T) -> character
+friendly: fn(x: Unknown) -> character
 character

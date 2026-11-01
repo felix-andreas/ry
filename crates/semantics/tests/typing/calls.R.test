@@ -453,8 +453,8 @@ f: <T, U> fn(a: T, b: U) -> Unknown
 fail_with <- function(x) stop(paste0("bad: ", class(x)[1]))
 checked <- function(x) paste0("bad: ", class(x)[1])
 #++++
-fail_with: <T> fn(x: T) -> Unknown
-checked: <T> fn(x: T) -> character
+fail_with: fn(x: Unknown) -> Unknown
+checked: fn(x: Unknown) -> character
 
 #---- a_callback_names_the_parameter_that_refuses_the_element
 # The two whole signatures cannot say this: the lambda's parameter is a

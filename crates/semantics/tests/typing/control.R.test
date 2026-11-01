@@ -13,7 +13,7 @@ fmt <- function(x) if (is.character(x)) x else "other"
 a <- fmt(1)
 b <- fmt("text")
 #++++
-fmt: <T> fn(x: T) -> Unknown
+fmt: fn(x: Unknown) -> Unknown
 a: Unknown
 b: Unknown
 

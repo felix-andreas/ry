@@ -800,7 +800,7 @@ sum_leaves <- function(node) {
 
 run <- function() sum_leaves(list(1, list(2, 3), list(list(4, 5), 6)))
 #++++
-sum_leaves: <T> fn(node: T) -> Unknown
+sum_leaves: fn(node: Unknown) -> Unknown
 run: fn() -> Unknown
 
 #==== accumulators

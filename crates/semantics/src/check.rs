@@ -962,6 +962,15 @@ enum GuardFamily {
     List,
 }
 
+fn is_type_probe(name: &str) -> bool {
+    match name {
+        "typeof" | "class" | "mode" | "storage.mode" | "inherits" | "is.object" | "oldClass" => true,
+        "is.null" | "is.na" | "is.nan" | "is.finite" | "is.infinite" | "is.element"
+        | "is.unsorted" | "is.loaded" => false,
+        _ => name.starts_with("is."),
+    }
+}
+
 fn guard_kind(name: &str) -> Option<GuardKind> {
     Some(match name {
         "is.null" => GuardKind::Null,
@@ -1426,6 +1435,8 @@ impl<'db> Checker<'db, '_> {
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
                 let omissible = self.omissible_formals(&parameters, *body);
+                let mut probed = FxHashSet::default();
+                self.collect_type_probed(*body, &mut probed);
                 let mut named = Vec::new();
                 let mut variadic = None;
                 for parameter in &parameters {
@@ -1436,7 +1447,11 @@ impl<'db> Checker<'db, '_> {
                         });
                         continue;
                     }
-                    let parameter_ty = self.fresh(Constraint::Unconstrained);
+                    let parameter_ty = if probed.contains(&parameter.name) {
+                        unknown(self.db)
+                    } else {
+                        self.fresh(Constraint::Unconstrained)
+                    };
                     let entry = named.len();
                     named.push(Parameter {
                         name: Name::new(self.db, parameter.name.as_str()),
@@ -3167,6 +3182,31 @@ impl<'db> Checker<'db, '_> {
             // discarded.
             self.errors.truncate(errors_mark);
             self.strict_origins.truncate(origins_mark);
+        }
+    }
+
+    /// The names whose runtime type the body inspects (`typeof(x)`, `class(x)`,
+    /// `is.character(x)`, `inherits(x, ...)`). Such a value is dynamically typed by
+    /// design: each branch uses it as a different type, so no one type describes it.
+    /// `is.null` and `is.na` test a value, not its type, and keep their narrowing.
+    fn collect_type_probed(&self, id: ExprId, probed: &mut FxHashSet<Symbol>) {
+        let kind = &self.module.expression(id).kind;
+        if matches!(kind, ExpressionKind::Function { .. }) {
+            return;
+        }
+        if let ExpressionKind::Call { callee, arguments } = kind
+            && let ExpressionKind::NameRef(name) = &self.module.expression(*callee).kind
+            && !self.naming.resolutions.contains_key(callee)
+            && is_type_probe(name.as_str())
+            && let Some(first) = arguments.first()
+            && first.name.is_none()
+            && let Some(value) = first.value
+            && let ExpressionKind::NameRef(probed_name) = &self.module.expression(value).kind
+        {
+            probed.insert(*probed_name);
+        }
+        for child in kind.child_ids() {
+            self.collect_type_probed(child, probed);
         }
     }
 
