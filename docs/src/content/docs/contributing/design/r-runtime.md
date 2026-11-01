@@ -775,6 +775,7 @@ At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code unde
 same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
 driven from Rust, without R.
 
+<!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
 | groupby q1: `sum(v1)` by `id1` | 0.151 | 0.022 | 0.034 |
@@ -797,6 +798,7 @@ driven from Rust, without R.
 | join q5: big, on `id3` | 3.797 | 0.664 | 1.028 |
 | keyed rolling join, 1e6 trades | 0.130 | 0.094 | 0.100 |
 | total | 26.16 | 5.22 | 9.54 |
+<!-- /bench-table:1e7 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the

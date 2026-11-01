@@ -2921,6 +2921,15 @@ sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: chara
 An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
 project's own function named `DataFrame`, which shadows the builtin.
 
+An `Array<T>` argument is a `T[]` column: the frame stores the column as a plain vector. Reading a
+column back, as `sales$amount` or `sales[["amount"]]`, gives that plain vector, typed `T[]`, even
+when no step could have put an `NA` into it. `as.Array(sales$amount)` is the checked way back to an
+`Array<T>`, and it stops with an error on an `NA`. A read never gives an Array, because an Array
+changes how R arithmetic on it behaves: two Arrays are never recycled and never mix `integer` with
+`double`, so `sales$units * sales$price` would stop with an error. Whether a column holds an `NA`
+depends on the data, such as a left join's unmatched rows, so a read that gave an Array only when
+the column had none would make the same code fail or pass depending on its input.
+
 #### Verbs
 
 Each verb of the [DataFrame API](/guides/dataframes) types as a new column list, computed from the

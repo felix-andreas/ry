@@ -3,8 +3,9 @@
 //! checksum`), so the two outputs line up row by row. Loading is not timed, and every question
 //! runs twice.
 //!
-//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir>`, where the directory holds the
-//! CSV files `tools/bench/table/datagen.R` writes.
+//! Usage: `cargo bench -p table --bench db_benchmark -- <data-dir> [--groupby-only]`, where the
+//! directory holds the CSV files `tools/bench/table/datagen.R` writes. `--groupby-only` runs only
+//! the ten group-by questions.
 
 use {
     std::{
@@ -39,7 +40,10 @@ fn main() -> ExitCode {
         eprintln!("usage: db_benchmark <data-dir>");
         return ExitCode::FAILURE;
     };
-    match run(&PathBuf::from(dir)) {
+    let groupby_only = env::args()
+        .skip(1)
+        .any(|argument| argument == "--groupby-only");
+    match run(&PathBuf::from(dir), groupby_only) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("db_benchmark: {error}");
@@ -48,17 +52,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(dir: &Path) -> Result<()> {
+fn run(dir: &Path, groupby_only: bool) -> Result<()> {
     println!(
         "# ry table engine on polars 0.55, {} threads",
         polars_threads()
     );
-    groupby(dir)?;
+    groupby(dir, groupby_only)?;
+    if groupby_only {
+        return Ok(());
+    }
     joins(dir)?;
     rolling_join(dir)
 }
 
-fn groupby(dir: &Path) -> Result<()> {
+fn groupby(dir: &Path, groupby_only: bool) -> Result<()> {
     let mut x = read(dir, "groupby.csv")?;
     let sum = |name: &str| aggregate(Aggregate::Sum, column(name));
     let mean = |name: &str| aggregate(Aggregate::Mean, column(name));
@@ -173,6 +180,9 @@ fn groupby(dir: &Path) -> Result<()> {
     ];
     for (question, query) in questions {
         time_question(question, || Ok(execute(&mut x, query.clone())?))?;
+    }
+    if groupby_only {
+        return Ok(());
     }
 
     time_question("update full", || {
