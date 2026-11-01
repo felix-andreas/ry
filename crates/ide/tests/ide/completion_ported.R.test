@@ -175,7 +175,7 @@ object@first_field
 object@second_field
 object@fi$0
 #++++
-hover 39..48: Unknown
+hover 46..48: fi: Unknown
 definition: none
 references: none
 rename: none

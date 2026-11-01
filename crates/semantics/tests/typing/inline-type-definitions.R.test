@@ -44,7 +44,7 @@ unwrap_or(:Ok("a"), 0L)
 unwrap_or: fn(r: Result<integer, character>, default: integer) -> integer
 integer
 integer
-214..222 error[type-mismatch] expected `:Ok(integer) | :Err(character)`, found `:Ok(character)`
+218..221 error[type-mismatch] expected `integer`, found `character`
 
 #---- nominal_tagged_union
 type Shape = :Circle(double) | :Square(double)
