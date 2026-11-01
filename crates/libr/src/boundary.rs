@@ -321,7 +321,8 @@ pub unsafe fn run_finalizer(weak: Sexp) {
     let c_finalizer = weak.weak_c_finalizer();
     let finalizer = weak.weak_finalizer();
     // The key is dead by definition, so only these roots keep it and the finalizer alive while
-    // the finalizer runs.
+    // the finalizer runs. `root_finalizable` has rooted them for a queued finalizer already, but
+    // a caller that runs one weak reference directly has not.
     let mark = runtime().heap.handle_mark();
     runtime().heap.root(key);
     runtime().heap.root(finalizer);

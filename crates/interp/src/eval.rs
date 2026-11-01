@@ -843,11 +843,9 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         let exit = eval(expression, env);
         interp().handlers = saved_handlers;
         match exit {
-            // `on.exit(return(x))` makes `x` the frame's value.
-            Err(unwind) if unwind.returns_to(env) => {
-                let Unwind::Jump(jump) = unwind else {
-                    unreachable!()
-                };
+            // `on.exit(return(x))` makes `x` the frame's value, even over an error unwinding
+            // through it, as in GNU R.
+            Err(Unwind::Jump(jump)) if matches!(*jump, Jump::Return { env: target, .. } if target == env) => {
                 if let Jump::Return { value, .. } = *jump {
                     outcome = Ok(value);
                 }
@@ -2105,8 +2103,8 @@ pub unsafe fn complex_assign(
         }
         items.push((symbols.value, value_promise));
         let setter_call = values::pairlist(&items, SexpType::Language)?;
-        let depth = interp().frames.len();
-        let outer = interp().assignment_call.replace((setter_call, whole, depth));
+        let frame_depth = interp().frames.len();
+        let outer = interp().assignment_call.replace((setter_call, whole, frame_depth));
         let result = apply_setter(setter_call, whole, env);
         interp().assignment_call = outer;
         replacement = result?;

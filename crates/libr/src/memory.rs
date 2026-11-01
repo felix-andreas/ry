@@ -579,8 +579,8 @@ pub unsafe extern "C" fn Rf_unprotect(count: c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Rf_unprotect_ptr(object: Sexp) {
-    enter(|| Ok(runtime().heap.roots.protect.unprotect_object(object)?))
+pub unsafe extern "C" fn Rf_unprotect_ptr(object: *mut Header) {
+    enter(|| Ok(runtime().heap.roots.protect.unprotect_object(protectable(object))?))
 }
 
 #[unsafe(no_mangle)]

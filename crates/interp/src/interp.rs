@@ -391,6 +391,10 @@ impl RootSource for InterpRoots {
             conditions::trace_handlers(&interp.global_handlers, marker);
             conditions::trace_restarts(&interp.restarts, marker);
             marker.mark(interp.srcref);
+            if let Some((replacement, whole, _)) = interp.assignment_call {
+                marker.mark(replacement);
+                marker.mark(whole);
+            }
             for &(call, _) in &interp.warnings {
                 marker.mark(call);
             }
