@@ -21,21 +21,31 @@ use {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
-        foreign_call(call, Some(Interface::Call))
+        foreign_context(call.call, || foreign_call(call, Some(Interface::Call)))
     }),
-    builtin(".External", -1, |call| unsafe { foreign_call(call, None) }),
-    builtin(".External2", -1, |call| unsafe { foreign_call(call, None) }),
+    builtin(".External", -1, |call| unsafe {
+        foreign_context(call.call, || foreign_call(call, None))
+    }),
+    builtin(".External2", -1, |call| unsafe {
+        foreign_context(call.call, || foreign_call(call, None))
+    }),
     builtin(".C", -1, |call| unsafe {
-        foreign_call(call, Some(Interface::C))
+        foreign_context(call.call, || foreign_call(call, Some(Interface::C)))
     }),
     builtin(".Fortran", -1, |call| unsafe {
-        foreign_call(call, Some(Interface::Fortran))
+        foreign_context(call.call, || {
+            foreign_call(call, Some(Interface::Fortran))
+        })
     }),
     builtin(".Call.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || foreign_call(call, None))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || foreign_call(call, None))
+        })
     }),
     builtin(".External.graphics", -1, |call| unsafe {
-        graphics_engine::graphics_call(call, || foreign_call(call, None))
+        foreign_context(call.call, || {
+            graphics_engine::graphics_call(call, || foreign_call(call, None))
+        })
     }),
     internal("dyn.load", 4, |call| unsafe {
         let path = values::require_string(call.arg(0), "x")?;
@@ -275,6 +285,17 @@ unsafe fn check_finite(value: Sexp, position: usize) -> R<()> {
         _ => return Ok(()),
     };
     Err(error(format!("{message} (arg {position})")))
+}
+
+/// Runs `body` as the foreign call `call`, which tracebacks list while it runs, as GNU R's
+/// builtin context for a foreign call does.
+pub unsafe fn foreign_context(call: Sexp, body: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
+    let state = interp();
+    let depth = state.foreign_calls.len();
+    state.foreign_calls.push((call, state.frames.len()));
+    let result = body();
+    interp().foreign_calls.truncate(depth);
+    result
 }
 
 unsafe fn foreign_call(call: &Call<'_>, interface: Option<Interface>) -> R<Sexp> {

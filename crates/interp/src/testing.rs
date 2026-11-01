@@ -58,6 +58,7 @@ pub fn check_unserialize_input(bytes: &[u8]) {
             drop(serialize::unserialize(bytes, values::nil()));
         }
         crate::interp().frames.clear();
+        crate::interp().foreign_calls.clear();
         crate::heap().release_handles(mark);
     });
 }
@@ -132,6 +133,7 @@ unsafe fn run(text: &str) -> String {
             Err(_) => "error".to_owned(),
         };
         crate::interp().frames.clear();
+        crate::interp().foreign_calls.clear();
         crate::heap().release_handles(mark);
         rendered
     }

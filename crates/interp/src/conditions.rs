@@ -317,24 +317,41 @@ unsafe fn user_abort_restart() -> R<Option<Unwind>> {
 /// carrying the srcref of where it was made: `.Traceback` as GNU R records it.
 pub unsafe fn traceback_calls(skip: usize) -> R<Sexp> {
     let mut items = Vec::new();
-    for frame in interp().frames.iter().rev().skip(skip) {
-        let lines = deparse::deparse_lines(frame.call, 60, deparse::options::SIMPLE);
+    for (call, srcref) in context_calls().into_iter().rev().skip(skip) {
+        let lines = deparse::deparse_lines(call, 60, deparse::options::SIMPLE);
         let text = values::string_vector(&lines)?;
-        if frame.srcref != nil() {
-            values::set_attr(text, symbols().srcref, values::duplicate(frame.srcref)?)?;
+        if srcref != nil() {
+            values::set_attr(text, symbols().srcref, values::duplicate(srcref)?)?;
         }
         items.push((nil(), text));
     }
     values::pairlist(&items, SexpType::Pairlist)
 }
 
+/// The calls a traceback lists, outermost first, with their srcrefs: every closure frame, and
+/// every foreign call between the frames it was made from and those it called back into.
+unsafe fn context_calls() -> Vec<(Sexp, Sexp)> {
+    let interp = interp();
+    let mut foreign = interp.foreign_calls.iter().peekable();
+    let mut calls = Vec::with_capacity(interp.frames.len() + interp.foreign_calls.len());
+    for (depth, frame) in interp.frames.iter().enumerate() {
+        while let Some(&(call, _)) = foreign.next_if(|(_, below)| *below <= depth) {
+            calls.push((call, nil()));
+        }
+        calls.push((frame.call, frame.srcref));
+    }
+    calls.extend(foreign.map(|&(call, _)| (call, nil())));
+    calls
+}
+
 /// GNU R's concise traceback: the functions on the stack, outermost first, or `None` when the
 /// only one is the call the message already names.
 unsafe fn concise_traceback(call: Sexp) -> Option<String> {
     let mut names = Vec::new();
-    for frame in &interp().frames {
-        let head = frame.call.car();
-        let name = if frame.call.kind() == SexpType::Language && head.kind() == SexpType::Symbol {
+    let calls = context_calls();
+    for &(frame_call, _) in &calls {
+        let head = frame_call.car();
+        let name = if frame_call.kind() == SexpType::Language && head.kind() == SexpType::Symbol {
             values::symbol_name(head).into_owned()
         } else {
             "<Anonymous>".to_owned()
@@ -357,12 +374,7 @@ unsafe fn concise_traceback(call: Sexp) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    if names.len() == 1
-        && interp()
-            .frames
-            .first()
-            .is_some_and(|frame| frame.call == call)
-    {
+    if names.len() == 1 && calls.first().is_some_and(|&(first, _)| first == call) {
         return None;
     }
     // Built from the innermost call outwards; once the chain passes 50 bytes, only the
