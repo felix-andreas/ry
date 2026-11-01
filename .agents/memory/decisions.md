@@ -2523,3 +2523,35 @@ first lines R had already read, leaving R mid-command.
   checker, hover, completion and goto-definition read the stub file like any other, so incremental
   analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
   the draft with open questions is `contributing/design/standard-library.md`.
+
+# Decision record: one Rmath, one codec stack, and the clean-room numerical routines
+
+- **One Rmath.** The interpreter's distributions and libR's Rmath were two independent
+  implementations of the same functions, so a precision fix landed in one and not the other.
+  `crates/interp/src/rmath.rs` is now the single copy (libR's version, the one the conformance
+  suite holds to GNU R): the interpreter's builtins vectorize it, libR only converts C flags,
+  raises the collected warnings and draws variates, and `gamma`, `lgamma`, `beta` and `lbeta` call
+  it instead of libm's `tgamma`, which is not exact for whole arguments.
+- **One compression stack.** libR decoded bzip2 and xz with `bzip2-rs` and `lzma-rs` while the
+  interpreter used `bzip2` and `lzma-rust2`, which also write. libR now calls
+  `interp::connections::decompress` (file magic) and `interp::serialize::decompress_record`
+  (lazy-load records), so one set of codecs reads every file and both crates drop the others.
+- **Time zones come from jiff** reading the system's tz database (`system.rs`, `Zone`). A name the
+  database does not know acts as UTC under the abbreviation glibc gives it (the name's leading
+  letters when there are three or more, else empty). Two glibc behaviors are copied deliberately:
+  an `isdst` that contradicts the zone's rule shifts the reading by an hour, even in a zone with
+  no daylight saving time, except for `"UTC"` and `"GMT"`, which GNU R converts itself; and a
+  year outside jiff's range moves by whole 400-year cycles, which keeps the calendar and weekdays.
+- **`nlm`, `nlminb` and `polyroot` are written from the published algorithms**, not GNU R's code:
+  Dennis and Schnabel's UNCMIN for `nlm`, a trust-region quasi-Newton method behind PORT's
+  `nlminb` interface (the same interface and stopping messages, not PORT's exact iterates), and
+  Jenkins and Traub's three-stage algorithm for `polyroot`, which also fixes the order of the roots
+  GNU R returns.
+- **`parse_Rd` is a hand-written parser** in `crates/interp/src/rd.rs`, built from the Rd format's
+  documentation and GNU R's observed output (`tools__parse_rd`). It tracks the three lexical modes
+  (LaTeX-like, R-like and verbatim) per macro, keeps srcrefs, and reproduces GNU R's warnings and
+  errors for unterminated strings. `deparseRd` reads the same tree.
+- **`iconv` goes through the C library's `iconv`** rather than a Rust crate, because GNU R's
+  results (which names it accepts, how `sub` substitutes, transliteration) are glibc's.
+- **Impact:** each fact has one implementation, so the oracle and GNU R's own tests exercise the
+  code that libR and the interpreter both run. No effect on static analysis.
