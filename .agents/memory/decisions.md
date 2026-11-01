@@ -4224,12 +4224,15 @@ explicit allocators".
   in the climb. The install-name match is reasoned from dyld's source and verified only once the
   release smoke test runs on a Mac.
 
-## Windows runtime: `R.dll` for windows-gnu, linked with lld
+## Windows runtime: `R.dll` and `ry.exe` for windows-gnullvm, linked with lld
 
 - **Before.** The runtime called libc directly (`dlopen`, `umask`, `utimensat`, `nl_langinfo`,
   `iconv`, `kill` and signal numbers, process priorities, `getpwnam`), so it built only on Unix, and the Windows archive
   carried `ry.exe` alone.
-- **Target.** `x86_64-pc-windows-gnu`, the mingw-w64 ABI Rtools builds packages with. Package DLLs
+- **Target.** `x86_64-pc-windows-gnullvm` for both binaries: the mingw-w64 ABI Rtools builds
+  packages with, on the UCRT that Rtools 4.2 and newer link. `windows-gnu` links `msvcrt.dll`, so
+  `errno`, `FILE *` and `malloc`/`free` pairs crossing the API would hit two C runtimes, and an MSVC
+  `ry.exe` loading a mingw `R.dll` mixes runtimes the same way, so neither is shipped. Package DLLs
   import from `R.dll` by module name, and the loader reuses an already loaded module with the same
   base name, so naming ry's library `R.dll` binds them with no rewriting. Exports come from
   `__declspec(dllexport)` in `native.c` plus rustc's own exports, so there is no `.def` file to
@@ -4250,13 +4253,29 @@ explicit allocators".
   -fuse-ld=lld` is the linker driver (`contributing/design/r-runtime.md`, section 11, has the
   command).
 - **A 64 MiB main-thread stack** for `ry.exe` (`crates/ry/build.rs`): the session evaluates on the
-  main thread, and base R's startup overflows Windows' 1 MiB default.
+  main thread, and base R's startup overflows Windows' 1 MiB default. The UTF-8 code-page
+  manifest the MSVC build embedded through linker flags goes in as a `windres` resource object,
+  so the gnullvm build needs `windres` (`WINDRES`, else `llvm-windres` or `windres` on `PATH`).
+- **Jumps use `_setjmp(buffer, NULL)` and `longjmp`.** mingw's `setjmp` macro records the frame
+  and `longjmp` then unwinds through SEH. clang's `__builtin_setjmp` stores the canonical frame
+  address, but its landing code uses it as the frame pointer, so `R_UnwindProtect`, whose frame
+  pointer sits above its stack pointer, resumed with garbage locals when an R error landed in it.
+  A null frame makes the CRT's `longjmp` a plain register restore, as on Unix.
+- **`xerbla_` never jumps over Rust.** Windows' R.dll exports it for R's `Rblas.dll`/`Rlapack.dll`.
+  It raises an R error for a package's call, but returns while the interpreter's `DirectFortran`
+  guard (`linalg.rs`) is alive, and the routine's negative `info` reaches the Rust caller.
+- **Two modules named `R.dll`.** ry's runtime beside `ry.exe` shares GNU R's DLL name, so `ry R`
+  loads GNU R's `R.dll` first by full path; later by-name imports bind to the loaded module.
+- **Toolchain.** The release runner uses MSYS2's clang64 environment (`msys2/setup-msys2`).
+  Cross-building from Linux works with the host clang and lld over MSYS2's clang64 sysroot
+  packages; packages for tests are built with the Rtools ABI from MSYS2's ucrt64 GCC 14 headers
+  and static `libstdc++` (GCC 16's needs a newer clang than 18).
 - **Windows-only routines** that `utils` and `grDevices` reference at load time are registered in
   `WINDOWS_ROUTINES` (`builtin_libraries.rs`), chained in only on Windows so Unix sessions keep
   GNU R's Unix routine table.
-- **Impact.** `ry run` runs base R under Wine with no GNU R binary executed. Open: BLAS through
-  `Rblas.dll`, the msvcrt versus UCRT mismatch with Rtools-built packages (the `gnullvm` target
-  closes it), and building `R.dll` in the release workflow.
+- **Impact.** `ry run` runs base R and Rtools-ABI package DLLs (jsonlite, data.table, digest, cli,
+  uuid, Rcpp with exceptions crossing R errors) under Wine with no GNU R binary executed, and the
+  release workflow ships `R.dll` beside `ry.exe`. Open items are in `r-runtime.md`, section 11.
 
 # Decision record: a new top-level name costs one project fold
 
@@ -4345,3 +4364,17 @@ explicit allocators".
   its uri and selection start instead of serializing ids into `data`, so a stale item never names
   a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
   statement calls first.
+
+## A conditional write of a formal covers the paths that run it
+
+- **Previous shape.** `FormalUses::assigned` held the names written on every path, so a read after
+  `if (flag) x <- 1` forced `x`. That contradicted the rule the spec opens with (a formal is required
+  only when every path forces it) and reported ks `kdde.binned(..., bin.par = bin.par)`, whose `w`
+  is rebound from `bin.par` on the branch the call takes.
+- **Target shape.** `assigned` holds the names some path wrote before forcing them, joined by
+  union, and a write of a name its path already forced is not recorded. A later read forces the
+  formal only when no path wrote it first. Loops and lazy operands keep the writes of the paths that
+  run them, and `local()` still discards its writes.
+- **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
+  A call that omits the formal and takes the non-writing path is no longer reported; that is the
+  accepted cost of a path-insensitive analysis that must not report correct calls.

@@ -327,8 +327,9 @@ pub unsafe extern "C" fn Riconv_open(
     }
 }
 
-/// `Riconv`: `iconv(3)`'s contract over a descriptor from `Riconv_open`, including a null
-/// input that writes the final shift sequence (or, with a null output too, resets the state).
+/// `Riconv`: `iconv(3)`'s contract over a descriptor from `Riconv_open`, including the count
+/// of irreversible conversions on success and a null input that writes the final shift
+/// sequence (or, with a null output too, resets the state).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riconv(
     descriptor: *mut std::ffi::c_void,
@@ -373,7 +374,7 @@ pub unsafe extern "C" fn Riconv(
         *output_left -= written;
     }
     match outcome {
-        Ok(()) => 0,
+        Ok(irreversible) => irreversible,
         Err(stop) => {
             platform::set_errno(stop.errno());
             usize::MAX

@@ -53,9 +53,11 @@ then turning on types.
   the binary for Linux x86_64, macOS on Apple silicon, and Windows x86_64.
 - **Command line:** download the binary for your platform from
   [0.3.2-beta](https://github.com/felix-andreas/ry/releases/tag/0.3.2-beta), or build it with
-  `cargo install --git https://github.com/felix-andreas/ry ry-lang`.
+  `cargo install --git https://github.com/felix-andreas/ry ry-lang`. Both give you the checker,
+  formatter and language server, but not ry's own runtime.
 - **From a clone of the repository:** `just try` builds ry and its runtime, then runs each command
-  on this page, and more, in a demo project.
+  on this page, and more, in a demo project. Until 0.4.0-beta is released, this is the way to try
+  `ry run` on ry's runtime.
 
 [Installation](/installation) covers Zed, RStudio, Nix, and the remaining cases.
 

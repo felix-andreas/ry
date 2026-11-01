@@ -148,9 +148,17 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-went from 3,112 errors to 233 after the false-report fixes listed in `limitations.md` and the
-reference. A random sample of the rest is still almost entirely false reports on correct R. The
+went from 3,112 errors to 98 after the false-report fixes listed in `limitations.md` and the
+reference, then rose to 233 when the shipped stubs grew to cover more of base, httr, xml2 and
+lifecycle. A random sample of the rest is still almost entirely false reports on correct R. The
 classes, largest first:
+
+- **Not yet sorted: reports the larger stub set exposed.** They are unanalyzed, so each needs a
+  repro before a fix. The biggest groups: kernlab calls a `character` or `double` local as a
+  function (21); Matrix, devtools and pkgdown calls leave out a required `x` or `object` (26);
+  rmgarch passes `list[Any]` where `list[named: Any]` is expected; usethis names arguments on a
+  callback with no named parameters and tests `character | logical | T | NULL` as `logical`;
+  lifecycle passes `NULL` to `character[]`; pkgdown passes `xml_node | xml_missing` to xml2.
 
 - **Scalar claims pin parameters through call chains.** A stub's scalar return (`round`, `sum`,
   `nchar`) or a scalar use far down a chain pins an unannotated project parameter to `double`, and a
@@ -177,25 +185,24 @@ classes, largest first:
   lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it; settle which before the list grows.
-- **A declared vector into a scalar parameter is still reported** (`double[]` into ks
-  `kfe.1d(g)` style project parameters whose scalar claim comes from the body). Only computed
-  variables pass by length (`without_inferred_length`), and only when their type is a union with
-  a scalar member: a computed plain `logical[]` into a parameter whose scalar claim was inferred
-  from the body (zoo `rlength(idx0)`, renv `unlink(recursive =)`, diffobj, ks, mgcv: about 13
-  corpus reports) is reported, because the call site cannot tell an inferred scalar parameter from
-  an annotated one (`pick(c(TRUE, FALSE))` against `fn(flag: logical)` is a real error). Exporting
-  whether each parameter type was declared with the item scheme would let only declared scalars
-  hold.
+- **A union parameter that flows to the return keeps every member at the call** (renv
+  `renv_path_normalize`, about 5 reports): `path: list[T] | T[]` from `map_lgl(path, ...)` is
+  returned, so a `character` argument returns `character | list[character] | character[]`, which an
+  inferred `character` parameter then rejects. Needs a bounded variable (`<P: list[T] | T[]>`) so the
+  return names the argument's own type.
+- **A branch join pins a rebound formal to the other branch's type** (mgcv `Sl.fitChol`:
+  `rho <- if (is.null(L)) rho + rho0 else L %*% rho + rho0` exports `rho: matrix`, so
+  `rho = lsp[1:n.sp]` is reported). Joining the open `T` of `rho + rho0` with `matrix` unifies the
+  formal's variable instead of forming a union.
 - **Negating a parameter whose only type is a `NULL` default is reported** (pracma
   `quadprog(A = NULL, b = NULL)` negates `b` under `if (!is.null(A))`: 2 corpus reports). Dropping
   the `NULL` there constrains the parameter's variable to numeric, and the rendered scheme
   `fn([b]: U)` then no longer admits its `NULL` default, which fails the annotation round trip.
   A fix needs the scheme to keep `U | NULL` for a numeric-constrained defaulted parameter.
-- **Stubs cannot select an overload by a literal argument value.** `sort(x, index.return = TRUE)`
-  returns `list{x, ix}`, so `sorted$ix` reports `$` on an atomic vector (rmgarch, mgcv: 5 corpus
-  reports). An overload that merely requires `index.return` also matches `index.return = FALSE`,
-  which returns a vector, so it was dropped. Literal `TRUE`/`FALSE` parameter types in stubs
-  would express it.
+- **A computed-key write into a record leaves the record unchanged** (highs `globals[[key]] <<-
+  value` on `list(threads = NA_integer_)`), so a later computed read claims only the declared
+  fields' types. Combined with a `missing(key)` path that returns the whole record, the result is
+  `list{threads: integer} | integer | T` and arithmetic on it is reported (4 corpus reports).
 - **A `NULL` placeholder that a reflective write replaces is reported** (renv `cond <- NULL` then
   `do.call(delayedAssign, list("cond", ...))`, brew's package-level `.extendedError = NULL` set by
   `assign()` into the namespace). The checker does not see `assign()` or `delayedAssign()` as a
@@ -575,7 +582,7 @@ change that does not pay.
    interpreter's call path, lookups and allocation").
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
-- **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
+- **Typed Array loops trail untyped ones slightly.** `python3 tools/bench/why/run.py --filter array` (GNU R / ry untyped / ry typed and strict, seconds, 4-core Xeon): array_dot 0.188/0.021/0.022, array_filter 0.167/0.022/0.026, array_map 0.247/0.038/0.041, array_sum 0.116/0.024/0.027. The JIT compiles Array element loops natively, but the typed program still pays 5 to 15 percent over the plain-vector one; find where (the strict operator check, `as.Array`, or the annotation checks) before calling Arrays a speed feature.
 
 ## Open: performance and memory
 
@@ -2009,8 +2016,9 @@ is a fourth, and the design record describes the versioned mirror structs it nee
 **Windows needs a real-machine smoke test.** The embedding is implemented and
 `contributing/design/repl.md` has the recipe, covering Rstart callbacks through `R_DefParamsEx`'s
 version handshake, sibling-DLL preloading, the RGui-to-LinkDLL switch, and the UserBreak plus
-deferred-interrupt pair. It is compile-verified and clippy-verified against
-`x86_64-pc-windows-gnu`, and no Windows machine with R has ever executed it. The smoke test is
+deferred-interrupt pair. It is compile-verified against `x86_64-pc-windows-gnullvm`, and GNU R's `R.dll`
+now loads first by full path, because ry's own `R.dll` sits beside `ry.exe` and would otherwise
+capture `Rblas.dll`'s import of `R.dll`. No Windows machine with R has ever executed it. The smoke test is
 `ry R`, checking the prompt, evaluation, Ctrl-C and vi mode, and `ry R script.R`, checking output
 and exit codes 0 and 1. One known caveat to watch is terminal VT input handling in the editor layer.
 
@@ -2336,7 +2344,12 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
 - **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
-  its R home from symbolic links, which need Developer Mode.
+  its R home from symbolic links, which need Developer Mode, and does not drive Rtools, so there is
+  no Windows `R CMD INSTALL` yet (package DLLs have been built by hand against `libR.dll.a`).
+- **C API exports packages may link but `libR` lacks** (found by diffing GNU R 4.5's `R.dll`
+  export table, on every platform): `R_findVar`, `R_findVarInFrame`, `R_findVarLoc`,
+  `R_findVarLocInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its siblings, `Rf_mbrtowc`,
+  `utf8clen`, `R_MissingArgError`. The rest of the 316-name difference is GNU R internals and RGui.
 
 ## Explicitly out of scope for now
 
