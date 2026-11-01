@@ -34,6 +34,7 @@ pub mod conditions;
 pub mod connections;
 pub mod data_table;
 pub mod dataframe;
+pub mod debugger;
 pub mod deparse;
 pub mod dispatch;
 pub mod distributions;
@@ -198,6 +199,9 @@ pub struct Interp {
     pub error_message: String,
     /// Whether the default error handler prints (`R_ShowErrorMessages`).
     pub show_error_messages: bool,
+    /// The attached Debug Adapter Protocol server, which the evaluator consults before each
+    /// statement.
+    pub debugger: Option<Box<debugger::Adapter>>,
     /// Depth of nested default error handling, to stop an error in `options(error=)` looping.
     pub in_error: u32,
     /// Objects that live as long as the session: the options list, `.Random.seed` helpers, and
@@ -318,6 +322,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         immediate_warning: false,
         error_message: String::new(),
         show_error_messages: true,
+        debugger: None,
         in_error: 0,
         globals: values::Globals::placeholder(),
         hooks,

@@ -15,6 +15,7 @@ use {
         },
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    smallvec::SmallVec,
 };
 
 unsafe extern "C" {
@@ -908,8 +909,10 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
     if !left_attributes && !right_attributes {
         return Ok(());
     }
+    // A zero-length result keeps names only from the left operand, matching GNU R, where
+    // `y + 1` keeps the empty names of `y` but `1 + y` and `numeric(0) + y` drop them.
     if result_length == 0 {
-        return copy_array_structure(left, right, result);
+        return copy_array_structure(left, right, result, false);
     }
     if right_attributes && length(right) == result_length {
         values::copy_most_attributes(right, result, false)?;
@@ -917,7 +920,7 @@ pub unsafe fn binary_attributes(left: Sexp, right: Sexp, result: Sexp, call: Sex
     if left_attributes && length(left) == result_length {
         values::copy_most_attributes(left, result, false)?;
     }
-    copy_array_structure(left, right, result)
+    copy_array_structure(left, right, result, true)
 }
 
 /// The attributes a comparison or a binary `&` and `|` keep, which GNU R limits to the
@@ -927,7 +930,7 @@ pub unsafe fn relational_attributes(left: Sexp, right: Sexp, result: Sexp, call:
     if left.attrib() == nil() && right.attrib() == nil() {
         return Ok(());
     }
-    copy_array_structure(left, right, result)?;
+    copy_array_structure(left, right, result, true)?;
     let result_length = length(result);
     for operand in [right, left] {
         let tsp = get_attr(operand, symbols().tsp);
@@ -980,7 +983,7 @@ unsafe fn check_conformable(left: Sexp, right: Sexp, call: Sexp, arithmetic: boo
 
 /// Dimensions, dimension names and names from the operand of the result's length, the left
 /// one first.
-unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp) -> R<()> {
+unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp, names_from_right: bool) -> R<()> {
     let result_length = length(result);
     for symbol in [symbols().dim, symbols().dimnames] {
         let from_left = get_attr(left, symbol);
@@ -997,11 +1000,11 @@ unsafe fn copy_array_structure(left: Sexp, right: Sexp, result: Sexp) -> R<()> {
         return Ok(());
     }
     let left_names = get_attr(left, symbols().names);
-    let right_names = get_attr(right, symbols().names);
+    let right_name_values = get_attr(right, symbols().names);
     if left_names != nil() && length(left) == result_length {
         values::set_attr(result, symbols().names, left_names)?;
-    } else if right_names != nil() && length(right) == result_length {
-        values::set_attr(result, symbols().names, right_names)?;
+    } else if names_from_right && right_name_values != nil() && length(right) == result_length {
+        values::set_attr(result, symbols().names, right_name_values)?;
     }
     Ok(())
 }
@@ -2589,8 +2592,8 @@ enum Summary {
 }
 
 /// The values a summary function reduces, and whether `na.rm` was set.
-unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
-    let mut items = Vec::new();
+unsafe fn summary_args(call: &Call<'_>) -> R<(SmallVec<[Sexp; 4]>, bool)> {
+    let mut items = SmallVec::new();
     let mut na_rm = false;
     for arg in call.args {
         if arg.tag == symbols().na_rm {
@@ -2604,9 +2607,7 @@ unsafe fn summary_args(call: &Call<'_>) -> R<(Vec<Sexp>, bool)> {
 }
 
 unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
-    let (mut items, na_rm) = summary_args(call)?;
-    // NULL contributes no values, and the typed loops below read vectors' payloads directly.
-    items.retain(|item| *item != nil());
+    let (items, na_rm) = summary_args(call)?;
     for item in &items {
         if !(item.kind().is_atomic() || *item == nil())
             || (item.kind() == SexpType::String
@@ -2618,8 +2619,6 @@ unsafe fn summary(call: &Call<'_>, function: Summary) -> R<Sexp> {
             )));
         }
     }
-    // `NULL` contributes nothing, and it has no elements to read.
-    let items: Vec<Sexp> = items.into_iter().filter(|item| *item != nil()).collect();
     let kind = items.iter().fold(SexpType::Logical, |kind, item| {
         coerce::higher_type(kind, item.kind())
     });
@@ -3461,10 +3460,13 @@ unsafe fn rep_classed(call: &Call<'_>, count: &str, tagged: bool) -> R<Option<Se
     if !has_method {
         return Ok(None);
     }
-    let count = values::install(count)?;
-    let expression = values::call(values::install("rep")?, &[values::install("x")?, count])?;
+    // The call carries the argument values rather than the internal's parameter names,
+    // because the caller's environment need not bind `x` or `times`.
+    let object = crate::eval::quote_value(call.arg(0))?;
+    let times = crate::eval::quote_value(call.arg(1))?;
+    let expression = values::call(values::install("rep")?, &[object, times])?;
     if tagged {
-        crate::heap().set_tag(expression.cdr().cdr(), count);
+        crate::heap().set_tag(expression.cdr().cdr(), values::install(count)?);
     }
     crate::eval::eval(expression, call.env).map(Some)
 }

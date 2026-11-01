@@ -28,6 +28,7 @@ Rboolean Rf_removeTaskCallbackByIndex(int id);
 Rboolean Rf_removeTaskCallbackByName(const char *name);
 R_ToplevelCallbackEl *Rf_addTaskCallback(R_ToplevelCallback cb, void *data,
                                          void (*finalizer)(void *), const char *name, int *pos);
+SEXP R_removeTaskCallback(SEXP which);
 
 #ifdef __cplusplus
 }

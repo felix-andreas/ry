@@ -776,36 +776,60 @@ columns as ALTREP vectors to native code. The user guide is [DataFrames](/guides
 
 The claim that the frame outperforms data.table rests on a benchmark of its own
 (`tools/bench/table/`): the db-benchmark group-by and join questions (the suite H2O started and
-DuckDB Labs maintains) at 0.5 GB and 5 GB, `:=` update loops and a keyed rolling join, run on the
-same machine against data.table with all threads.
+DuckDB Labs maintains), `:=` update loops and a keyed rolling join, run on the same machine against
+data.table with all threads. `just bench-table <dir> --rows 1e7` regenerates a table below (it
+generates the data on first use), and `--groupby-only` limits a run to the group-by questions.
 
 At db-benchmark's 0.5 GB size (1e7 rows, 4 threads), DataFrames from R code under
 `ry run` beat data.table under GNU R on every question, and all three runs give the
 same checksums. Each cell is the faster of two runs, in seconds; the last column is the same engine
 driven from Rust, without R.
 
+<!-- bench-table:1e7 -->
 | Question | data.table | ry, from R | ry, from Rust |
 |---|---|---|---|
-| groupby q1: `sum(v1)` by `id1` | 0.151 | 0.022 | 0.034 |
-| groupby q2: `sum(v1)` by `id1, id2` | 0.192 | 0.020 | 0.044 |
-| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.272 | 0.096 | 0.110 |
-| groupby q4: three means by `id4` | 0.357 | 0.158 | 0.175 |
-| groupby q5: three sums by `id6` | 0.291 | 0.089 | 0.157 |
-| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.692 | 0.091 | 0.146 |
-| groupby q7: `max(v1) - min(v2)` by `id3` | 0.714 | 0.053 | 0.081 |
-| groupby q8: the two largest `v3` by `id6` | 0.759 | 0.177 | 0.235 |
-| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.769 | 0.041 | 0.099 |
-| groupby q10: `sum(v3)`, count by all six ids | 1.733 | 1.033 | 0.896 |
-| `:=` on a whole column, 100 times | 5.349 | 0.291 | 2.081 |
-| `:=` on 1% of rows, 100 times | 3.803 | 1.112 | 0.891 |
-| `:=` adding a column, 100 times | 5.159 | 0.744 | 2.666 |
-| join q1: small, on `id1` | 0.356 | 0.110 | 0.149 |
-| join q2: medium, on `id2` | 0.522 | 0.131 | 0.229 |
-| join q3: medium, left, on `id2` | 0.612 | 0.179 | 0.192 |
-| join q4: medium, on factor `id5` | 0.499 | 0.119 | 0.230 |
-| join q5: big, on `id3` | 3.797 | 0.664 | 1.028 |
-| keyed rolling join, 1e6 trades | 0.130 | 0.094 | 0.100 |
-| total | 26.16 | 5.22 | 9.54 |
+| groupby q1: `sum(v1)` by `id1` | 0.131 | 0.062 | 0.152 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.186 | 0.063 | 0.151 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 0.289 | 0.148 | 0.289 |
+| groupby q4: three means by `id4` | 0.319 | 0.181 | 0.281 |
+| groupby q5: three sums by `id6` | 0.319 | 0.171 | 0.247 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 0.668 | 0.186 | 0.291 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 0.749 | 0.090 | 0.158 |
+| groupby q8: the two largest `v3` by `id6` | 0.666 | 0.253 | 0.322 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 0.932 | 0.105 | 0.199 |
+| groupby q10: `sum(v3)`, count by all six ids | 1.909 | 0.856 | 0.902 |
+| `:=` on a whole column, 100 times | 5.204 | 0.310 | 2.005 |
+| `:=` on 1% of rows, 100 times | 3.857 | 0.809 | 0.906 |
+| `:=` adding a column, 100 times | 4.997 | 0.773 | 1.428 |
+| join q1: small, on `id1` | 0.372 | 0.219 | 0.133 |
+| join q2: medium, on `id2` | 0.486 | 0.250 | 0.238 |
+| join q3: medium, left, on `id2` | 0.622 | 0.266 | 0.188 |
+| join q4: medium, on factor `id5` | 0.489 | 0.221 | 0.241 |
+| join q5: big, on `id3` | 3.588 | 1.193 | 0.947 |
+| keyed rolling join | 0.127 | 0.115 | 0.083 |
+| total | 25.91 | 6.27 | 9.16 |
+<!-- /bench-table:1e7 -->
+
+At 5e7 rows (2.6 GB of CSV) the table holds the ten group-by questions alone, because the `:=` loop
+that adds 100 columns needs more than this machine's 15 GB. db-benchmark's 5 GB size (1e8 rows) is
+out of reach for the same reason: at 5e7 rows the CSV read already peaks at 10 GB and data.table's q10
+at 6.4 GB, and both grow with the row count.
+
+<!-- bench-table:5e7 -->
+| Question | data.table | ry, from R | ry, from Rust |
+|---|---|---|---|
+| groupby q1: `sum(v1)` by `id1` | 0.737 | 0.285 | 0.656 |
+| groupby q2: `sum(v1)` by `id1, id2` | 0.898 | 0.306 | 0.629 |
+| groupby q3: `sum(v1)`, `mean(v3)` by `id3` | 1.182 | 0.869 | 1.083 |
+| groupby q4: three means by `id4` | 1.525 | 0.854 | 1.170 |
+| groupby q5: three sums by `id6` | 1.265 | 0.919 | 1.136 |
+| groupby q6: `median(v3)`, `sd(v3)` by `id4, id5` | 3.816 | 0.883 | 1.285 |
+| groupby q7: `max(v1) - min(v2)` by `id3` | 5.071 | 0.665 | 1.065 |
+| groupby q8: the two largest `v3` by `id6` | 3.424 | 1.500 | 1.994 |
+| groupby q9: `cor(v1, v2)^2` by `id2, id4` | 2.247 | 0.476 | 0.901 |
+| groupby q10: `sum(v3)`, count by all six ids | 9.675 | 5.070 | 6.053 |
+| total | 29.84 | 11.83 | 15.97 |
+<!-- /bench-table:5e7 -->
 
 The R script uses the Polars-style verbs for every question except the `:=` loops, which measure
 in-place update and so keep data.table's syntax. Run-to-run times vary by up to 2x on the
@@ -960,8 +984,10 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 111 of the 112 oracle cases match GNU R (`oracle compare --engine ry`); the
-   other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   The interpreter runs. 149 of the 150 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
+   (`oracle compare --engine ry`), and 148 of 150 under the JIT (`--engine ry-jit`, which also
+   differs on `environments__hidden_function_bindings`). The
+   remaining interpreter case, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
    different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
    exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
@@ -973,6 +999,12 @@ Each step ends with something real running, and each one is a large, whole chang
    ragg share one engine, and the built-in `pdf`, `svg`, `postscript`, `png`, `jpeg`, `bmp` and
    `tiff` devices are engine devices too. On ragg captures, base graphics, grid and lattice match
    GNU R pixel for pixel.
+
+   At the full benchmark size (about 308,000 lines per code base), ry's test suites match GNU R on
+   every test of all three code bases. With the JIT off, finbench's suite takes 1.13x GNU R's time;
+   with it on, finbench, dsbench and biobench take 1.30x, 1.35x and 1.21x, so the JIT currently costs
+   cold code about 15% (`.agents/memory/backlog.md`, "Open: the benchmark packages under ry's
+   runtime", has the levers).
 4. **The full C API and packages.** The rest of the 792 measured names and the BLAS and LAPACK
    interfaces, ALTREP, connections,
    unwind protection, C callables, `R CMD INSTALL` semantics and binary installs. Exit criterion: all
@@ -980,9 +1012,11 @@ Each step ends with something real running, and each one is a large, whole chang
    installed), and the three generated
    code bases pass their test suites with output identical to GNU R.
 
-   The C API is done, with evaluation behind a hook the interpreter installs (`libr::eval::Evaluator`). `libR` exports every one of the 444 function and variable
-   names the closure uses (the rest of the 792 are types, macros and enum constants in the headers)
-   and implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
+   The C API is done, with evaluation behind a hook the interpreter installs
+   (`libr::eval::Evaluator`). `libR` declares and exports all 985 function and variable names that
+   GNU R's public headers declare, which covers the 444 the closure uses (the rest of the 792 are
+   types, macros and enum constants in the headers). `crates/libr/tests/test_headers.rs` checks the
+   list in `tests/headers/r_api_names.txt` against ry's headers and the exports. `libR` implements Rmath, Applic, LINPACK, ALTREP, connections and serialization; BLAS and LAPACK
    are declared in headers and come from the system libraries. Against the corpus library (GNU R
    4.3.3 binaries, `tests/test_corpus_binaries.rs`), 192 of the closure's 199 non-base compiled
    packages load and register under ry. Of the other seven, six evaluate R code while loading (S7,
@@ -994,8 +1028,11 @@ Each step ends with something real running, and each one is a large, whole chang
    also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
    on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
    packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
-   Magick++. Run on those installs, ry passes the tests of 90 of the 165 packages whose tests pass
-   under GNU R (54.5%). The rest fail on interpreter gaps, and the classes are listed in
+   Magick++. Two package-test rates are tracked, both counting only the packages whose
+   tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
+   ry passes the tests of 113 of 146 (77.4%). With the packages ry installed itself
+   (`.corpus/ry-library`, `oracle packages --installed`), the last measured rate was 90 of 165
+   (54.5%), from an older interpreter. The rest fail on interpreter gaps, and the classes are listed in
    `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime
@@ -1008,7 +1045,8 @@ Each step ends with something real running, and each one is a large, whole chang
 8. **The table type,** on Polars, with its own benchmark against data.table. The engine, its query
    IR, ALTREP exposure and the checker's `DataFrame` type exist (section 7); the interpreter now
    runs DataFrames and their Polars-style verbs, and data.table's queries run on the engine. Routing data.table's readers, writers and
-   helpers to it is next.
+   helpers to it is next. On db-benchmark's questions at 1e7 rows on four cores, ry called from R is
+   faster than data.table on every one (section 7 has the table).
 
 9. **Portability.** macOS runs the runtime: `libR.dylib` builds with the install name
    `@rpath/libR.dylib` and the full export list, GNU R's package binaries are rebound to it (section
@@ -1016,8 +1054,9 @@ Each step ends with something real running, and each one is a large, whole chang
    cross-compiling from Linux for `aarch64-apple-darwin` and `x86_64-apple-darwin` and by running
    the Mach-O rewriter on a linker-built package; the release smoke test is the first run on a Mac.
    Windows builds `R.dll` and `ry.exe` for `x86_64-pc-windows-gnullvm` (the UCRT), and `ry run`
-   runs base R and Rtools-built packages under Wine; what is verified and what is open is in
-   section 11.
+   runs base R and Rtools-built packages under Wine. `rcmd` also follows Rtools' conventions for
+   `R CMD INSTALL` on Windows, verified only by installing from a Linux host, and the session reports
+   a UTF-8 locale as `.utf8`, as GNU R does. What is verified and what is open is in section 11.
 
 The JIT comes late on purpose. Until real packages run, there is nothing representative to optimize,
 and an object model or calling convention changed for the JIT's sake after the C API exists would
@@ -1063,8 +1102,24 @@ JIT fits around them.
     packages' DLLs are found under `library/<pkg>/libs/x64/`, and the Windows-only routines that
     `utils` and `grDevices` call at load time (`winver`, `getIdentification`, `readRegistry` and
     so on) are registered (`WINDOWS_ROUTINES` in `crates/interp/src/builtin_libraries.rs`).
-  - `ry.exe` reserves a 64 MiB main-thread stack and embeds `ry.exe.manifest`, which makes UTF-8
-    the active code page as `R.exe`'s manifest does (`crates/ry/build.rs`, through `windres`).
+  - `ry.exe` and `ry-rcmd.exe` reserve a 64 MiB main-thread stack and embed `ry.exe.manifest`,
+    which makes UTF-8 the active code page as `R.exe`'s manifest does (`crates/ry/build.rs`,
+    through `windres`, which `rcmd` names as its build script too). The session also switches each
+    locale category's codeset to UTF-8 at startup, so it holds even where the manifest is ignored,
+    and reports the codeset as `.utf8`, as GNU R does (Wine's CRT names it `.65001`).
+  - `rcmd` builds packages the Windows way when the R home's `etc/Makeconf` says `SHLIB_EXT =
+    .dll`, the one fact every other convention is derived from (`Platform::of_home`):
+    `Makevars.ucrt`, then `Makevars.win`, then `Makevars`; `configure.ucrt` or `configure.win` and
+    `Makefile.ucrt` or `Makefile.win`, with no fallback to the Unix files; DLLs installed under
+    `libs/x64/`; and `R_ARCH=/x64` for the build and for `install.libs.R`. Its `Makeconf` follows
+    the Rtools ABI of GNU R's `etc/x64/Makeconf`: `gcc`/`g++`/`gfortran`, `-shared
+    -static-libgcc`, no PIC flags, and `-L"$(R_HOME)/bin/x64" -lR` against the `libR.dll.a` that
+    the home keeps beside `R.dll` in `bin/x64/`. Windows runs no shell scripts, so the home's
+    `bin/R.exe`, `bin/Rscript.exe`, `bin/x64/Rcmd.exe` and `bin/x64/Rterm.exe` (which callr starts)
+    are copies of `ry-rcmd.exe`, which reads which front end it is from its file name and the home
+    from its location, ignoring an inherited `R_HOME`. The paths it exports to `configure` and
+    `make` use forward slashes, because both read a backslash as an escape. Directories that
+    cannot be linked (Windows needs Developer Mode for symbolic links) are copied.
   - `ry run` loads `R.dll` from beside `ry.exe`, and BLAS and LAPACK from the R installation's
     `bin/x64/Rblas.dll` and `Rlapack.dll`. DLLs load with `LOAD_WITH_ALTERED_SEARCH_PATH` from a
     backslashed path, so `Rlapack.dll` finds `Rblas.dll` in its own directory.
@@ -1098,8 +1153,16 @@ JIT fits around them.
     (GCC 14's headers and static `libstdc++` from MSYS2's ucrt64 environment, driven by clang
     and lld): jsonlite, data.table (grouping, keys, `fwrite`/`fread`, its error messages), digest,
     cli, uuid and Rcpp, plus a test package that throws Rcpp and C++ exceptions, calls back into R,
-    and lets an R error cross its C++ frames, with every destructor run once. Installation was a
-    script over `tools:::.install_package_*` and `makeLazyLoading`, not `R CMD INSTALL`.
+    and lets an R error cross its C++ frames, with every destructor run once.
+  - `R CMD INSTALL` of those six packages through `rcmd`'s Windows conventions, then `library()`
+    and a call into each one's DLL from `libs/x64/` under `ry.exe`. The install was cross-hosted,
+    because running MSYS2's `gcc`, `make` or `sh` under Wine is not allowed in the environment
+    that verified it: `rcmd` on Linux, with a home whose `Makeconf` is the Windows one and whose
+    compilers are clang wrappers over the ucrt64 sysroot that link libstdc++, winpthreads and zlib
+    statically, as Rtools' GCC does. The R-code half of that install ran on Linux ry, so the
+    `Built:` platform was restamped before loading. `ry-rcmd.exe assemble` under Wine wrote the
+    Windows home, and its `R.exe RHOME` and `Rscript.exe` (loading digest, reporting `.utf8`
+    locales and code page 65001) ran from it.
   - The BLAS path, with a stand-in `Rblas.dll` built from C that imports `xerbla_` from `R.dll`
     as R's own does: `%*%` loads and calls it, and a bad argument becomes the R error `BLAS/LAPACK
     routine 'DGEMM ' gave error code -3`. R's own `Rblas.dll` and `Rlapack.dll` import nothing
@@ -1108,15 +1171,8 @@ JIT fits around them.
   Open:
   - Nothing has run on Windows itself; the release smoke test (`tools/smoke-test.sh`, which runs
     a script, a BLAS and LAPACK call and a CRAN binary of jsonlite) is the first run.
-  - Under Wine, `Sys.getlocale("LC_CTYPE")` reports `English_United States.1252` although the
-    active code page is UTF-8; GNU R under its manifest reports `.utf8`. Unverified on Windows.
-  - `rcmd` has no Windows `R CMD INSTALL`: it assembles its R home from symbolic links, which
-    Windows creates only in Developer Mode or as administrator, and it does not yet drive
-    Rtools.
-  - R.dll exports 1211 names against GNU R 4.5's 1352. Most of the difference is GNU R internals and
-    RGui, but `R_findVar`, `R_findVarInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its
-    siblings, `Rf_mbrtowc`, `utf8clen` and `R_MissingArgError` are public enough that packages
-    may link them, on every platform.
+  - `R CMD INSTALL` driving Rtools' own `make`, `sh` and GCC on Windows has not run; the release
+    smoke test should install a source package with a `Makevars.win` (data.table) on the runner.
   - `win.version()` and `Sys.info()` report a fixed `Windows 10 x64` with no build number.
 - **Bytecode compatibility.** Installed binary packages contain GNU R bytecode in their lazy-load
   databases. ry can ignore it and recompile from the deparsed closures, which is the current plan,

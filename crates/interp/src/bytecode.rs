@@ -44,6 +44,7 @@ use {
         object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Sexp, SexpType, gp, is_na_real},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::{SmallVec, smallvec},
     std::ops::Range,
 };
 
@@ -355,8 +356,9 @@ pub enum Op {
     /// `double` is 1), where `index` is a register that already holds the index's value and the
     /// assignment runs as `<-` would run it.
     SubAssign,
-    /// `srcref`: makes the srcref constant current, for a statement of a `{` with source
-    /// references.
+    /// `srcref statement`: makes the srcref constant current, for a statement of a `{` with
+    /// source references; `statement` is 1 when a statement starts there, which an attached
+    /// debugger may stop on, and 0 when a block's end restores the outer srcref.
     SetSrcref,
     /// `function expected target`: jumps unless the function is the primitive `expected`.
     BranchUnlessPrimitive,
@@ -1237,7 +1239,7 @@ impl Compiler {
                     if srcrefs != nil() {
                         self.srcref = eval::statement_srcref(srcrefs, index + 1);
                         let srcref = self.constant(self.srcref);
-                        self.emit(Op::SetSrcref, &[srcref]);
+                        self.emit(Op::SetSrcref, &[srcref, 1]);
                     }
                     self.expression(*statement, dst)?;
                     used = self.registers;
@@ -1248,7 +1250,9 @@ impl Compiler {
                 }
                 self.srcref = outer;
                 let srcref = self.constant(outer);
-                self.emit(Op::SetSrcref, &[srcref]);
+                // Restoring the outer srcref after a block starts no statement, so the
+                // debugger must not stop on it.
+                self.emit(Op::SetSrcref, &[srcref, 0]);
             }
             "(" => {
                 self.expression(args[0].1, dst)?;
@@ -1655,7 +1659,7 @@ pub fn operand_count(op: Op) -> usize {
         Op::LogicRight => 5,
         Op::Closure => 4,
         Op::SubAssign => 6,
-        Op::SetSrcref => 1,
+        Op::SetSrcref => 2,
         Op::EndStatement => 3,
         Op::BranchUnlessPrimitive => 3,
         Op::BranchIfObject => 2,
@@ -1733,7 +1737,7 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
     reserve_registers(base + register_count)?;
     let profile = values::ints_mut(constants.element(PROFILE));
     profile[profile::ENTRIES] = profile[profile::ENTRIES].saturating_add(1);
-    let mut loops = vec![LoopState::default(); loop_count(code)];
+    let mut loops: SmallVec<[LoopState; 4]> = smallvec![LoopState::default(); loop_count(code)];
     let was_compiled_frame = env.has_gp(gp::COMPILED_FRAME);
     env.set_gp_bits(gp::COMPILED_FRAME, true);
     let mut machine = Machine {
@@ -1766,9 +1770,10 @@ unsafe fn run(function: Sexp, code: Sexp, env: Sexp) -> R<Sexp> {
 }
 
 unsafe fn execute_code(machine: &mut Machine<'_>, mut pc: usize) -> R<Sexp> {
+    let decoded = Decoded::of(machine);
     loop {
         let at = pc;
-        match step(machine, &mut pc) {
+        match step(machine, &decoded, &mut pc) {
             Ok(Some(value)) => return Ok(value),
             Ok(None) => {
                 if pc < at
@@ -1837,7 +1842,7 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// does not specialize. It must not be a jump, a branch, `Return` or a loop instruction.
 pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<()> {
     let mut next = pc;
-    step(machine, &mut next).map(|_| ())
+    step(machine, &Decoded::of(machine), &mut next).map(|_| ())
 }
 
 /// What `GetVar` at `pc` reads, and whether the binding is in the activation's own frame.
@@ -1858,18 +1863,66 @@ pub unsafe fn load_variable(code: Sexp, env: Sexp, pc: usize) -> R<(Sexp, bool)>
     Ok((value, local))
 }
 
+/// What every instruction of an activation reads, loaded once instead of once per instruction.
+/// None of it changes while the activation runs: the code object is rooted and never patched,
+/// and the register window was reserved on entry in a file that never reallocates.
+#[derive(Clone, Copy)]
+struct Decoded<'a> {
+    code: &'a [i32],
+    constants: Sexp,
+    caches: Sexp,
+    registers: *mut Sexp,
+    /// The type feedback bytes, one per code word, or null when no optimizing tier is installed
+    /// to read them.
+    feedback: *mut i32,
+}
+
+impl Decoded<'_> {
+    unsafe fn of(machine: &Machine<'_>) -> Self {
+        let constants = machine.code.cdr();
+        let feedback = match interp().bytecode.tier {
+            Some(_) => values::ints_mut(constants.element(FEEDBACK)).as_mut_ptr(),
+            None => std::ptr::null_mut(),
+        };
+        Decoded {
+            code: values::ints(machine.code.car()),
+            constants,
+            caches: machine.code.tag(),
+            registers: register_address(machine.base),
+            feedback,
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn record(&self, pc: usize, value: Sexp) {
+        if !self.feedback.is_null() {
+            *self.feedback.add(pc) |= i32::from(value_kind(value));
+        }
+    }
+}
+
 /// Runs one instruction. `Some(value)` means the body returned.
-unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
+//
+// Inlined into the dispatch loop, so the activation's state stays in registers and an
+// instruction costs no call: as a call, the prologue and epilogue were most of a simple one.
+#[inline(always)]
+unsafe fn step(
+    machine: &mut Machine<'_>,
+    decoded: &Decoded<'_>,
+    pc: &mut usize,
+) -> R<Option<Sexp>> {
     let env = machine.env;
-    let base = machine.base;
-    let words = machine.code.car();
-    let constants = machine.code.cdr();
-    let caches = machine.code.tag();
-    let code = values::ints(words);
+    let Decoded {
+        code,
+        constants,
+        caches,
+        registers,
+        ..
+    } = *decoded;
     let at = *pc;
-    let operand = |index: usize| code[at + 1 + index] as usize;
-    let register = |index: usize| interp().bytecode.registers[base + index];
-    let set = |index: usize, value: Sexp| interp().bytecode.registers[base + index] = value;
+    let operand = |index: usize| *code.get_unchecked(at + 1 + index) as usize;
+    let register = |index: usize| *registers.add(index);
+    let set = |index: usize, value: Sexp| *registers.add(index) = value;
     let op = OPS[code[at] as usize];
     let next = at + 1 + operand_count(op);
     match op {
@@ -1882,9 +1935,9 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             // value invisible, as `withCallingHandlers(expr)` relies on.
             interp().visible = true;
             let symbol = constants.element(operand(1));
-            let held = base..base + operand(0);
+            let held = machine.base..machine.base + operand(0);
             let value = lookup_variable(symbol, env, constants, caches, operand(2), held)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::SetVar => {
@@ -1927,14 +1980,14 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
                 cell = cell.cdr();
             }
             let value = call_builtin(definition, call, function, &args, env)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::CallGeneric => {
             let function = register(operand(1));
             let call = constants.element(operand(2));
             let value = eval::apply_call(call, function, call.cdr(), env)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::CallRebinding => {
@@ -1942,7 +1995,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let call = constants.element(operand(2));
             let target = constants.element(operand(3));
             let value = eval::rebind_call(call, function, target, env)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::CallTailUpdate => {
@@ -1950,7 +2003,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             let call = constants.element(operand(2));
             let target = constants.element(operand(3));
             let value = eval::tail_update(call, function, target, env)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::BranchUnlessPrimitive => {
@@ -1982,13 +2035,13 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
                 Some(value) => value,
                 None => call_builtin(definition, call, function, &args, env)?,
             };
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::Ast => {
             let expression = constants.element(operand(1));
             let value = eval::eval(expression, env)?;
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(0), value);
         }
         Op::Guard => {
@@ -2042,7 +2095,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
                     call_builtin(definition, call, function, &args, env)?
                 }
             };
-            record_feedback(constants, at, value);
+            decoded.record(at, value);
             set(operand(1), value);
             interp().visible = true;
         }
@@ -2063,7 +2116,7 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
             // The body must see the sequence as shared, so that modifying the variable it came
             // from copies it instead of changing the elements still to come.
             sequence.increment_refcount();
-            record_feedback(constants, at, sequence);
+            decoded.record(at, sequence);
             set(operand(1), sequence);
             machine.loops[operand(0)] = LoopState {
                 index: 0,
@@ -2097,7 +2150,12 @@ unsafe fn step(machine: &mut Machine<'_>, pc: &mut usize) -> R<Option<Sexp>> {
         Op::ForEnd => register(operand(0)).decrement_refcount(),
         Op::Invisible => interp().visible = false,
         Op::Visible => interp().visible = true,
-        Op::SetSrcref => interp().srcref = constants.element(operand(0)),
+        Op::SetSrcref => {
+            interp().srcref = constants.element(operand(0));
+            if operand(1) == 1 && interp().debugger.is_some() {
+                crate::debugger::statement()?;
+            }
+        }
         Op::EndStatement => {
             set(operand(0), nil());
             for register in operand(1)..operand(2) {
@@ -2403,7 +2461,10 @@ unsafe fn lookup_enclosing_function(
     if let Some(cell) = cached_cell(symbol, enclosure, constants, caches, slot)
         && !cell.has_gp(gp::ACTIVE_BINDING)
     {
-        let value = cell.cdr();
+        let mut value = cell.cdr();
+        if value.kind() == SexpType::Promise && value.car() != unbound() {
+            value = value.car();
+        }
         if values::is_function(value) {
             return Ok(value);
         }
@@ -2411,6 +2472,7 @@ unsafe fn lookup_enclosing_function(
     lookup_function(symbol, env, constants, caches, slot, unbound())
 }
 
+#[inline]
 unsafe fn cached_cell(
     symbol: Sexp,
     enclosure: Sexp,

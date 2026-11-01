@@ -428,13 +428,13 @@ unsafe fn matrix_columns(
     };
     let mut columns = Vec::with_capacity(cols);
     for col in 0..cols {
-        let indices: Vec<usize> = (0..shown).map(|row| row + col * rows).collect();
+        // The whole column sets the common width and digits, as in GNU R, even when
+        // `max.print` hides some of its rows.
+        let indices: Vec<usize> = (0..rows).map(|row| row + col * rows).collect();
         let column = crate::subset::select_elements(matrix, &indices)?;
-        columns.push(escape_unquoted(
-            format::format_vector(column, options.settings, options.quote, na)?,
-            matrix,
-            options,
-        ));
+        let mut items = format::format_vector(column, options.settings, options.quote, na)?;
+        items.truncate(shown);
+        columns.push(escape_unquoted(items, matrix, options));
     }
     Ok(columns)
 }
@@ -466,8 +466,9 @@ pub unsafe fn print_matrix(
     print_matrix_rows(matrix, rows, cols, shown, options)?;
     if shown < rows {
         out(&format!(
-            " [ reached getOption(\"max.print\") -- omitted {} rows ]\n",
-            rows - shown
+            " [ reached getOption(\"max.print\") -- omitted {} {} ]\n",
+            rows - shown,
+            if rows - shown == 1 { "row" } else { "rows" }
         ));
     }
     Ok(())

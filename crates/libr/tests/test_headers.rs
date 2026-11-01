@@ -279,7 +279,11 @@ fn r_and_rinternals_compile_on_their_own() {
 /// The functions a set of headers declares, read from the compiler's own record of every
 /// prototype (`-aux-info`), so macros such as `#define curDevice Rf_curDevice` are resolved
 /// exactly as a package's compiler resolves them.
-fn declared_functions(headers: &[&str], directory: &Path) -> BTreeMap<String, String> {
+fn declared_functions(
+    include: &Path,
+    headers: &[&str],
+    directory: &Path,
+) -> BTreeMap<String, String> {
     let info = directory.join("declarations.txt");
     let source = directory.join("declarations.c");
     fs::write(&source, translation_unit(&[], headers)).expect("the probe source is written");
@@ -287,12 +291,11 @@ fn declared_functions(headers: &[&str], directory: &Path) -> BTreeMap<String, St
         .args(["-std=c11", "-fsyntax-only", "-aux-info"])
         .arg(&info)
         .arg("-I")
-        .arg(include_dir())
+        .arg(include)
         .arg(&source)
         .status()
         .expect("cc runs");
     assert!(status.success(), "the headers compile for -aux-info");
-    let include = include_dir();
     let include = include.to_string_lossy();
     let mut functions = BTreeMap::new();
     for line in fs::read_to_string(&info)
@@ -333,18 +336,22 @@ fn declared_functions(headers: &[&str], directory: &Path) -> BTreeMap<String, St
 /// The variables a set of headers declares `extern` (GNU R spells it `LibExtern`), read from
 /// the preprocessed source so macros are resolved, and attributed to their header through the
 /// preprocessor's line markers.
-fn declared_variables(headers: &[&str], directory: &Path) -> BTreeMap<String, String> {
+fn declared_variables(
+    include: &Path,
+    headers: &[&str],
+    directory: &Path,
+) -> BTreeMap<String, String> {
     let source = directory.join("variables.c");
     fs::write(&source, translation_unit(&[], headers)).expect("the probe source is written");
     let output = Command::new("cc")
         .args(["-std=c11", "-E"])
         .arg("-I")
-        .arg(include_dir())
+        .arg(include)
         .arg(&source)
         .output()
         .expect("cc runs");
     assert!(output.status.success(), "the headers preprocess");
-    let include = include_dir().to_string_lossy().into_owned();
+    let include = include.to_string_lossy().into_owned();
     // Each statement of our headers' text, with the header it came from.
     let mut statements: Vec<(String, String)> = Vec::new();
     let mut file = String::new();
@@ -430,14 +437,14 @@ fn every_declared_name_is_exported_by_libr() {
         .collect();
     let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
     let directory = work_dir("exports");
-    let mut declared = declared_functions(&headers, &directory);
+    let mut declared = declared_functions(&include_dir(), &headers, &directory);
     assert!(
         declared.len() > 300
             && declared.contains_key("Rf_curDevice")
             && declared.contains_key("Rf_allocVector"),
         "the declaration scan finds the headers' functions"
     );
-    let variables = declared_variables(&headers, &directory);
+    let variables = declared_variables(&include_dir(), &headers, &directory);
     assert!(
         variables.len() > 50
             && variables.contains_key("R_NilValue")
@@ -462,6 +469,178 @@ fn every_declared_name_is_exported_by_libr() {
         missing.join("\n")
     );
 }
+
+/// GNU R's API names, in `tests/headers/r_api_names.txt`: each function and variable GNU R's
+/// public headers declare and its library exports, with the header that declares it, then
+/// the names GNU R exports without declaring them that packages call anyway (`R_findVar`).
+/// The list is checked in because GNU R need not be installed; `api_names_cover_gnu_r`
+/// regenerates it.
+fn api_names() -> Vec<(String, Option<String>)> {
+    fs::read_to_string(probe_dir().join("r_api_names.txt"))
+        .expect("r_api_names.txt is readable")
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next().unwrap_or_default().to_owned();
+            let header = fields
+                .next()
+                .filter(|header| *header != "-")
+                .map(str::to_owned);
+            (name, header)
+        })
+        .collect()
+}
+
+/// GNU R's Windows build ships front-end headers no package compiles against.
+const GNU_R_FRONT_END_HEADERS: &[&str] = &["ga.h", "graphapp.h", "iconv.h", "libintl.h"];
+
+/// Every name of GNU R's API is declared by ry's headers and exported by libR, so a package
+/// that compiles and links against GNU R does both against ry. A name missing from either
+/// fails here.
+#[test]
+fn every_gnu_r_api_name_is_declared_and_exported() {
+    let names = api_names();
+    assert!(
+        names.len() > 900
+            && names
+                .iter()
+                .any(|(name, header)| name == "Rf_allocVector" && header.is_some())
+            && names
+                .iter()
+                .any(|(name, header)| name == "R_findVar" && header.is_none()),
+        "r_api_names.txt lists GNU R's API"
+    );
+    let headers: Vec<String> = headers()
+        .into_iter()
+        .filter(|header| !NOT_IN_LIBR.contains(&header.as_str()))
+        .collect();
+    let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+    let directory = work_dir("api_names");
+    let mut declared = declared_functions(&include_dir(), &headers, &directory);
+    declared.extend(declared_variables(&include_dir(), &headers, &directory));
+    let exported = dynamic_symbols(&harness::library_path());
+    let mut problems = Vec::new();
+    for (name, header) in &names {
+        if let Some(header) = header
+            && !declared.contains_key(name)
+        {
+            problems.push(format!(
+                "{name}: GNU R declares it in {header}, ry's headers do not"
+            ));
+        }
+        if !exported.contains(name) {
+            problems.push(format!("{name}: GNU R exports it, libR does not"));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "missing from ry's C API:\n{}",
+        problems.join("\n")
+    );
+}
+
+/// GNU R's headers and exported names, from `RY_GNU_R_INCLUDE` and `RY_GNU_R_EXPORTS` (a file
+/// with one exported name per line, as `nm -D --defined-only libR.so` or `objdump -p R.dll`
+/// list them). A name counts when GNU R both declares and exports it: GNU R's headers also
+/// declare names its library keeps private, such as the LINPACK routines R no longer
+/// compiles and the Hershey vector-font entry points. Every API name they yield must be in `r_api_names.txt` and every header must
+/// exist in ry, so a newer GNU R surfaces its additions here. With `RY_UPDATE_API_NAMES` set,
+/// the header section of the list is rewritten instead.
+#[test]
+fn api_names_cover_gnu_r() {
+    let (Some(include), Some(exports)) = (
+        std::env::var_os("RY_GNU_R_INCLUDE"),
+        std::env::var_os("RY_GNU_R_EXPORTS"),
+    ) else {
+        eprintln!("skipped: set RY_GNU_R_INCLUDE and RY_GNU_R_EXPORTS to compare with GNU R");
+        return;
+    };
+    let include = PathBuf::from(include);
+    let exports: BTreeSet<String> = fs::read_to_string(&exports)
+        .expect("the export list is readable")
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut gnu_headers = Vec::new();
+    for (directory, prefix) in [(include.clone(), ""), (include.join("R_ext"), "R_ext/")] {
+        for entry in fs::read_dir(&directory).expect("GNU R's include directory is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().is_some_and(|extension| extension == "h") {
+                let name = path.file_name().expect("a file name").to_string_lossy();
+                gnu_headers.push(format!("{prefix}{name}"));
+            }
+        }
+    }
+    let ours = headers();
+    let missing_headers: Vec<&String> = gnu_headers
+        .iter()
+        .filter(|header| {
+            !ours.contains(header) && !GNU_R_FRONT_END_HEADERS.contains(&header.as_str())
+        })
+        .collect();
+    assert!(
+        missing_headers.is_empty(),
+        "GNU R headers ry lacks: {missing_headers:?}"
+    );
+    // ry's header order satisfies the dependencies GNU R's headers share.
+    let shared: Vec<&str> = ours
+        .iter()
+        .filter(|header| gnu_headers.contains(header) && !NOT_IN_LIBR.contains(&header.as_str()))
+        .map(String::as_str)
+        .collect();
+    let directory = work_dir("gnu_api_names");
+    let mut declared = declared_functions(&include, &shared, &directory);
+    declared.extend(declared_variables(&include, &shared, &directory));
+    let fresh: BTreeMap<&String, &String> = declared
+        .iter()
+        .filter(|(name, _)| {
+            exports.contains(*name) && !DEFINED_BY_PACKAGES.contains(&name.as_str())
+        })
+        .collect();
+    let names = api_names();
+    if std::env::var_os("RY_UPDATE_API_NAMES").is_some() {
+        let path = probe_dir().join("r_api_names.txt");
+        let text = fs::read_to_string(&path).expect("r_api_names.txt is readable");
+        let internal = text
+            .split_once(INTERNAL_MARKER)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let mut updated = String::from(API_NAMES_PREAMBLE);
+        for (name, header) in &fresh {
+            updated.push_str(&format!("{name} {header}\n"));
+        }
+        updated.push_str(INTERNAL_MARKER);
+        updated.push_str(internal);
+        fs::write(&path, updated).expect("r_api_names.txt is written");
+        return;
+    }
+    let listed: BTreeSet<&String> = names.iter().map(|(name, _)| name).collect();
+    let unlisted: Vec<String> = fresh
+        .iter()
+        .filter(|(name, _)| !listed.contains(*name))
+        .map(|(name, header)| format!("{name} ({header})"))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "GNU R's API names missing from r_api_names.txt (rerun with RY_UPDATE_API_NAMES=1):\n{}",
+        unlisted.join("\n")
+    );
+}
+
+const API_NAMES_PREAMBLE: &str = "\
+# GNU R's C API: the functions and variables GNU R's public headers declare and its library
+# exports, each with the header that declares it. test_headers.rs requires ry's headers to
+# declare and libR to export every one. Regenerate the header section with
+#   RY_GNU_R_INCLUDE=<R include dir> RY_GNU_R_EXPORTS=<exported names file> \\
+#   RY_UPDATE_API_NAMES=1 cargo test -p libr --test test_headers api_names_cover_gnu_r
+";
+
+const INTERNAL_MARKER: &str = "\
+# Names GNU R exports without a header declaration that packages call regardless. They are
+# maintained by hand; libR must export each.
+";
 
 /// The path of a system library the C compiler would link, or `None` when it has none.
 fn system_library(file: &str) -> Option<PathBuf> {

@@ -20,3 +20,20 @@ z <- x; z[k] <- -1; print(z)
 z <- x; try(z[k] <- -(1:3)); print(z)
 print(as.list(1:6), max = 3)
 print(as.list(1:4), max = 3)
+
+# A hidden row still widens its column, and one omitted row reads singular.
+print(matrix(c(1, 2, 1000, 3.5), 4), max = 2)
+print(matrix(1:4, 2), max = 2)
+print(matrix(c(1, 2, 1000, 3.5), 2), max = 2)
+
+# A classed rep reaches its method whatever the caller names its variables.
+f <- function(d, k) rep(d, k)
+f(as.Date("2020-01-01"), 2)
+g <- function(d, k) rep_len(d, k)
+g(as.Date("2020-01-01"), 3)
+
+# A zero-length result takes names only from the left operand.
+y <- structure(numeric(0), names = character(0))
+attributes(1 + y)
+attributes(y + 1)
+attributes(numeric(0) + y)

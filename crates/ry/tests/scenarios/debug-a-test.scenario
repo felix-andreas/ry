@@ -1,0 +1,34 @@
+# A package author debugs one testthat test from its code lens: the editor loads the package,
+# runs only that test, and stops at a breakpoint inside the package's own code.
+
+requires ry-runtime r-package:testthat
+
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+file NAMESPACE
+| export(balance)
+file R/ledger.R
+| balance <- function(entries, opening = 0) {
+|   total <- sum(entries)
+|   opening + total
+| }
+file tests/testthat/test-ledger.R
+| test_that("balance adds the opening amount", {
+|   expect_equal(balance(c(1, 2), opening = 3), 6)
+| })
+| test_that("a test the editor did not pick", {
+|   stop("this test must not run")
+| })
+
+open tests/testthat/test-ledger.R
+expect lens tests/testthat/test-ledger.R "a test the editor" "Debug test"
+
+debug start tests/testthat/test-ledger.R prelude "load_all('.'); library(testthat)" test "balance adds the opening amount" break R/ledger.R:3
+expect stopped breakpoint at 3
+expect stack "balance@3"
+expect variable total 3
+expect variable opening "<not yet evaluated>"
+debug continue
+expect exited 0
+expect debug-output "Test passed"

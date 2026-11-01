@@ -238,6 +238,11 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         }
     }
     let mut outcome = jump(Jump::TopLevel);
+    if interp().debugger.is_some()
+        && let Err(unwind) = crate::debugger::uncaught_error(&text)
+    {
+        outcome = unwind;
+    }
     if option != nil() {
         let result = match option.kind() {
             SexpType::Language | SexpType::Symbol => eval::eval(option, global_env()).map(|_| ()),

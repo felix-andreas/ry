@@ -105,6 +105,9 @@ void (MARK_NOT_MUTABLE)(SEXP x);
 int (ALTREP)(SEXP x);
 SEXP (ATTRIB)(SEXP x);
 void SET_ATTRIB(SEXP x, SEXP v);
+/* The headers declare the API of the R version ry presents (Rversion.h), so a package's version
+ * branches see the same names they would under that GNU R: rlang and yaml define their own
+ * R_mkClosure and ANY_ATTRIB below 4.5. */
 #if R_VERSION >= R_Version(4, 5, 0)
 int (ANY_ATTRIB)(SEXP x);
 void (CLEAR_ATTRIB)(SEXP x);
@@ -116,12 +119,24 @@ void SHALLOW_DUPLICATE_ATTRIB(SEXP to, SEXP from);
 #define NO_REFERENCES(x) (NAMED(x) == 0)
 #define MAYBE_REFERENCED(x) (!NO_REFERENCES(x))
 #define NOT_SHARED(x) (!MAYBE_SHARED(x))
+int (MAYBE_SHARED)(SEXP x);
+int (NO_REFERENCES)(SEXP x);
 int (IS_SCALAR)(SEXP x, int type);
 
 /* Vectors. */
 int (LENGTH)(SEXP x);
 R_xlen_t (XLENGTH)(SEXP x);
 #define IS_LONG_VEC(x) (XLENGTH(x) > R_SHORT_LEN_MAX)
+int (IS_LONG_VEC)(SEXP x);
+/* The checked forms of LENGTH and XLENGTH and the data pointers without the ALTREP check, which
+   GNU R's inline accessors expand to. */
+int LENGTH_EX(SEXP x, const char *file, int line);
+R_xlen_t XLENGTH_EX(SEXP x);
+int *LOGICAL0(SEXP x);
+int *INTEGER0(SEXP x);
+double *REAL0(SEXP x);
+Rcomplex *COMPLEX0(SEXP x);
+Rbyte *RAW0(SEXP x);
 int *(LOGICAL)(SEXP x);
 int *(INTEGER)(SEXP x);
 Rbyte *(RAW)(SEXP x);
@@ -150,12 +165,9 @@ const SEXP *(STRING_PTR_RO)(SEXP x);
 #if R_VERSION >= R_Version(4, 5, 0)
 const SEXP *(VECTOR_PTR_RO)(SEXP x);
 #endif
-/* The headers declare the API of the R version ry presents (Rversion.h), so a package's version
- * branches see the same names they would under that GNU R: Rcpp names VECTOR_PTR below 4.5,
- * and rlang and yaml define their own R_mkClosure and ANY_ATTRIB there. */
-#if R_VERSION < R_Version(4, 5, 0)
+/* GNU R declares VECTOR_PTR noreturn from 4.5 on because it refuses the call; ry hands out the
+ * pointer, so the declaration stays an ordinary one. */
 SEXP *(VECTOR_PTR)(SEXP x);
-#endif
 int INTEGER_ELT(SEXP x, R_xlen_t i);
 double REAL_ELT(SEXP x, R_xlen_t i);
 int LOGICAL_ELT(SEXP x, R_xlen_t i);
@@ -742,6 +754,37 @@ int Rf_envlength(SEXP rho);
 R_xlen_t Rf_envxlength(SEXP rho);
 SEXP Rf_CreateTag(SEXP x);
 SEXP Rf_type2rstr(SEXPTYPE t);
+SEXP Rf_substitute(SEXP lang, SEXP rho);
+SEXP R_duplicate_attr(SEXP x);
+SEXP R_shallow_duplicate_attr(SEXP x);
+SEXP R_body_no_src(SEXP x);
+
+/* The rest of GNU R 4.5's Rinternals.h function list: S4 class queries the methods package
+ * answers, binding and frame access for serializers that rebuild environments (qs), XDR
+ * encoding, and small predicates. */
+SEXP R_FindPackageEnv(SEXP info);
+Rboolean R_HasFancyBindings(SEXP rho);
+void R_XDREncodeDouble(double d, void *buf);
+double R_XDRDecodeDouble(void *buf);
+void R_XDREncodeInteger(int i, void *buf);
+int R_XDRDecodeInteger(void *buf);
+SEXP R_S4_extends(SEXP klass, SEXP useTable);
+SEXP R_getClassDef_R(SEXP what);
+Rboolean R_has_methods_attached(void);
+Rboolean R_isVirtualClass(SEXP class_def, SEXP env);
+Rboolean R_extends(SEXP class1, SEXP class2, SEXP env);
+int R_check_class_and_super(SEXP x, const char **valid, SEXP rho);
+int R_system(const char *command);
+const char *R_typeToChar(SEXP x);
+Rboolean Rf_conformable(SEXP x, SEXP y);
+void Rf_gsetVar(SEXP symbol, SEXP value, SEXP rho);
+SEXP Rf_installNoTrChar(SEXP charSXP);
+Rboolean Rf_isUserBinop(SEXP s);
+int Rf_stringPositionTr(SEXP string, const char *translatedElement);
+void SET_FRAME(SEXP x, SEXP v);
+void SET_HASHTAB(SEXP x, SEXP v);
+#define R_XDR_DOUBLE_SIZE 8
+#define R_XDR_INTEGER_SIZE 4
 
 /* Environment flags, which GNU R exposes as functions. */
 int (ENVFLAGS)(SEXP x);
@@ -761,6 +804,12 @@ void (SET_ENVFLAGS)(SEXP x, int v);
 #define isBasicClass Rf_isBasicClass
 #define S3Class Rf_S3Class
 #define type2rstr Rf_type2rstr
+#define substitute Rf_substitute
+#define conformable Rf_conformable
+#define gsetVar Rf_gsetVar
+#define installNoTrChar Rf_installNoTrChar
+#define isUserBinop Rf_isUserBinop
+#define stringPositionTr Rf_stringPositionTr
 #define copyListMatrix Rf_copyListMatrix
 #define copyMatrix Rf_copyMatrix
 #define copyVector Rf_copyVector

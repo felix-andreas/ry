@@ -16,6 +16,7 @@ use {
         },
     },
     heap::object::{Sexp, SexpType, gp},
+    smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -65,20 +66,41 @@ pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
         }
         return Ok(class);
     }
-    let mut classes: Vec<&str> = Vec::new();
     let dim = get_attr(object, symbols().dim);
-    if dim != nil() {
-        if length(dim) == 2 {
-            classes.push("matrix");
-        }
+    let shape = match dim {
+        dim if dim == nil() => 0,
+        dim if length(dim) == 2 => 2,
+        _ => 1,
+    };
+    let kind = object.kind();
+    // A call's class depends on its head (`if`, `for`, `=`, ...) and a record's on its kind,
+    // so only their type does not determine it.
+    let cacheable = !matches!(kind, SexpType::Language | SexpType::Record);
+    if cacheable && let Some(&classes) = interp().globals.implicit_classes.get(&(shape, kind)) {
+        return Ok(classes);
+    }
+    let mut classes: Vec<&str> = Vec::new();
+    if shape == 2 {
+        classes.push("matrix");
+    }
+    if shape > 0 {
         classes.push("array");
     }
-    match object.kind() {
+    match kind {
         SexpType::Integer => classes.extend(["integer", "numeric"]),
         SexpType::Real => classes.extend(["double", "numeric"]),
         _ => classes.push(basic_class(object, true)),
     }
-    string_vector(&classes)
+    let classes = string_vector(&classes)?;
+    if cacheable {
+        // Shared by every dispatch from now on, so a caller that modifies it must copy it.
+        classes.mark_not_mutable();
+        interp()
+            .globals
+            .implicit_classes
+            .insert((shape, kind), classes);
+    }
+    Ok(classes)
 }
 
 /// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class
@@ -235,7 +257,13 @@ unsafe fn function_in_frame(name: Sexp, env: Sexp) -> R<Option<Sexp>> {
 }
 
 unsafe fn method_symbol(generic: &str, class: &str) -> R<Sexp> {
-    values::install(&format!("{generic}.{class}"))
+    // Dispatch builds two or three of these names per call, and formatting them was most of the
+    // cost of `UseMethod`.
+    let mut name: SmallVec<[u8; 64]> = SmallVec::new();
+    name.extend_from_slice(generic.as_bytes());
+    name.push(b'.');
+    name.extend_from_slice(class.as_bytes());
+    values::install_bytes(&name)
 }
 
 /// The dispatch variables a method frame gets.
@@ -306,7 +334,7 @@ unsafe fn find_s3_method(
                 && method.tag() == values::base_namespace())
         {
             let suffix = class_suffix(classes, index)?;
-            let method_string = scalar_string(&symbol_name(method_name))?;
+            let method_string = values::scalar_string_charsxp(method_name.car())?;
             let vars = dispatch_vars(generic, suffix, method_string, call_env, def_env, group)?;
             return Ok(Some(Found {
                 method,
@@ -317,7 +345,7 @@ unsafe fn find_s3_method(
     }
     let default = method_symbol(generic, "default")?;
     if let Some(method) = lookup_method(default, call_env, def_env)? {
-        let method_string = scalar_string(&symbol_name(default))?;
+        let method_string = values::scalar_string_charsxp(default.car())?;
         let empty = values::alloc(SexpType::String, 0)?;
         let vars = dispatch_vars(generic, empty, method_string, call_env, def_env, group)?;
         return Ok(Some(Found {
@@ -712,7 +740,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             .collect();
         string_vector(&entries)?
     } else {
-        scalar_string(&symbol_name(method_name))?
+        values::scalar_string_charsxp(method_name.car())?
     };
     let vars = dispatch_vars(
         &generic_name,
@@ -1243,7 +1271,7 @@ unsafe fn find_group_method(
             let name = method_symbol(prefix, &class)?;
             if let Some(method) = lookup_method(name, env, def_env)? {
                 let suffix = class_suffix(classes, index)?;
-                let method_string = scalar_string(&symbol_name(name))?;
+                let method_string = values::scalar_string_charsxp(name.car())?;
                 let vars =
                     dispatch_vars(generic, suffix, method_string, env, def_env, Some(group))?;
                 return Ok(Some(Found {
