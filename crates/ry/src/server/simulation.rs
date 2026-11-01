@@ -16,7 +16,6 @@
 
 use {
     super::{CancelHandle, Job, Outbox, ServerState, Worker, WorkerSeed, run_job},
-    crate::config::ExperimentalFeatures,
     async_lsp::{
         LanguageServer, ResponseError,
         lsp_types::{self, Position, Url},
@@ -86,6 +85,10 @@ pub enum RequestKind {
     /// Asks for callers of an item placed at the position, as a client replays one it kept.
     IncomingCalls,
     OutgoingCalls,
+    /// Selects from the line start up to the position.
+    RangeFormatting,
+    /// Types a line break at the position.
+    OnTypeFormatting,
 }
 
 pub const REQUEST_KINDS: &[RequestKind] = &[
@@ -108,6 +111,8 @@ pub const REQUEST_KINDS: &[RequestKind] = &[
     RequestKind::CallHierarchy,
     RequestKind::IncomingCalls,
     RequestKind::OutgoingCalls,
+    RequestKind::RangeFormatting,
+    RequestKind::OnTypeFormatting,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -134,7 +139,6 @@ impl Simulation {
         let outbox = Arc::new(Mutex::new(Vec::new()));
         let seed = WorkerSeed {
             outbox: Outbox::Recorder(outbox.clone()),
-            experimental_features: ExperimentalFeatures::default(),
             debug: false,
             cancel: cancel.clone(),
         };
@@ -277,6 +281,21 @@ impl Simulation {
                     work_done_progress_params: work,
                 }))
             }
+            RequestKind::RangeFormatting => json(self.state.range_formatting(
+                lsp_types::DocumentRangeFormattingParams {
+                    text_document: document,
+                    range: lsp_types::Range::new(Position::new(position.line, 0), position),
+                    options: lsp_types::FormattingOptions::default(),
+                    work_done_progress_params: work,
+                },
+            )),
+            RequestKind::OnTypeFormatting => json(self.state.on_type_formatting(
+                lsp_types::DocumentOnTypeFormattingParams {
+                    text_document_position: at,
+                    ch: "\n".to_owned(),
+                    options: lsp_types::FormattingOptions::default(),
+                },
+            )),
             RequestKind::InlayHint => json(self.state.inlay_hint(lsp_types::InlayHintParams {
                 work_done_progress_params: work,
                 text_document: document,

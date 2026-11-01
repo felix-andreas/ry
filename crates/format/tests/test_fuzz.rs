@@ -1,7 +1,7 @@
 //! `FUZZ_ITERS` scales the per-generator budget; runs are deterministic.
 
 use {
-    format::{Config, check_format_invariants as check_invariants, format},
+    format::{Config, check_format_invariants, check_range_format_invariants, format},
     std::panic::catch_unwind,
     syntax::testing::{
         SplitMix64, corpus_sample, fixture_case_sources, fuzz_iterations, mutate_bytes,
@@ -161,6 +161,14 @@ const REGRESSIONS: &[&str] = &[
     "1L --- fn(ier\n#:dL\n----a, bar)\n\n!\n L\n",
 ];
 
+/// Whole-file and range formatting share every generated input: a range
+/// edit is a slice of the whole-file layout, so a bug in either shows up as a
+/// broken range invariant.
+fn check_invariants(input: &str) {
+    check_format_invariants(input);
+    check_range_format_invariants(input);
+}
+
 fn iterations() -> usize {
     fuzz_iterations(1500)
 }
@@ -187,7 +195,7 @@ fn fuzz_regressions_hold_invariants() {
 fn fixture_sources_hold_invariants() {
     let sources = fixture_case_sources();
     for (_, source) in &sources {
-        check_invariants(source);
+        check_format_invariants(source);
     }
     assert!(
         sources.len() > 100,
@@ -205,7 +213,7 @@ fn program_corpus_holds_invariants() {
         sources.len()
     );
     for (id, source) in &sources {
-        catch_unwind(|| check_invariants(source))
+        catch_unwind(|| check_format_invariants(source))
             .unwrap_or_else(|_| panic!("program corpus case `{id}` broke a format invariant"));
     }
 }

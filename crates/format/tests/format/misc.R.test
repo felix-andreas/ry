@@ -329,3 +329,10 @@ match (s) {
 #: @str(_, a) => a
   _ => 0
 }
+
+#---- subset_by_an_array_literal_keeps_the_space
+x[  [y[1]]]
+x[ [[1]]]
+#++++
+x[ [y[1]]]
+x[ [[1]]]

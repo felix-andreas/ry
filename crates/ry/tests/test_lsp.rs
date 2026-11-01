@@ -9,14 +9,14 @@ use {
             DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
             DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
             DocumentDiagnosticReportResult, DocumentFormattingParams,
-            DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
-            DocumentSymbolResponse, FileChangeType, FileEvent, FormattingOptions,
-            GeneralClientCapabilities, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-            HoverContents, HoverParams, InitializeParams, InitializeResult, InitializedParams,
-            InlayHint, InlayHintParams, InsertTextFormat, Location, NumberOrString,
-            ParameterInformationSettings, ParameterLabel, PartialResultParams, Position,
-            PositionEncodingKind, PublishDiagnosticsParams, Range, ReferenceContext,
-            ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams,
+            DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbol,
+            DocumentSymbolParams, DocumentSymbolResponse, FileChangeType, FileEvent,
+            FormattingOptions, GeneralClientCapabilities, GotoDefinitionParams,
+            GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams,
+            InitializeResult, InitializedParams, InlayHint, InlayHintParams, InsertTextFormat,
+            Location, NumberOrString, ParameterInformationSettings, ParameterLabel,
+            PartialResultParams, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
+            ReferenceContext, ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams,
             SemanticTokensResult, ShowMessageParams, SignatureHelp,
             SignatureHelpClientCapabilities, SignatureHelpParams, SignatureInformationSettings,
             SymbolKind, TextDocumentClientCapabilities, TextDocumentContentChangeEvent,
@@ -468,16 +468,33 @@ impl TestContext {
             .await
     }
 
-    /// The text of the first formatting edit.
-    async fn formatted(&mut self, uri: &Url) -> String {
-        self.formatting(uri)
+    /// `text`, the open document's contents, after the formatting edits.
+    async fn formatted(&mut self, uri: &Url, text: &str) -> String {
+        let edits = self
+            .formatting(uri)
             .await
             .expect("formatting failed")
-            .expect("expected formatting edits")
-            .into_iter()
-            .next()
-            .expect("expected a formatting edit")
-            .new_text
+            .expect("expected formatting edits");
+        apply_edits(text, &edits)
+    }
+
+    async fn on_type_formatting(
+        &mut self,
+        uri: &Url,
+        position: Position,
+        typed: &str,
+    ) -> Option<Vec<TextEdit>> {
+        self.server
+            .on_type_formatting(DocumentOnTypeFormattingParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                ch: typed.to_owned(),
+                options: FormattingOptions::default(),
+            })
+            .await
+            .expect("on-type formatting failed")
     }
 
     async fn range_formatting(
@@ -617,6 +634,11 @@ async fn initialize_reports_capabilities() {
     assert!(capabilities.rename_provider.is_some());
     assert!(capabilities.completion_provider.is_some());
     assert!(capabilities.document_formatting_provider.is_some());
+    assert_eq!(
+        capabilities.document_range_formatting_provider,
+        Some(async_lsp::lsp_types::OneOf::Left(true))
+    );
+    assert!(capabilities.document_on_type_formatting_provider.is_some());
     assert!(capabilities.document_symbol_provider.is_some());
     assert!(capabilities.inlay_hint_provider.is_some());
     assert!(capabilities.signature_help_provider.is_some());
@@ -947,36 +969,198 @@ async fn formatting_rewrites_documents_and_refuses_on_syntax_errors() {
     context.shutdown().await;
 }
 
-#[tokio::test]
-async fn range_formatting_snaps_to_whole_statements() {
-    let mut context = setup_test(&[]).await;
-    let uri = context.open("R/fmt.R", "x<-1\ny<-2\nz<-3\n");
-    let spaced = context.open("R/spaced.R", "a <- 1\n\n\nb <- 2\n");
-    context.recv_diagnostics(&uri).await;
-    context.recv_diagnostics(&spaced).await;
+/// Applies LSP edits to an ASCII text, where a character column is a byte.
+fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
+    let offset = |position: Position| {
+        let line_start: usize = text
+            .split_inclusive('\n')
+            .take(position.line as usize)
+            .map(str::len)
+            .sum();
+        (line_start + position.character as usize).min(text.len())
+    };
+    let mut result = text.to_owned();
+    for edit in edits.iter().rev() {
+        result.replace_range(
+            offset(edit.range.start)..offset(edit.range.end),
+            &edit.new_text,
+        );
+    }
+    result
+}
 
-    // Covers part of the middle line only; the edit must cover that whole statement.
+#[tokio::test]
+async fn range_formatting_lays_out_only_the_lines_a_selection_touches() {
+    let mut context = setup_test(&[]).await;
+    let text = "x<-1\ny<-2\nz<-3\n";
+    let uri = context.open("R/fmt.R", text);
+    context.recv_diagnostics(&uri).await;
+
+    // Part of the middle line, a bare caret on it, the whole line as an editor
+    // sends it (stopping at the next line's first column), and the same range
+    // sent end first all take exactly that line.
+    for range in [
+        Range::new(Position::new(1, 1), Position::new(1, 2)),
+        Range::new(Position::new(1, 2), Position::new(1, 2)),
+        Range::new(Position::new(1, 0), Position::new(2, 0)),
+        Range::new(Position::new(1, 3), Position::new(1, 1)),
+    ] {
+        let edits = context
+            .range_formatting(&uri, range)
+            .await
+            .expect("range formatting failed")
+            .expect("expected range formatting edits");
+        assert_eq!(
+            apply_edits(text, &edits),
+            "x<-1\ny <- 2\nz<-3\n",
+            "{range:?}"
+        );
+    }
+
+    // A range past the end clamps to the document.
     let edits = context
-        .range_formatting(&uri, Range::new(Position::new(1, 1), Position::new(1, 2)))
+        .range_formatting(&uri, Range::new(Position::new(2, 0), Position::new(99, 99)))
         .await
         .expect("range formatting failed")
         .expect("expected range formatting edits");
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "y <- 2");
+    assert_eq!(apply_edits(text, &edits), "x<-1\ny<-2\nz <- 3\n");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_reaches_into_a_function_at_the_documents_indentation() {
+    let mut context = setup_test(&[]).await;
+    let text = "f <- function(x) {\n    a<-1\n    b<-2\n}\n";
+    let uri = context.open("R/four.R", text);
+    context.recv_diagnostics(&uri).await;
+    let edits = context
+        .range_formatting(&uri, Range::new(Position::new(1, 6), Position::new(1, 6)))
+        .await
+        .expect("range formatting failed")
+        .expect("expected range formatting edits");
     assert_eq!(
-        edits[0].range,
-        Range::new(Position::new(1, 0), Position::new(1, 4))
+        apply_edits(text, &edits),
+        "f <- function(x) {\n    a <- 1\n    b<-2\n}\n",
+        "a selection keeps the four-space step the file already uses"
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_skips_off_regions_and_refuses_broken_files() {
+    let mut context = setup_test(&[]).await;
+    let text = "before<-1\n# fmt: off\nweird   <-  1\n# fmt: on\nafter<-1\n";
+    let uri = context.open("R/fmt.R", text);
+    let broken = context.open("R/bad.R", "x <- (\ny<-2\n");
+    let laid_out = context.open("R/done.R", "x <- 1\ny <- 2\nz<-3\n");
+    context.recv_diagnostics(&uri).await;
+    context.recv_diagnostics(&broken).await;
+    context.recv_diagnostics(&laid_out).await;
+
+    let edits = context
+        .range_formatting(&uri, Range::new(Position::new(0, 0), Position::new(4, 8)))
+        .await
+        .expect("range formatting failed")
+        .expect("expected range formatting edits");
+    assert_eq!(
+        apply_edits(text, &edits),
+        "before <- 1\n# fmt: off\nweird   <-  1\n# fmt: on\nafter <- 1\n"
     );
 
-    // A selection holding no statement is left alone.
     let edits = context
         .range_formatting(
-            &spaced,
-            Range::new(Position::new(1, 0), Position::new(2, 0)),
+            &broken,
+            Range::new(Position::new(1, 0), Position::new(1, 4)),
         )
         .await
         .expect("range formatting failed");
     assert!(edits.is_none(), "{edits:?}");
+
+    let edits = context
+        .range_formatting(
+            &laid_out,
+            Range::new(Position::new(0, 0), Position::new(1, 6)),
+        )
+        .await
+        .expect("range formatting failed")
+        .expect("an answer, not a refusal");
+    assert!(edits.is_empty(), "{edits:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn range_formatting_positions_count_utf16_units() {
+    let mut context = setup_test(&[]).await;
+    // Each emoji is 4 UTF-8 bytes and 2 UTF-16 units, so a byte-counting
+    // server would pick the wrong column here.
+    let uri = context.open("R/emoji.R", "a<-\"😀😀\"\nb<-\"🎉\"\nc<-1\n");
+    context.recv_diagnostics(&uri).await;
+    let edits = context
+        .range_formatting(&uri, Range::new(Position::new(1, 5), Position::new(1, 5)))
+        .await
+        .expect("range formatting failed")
+        .expect("expected range formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "b <- \"🎉\"\n");
+    assert_eq!(
+        edits[0].range,
+        Range::new(Position::new(1, 0), Position::new(2, 0))
+    );
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn formatting_replaces_only_the_lines_that_change() {
+    let mut context = setup_test(&[]).await;
+    let uri = context.open("R/fmt.R", "x <- 1\ny<-2\nz <- 3\n");
+    let done = context.open("R/done.R", "x <- 1\ny <- 2\n");
+    context.recv_diagnostics(&uri).await;
+    context.recv_diagnostics(&done).await;
+    let edits = context
+        .formatting(&uri)
+        .await
+        .expect("formatting failed")
+        .expect("expected formatting edits");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "y <- 2\n");
+    assert_eq!(
+        edits[0].range,
+        Range::new(Position::new(1, 0), Position::new(2, 0))
+    );
+    let edits = context
+        .formatting(&done)
+        .await
+        .expect("formatting failed")
+        .expect("an answer, not a refusal");
+    assert!(edits.is_empty(), "{edits:?}");
+    context.shutdown().await;
+}
+
+#[tokio::test]
+async fn on_type_formatting_lays_out_the_line_just_finished() {
+    let mut context = setup_test(&[]).await;
+    // The editor has inserted the line break and indented the new line.
+    let text = "f <- function(x) {\n  y<-x+1\n  \n}\n";
+    let uri = context.open("R/type.R", text);
+    context.recv_diagnostics(&uri).await;
+    let edits = context
+        .on_type_formatting(&uri, Position::new(2, 2), "\n")
+        .await
+        .expect("expected edits");
+    assert_eq!(
+        apply_edits(text, &edits),
+        "f <- function(x) {\n  y <- x + 1\n  \n}\n",
+        "the finished line is laid out, and the cursor's line keeps its indentation"
+    );
+
+    let closed = "if(a){\n  b\n  }\n";
+    let closed_uri = context.open("R/close.R", closed);
+    context.recv_diagnostics(&closed_uri).await;
+    let edits = context
+        .on_type_formatting(&closed_uri, Position::new(2, 3), "}")
+        .await
+        .expect("expected edits");
+    assert_eq!(apply_edits(closed, &edits), "if (a) {\n  b\n}\n");
     context.shutdown().await;
 }
 
@@ -1089,9 +1273,10 @@ async fn malformed_config_falls_back_to_defaults_and_reports() {
 #[tokio::test]
 async fn ancestor_config_governs_a_workspace_without_its_own() {
     let mut context = setup_test(&[("../ry.toml", "[format]\nindent-width = 7\n")]).await;
-    let uri = context.open("R/indent.R", "f <- function(x) {\nx + 1\n}\n");
+    let text = "f <- function(x) {\nx + 1\n}\n";
+    let uri = context.open("R/indent.R", text);
     context.drain_diagnostics();
-    let formatted = context.formatted(&uri).await;
+    let formatted = context.formatted(&uri, text).await;
     assert!(
         formatted.contains("       x + 1"),
         "expected 7-space indentation from the ancestor config, got:\n{formatted}"
@@ -1102,11 +1287,12 @@ async fn ancestor_config_governs_a_workspace_without_its_own() {
 #[tokio::test]
 async fn config_reloads_and_a_failed_reload_keeps_the_previous_config() {
     let mut context = setup_test(&[("ry.toml", "[format]\nindent-width = 4\n")]).await;
-    let uri = context.open("R/indent.R", "f <- function(x) {\nx + 1\n}\n");
+    let text = "f <- function(x) {\nx + 1\n}\n";
+    let uri = context.open("R/indent.R", text);
     context.drain_diagnostics();
     let indented = |width: usize| format!("f <- function(x) {{\n{}x + 1\n}}\n", " ".repeat(width));
     assert_eq!(
-        context.formatted(&uri).await,
+        context.formatted(&uri, text).await,
         indented(4),
         "the initial config governs"
     );
@@ -1118,7 +1304,7 @@ async fn config_reloads_and_a_failed_reload_keeps_the_previous_config() {
     .expect("update config");
     context.notify_watched_file_changed("ry.toml", FileChangeType::CHANGED);
     assert_eq!(
-        context.formatted(&uri).await,
+        context.formatted(&uri, text).await,
         indented(3),
         "the reloaded config governs"
     );
@@ -1138,7 +1324,7 @@ async fn config_reloads_and_a_failed_reload_keeps_the_previous_config() {
         message.message
     );
     assert_eq!(
-        context.formatted(&uri).await,
+        context.formatted(&uri, text).await,
         indented(3),
         "the previous config keeps governing"
     );

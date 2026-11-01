@@ -10,7 +10,7 @@ use {
 
 #[derive(Debug, Parser)]
 // Clap defaults to the package name, `ry-lang`; the command is `ry`.
-#[command(name = "ry", version, after_help = experimental_features_help())]
+#[command(name = "ry", version, after_help = EXPERIMENTAL_FEATURES_HELP)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -62,6 +62,10 @@ pub enum Command {
         /// Show diff instead of modifying files; exit with error if changes needed
         #[arg(long, default_value_t = false)]
         diff: bool,
+        /// Format only the lines this range touches, in a single file: `LINE`, `START-END`, or
+        /// `LINE:COLUMN-LINE:COLUMN`, counting from 1
+        #[arg(long, value_name = "RANGE")]
+        range: Option<crate::cli::FormatRange>,
         /// Print verbose output
         #[arg(short, long, default_value_t = false)]
         verbose: bool,
@@ -287,14 +291,7 @@ fn session_mode(session: &SessionArguments, load_package: bool) -> Mode {
     }
 }
 
-fn experimental_features_help() -> String {
-    let features = crate::config::ExperimentalFeatures::KNOWN
-        .iter()
-        .map(|feature| format!("            {}: {}", feature.name, feature.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Global options:\n      --experimental-features <FEATURES>\n          \
-         Enable experimental features (space-separated, or \"all\" for every one):\n{features}"
-    )
-}
+const EXPERIMENTAL_FEATURES_HELP: &str = "Global options:
+      --experimental-features <FEATURES>
+          Enable experimental features (space-separated, or \"all\" for every one).
+          No feature is experimental right now. A name is ignored with a warning.";

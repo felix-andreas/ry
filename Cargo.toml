@@ -64,6 +64,7 @@ tokio-util = { version = "0.7.15", features = ["compat"] }
 [profile.dev.package]
 "*".debug = false
 similar.opt-level = 3
+rowan.opt-level = 3
 tree-sitter.opt-level = 3
 tree-sitter-r.opt-level = 3
 # The JIT compiles while the program runs, so an unoptimized code generator makes debug runs of
