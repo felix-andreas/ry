@@ -3,6 +3,10 @@
 //! as long as anything references it, which is what lets compiled code watch a binding for
 //! redefinition, and it outlives its removal from the frame if compiled code still holds it.
 //!
+//! The frame also keeps each cell's symbol beside it, so a lookup scans one contiguous array
+//! inside the environment object instead of loading every cell, which a profile showed stalling
+//! on a cache miss per binding.
+//!
 //! The cells are kept in insertion order, and [`Frame::listed_cells`] derives from it the order
 //! GNU R lists a frame in (`ls(sorted = FALSE)`, `as.list`, `eapply`), which packages such as R6
 //! depend on. An unhashed frame is a cons list there, so it lists the newest binding first, after
@@ -19,8 +23,9 @@ use {crate::object::Sexp, rustc_hash::FxHashMap, smallvec::SmallVec};
 /// formals (`identical` has nine) would otherwise pay on every call.
 const INDEX_THRESHOLD: usize = 16;
 
-/// The cells a frame holds without a second allocation.
-const INLINE_CELLS: usize = 12;
+/// The bindings a frame holds without a second allocation. Eight keeps the environment object in
+/// the 192-byte size class with the symbols stored beside the cells.
+const INLINE_CELLS: usize = 8;
 
 /// GNU R's default and minimum hash table size (`HASHMINSIZE`).
 const HASH_MINIMUM_SIZE: u32 = 29;
@@ -30,7 +35,11 @@ pub struct Frame {
     /// Inline, because most frames are a call's few arguments and locals, and a closure call
     /// should not pay for a second allocation beside the frame's own.
     cells: SmallVec<[Sexp; INLINE_CELLS]>,
-    index: Option<FxHashMap<Sexp, u32>>,
+    /// `symbols[i]` is the symbol of `cells[i]`.
+    symbols: SmallVec<[Sexp; INLINE_CELLS]>,
+    /// Boxed, because only large frames have one and the inline map would push every
+    /// environment into a larger size class.
+    index: Option<Box<FxHashMap<Sexp, u32>>>,
     /// The initial table size of a hashed frame, or 0 for an unhashed one.
     hash_size: u32,
     /// How many leading cells are a closure's formals, which GNU R lists after the locals and
@@ -42,6 +51,7 @@ impl Frame {
     pub fn with_capacity(bindings: usize) -> Frame {
         Frame {
             cells: SmallVec::with_capacity(bindings),
+            symbols: SmallVec::with_capacity(bindings),
             ..Frame::default()
         }
     }
@@ -59,16 +69,17 @@ impl Frame {
     }
 
     /// The binding cell for `symbol`, if the frame binds it.
-    ///
-    /// # Safety
-    /// Every cell in the frame must be live, which holds while the environment is reachable.
-    pub unsafe fn find(&self, symbol: Sexp) -> Option<Sexp> {
-        match &self.index {
-            Some(index) => index
-                .get(&symbol)
-                .and_then(|&position| self.cells.get(position as usize).copied()),
-            None => unsafe { self.cells.iter().copied().find(|cell| cell.car() == symbol) },
-        }
+    pub fn find(&self, symbol: Sexp) -> Option<Sexp> {
+        let position = match &self.index {
+            Some(index) => *index.get(&symbol)? as usize,
+            None => self.symbols.iter().position(|&bound| bound == symbol)?,
+        };
+        self.cells.get(position).copied()
+    }
+
+    /// The symbols of the cells, in the same order.
+    pub fn symbols(&self) -> &[Sexp] {
+        &self.symbols
     }
 
     /// Makes the frame hashed with GNU R's table size for `size` (29 when `size` is not
@@ -108,9 +119,9 @@ impl Frame {
         let mut next = vec![EMPTY; self.cells.len()];
         let mut count = 0;
         let hashes: Vec<usize> = self
-            .cells
+            .symbols
             .iter()
-            .map(|cell| unsafe { pjw_hash(cell.car().car().bytes()) } as usize)
+            .map(|symbol| unsafe { pjw_hash(symbol.car().bytes()) } as usize)
             .collect();
         for (position, hash) in hashes.iter().enumerate() {
             let bucket = hash % size;
@@ -148,37 +159,37 @@ impl Frame {
     /// Adds a cell. Only a closure with duplicate formals (which `formals<-` can make) adds a
     /// symbol the frame already binds, and then the first cell keeps answering lookups, as the
     /// first match in GNU R's frame list does.
-    pub(crate) unsafe fn insert(&mut self, cell: Sexp) {
+    pub(crate) fn insert(&mut self, symbol: Sexp, cell: Sexp) {
         let position = self.cells.len() as u32;
         self.cells.push(cell);
+        self.symbols.push(symbol);
         match &mut self.index {
             Some(index) => {
-                index.entry(unsafe { cell.car() }).or_insert(position);
+                index.entry(symbol).or_insert(position);
             }
             None if self.cells.len() > INDEX_THRESHOLD => {
                 let mut index = FxHashMap::default();
-                for (position, cell) in self.cells.iter().enumerate() {
-                    index
-                        .entry(unsafe { cell.car() })
-                        .or_insert(position as u32);
+                for (position, &symbol) in self.symbols.iter().enumerate() {
+                    index.entry(symbol).or_insert(position as u32);
                 }
-                self.index = Some(index);
+                self.index = Some(Box::new(index));
             }
             None => {}
         }
     }
 
     /// Removes the cell for `symbol` and returns it.
-    pub(crate) unsafe fn remove(&mut self, symbol: Sexp) -> Option<Sexp> {
+    pub(crate) fn remove(&mut self, symbol: Sexp) -> Option<Sexp> {
         let position = match &mut self.index {
             Some(index) => index.remove(&symbol)? as usize,
-            None => unsafe { self.cells.iter().position(|cell| cell.car() == symbol)? },
+            None => self.symbols.iter().position(|&bound| bound == symbol)?,
         };
         // Removal keeps the insertion order, which the listing order is derived from.
         let cell = self.cells.remove(position);
+        self.symbols.remove(position);
         if let Some(index) = &mut self.index {
-            for (offset, moved) in self.cells[position..].iter().enumerate() {
-                index.insert(unsafe { moved.car() }, (position + offset) as u32);
+            for (offset, &moved) in self.symbols[position..].iter().enumerate() {
+                index.insert(moved, (position + offset) as u32);
             }
         }
         if position < self.formals as usize {

@@ -36,6 +36,7 @@ use {
         strings::{Encoding, StringTable},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{alloc::Layout, cell::Cell, ffi::c_void, fmt, ptr::NonNull, rc::Rc},
 };
 
@@ -80,6 +81,15 @@ pub struct Heap {
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
+}
+
+/// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
+/// for `missing()`.
+#[derive(Clone, Copy)]
+pub struct Formal {
+    pub symbol: Sexp,
+    pub value: Sexp,
+    pub missing: bool,
 }
 
 /// The objects every R session has, created with the heap.
@@ -617,9 +627,11 @@ impl Heap {
         bindings: usize,
     ) -> HeapResult<Sexp> {
         let size = object_size(SexpType::Environment, 0).ok_or(HeapError::TooLong)?;
-        let object = self.allocate(SexpType::Environment, size, &[enclosure])?;
+        // Every field is written below, so zeroing the slot first would store it twice.
+        let object = self.allocate_with(SexpType::Environment, size, &[enclosure], 0)?;
         std::ptr::write(object.frame_ptr(), Frame::with_capacity(bindings));
         object.set_enclosure_unbarriered(enclosure);
+        object.set_environment_spare(0);
         Ok(object)
     }
 
@@ -935,27 +947,47 @@ impl Heap {
             symbol.set_cdr_unbarriered(cell);
         } else {
             self.write_barrier(env, cell);
-            (*env.frame_ptr()).insert(cell);
+            (*env.frame_ptr()).insert(symbol, cell);
         }
         Ok(())
     }
 
-    /// Binds `symbol` in the frame of `env`, a new function frame, and returns the new cell. A
-    /// closure call binds each formal this way: the frame is new, so the lock checks of
-    /// [`Heap::define`] cannot matter, and its probe would only matter for duplicate formals,
-    /// where the frame keeps the first binding as GNU R does.
-    pub unsafe fn define_fresh(
-        &mut self,
-        env: Sexp,
-        symbol: Sexp,
-        value: Sexp,
-    ) -> HeapResult<Sexp> {
+    /// Binds each of `bindings` in `env`, a new function frame, as a closure call binds its
+    /// matched formals. The cells are allocated as one batch, with a single collection check
+    /// that keeps every value alive, so the values need no other root.
+    pub unsafe fn define_formals(&mut self, env: Sexp, bindings: &[Formal]) -> HeapResult<()> {
         debug_assert!(env.has_gp(gp::FUNCTION_FRAME));
-        let cell =
-            self.alloc_triple_keeping(SexpType::Binding, symbol, value, self.known.nil, Some(env))?;
-        self.write_barrier(env, cell);
-        (*env.frame_ptr()).insert(cell);
-        Ok(cell)
+        let size = object_size(SexpType::Binding, 0).ok_or(HeapError::TooLong)?;
+        let request = size * bindings.len();
+        if self.collection_due(request) {
+            let keep: SmallVec<[Sexp; 16]> = bindings
+                .iter()
+                .map(|binding| binding.value)
+                .chain([env])
+                .collect();
+            self.maybe_collect(request, &keep);
+        }
+        let nil = self.known.nil;
+        let frame = &mut *env.frame_ptr();
+        for binding in bindings {
+            let cell = self.allocate_uncollected(SexpType::Binding, size, 0)?;
+            cell.set_car_unbarriered(binding.symbol);
+            cell.set_cdr_unbarriered(binding.value);
+            cell.set_tag_unbarriered(nil);
+            binding.symbol.increment_refcount();
+            binding.value.increment_refcount();
+            nil.increment_refcount();
+            if binding.missing {
+                cell.set_gp_bits(gp::BINDING_MISSING, true);
+            }
+            frame.insert(binding.symbol, cell);
+        }
+        // A collection above may have made `env` old, and the cells are all young, so one
+        // barrier check covers every one of them.
+        if let Some(&cell) = frame.cells().last() {
+            self.write_barrier(env, cell);
+        }
+        Ok(())
     }
 
     pub unsafe fn set_binding_value(&mut self, cell: Sexp, value: Sexp) -> HeapResult<()> {
@@ -1043,11 +1075,7 @@ impl Heap {
         if self.is_symbol_frame(env) || env == self.known.empty_env {
             return self.frame_symbols(env);
         }
-        (*env.frame_ptr())
-            .cells()
-            .iter()
-            .map(|cell| cell.car())
-            .collect()
+        (*env.frame_ptr()).symbols().to_vec()
     }
 
     /// The symbols bound in `env`'s own frame, in the order GNU R lists them.
@@ -1176,6 +1204,17 @@ impl Heap {
         zeroed: usize,
     ) -> HeapResult<Sexp> {
         self.maybe_collect(size, keep);
+        self.allocate_uncollected(kind, size, zeroed)
+    }
+
+    /// [`Heap::allocate_with`] without the collection check, for a caller that ran it once for
+    /// a batch of objects.
+    unsafe fn allocate_uncollected(
+        &mut self,
+        kind: SexpType,
+        size: usize,
+        zeroed: usize,
+    ) -> HeapResult<Sexp> {
         let class = SIZE_CLASS_BY_WORDS.get(size.div_ceil(8)).copied();
         let (memory, size_class, gc) = match class {
             Some(class) => {
@@ -1258,10 +1297,7 @@ impl Heap {
                 self.collect_keeping(kind, keep);
             }
             GcStress::Off => {
-                // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect
-                // on every large vector a big session allocates, rescanning the young ones each time.
-                let budget = self.policy.young_limit.max(self.old_bytes / 2);
-                if self.young_bytes + request > budget {
+                if self.collection_due(request) {
                     self.collect_keeping(Collection::Minor, keep);
                     if self.old_bytes > self.policy.old_limit {
                         self.collect_keeping(Collection::Major, keep);
@@ -1269,6 +1305,20 @@ impl Heap {
                 }
             }
         }
+    }
+
+    /// Whether allocating `request` more bytes runs a collection.
+    fn collection_due(&self, request: usize) -> bool {
+        if self.inhibit > 0 {
+            return false;
+        }
+        if self.policy.stress == GcStress::EveryAllocation {
+            return true;
+        }
+        // Like GNU R's trigger, the budget grows with the heap: a fixed one would collect on
+        // every large vector a big session allocates, rescanning the young ones each time.
+        let budget = self.policy.young_limit.max(self.old_bytes / 2);
+        self.young_bytes + request > budget
     }
 
     /// Runs a collection now. Every live object must be reachable from a root.

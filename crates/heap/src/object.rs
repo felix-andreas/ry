@@ -372,6 +372,10 @@ pub(crate) struct EnvironmentObject {
     pub spare: Cell<usize>,
 }
 
+// Every closure call allocates an environment, so growing the frame past this size class would
+// cost each call a larger slot to zero.
+const _: () = assert!(size_of::<EnvironmentObject>() <= 192);
+
 #[repr(C)]
 pub(crate) struct ExternalPtrObject {
     pub header: Header,
@@ -773,6 +777,10 @@ impl Sexp {
 
     pub(crate) unsafe fn set_enclosure_unbarriered(self, value: Sexp) {
         unsafe { self.payload::<EnvironmentObject>().enclosure.set(value) }
+    }
+
+    pub(crate) unsafe fn set_environment_spare(self, value: usize) {
+        unsafe { self.payload::<EnvironmentObject>().spare.set(value) }
     }
 
     // External pointers.

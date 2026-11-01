@@ -3491,7 +3491,7 @@ explicit allocators".
   constant costs an allocation and a force for the same value; `missing()` reads the bit, not the
   binding's type. A typed closure turns such a binding back into a promise on entry, because an
   inline annotation checks a default only when the body uses it.
-- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_fresh`
+- **Duplicate formals keep the first binding.** `formals<-` can make them, and `define_formals`
   skips the probe that would catch them, so the frame (scanned or indexed) answers with the first
   cell, as GNU R's frame list does.
 - **Frames scan up to 16 cells before building a hash index**, and hold 12 cells inline.
