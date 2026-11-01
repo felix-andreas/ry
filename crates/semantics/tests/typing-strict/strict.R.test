@@ -147,8 +147,8 @@ f <- function() {
   x[1L, 2L]
 }
 #++++
-f: Unknown
-36..45 error[type-mismatch] indexing with 2 indexes is not supported yet. ry does not model matrix and data.frame subsetting
+f: fn() -> Unknown
+36..45 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 
 #==== recursion
 #---- self_recursion_is_attributed

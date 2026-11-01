@@ -71,7 +71,7 @@ fields or all items: `(1L, y = 2)` is a syntax error, and so is a repeated field
 `...`.
 
 **Types.** `Record{name: T}` and `Tuple{T1, T2}` are new types, spelled like the existing
-`list{...}` and `frame{...}`. They cannot reuse `list{...}`, because a record is not a list: passing
+`list{...}` and `DataFrame{...}`. They cannot reuse `list{...}`, because a record is not a list: passing
 `(x = 1,)` where `list{x: double}` is expected is a type error, and so is the reverse. A record's
 fields are all required, and field order is part of neither its identity nor its type, so
 `(x = 1, y = 2)` and `(y = 2, x = 1)` have the same type and are equal values. A record stores and

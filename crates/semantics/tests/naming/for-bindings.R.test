@@ -8,6 +8,7 @@ for (x in list(1L)) {
   b0 x for-variable 5..6
   10..14 list -> non-local
   24..25 x -> b0
+  super-globals: x
 
 #---- loop_body_resolves_other_outer_binding
 y <- 1L
@@ -22,6 +23,7 @@ for (x in list(1L)) {
   b0 x for-variable 5..6
   10..14 list -> non-local
   24..25 y -> non-local
+  super-globals: x
 
 #---- assignment_inside_loop_rhs_sees_loop_binding
 x <- 0L
@@ -40,6 +42,7 @@ x
   24..25 x <- b0
   29..30 x -> b0
   33..34 x -> b0
+  super-globals: x
 # <statement>
   0..1 x -> non-local
 
@@ -61,6 +64,7 @@ y
   24..25 y <- b1
   29..30 y -> b1 maybe-undefined
   33..34 y -> b1
+  super-globals: x
   used top-level: y
 # <statement>
   0..1 y -> non-local
@@ -76,6 +80,7 @@ for (x in list(1L)) {
   10..14 list -> non-local
   24..25 g <- b1
   40..41 x -> b0 captured
+  super-globals: x
 
 #---- for_variable_shadows_outer_top_level_binding
 x <- 1L
@@ -91,5 +96,6 @@ x
   b0 x for-variable 5..6
   10..14 list -> non-local
   24..25 x -> b0
+  super-globals: x
 # <statement>
   0..1 x -> non-local

@@ -594,10 +594,13 @@ impl<'db> InferenceTable<'db> {
             return false;
         };
         let actual = self.resolve(db, actual);
+        // R's arithmetic promotes `logical` to `integer` and `integer` to `double`.
         let rank = |ty: Ty<'db>| match ty.kind(db) {
+            TyKind::Scalar(Atomic::Logical) => Some((false, 0)),
             TyKind::Scalar(Atomic::Integer) => Some((false, 1)),
             TyKind::Scalar(Atomic::Double) => Some((false, 2)),
             TyKind::Vector(element) => match element.kind(db) {
+                TyKind::Scalar(Atomic::Logical) => Some((true, 0)),
                 TyKind::Scalar(Atomic::Integer) => Some((true, 1)),
                 TyKind::Scalar(Atomic::Double) => Some((true, 2)),
                 _ => None,
@@ -612,10 +615,10 @@ impl<'db> InferenceTable<'db> {
                 // A scalar meeting a vector widens to the vector: R recycles it.
                 let element = scalar(
                     db,
-                    if actual_rank.max(bound_rank) == 2 {
-                        Atomic::Double
-                    } else {
-                        Atomic::Integer
+                    match actual_rank.max(bound_rank) {
+                        2 => Atomic::Double,
+                        1 => Atomic::Integer,
+                        _ => Atomic::Logical,
                     },
                 );
                 let widened = if bound_vector || actual_vector {
@@ -705,6 +708,41 @@ impl<'db> InferenceTable<'db> {
             return true;
         }
         match (actual.kind(db), expected.kind(db)) {
+            // `character | list{..}` into `T | NULL`: the members the target does not list
+            // bind its one variable together, where member by member the first would pin it.
+            (TyKind::Union(members), TyKind::Union(expected_members))
+                if !members
+                    .iter()
+                    .any(|member| matches!(member.kind(db), TyKind::OtherTags))
+                    && expected_members
+                        .iter()
+                        .filter(|&&member| {
+                            matches!(self.shallow_resolve(db, member).kind(db), TyKind::Var(_))
+                        })
+                        .count()
+                        == 1 =>
+            {
+                let mut variable = None;
+                let mut concrete = Vec::new();
+                for &member in expected_members {
+                    let member = self.shallow_resolve(db, member);
+                    if matches!(member.kind(db), TyKind::Var(_)) {
+                        variable = Some(member);
+                    } else {
+                        concrete.push(member);
+                    }
+                }
+                let rest: Vec<Ty<'db>> = members
+                    .iter()
+                    .copied()
+                    .filter(|member| !concrete.contains(member))
+                    .collect();
+                match variable {
+                    Some(_) if rest.is_empty() => true,
+                    Some(variable) => self.unify(db, variable, union_of(db, rest)).is_ok(),
+                    None => false,
+                }
+            }
             // First, so union-vs-union means every actual member fits some expected member.
             // An open source fits only an open target that it can vouch for: a tag hidden in
             // the source's `..` could carry any payload under a name the target lists.
@@ -1449,13 +1487,18 @@ fn constraint_rejects<'db>(
     };
     let admissible = match constraint {
         Constraint::Unconstrained => true,
+        // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
         Constraint::Numeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) | TyKind::Any | TyKind::Unknown => {
-                true
-            }
+            TyKind::Scalar(
+                Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
+            )
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Vector(element) | TyKind::NamedVector(element) => matches!(
                 element.kind(db),
-                TyKind::Scalar(Atomic::Integer | Atomic::Double)
+                TyKind::Scalar(
+                    Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex
+                )
             ),
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
@@ -1476,9 +1519,9 @@ fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::ScalarNumeric => match ty.kind(db) {
-            TyKind::Scalar(Atomic::Integer | Atomic::Double) | TyKind::Any | TyKind::Unknown => {
-                true
-            }
+            TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double)
+            | TyKind::Any
+            | TyKind::Unknown => true,
             TyKind::Named(name, _) => declares_arithmetic(name),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,

@@ -1,0 +1,176 @@
+---
+title: Why ry
+description: One toolchain for R, a type system on top of it, and a path from the R code you have to code an agent can safely change
+---
+
+import Venn from '../../components/Venn.astro';
+
+R code bases that are years old are now being changed by agents, and code an agent writes needs to
+be checked by something other than a person reading every line. The future of such a code base is
+typed, checked on every edit, and safe for an agent to change. R has no type checker, so ry adds
+one. You can use it today on the R code you already have, and it takes that code there one step at
+a time.
+
+With ry you check, format, load and run R from one tool configured by one `ry.toml`. Its type
+system sits on top of R, so plain R stays valid. ry also adds what R lacks: records, tagged unions,
+a typed table called `DataFrame` with a Polars-style API, and a standard library. Everything ry runs, plain R plus these
+additions, is what we call R++. Strict mode then keeps only code whose types are known, which we
+call R--.
+
+<figure>
+  <Venn id="ry-venn" />
+</figure>
+
+## From plain R to fully typed code in four steps
+
+Your code moves from the blue circle toward the purple one. Each step is optional, and you can stop
+after any of them.
+
+### 1. Check the code you have
+
+Run `ry check` in a project, with no configuration and nothing to annotate. It reads the source
+without running it, so it reports mistakes that R reports only when the line runs:
+
+```r
+# R/pricing.R
+net_price <- function(price, rate) {
+  price * (1 - ratee)
+}
+```
+
+```text
+unresolved
+
+  ! I could not resolve `ratee` in this package, its imports, or builtins. Did you mean `rate`?
+   --[R/pricing.R:2:16]
+ 1 | net_price <- function(price, rate) {
+ 2 |   price * (1 - ratee)
+   |                ^^^^^
+ 3 | }
+```
+
+The same analysis drives [your editor](/guides/editors), and `ry fmt`, `ry load` and `ry repl`
+cover formatting, loading a package from its sources, and the console.
+
+### 2. Type your code
+
+Set `typing = true` under `[check]` in `ry.toml`, and ry reports type errors. It infers types from
+how values are used, and a `#:` comment states the type where you want it fixed:
+
+```r
+#: fn(price: double, rate: double) -> double
+net_price <- function(price, rate) {
+  price * (1 - rate)
+}
+
+net_price(100, "0.2")
+```
+
+```text
+type-mismatch
+
+  x expected `double`, found `character`
+   --[R/pricing.R:6:16]
+ 5 |
+ 6 | net_price(100, "0.2")
+   |                ^^^^^
+```
+
+The file is still plain R, so GNU R, `Rscript`, RStudio and every other R tool run it unchanged. If
+you want files that every R tool can run without ry, this is where you stop.
+
+### 3. Switch to inline types
+
+Inline annotations write the same types in the code itself, and the checker reports the same
+`type-mismatch` for `net_price(100, "0.2")`. They also check at run time, which matters for a value
+whose type only shows up when the script runs:
+
+```r
+net_price <- function(price: double, rate: double) -> double {
+  price * (1 - rate)
+}
+
+rate <- eval(parse(text = '"0.2"'))
+net_price(100, rate)
+```
+
+On ry's runtime, the call fails at the boundary and names the argument:
+
+```text
+$ ry run --runtime ry pricing.R
+Error in net_price(100, rate) :
+  argument `rate` must be `double`, not `character`
+Execution halted
+```
+
+GNU R fails later, inside the body: `Error in 1 - rate : non-numeric argument to binary operator`.
+`ry run` without `--runtime ry` runs the file on GNU R with the annotations erased, but plain
+`Rscript` cannot parse them, so a file with inline types needs ry.
+
+### 4. Go fully typed
+
+A field read from an R6 object, or from a list built at run time, has a type the checker cannot
+see. ry's own data types have one. [Records, tuples and tagged unions](/type-checking/records-and-tags)
+come with a `match` that knows every case, [`DataFrame`](/type-checking/dataframes) is a table whose
+columns the checker follows through every query, and the [standard library](/reference/standard-library) returns
+`Result`, `List` and `Dict` values instead of `NA` or a warning:
+
+```r
+alias Payment = :Paid(amount: double) | :Refunded(amount: double) | :Pending
+
+balance <- function(payment: Payment) -> double {
+  match (payment) {
+    :Paid(amount = a) => a
+    :Refunded(amount = a) => -a
+  }
+}
+```
+
+```text
+non-exhaustive-match
+
+  x this `match` does not handle `:Pending`: add an arm for it, or a catch-all `_ => ...` arm
+   --[R/payments.R:4:3]
+ 3 | balance <- function(payment: Payment) -> double {
+ 4 |   match (payment) {
+   |   ^^^^^^^^^^^^^^^
+```
+
+[Strict mode](/type-checking/strict-mode) (`strict = true`) finishes the move: a value ry cannot
+type, or a parameter nothing constrains, is an error, and `ry run` refuses to run code that has one.
+`object-systems = false` additionally rejects new S4, R6 and Reference Classes:
+
+```text
+strict
+
+  x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
+
+object-system
+
+  x R6 classes are turned off in this project (`[check] object-systems = false`), so `R6Class` cannot define an R6 class. Use a record or a tagged union instead
+```
+
+## What it leaves out
+
+Every rule in the type system has to be cheap enough to run on each keystroke, so some things are
+left out on purpose:
+
+- **Several signatures for one of your functions.** That would turn every call into a search. A
+  parameter can accept either of two types instead, written `integer | character`.
+- **Inheritance.** One type extending another makes inference slow and its results hard to predict.
+  [Custom types](/type-checking/custom-types) keep values apart without it.
+
+Some things it cannot model yet. S4 and R6 objects and data frame columns get a type that is
+compatible with everything, so they never cause a false error, but they are not checked either.
+Strict mode shows where that happens, and [limitations](/type-checking/limitations) lists the rest.
+
+## Status
+
+ry is in beta. The checker, language server, formatter and loader are ready for daily use, and
+diagnostic codes, `ry.toml` keys and the JSON output are stable, so CI built on them keeps working.
+The type system is still growing, so a new release can report findings an older one did not, which
+is why CI should pin the version.
+
+ry's own runtime is under construction. It still reads base R from your GNU R installation, and a
+script that uses something it lacks stops with an error that names it. Records, tagged unions, `DataFrame` and
+the standard library run only on it, so for production work today, run plain R and typed R on GNU R.

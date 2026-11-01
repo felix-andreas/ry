@@ -344,6 +344,6 @@ back <- as.DataFrame(table)
 #++++
 Any
 sales: DataFrame{region: character[], units: integer[]}
-table: data.table
-back: DataFrame
+table: data.table{region: character[], units: integer[]}
+back: DataFrame{region: character[], units: integer[]}
 112..116 warning[unused] `back` is assigned but never used.

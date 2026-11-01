@@ -155,6 +155,7 @@ for (item in list(1L)) {
   b0 item for-variable 5..9
   13..17 list -> non-local
   27..31 item -> b0
+  super-globals: item
 
 #---- a_top_level_loop_accumulator_reads_out_of_the_item_first
 # The first iteration reads the name's cross-item binding, so the read leaves
@@ -169,6 +170,7 @@ for (index in 1:3) {
   23..28 total <- b1
   32..37 total -> b1 maybe-undefined
   40..45 index -> b0
+  super-globals: index
   used top-level: total
 
 #==== unresolved_reads

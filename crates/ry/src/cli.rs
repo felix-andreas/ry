@@ -384,12 +384,13 @@ pub(crate) fn analyze_project(
         let exports = |package: &str, name: &str| namespace_exports(&db, package, name);
         let mut problems =
             namespace::namespace_import_problems(&namespace_imports, &knows, &exports);
-        // A conditional or chained write (`a <- b <- function() ...`) defines `b` as well.
+        // R resolves an export with `exists()` from the namespace, which inherits through base
+        // and the default search path, so `export(diff)` beside `diff.git_repository` loads.
         let defines = |name: &str| {
-            ProjectFiles::try_get(&db).is_some_and(|files| {
-                semantics::package_definitions(&db, files).contains_key(name)
-                    || semantics::conditional_slot_items(&db, files).contains_key(name)
-            })
+            ProjectFiles::try_get(&db).is_some_and(|files| semantics::package_binds(&db, files, name))
+                || semantics::check::DEFAULT_SEARCH_PATH
+                    .iter()
+                    .any(|package| namespace_exports(&db, package, name))
         };
         problems.extend(namespace::namespace_export_problems(
             &parse_namespace_exports(namespace_source),
@@ -397,6 +398,7 @@ pub(crate) fn analyze_project(
             &defines,
             &knows,
             &exports,
+            &used_tokens,
         ));
         problems.extend(namespace::unused_import_diagnostics(
             &namespace_imports,
