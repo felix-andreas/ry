@@ -1,7 +1,9 @@
-//! Facts about ry's own records, tuples and tags that both the checker and the runtime need,
+//! Facts about ry's own records, tuples, tags, dictionaries and sets that both the checker and the runtime need,
 //! kept here so the two cannot drift apart.
 
-/// The R functions that accept a record, tuple or tag as a top-level argument. Every other builtin
+/// The R functions that accept a record, tuple, tag, dictionary or set as a top-level argument.
+/// The standard library's own functions are not listed: `types/ry.Rtypes` declares them for the
+/// checker, and the runtime marks them with `BuiltinDef::accepting_native`. Every other builtin
 /// and internal refuses one with the runtime's boundary error before it runs, which is what keeps code
 /// written for R lists from silently misreading these values. The list holds the builtins that
 /// understand the values, the ones that only ask what a value is, and the ones that store a value
@@ -23,6 +25,12 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     "all.equal.ry_record",
     "all.equal.ry_tuple",
     "all.equal.ry_tag",
+    "as.list.ry_dict",
+    "as.list.ry_set",
+    "format.ry_dict",
+    "format.ry_set",
+    "all.equal.ry_dict",
+    "all.equal.ry_set",
     "print.default",
     "deparse",
     "dput",
@@ -82,7 +90,7 @@ pub fn accepts_native(name: &str) -> bool {
     ACCEPTS_NATIVE.contains(&name)
         || name == "print"
         || ACCEPTS_NATIVE.iter().any(|accepted| {
-            [".ry_record", ".ry_tuple", ".ry_tag"]
+            [".ry_record", ".ry_tuple", ".ry_tag", ".ry_dict", ".ry_set"]
                 .iter()
                 .any(|suffix| accepted.strip_suffix(suffix) == Some(name))
         })

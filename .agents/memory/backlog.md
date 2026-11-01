@@ -258,6 +258,20 @@ distinctness, and no cascades outside the `@param` case. The gap is not the engi
 render the artifact unification left behind rather than the fact that failed, and the nominal story
 protects construction but nothing after it.
 
+## Open: ry's standard library
+
+- `Result.and_then` keeps one error type: a step that fails with another tag is a `type-mismatch`,
+  because a generic's tag union does not widen across calls. Widen `E` to the union of both, then
+  drop the limit from `reference/standard-library.mdx` ("Limits").
+- `Dict.insert`, `Set.insert` and `List.append` copy, so a growing loop is quadratic. Reuse the
+  value in place when the compiler proves the argument is the last use of its binding.
+- A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
+  error; the checker rejects it statically, so only `Unknown` code reaches it.
+- The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
+  touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
+- `serialize()` fails on ry's runtime for every value ("5 arguments passed to .Internal(serialize)
+  which requires 6"); `saveRDS()` works and refuses dicts and sets as intended.
+
 ## Open: the JIT
 
 `crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:

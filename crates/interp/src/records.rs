@@ -9,6 +9,8 @@
 use crate::{
     builtins::{Arg, BuiltinDef, Call, builtin, special},
     deparse, eval, interp,
+    sort::IdenticalFlags,
+    standard_library,
     unwind::{R, Unwind, error, error_in},
     values::{self, char_str, length, missing_arg, nil, scalar_string, symbol_name, symbols},
 };
@@ -34,6 +36,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("all.equal.ry_record", -1, do_all_equal),
     builtin("all.equal.ry_tuple", -1, do_all_equal),
     builtin("all.equal.ry_tag", -1, do_all_equal),
+    builtin("as.list.ry_dict", -1, do_as_list),
+    builtin("as.list.ry_set", -1, do_as_list),
+    builtin("format.ry_dict", -1, do_format),
+    builtin("format.ry_set", -1, do_format),
+    builtin("all.equal.ry_dict", -1, do_all_equal),
+    builtin("all.equal.ry_set", -1, do_all_equal),
 ];
 
 /// The kind of a record object.
@@ -199,7 +207,7 @@ unsafe fn tag_id(name: Sexp) -> Result<u32, String> {
 
 /// Builds a record (named items), tuple (unnamed items) or tag (with `tag`). Field names are
 /// sorted by their bytes, so field order is part of neither the value nor its layout.
-unsafe fn make(tag: Option<u32>, items: &[(Option<Sexp>, Sexp)]) -> Result<Sexp, String> {
+pub(crate) unsafe fn make(tag: Option<u32>, items: &[(Option<Sexp>, Sexp)]) -> Result<Sexp, String> {
     let named = items.iter().filter(|(name, _)| name.is_some()).count();
     if named != 0 && named != items.len() {
         return Err("a record cannot mix named fields and unnamed items".to_owned());
@@ -226,7 +234,7 @@ unsafe fn make(tag: Option<u32>, items: &[(Option<Sexp>, Sexp)]) -> Result<Sexp,
     alloc(Layout { tag, fields }, &slots).map_err(|failure| failure.to_string())
 }
 
-unsafe fn alloc(layout: Layout, slots: &[Sexp]) -> Result<Sexp, heap::HeapError> {
+pub(crate) unsafe fn alloc(layout: Layout, slots: &[Sexp]) -> Result<Sexp, heap::HeapError> {
     let heap = crate::heap();
     let id = heap.layouts.intern(layout);
     let object = heap.alloc_record(id, slots)?;
@@ -286,6 +294,14 @@ unsafe fn field_index(object: Sexp, name: &[u8], call: Sexp) -> R<usize> {
             call,
             "a tag has no fields; read its payload with `match`",
         )),
+        NativeKind::Dict => Err(error_in(
+            call,
+            "a dict has no fields; read a value with `Dict.get(dict, key)`",
+        )),
+        NativeKind::Set => Err(error_in(
+            call,
+            "a set has no fields; test an element with `Set.contains(set, element)`",
+        )),
         NativeKind::Tuple => Err(error_in(
             call,
             format!("a tuple has no field `{text}`; read its items by position, as in `x[[1L]]`"),
@@ -314,6 +330,21 @@ unsafe fn item_index(object: Sexp, indices: &[Sexp], call: Sexp) -> R<usize> {
         ));
     };
     let index = *index;
+    match native_kind(object) {
+        NativeKind::Dict => {
+            return Err(error_in(
+                call,
+                "a dict cannot be indexed; read a value with `Dict.get(dict, key)`",
+            ));
+        }
+        NativeKind::Set => {
+            return Err(error_in(
+                call,
+                "a set cannot be indexed; test an element with `Set.contains(set, element)`",
+            ));
+        }
+        NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => {}
+    }
     if index.kind() == SexpType::String && length(index) == 1 {
         return field_index(object, index.element(0).bytes(), call);
     }
@@ -554,6 +585,7 @@ unsafe fn payload_matches(
     };
     let named = items.iter().any(|(tag, _)| *tag != nil());
     match &layout.fields {
+        Fields::Dict | Fields::Set => Ok(false),
         Fields::Positional(count) => {
             if named || rest || items.len() != *count as usize {
                 return Ok(false);
@@ -666,7 +698,10 @@ unsafe fn scalar(value: Sexp) -> Option<Scalar> {
 unsafe fn do_as_list(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     if object.kind() != SexpType::Record {
-        return Err(call.error("`as.list()` for a ry value needs a record, tuple or tag"));
+        return Err(call.error("`as.list()` for a ry value needs a record, tuple, tag, dict or set"));
+    }
+    if matches!(native_kind(object), NativeKind::Dict | NativeKind::Set) {
+        return standard_library::as_list(object);
     }
     let layout = layout(object);
     let mut items = Vec::with_capacity(layout.slot_count());
@@ -831,6 +866,12 @@ unsafe fn compare(
         ));
         return Ok(());
     }
+    if matches!(left.kind(), NativeKind::Dict | NativeKind::Set) {
+        if !standard_library::collections_identical(target, current, &IdenticalFlags::default()) {
+            messages.push(format!("{prefix}target and current hold different entries"));
+        }
+        return Ok(());
+    }
     if left.tag != right.tag {
         let name = |tag: Option<u32>| tag.map(|tag| tag_name(tag)).unwrap_or_default();
         messages.push(format!(
@@ -853,6 +894,9 @@ unsafe fn compare(
             )),
             (Fields::Positional(left), Fields::Positional(right)) => messages.push(format!(
                 "{prefix}target has {left} items, current has {right}"
+            )),
+            _ => messages.push(format!(
+                "{prefix}target and current have different payload shapes"
             )),
         }
         return Ok(());

@@ -71,6 +71,11 @@ s: double
 bad: Unknown
 44..57 error[type-mismatch] expected `list[T]`, found `list{double[]}`
 
+#---- max_of_an_empty_list_checks
+top <- List.max(list())
+#++++
+top: :Ok(double) | :Err(:ListWasEmpty)
+
 #---- split_at_returns_a_record
 halves <- List.split_at(list("a", "b", "c"), 1L)
 before <- halves$before

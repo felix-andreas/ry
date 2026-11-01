@@ -2332,3 +2332,32 @@ first lines R had already read, leaving R mid-command.
   calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+
+# Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
+
+- **Previous shape:** none. Results were a user-declared `@alias`, and the only stdlib was the stubs
+  for R's own packages (the first record in this file), so every project re-declared `Result` and
+  wrote its own helpers over plain lists.
+- **Names:** plain qualified names such as `List.map` are ordinary R symbols with a dot, bound in a
+  `package:ry` environment attached just above `package:base` (`standard_library::attach`). There
+  is no static dispatch, so a call is a symbol lookup and the checker reads one stub per name. A
+  definition in the user's code shadows a library name like any R binding, and
+  `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so
+  plain R cannot change meaning. Module names are Roc's; a Roc name that already means something
+  else in R is renamed (`Result.try` is `Result.and_then`).
+- **One source of truth per side:** the types live once in `types/ry.Rtypes` (namespace `ry`,
+  always active), and the runtime functions live once in `crates/interp/src/standard_library.rs`,
+  registered with `BuiltinDef::accepting_native`. A test asserts the two name sets are equal and
+  that every declared parameter name is accepted at run time.
+- **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
+  with value semantics, insertion order and an open-addressing index, because a named list
+  matches partially and allows duplicates, and an environment has reference semantics.
+  `identical()` ignores order, as Roc's equality does. Updates copy, which makes a growing loop
+  quadratic until the compiler can reuse a value it owns (backlog).
+- **Errors are tags, not conditions:** a function that can fail returns `:Ok(x) | :Err(:Tag)`, and a
+  wrong argument type raises an R error that names the parameter, so a misuse is loud and a domain
+  failure is a value.
+- **Impact:** no change for plain R (no shipped name collides, and all names are new symbols). The
+  checker, hover, completion and goto-definition read the stub file like any other, so incremental
+  analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
+  the draft with open questions is `contributing/design/standard-library.md`.

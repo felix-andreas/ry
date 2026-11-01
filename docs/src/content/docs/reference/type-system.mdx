@@ -754,7 +754,9 @@ A union that lists `..` as a member is *open*: it also holds every tag it does n
 
 There are no row variables, so a function cannot pass the unlisted tags of an open union through
 with their types. Generic tag unions come from aliases, such as
-`#: @alias Option<T> {:Some(T) | :None}`; none is built in.
+`#: @alias Option<T> {:Some(T) | :None}`. One is built in: the
+[standard library](/reference/standard-library/) defines `Result<T, E>` as `{:Ok(T) | :Err(E)}`, and a
+project's own `Result` alias shadows it.
 
 ### `match`
 

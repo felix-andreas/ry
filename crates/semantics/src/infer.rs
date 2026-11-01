@@ -842,10 +842,15 @@ impl<'db> InferenceTable<'db> {
                     .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1))
             }
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
-            // to the first item and reject the rest.
+            // to the first item and reject the rest. An empty `list()` says nothing about `T`,
+            // so it leaves `T` open; binding it to the empty join would fail every constraint
+            // on `T`, as in `List.max(list())`.
             (TyKind::Tuple(items), TyKind::List(element))
                 if matches!(self.resolve(db, *element).kind(db), TyKind::Var(_)) =>
             {
+                if items.is_empty() {
+                    return true;
+                }
                 let joined = union_of(db, items.iter().copied());
                 self.unify(db, *element, joined).is_ok()
             }

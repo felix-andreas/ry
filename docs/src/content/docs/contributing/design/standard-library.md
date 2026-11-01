@@ -159,7 +159,7 @@ native kinds beside records, tuples and tags, with value semantics like theirs: 
 `"dict"` or `"set"`, the implicit class is `ry_dict` or `ry_set`, and every R function that refuses
 a record refuses them too, at run time and in the checker. They print as the call that rebuilds
 them, `identical()` ignores insertion order (as Roc's equality does), `as.list()` converts one to a
-list of `(key, value)` tuples or of elements, and `serialize()` and C code refuse them like any
+list of `(key, value)` tuples or of elements, and `saveRDS()` and C code refuse them like any
 other ry value.
 
 Keys and elements are `logical`, `integer`, `double` or `character` scalars, never `NA` or `NaN`.
@@ -224,10 +224,10 @@ reference-count-one path needs either a special form or the compiler's last-use 
 
 ## Open questions
 
+- `Result.and_then` keeps one error type: a step that fails with a different tag is a type
+  mismatch, because a generic's tag union does not widen across calls.
 - In-place `Dict.insert` and `List.append` inside a loop, through last-use analysis in the compiler.
 - Whether GNU R should get a pure-R build of the functions that touch no ry values (`Str`, `Num`),
   which would remove the runtime split for those modules.
 - A diagnostic when a project that targets GNU R calls a library function, once a project can
   declare its runtime.
-- `List.first(list())` is a type error today: `list()` types as the empty tuple, which binds `T`
-  to `NULL`.
