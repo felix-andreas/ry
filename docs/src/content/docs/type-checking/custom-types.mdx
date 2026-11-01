@@ -63,10 +63,10 @@ amount_of(list(amount = 1, currency = "EUR"))
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
-  x expected `Money`, found `list{amount: double, currency: character}`
+  x expected `Money`, found `list{amount: double, currency: character}`. The value has the right shape, but `Money` is a nominal type, so only `@Money(...)` or `#: @new Money` creates one
 ```
 
 A list with the right fields is still not a `Money`. Put `@Money(...)` in one constructor and
@@ -154,7 +154,7 @@ handle <- function(e) {
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 non-exhaustive-match
 
   x this `match` does not handle `:Quit`: add an arm for it, or a catch-all `_ => ...` arm

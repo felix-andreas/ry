@@ -32,6 +32,14 @@ bless *args:
 format-docs:
     RY_BLESS=1 cargo test -p format --test test_format_docs
 
+# Run the docs' marked examples, or those of the pages whose path contains `page`.
+docs-test page="":
+    DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
+
+# Rewrite the output of the docs' exact examples from the real tool; excerpts are left to you.
+docs-bless page="":
+    RY_BLESS=1 DOCS_PAGE={{ page }} cargo test -p ry-lang --test test_docs -- --nocapture
+
 # The seeded deep fuzz run; `FUZZ_ITERS` scales the budget.
 fuzz-deep:
     cargo test -p semantics --test test_fuzz fuzz_deep -- --ignored --nocapture

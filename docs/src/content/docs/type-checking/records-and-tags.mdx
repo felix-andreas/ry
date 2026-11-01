@@ -41,7 +41,7 @@ area <- function(s) {
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 non-exhaustive-match
 
   x this `match` does not handle `:Empty`: add an arm for it, or a catch-all `_ => ...` arm
@@ -109,7 +109,7 @@ bare <- :Circle(radius = 1)
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `Fahrenheit`, found `Celsius`
@@ -117,7 +117,7 @@ type-mismatch
 type-mismatch
 
   x expected `Shape`, found `:Circle(radius: double)`. The value has the right shape, but `Shape` is
-    a nominal type, so only `@Shape(...)` (or `#: @new Shape`) creates one
+    a nominal type, so only `@Shape(...)` or `#: @new Shape` creates one
 ```
 
 The parentheses of `@Name(...)` belong to the value inside, so `@Celsius(degrees = 100,)` is a
@@ -161,7 +161,7 @@ moved <- origin$xx
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x field `xx` does not exist in `Record{x: double, y: double}`
@@ -195,10 +195,10 @@ bad <- :Ok("five")
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
-  x expected `:Ok(integer) | :Err(character)`, found `:Ok(character)`
+  x expected `integer`, found `character`
 ```
 
 A union that ends in `..` is open: it accepts any other tag as well, so a `match` on it needs a
@@ -279,7 +279,7 @@ describe <- function(result) {
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 non-exhaustive-match
 
   x this `match` does not handle `:Ok(_)`: add an arm for it, or a catch-all `_ => ...` arm
@@ -308,7 +308,7 @@ point <- (x = 1, y = 2)
 sum(point)
 ```
 
-```text
+```text ry check typing
 type-mismatch
 
   x `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
@@ -318,7 +318,7 @@ A few R functions do accept them, such as `length()`, `print()`, `format()`, `id
 `list()`, and so do the functions your own project defines. If the checker misses a case, the code
 still stops when it runs, with the same fix in the message:
 
-```text
+```text ry run runtime=ry
 Error in sum(point) :
   `point` is a ry record, not an R object; convert it with `as.list()`
 ```

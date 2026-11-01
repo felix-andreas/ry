@@ -13,7 +13,7 @@ use crate::{
         triple, unbound,
     },
 };
-use heap::object::{Sexp, SexpType, gp};
+use heap::object::{NA_INTEGER, Sexp, SexpType, gp};
 use smallvec::{SmallVec, smallvec};
 
 /// The promise bit set while its code runs, to report recursive default references.
@@ -1800,8 +1800,9 @@ unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
         .iter()
         .rev()
         .find(|frame| frame.env == env)
-        .map_or(0, |frame| values::pairlist_length(frame.promargs));
-    values::scalar_integer(count as i32)
+        .map_or(NA_INTEGER, |frame| values::pairlist_length(frame.promargs) as i32);
+    // Outside any closure, such as at top level, GNU R finds no call to count and answers NA.
+    values::scalar_integer(count)
 }
 
 unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {

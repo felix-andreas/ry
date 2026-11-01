@@ -32,7 +32,7 @@ A parameter with no type, whose use in the body does not determine one, accepts 
 describe <- function(x) cat("a value\n")
 ```
 
-```text
+```text ry check typing strict
 strict
 
   x strict mode: parameter `x` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `x: TYPE`
@@ -61,7 +61,7 @@ total <- function(df) sum(df$amount)
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing strict
 strict
 
   x strict mode: this expression has an undetermined type (`Unknown`)

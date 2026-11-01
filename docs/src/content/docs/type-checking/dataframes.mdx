@@ -43,7 +43,7 @@ A column that does not exist is reported on the string that names it, with the n
 bad <- sales |> DataFrame.select(col("prcie"))
 ```
 
-```text
+```text ry check typing continue
 type-mismatch
 
   x the frame `sales` has no column `prcie`. Did you mean `price`?
@@ -56,7 +56,7 @@ group to one value:
 per_region <- sales |> DataFrame.group_by("region") |> GroupBy.agg(col("units"))
 ```
 
-```text
+```text ry check typing continue
 type-mismatch
 
   x `units` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`
@@ -94,7 +94,7 @@ total_units(DataFrame(region = "eu", unit = 1L))
 </TabItem>
 </Tabs>
 
-```text
+```text ry check typing
 type-mismatch
 
   x expected `DataFrame{region: character[], units: integer[]}`, found `DataFrame{region: character[], unit: integer[]}`

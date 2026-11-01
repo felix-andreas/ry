@@ -50,7 +50,7 @@ config <- list(
 )
 ```
 
-```text
+```text ry check
 syntax-error
 
   x missing `,` between these arguments
@@ -73,7 +73,7 @@ flag <- T
 x <- c(1, 2, )
 ```
 
-```text
+```text ry check
 assignment-operator
 
   ! Use <-, not =, for assignment

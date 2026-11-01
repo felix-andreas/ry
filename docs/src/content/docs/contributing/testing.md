@@ -392,6 +392,85 @@ diff's ordering rules turns it red within a few hundred seeds.
 - data-masked evaluation;
 - the formatter's `--check`, `--diff`, and in-place modes.
 
+### Docs examples
+
+`crates/ry/tests/test_docs.rs` runs the examples in the docs through the real `ry` binary, so a page
+that shows stale output fails the suite. A block opts in with a marker: the word `ry` after the
+fence's language, then the command and its options. Expressive Code ignores the extra words, so the
+site shows a plain block, and the pages' Markdown versions drop the marker. Here an output block
+follows a tab group:
+
+````md
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+greet <- function(name: character, greeting: character = "hello") -> character {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(name: character, [greeting]: character) -> character
+greet <- function(name, greeting = "hello") {
+  paste(greeting, name)
+}
+greet("Ada", greting = "hi")
+```
+
+</TabItem>
+</Tabs>
+
+```text ry check typing
+type-mismatch
+
+  x this function has no parameter `greting`. Did you mean `greeting`?
+```
+````
+
+A marked `text` block is the output of the nearest `r` block above it, or of every tab of the
+nearest tab group above it, and each tab must produce it on its own. The code runs in a throwaway
+project of one `ry.toml` and one file, `main.R` unless the output's snippet names another file, as
+`--[R/both.R:2:31]` does. A tab group that no output block follows must give the same findings in
+every tab, with typing on. An unmarked output block is not tested.
+
+| Word | Meaning |
+| --- | --- |
+| `check` / `run` | Run `ry check`, or `ry run main.R`. |
+| `typing`, `strict` | Set that `[check]` key to `true`. Type checking is off unless a block says `typing`. |
+| `KEY=VALUE` | Any other `[check]` key, written as in `ry.toml`, such as `object-systems=false`. |
+| `runtime=ry` / `runtime=gnu-r` | Which runtime `run` uses; GNU R by default, as on the command line. |
+| `exact` | Compare the whole output instead of an excerpt. |
+| `continue` | Run the page's earlier `r` blocks first, as one session, and compare only this block's output. |
+| `tab=LABEL` | Only that tab produces this output, for the rare example whose spellings legitimately differ. |
+| `dput` | On an `r` block with `#>` output, print each result with `dput()` instead of `print()`. |
+
+An `r` block can also hold its own output, as `#>` lines after the code that prints it, with a marker
+such as ```` ```r ry run runtime=ry dput ````. Each run of code before a `#>` group shows its last
+value, and the comparison is always exact. A page's `#>` blocks share one R process, each in its
+own `local()` environment, because a runtime start costs seconds and the standard library reference
+has over a hundred of them.
+
+An excerpt matches when every non-blank line of it equals a line of the real output, both trimmed of
+surrounding whitespace, in the page's order. Lines the page leaves out, such as the summary, a
+source snippet, or other findings, are free. A message the page wraps by hand matches one output
+line when its lines are joined with single spaces. This rule lets a page show the part of the
+output that matters while still pinning every word it does show. An exact block matches when the
+whole output agrees, ignoring trailing whitespace and the project's temporary directory. Both
+compare standard output and standard error as one stream, interleaved as a terminal shows them,
+with color off.
+
+`just docs-test [PAGE]` runs the pages whose path contains `PAGE`, and `just docs-bless [PAGE]`
+rewrites the output of exact and `#>` blocks from the real tool. An excerpt is curated by hand, so
+bless leaves it alone: the failure prints the full output to choose the lines from. A `run` block
+is skipped with a note when GNU R is missing, or for `runtime=ry`, when `libR.so` is not built
+beside `ry`. The landing page's samples in `docs/src/pages/index.astro` are checked as excerpts with
+typing on, without markers.
+
 ### Package loading
 
 `crates/ry/tests/test_load.rs` runs `ry load` and plain `Rscript` against a real GNU R and checks
