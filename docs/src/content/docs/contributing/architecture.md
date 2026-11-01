@@ -193,6 +193,46 @@ wall time. Several of them are worth knowing:
   setting up fresh pages, which scales with the memory the analysis keeps, and mimalloc's purge
   and huge-page options measured no difference.
 
+### The check cache
+
+The cold check already uses about 3.4 of 4 cores in every pass, so more parallelism cannot bring
+it much lower. What a repeat run can skip is work whose result is already known, so `ry check`
+records each file's findings in `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`). The salsa
+memos themselves are not persisted. Salsa 0.28 exposes no dependency graph to save, and its
+persistence feature would need every memo to serialize, including the process-wide `Ty` table.
+
+The record has a key fingerprint and, for each file, four facts:
+
+- **Key**: the ry version and binary, the configuration, the project root, the data files,
+  `NAMESPACE`, `DESCRIPTION`, and the project's stubs. A different key checks every file.
+- **Content fingerprint**: the file's text.
+- **Surface fingerprint**: two parts. The first is the text with the body of each top-level
+  function definition left out, unless the body contains `<<-`, `->>`, or a call that declares or
+  attaches something (`assign`, `library`, `setClass` and the rest of `DECLARING_CALLS`). The
+  second is the file's share of every project-wide fold, listed by
+  `diagnostics::project_fold_shares`: its definitions, conditional writers, type declarations,
+  `globalVariables` names, S3 generics and attached packages. A body can feed a fold, as a
+  `UseMethod` call or a `#: @type` inside it does, so the shares come from the queries rather
+  than from the text. A new fold over the project's files must add its share there.
+- **Dependencies**: the files whose items the check read through interface edges, transitively
+  (`semantics::file_dependency_files`), plus the files that its findings point into.
+- **Imports used**: the `NAMESPACE` imports the file's code uses, which the `NAMESPACE` findings
+  depend on.
+
+A run with no changed file replays every finding without building a tree. A run whose changed
+files all keep their surface checks the changed files and the files whose dependencies include
+one of them. Every surface then matches the record, so the attached set and, when the imports used
+are unchanged, the `NAMESPACE` findings come from the record as well. Any other change checks every
+file. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
+an edit inside a body rechecks one or two files.
+
+A partial run still parses every file, because the project-wide maps fold every file's items. So
+it warms those folds across all cores, and that parse, about 0.3 s of the 0.45 s total, is its
+floor. Removing that floor would mean persisting the item trees. When invariants are on
+(`syntax::testing::enable_invariants`), every run that reuses findings is compared with a fresh
+run and panics on any difference. The seeded edit simulation in `cli.rs`
+(`cached_checks_match_fresh_checks_across_seeded_edits`) drives that comparison.
+
 ### From item to scheme
 
 An item's green subtree lowers to HIR, with spans relative to the item. Its annotations lower

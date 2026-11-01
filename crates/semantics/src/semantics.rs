@@ -1272,7 +1272,7 @@ pub fn s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
 
 /// The `UseMethod` argument is ignored: a mismatch is a runtime error R reports itself.
 #[salsa::tracked(returns(ref))]
-fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
+pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
     let mut generics = FxHashSet::default();
     for &item in item_tree(db, file) {
         if let Some(name) = item.name(db).clone()
@@ -1578,6 +1578,26 @@ fn write_tokens(node: &SyntaxNode) -> usize {
     count
 }
 
+/// Every other file whose items a check of `file` can read exports from, transitively through
+/// the interface edges, in no particular order. A file's checked findings can change only
+/// when its own text, one of these files, or the project's top-level declarations change.
+pub fn file_dependency_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
+    let mut seen: FxHashSet<Item<'_>> = FxHashSet::default();
+    let mut stack: Vec<Item<'_>> = item_tree(db, file).clone();
+    let mut files: FxHashSet<SourceFile> = FxHashSet::default();
+    while let Some(item) = stack.pop() {
+        if !seen.insert(item) {
+            continue;
+        }
+        let owner = *item.file(db);
+        if owner != file {
+            files.insert(owner);
+        }
+        stack.extend(item_interface_edges(db, item).iter().copied());
+    }
+    files.into_iter().collect()
+}
+
 /// The cyclic group an item belongs to, members in canonical order (project file order, then
 /// item order), or `None` when no read cycle runs through the item. A group must resolve
 /// through one canonical fixpoint, since iterating from whichever member was queried first
@@ -1586,6 +1606,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
 /// A strongly connected component lies inside the reachable set of each of its members, so
 /// the walk visits only what the item can read, transitively. One file's check therefore
 /// names only the items it can reach, not the whole project.
+
 #[salsa::tracked(returns(ref))]
 pub fn interface_group<'db>(
     db: &'db dyn Db,

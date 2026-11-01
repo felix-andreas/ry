@@ -3047,3 +3047,16 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - 15 "expected a list": `$` on a value that is definitely NULL, and R6's metaprogrammed `generator_funs`.
 - 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
 - 5 matrix indexing, a documented limitation.
+
+## Server cold start from the check cache
+
+- The language server starts from nothing and does not read `.ry_cache/check.json`. It could publish
+  the recorded findings of unchanged files at once and check them in idle time, but its findings
+  come from the open buffers and its own scheduling waves, so it needs its own rule for when a
+  recorded finding is still valid. Measure first how long the server's first full wave takes on a
+  benchmark.
+- A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
+  `package_definitions` and the other project-wide folds read every file's item tree. Persisting
+  each file's share of those folds next to its findings would remove that floor.
+- A cold check is about 1.45 s on 4 cores and already uses about 3.4 of them, so the 1 s cold target
+  needs about a third less CPU work. The levers are in "Benchmark code bases (measured)".

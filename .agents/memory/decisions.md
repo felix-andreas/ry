@@ -4654,6 +4654,45 @@ GNU R's `tests/*.R` pin several behaviors that come from GNU R's machine or its 
   A call that omits the formal and takes the non-writing path is no longer reported; that is the
   accepted cost of a path-insensitive analysis that must not report correct calls.
 
+## `ry check` keeps an on-disk record of its findings
+
+- **Measured first.** On 4 cores, a cold check of the 300,000-line finance bench takes about 1.45 s
+  wall and 5 CPU seconds. Every pass already spreads over the cores: deriving the syntax facts used
+  3.8 cores, naming 3.6, and the item check 3.7. Releasing the trees (0.05 s) and setup (0.05 s) are
+  the only serial parts. More parallelism therefore has no headroom on this machine, and a cold run
+  under 1 s needs about a third less CPU work, not more threads.
+- **Previous shape.** Each run started from nothing. The salsa memos live only in memory, and
+  salsa 0.28 neither exposes its dependency graph nor persists memos without serde on every value,
+  including the global `Ty` table.
+- **Target shape.** `.ry_cache/check.json` (`crates/ry/src/check_cache.rs`) records the findings,
+  not the memos. Each file's record holds its content fingerprint, its surface fingerprint (the
+  text without top-level function bodies, unless a body can write or declare outside its frame),
+  the files its check read through interface edges, and the `NAMESPACE` imports it uses. The whole
+  record is keyed by the ry binary (hashed by its bytes), the configuration, `NAMESPACE`,
+  `DESCRIPTION`, the data files and the stubs. With no changed file, every finding replays. When
+  every changed file keeps its surface, only the changed files and their dependents are checked.
+  Anything else checks all files. A directory with no `ry.toml` or `DESCRIPTION` gets no record.
+  The architecture page's "The check cache" section has the details.
+- **Why the surface rule is sound.** One file's check reads other files without an interface edge
+  only through name-keyed project-wide maps. Those are folds of per-file shares, so the surface
+  fingerprints each share as `diagnostics::project_fold_shares` spells it, beside the text outside
+  function bodies. A text rule alone was not enough: a `UseMethod` call or a `#: @type` inside a
+  body feeds the S3-generic and type-declaration folds, and a review reproduced both as stale
+  findings before the shares were added. Inferred schemes are the remaining body-dependent fact,
+  and the recorded interface dependencies cover them. On all three benches, a file's dependency
+  closure has a median size of 0, a 90th percentile of 1 and a maximum of 1.
+- **Measured.** On the finance bench, a replay takes 0.10 s (57 MB peak), a body edit 0.45 s, and a
+  cold run with the record written 0.1 s more than `--no-cache`. The data-science and biostatistics
+  benches replay in 0.09 s and 0.07 s. The output is byte-identical to a run with `--no-cache`.
+- **Floor of a partial run.** It still parses every file, because the project-wide folds read every
+  file's item tree. It warms those folds on all cores, and keeps its trees instead of releasing
+  them: releasing walks every item serially and cost more than it saved.
+- **Checked.** With invariants on, every run that reuses findings is compared against a fresh run
+  and panics on a difference. A seeded simulation drives that comparison with body and signature
+  edits, `<<-`, `library`, `assign`, `setClass`, `UseMethod` and S3 methods, `#: @type` in and
+  outside bodies, script files, and added and removed files
+  (`cached_checks_match_fresh_checks_across_seeded_edits` in `cli.rs`).
+
 ## Corpus-driven stub and overload fixes
 
 - A name the item writes with `<<-` reads as `Unknown` unless the project defines it (`read_non_local` in `check.rs`, via `top_level::super_assigned_names` over the item's own HIR, so no project-wide map is read). Before, openxlsx's Reference Class field `t <<- t[-inds]` resolved to base `t` and indexing it was a false report.
