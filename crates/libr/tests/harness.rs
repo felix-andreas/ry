@@ -138,13 +138,48 @@ unsafe extern "C" fn capture_console(
         .extend_from_slice(bytes);
 }
 
-/// `cargo test` writes the crate's fresh shared library next to the test executable, in
-/// `target/<profile>/deps`; the copy one level up is only refreshed by `cargo build`.
-fn library_dir() -> PathBuf {
+/// The directory of the freshest `libR.so` that `cargo test` built. Older cargo writes it next to
+/// the test executable, in `target/<profile>/deps`. The build-directory layout of current nightly
+/// cargo gives every unit its own `target/<profile>/build/<package>/<hash>/out`, so the library
+/// sits in a sibling of the executable's directory, and the copy in `target/<profile>` is only
+/// refreshed by `cargo build`.
+pub fn library_dir() -> PathBuf {
+    let executable = std::env::current_exe().expect("the test executable has a path");
+    let directory = executable
+        .parent()
+        .expect("the test executable lives in a directory");
+    let mut candidates = vec![directory.join("libR.so")];
+    // `.../build/libr/<hash>/out/<test>`: the units of this package are the hash's siblings.
+    if let Some(units) = directory.parent().and_then(Path::parent)
+        && let Ok(entries) = std::fs::read_dir(units)
+    {
+        candidates.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path().join("out").join("libR.so")),
+        );
+    }
+    candidates
+        .into_iter()
+        .filter_map(|path| {
+            let modified = path.metadata().and_then(|metadata| metadata.modified()).ok()?;
+            Some((modified, path))
+        })
+        .max()
+        .and_then(|(_, path)| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| directory.to_path_buf())
+}
+
+/// `target/<profile>`, where `cargo build` puts binaries: the nearest ancestor of the test
+/// executable that holds the `build` directory, in either cargo layout.
+#[allow(dead_code)]
+pub fn profile_dir() -> PathBuf {
     let executable = std::env::current_exe().expect("the test executable has a path");
     executable
-        .parent()
-        .expect("the test executable lives in a directory")
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join("build").is_dir())
+        .expect("the test executable lives under a cargo profile directory")
         .to_path_buf()
 }
 
