@@ -4353,3 +4353,17 @@ explicit allocators".
   its uri and selection start instead of serializing ids into `data`, so a stale item never names
   a wrong function; a "(top level)" item does not re-resolve, because its start is whatever the
   statement calls first.
+
+## A conditional write of a formal covers the paths that run it
+
+- **Previous shape.** `FormalUses::assigned` held the names written on every path, so a read after
+  `if (flag) x <- 1` forced `x`. That contradicted the rule the spec opens with (a formal is required
+  only when every path forces it) and reported ks `kdde.binned(..., bin.par = bin.par)`, whose `w`
+  is rebound from `bin.par` on the branch the call takes.
+- **Target shape.** `assigned` holds the names some path wrote before forcing them, joined by
+  union, and a write of a name its path already forced is not recorded. A later read forces the
+  formal only when no path wrote it first. Loops and lazy operands keep the writes of the paths that
+  run them, and `local()` still discards its writes.
+- **Impact.** Reports only omissions that fail on every path, matching the `missing()` narrowing.
+  A call that omits the formal and takes the non-writing path is no longer reported; that is the
+  accepted cost of a path-insensitive analysis that must not report correct calls.

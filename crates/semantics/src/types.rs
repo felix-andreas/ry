@@ -257,6 +257,9 @@ pub struct FunctionType<'db> {
     /// Parameters after `...` match by name only.
     pub variadic: Option<RestParameter<'db>>,
     pub ret: Ty<'db>,
+    /// The signature was inferred from an unannotated body, so a scalar parameter type is a
+    /// claim of how the body uses the value, not a declared length.
+    pub inferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -673,6 +676,7 @@ fn mapped_kind<'db>(
                 ..rest.clone()
             }),
             ret: map(function.ret),
+            inferred: function.inferred,
         })),
         TyKind::Union(_) => None,
         TyKind::Named(name, arguments) => Some(TyKind::Named(
@@ -880,6 +884,7 @@ mod tests {
                 }],
                 variadic: None,
                 ret: scalar(&db, Atomic::Integer),
+                inferred: false,
             }),
         );
 
@@ -905,6 +910,7 @@ mod tests {
                 named: Vec::new(),
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
+                inferred: false,
             }),
         );
         let f2 = Ty::new(
@@ -914,6 +920,7 @@ mod tests {
                 named: Vec::new(),
                 variadic: None,
                 ret: scalar(&db, Atomic::Double),
+                inferred: false,
             }),
         );
         assert_eq!(f1, f2);
