@@ -100,6 +100,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pRho", stats_tests::p_rho),
     ("d2x2xk", stats_tests::d2x2xk),
     ("Fisher_sim", stats_tests::fisher_sim),
+    ("Fexact", stats_tests::fexact),
     ("chisq_sim", stats_tests::chisq_sim),
     ("r2dtable", stats_tests::r2dtable),
     ("ARIMA_transPars", stats_arima::transpars),

@@ -206,6 +206,12 @@ fn nonint(x: f64) -> bool {
     (x - forceint(x)).abs() > 1e-9 * fmax2(1.0, x.abs())
 }
 
+/// Whether `choose` and `lchoose` treat `n` as an integer, which allows more slack than
+/// `nonint`, so `choose(4 - 1e-7, 4)` is 1.
+fn near_integer(x: f64) -> bool {
+    (x - forceint(x)).abs() <= 1e-7 * fmax2(1.0, x.abs())
+}
+
 /// `R_D_negInonint`.
 fn negative_or_nonint(x: f64) -> bool {
     x < 0.0 || nonint(x)
@@ -1150,7 +1156,7 @@ pub fn lchoose(n: f64, k: f64) -> f64 {
     }
     if n < 0.0 {
         return lchoose(-n + k - 1.0, k);
-    } else if !nonint(n) {
+    } else if near_integer(n) {
         let n = forceint(n);
         if n < k {
             return f64::NEG_INFINITY;
@@ -1175,7 +1181,7 @@ pub fn choose(n: f64, k: f64) -> f64 {
     }
     round_k_warning(k0, k);
     if k < K_SMALL_MAX {
-        if n - k < k && n >= 0.0 && !nonint(n) {
+        if n - k < k && n >= 0.0 && near_integer(n) {
             k = forceint(n - k);
         }
         if k < 0.0 {
@@ -1190,12 +1196,12 @@ pub fn choose(n: f64, k: f64) -> f64 {
             r *= (n - j + 1.0) / j;
             j += 1.0;
         }
-        return if !nonint(n) { forceint(r) } else { r };
+        return if near_integer(n) { forceint(r) } else { r };
     }
     if n < 0.0 {
         let r = choose(-n + k - 1.0, k);
         return if k != 2.0 * (k / 2.0).floor() { -r } else { r };
-    } else if !nonint(n) {
+    } else if near_integer(n) {
         let n = forceint(n);
         if n < k {
             return 0.0;

@@ -2179,7 +2179,8 @@ pub unsafe fn set_dimnames(object: Sexp, dimnames: Sexp, call: Sexp) -> R<()> {
     let result = alloc(SexpType::List, dims.len())?;
     for (dimension, &extent) in dims.iter().enumerate().take(length(dimnames)) {
         let component = dimnames.element(dimension);
-        if component == nil() {
+        // A zero-length component means no names for that dimension, whatever its extent.
+        if component == nil() || length(component) == 0 {
             continue;
         }
         let component = if values::inherits(component, "factor") {
