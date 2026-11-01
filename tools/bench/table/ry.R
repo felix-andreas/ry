@@ -5,10 +5,11 @@
 # Polars-style API. The `:=` loops use the data.table syntax the DataFrame keeps for
 # compatibility, because they measure in-place updates, which the Polars-style API does not do.
 #
-# Usage: ry run ry.R <data-dir>
+# Usage: ry run ry.R <data-dir> [groupby]   (`groupby` runs only the ten group-by questions)
 
 args <- commandArgs(trailingOnly = TRUE)
 dir <- args[[1]]
+groupby_only <- identical(args[2], "groupby")
 cat("# ry DataFrame\n")
 
 read <- function(name, factors = TRUE) DataFrame.read_csv(file.path(dir, name), strings_as_factors = factors)
@@ -62,34 +63,36 @@ time_question("groupby q10", by("id1", "id2", "id3", "id4", "id5", "id6") |> Gro
   count = Expr.len()
 ))
 
-# `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
-time_question("update full", {
-  for (step in 1:100) x[, v3 := v3 * 1.000001]
-  x[, .(v3 = sum(v3))]
-})
-time_question("update subset", {
-  for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
-  x[, .(v1 = sum(v1))]
-})
-time_question("update add", {
-  for (step in 1:100) x[, paste0("added", step) := v2 * step]
-  x[, .(added100 = sum(added100))]
-})
-rm(x)
-invisible(gc())
+if (!groupby_only) {
+  # `:=` loops: a whole-column update, a 1% subset update and an added column, each 100 times.
+  time_question("update full", {
+    for (step in 1:100) x[, v3 := v3 * 1.000001]
+    x[, .(v3 = sum(v3))]
+  })
+  time_question("update subset", {
+    for (step in 1:100) x[id4 == step, v1 := v1 + 1L]
+    x[, .(v1 = sum(v1))]
+  })
+  time_question("update add", {
+    for (step in 1:100) x[, paste0("added", step) := v2 * step]
+    x[, .(added100 = sum(added100))]
+  })
+  rm(x)
+  invisible(gc())
 
-x <- read("join_x.csv")
-small <- read("join_small.csv")
-medium <- read("join_medium.csv")
-big <- read("join_big.csv")
-time_question("join q1", DataFrame.join(x, small, on = "id1"))
-time_question("join q2", DataFrame.join(x, medium, on = "id2"))
-time_question("join q3", DataFrame.join(x, medium, on = "id2", how = "left"))
-time_question("join q4", DataFrame.join(x, medium, on = "id5"))
-time_question("join q5", DataFrame.join(x, big, on = "id3"))
-rm(x, small, medium, big)
-invisible(gc())
+  x <- read("join_x.csv")
+  small <- read("join_small.csv")
+  medium <- read("join_medium.csv")
+  big <- read("join_big.csv")
+  time_question("join q1", DataFrame.join(x, small, on = "id1"))
+  time_question("join q2", DataFrame.join(x, medium, on = "id2"))
+  time_question("join q3", DataFrame.join(x, medium, on = "id2", how = "left"))
+  time_question("join q4", DataFrame.join(x, medium, on = "id5"))
+  time_question("join q5", DataFrame.join(x, big, on = "id3"))
+  rm(x, small, medium, big)
+  invisible(gc())
 
-prices <- read("rolljoin_prices.csv", factors = FALSE)
-trades <- read("rolljoin_trades.csv", factors = FALSE)
-time_question("rolljoin keyed", DataFrame.join_asof(trades, prices, on = "time", by = "ticker"))
+  prices <- read("rolljoin_prices.csv", factors = FALSE)
+  trades <- read("rolljoin_trades.csv", factors = FALSE)
+  time_question("rolljoin keyed", DataFrame.join_asof(trades, prices, on = "time", by = "ticker"))
+}

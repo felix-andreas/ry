@@ -5,10 +5,11 @@
 
 use {
     ide::{
-        CodeActionKind, DefinitionTarget, DocumentSymbol, HoverDefinition, call_hierarchy_item,
-        code_actions, completion, definition, diagnostic_fixes, document_symbols, folding_ranges,
-        hover, incoming_calls, inlay_hints, outgoing_calls, references, rename, selection_ranges,
-        semantic_tokens, signature_help, type_definition, workspace_symbols,
+        CodeActionKind, CodeLensKind, DefinitionTarget, DocumentSymbol, HoverDefinition,
+        call_hierarchy_item, code_actions, code_lenses, completion, definition, diagnostic_fixes,
+        document_symbols, folding_ranges, hover, incoming_calls, inlay_hints, outgoing_calls,
+        references, rename, selection_ranges, semantic_tokens, signature_help, type_definition,
+        workspace_symbols,
     },
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -545,6 +546,22 @@ fn render_structure(source: &str) -> String {
                         covered(edit.range),
                         edit.replacement
                     ));
+                }
+            }
+            for lens in code_lenses(db, file) {
+                let line = text[..usize::from(lens.range.start())]
+                    .matches('\n')
+                    .count();
+                match lens.kind {
+                    CodeLensKind::RunFile => {
+                        output.push_str(&format!("lens run file at line {line}\n"));
+                    }
+                    CodeLensKind::Test { name } => {
+                        output.push_str(&format!("lens test {name:?} at line {line}\n"));
+                    }
+                    CodeLensKind::References => {
+                        output.push_str(&format!("lens references {}\n", covered(lens.range)));
+                    }
                 }
             }
             if let Some(at) = cursor {

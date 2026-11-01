@@ -2086,6 +2086,10 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **A CSV read peaks far above the table it makes.** A 5e7-row `groupby.csv` (2.6 GB) peaks at
+  10 GB resident, 2.6 GB of it the mapped file, for a 1.7 GB table: Polars parses the three id
+  columns as strings (16-byte views per row) before `strings_as_factors` codes them. Parsing a
+  column that will become a factor straight into codes would cut the peak by about 2.4 GB.
 - **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
   a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
   the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
@@ -2093,11 +2097,17 @@ The end-to-end guard rests on the corpus suites.
   to never (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory"), because
   refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
   Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
-- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
-  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
-  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
-  31 s for the same file. A factor representation that keeps the levels as a plain string array
-  and maps them only on demand would remove the 6 s.
+- **A factor build is bound by Polars' Enum interning.** `string_to_factor`
+  (`crates/table/src/convert.rs`) hashes, deduplicates and sorts the levels itself in parallel
+  (1.8 s for `join_big.csv`'s 9.95 million distinct `id6` values on 4 cores), then hands the sorted
+  levels to Polars' `FrozenCategories::new`, which inserts them one at a time into a concurrent
+  table that copies and hashes each key again: 9.6 s for those 9.95 million levels, 3.1 s to build
+  and 2.4 s to drop for 6.3 million. The whole factor conversion is 0.9 s for `groupby.csv`, 7.3 s
+  for `join_x.csv` and 12.3 s for `join_big.csv`, against data.table's `fread(stringsAsFactors =
+  TRUE)` at 5.3 s, 31 s and 37 s (1e7 rows, parse included on both sides). Removing the rest needs
+  a factor type outside Polars (codes plus a plain levels array, mapped to an Enum only when a
+  Polars plan needs one), which every kernel and the lazy planner must handle (`decisions.md`,
+  "Factors stay Polars Enums").
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
@@ -2331,13 +2341,10 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   QUADPACK wrappers `Rdqags`/`Rdqagi`, `findInterval`/`interv_`, `dpofa`'s 1e-14 tolerance,
   `d1mach`/`i1mach`, and in Rmath `qgamma`, `dnchisq`, `qgeom`'s fuzz, and the `bd0`/`stirlerr`/
   `logcf` helpers whose doc comments still name R's macros. Rewrite each from its published source as `decisions.md` describes.
-- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux, and on Windows assembles
-  its R home from symbolic links, which need Developer Mode, and does not drive Rtools, so there is
-  no Windows `R CMD INSTALL` yet (package DLLs have been built by hand against `libR.dll.a`).
-- **C API exports packages may link but `libR` lacks** (found by diffing GNU R 4.5's `R.dll`
-  export table, on every platform): `R_findVar`, `R_findVarInFrame`, `R_findVarLoc`,
-  `R_findVarLocInFrame`, `R_AllocStringBuffer`, `Rf_formatReal` and its siblings, `Rf_mbrtowc`,
-  `utf8clen`, `R_MissingArgError`. The rest of the 316-name difference is GNU R internals and RGui.
+- **Platforms.** The `rcmd` toolchain assumes gcc and gfortran on Linux. Windows `R CMD INSTALL`
+  follows the Rtools conventions but has only been verified cross-hosted (`decisions.md`, "Windows
+  `R CMD INSTALL`"): the release smoke test should install data.table from source with Rtools on
+  the Windows runner, and `R CMD config` there needs Rtools' `make` on `PATH`.
 
 ## Explicitly out of scope for now
 
@@ -3001,17 +3008,18 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 ## Open: editor parity
 
 - More quick fixes: a missing `library()` for a namespaced name.
-- `missing_arms_fix` takes its indent from the previous physical line, so after a continuation
-  line the new arms are misindented, and it inserts `\n` in a CRLF file.
-- A finding in a file with a syntax error still says "`ry check --fix` applies it", though
-  `--fix` skips such files.
-- `pkg::name` is always a library token, even when `pkg` is the project's own package.
 - Semantic tokens: coloring of `$` fields and frame columns.
+- Hover does not read the console's environment: a value defined only in the "ry console" terminal
+  has no type in the editor. It needs the console to publish its global bindings (a libR export
+  read by the server), which the console's owners should design with it.
+- Debugger: it cannot attach to a running console yet, and `debugonce()`/`trace()` do not map
+  onto it. Columns come from the srcref's tab-expanded column, so they are off on lines with
+  tabs, and `browser()` in code without a srcref does not stop.
+- Code lenses: "Run test" only finds a `test_that()` whose description is a plain string literal;
+  `describe()`/`it()` blocks have no lens.
 - Call hierarchy covers project top-level functions only; a local helper or a library function
   is not an item. Calls through `lapply(xs, f)` and `do.call` are not counted as calls.
 - Not done from rust-analyzer's list, with the reason:
-  - Code lens (run test, references count): needs client commands the VS Code extension does not
-    register yet; add them together.
   - On-type formatting: editors already indent R well, and `ry fmt` on save covers the rest.
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
