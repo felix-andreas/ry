@@ -2012,9 +2012,9 @@ primitives, and nothing built or installed packages.
   while it has one, so no address is reused under a stale value. `SETLENGTH` makes the vector
   resizable. `FRAME` returns a snapshot pairlist (frames are hashed). `R_PPStack` is a real array
   that a root source scans up to `R_PPStackTop`, for code compiled with R's internal macros.
-- **The graphics engine is exported and errors when used.** Device packages (ragg, systemfonts)
-  must load and register; the colour and text helpers work. Implementing devices stays the open
-  question it was.
+- **The graphics engine C API is real** (`crates/libr/src/graphics.rs` over
+  `crates/interp/src/graphics_engine.rs`); see "One graphics engine for base graphics, grid and
+  device packages" below.
 - **`.C` and `.Fortran` copy their arguments** and pass data pointers through the same
   dispatcher as `.Call` (all arguments are pointers), returning the copies as a named list.
   `.Call` accepts `NativeSymbolInfo` objects, which packages that call `R_forceSymbols` require.
@@ -2220,35 +2220,60 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*`, `graphics__*` and
 `utils__sizes_hashtabs_and_tools`), never from its C source.
 
-- **Devices record pages of shapes and render them when they close.** Every file device (pdf,
-  postscript, xfig, pictex, png, jpeg, bmp, tiff, svg, cairo_pdf) opens a `graphics::Device`
-  holding its size, point size, the base graphics parameters and the pages drawn so far. A page is
-  a list of `graphics_render::Shape`s (paths, circles, text) in inches from the bottom-left corner,
-  each with the clip rectangle in force, so the drawing routines know nothing about file formats
-  and each format is one writer over the same pages. `plot.new` starts a page when the layout's
-  last figure is done; `dev.off`, `quit()` and the end of a session write the file: PDF and SVG
-  as vectors, PNG, BMP and TIFF rasterized with tiny-skia, text outlined with ab_glyph from the
-  system's Helvetica-compatible fonts (Liberation Sans, then others). Rendering at close rather
-  than streaming keeps devices free of file handles and makes a multi-page bitmap device one file
-  per page, as GNU R's `%d` names expect. jpeg, postscript, xfig, pictex and cairo_ps have no
-  writer yet and write nothing beyond what they did before. File behavior otherwise follows GNU
-  R: vector devices create their file at open (so a bad path fails there), a pdf without pages
-  is still a valid document, and bitmap devices with no page write nothing.
-- **The drawing geometry is GNU R's, checked against its pdf output.** A line of `lwd` 1 is
-  1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline offset by
-  `ylbias`, symbols are sized from half the character height, font sizes round to whole points,
-  and text widths come from Helvetica's AFM metrics, the same table `strwidth` uses. Rendering a
-  plot through both engines' pdf devices and rasterizing them is how to check a change: plot,
-  hist, barplot and `par(mfrow)` layouts differ in a handful of pixels. Contour labels use a
-  clean-room "flattest window" placement, so they can sit in a different spot than GNU R's.
-- **Display lists and snapshots stay empty.** `dev.control` and
-  `dev.displaylist` toggle a per-device flag, but no call is ever recorded, so `recordPlot` returns
-  GNU R's shape (`list(NULL, <raw state, pkgName "graphics">)`, `engineVersion` 16) with a `NULL`
-  display list and empty state, which plot capture such as evaluate's reads as "no plot was made".
-  `replayPlot` of such a snapshot is a no-op and any other snapshot is an error. The snapshot does
-  not capture `Pars`: restoring parameters on replay would need the snapshot to own a copy of them,
-  and that belongs with recording the display list, which would also let devices replay a
-  plot onto a resized or copied device.
+- **One graphics engine for base graphics, grid and device packages.** GNU R's split is kept:
+  graphics systems (base graphics, grid) call the engine (`graphics_engine.rs`), and the engine
+  calls a device through the C callbacks of a `DevDesc`. `GEDevDesc`, `DevDesc`, `GEContext` and
+  `GESystemDesc` are `#[repr(C)]` copies of R_GE_version 17's headers, because grid and ragg read
+  and write their fields directly; a built-in device is a `DevDesc` whose callbacks are Rust
+  (`graphics_render.rs`), so a ragg device and `pdf()` take exactly the same path. Previously base
+  graphics drew straight into the built-in devices' shape lists and the GE entry points errored, so
+  grid and ragg could not run and two drawing paths would have had to agree.
+  - The display list is struct-of-arrays inside the engine's own `EngineDevice` (parallel `ops`
+    and `args` vectors of the primitive and its argument pairlist), and `GEDevDesc.displayList`
+    stays `R_NilValue`. A pairlist is built only where GNU R exposes one: `recordPlot` snapshots
+    and `dev.copy`. Recording a call is two pushes, not a cons chain. The cost: a C device that
+    tests `displayList != R_NilValue` before replaying on resize (as GNU R's own window devices
+    do) never replays; ragg and the file devices never resize, so none does today.
+  - `R_GE_checkVersionOrDie` accepts engine versions 14 to 17 rather than GNU R's exact match,
+    so binaries built for any of R 4.1 to 4.6 load. `DevDesc` only grew into its reserved space
+    over those versions. `GEDevDesc` gained `lock` before `gesd` in 4.4, and the engine serves
+    both layouts by storing each system descriptor in two adjacent slots and mirroring `ask` into
+    the last one (`GEDevDesc`'s doc comment).
+  - `R_GE_getVersion`, `R_GE_version` in `GraphicsEngine.h` (through `Rversion.h`) and a recorded
+    plot's `engineVersion` follow the R release ry presents: 16 through R 4.5, 17 from R 4.6. A
+    device binary built for that release and `replayPlot()` on a plot it recorded then see the
+    version they expect.
+  - `GEregisterSystem` hands the caller its index (through a claim callback) before it calls the
+    system on the open devices, because grid's `InitState` reads its own index on that call.
+  - Built-in devices install no-op pattern, clip-path and mask callbacks, because grid's
+    `newpage` calls `releasePattern` unconditionally; `patternFill` defaults to `R_NilValue`,
+    which ragg reads.
+  - `fromDeviceHeight` in inches is `value * ipr` without a sign, as in GNU R; a y-down device
+    (every bitmap device) otherwise gets negative string heights, which shifted rotated grid text.
+  - Base text hands both adjustments to `GEText`, so an unspecified vertical adjustment centres
+    the label on its glyphs' extent from the device's metric callback, as GNU R does.
+  - Base graphics hands rasters to `GERaster` and X-splines to the engine's `xspline`, as GNU R
+    does, so a device package draws them itself. The X-spline is written from Blanc and
+    Schlick's paper; its sampling (one point for a segment between two corners, otherwise a step
+    of `2 / sqrt(length in 1/1200 inch)`, at most 0.2) reproduces GNU R's open splines exactly.
+  - `plot.new` marks the device dirty, because grid starts a page of its own on its first
+    drawing unless another system already drew.
+  - Text widths are Helvetica's AFM widths plus its ASCII kerning pairs (tables generated from
+    GNU R's `afm/Helvetica*.afm`), which makes `strwidth` on pdf match GNU R exactly. Bitmap
+    devices in GNU R measure with cairo's font instead, so their widths differ slightly.
+- **Built-in devices record pages of shapes and render them when they close.** Each built-in
+  device's callbacks append `graphics_render::Shape`s (paths, circles, text) in inches with the
+  clip in force to the current page, and each file format is one writer over the same pages: PDF,
+  SVG and PostScript as vectors, PNG, JPEG, BMP and TIFF rasterized with tiny-skia, text outlined
+  with ab_glyph from the system's Helvetica-compatible fonts. Rendering at close keeps devices free
+  of file handles and makes a multi-page bitmap device one file per page, as GNU R's `%d` names
+  expect. Vector devices create their file at open, so a bad path fails there.
+- **The drawing geometry is GNU R's, checked against its pdf output and ragg pixels.** A line of
+  `lwd` 1 is 1/96 inch, a margin line is `mex * csi`, text sits on a margin line by its baseline
+  offset by `ylbias`, symbols are sized from half the character height, and font sizes round to
+  whole points. Base graphics computes positions in inches rather than through GNU R's NDC
+  pipeline, so the last bit of a coordinate can differ. Contour labels use a clean-room
+  "flattest window" placement, so they can sit in a different spot than GNU R's.
 - **The device table mirrors GNU R's**: slot 0 is the null device, at most 64 devices, `.Devices`
   (a pairlist whose entries carry `filepath` for a device opened on a file) and `.Device` in base
   are rebound from the table after every change, `dev.set(1)` starts the default device but
@@ -3349,6 +3374,34 @@ first lines R had already read, leaving R mid-command.
 - **Minor collection budget.** The young budget is the larger of `GcPolicy::young_limit` (8 MB) and half the old generation, as GNU R's trigger grows with its heap, so a session holding a large table does not collect on every large vector it allocates.
 - **Impact.** The single-loop data.table helpers run at GNU R's speed in a session that has called any data.table function, and `rbindlist` of two 1e7-row tables drops from 1.75 s to 1.26 s; `setkey`, `dcast` and `unique` now match or beat GNU R. `crates/heap/tests/test_gc.rs` pins that stores through an escaped pointer survive minor collections, before and after the escape is retired.
 
+## What keeps a dropped object alive: registers, handles, caches and dying finalizers
+
+GNU R finalizes an object at the first full `gc()` after its last reference goes, and R6, lgr's buffered appenders and processx all depend on that timing. Four places in ry's runtime held a reference GNU R does not have.
+
+- **The register file and the handle stack.** Both are roots. Tier-0 bytecode released handles only on a backward jump and never cleared a statement's temporaries, so a straight-line body kept everything it had touched until it returned. A statement of a `{` now ends with `Op::EndStatement dst start end`, which clears the block's result register and the statement's temporaries (registers are allocated in stack order, so they are exactly `start..end`) and releases the activation's handles, as the back edge already did. The AST interpreter's `do_begin` roots only the last value for the same reason. Compiled code shares the same register window, so the JIT lowers the op to inline `NULL` stores (`Action::Clear`), kills those registers in its liveness, and leaves handle release to tier 0's back edges and the activation's exit.
+- **Bytecode inline caches.** A cache holds the environment a lookup started from and the cell it found, so a body shared between closures (R6's `clone()` rebinds copied methods with `environment<-`) kept the original object's environment alive. A major collection empties every cache it traces (`Heap::trace`, `major_marking`) instead of marking through it; the next lookup refills it. Minor collections still trace them, so the retention lasts at most until the next full collection, which is when GNU R would finalize anyway.
+- **Tier-1 code.** A compiled body embeds its enclosure and the cells its lookups speculated on, and the body outlives any one closure (R6 gives every object's methods the same body). The TIER1 external pointer therefore protects a weak reference keyed on the enclosure, whose value lists what the machine code embeds. While the enclosure lives everything stays reachable; once it dies, `compiled_for` frees the code and clears TIER1, which is safe because a running activation keeps its own enclosure reachable.
+- **Removed binding cells.** A cell can outlive its frame entry while a cache holds it, so `remove_binding` sets the cell's value to the unbound marker and a stale cell reaches nothing.
+- **Dying finalizers.** Marking a dying weak reference's key, value and finalizer can make another weak reference's key reachable after the ephemeron fixpoint ended, and that reference's value and finalizer were then swept while it stayed registered (processx's exit finalizers ran freed closures). `process_weak_refs` now takes every dying reference off the list before marking any of them, then queues and marks them all. What they reach can no longer be a registered reference's key that missed the fixpoint, because every reference still registered has a key the fixpoint already marked, as GNU R's `CheckFinalizers` does.
+- **Visibility of a variable read.** Reading a variable can force a promise, whose expression then decides whether the value prints (`withCallingHandlers(f(), ...)` stays invisible when `f()` is). Compiled code sets the visible flag before the load, not after it, and the analysis treats the flag as unknown after a load that may force.
+- **Expression vectors.** `eval()` of an expression vector (`eval::eval_all`, which is how testthat runs a test file) releases each element's handles before the next element runs, exactly as `{` does, so a `gc()` in one top-level statement of a test file finalizes what an earlier statement dropped (lgr's `AppenderBuffer` flushes on destruction this way).
+- **Impact:** finalizer timing matches GNU R in the oracle cases `evaluation__block_finalizers`, `evaluation__expression_vector_finalizers` and `evaluation__finalizers_in_compiled_code`. The cost is one instruction per block statement in tier 0 and a cache refill after each major collection. No effect on static analysis.
+
+## ALTREP elements go through the class methods everywhere
+
+- **Previous shape.** libr's C entry points dispatched ALTREP `Elt` methods, but the interpreter read and wrote vector elements through `Sexp::element` and `Heap::set_element`, which read raw storage. About 370 interpreter call sites then saw an ALTREP instance's private triple instead of its elements (nanoarrow's character columns crashed DBI's arrow round trip).
+- **Target shape.** `heap::object::install_altrep_elements` takes a read and a write function, which libr installs at startup, and `Sexp::element` and `Heap::set_element` dispatch to them for an ALTREP object, so there is one access path and no call site can forget it. The accessor cannot fail, so an unwind from the method (an error, a condition handler's jump, an interrupt) is parked in the interpreter (`interp::unwind::park`) and raised as soon as the builtin that made the read returns (`call_builtin`), before its value reaches any R code, so `tryCatch(x[[2]], ...)` catches it; a read outside a builtin raises it at the evaluator's next poll instead. Meanwhile the read returns `NA` (strings) or `NULL`. `length()` asks the class's `Length` method, and `[[` on a string or list instance reads only the element it selects, so an R caller runs `Elt` exactly where GNU R does (`r_code_reads_only_the_string_elements_it_asks_for` in `crates/libr/tests/test_altrep.rs`). Numeric instances are still materialized whole for slice access. Making `element` fallible would touch every call site for a case only ALTREP classes reach. An ALTREP instance is never marked mutable, so the interpreter copies it before modifying it in place, as GNU R's `DATAPTR` contract implies.
+
+## POSIX regular expressions run on an automaton when they need the longest match
+
+- **Previous shape.** TRE patterns (`perl = FALSE`) ran on fancy-regex with `leftmost_longest`, which sends every variable-width pattern to the backtracker. lgr's `(.*z.*){10}` never finished.
+- **Target shape.** `Matcher::Automaton` keeps two regex-automata `meta::Regex` beside the fancy one: a leftmost-first search gives the match start, and an anchored `MatchKind::All` search from there gives the longest end, which is POSIX's leftmost-longest rule in linear time. Capture groups still come from fancy-regex, and the callers that do not report groups (`regexpr` and `gregexpr` without `perl`, `sub` and `gsub` without backreferences) never ask for them. Patterns regex-automata cannot compile, such as ones with backreferences, stay on fancy-regex.
+
+## Smaller runtime choices
+
+- **PostScript output reuses the PDF device's drawing operators** with a prolog that defines them in PostScript, so the two devices share one renderer. JPEG goes through `jpeg-encoder` from the same raster the PNG device draws.
+- **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports ASCII as GNU R does and utf8's formatting under `LC_ALL=C` escapes what GNU R escapes.
+
 ## libR commits mimalloc arenas lazily, and handle vectors are not zeroed before their fill
 
 - **Previous shape.** `libR.so` declares its own mimalloc, separate from the `ry` binary's, and only the binary turned off eager arena commit. In `libR` an eagerly committed arena is backed by transparent huge pages, so after earlier work had purged parts of it, the next large vector faulted them back in and the kernel zeroed and compacted whole huge pages. Every `Rf_allocVector` also zeroed the whole vector, which GNU R does not do for numbers, and a character vector or list was zeroed and then filled.
@@ -3661,6 +3714,14 @@ explicit allocators".
   once the list is complete. It runs in a per-thread scratch module that keeps its capacity, and
   the memoized module gets exact-size copies, which is the "scratch arena, owned compact result"
   rule of the data-oriented record above.
+- **Names at their own site are one side array, and ids carry a niche.** An argument name, a
+  field after `$` or `@`, a loop variable and a tag are a `NameId` into `Module::name_sites`, which
+  holds the `Symbol` with its range, instead of a `Symbol` and an `Option<TextRange>` inline in
+  every kind. `ExprId`, `PatId` and `NameId` are `NonZeroU32`, so `Option<ExprId>` is four bytes.
+  An expression kind went from 28 to 16 bytes and an argument from 24 to 8; together with hashing
+  `Symbol` by its index (`Ord` stays by spelling, so sorted output does not move) the cold check
+  took 3 to 8% less wall time and about 30 MiB less peak RSS. Read names through
+  `Module::name`, `Module::name_range` and `Module::argument_name`.
 - **Kept deliberately.** `ExprId` allocation order is the old one, so ids, fixtures and every
   downstream map are unchanged. `Module` still owns plain vectors and compares by value, so salsa
   backdating works as before.
@@ -3727,6 +3788,24 @@ explicit allocators".
   including checker-only and LSP work, would compile libr and Polars, and `cargo install` would
   still lose the library, because the artifact path points into the build directory. Embedding
   the library in the binary would double its size for users who never run code.
+
+## A DataFrame column reads back as a plain vector, not an Array
+
+- `DataFrame(price = [12.5, 9.99])` checks each column as an Array, then stores it as the plain
+  vector, and `df$price` reads back a plain `double[]`, statically and at run time.
+- Typing the read as `Array<T>` was rejected: a frame's later steps can put `NA` into a column (a
+  left join's unmatched rows), so the column type would have to be tracked per verb and an
+  `NA`-holding column would need a second representation. One column type keeps the schema the
+  single source of truth. `as.Array(df$x)` is the checked way back, and it fails on an `NA`.
+
+## mimalloc's purge delay stays at its default
+
+- Raising `MIMALLOC_PURGE_DELAY` (or calling `mi_option_set` for `purge_delay` in
+  `crates/libr/src/libr.rs`) keeps freed pages resident. Measured on the whole db-benchmark script
+  with lazy arena commit (`LAZY_ARENA_COMMIT` in the same file), never purging was 7% faster and
+  raised peak memory by 1.4 GB. The option is process-wide, so every R program would pay the
+  memory for a gain that lies mostly in CSV loading. The numbers are in the backlog item "Large
+  allocations page-fault on every query"; revisit with a per-query arena, which keeps the gain without the global cost.
 
 ## Releases are built natively per platform, with the runtime beside the binary
 

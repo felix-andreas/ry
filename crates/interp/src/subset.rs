@@ -87,7 +87,12 @@ pub unsafe fn modifiable(object: Sexp) -> R<Sexp> {
 
 /// Element `index` of any vector as a length-one vector (or, for lists, the element).
 pub unsafe fn vector_element(vector: Sexp, index: usize) -> R<Sexp> {
-    let vector = values::materialize(vector)?;
+    // A string or list element reads through the ALTREP class's `Elt` method on its own.
+    let vector = if matches!(vector.kind(), SexpType::String | SexpType::List) {
+        vector
+    } else {
+        values::materialize(vector)?
+    };
     match vector.kind() {
         SexpType::List | SexpType::Expression => Ok(vector.element(index)),
         SexpType::Logical => values::fresh_logical(values::ints(vector)[index]),
@@ -790,7 +795,13 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     if object.is_array() {
         return crate::arrays::subset2(object, indices, call);
     }
-    let object = values::materialize(object)?;
+    // String and list elements read through the class's `Elt` method, so `x[[i]]` asks for
+    // element `i` alone, as GNU R does; other vectors are read as slices.
+    let object = if matches!(object.kind(), SexpType::String | SexpType::List) {
+        object
+    } else {
+        values::materialize(object)?
+    };
     if object.kind() == SexpType::Object && object.has_gp(gp::S4_OBJECT) {
         let data = s4_data_part(object);
         if data == nil() {
@@ -869,12 +880,15 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
     let index = values::materialize(indices[0])?;
     let count = length(index);
     if count > 1 && matches!(object.kind(), SexpType::List | SexpType::Expression) {
-        // Recursive indexing: each subscript goes one level deeper.
+        // Recursive indexing: each subscript goes one level deeper, through calls and
+        // pairlists as well as lists, as GNU R's `isPairList` lets it.
         let mut current = object;
         for position in 0..count {
             let single = vector_element(index, position)?;
-            if !matches!(current.kind(), SexpType::List | SexpType::Expression)
-                && position + 1 < count
+            if !matches!(
+                current.kind(),
+                SexpType::List | SexpType::Expression | SexpType::Pairlist | SexpType::Language
+            ) && position + 1 < count
             {
                 return Err(crate::unwind::error_in(call, "subscript out of bounds"));
             }
@@ -1290,8 +1304,22 @@ pub unsafe fn subassign(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp)
     };
     let object = values::materialize(object)?;
     let value = values::materialize(value)?;
-    // A pairlist value assigns its elements, as a list would.
+    // A pairlist value assigns its elements into a list, as a list would, but has no atomic
+    // counterpart to coerce to.
     let value = if value.kind() == SexpType::Pairlist {
+        if !matches!(
+            object.kind(),
+            SexpType::List
+                | SexpType::Expression
+                | SexpType::Pairlist
+                | SexpType::Language
+                | SexpType::Nil
+        ) {
+            return Err(error(format!(
+                "incompatible types (from pairlist to {}) in subassignment type fix",
+                crate::coerce::type_name(object)
+            )));
+        }
         values::pairlist_to_list(value)?
     } else {
         value
@@ -1795,18 +1823,34 @@ struct Flattener {
     use_names: bool,
 }
 
+/// The names GNU R gives the leaves under one tagged base: a leaf without a name of its own is
+/// the base alone when it is the only such leaf, and otherwise the base followed by its position
+/// among all the leaves under that base.
+struct NameScope {
+    base: String,
+    count: usize,
+    position: usize,
+}
+
 impl Flattener {
     unsafe fn add(&mut self, value: Sexp, tag: &str) -> R<()> {
-        let value = values::materialize(value)?;
-        // A pairlist combines like the list of its elements.
-        let value = if value.kind() == SexpType::Pairlist {
-            values::pairlist_to_list(value)?
-        } else {
-            value
+        let value = flattenable(value)?;
+        let mut scope = NameScope {
+            base: tag.to_owned(),
+            count: if tag.is_empty() {
+                0
+            } else {
+                self.unnamed_leaves(value)?
+            },
+            position: 0,
         };
+        self.add_in(value, &mut scope)
+    }
+
+    unsafe fn add_in(&mut self, value: Sexp, scope: &mut NameScope) -> R<()> {
         let count = length(value);
         let element_names = values::names(value);
-        if !tag.is_empty() || element_names != nil() {
+        if !scope.base.is_empty() || element_names != nil() {
             self.any_names = true;
         }
         let is_list = matches!(
@@ -1815,8 +1859,27 @@ impl Flattener {
         );
         if is_list && self.recursive && value.kind() != SexpType::Language {
             for index in 0..count {
-                let name = self.child_name(tag, element_names, index, count);
-                self.add(value.element(index), name.as_deref().unwrap_or("NA"))?;
+                let element = flattenable(value.element(index))?;
+                match own_name(element_names, index) {
+                    Some(name) if name.is_empty() => self.add_in(element, scope)?,
+                    name => {
+                        // A named element starts a new base, so its leaves count afresh, but
+                        // they still take their places in the enclosing base's numbering.
+                        let name = name.unwrap_or_else(|| "NA".to_owned());
+                        let base = match scope.base.as_str() {
+                            "" => name,
+                            base => format!("{base}.{name}"),
+                        };
+                        let count = self.unnamed_leaves(element)?;
+                        let mut inner = NameScope {
+                            base,
+                            count,
+                            position: 0,
+                        };
+                        self.add_in(element, &mut inner)?;
+                        scope.position += inner.position;
+                    }
+                }
             }
             return Ok(());
         }
@@ -1824,44 +1887,60 @@ impl Flattener {
             return Ok(());
         }
         if !value.kind().is_vector() {
+            let name = self.leaf_name(scope, Some(String::new()));
             self.values.push((value, usize::MAX));
-            self.names.push(Some(tag.to_owned()));
+            self.names.push(name);
             return Ok(());
         }
         for index in 0..count {
-            let name = self.child_name(tag, element_names, index, count);
+            let name = self.leaf_name(scope, own_name(element_names, index));
             self.values.push((value, index));
             self.names.push(name);
         }
         Ok(())
     }
 
-    unsafe fn child_name(
-        &self,
-        tag: &str,
-        names: Sexp,
-        index: usize,
-        count: usize,
-    ) -> Option<String> {
+    fn leaf_name(&self, scope: &mut NameScope, own: Option<String>) -> Option<String> {
+        scope.position += 1;
         if !self.use_names {
             return Some(String::new());
         }
-        let inner = if names != nil() && index < length(names) {
-            values::string_at(names, index).map(|text| text.into_owned())
-        } else {
-            Some(String::new())
-        };
-        if tag.is_empty() {
-            return inner;
+        if scope.base.is_empty() {
+            return own;
         }
-        let inner = inner.unwrap_or_else(|| "NA".to_owned());
-        Some(if !inner.is_empty() {
-            format!("{tag}.{inner}")
-        } else if count == 1 {
-            tag.to_owned()
+        let own = own.unwrap_or_else(|| "NA".to_owned());
+        Some(if !own.is_empty() {
+            format!("{}.{own}", scope.base)
+        } else if scope.count == 1 {
+            scope.base.clone()
         } else {
-            format!("{tag}{}", index + 1)
+            format!("{}{}", scope.base, scope.position)
         })
+    }
+
+    /// GNU R's `namesCount`: every element of an atomic vector or of a list that is not
+    /// recursed into, and the leaves of unnamed list elements, stopping once past one.
+    unsafe fn unnamed_leaves(&self, value: Sexp) -> R<usize> {
+        let recursed =
+            matches!(value.kind(), SexpType::List | SexpType::Expression) && self.recursive;
+        if !recursed {
+            return Ok(if value.kind().is_vector() || value == nil() {
+                length(value)
+            } else {
+                1
+            });
+        }
+        let names = values::names(value);
+        let mut count = 0;
+        for index in 0..length(value) {
+            if count > 1 {
+                break;
+            }
+            if own_name(names, index).is_some_and(|name| name.is_empty()) {
+                count += self.unnamed_leaves(flattenable(value.element(index))?)?;
+            }
+        }
+        Ok(count)
     }
 
     unsafe fn kind_of(&mut self, value: Sexp) -> R<()> {
@@ -1905,6 +1984,25 @@ impl Flattener {
 }
 
 /// `c()` of already evaluated values, without names.
+/// A pairlist combines like the list of its elements.
+unsafe fn flattenable(value: Sexp) -> R<Sexp> {
+    let value = values::materialize(value)?;
+    if value.kind() == SexpType::Pairlist {
+        values::pairlist_to_list(value)
+    } else {
+        Ok(value)
+    }
+}
+
+/// The element's own name: empty when it has none, and `None` when it is NA.
+unsafe fn own_name(names: Sexp, index: usize) -> Option<String> {
+    if names != nil() && index < length(names) {
+        values::string_at(names, index).map(|text| text.into_owned())
+    } else {
+        Some(String::new())
+    }
+}
+
 pub unsafe fn combine(items: &[Sexp]) -> R<Sexp> {
     let args: Vec<Arg> = items
         .iter()
@@ -2686,8 +2784,6 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         let swapped = values::list_vector(&[first, second])?;
         let names = values::names(dimnames);
         if names != nil() && length(names) == 2 {
-            let swapped_names = values::list_vector(&[])?;
-            drop(swapped_names);
             let new_names = alloc(SexpType::String, 2)?;
             values::set_elt(new_names, 0, names.element(1));
             values::set_elt(new_names, 1, names.element(0));
@@ -2695,6 +2791,9 @@ unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
         }
         values::set_attr(result, symbols().dimnames, swapped)?;
     }
+    // GNU R keeps the other attributes after `dim` and `dimnames`, and `getParseData` relies on
+    // that to read the parse data's `text` after transposing it.
+    values::copy_most_attributes(object, result, false)?;
     Ok(result)
 }
 

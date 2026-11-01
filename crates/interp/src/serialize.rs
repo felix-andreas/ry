@@ -142,9 +142,7 @@ impl Reader<'_> {
 
     fn string(&mut self, length: usize) -> R<Vec<u8>> {
         if self.format == Format::Ascii {
-            let word = self.ascii_word()?;
-            return Ok(crate::lower::unescape_bytes(&word)
-                .map_or_else(|_| word.into_bytes(), |(bytes, _)| bytes));
+            return Ok(unescape_ascii(self.ascii_word()?.as_bytes()));
         }
         Ok(self.take(length)?.to_vec())
     }
@@ -1055,4 +1053,48 @@ unsafe fn do_unserialize(call: &Call<'_>) -> R<Sexp> {
     }
     let bytes = crate::connections::read_binary(source)?;
     unserialize(&bytes, call.arg(1))
+}
+
+/// Decodes a string of the ASCII format as GNU R's `InString` does: C escapes, up to three octal
+/// digits, and any other escaped byte (`\?`, `\"`, `\\`) standing for itself. R's string
+/// literal rules do not apply, because they reject `\?`, which the writer emits.
+fn unescape_ascii(word: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(word.len());
+    let mut index = 0;
+    while let Some(&current) = word.get(index) {
+        index += 1;
+        if current != b'\\' {
+            bytes.push(current);
+            continue;
+        }
+        let Some(&escaped) = word.get(index) else {
+            break;
+        };
+        index += 1;
+        let decoded = match escaped {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'v' => 0x0b,
+            b'b' => 0x08,
+            b'r' => b'\r',
+            b'f' => 0x0c,
+            b'a' => 0x07,
+            b'0'..=b'7' => {
+                let mut value = u32::from(escaped - b'0');
+                for _ in 0..2 {
+                    match word.get(index) {
+                        Some(&octal @ b'0'..=b'7') => {
+                            value = value * 8 + u32::from(octal - b'0');
+                            index += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                value as u8
+            }
+            other => other,
+        };
+        bytes.push(decoded);
+    }
+    bytes
 }

@@ -384,7 +384,6 @@ protects construction but nothing after it.
 - C code can write `NA` into an Array through `REAL()` or `INTEGER()`; nothing re-checks it.
 - The JIT and the bytecode fast paths treat an Array as an unknown value. A dedicated feedback kind
   would let compiled loops run strict arithmetic without the generic call.
-- A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 - An integer overflow in an Array operator prints R's "NAs produced by integer overflow" warning
   as well as the Array error, because the check runs after R's operator. Muffle the warning when the
@@ -433,6 +432,11 @@ The rule ships (`decisions.md`, "A strict library file's top level holds only de
   untyped code, minus the boundary checks.
 - **Free invalidated code.** The machine code and `Compiled` box of an invalidated body are leaked,
   and invalidated external pointers stay rooted.
+- **`uniroot(extendInt = "yes")` loops to its iteration limit under `RY_JIT=force`** after another
+  closure with a formal named `f` ran first (`stats__optimize_and_integrate`, the `ry-jit` engine
+  only). The `while` condition `f.lower * f.upper > 0` keeps reading the old `f.upper` after the
+  body reassigns it inside `is.na(f.upper <- f(...))`; both are formals with defaults
+  (`defaulted`). Already on main before the statement-clearing work.
 - **Recompile churn.** The global binding epoch invalidates every speculation when any watched name
   is defined in a function frame, so a program that reuses a common function name as a local
   variable recompiles up to the per-body cap. Count invalidations per body before tightening it.
@@ -492,14 +496,6 @@ change that does not pay.
    stack: `match_args` returns `eval::Matched` and calls fill an `eval::Args`, both `SmallVec`s,
    so a typical closure call allocates nothing on the Rust heap (`decisions.md`, "the
    interpreter's call path, lookups and allocation").
-6. **Hash `Symbol` by its index.** `hir::Symbol` is a dense 4-byte id but hashes and orders
-   through its string (`crates/semantics/src/hir.rs`), which was measured at about 7 ms per settled
-   re-check. Target: hash the index, and sort by spelling only where output order is visible.
-   Check first which maps rely on string order for deterministic output.
-7. **Bitmaps for group accumulator flags.** The table engine's per-group `missing` and `seen`
-   flags are `Vec<bool>` (`State` in `crates/table/src/group.rs`). Target: bitmaps, eight times
-   less memory per flag. Expected win: small, since the engine is already columnar; worth doing
-   only alongside other work in that file.
 
 - **Columnar record Arrays.** Store `Array<record>` as one buffer per field once the JIT fuses `xs[[i]]$field`; decided and deferred in `decisions.md`, "Array storage stays row-major". Measure a million-item loop both ways first.
 - **Measure typed Array loops.** `tools/bench/why/{typed,untyped}/array_{sum,dot,map,filter}.R` compare Array loops with plain-vector loops. They need GNU R's base library and a release build, so run `tools/bench/why/run.py` once the JIT's Array guard lands.
@@ -2004,11 +2000,18 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
-- **Large allocations page-fault on every query.** mimalloc returns big blocks to the OS, so a
-  kernel's scratch memory at 1e7 rows is faulted in afresh each time, and run-to-run times on the
-  same question vary by up to 2x (`MIMALLOC_PURGE_DELAY=-1` steadies them). Keeping scratch small
-  is the fix used so far (the grouped median). libR sets mimalloc's purge delay to never
-  (`crates/libr/src/libr.rs`), which removes the refaulting; resident memory stays at its peak.
+- **Large allocations page-fault on every query** under mimalloc's default 10 ms purge delay, so
+  a kernel's scratch memory at 1e7 rows is faulted in afresh each time. With lazy arena commit and
+  the one-pass factor conversion, the whole db-benchmark script (load plus all questions) runs 97 s
+  at 6.7 GB peak with the default delay and 91 s at 8.1 GB with the delay set to never. libR sets it
+  to never (`crates/libr/src/libr.rs`, see decisions.md "libR keeps freed memory"), because
+  refaulting was 15% of the benchmark tests' profile; the cost is resident memory at its peak.
+  Keeping scratch small (the grouped median) and a per-query arena remain the targeted fixes.
+- **`strings_as_factors` on a high-cardinality column.** `join_x.csv`'s `id6` has 6.3 million
+  distinct strings. Converting it takes about 9 s, of which Polars' `FrozenCategories::new`, which
+  interns every level into its own mapping, is 6 s; the parse is 1.1 s. data.table's `fread` takes
+  31 s for the same file. A factor representation that keeps the levels as a plain string array
+  and maps them only on demand would remove the 6 s.
 - **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`), no `cast`,
   `n_unique`, `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`,
   `drop`, `pivot`/`unpivot`, `concat`, window expressions (`over`), or `when/then/otherwise`
@@ -2112,17 +2115,27 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - Crashes that leave an empty or truncated `.Rout`: DBI segfaults in `test-arrow.R` only in the
-    full run (a standalone repro passes), and lgr and withr hit a finalizer whose weak reference
-    was already freed (`onexit = TRUE`). Reproduce with `gctorture(TRUE)` on a profiling build.
-  - R6's finalizer tests: an object made in one `test_that` block stays reachable after its
-    `rm()` and `gc()`, so it is finalized in a later block.
-  - `getParseData` returns `NULL` (see the source-references item below), and cli's
-    `code_highlight` then fails on `character(nrow(data))` whenever it formats a trace.
-  - Regular expressions fancy-regex cannot compile: rcmdcheck's `(?<q>...)\g{q}` backreference,
-    and lubridate's quantified lookahead `(?=\D+)?`. A non-constant-size pattern runs on
-    fancy-regex's backtracking VM because of `leftmost_longest`; a DFA leftmost-longest search
-    (regex-automata's `MatchKind::All`, anchored at the leftmost-first start) would avoid it.
+  - cli's "message if there is a sink" test: `sink(con, type = "message")` does not divert
+    stderr to the connection, and writes to a file connection are not flushed before it closes.
+    Both belong to the move of connection builtins onto `libr::connections`.
+  - `.Internal(inspect(x))` is missing.
+  - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
+    that hard-codes an id would differ (none in the corpus does).
+  - lobstr's `obj_size` counts a closure's environment a few kilobytes higher than GNU R, because
+    ry's environments and bytecode have their own layout. Only relative comparisons are portable.
+  - Each ALTREP string or list element read through `Sexp::element` pushes a handle that lives
+    until the enclosing scope ends, so a builtin walking a 10M-element nanoarrow column pushes 10M
+    handles. Materialize once in bulk paths, or root only where the element survives an
+    allocation.
+  - The TRE matcher now compiles three regexes per pattern, which costs `grepl` in a loop with no
+    matcher cache.
+  - `getParseData`'s comment parents (`comment_parent` in `crates/interp/src/lower.rs`) scan every
+    row per comment, quadratic in a heavily commented file parsed with `keep.source = TRUE`. The
+    builder knows each comment's enclosing node while it walks, so record it there.
+  - Tier-1 code is freed once its enclosure dies (`compiled_for` in `crates/jit/src/jit.rs`), on
+    the reasoning that a running activation keeps its closure, and so its enclosure, alive. An
+    activation whose closure's environment is replaced while it runs (`environment(f) <- e`
+    inside `f`) would break that. No repro yet; write one before changing the code.
   - Two unserializers: `interp::serialize`'s reader and libr's `R_Unserialize`. The writer is
     already libr's alone (`decisions.md`, "One serializer writer, in libr"); move the reader the
     same way.
@@ -2134,10 +2147,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
     - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
       reports an error; quantified lookarounds and lookarounds in non-capturing groups.
     - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
-  - utf8's "long text in C locale" tests switch `LC_CTYPE` to C and expect `...` instead of an
-    ellipsis and byte-based widths; ry's width and `l10n_info` ignore the C library's locale.
-  - withr: `RNGkind` lacks "Marsaglia-Multicarry", "Buggy Kinderman-Ramage" and "Rounding", and
-    the file devices (`png`, `bmp`, `jpeg`, `tiff`, `svg`, `cairo_pdf`) do not create files.
   - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
     Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
     asymptotic test, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's error message for `hashfile(NA)`, the `parallel`
@@ -2161,8 +2170,7 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **One oracle case differs in the last digits**: `stats__lbfgsb`. ry's
   `optim(method = "L-BFGS-B")` converges to the same optimum along a slightly different path, so
   values agree to about seven digits only.
-- **Source references lack parse data and differ in console srcfiles.** `parse(keep.source = TRUE)`
-  stores no `parseData` in the srcfile, so `getParseData` returns `NULL`. In a script or console
+- **Source references differ in console srcfiles.** In a script or console
   with `keep.source` on, each top-level expression gets its own srcfile whose `lines` are that
   expression's lines (with `fixedNewlines`), while GNU R shares one buffer srcfile, so `lines` and
   the column of a second expression after `;` differ. `.Internal(.traceback(x))`, the helper
@@ -2211,13 +2219,26 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   package shows the cost, cap the scope or switch it off inside `R_ToplevelExec`.
 - **Platforms.** The C symbol export relies on lld merging two version scripts, and `dlopen` is the
   only loader, so macOS and Windows need their own paths.
-- **Graphics output gaps** (`decisions.md`, "Devices record pages of shapes and render them when
-  they close"). `pdf`, `svg`, `png`, `bmp` and `tiff` draw; `jpeg` writes nothing and
-  `postscript`, `xfig`, `pictex` and `cairo_ps` leave an empty file. Also missing: a display list
-  (`dev.copy`, `recordPlot`, replay on resize), GNU R's `R_pretty` warnings on subnormal axis
-  ranges (the only difference left in reg-plot), cairo font metrics for bitmap devices, plotmath
-  layout (an expression is drawn and measured as its deparsed text), `stem()` beyond the empty
-  case, and contour label placement, which picks slightly different positions than GNU R.
+- **Graphics gaps** (`decisions.md`, "One graphics engine for base graphics, grid and device
+  packages"). Base graphics, grid, lattice and ragg match GNU R pixel for pixel on the `grid__*`
+  oracle cases; what is left:
+  - The built-in devices have no patterns, gradients, clipping paths, masks or groups (device
+    version 0), so grid's `clippaths`, `patterns`, `compositing`, `groups` and `paths` tests differ
+    from GNU R's pdf output, and compound paths fill their holes.
+  - Built-in devices ignore raster interpolation, and PostScript paints semi-transparent colours
+    opaque (its prolog ignores the PDF `gs` opacity), where GNU R leaves them out with a warning.
+  - Metrics are Helvetica's AFM tables on every built-in device; GNU R's bitmap devices measure
+    with cairo's font, so `strwidth` on `png()` differs slightly.
+  - plotmath is approximated (an expression is measured and drawn as its deparsed text), Hershey
+    fonts fall back to ordinary text, and the Adobe symbol conversions pass text through.
+  - A closed X-spline's first segment is sampled more coarsely than GNU R's (same curve, two fewer
+    points); open splines match GNU R value for value.
+  - `savedSnapshot` is never kept, `NewFrameConfirm` never prompts, graphics events
+    (`getGraphicsEvent`) are unsupported, and `Rf_eval_with_gd` is a plain eval.
+  - Bitmap pages are written when the device closes rather than per page.
+  - Contour label placement picks slightly different positions than GNU R, GNU R's `R_pretty`
+    warnings on subnormal axis ranges are missing, and `stem()` only handles the empty case.
+  - Matrix is not in the corpus library; its image methods match GNU R pixel for pixel with the archived Matrix 1.6-5 (the current release needs R 4.4).
 - **GNU R's regression tests under ry** (`tests/*.R` of the R 4.3.3 sources: 47 of 66 end with
   GNU R's exit status, 23 print exactly its output). First failures: qbeta precision
   (p-qbeta-strict-tst), `ff %in% known` (primitives), `identical()` on S4 objects (reg-S4), an
@@ -2849,7 +2870,7 @@ typing on:
 | data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
 | biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The struct-of-arrays HIR lowered from the green tree (`decisions.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (rowan's node cache and the event-to-tree build), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions.md`, "HIR as struct-of-arrays") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions.md`, "every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 

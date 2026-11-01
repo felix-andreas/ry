@@ -80,6 +80,8 @@ pub struct Heap {
     /// removed, an enclosure replaced), so a cached lookup that resolved through those
     /// environments knows it is still valid when the epoch is unchanged.
     binding_epoch: u64,
+    /// Set while a major collection marks, which is when bytecode inline caches are emptied.
+    major_marking: bool,
     /// Bumped whenever an enclosure is replaced. A symbol's lookup stamp adds it to the symbol's
     /// own epoch, so a cache keyed by symbol sees both kinds of change.
     enclosure_epoch: u64,
@@ -326,6 +328,7 @@ impl Heap {
             ready_to_finalize: Vec::new(),
             mark_stack: Vec::new(),
             binding_epoch: 0,
+            major_marking: false,
             enclosure_epoch: 0,
             strings: StringTable::default(),
             symbols: FxHashMap::default(),
@@ -842,6 +845,11 @@ impl Heap {
     }
 
     pub unsafe fn set_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
+        if vector.is_altrep()
+            && let Some(elements) = crate::object::altrep_elements()
+        {
+            return (elements.write)(vector, index, value);
+        }
         self.store(vector, vector.element(index), value);
         vector.set_element_unbarriered(index, value);
     }
@@ -1018,12 +1026,25 @@ impl Heap {
             }
             self.store(symbol, cell, self.known.nil);
             symbol.set_cdr_unbarriered(self.known.nil);
+            self.clear_removed_cell(cell);
             return Ok(true);
         }
         if env == self.known.empty_env {
             return Ok(false);
         }
-        Ok((*env.frame_ptr()).remove(symbol).is_some())
+        let Some(cell) = (*env.frame_ptr()).remove(symbol) else {
+            return Ok(false);
+        };
+        self.clear_removed_cell(cell);
+        Ok(true)
+    }
+
+    /// An inline cache can still hold a removed cell until the code next runs, and the value
+    /// must not stay reachable through it: `rm(x); gc()` has to let a finalizer on `x` run.
+    unsafe fn clear_removed_cell(&mut self, cell: Sexp) {
+        let unbound = self.known.unbound;
+        self.store(cell, cell.cdr(), unbound);
+        cell.set_cdr_unbarriered(unbound);
     }
 
     /// A stamp for lookups of `symbol` through environments other than function frames: it
@@ -1310,6 +1331,7 @@ impl Heap {
             return;
         }
         self.inhibit += 1;
+        self.major_marking = kind == Collection::Major;
         if kind == Collection::Major {
             self.clear_marks();
         } else if self.policy.verify {
@@ -1353,6 +1375,7 @@ impl Heap {
         }
         self.drain();
         self.process_weak_refs();
+        self.major_marking = false;
         // Before the sweep, while a mark still means "survives".
         let space = &self.space;
         self.escaped.retain(|&object| space.is_marked(object));
@@ -1468,7 +1491,22 @@ impl Heap {
             Shape::Triple => {
                 self.mark(object.car());
                 self.mark(object.cdr());
-                self.mark(object.tag());
+                let tag = object.tag();
+                // A bytecode object's tag holds its inline caches: the environment each lookup
+                // started from and the binding cell it found. They are only a speed-up, but
+                // traced they would keep an environment alive for as long as the code lives,
+                // such as an R6 object whose methods a clone shares. A major collection empties
+                // them instead, and the next lookup refills them.
+                if self.major_marking
+                    && object.kind() == SexpType::Bytecode
+                    && tag.kind() == SexpType::List
+                {
+                    for index in 0..tag.length() as usize {
+                        tag.element(index).decrement_refcount();
+                        tag.set_element_unbarriered(index, self.known.nil);
+                    }
+                }
+                self.mark(tag);
             }
             Shape::Environment => {
                 self.mark(object.enclosure());
@@ -1495,6 +1533,35 @@ impl Heap {
     /// Ephemeron semantics: a weak reference's value and finalizer are reachable only while its
     /// key is, so the values are marked to a fixpoint before any key is declared dead.
     unsafe fn process_weak_refs(&mut self) {
+        self.mark_live_weak_values();
+        let mut dying = Vec::new();
+        let mut index = 0;
+        while index < self.weak_refs.len() {
+            let weak = self.weak_refs[index];
+            if self.space.is_marked(weak.weak_key()) {
+                index += 1;
+            } else {
+                dying.push(self.weak_refs.swap_remove(index));
+            }
+        }
+        for weak in dying {
+            let has_finalizer =
+                weak.weak_c_finalizer() != 0 || weak.weak_finalizer() != self.known.nil;
+            if has_finalizer {
+                self.mark(weak.weak_key());
+                self.mark(weak.weak_value());
+                self.mark(weak.weak_finalizer());
+                self.ready_to_finalize.push(weak);
+            } else {
+                self.clear_weak_ref(weak);
+            }
+        }
+        // Every reference still registered has a key the first fixpoint marked, so marking what
+        // the dying finalizers reach cannot revive another value: it only keeps those objects.
+        self.drain();
+    }
+
+    unsafe fn mark_live_weak_values(&mut self) {
         loop {
             let mut changed = false;
             for index in 0..self.weak_refs.len() {
@@ -1512,26 +1579,6 @@ impl Heap {
                 break;
             }
             self.drain();
-        }
-        let mut index = 0;
-        while index < self.weak_refs.len() {
-            let weak = self.weak_refs[index];
-            if self.space.is_marked(weak.weak_key()) {
-                index += 1;
-                continue;
-            }
-            self.weak_refs.swap_remove(index);
-            let has_finalizer =
-                weak.weak_c_finalizer() != 0 || weak.weak_finalizer() != self.known.nil;
-            if has_finalizer {
-                self.mark(weak.weak_key());
-                self.mark(weak.weak_value());
-                self.mark(weak.weak_finalizer());
-                self.drain();
-                self.ready_to_finalize.push(weak);
-            } else {
-                self.clear_weak_ref(weak);
-            }
         }
     }
 

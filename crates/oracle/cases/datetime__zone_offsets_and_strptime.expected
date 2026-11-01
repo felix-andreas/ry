@@ -58,11 +58,21 @@
 | [1] "use of %Z for input is not supported"
 | [1] NA
 | [1] "2020-01-01 05:00:00 UTC"
+| [1] "2024-01-15 UTC" NA              
+| [1] NA               "2024-01-02 UTC"
+| [1] "2024-03-11 UTC"
+| [1] "2024-03-04 UTC" "2024-03-03 UTC"
+| [1] 0
+| [1] 5
+| [1] NA
+| warning: values for %z outside +/-1400 are an error 
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] "use of %Z for input is not supported"
 [messages]
 [warnings]
 [errors]
 [value]
-list
-| structure(list(sec = 0, min = 0L, hour = 5L, mday = 1L, mon = 0L, 
-|     year = 120L, wday = 3L, yday = 0L, isdst = 0L, zone = "UTC", 
-|     gmtoff = 0L), class = c("POSIXlt", "POSIXt"), tzone = "UTC", balanced = TRUE)
+character
+| "use of %Z for input is not supported"

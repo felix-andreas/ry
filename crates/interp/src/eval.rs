@@ -470,7 +470,10 @@ unsafe fn call_builtin_reusing(
     {
         Err(refused)
     } else {
-        scope(|| function(&context))
+        // An ALTREP method's error, parked by the element accessor the builtin went through,
+        // is raised before the builtin's value goes anywhere, so `tryCatch` around the call
+        // sees it and no code acts on the placeholder the read returned.
+        scope(|| function(&context)).and_then(|value| crate::unwind::raise_parked().map(|()| value))
     };
     // A jump out of the builtin (`return(invisible(x))`) keeps the visibility of the value it
     // carries.
@@ -1560,9 +1563,10 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
     // The first srcref is the brace's own; each statement runs with its srcref current, which
     // the calls it makes record for `sys.call` and `traceback`.
     let saved = interp().srcref;
-    // Only the last value stays rooted, so an object a statement drops can be collected (and
-    // finalized) by a `gc()` later in the same block.
+    // Nothing a statement made stays rooted while the next one runs, not even its value, so an
+    // object it drops can be collected (and finalized) by a `gc()` later in the same block.
     let mark = crate::heap().handle_mark();
+    let last = call.args.len().saturating_sub(1);
     for (index, arg) in call.args.iter().enumerate() {
         if srcrefs != nil() {
             interp().srcref = statement_srcref(srcrefs, index + 1);
@@ -1572,7 +1576,9 @@ unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
         crate::heap().release_handles(mark);
         match result {
             Ok(next) => {
-                crate::heap().root(next);
+                if index == last {
+                    crate::heap().root(next);
+                }
                 value = next;
             }
             Err(unwind) => {
@@ -2233,20 +2239,7 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     });
     let depth = state.frames.len();
     let result = scope(|| match expression.kind() {
-        SexpType::Expression => {
-            let srcrefs = values::get_attr(expression, symbols().srcref);
-            let saved = interp().srcref;
-            let mut value = nil();
-            for index in 0..length(expression) {
-                if srcrefs != nil() {
-                    interp().srcref = statement_srcref(srcrefs, index);
-                }
-                let result = eval(expression.element(index), env);
-                interp().srcref = saved;
-                value = result?;
-            }
-            Ok(value)
-        }
+        SexpType::Expression => eval_all(expression, env),
         SexpType::Promise => force_promise(expression),
         _ => eval(expression, env),
     });
@@ -2869,11 +2862,36 @@ unsafe fn replacement_function(getter: Sexp, whole: Sexp) -> R<Sexp> {
     }
 }
 
-/// Evaluates every top-level expression of `expressions` in `env`, returning the last value.
+/// Evaluates each element of an expression vector in turn, with its srcref current, and
+/// returns the last value.
 pub unsafe fn eval_all(expressions: Sexp, env: Sexp) -> R<Sexp> {
+    let srcrefs = values::get_attr(expressions, symbols().srcref);
+    let saved = interp().srcref;
+    // As in `{`, nothing an element made stays rooted while the next one runs, so an object
+    // it drops can be finalized by a `gc()` in a later element (testthat evaluates a whole
+    // test file this way).
+    let mark = crate::heap().handle_mark();
+    let count = length(expressions);
     let mut value = nil();
-    for index in 0..length(expressions) {
-        value = eval(expressions.element(index), env)?;
+    for index in 0..count {
+        if srcrefs != nil() {
+            interp().srcref = statement_srcref(srcrefs, index);
+        }
+        let result = eval(expressions.element(index), env);
+        interp().srcref = saved;
+        crate::heap().release_handles(mark);
+        match result {
+            Ok(next) => {
+                if index + 1 == count {
+                    crate::heap().root(next);
+                }
+                value = next;
+            }
+            Err(unwind) => {
+                unwind.root();
+                return Err(unwind);
+            }
+        }
     }
     Ok(value)
 }

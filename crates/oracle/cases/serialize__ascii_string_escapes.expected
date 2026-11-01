@@ -1,0 +1,11 @@
+[stdout]
+| [1] TRUE
+| NULL
+| [1] TRUE
+| [1] "<?xml version=\"1.0\"?>\n<a>\t\\b</a>"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "<?xml version=\"1.0\"?>\n<a>\t\\b</a>"
