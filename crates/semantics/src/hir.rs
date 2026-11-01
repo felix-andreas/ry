@@ -75,6 +75,12 @@ impl Symbol {
         symbol
     }
 
+    /// The symbol's position in the table: stable for the process, but it depends on the
+    /// order in which threads first met each spelling.
+    pub fn index(self) -> u32 {
+        self.0.get()
+    }
+
     pub fn as_str(self) -> &'static str {
         SYMBOL_TEXT
             .get(self.0.get() as usize - 1)

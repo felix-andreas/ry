@@ -2104,13 +2104,13 @@ impl CompensatedSum {
     /// dependency chain a single accumulator has and keeps the compensation per lane.
     pub fn add_all(&mut self, values: &[f64]) {
         let mut lanes: [CompensatedSum; 4] = Default::default();
-        let mut chunks = values.chunks_exact(4);
-        for chunk in &mut chunks {
+        let (chunks, rest) = values.as_chunks::<4>();
+        for chunk in chunks {
             for (lane, &value) in lanes.iter_mut().zip(chunk) {
                 lane.add(value);
             }
         }
-        for &value in chunks.remainder() {
+        for &value in rest {
             self.add(value);
         }
         for lane in lanes {
@@ -2472,7 +2472,7 @@ unsafe fn do_mean(call: &Call<'_>) -> R<Sexp> {
             let mut correction = CompensatedSum::default();
             for chunk in data.chunks(128) {
                 let mut deviations = [0.0; 256];
-                for (pair, &value) in deviations.chunks_exact_mut(2).zip(chunk) {
+                for (pair, &value) in deviations.as_chunks_mut::<2>().0.iter_mut().zip(chunk) {
                     // Knuth's two-sum of `value` and `-mean`.
                     let deviation = value - mean;
                     let negated_part = deviation - value;
