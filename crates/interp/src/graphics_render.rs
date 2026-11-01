@@ -590,6 +590,57 @@ fn pdf_string(text: &str) -> String {
     out
 }
 
+// PostScript.
+
+/// Procedures named after the PDF content operators that `pdf_content` writes, so that a page's
+/// PDF content stream is also a PostScript program. PDF keeps separate stroke and fill colours
+/// where PostScript has one current colour, so `RG` and `rg` store theirs and each painting
+/// operator sets the one it needs. Opacity has no PostScript equivalent, so `gs` drops it, as
+/// GNU R's `postscript` device does.
+const POSTSCRIPT_PROLOG: &str = "\
+/FillColor [0 0 0] def /StrokeColor [0 0 0] def
+/rg { 3 array astore /FillColor exch def } bind def
+/RG { 3 array astore /StrokeColor exch def } bind def
+/m { moveto } bind def /l { lineto } bind def /c { curveto } bind def /h { closepath } bind def
+/re { 4 2 roll moveto 1 index 0 rlineto 0 exch rlineto neg 0 rlineto closepath } bind def
+/f { FillColor aload pop setrgbcolor fill } bind def
+/S { StrokeColor aload pop setrgbcolor stroke } bind def
+/B { gsave f grestore S } bind def
+/q { gsave } bind def /Q { grestore } bind def /W { clip } bind def /n { newpath } bind def
+/w { setlinewidth } bind def /J { setlinecap } bind def /j { setlinejoin } bind def
+/M { setmiterlimit } bind def /d { setdash } bind def /gs { pop } bind def
+/BT { gsave } bind def /ET { grestore } bind def
+/Tf { exch findfont exch scalefont setfont } bind def
+/Tm { 6 array astore concat 0 0 moveto } bind def
+/Tj { FillColor aload pop setrgbcolor show } bind def
+/reencode { findfont dup length dict begin { 1 index /FID ne { def } { pop pop } ifelse } forall
+  /Encoding ISOLatin1Encoding def currentdict end definefont pop } bind def
+/F1 /Helvetica reencode /F2 /Helvetica-Bold reencode /F3 /Helvetica-Oblique reencode
+/F4 /Helvetica-BoldOblique reencode /F5 /Symbol findfont definefont pop
+";
+
+/// A PostScript document of `pages`, each `size` inches. Text uses the standard Helvetica
+/// fonts in the ISO Latin-1 encoding, which matches the escapes `pdf_string` writes for it.
+fn postscript_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
+    let [width, height] = size.map(|inches| (inches * POINTS_PER_INCH).round() as i64);
+    let mut out = format!(
+        "%!PS-Adobe-3.0\n%%DocumentNeededResources: font Helvetica Helvetica-Bold \
+         Helvetica-Oblique Helvetica-BoldOblique Symbol\n%%Title: {}\n%%Creator: R (ry)\n\
+         %%Pages: {}\n%%BoundingBox: 0 0 {width} {height}\n%%EndComments\n\
+         %%BeginProlog\n{POSTSCRIPT_PROLOG}%%EndProlog\n",
+        title.replace(['\n', '\r'], " "),
+        pages.len()
+    );
+    let mut opacities = BTreeMap::new();
+    for (index, page) in pages.iter().enumerate() {
+        out.push_str(&format!("%%Page: {0} {0}\n", index + 1));
+        out.push_str(&pdf_content(page, &mut opacities));
+        out.push_str("showpage\n");
+    }
+    out.push_str("%%EOF\n");
+    out.into_bytes()
+}
+
 // SVG.
 
 /// An SVG document of one page, in points with y growing downwards.
@@ -1160,173 +1211,6 @@ fn jpeg(pixmap: &tiny_skia::Pixmap, resolution: f64, quality: u8) -> std::io::Re
         .encode(&image, width, height, jpeg_encoder::ColorType::Rgb)
         .map_err(|failure| std::io::Error::other(failure.to_string()))?;
     Ok(out)
-}
-
-// PostScript.
-
-/// A PostScript document of `pages`, each `size` inches, in points with y growing upwards as
-/// in PDF. PostScript has no transparency, so anything not fully opaque is left out, as GNU R's
-/// `postscript` device does.
-fn postscript_document(pages: &[Page], size: [f64; 2], title: &str) -> Vec<u8> {
-    let [width, height] = size.map(|inches| inches * POINTS_PER_INCH);
-    let mut out = String::new();
-    out.push_str("%!PS-Adobe-3.0\n");
-    out.push_str(&format!(
-        "%%BoundingBox: 0 0 {} {}\n",
-        width.ceil(),
-        height.ceil()
-    ));
-    out.push_str(&format!("%%Title: {}\n", title.replace(['\n', '\r'], " ")));
-    out.push_str("%%Creator: R\n%%Producer: ry\n");
-    out.push_str(&format!("%%Pages: {}\n%%EndComments\n", pages.len()));
-    out.push_str("%%BeginProlog\n");
-    for (index, name) in PDF_FONTS.iter().enumerate() {
-        if index < 4 {
-            out.push_str(&format!(
-                "/{name} findfont dup length dict begin {{1 index /FID ne {{def}} {{pop pop}} \
-                 ifelse}} forall /Encoding ISOLatin1Encoding def currentdict end \
-                 /F{} exch definefont pop\n",
-                index + 1
-            ));
-        } else {
-            out.push_str(&format!(
-                "/F{} /{name} findfont definefont pop\n",
-                index + 1
-            ));
-        }
-    }
-    out.push_str("%%EndProlog\n");
-    for (index, page) in pages.iter().enumerate() {
-        out.push_str(&format!("%%Page: {0} {0}\n", index + 1));
-        postscript_page(&mut out, page);
-        out.push_str("showpage\n");
-    }
-    out.push_str("%%EOF\n");
-    out.into_bytes()
-}
-
-fn postscript_page(out: &mut String, page: &Page) {
-    let pt = |value: f64| value * POINTS_PER_INCH;
-    let opaque = |colour: Colour| alpha(colour) == 255;
-    let rgb = |colour: Colour| {
-        let [red, green, blue, _] = channels(colour);
-        format!("{} setrgbcolor", pdf_rgb(red, green, blue))
-    };
-    if opaque(page.background) {
-        out.push_str(&format!(
-            "{} 0 0 10000 10000 rectfill\n",
-            rgb(page.background)
-        ));
-    }
-    let mut current_clip: Option<Rect> = None;
-    for item in &page.items {
-        if current_clip != Some(item.clip) {
-            if current_clip.is_some() {
-                out.push_str("grestore\n");
-            }
-            let clip = item.clip;
-            out.push_str(&format!(
-                "gsave {:.2} {:.2} {:.2} {:.2} rectclip\n",
-                pt(clip.x0),
-                pt(clip.y0),
-                pt(clip.x1 - clip.x0),
-                pt(clip.y1 - clip.y0)
-            ));
-            current_clip = Some(clip);
-        }
-        let paint = |out: &mut String, fill: Option<Colour>, stroke: Option<&Stroke>| {
-            if let Some(fill) = fill {
-                out.push_str(&format!("gsave {} fill grestore\n", rgb(fill)));
-            }
-            if let Some(stroke) = stroke {
-                let dash: Vec<String> = dashes(stroke)
-                    .iter()
-                    .map(|length| format!("{:.2}", length * POINTS_PER_INCH))
-                    .collect();
-                out.push_str(&format!(
-                    "{} {:.2} setlinewidth {} setlinecap {} setlinejoin {:.2} setmiterlimit \
-                     [{}] 0 setdash stroke\n",
-                    rgb(stroke.colour),
-                    stroke.lwd * 0.75,
-                    pdf_cap(stroke.lend),
-                    pdf_join(stroke.ljoin),
-                    stroke.lmitre.max(1.0),
-                    dash.join(" ")
-                ));
-            } else {
-                out.push_str("newpath\n");
-            }
-        };
-        match &item.shape {
-            Shape::Path {
-                points,
-                closed,
-                fill,
-                stroke,
-            } => {
-                let fill = (*closed && opaque(*fill)).then_some(*fill);
-                let stroke = visible(stroke).filter(|stroke| opaque(stroke.colour));
-                if (fill.is_none() && stroke.is_none()) || points.is_empty() {
-                    continue;
-                }
-                out.push_str("newpath\n");
-                for (index, [x, y]) in points.iter().enumerate() {
-                    let operator = if index == 0 { "moveto" } else { "lineto" };
-                    out.push_str(&format!("{:.2} {:.2} {operator}\n", pt(*x), pt(*y)));
-                }
-                if *closed {
-                    out.push_str("closepath\n");
-                }
-                paint(out, fill, stroke);
-            }
-            Shape::Circle {
-                centre,
-                radius,
-                fill,
-                stroke,
-            } => {
-                let fill = opaque(*fill).then_some(*fill);
-                let stroke = visible(stroke).filter(|stroke| opaque(stroke.colour));
-                if fill.is_none() && stroke.is_none() {
-                    continue;
-                }
-                out.push_str(&format!(
-                    "newpath {:.2} {:.2} {:.2} 0 360 arc closepath\n",
-                    pt(centre[0]),
-                    pt(centre[1]),
-                    pt(*radius)
-                ));
-                paint(out, fill, stroke);
-            }
-            Shape::Text {
-                origin,
-                text,
-                points,
-                font,
-                rotation,
-                hadj,
-                colour,
-            } => {
-                if !opaque(*colour) || text.is_empty() {
-                    continue;
-                }
-                let face = if (1..=5).contains(font) { *font } else { 1 };
-                let width = text_width_ems(text, face) * points;
-                out.push_str(&format!(
-                    "gsave {} /F{face} findfont {points:.2} scalefont setfont {:.2} {:.2} \
-                     translate {rotation:.2} rotate {:.2} 0 moveto ({}) show grestore\n",
-                    rgb(*colour),
-                    pt(origin[0]),
-                    pt(origin[1]),
-                    -hadj * width,
-                    pdf_string(text)
-                ));
-            }
-        }
-    }
-    if current_clip.is_some() {
-        out.push_str("grestore\n");
-    }
 }
 
 // The built-in devices.
