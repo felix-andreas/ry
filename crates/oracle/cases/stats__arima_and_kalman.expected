@@ -1,0 +1,105 @@
+[stdout]
+| 
+| Call:
+| arima(x = lh, order = c(1, 0, 0))
+| 
+| Coefficients:
+|          ar1  intercept
+|       0.5739     2.4133
+| s.e.  0.1161     0.1466
+| 
+| sigma^2 estimated as 0.1975:  log likelihood = -29.38,  aic = 64.76
+| 
+| Call:
+| arima(x = lh, order = c(3, 0, 0))
+| 
+| Coefficients:
+|          ar1      ar2      ar3  intercept
+|       0.6448  -0.0634  -0.2198     2.3931
+| s.e.  0.1394   0.1668   0.1421     0.0963
+| 
+| sigma^2 estimated as 0.1787:  log likelihood = -27.09,  aic = 64.18
+| 
+| Call:
+| arima(x = lh, order = c(1, 0, 1))
+| 
+| Coefficients:
+|          ar1     ma1  intercept
+|       0.4522  0.1982     2.4101
+| s.e.  0.1769  0.1705     0.1358
+| 
+| sigma^2 estimated as 0.1923:  log likelihood = -28.76,  aic = 65.52
+| 
+| Call:
+| arima(x = lh, order = c(3, 0, 0), method = "CSS")
+| 
+| Coefficients:
+|          ar1      ar2      ar3  intercept
+|       0.6578  -0.0658  -0.2348     2.3918
+| s.e.  0.1414   0.1702   0.1473     0.0983
+| 
+| sigma^2 estimated as 0.1905:  part log likelihood = -28.31
+| 
+| Call:
+| arima(x = USAccDeaths, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 1)))
+| 
+| Coefficients:
+|           ma1     sma1
+|       -0.4303  -0.5528
+| s.e.   0.1228   0.1784
+| 
+| sigma^2 estimated as 99347:  log likelihood = -425.44,  aic = 856.88
+| $pred
+|           Jan      Feb      Mar      Apr      May      Jun
+| 1979 8336.061 7531.829 8314.644 8616.869 9488.913 9859.757
+| 
+| $se
+|           Jan      Feb      Mar      Apr      May      Jun
+| 1979 315.4481 363.0056 405.0168 443.0623 478.0897 510.7204
+| 
+| 
+| Call:
+| arima(x = LakeHuron, order = c(2, 0, 0), xreg = time(LakeHuron) - 1920)
+| 
+| Coefficients:
+|          ar1      ar2  intercept  time(LakeHuron) - 1920
+|       1.0048  -0.2913   579.0993                 -0.0216
+| s.e.  0.0976   0.1004     0.2370                  0.0081
+| 
+| sigma^2 estimated as 0.4566:  log likelihood = -101.2,  aic = 212.4
+| 
+| 	Box-Ljung test
+| 
+| data:  residuals(fit)
+| X-squared = 2.9352, df = 6, p-value = 0.8169
+| 
+|                   [,1]              [,2]
+| [1,] 1.882352941176471 0.176470588235294
+| [2,] 0.176470588235294 0.235294117647059
+| $Lik
+| [1] 5.010965
+| 
+| $s2
+| [1] 1.092961
+| 
+| 
+| Call:
+| StructTS(x = log10(UKgas), type = "BSM")
+| 
+| Variances:
+|     level      slope       seas    epsilon  
+| 0.000e+00  1.733e-05  7.137e-04  3.678e-04  
+| [1] 1111.669 1110.858 1105.266 1113.516 1112.378
+|           0           1           2           3           4           5 
+| 1.000000000 0.875000000 0.625000000 0.406250000 0.250000000 0.148437500 
+|           6           7           8           9          10 
+| 0.085937500 0.048828125 0.027343750 0.015136719 0.008300781 
+| [1] 2+0i 3+0i
+| [1] 0+1i 0-1i
+| [1] 1.596420 1.596420 3.923791
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(1.59641959706178, 1.59641959706179, 3.92379129383117)

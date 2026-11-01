@@ -1,0 +1,16 @@
+# Graphical parameters on a pdf device: queries, settings, the margins GNU R derives, layout
+# scaling, read-only and unknown parameters, the display list, and an empty recorded plot.
+pdf(NULL)
+dev.control(displaylist = "enable")
+print(grDevices:::dev.displaylist())
+p <- recordPlot(); print(class(p)); print(is.null(p[[1]])); print(attr(p, "engineVersion"))
+print(par("page")); print(par("mar", "cex"))
+old <- par(mar = c(1, 1, 1, 1), mfrow = c(2, 2)); print(old)
+print(par("mai")); print(par("mfcol")); print(storage.mode(par("mfrow")))
+print(length(par())); print(length(par(no.readonly = TRUE)))
+r <- withCallingHandlers(par(foo = 1, din = 3), warning = function(w) { print(conditionMessage(w)); invokeRestart("muffleWarning") }); print(r)
+print(dev.size())
+dev.off()
+pdf(NULL, width = 4, height = 5); print(par("din")); print(dev.size()); dev.off()
+print(dev.cur())
+pdf(NULL); par(mfrow=c(2,2)); print(par("cex","csi","mai","omi","mex")); par(mfrow=c(3,1)); print(par("cex")); par(mfrow=c(1,2)); print(par("cex")); par(cex=2); print(par("mai","csi")); par(mex=2); print(par("mai")); par(mai=c(1,1,1,1)); print(par("mar")); par(oma=c(1,1,1,1)); print(par("omi")); dev.off()

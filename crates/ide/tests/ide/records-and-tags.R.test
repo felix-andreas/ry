@@ -60,7 +60,7 @@ definition 87..92
 references: 87..92*, 97..102
 rename: 2 edit(s)
 signature: none
-completion (48): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
+completion (50): value, validEnc, validObject, validSlotNames, validUTF8, .valid.factor, .valueClassTest, eval
 
 #---- completion_after_dollar_offers_record_fields
 f <- function() {

@@ -1283,11 +1283,11 @@ unsafe fn do_write_table(call: &NativeCall<'_>) -> R<Sexp> {
         }
         output.push_str(&eol);
         if output.len() > 1 << 16 {
-            crate::connections::write_bytes(file, output.as_bytes())?;
+            crate::connections::print(file, output.as_bytes())?;
             output.clear();
         }
     }
-    crate::connections::write_bytes(file, output.as_bytes())?;
+    crate::connections::print(file, output.as_bytes())?;
     Ok(nil())
 }
 

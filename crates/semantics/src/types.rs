@@ -125,15 +125,20 @@ pub enum Constraint {
     Unconstrained,
     Numeric,
     AtomicElement,
+    /// A dictionary key or set element: a `logical`, `integer`, `double` or `character` scalar.
+    /// `complex` and `raw` are left out because they have no total order or hash that the
+    /// runtime's collections use.
+    Key,
     ScalarNumeric,
 }
 
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 3] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 4] = [
         ("numeric", Constraint::Numeric),
         ("atomic", Constraint::AtomicElement),
+        ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
     ];
 
@@ -157,7 +162,8 @@ impl Constraint {
             (Unconstrained, c) | (c, Unconstrained) => c,
             (a, b) if a == b => a,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
-            (Numeric, AtomicElement) | (AtomicElement, Numeric) => ScalarNumeric,
+            (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
+            (Key, AtomicElement) | (AtomicElement, Key) => Key,
             _ => unreachable!("all constraint pairs are covered"),
         }
     }
@@ -732,5 +738,7 @@ mod tests {
         assert_eq!(Numeric.join(AtomicElement), ScalarNumeric);
         assert_eq!(ScalarNumeric.join(Numeric), ScalarNumeric);
         assert_eq!(AtomicElement.join(AtomicElement), AtomicElement);
+        assert_eq!(Key.join(AtomicElement), Key);
+        assert_eq!(Key.join(Numeric), ScalarNumeric);
     }
 }

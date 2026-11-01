@@ -651,7 +651,7 @@ matrix(c(1, 2,
          3, 4), nrow=2) # fmt: skip
 ```
 
-For a whole region, use `# fmt: off` and re-enable formatting with `# fmt: on`. The region between the directives is preserved byte-exactly, keeping its original indentation, columns, and blank lines. The directives work at the top level as well as inside functions and `{ ... }` blocks; a region left open runs to the end of its enclosing block.
+For a whole region, use `# fmt: off` and re-enable formatting with `# fmt: on`. The region between the directives is preserved byte-exactly, keeping its original indentation, columns, and blank lines. A directive must start its own line: a comment trailing code, such as `y <- 1 # fmt: off`, is an ordinary comment. The directives work at the top level as well as inside functions and `{ ... }` blocks; a region left open runs to the end of its enclosing block.
 
 ```r
 f <- function() {

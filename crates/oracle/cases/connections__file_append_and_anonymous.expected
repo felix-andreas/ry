@@ -1,0 +1,15 @@
+[stdout]
+| [1] TRUE TRUE
+| [1] "one"   "two"   "three"
+| [1] FALSE
+| [1] "nothing to append to"
+| logical(0)
+| [1] "hello"
+| [1] "x" "y"
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE
