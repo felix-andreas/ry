@@ -1814,6 +1814,14 @@ fn annotation_completion(
         .iter()
         .map(|(name, definition)| (name.text(db).to_owned(), definition.body))
         .collect();
+    if let Some(library) = stubs(db) {
+        for (name, definition) in &library.type_definitions {
+            let label = name.text(db).to_owned();
+            if !definitions.iter().any(|(known, _)| *known == label) {
+                definitions.push((label, definition.body));
+            }
+        }
+    }
     for definition in file_type_definitions(db, file) {
         let label = definition.name.text(db).to_owned();
         if !definitions.iter().any(|(name, _)| *name == label) {

@@ -1262,6 +1262,11 @@ enum Variance {
 }
 
 fn parameter_variances<'db>(db: &'db dyn Db, definition: &NamedDefinition<'db>) -> Vec<Variance> {
+    // An opaque type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
+    // values apart, and a `Dict<character, double>` must not pass for a `Dict<integer, double>`.
+    if !definition.alias && matches!(definition.body.kind(db), TyKind::Unknown) {
+        return vec![Variance::Invariant; definition.parameters.len()];
+    }
     let mut occurrences = vec![(false, false); definition.parameters.len()];
     record_occurrences(
         db,
