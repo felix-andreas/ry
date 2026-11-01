@@ -53,6 +53,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     // No vector carries sortedness metadata, so the fast pass never applies and the caller
     // sorts; the answer is the same either way.
     internal("sorted_fpass", 3, |_| unsafe { values::scalar_bool(false) }),
+    // The libR host replaces this with a real wrapper for package code.
     internal("wrap_meta", 3, |call| Ok(call.arg(0))),
 ];
 

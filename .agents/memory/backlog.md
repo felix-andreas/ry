@@ -23,7 +23,7 @@ The quality bar is four things.
 
 `just bench-compare` gives the current numbers; `MEMORY.md` records them.
 
-- **parallel cannot fork or open sockets.** `mc_fork` and the other fork routines error, so `mclapply` and `registerDoParallel(cores = 2)` fail, and `makeCluster` needs `.Internal(serverSocket)` (`decisions.md`, "parallel's natives without fork").
+- **parallel cannot open sockets.** ry has no socket connections at all, so `makeCluster(type = "PSOCK")` stops at `.Internal(serverSocket)`; a PSOCK cluster also needs `socketAccept`, client `socketConnection`, `socketSelect` and `socketTimeout`, and `serialize`/`unserialize` over the connection. This blocks foreach's cluster tests (its 570 sequential tests pass). Forking works (`decisions.md`, "parallel's fork routines"), so `mclapply` and lgr's `future_lapply` run; libr's `R_isForkedChild` stays 0 in a forked child.
 - **Promises in replacement methods.** `substitute(value)` in a `[[<-` method, and the call in `$<-`'s warning, show `<promise>`, because the forced right-hand side is wrapped in a second promise.
 - **The call on replacement errors.** GNU R reports a `[<-`/`[[<-` message raised with `error()` or `warning()` against the whole assignment (`x[1:2] <- 1:3`) but one raised with `errorcall()` against the generated `` `[<-`(`*tmp*`, 3, 1, value = 1) `` call (out-of-bounds matrix subscripts). `apply_setter` in `crates/interp/src/eval.rs` picks one call per dispatch path, so the out-of-bounds case names the whole assignment; the builtin needs to choose per message. Related gaps: `x[[1:2]] <- 1` and `x[[NA]] <- 1` on an atomic vector, `x[[4]] <- NULL` and `x[1] <- sum` raise no error, and a nested replacement error deparses as `<promise>[["a"]]` instead of `` `*tmp*`[["a"]] ``.
 - **Byte strings.** Invalid UTF-8 bytes travel as private-use stand-ins (U+F780..U+F7FF), so a real character in that range prints as `\xNN`, and a `"bytes"`-encoded string is processed as `\xNN` text: `toupper()` and `nchar(type = "chars")` return values where GNU R raises its "translating strings with \"bytes\" encoding is not allowed" error. A byte-string representation in the heap would fix both (`decisions.md`, "Invalid UTF-8 bytes").
@@ -500,6 +500,7 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 
 `crates/jit` compiles hot bodies and loops (`decisions.md`, "the JIT tier"). In priority order:
 
+- **A cached global function binding goes stale under the JIT.** `oracle compare --engine ry-jit` fails `environments__hidden_function_bindings`: once a hot call site has cached the global `g`, a `g` later bound in the calling frame (by `assign` into `parent.frame()`, a default argument, `base::assign`, or the generic's frame before `UseMethod`) is not seen, and all four loops print "global" where GNU R prints "local". The bytecode interpreter (`--engine ry`) passes it.
 - **Compiled-to-compiled calls.** `fib` in `tools/bench/why` now runs about 1.2 times faster
   than GNU R: a hot body whose call results have not returned yet refuses to compile as cold and
   waits (`decisions.md`, "Cold refusals"), and a frame-safe direct call binds its arguments as plain
@@ -2196,9 +2197,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
   the user finishes it, where GNU R runs each expression as soon as it is complete.
 
 - **Corpus package tests: what still fails** (`oracle packages`, `.corpus/tests/summary.md`).
-  - cli's "message if there is a sink" test: `sink(con, type = "message")` does not divert
-    stderr to the connection, and writes to a file connection are not flushed before it closes.
-    Both belong to the move of connection builtins onto `libr::connections`.
   - `.Internal(inspect(x))` is missing.
   - `getParseData` ids are ry's own node numbers, where GNU R's are bison's internal ones, so code
     that hard-codes an id would differ (none in the corpus does).
@@ -2227,12 +2225,15 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
       `format`/`strptime` do not recycle the format.
     - The fancy-regex backtrack limit is unbounded, so a catastrophic pattern hangs where PCRE
       reports an error; quantified lookarounds and lookarounds in non-capturing groups.
-    - `iconv(sub = , "ASCII//TRANSLIT")`, and `sink(file(f, "w"))` not flushing until close.
-  - Smaller classes: ALTREP in checkmate, shiny's `end_reporter`, `gsub` with a
-    Unicode-escape pattern in selectr, integer `POSIXct` in timechange, `Inf` in Bessel's
-    asymptotic test, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's error message for `hashfile(NA)`, the `parallel`
-    package's DLL for doParallel, MASS and vctrs matrix `dimnames` length, an empty `switch`
-    alternative in mvtnorm, and `NextMethod` in xts.
+    - `iconv(sub = , "ASCII//TRANSLIT")`.
+  - Smaller classes: shiny's `end_reporter`, `gsub` with a Unicode-escape pattern and
+    `ignore.case` with a `(?:` group in selectr, Bessel's `IJKY.R` (a relative difference of
+    0.036 between `besselI` results), data.table's `S4.Rraw` test 2, an F value in nlme's
+    `anova`, gmp's `factorialZ` and `asNumeric` precision, the C symbols of commonmark, git2r's
+    error message for `hashfile(NA)`, openssl's bignum "not valid integer", jose's `grepRaw`,
+    Rdpack's bibliography, and a long-path error in rprojroot.
+  - glue runs 271 tests on ry against GNU R's 265: ry runs a test GNU R skips, so its failure
+    may not be a real one.
   - No graphics devices: Matrix's `Simple.R`, gtable, and every vignette that plots (rcmdcheck's
     `R CMD build` of its `bad3` fixture) stop at "graphics devices are not supported by ry yet".
   - GNU R's binaries of device packages check `R_GE_version` 16 and ry provides 17, so svglite
@@ -2289,8 +2290,6 @@ What steps 2 to 4 of `contributing/design/r-runtime.md` left for later, most pre
 - **Deparse differences left by `tests/eval-etc.R`:** line breaking of `if`/`else` inside function
   bodies, `example()` echo without `keep.source` (GNU R shows the original text and comments), and
   the "deparse may be incomplete" warning.
-- **The interpreter keeps its own RNG beside libr's.** Both sync through `.Random.seed`, and
-  libr's built-in evaluator is unused while the interpreter is installed.
 - **R-level finalizers** run through the interpreter; a finalized weak reference stays in the
   weak list with a `NULL` key.
 - **Accessor speed.** Every accessor is an out-of-line call through `enter`, with a handle-stack

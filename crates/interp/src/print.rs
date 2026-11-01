@@ -417,6 +417,7 @@ unsafe fn print_named_vector(items: &[String], names: Sexp, complex: bool, optio
 unsafe fn matrix_columns(
     matrix: Sexp,
     rows: usize,
+    shown: usize,
     cols: usize,
     options: &PrintOptions,
 ) -> R<Vec<Vec<String>>> {
@@ -427,13 +428,13 @@ unsafe fn matrix_columns(
     };
     let mut columns = Vec::with_capacity(cols);
     for col in 0..cols {
+        // The whole column sets the common width and digits, as in GNU R, even when
+        // `max.print` hides some of its rows.
         let indices: Vec<usize> = (0..rows).map(|row| row + col * rows).collect();
         let column = crate::subset::select_elements(matrix, &indices)?;
-        columns.push(escape_unquoted(
-            format::format_vector(column, options.settings, options.quote, na)?,
-            matrix,
-            options,
-        ));
+        let mut items = format::format_vector(column, options.settings, options.quote, na)?;
+        items.truncate(shown);
+        columns.push(escape_unquoted(items, matrix, options));
     }
     Ok(columns)
 }
@@ -454,7 +455,32 @@ pub unsafe fn print_matrix(
     rows: usize,
     cols: usize,
     options: &PrintOptions,
-    _top: bool,
+    top: bool,
+) -> R<()> {
+    // GNU R prints whole rows only, as many as fit within `max` entries.
+    let shown = if top && cols > 0 && options.max / cols < rows {
+        options.max / cols
+    } else {
+        rows
+    };
+    print_matrix_rows(matrix, rows, cols, shown, options)?;
+    if shown < rows {
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted {} {} ]\n",
+            rows - shown,
+            if rows - shown == 1 { "row" } else { "rows" }
+        ));
+    }
+    Ok(())
+}
+
+/// Prints the first `shown` rows of a matrix. Row labels keep the width of all `rows`.
+unsafe fn print_matrix_rows(
+    matrix: Sexp,
+    rows: usize,
+    cols: usize,
+    shown: usize,
+    options: &PrintOptions,
 ) -> R<()> {
     if rows == 0 && cols == 0 {
         out("<0 x 0 matrix>\n");
@@ -531,7 +557,7 @@ pub unsafe fn print_matrix(
             }
         })
         .collect();
-    let columns = matrix_columns(matrix, rows, cols, options)?;
+    let columns = matrix_columns(matrix, rows, shown, cols, options)?;
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
     let col_labels: Vec<String> = (0..cols)
@@ -561,7 +587,7 @@ pub unsafe fn print_matrix(
         let mut text = String::new();
         text.push_str(&pad(&row_title, row_label_width, false));
         text.push('\n');
-        for label in &row_labels {
+        for label in &row_labels[..shown] {
             text.push_str(label);
             text.push('\n');
         }
@@ -589,7 +615,7 @@ pub unsafe fn print_matrix(
             text.push_str(&pad(&col_labels[col], widths[col], right));
         }
         text.push('\n');
-        for row in 0..rows {
+        for row in 0..shown {
             text.push_str(&row_labels[row]);
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
@@ -609,7 +635,24 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     let slice = rows * cols;
     let slices: usize = dims[2..].iter().product();
     let dimnames = get_attr(array, symbols().dimnames);
-    for index in 0..slices {
+    let dimnames_names = if dimnames.kind() == SexpType::List {
+        values::names(dimnames)
+    } else {
+        nil()
+    };
+    // GNU R prints whole slices up to `max` entries, then the whole rows of a last slice that fit.
+    let (shown_slices, last_rows) = if slice > 0 && cols > 0 && options.max < slice * slices {
+        let shown = options.max.div_ceil(slice);
+        let last_rows = (options.max - slice * (shown - 1)) / cols;
+        if last_rows == 0 {
+            (shown - 1, rows)
+        } else {
+            (shown, last_rows)
+        }
+    } else {
+        (slices, rows)
+    };
+    for index in 0..shown_slices {
         let mut label = String::from(", , ");
         let mut remainder = index;
         let mut parts = Vec::new();
@@ -622,11 +665,17 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
                 nil()
             };
             if names != nil() {
-                parts.push(
-                    values::string_at(names, position)
-                        .map(|text| text.into_owned())
-                        .unwrap_or_default(),
-                );
+                let name = values::string_at(names, position)
+                    .map(|text| text.into_owned())
+                    .unwrap_or_default();
+                // Named dimnames label each slice `dimension = name`, even when the dimension's
+                // own name is empty.
+                if dimnames_names == nil() {
+                    parts.push(name);
+                } else {
+                    let title = values::string_at(dimnames_names, dimension).unwrap_or_default();
+                    parts.push(format!("{title} = {name}"));
+                }
             } else {
                 parts.push((position + 1).to_string());
             }
@@ -639,10 +688,29 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         values::set_attr(matrix, symbols().dim, dim)?;
         if dimnames.kind() == SexpType::List {
             let sub = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
+            if dimnames_names != nil() {
+                let titles = values::string_vector(&[
+                    &values::string_at(dimnames_names, 0).unwrap_or_default(),
+                    &values::string_at(dimnames_names, 1).unwrap_or_default(),
+                ])?;
+                values::set_attr(sub, symbols().names, titles)?;
+            }
             values::set_attr(matrix, symbols().dimnames, sub)?;
         }
-        print_matrix(matrix, rows, cols, options, false)?;
+        let shown = if index + 1 == shown_slices { last_rows } else { rows };
+        print_matrix_rows(matrix, rows, cols, shown, options)?;
         out("\n");
+    }
+    if shown_slices < slices {
+        let omitted_rows = if last_rows < rows {
+            format!(" {} row(s) and", rows - last_rows)
+        } else {
+            String::new()
+        };
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted{omitted_rows} {} matrix slice(s) ]\n",
+            slices - shown_slices
+        ));
     }
     Ok(())
 }
@@ -693,7 +761,13 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
     }
     let names = values::names(list);
     let saved = tag.len();
-    for index in 0..count {
+    // GNU R prints the whole list when it is at most one element over `max`.
+    let shown = if count <= options.max.saturating_add(1) {
+        count
+    } else {
+        options.max
+    };
+    for index in 0..shown {
         let element = list.element(index);
         let name = if names != nil() {
             values::string_at(names, index).map(|text| text.into_owned())
@@ -718,6 +792,12 @@ unsafe fn print_list(list: Sexp, options: &PrintOptions, tag: &mut String) -> R<
         }
         tag.truncate(saved);
         out("\n");
+    }
+    if shown < count {
+        out(&format!(
+            " [ reached getOption(\"max.print\") -- omitted {} entries ]\n",
+            count - shown
+        ));
     }
     print_attributes(list, options, tag)
 }

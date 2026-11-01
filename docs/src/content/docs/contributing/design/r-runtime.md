@@ -984,9 +984,10 @@ Each step ends with something real running, and each one is a large, whole chang
    the internals behind `.Internal` and `.Primitive` are reimplemented. Run the base package's own
    tests through the oracle.
 
-   The interpreter runs. 141 of the 142 oracle cases match GNU R (`oracle compare --engine ry`, as
-   last recorded); the
-   other, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
+   The interpreter runs. 149 of the 150 oracle cases in `crates/oracle/cases` match GNU R 4.3.3
+   (`oracle compare --engine ry`), and 148 of 150 under the JIT (`--engine ry-jit`, which also
+   differs on `environments__hidden_function_bindings`). The
+   remaining interpreter case, `stats__lbfgsb`, agrees only to about seven digits because ry's L-BFGS-B takes a slightly
    different path to the same optimum. Of GNU R 4.3.3's own `tests/*.R`, 63 of 66 end with GNU R's
    exit status and 26 print exactly GNU R's output. Two of the others are accepted divergences
    (`pf` to the last bit, and `env.profile` counts that follow GNU R's string hash), and
@@ -1027,8 +1028,11 @@ Each step ends with something real running, and each one is a large, whole chang
    also runs the R-level half of installation (the lazy-load database, `Meta/` and help indices)
    on ry's interpreter, and `oracle install` installs the whole corpus that way: 236 of 238
    packages install from source and load. Rblpapi needs blpapi3 and magick needs ImageMagick's
-   Magick++. Run on those installs, ry passes the tests of 93 of the 164 packages whose tests pass
-   under GNU R (56.7%, the last recorded run). The rest fail on interpreter gaps, and the classes are listed in
+   Magick++. Two package-test rates are tracked, both counting only the packages whose
+   tests pass under GNU R. With the packages GNU R installed (`.corpus/library`, `oracle packages`),
+   ry passes the tests of 115 of 146 (78.8%). With the packages ry installed itself
+   (`.corpus/ry-library`, `oracle packages --installed`), the last measured rate was 90 of 165
+   (54.5%), from an older interpreter. The rest fail on interpreter gaps, and the classes are listed in
    `.agents/memory/backlog.md`.
 5. **Lazy loading.** The item-based loader on top of the analysis index, replacing `load_all` and
    `loadfast` for the code bases. Built ahead of steps 1 to 4 on the GNU R backend; once the runtime

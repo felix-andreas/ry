@@ -101,6 +101,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     interp::register_builtins(BOOTSTRAP_BUILTINS);
     interp::register_builtins(loader::ry_runtime::BUILTINS);
     interp::register_builtins(crate::serialize::BUILTINS);
+    interp::register_builtins(crate::altrep::INTERNALS);
     install_evaluator(&Interpreter);
 }
 
@@ -575,7 +576,9 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".External", -1, |call| unsafe {
         dot_call(call, RoutineKind::External)
     }),
-    builtin(".External2", -1, |call| unsafe { dot_external2(call) }),
+    // GNU R lets `.External2` keep whatever visibility its native code last evaluated with,
+    // which is how magrittr's pipe forwards `invisible()`.
+    builtin(".External2", -1, |call| unsafe { dot_external2(call) }).keep_visibility(),
     builtin(".Call.graphics", -1, |call| unsafe {
         graphics_engine::graphics_call(call, || dot_call(call, RoutineKind::Call))
     }),
