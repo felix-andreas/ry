@@ -345,6 +345,10 @@ protects construction but nothing after it.
 - A DataFrame column read back (`df$x`) is a plain vector, both statically and at run time.
 - The empty `[]` is a flagged `logical(0)` at run time, so its item type is known only statically.
 
+## Open: `fuzz_multi_file` hits a salsa backdate violation
+
+`cargo test -p semantics --test test_fuzz fuzz_multi_file` panics in debug builds with a backdate violation on `global_scheme` (salsa's `report_backdate_violation`): the query's value compared equal while its new `changed_at` is older than the old one's. A query under `global_scheme` reads state salsa does not track, or depends on iteration order. Bisect among the Array (`[...]`) and function-literal typing changes.
+
 ## Open: strict mode's top-level rule
 
 The rule ships (`decisions.md`, "A strict library file's top level holds only definitions"). Follow-ups:
