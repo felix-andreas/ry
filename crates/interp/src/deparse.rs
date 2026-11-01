@@ -204,6 +204,10 @@ struct Deparser {
     in_list: usize,
     depth: usize,
     backtick: bool,
+    /// Set just before deparsing the left operand of a binary operator, to that operator's
+    /// precedence. Whatever ends that operand without parentheses (an `if`, a loop, or a
+    /// low-precedence unary operator) would swallow the rest of the expression on reparsing.
+    left_of: Option<u8>,
 }
 
 impl Deparser {
@@ -220,6 +224,7 @@ impl Deparser {
             in_list: 0,
             backtick: true,
             depth: 0,
+            left_of: None,
         }
     }
 
@@ -262,6 +267,7 @@ impl Deparser {
     }
 
     unsafe fn deparse(&mut self, object: Sexp) {
+        let left_of = self.left_of.take();
         self.depth += 1;
         if self.depth > 500 {
             self.print("...");
@@ -282,7 +288,7 @@ impl Deparser {
         if attributes {
             self.print("structure(");
         }
-        self.deparse_inner(object);
+        self.deparse_inner(object, if attributes { None } else { left_of });
         if attributes {
             self.attributes(object);
             self.print(")");
@@ -290,7 +296,7 @@ impl Deparser {
         self.depth -= 1;
     }
 
-    unsafe fn deparse_inner(&mut self, object: Sexp) {
+    unsafe fn deparse_inner(&mut self, object: Sexp, left_of: Option<u8>) {
         match object.kind() {
             SexpType::Nil => self.print("NULL"),
             SexpType::Symbol => {
@@ -319,7 +325,7 @@ impl Deparser {
             SexpType::WeakRef => self.print("<weak reference>"),
             SexpType::Bytecode => self.print("<bytecode>"),
             SexpType::Char => self.print(&format::encode_element(object, Some('"'))),
-            SexpType::Language => self.language(object),
+            SexpType::Language => self.language(object, left_of),
             SexpType::Pairlist | SexpType::Dots => {
                 // `pairlist()` evaluates its arguments, so an empty one only survives `alist()`.
                 let mut has_missing = false;
@@ -490,7 +496,7 @@ impl Deparser {
         }
     }
 
-    unsafe fn language(&mut self, call: Sexp) {
+    unsafe fn language(&mut self, call: Sexp, left_of: Option<u8>) {
         // `quote()` wraps the outermost call once, and a formula evaluates to itself, so it needs
         // no wrapping at all.
         if self.opts & options::QUOTE_EXPRESSIONS != 0 {
@@ -499,7 +505,7 @@ impl Deparser {
             if !formula {
                 self.print("quote(");
             }
-            self.language(call);
+            self.language(call, None);
             if !formula {
                 self.print(")");
             }
@@ -603,7 +609,14 @@ impl Deparser {
                         self.print(&name_text);
                         let member = arguments.cdr().car();
                         if member.kind() == SexpType::String && length(member) == 1 {
-                            self.vector(member);
+                            // A syntactic name reads back the same bare, as GNU R prints it.
+                            let text = member.element(0);
+                            match std::str::from_utf8(text.bytes()) {
+                                Ok(name) if text != values::na_string() && is_syntactic(name) => {
+                                    self.print(name)
+                                }
+                                _ => self.vector(member),
+                            }
                         } else {
                             self.deparse(member);
                         }
@@ -615,6 +628,8 @@ impl Deparser {
                         let left_parens = needs_parens(info, left, true);
                         if left_parens {
                             self.print("(");
+                        } else {
+                            self.left_of = Some(info.precedence);
                         }
                         self.deparse(left);
                         if left_parens {
@@ -631,9 +646,12 @@ impl Deparser {
                         if info.kind == Kind::Binary {
                             self.line_break(&mut broken);
                         }
-                        let right_parens = needs_parens(info, right, false);
+                        let right_parens = needs_parens(info, right, false)
+                            || left_of.is_some_and(|outer| dangles(right, outer));
                         if right_parens {
                             self.print("(");
+                        } else {
+                            self.left_of = left_of;
                         }
                         self.deparse(right);
                         if right_parens {
@@ -681,6 +699,8 @@ impl Deparser {
                 let left_parens = needs_parens(info, left, true);
                 if left_parens {
                     self.print("(");
+                } else {
+                    self.left_of = Some(info.precedence);
                 }
                 self.deparse(left);
                 if left_parens {
@@ -691,9 +711,12 @@ impl Deparser {
                 self.print(" ");
                 let mut broken = false;
                 self.line_break(&mut broken);
-                let right_parens = needs_parens(info, right, false);
+                let right_parens = needs_parens(info, right, false)
+                    || left_of.is_some_and(|outer| dangles(right, outer));
                 if right_parens {
                     self.print("(");
+                } else {
+                    self.left_of = left_of;
                 }
                 self.deparse(right);
                 if right_parens {
@@ -1496,6 +1519,29 @@ unsafe fn ry_call_form(expression: Sexp) -> Option<RyForm> {
 
 unsafe fn is_curly(expression: Sexp) -> bool {
     expression.kind() == SexpType::Language && expression.car() == symbols().brace
+}
+
+/// Whether `argument`, ending the left operand of an operator of precedence `outer`, would
+/// extend past that operand when reparsed: a keyword construct always would, and a unary
+/// operator would when it binds more loosely than `outer`. A function definition would too,
+/// but GNU R leaves it bare, so ry does the same to keep the same text.
+unsafe fn dangles(argument: Sexp, outer: u8) -> bool {
+    if argument.kind() != SexpType::Language || argument.car().kind() != SexpType::Symbol {
+        return false;
+    }
+    let name = argument.car().car().bytes();
+    if matches!(name, b"for" | b"if" | b"while" | b"repeat") {
+        return true;
+    }
+    values::pairlist_length(argument.cdr()) == 1
+        && operator_info(name).is_some_and(|info| {
+            let precedence = if info.precedence == precedence::SUM {
+                precedence::SIGN
+            } else {
+                info.precedence
+            };
+            precedence < outer
+        })
 }
 
 /// GNU R's `needsparens`: whether an operand of `main` must be parenthesized.

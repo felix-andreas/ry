@@ -793,8 +793,10 @@ pub unsafe fn subset2(object: Sexp, indices: &[Sexp], exact: Option<bool>, call:
         let mut current = object;
         for position in 0..count {
             let single = vector_element(index, position)?;
-            if !matches!(current.kind(), SexpType::List | SexpType::Expression)
-                && position + 1 < count
+            if !matches!(
+                current.kind(),
+                SexpType::List | SexpType::Expression | SexpType::Language | SexpType::Pairlist
+            ) && position + 1 < count
             {
                 return Err(crate::unwind::error_in(call, "subscript out of bounds"));
             }
