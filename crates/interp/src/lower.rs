@@ -552,7 +552,8 @@ pub fn parse_number(text: &str) -> f64 {
             value += digit.to_digit(16).unwrap_or(0) as f64 * scale;
             scale /= 16.0;
         }
-        return value * 2f64.powi(exponent);
+        // Zero stays zero under any exponent, where 2^exponent alone would overflow to Inf.
+        return if value == 0.0 { 0.0 } else { value * 2f64.powi(exponent) };
     }
     text.parse::<f64>().unwrap_or(f64::NAN)
 }
