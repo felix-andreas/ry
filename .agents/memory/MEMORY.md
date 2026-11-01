@@ -100,6 +100,8 @@ Cross-session knowledge base for the agents building ry, in three horizons. **Sh
 - **Do not `table.resolve` a type you display as written**, because resolve expands aliases.
 - **One `TypeRenderer` spans everything that shares variable names** (a signature, both sides of a mismatch).
 - **Immediate reads resolve against the nearest earlier writer in the file, while deferred reads (closures) differ by kind.** A package closure sees the project-wide winner and a script closure sees the settled file frame. Getting this backwards breaks forward references from function bodies.
+- **A called name is looked up as a function** (`Checker::function_lookup`, reference "Called names"): non-function bindings are skipped, and the binding the call reached is recorded in `ItemCheck.callee_targets`, which hover, goto, references and rename must follow instead of the plain slot resolution. A type parameter counts as untyped, or `test_roundtrip` finds unwritable schemes.
+- **Test files are `DocumentKind::Test`, helper and setup files `TestHelper`** (`semantics::test_document_kind`). Only helpers fill the shared test namespace, and no test binding reaches the package namespace. Removing the old pooling of every test file exposed checker false positives that it used to mask, chiefly rlang's own `expr(foo(...))` being checked as evaluated code inside rlang, where `expr` is a project function rather than a quoting stub.
 - **`"x" <- 1` binds `x`** through the name-target arm, not `replacement_base`, which reads the base first.
 - **A fixture cannot exercise anything keyed on `PackageMetadata`**, so those cases belong in `crates/ry/tests/test_cli.rs`. Read what a bless recorded before believing it covers the scenario.
 
