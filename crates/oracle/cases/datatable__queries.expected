@@ -1,0 +1,189 @@
+[stdout]
+|     g h  x      y  flag  f
+|  1: b 2 18  0.650  TRUE hi
+|  2: c 3 19 -0.861 FALSE hi
+|  3: a 2 16 -1.132    NA lo
+|  4: a 1 17 -1.459    NA hi
+|  5: c 2 16 -1.003 FALSE lo
+|  6: b 1 16 -0.025    NA lo
+|  7: b 1 19 -0.382    NA hi
+|  8: c 2 17 -0.513 FALSE hi
+|  9: b 2 16 -0.002  TRUE hi
+| 10: b 3 17 -0.428  TRUE lo
+|     g h  x      y  flag  f
+|  1: a 3  8 -0.217  TRUE hi
+|  2: c 3 19 -0.861 FALSE hi
+|  3: a 1 17 -1.459    NA hi
+|  4: b 3  9  0.653  TRUE lo
+|  5: a 1  8  1.848    NA hi
+|  6: a 1  6 -0.667    NA lo
+|  7: a 3 13 -0.422    NA lo
+|  8: c 1 14 -0.122 FALSE hi
+|  9: a 1  9  0.119 FALSE lo
+| 10: b 1 16 -0.025    NA lo
+| 11: c 1 11  0.108    NA hi
+| 12: b 3 10 -0.485  TRUE hi
+| 13: a 3 10 -0.504  TRUE lo
+| 14: b 1 19 -0.382    NA hi
+| 15: c 1 14  2.702  TRUE hi
+| 16: b 1 15 -1.470  TRUE lo
+| 17: b 3 17 -0.428  TRUE lo
+|     g h  x      y  flag  f
+|  1: b 1 19 -0.382    NA hi
+|  2: c 3 19 -0.861 FALSE hi
+|  3: b 2 18  0.650  TRUE hi
+|  4: a 1 17 -1.459    NA hi
+|  5: b 3 17 -0.428  TRUE lo
+|  6: c 2 17 -0.513 FALSE hi
+|  7: a 2 16 -1.132    NA lo
+|  8: b 1 16 -0.025    NA lo
+|  9: b 2 16 -0.002  TRUE hi
+| 10: c 2 16 -1.003 FALSE lo
+| 11: b 2 15  0.137    NA lo
+| 12: b 1 15 -1.470  TRUE lo
+| 13: b 2 14 -1.362    NA hi
+| 14: c 1 14 -0.122 FALSE hi
+| 15: c 1 14  2.702  TRUE hi
+| 16: a 2 13  1.391  TRUE hi
+| 17: a 3 13 -0.422    NA lo
+| 18: b 2 12  0.080    NA lo
+| 19: a 2 11  0.125  TRUE lo
+| 20: c 2 11  1.045  TRUE lo
+| 21: c 1 11  0.108    NA hi
+| 22: a 3 10 -0.504  TRUE lo
+| 23: b 2 10 -0.476  TRUE hi
+| 24: b 3 10 -0.485  TRUE hi
+| 25: a 1  9  0.119 FALSE lo
+| 26: b 3  9  0.653  TRUE lo
+| 27: a 3  8 -0.217  TRUE hi
+| 28: a 1  8  1.848    NA hi
+| 29: b 2  7  1.392  TRUE hi
+| 30: a 1  6 -0.667    NA lo
+| 31: b 2  6 -1.494  TRUE lo
+| 32: a 2  5  0.188    NA hi
+| 33: a 1  5 -0.997 FALSE lo
+| 34: a 1  4  0.933 FALSE lo
+| 35: a 1  4  0.822    NA hi
+| 36: b 1  1 -1.661  TRUE hi
+| 37: c 1  1  0.106  TRUE hi
+| 38: a 3 NA -0.183    NA lo
+| 39: b 2 NA  1.201  TRUE lo
+| 40: c 2 NA -1.111  TRUE lo
+|     g h  x      y  flag  f
+|     g h  x     y  flag  f
+|  1: b 2 12 0.080    NA lo
+|  2: c 1  1 0.106  TRUE hi
+|  3: c 1 11 0.108    NA hi
+|  4: a 1  9 0.119 FALSE lo
+|  5: a 2 11 0.125  TRUE lo
+|  6: b 2 15 0.137    NA lo
+|  7: a 2  5 0.188    NA hi
+|  8: b 2 18 0.650  TRUE hi
+|  9: b 3  9 0.653  TRUE lo
+| 10: a 1  4 0.822    NA hi
+| 11: a 1  4 0.933 FALSE lo
+| 12: c 2 11 1.045  TRUE lo
+| 13: a 2 13 1.391  TRUE hi
+| 14: b 2  7 1.392  TRUE hi
+| 15: a 1  8 1.848    NA hi
+| 16: c 1 14 2.702  TRUE hi
+|    g h  x      y  flag  f
+| 1: a 3  8 -0.217  TRUE hi
+| 2: a 3 NA -0.183    NA lo
+| 3: a 1  4  0.933 FALSE lo
+| Empty data.table (0 rows and 6 cols): g,h,x,y,flag,f
+|    g  N
+| 1: a 15
+| 2: b 16
+| 3: c  9
+|    g h N
+| 1: a 3 4
+| 2: a 1 7
+| 3: b 2 9
+| 4: a 2 4
+| 5: c 2 4
+| 6: c 3 1
+| 7: b 3 3
+| 8: c 1 4
+| 9: b 1 4
+|    g  s           m
+| 1: a NA -0.01033333
+| 2: b NA -0.22950000
+| 3: c NA  0.03900000
+|    g   s   top
+| 1: a 129 1.848
+| 2: b 185 1.392
+| 3: c 103 2.702
+| [1] "f" "g"
+|    g  n  total     share
+| 1: c  9  0.351 0.5000000
+| 2: a 15 -0.155 0.5714286
+| 3: b 16 -3.672 1.0000000
+|    g  x
+| 1: a  8
+| 2: a NA
+| 3: a  4
+| 4: a  4
+| 5: a 13
+|     f       V1
+| 1: hi  0.08335
+| 2: lo -0.25715
+|    h   x      y
+| 1: 3  NA -2.447
+| 2: 1 144 -0.145
+| 3: 2  NA -0.884
+|     g      z
+|  1: b  1.300
+|  2: a  2.782
+|  3: c -1.722
+|  4: a -2.264
+|  5: a -2.918
+|  6: b  0.160
+|  7: c  2.090
+|  8: c -2.006
+|  9: a -0.844
+| 10: c -0.244
+| 11: b -0.050
+| 12: c  0.216
+| 13: b -0.764
+| 14: c -1.026
+| 15: c  5.404
+| 16: b -2.724
+| 17: b  0.274
+| 18: b -2.940
+| 19: a  0.250
+| 20: b -0.004
+| 21: b -0.856
+|     g      z
+|     x      y
+| 1:  8 -0.217
+| 2: NA -0.183
+| 3:  4  0.933
+|    g      y
+| 1: a -0.217
+| 2: a -0.183
+|    h  x      y flag  f
+| 1: 3  8 -0.217 TRUE hi
+| 2: 3 NA -0.183   NA lo
+| [1] -0.217 -0.183  0.933  0.822
+| [1] 40
+|           g           h           x           y        flag           f 
+| "character"   "integer"   "integer"   "numeric"   "logical"    "factor" 
+| [1] "row.names"         "class"             ".internal.selfref"
+| [4] "names"            
+| [1] "row.names"         "class"             "names"            
+| [4] ".internal.selfref"
+| [1] "row.names"         "class"             "names"            
+| [4] "sorted"            ".internal.selfref"
+| [1] "names"             "row.names"         "class"            
+| [4] ".internal.selfref"
+|    g      s  n
+| 1: a -0.918 10
+| 2: b -3.212 14
+| 3: c  1.356  7
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

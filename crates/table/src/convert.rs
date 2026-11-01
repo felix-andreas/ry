@@ -11,7 +11,8 @@ use polars::prelude::{
     BooleanChunked, ChunkUnique, DataType, Float64Chunked, FrozenCategories, Int32Chunked,
     IntoSeries, NewChunkedArray, PlSmallStr, Series, StringChunked,
 };
-use polars_arrow::bitmap::Bitmap;
+use polars_arrow::{array::PrimitiveArray, bitmap::Bitmap, datatypes::ArrowDataType};
+use polars_buffer::{Buffer, SharedStorage};
 
 /// R's `NA_integer_`, which is also `NA` for a logical vector.
 pub const NA_INTEGER: i32 = i32::MIN;
@@ -100,6 +101,28 @@ pub fn to_series(name: PlSmallStr, vector: RVector) -> Result<Series> {
                 .cast(&dtype)?
         }
     })
+}
+
+/// Builds an integer column over memory the caller owns, such as an R vector's data, without
+/// copying it. Only the validity bitmap is allocated, and only when the values hold an NA.
+///
+/// # Safety
+/// `values` must stay valid and unmodified for as long as the series, or any column derived from
+/// it, is alive.
+pub unsafe fn borrow_integer(name: PlSmallStr, values: &[i32]) -> Series {
+    let validity = validity(values, |value| *value != NA_INTEGER);
+    let buffer = unsafe { Buffer::from_storage(SharedStorage::from_slice_with_owner(values, ())) };
+    Int32Chunked::with_chunk(name, PrimitiveArray::new(ArrowDataType::Int32, buffer, validity)).into_series()
+}
+
+/// [`borrow_integer`] for a double column.
+///
+/// # Safety
+/// As for [`borrow_integer`].
+pub unsafe fn borrow_double(name: PlSmallStr, values: &[f64]) -> Series {
+    let validity = validity(values, |value| !is_na_real(*value));
+    let buffer = unsafe { Buffer::from_storage(SharedStorage::from_slice_with_owner(values, ())) };
+    Float64Chunked::with_chunk(name, PrimitiveArray::new(ArrowDataType::Float64, buffer, validity)).into_series()
 }
 
 /// Converts a column to R's layout. The column's dtype must be one [`crate::ColumnType`] names.

@@ -1263,12 +1263,56 @@ fn pack(len: usize, write: impl Fn(usize, &mut [MaybeUninit<u8>]) + Sync) -> Bit
     Bitmap::from_u8_vec(bytes, len)
 }
 
-fn pack_byte<T: Copy>(values: &[T], test: &impl Fn(T) -> bool) -> u8 {
-    let mut byte = 0u8;
-    for (bit, value) in values.iter().enumerate() {
-        byte |= u8::from(test(*value)) << bit;
+/// Packs `test` of each value into `out`, eight values per byte. Full bytes come from fixed
+/// eight-value arrays, which LLVM unrolls into branch-free compares; a loop over a slice of
+/// unknown length compiles to one branch per bit and runs several times slower.
+fn pack_into<T: Copy>(out: &mut [MaybeUninit<u8>], values: &[T], test: impl Fn(T) -> bool) {
+    let mut chunks = values.chunks_exact(8);
+    for (slot, chunk) in out.iter_mut().zip(&mut chunks) {
+        let mut byte = 0u8;
+        if let Ok(chunk) = <&[T; 8]>::try_from(chunk) {
+            for (bit, value) in chunk.iter().enumerate() {
+                byte |= u8::from(test(*value)) << bit;
+            }
+        }
+        slot.write(byte);
     }
-    byte
+    let rest = chunks.remainder();
+    if let Some(slot) = out.get_mut(values.len() / 8)
+        && !rest.is_empty()
+    {
+        let mut byte = 0u8;
+        for (bit, value) in rest.iter().enumerate() {
+            byte |= u8::from(test(*value)) << bit;
+        }
+        slot.write(byte);
+    }
+}
+
+/// [`pack_into`] for a test of two equally long slices, value by value.
+fn pack_pairs<T: Copy>(out: &mut [MaybeUninit<u8>], lhs: &[T], rhs: &[T], test: impl Fn(T, T) -> bool) {
+    let full = lhs.len() / 8;
+    let mut left = lhs.chunks_exact(8);
+    let mut right = rhs.chunks_exact(8);
+    for ((slot, lhs), rhs) in out.iter_mut().zip(&mut left).zip(&mut right) {
+        let mut byte = 0u8;
+        if let (Ok(lhs), Ok(rhs)) = (<&[T; 8]>::try_from(lhs), <&[T; 8]>::try_from(rhs)) {
+            for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
+                byte |= u8::from(test(*lhs, *rhs)) << bit;
+            }
+        }
+        slot.write(byte);
+    }
+    let (lhs, rhs) = (left.remainder(), right.remainder());
+    if let Some(slot) = out.get_mut(full)
+        && !lhs.is_empty()
+    {
+        let mut byte = 0u8;
+        for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
+            byte |= u8::from(test(*lhs, *rhs)) << bit;
+        }
+        slot.write(byte);
+    }
 }
 
 /// One bit per row, set where `test(row)` holds, computed in parallel.
@@ -1292,9 +1336,7 @@ pub(crate) fn pack_map<T: Copy + Sync>(
 ) -> Bitmap {
     pack(len, |start, out| {
         let end = (start + out.len() * 8).min(len);
-        for (slot, chunk) in out.iter_mut().zip(values[start..end].chunks(8)) {
-            slot.write(pack_byte(chunk, &test));
-        }
+        pack_into(out, &values[start..end], &test);
     })
 }
 
@@ -1311,29 +1353,15 @@ where
         let end = (start + out.len() * 8).min(len);
         match (left, right) {
             (Side::Array(lhs), Side::Array(rhs)) => {
-                for ((slot, lhs), rhs) in out
-                    .iter_mut()
-                    .zip(lhs[start..end].chunks(8))
-                    .zip(rhs[start..end].chunks(8))
-                {
-                    let mut byte = 0u8;
-                    for (bit, (lhs, rhs)) in lhs.iter().zip(rhs).enumerate() {
-                        byte |= u8::from(test(*lhs, *rhs)) << bit;
-                    }
-                    slot.write(byte);
-                }
+                pack_pairs(out, &lhs[start..end], &rhs[start..end], &test);
             }
             (Side::Array(lhs), Side::Scalar(rhs)) => {
                 let rhs = rhs.unwrap_or_default();
-                for (slot, lhs) in out.iter_mut().zip(lhs[start..end].chunks(8)) {
-                    slot.write(pack_byte(lhs, &|lhs| test(lhs, rhs)));
-                }
+                pack_into(out, &lhs[start..end], |lhs| test(lhs, rhs));
             }
             (Side::Scalar(lhs), Side::Array(rhs)) => {
                 let lhs = lhs.unwrap_or_default();
-                for (slot, rhs) in out.iter_mut().zip(rhs[start..end].chunks(8)) {
-                    slot.write(pack_byte(rhs, &|rhs| test(lhs, rhs)));
-                }
+                pack_into(out, &rhs[start..end], |rhs| test(lhs, rhs));
             }
             (Side::Scalar(lhs), Side::Scalar(rhs)) => {
                 let bit = test(lhs.unwrap_or_default(), rhs.unwrap_or_default());
@@ -1465,13 +1493,7 @@ pub(crate) fn gather_values<T: Copy + Send + Sync>(values: &[T], rows: &[u32]) -
 pub(crate) fn gather_bits(bits: &Bitmap, rows: &[u32]) -> Bitmap {
     pack(rows.len(), |start, out| {
         let end = (start + out.len() * 8).min(rows.len());
-        for (slot, chunk) in out.iter_mut().zip(rows[start..end].chunks(8)) {
-            let mut byte = 0u8;
-            for (bit, row) in chunk.iter().enumerate() {
-                byte |= u8::from(bits.get_bit(*row as usize)) << bit;
-            }
-            slot.write(byte);
-        }
+        pack_into(out, &rows[start..end], |row| bits.get_bit(row as usize));
     })
 }
 

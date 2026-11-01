@@ -1837,10 +1837,11 @@ The end-to-end guard rests on the corpus suites.
   needs R code (including under `.EACHI`) stop with an error.
 - **Native code gets copied columns.** `crates/libr/src/frame_altrep.rs` can expose columns as
   ALTREP, but `frame.rs` still converts a column into an R vector when R code reads it.
-- **A filtered `:=` loop runs at data.table's speed, not faster** (`tools/bench/table/ry.R`,
-  "update subset", 1e6 rows: about 0.11 s for both). From R it takes 0.10 to 0.14 s against the
-  engine's 0.085 s from Rust, so the interpreter's per-query cost (schema clone, lowering, fork
-  checks) shows here and is worth profiling.
+- **A filtered `:=` loop is engine-bound** (`tools/bench/table/ry.R`, "update subset", 1e6 rows:
+  0.082 s from R, 0.067 s from Rust, 0.11 s for data.table). Profiling puts the R layer at about
+  5 µs per query; the rest is the filter's compare and the scatter. The R/Rust gap is the same
+  engine code in a different process (libR.so allocates with glibc malloc, the Rust bench with
+  mimalloc), which is the next thing to check.
 - **A frame satisfies a `list` parameter in the checker** so that `lapply` and `Map` accept it,
   which is unsound for code that indexes the argument with `[` (rows on a frame). Overloads that
   take `frame` directly would let the compat go.
@@ -2635,6 +2636,18 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   unresolved and the defining file reports it unused. Destructured names also lack declaration
   occurrences in `ide.rs` (goto-definition across files, inlay hints, unused-assignment fixes).
 - `Function | Null | Var` callee unions fall through to the not-callable finding.
+
+## Open: the data.table bridge
+
+`crates/interp/src/data_table.rs` declines these to data.table. Each one is a shape to accept once the engine can reproduce data.table's result exactly, checked by a new `datatable__*` oracle case.
+
+- Keyed subjects: accept them by carrying `sorted` through filters and selections the way data.table does, and binary-search `x[.("a")]` key joins.
+- Auto-indexing filters (`col == v`, `%in%`, `%chin%`): data.table adds an `index` attribute to the source on the first such filter. Accepting them means building that attribute (`setindexv`) after answering.
+- Reductions outside GForce form, and `:=` with `by` over doubles: base R sums in long double there. The engine would need a long double (or compensated, then verified) sum path.
+- `median`, `var`, `sd`, `prod` and `mean(na.rm = TRUE)` on doubles in GForce: data.table's own algorithms (long double accumulation, two-pass variance) must be mirrored first.
+- Integer sums in grouped `:=` are exact and could be accepted now; they decline because the reduction rule does not split by column type yet.
+- Joins without `on =` (key joins) and `x[]`.
+- The benchmark code bases' data.table-heavy tests have not run under the bridge: their other dependencies (testthat, R6, purrr and more) are not installed in the default environment.
 
 ## Open: findings from the records, library and frame round
 
