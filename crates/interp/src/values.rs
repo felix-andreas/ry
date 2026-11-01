@@ -616,6 +616,11 @@ pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
     if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
         return false;
     }
+    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
+    // their bytes, which keeps `x == "a"` from decoding every element.
+    if [gp::LATIN1, gp::UTF8].iter().all(|&bit| left.has_gp(bit) == right.has_gp(bit)) {
+        return false;
+    }
     char_str(left) == char_str(right)
 }
 
