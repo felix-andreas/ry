@@ -2017,6 +2017,30 @@ Nothing loaded packages before; `contributing/design/r-runtime.md` section 6 and
   and the reload logic are shared, because both backends apply the same plan; `test_load.rs` runs its
   namespace, S3/S4, collation and reload tests on both runtimes.
 
+# Decision record: package tests through the oracle
+
+`oracle packages` (`crates/oracle/src/packages.rs`, `contributing/corpus-and-oracle.md`, "Package
+tests") runs each corpus package's own `tests/` under GNU R and under ry and reports pass or fail per
+package. It is the measure for "the corpus packages run on ry".
+
+- **A file passes when its process exits with status 0, and a package passes when every file
+  does**, which is the rule `R CMD check` applies to `tests/`. The `.Rout` files are not diffed,
+  because they carry timings, temporary paths and addresses; testthat's summary counts are read
+  from them and reported beside the verdict, which shows how far a failing package got.
+- **The pass rate counts only packages GNU R passes**, because a package whose tests fail on GNU R
+  (missing suggests, network, a display) says nothing about ry.
+- **GNU R's results are reused** for the same package version unless `--rerun-gnu-r`, since they
+  change only when the corpus does.
+- **Each file runs in its own process group under `--timeout`**, killed as a group, because a hung
+  test usually leaves a child (callr, processx) behind that would keep the pipe open.
+- **Run it against a copied binary** (`ORACLE_RY`), not `target/release/ry`, because a full run is
+  long and a rebuild under it changes the engine midway.
+
+Fixes the harness drove are classes, each with an oracle case under `crates/oracle/cases/`:
+`deparse.level` naming in `cbind`/`rbind` (read from the closure's `...` promises), the `Summary`
+group's `na.rm` reordering, list comparison coercion, `return` outside a function, POSIXlt balancing,
+graphical parameters, `file.append` and anonymous `file()` buffers.
+
 # Decision record: base R's linear algebra
 
 - **Previous shape.** `%*%`, `crossprod` and `tcrossprod` were a plain Rust loop in `arith.rs` with no complex support, and base's `.Fortran` routines (`dqrdc2` and friends) were listed by `getRegisteredRoutines` with null addresses, so `qr()` failed. The routine list was a hard-coded copy of names and arities.
@@ -2032,11 +2056,16 @@ The routines live in `crates/interp/src/{utils,tools,graphics}.rs`, wired by pac
 observed output (the oracle cases `io__*`, `colours__*` and `utils__sizes_hashtabs_and_tools`),
 never from its C source.
 
-- **The session has only the null device.** `dev.cur()` is device 1, `.Device` and `.Devices` are
-  bound at startup, and every grDevices or graphics routine without an entry in the tables fails
-  with "graphics devices are not supported in ry yet" (`graphics::no_devices` is the fallback, so a
-  new routine needs no stub). `cairoProps` reports no cairo, so the default device is `pdf` and
-  `bitmapType` is `"Xlib"`, as in a headless build. A real device is a later step.
+- **Devices are a table of records that hold state but draw nothing.** Device 1 is the null
+  device; `pdf()` opens a record with its size, its display-list flag and its graphical parameters
+  (`graphics::Device`), which `dev.off()` releases. The parameters are an R list built from GNU R's
+  documented `pdf` defaults and rooted with `Heap::preserve`, so `par()` reads and writes R values
+  directly. Setting `mar`, `oma`, `mex`, `mfrow` or `mfcol` recomputes `mai` and the layout's `cex`
+  as GNU R does; `cex` alone does not. `recordPlot()` gets an empty snapshot tagged with engine
+  version 16. Every routine without an entry in the tables fails with "graphics devices are not
+  supported in ry yet" (`graphics::no_devices`), which is where drawing lands today. `cairoProps`
+  reports no cairo, so the default device is `pdf` and `bitmapType` is `"Xlib"`, as in a headless
+  build.
 - **The palette is thread-local state in `graphics.rs`**, packed as GNU R packs colours (red in the
   low byte), because only the colour routines read it and the interpreter is single-threaded.
 - **`scan` is implemented in `utils.rs`, not `connections.rs`**, because `scan`, `readtablehead`
