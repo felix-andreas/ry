@@ -97,6 +97,12 @@ fn seeds_agree_across_tiers() {
         ),
         // A missing formal as the index selects everything.
         ("g <- function(i) v[i]\nfor (j in 1:n) r <- g()\nr", "(n = 3L)", false),
+        // A formal that is only called shadows a function of the same name in the enclosure.
+        (
+            "h <- function(x) -1\ng <- function(h) { s <- 0; for (i in 1:n) s <- s + h(i); s }\nc(g(function(x) x * 2), g(function(x) x * 3))",
+            "(n = 4L)",
+            false,
+        ),
     ];
     with_interpreter(|| {
         for (case, (body, call, fails)) in seeds.iter().enumerate() {

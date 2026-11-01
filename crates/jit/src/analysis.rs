@@ -413,9 +413,9 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
     let constants = code.cdr();
     let source = constants.element(bytecode::SOURCE);
     // A body that reflects on its frame can bind any symbol, which slots cannot model.
-    if bytecode::local_symbols(source, formals).is_none() {
+    let Some(locals) = bytecode::local_symbols(source, formals) else {
         return Err(Refusal("the body reflects on its frame"));
-    }
+    };
     let insts = decode(code)?;
     let registers = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
     let loops = bytecode::loop_count(code);
@@ -430,6 +430,7 @@ pub unsafe fn plan(code: Sexp, formals: Sexp, enclosure: Sexp) -> Result<Plan, R
         speculations: Vec::new(),
         registers,
         defaulted: defaulted_formals(formals),
+        locals,
         hints: Vec::new(),
         frame_safe: FxHashMap::default(),
     };
@@ -513,6 +514,9 @@ struct Builder<'a> {
     /// Formals whose default is an expression. Their first load may evaluate it in this frame,
     /// where it reads and may assign the body's variables.
     defaulted: FxHashSet<Sexp>,
+    /// The formals and every symbol the body binds. A call through one of them may find a local
+    /// function first, so its head cannot be speculated from the enclosure.
+    locals: FxHashSet<Sexp>,
     /// Each slot's type as tier 0 saw it at its loads, for inlined code that reads a variable
     /// compiled code has not loaded.
     hints: Vec<Ty>,
@@ -758,7 +762,9 @@ impl Builder<'_> {
                     }
                 }
                 state.registers[operand(0)] = state.slots[slot].ty;
-                state.visible = Some(true);
+                // A load can force a promise to `invisible()`, which leaves the value invisible,
+                // as `withCallingHandlers(expr)` relies on.
+                state.visible = if load.is_some() { None } else { Some(true) };
                 Action::GetVar { dst: operand(0), slot, load, forcing }
             }
             Op::SetVar => {
@@ -786,7 +792,7 @@ impl Builder<'_> {
                     return self.finish(Action::GetFunSlot { dst: operand(0), slot, load }, inst.op, next_pc, state, edges);
                 }
                 match self.speculate(symbol) {
-                    Some(function) if !self.slot_of.contains_key(&symbol) => {
+                    Some(function) if !self.bound_locally(symbol) => {
                         state.registers[operand(0)] = Ty::Fun(function);
                         Action::GetFun { dst: operand(0), function }
                     }
@@ -846,7 +852,7 @@ impl Builder<'_> {
             Op::Guard => {
                 let symbol = self.constant(operand(0));
                 let expected = self.constant(operand(1));
-                if operand(3) != 0 || self.slot_of.contains_key(&symbol) {
+                if operand(3) != 0 || self.bound_locally(symbol) {
                     return Err(Refusal("the frame may rebind a syntax function"));
                 }
                 if self.speculate(symbol) != Some(expected) {
@@ -1192,7 +1198,7 @@ impl Builder<'_> {
     /// inlined, found from that closure's environment and recorded as a speculation.
     unsafe fn resolve_head(&mut self, lowering: &Lowering, symbol: Sexp) -> Option<Sexp> {
         match lowering.closed {
-            None if self.slot_of.contains_key(&symbol) => None,
+            None if self.bound_locally(symbol) => None,
             None => self.speculate(symbol),
             Some(env) if env == self.enclosure => self.speculate(symbol),
             Some(env) => {
@@ -1306,6 +1312,11 @@ impl Builder<'_> {
         }
         self.frame_safe.insert(function, safe);
         safe
+    }
+
+    /// Whether the activation's own frame may bind `symbol`.
+    fn bound_locally(&self, symbol: Sexp) -> bool {
+        self.locals.contains(&symbol) || self.slot_of.contains_key(&symbol)
     }
 
     /// The function `symbol` resolves to from the enclosure, found without forcing promises,
