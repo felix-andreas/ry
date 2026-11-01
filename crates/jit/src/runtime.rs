@@ -564,6 +564,8 @@ pub unsafe extern "C" fn jit_duplicate(
             let old = *cell;
             match scoped(|| values::shallow_duplicate(old)) {
                 Ok(copy) => {
+                    // Assigning an item into an Array keeps it an Array, as tier 0 does.
+                    copy.set_array(old.is_array());
                     copy.increment_refcount();
                     *cell = copy;
                     if dirty != 0 {

@@ -429,7 +429,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             } => {
                 self.set_visible(&before, true);
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, forcing)?;
+                    self.load_slot(position, &before, slot, ty, forcing, Some(dst))?;
                 }
                 let ty = load.unwrap_or(before.slots[slot].ty);
                 if ty.is_unboxed() {
@@ -459,7 +459,7 @@ impl<'p, 'b> Translator<'p, 'b> {
             }
             Action::GetFunSlot { dst, slot, load } => {
                 if let Some(ty) = load {
-                    self.load_slot(position, &before, slot, ty, false)?;
+                    self.load_slot(position, &before, slot, ty, false, None)?;
                 }
                 let value = self.load_slot_cell(slot);
                 self.store_register(dst, value);
@@ -1163,9 +1163,7 @@ impl<'p, 'b> Translator<'p, 'b> {
                             self.builder
                                 .ins()
                                 .fcmp(FloatCC::GreaterThanOrEqual, index, one);
-                        let bound = self.builder.ins().fcvt_from_sint(F64, length);
-                        let bound = self.builder.ins().fadd(bound, one);
-                        let within = self.builder.ins().fcmp(FloatCC::LessThan, index, bound);
+                        let within = self.within_length(index, length, types[0].is_array());
                         let in_range = self.builder.ins().band(positive, within);
                         // Only converted where it is in range, so the conversion cannot trap.
                         let safe = self.builder.ins().select(in_range, index, one);
@@ -1565,16 +1563,29 @@ impl<'p, 'b> Translator<'p, 'b> {
                     self.builder
                         .ins()
                         .fcmp(FloatCC::GreaterThanOrEqual, index_value, one);
-                let bound = self.builder.ins().fcvt_from_sint(F64, length);
-                let bound = self.builder.ins().fadd(bound, one);
-                let within = self
-                    .builder
-                    .ins()
-                    .fcmp(FloatCC::LessThan, index_value, bound);
+                let within = self.within_length(index_value, length, target.is_array());
                 let in_range = self.builder.ins().band(positive, within);
                 let safe = self.builder.ins().select(in_range, index_value, one);
                 (self.builder.ins().fcvt_to_sint(I64, safe), in_range)
             }
+        };
+        // An Array cannot hold a missing value, so storing one is tier 0's to do: it turns the
+        // Array into an R vector.
+        let in_range = match target {
+            Ty::DblArr => {
+                let element = self.use_register(value, Ty::Dbl);
+                let present = self.builder.ins().fcmp(FloatCC::Ordered, element, element);
+                self.builder.ins().band(in_range, present)
+            }
+            Ty::IntArr | Ty::LglArr => {
+                let element = self.use_register(value, value_ty);
+                let present =
+                    self.builder
+                        .ins()
+                        .icmp_imm_s(IntCC::NotEqual, element, NA_INTEGER as i64);
+                self.builder.ins().band(in_range, present)
+            }
+            _ => in_range,
         };
         let fast = self.builder.create_block();
         let slow = self.builder.create_block();
@@ -1623,13 +1634,13 @@ impl<'p, 'b> Translator<'p, 'b> {
         let vector = self.builder.block_params(store)[0];
         let element_offset = self.builder.ins().iadd_imm_s(position_value, -1);
         match target {
-            Ty::DblVec => {
+            Ty::DblVec | Ty::DblArr => {
                 let element = self.as_double(value, value_ty);
                 let scaled = self.builder.ins().imul_imm_s(element_offset, 8);
                 let address = self.builder.ins().iadd(vector, scaled);
                 self.builder.ins().store(flags(), element, address, DATA);
             }
-            Ty::IntVec | Ty::LglVec => {
+            Ty::IntVec | Ty::LglVec | Ty::IntArr | Ty::LglArr => {
                 let element = self.use_register(value, value_ty);
                 let scaled = self.builder.ins().imul_imm_s(element_offset, 4);
                 let address = self.builder.ins().iadd(vector, scaled);
@@ -1680,10 +1691,21 @@ impl<'p, 'b> Translator<'p, 'b> {
         slot: usize,
         ty: Ty,
         forcing: bool,
+        dst: Option<usize>,
     ) -> Result<(), Refusal> {
         let pc = self.plan.insts[position].pc;
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
-        let mismatch = self.deopt(pc, before.id, None, position, reason::SPECULATION);
+        // Once the load has run, tier 0 resumes after it with the loaded value rather than
+        // loading again: the load may have forced a promise, and only that forcing knows whether
+        // the value is visible, which `withVisible(x)` reads.
+        let mismatch = match dst {
+            Some(dst) => {
+                let after = self.after_with_boxed(position, Some(dst))?;
+                let next = self.next_pc(position)?;
+                self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION)
+            }
+            None => self.deopt(pc, before.id, None, position, reason::SPECULATION),
+        };
         let done = self.builder.create_block();
         let load = self.builder.create_block();
         if before.slots[slot].may_be(status::LOADED) {
@@ -1719,11 +1741,14 @@ impl<'p, 'b> Translator<'p, 'b> {
                 .ins()
                 .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
         let valid = self.builder.ins().bxor_imm_u(invalid, 1);
+        let value = self.load_slot_cell(slot);
+        if let Some(dst) = dst {
+            self.store_register(dst, value);
+        }
         self.guard(valid, mismatch);
         if forcing {
             self.forget_slots();
         }
-        let value = self.load_slot_cell(slot);
         if !matches!(ty, Ty::Boxed | Ty::Bottom) {
             let fits = self.check(value, ty);
             self.guard(fits, mismatch);
@@ -2229,6 +2254,29 @@ impl<'p, 'b> Translator<'p, 'b> {
             Ty::DblVec => (SexpType::Real, false),
             Ty::LglVec => (SexpType::Logical, false),
             Ty::List => (SexpType::List, false),
+            Ty::IntArr | Ty::DblArr | Ty::LglArr => {
+                // The Array bit promises no attributes, so the kind and the bits decide it.
+                let kind = match ty {
+                    Ty::IntArr => SexpType::Integer,
+                    Ty::DblArr => SexpType::Real,
+                    _ => SexpType::Logical,
+                };
+                let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
+                let fits = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, actual, kind as i64);
+                let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+                let bits = self
+                    .builder
+                    .ins()
+                    .band_imm_u(bits, ALTREP_FLAG | ARRAY_FLAG);
+                let array = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, bits, ARRAY_FLAG);
+                return self.builder.ins().band(fits, array);
+            }
             Ty::Boxed | Ty::Bottom => return self.builder.ins().iconst(I8, 1),
         };
         let actual = self.builder.ins().uload8(I32, flags(), value, KIND);
@@ -2255,6 +2303,22 @@ impl<'p, 'b> Translator<'p, 'b> {
             fits = self.builder.ins().band(fits, single);
         }
         fits
+    }
+
+    /// Whether a double position at least one is within `length`. R truncates the position,
+    /// so a vector accepts anything below `length + 1`; an Array rejects a position past its
+    /// last item before truncating.
+    fn within_length(&mut self, index: Value, length: Value, array: bool) -> Value {
+        let bound = self.builder.ins().fcvt_from_sint(F64, length);
+        if array {
+            return self
+                .builder
+                .ins()
+                .fcmp(FloatCC::LessThanOrEqual, index, bound);
+        }
+        let one = self.builder.ins().f64const(1.0);
+        let bound = self.builder.ins().fadd(bound, one);
+        self.builder.ins().fcmp(FloatCC::LessThan, index, bound)
     }
 
     fn unbox(&mut self, value: Value, ty: Ty) -> Value {

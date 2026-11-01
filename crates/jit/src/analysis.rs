@@ -74,6 +74,11 @@ pub enum Ty {
     LglVec,
     /// A boxed, attribute-free list.
     List,
+    /// A boxed `Array<integer>`, `Array<double>` or `Array<logical>` of any length: a vector with
+    /// the Array bit, which promises no attributes and no NA.
+    IntArr,
+    DblArr,
+    LglArr,
     /// A boxed function known to be exactly this object.
     Fun(Sexp),
     /// A closure made by a `function` expression of this body, in this activation's
@@ -101,12 +106,16 @@ impl Ty {
         matches!(self, Ty::IntVec | Ty::DblVec | Ty::LglVec)
     }
 
+    pub fn is_array(self) -> bool {
+        matches!(self, Ty::IntArr | Ty::DblArr | Ty::LglArr)
+    }
+
     /// The scalar type of one element.
     pub fn element(self) -> Ty {
         match self {
-            Ty::IntVec | Ty::Int => Ty::Int,
-            Ty::DblVec | Ty::Dbl => Ty::Dbl,
-            Ty::LglVec | Ty::Lgl => Ty::Lgl,
+            Ty::IntVec | Ty::IntArr | Ty::Int => Ty::Int,
+            Ty::DblVec | Ty::DblArr | Ty::Dbl => Ty::Dbl,
+            Ty::LglVec | Ty::LglArr | Ty::Lgl => Ty::Lgl,
             _ => Ty::Boxed,
         }
     }
@@ -143,8 +152,8 @@ impl Ty {
 }
 
 /// The type tier 0's feedback bits speculate on.
-pub fn from_feedback(bits: u8) -> Ty {
-    let within = |mask: u8| bits & !mask == 0;
+pub fn from_feedback(bits: u16) -> Ty {
+    let within = |mask: u16| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
         feedback::INTEGER_SCALAR => Ty::Int,
@@ -154,6 +163,9 @@ pub fn from_feedback(bits: u8) -> Ty {
         _ if within(feedback::DOUBLE_SCALAR | feedback::DOUBLE_VECTOR) => Ty::DblVec,
         _ if within(feedback::LOGICAL_SCALAR | feedback::LOGICAL_VECTOR) => Ty::LglVec,
         feedback::LIST => Ty::List,
+        feedback::INTEGER_ARRAY => Ty::IntArr,
+        feedback::DOUBLE_ARRAY => Ty::DblArr,
+        feedback::LOGICAL_ARRAY => Ty::LglArr,
         _ => Ty::Boxed,
     }
 }
@@ -186,7 +198,10 @@ impl Slot {
     };
 
     fn join(self, other: Slot) -> Slot {
-        let ty = if self.status & status::LOADED == 0 {
+        let ty = if self.status & status::LOADED == 0 && other.status & status::LOADED == 0 {
+            // Both forgotten: the types are what a reload speculates on.
+            self.ty.join(other.ty)
+        } else if self.status & status::LOADED == 0 {
             other.ty
         } else if other.status & status::LOADED == 0 {
             self.ty
@@ -237,9 +252,11 @@ impl<'a> State<'a> {
     }
 
     /// Forgets every variable, after code that may have rebound any of them ran.
+    /// Forgets every variable's value but keeps its type, which a reload whose instruction
+    /// has no feedback yet speculates on (and checks).
     fn forget_slots(&mut self) {
         for slot in &mut self.slots {
-            *slot = Slot::UNLOADED;
+            slot.status = status::NOT_LOADED;
         }
     }
 
@@ -820,7 +837,7 @@ pub unsafe fn plan<'a>(
         arena,
         code,
         enclosure,
-        feedback: values::raws(constants.element(FEEDBACK)),
+        feedback: values::ints(constants.element(FEEDBACK)),
         insts,
         slot_of: Map::with_hasher_in(FxBuildHasher, arena),
         slots: List::new_in(arena),
@@ -1009,7 +1026,7 @@ struct Builder<'a> {
     arena: Arena<'a>,
     code: Sexp,
     enclosure: Sexp,
-    feedback: &'a [u8],
+    feedback: &'a [i32],
     insts: List<'a, Inst<'a>>,
     slot_of: Map<'a, Sexp, usize>,
     slots: List<'a, Sexp>,
@@ -1057,7 +1074,7 @@ impl<'a> Builder<'a> {
                     self.slots.push(symbol);
                     self.hints.push(Ty::Bottom);
                 }
-                let bits = self.feedback.get(inst.pc).copied().unwrap_or(0);
+                let bits = self.feedback.get(inst.pc).map_or(0, |&bits| bits as u16);
                 if inst.op == Op::GetVar && bits != 0 {
                     let slot = self.slot_of[&symbol];
                     self.hints[slot] = self.hints[slot].join(from_feedback(bits));
@@ -1071,7 +1088,7 @@ impl<'a> Builder<'a> {
     }
 
     fn feedback_at(&self, pc: usize) -> Ty {
-        from_feedback(self.feedback.get(pc).copied().unwrap_or(0))
+        from_feedback(self.feedback.get(pc).map_or(0, |&bits| bits as u16))
     }
 
     /// Whether the instruction at `pc` has never recorded a value.
@@ -1321,6 +1338,12 @@ impl<'a> Builder<'a> {
                 let current = state.slots[slot];
                 let load = if current.may_be(status::NOT_LOADED) {
                     let ty = if current.may_be(status::LOADED) {
+                        current.ty
+                    } else if self.never_ran(inst.pc) && current.ty != Ty::Bottom {
+                        // A variable forgotten across an opaque call, read where tier 0 has not
+                        // read it yet (a branch not taken so far): the type it had before the call
+                        // is a better guess than a boxed unknown, which leaves its arithmetic to
+                        // tier 0 for good.
                         current.ty
                     } else {
                         self.feedback_at(inst.pc)
@@ -1650,6 +1673,9 @@ impl<'a> Builder<'a> {
                     Ty::DblVec => value.is_numeric_scalar(),
                     Ty::IntVec => matches!(value, Ty::Int | Ty::Lgl),
                     Ty::LglVec => value == Ty::Lgl,
+                    // An Array takes only items of its own type; anything else turns it into
+                    // an R vector, which tier 0 does.
+                    Ty::IntArr | Ty::DblArr | Ty::LglArr => value == target.element(),
                     _ => false,
                 };
                 if fits
@@ -2527,6 +2553,9 @@ unsafe fn constant_type(value: Sexp) -> Ty {
         feedback::DOUBLE_VECTOR => Ty::DblVec,
         feedback::LOGICAL_VECTOR => Ty::LglVec,
         feedback::LIST => Ty::List,
+        feedback::INTEGER_ARRAY => Ty::IntArr,
+        feedback::DOUBLE_ARRAY => Ty::DblArr,
+        feedback::LOGICAL_ARRAY => Ty::LglArr,
         _ if values::is_function(value) => Ty::Fun(value),
         _ => Ty::Boxed,
     }
@@ -2547,12 +2576,20 @@ fn intrinsic_for(name: &str, types: &[Ty]) -> Option<(Intrinsic, Ty)> {
         {
             (Intrinsic::Element, vector.element())
         }
+        // `[` on an Array makes an Array, so only `[[` reads an element.
+        ("[[", [array, index]) if array.is_array() && matches!(index, Ty::Int | Ty::Dbl) => {
+            (Intrinsic::Element, array.element())
+        }
         ("[[", [Ty::List, index]) if matches!(index, Ty::Int | Ty::Dbl) => {
             (Intrinsic::Element, Ty::Boxed)
         }
-        ("length", [ty]) if ty.is_vector() || ty.is_numeric_scalar() || *ty == Ty::List => {
+        ("length", [ty])
+            if ty.is_vector() || ty.is_array() || ty.is_numeric_scalar() || *ty == Ty::List =>
+        {
             (Intrinsic::Length, Ty::Int)
         }
+        // An opaque call would make the compiled code forget every variable's type.
+        ("List.len", [ty]) if ty.is_array() || *ty == Ty::List => (Intrinsic::Length, Ty::Int),
         ("-", [ty]) if ty.is_numeric_scalar() => (
             Intrinsic::Negate(numeric(*ty)),
             if *ty == Ty::Dbl { Ty::Dbl } else { Ty::Int },

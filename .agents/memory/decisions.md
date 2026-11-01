@@ -2700,10 +2700,16 @@ first lines R had already read, leaving R mid-command.
 - **A refused body is not retried, except for `COLD`.** A `for` loop over a value with no type
   feedback yet is a temporary refusal; every other refusal and a fifth compile mark the body as
   never to compile.
-- **Every hot body compiles, loop or not.** Loop-only compilation was a stopgap while entering
-  compiled code meant forcing every argument through a promise helper, which made
-  `function(a, b) a + b` slower compiled than in tier 0. Direct calls removed that cost, so the
-  loop-only rule went with it.
+- **Every hot body compiles, loop or not, unless it would run nothing natively.** Loop-only
+  compilation was a stopgap while entering compiled code meant forcing every argument through a
+  promise helper, which made `function(a, b) a + b` slower compiled than in tier 0. Direct calls
+  removed that cost, so the loop-only rule went with it. A body whose plan has no loop and no
+  inlined call, direct call, arithmetic, comparison, intrinsic, element assignment or `&&`/`||`
+  (`Plan::runs_natively`) would only call the same helpers tier 0 does, so it is refused
+  (`analysis::NOTHING_NATIVE`, permanent) instead of costing a compile; most base R wrappers are
+  such bodies. `RY_JIT=force` still compiles them, so the tier tests cover them. Measured with
+  callgrind over the why-ry programs (whole process): about 170M instructions fewer per program,
+  on top of the higher entry threshold's 280M.
 - **Function speculation is validated by the binding epoch alone.** Compiling marks each
   speculated symbol and binding cell `WATCHED`, and the heap bumps one global epoch when a watched
   cell is assigned or a watched symbol is defined in any function frame (which could shadow the
@@ -2755,6 +2761,34 @@ first lines R had already read, leaving R mid-command.
   the first try instead of waiting.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+- **Compile latency: what was measured and rejected.** Cranelift's `opt_level = "none"` as a
+  first tier did not shorten whole-process time on the why-ry programs (compiling is dominated by
+  lowering and register allocation, which `none` keeps), so there is one tier. A back-edge
+  threshold of 2000 instead of 500 changed instruction counts by under 4% either way. Not built:
+  background compilation (compiled code embeds heap pointers and speculations validated against
+  the interpreter's state at compile time, so a second thread would need the heap frozen or a
+  revalidation step) and a persistent code cache keyed by body hash (the same embedded pointers
+  make machine code process-specific; it would need relocations for every constant and
+  speculation).
+- **Inlining keeps annotation checks.** An inlined call has no frame, so `annotations::enter` and
+  `check_return` never run for it. The inliner therefore inlines a typed closure only when
+  `annotations::admits_inline` proves, from the argument and result storage types it inferred,
+  that every check would pass; otherwise the call stays a real call. Before this, a typed callee
+  inlined into a hot loop silently skipped its checks (`test_tiers.rs` pins both directions).
+- **A builtin's repeated calls check the signature once.** `lapply` and `vapply` over an atomic
+  vector call the same closure with one argument whose storage type is the vector's, so
+  `eval::KnownFirst` resolves `annotations::entry_for` once per function and later calls run as
+  `Entry::Checked`, skipping the per-call parameter checks. A list's elements differ, so lists
+  check every call.
+- **Arrays are their own JIT types.** `Ty::IntArr`, `DblArr` and `LglArr` come from three
+  feedback kinds (`feedback::INTEGER_ARRAY` and so on, which is why feedback is 16 bits per
+  instruction, stored as an integer vector). The guard reads the kind and the flag bits only,
+  because the Array bit promises no attributes. `x[[i]]` reads the item directly and
+  `x[[i]] <- v` stores it when `v` has the Array's exact item type and is not missing; a missing
+  value, another type or a position out of range goes to tier 0, which applies the Array rules
+  (a double position past the last item is an error, not truncated into range). `[` and
+  arithmetic on Arrays stay generic, because their results must be Arrays checked for missing
+  values. A copy for a shared Array keeps the bit (`jit_duplicate`).
 
 # Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
 

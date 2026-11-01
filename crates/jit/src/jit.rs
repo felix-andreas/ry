@@ -21,7 +21,7 @@ use {
     bumpalo::Bump,
     heap::object::{Header, Sexp, SexpType, gp},
     interp::{
-        bytecode::{self, Machine, PROFILE, TIER1, Tier, TierExit, profile},
+        bytecode::{self, Machine, Op, PROFILE, TIER1, Tier, TierExit, profile},
         heap, interp,
         unwind::{R, error},
         values,
@@ -210,12 +210,26 @@ unsafe fn compile_in<'a>(
         let generated = started.elapsed() - planned;
         if std::env::var_os("RY_JIT_LOG").is_some() {
             // The instructions left to tier 0 are where compiled code is slow.
+            // A builtin call lists its argument types, which say why it was not an intrinsic.
             let steps: Vec<String> = plan
                 .insts
                 .iter()
                 .zip(&plan.actions)
-                .filter(|(_, action)| matches!(action, analysis::Action::Step { .. }))
-                .map(|(inst, _)| format!("{:?}@{}", inst.op, inst.pc))
+                .enumerate()
+                .filter(|(_, (_, action))| matches!(action, analysis::Action::Step { .. }))
+                .map(|(position, (inst, _))| {
+                    let arguments = match (inst.op, plan.before(position)) {
+                        (Op::CallBuiltin, Some(before)) => {
+                            let first = inst.operand(3);
+                            let types: Vec<String> = (first..first + inst.operand(4))
+                                .map(|register| format!("{:?}", before.registers[register]))
+                                .collect();
+                            format!("({})", types.join(", "))
+                        }
+                        _ => String::new(),
+                    };
+                    format!("{:?}@{}{arguments}", inst.op, inst.pc)
+                })
                 .collect();
             eprintln!(
                 "jit: compiled {} in {} us (analysis {} us, codegen {} us; {} speculations; tier 0 runs: {})",
