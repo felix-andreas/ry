@@ -76,7 +76,6 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 - Benchmark at full size (session_0111kWqEYviXMfUZx1qCaLE1, Opus): 300K-line code bases toward 100% match, runtime speed past GNU R, `ry check` timings. PR #123 (90 to 97% of tests match at 10K lines) merged as ad7ebc7.
 - Analysis performance round 4 (session_0111kWqEhvxZmGPocu7FZkAe, Opus): performance only, halve per-file CPU toward a cold check under 1 s on 4 cores, findings byte-identical, memory at or below 520 MiB. PR #135 (cold check about 2.5 s, peak RSS about 520 MiB, CRAN false errors 669 to 175) merged as eebed45; #129 as 0cee236.
 - Analysis false reports (session_0111kWqAtf1jzUW6T3FHvaDo, Opus): sole owner of false reports. Dedupe against #135, then the backlog false reports, the 175 remaining CRAN errors, and `ry check` on the corpus packages' R sources with every finding triaged.
-- Docs pass (session_0111kWqDFbu7Vb79hv7s9e8B, Sonnet): docs for #131, #133, #134, #135, object-systems at run time and the piped console; the why-ry benchmark table is left to #128.
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next
