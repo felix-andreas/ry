@@ -5,11 +5,14 @@
 
 use crate::{
     builtins::{BuiltinDef, Call, internal},
-    format, records,
+    format, records, standard_library,
     unwind::R,
     values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
 };
-use heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real};
+use heap::{
+    object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, gp, is_na_real},
+    records::NativeKind,
+};
 
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("deparse", 5, do_deparse),
@@ -697,6 +700,10 @@ impl Deparser {
     /// `()`, `:None` or `:Circle(radius = 2)`.
     unsafe fn native(&mut self, object: Sexp) {
         let layout = records::layout(object);
+        if matches!(layout.kind(), NativeKind::Dict | NativeKind::Set) {
+            self.collection(object, layout.kind() == NativeKind::Dict);
+            return;
+        }
         let count = layout.slot_count();
         if let Some(tag) = layout.tag {
             self.print(":");
@@ -732,6 +739,49 @@ impl Deparser {
             self.print(",");
         }
         self.print(")");
+    }
+
+    /// A dictionary or set, as the call that rebuilds it: `Dict.from_list(list(("a", 1)))` or
+    /// `Set.empty()`.
+    unsafe fn collection(&mut self, object: Sexp, dict: bool) {
+        let module = if dict { "Dict" } else { "Set" };
+        // The deparser cannot fail, and reading entries fails only on a malformed collection or
+        // an exhausted heap, so printing a placeholder would hide a corrupted value.
+        let entries = match standard_library::entries(object) {
+            Ok(entries) => entries,
+            Err(failure) => panic!("a {module} value could not be read for deparsing: {failure:?}"),
+        };
+        if entries.is_empty() {
+            self.print(module);
+            self.print(".empty()");
+            return;
+        }
+        self.print(module);
+        self.print(".from_list(list(");
+        self.in_list += 1;
+        let mut broken = false;
+        let count = entries.len();
+        for (index, (key, value)) in entries.into_iter().enumerate() {
+            match value {
+                Some(value) => {
+                    self.print("(");
+                    self.deparse(key);
+                    self.print(", ");
+                    self.deparse(value);
+                    self.print(")");
+                }
+                None => self.deparse(key),
+            }
+            if index + 1 < count {
+                self.print(", ");
+                self.line_break(&mut broken);
+            }
+        }
+        if broken {
+            self.indent -= 1;
+        }
+        self.in_list -= 1;
+        self.print("))");
     }
 
     /// The calls ry's own syntax lowers to, printed back in that syntax.

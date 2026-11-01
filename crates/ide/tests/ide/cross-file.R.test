@@ -495,7 +495,7 @@ rename: 5 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
   edit 50..50 -> "#: <T> fn(x: T) -> T\n"
-completion: none
+completion (1): Set
 hint @54: <T> fn(x: T) -> T
 
 #==== global

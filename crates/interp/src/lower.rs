@@ -236,6 +236,8 @@ fn is_skipped(node: &SyntaxNode) -> bool {
             | SyntaxKind::TYPE_ASCRIPTION
             | SyntaxKind::RETURN_TYPE
             | SyntaxKind::TYPE_BINDER_LIST
+            | SyntaxKind::TYPE_DEFINITION
+            | SyntaxKind::NEW_TYPE
     )
 }
 
@@ -269,6 +271,11 @@ unsafe fn lower(node: &SyntaxNode, source: Option<&SourceMap>) -> R<Sexp> {
             };
             values::call(symbols().paren, &[value])
         }
+        // `@Name(value)` runs as its `(value)`: the nominal type exists only for the checker.
+        SyntaxKind::NEW_EXPR => match expression_children(node).first() {
+            Some(inner) => lower(inner),
+            None => Err(error("expected `(` after the nominal type")),
+        },
         SyntaxKind::BRACE_EXPR => {
             let mut items = vec![(nil(), symbols().brace)];
             let statements = expression_children(node);

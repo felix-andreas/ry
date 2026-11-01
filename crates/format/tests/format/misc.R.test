@@ -280,3 +280,10 @@ if (1) {
     4
   }
 }
+
+#---- trailing_directive_after_semicolon_is_plain_comment
+y = 6;# fmt: off
+weird  <-  1
+#++++
+y = 6 # fmt: off
+weird <- 1

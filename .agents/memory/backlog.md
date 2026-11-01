@@ -259,6 +259,20 @@ distinctness, and no cascades outside the `@param` case. The gap is not the engi
 render the artifact unification left behind rather than the fact that failed, and the nominal story
 protects construction but nothing after it.
 
+## Open: ry's standard library
+
+- `Result.and_then` keeps one error type: a step that fails with another tag is a `type-mismatch`,
+  because a generic's tag union does not widen across calls. Widen `E` to the union of both, then
+  drop the limit from `reference/standard-library.mdx` ("Limits").
+- `Dict.insert`, `Set.insert` and `List.append` copy, so a growing loop is quadratic. Reuse the
+  value in place when the compiler proves the argument is the last use of its binding.
+- A lookup with a key of the wrong type at run time returns `:Err(:KeyNotFound)` instead of an
+  error; the checker rejects it statically, so only `Unknown` code reaches it.
+- The library needs ry's runtime. Decide whether GNU R gets a pure-R build of the modules that
+  touch no ry values (`Str`, `Num`), and add a diagnostic once a project can declare its runtime.
+- `serialize()` fails on ry's runtime for every value ("5 arguments passed to .Internal(serialize)
+  which requires 6"); `saveRDS()` works and refuses dicts and sets as intended.
+
 ## Open: the JIT
 
 `crates/jit` compiles loops (`decisions.md`, "the JIT tier"). In priority order:
@@ -1152,6 +1166,16 @@ The message says to add a type annotation, and no annotation form silences it. `
   idempotent, so it is deliberate, and it is undocumented.
 - **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
   annotations with a blank line" when there is only one annotation.**
+- **The deep formatter fuzz (`FUZZ_ITERS=300000`) still finds `l: :Sost$field`**, which the formatter
+  rewrites to `l::Sost$field`, turning two `:` tokens into one `::` and changing the code. The
+  default `fuzz_deep` budget passes.
+- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
+  definition may also be written inline as `type` or `alias`.
+- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+  accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
+  two spellings stay one grammar.
+- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
+  states the type.
 - **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
   missing fence.
 
@@ -1802,12 +1826,17 @@ The end-to-end guard rests on the corpus suites.
 
 - **Interpreter wiring.** No R code reaches `crates/table` until the evaluator exists; then
   `[.frame` dispatches into `query::execute` and `frame()` builds a `Table`.
-- **Query features:** `.EACHI` and non-equi joins are not supported.
-- **No warning channel.** data.table warns when a value is truncated into an integer column and when
-  gsum coerces an overflowing sum to double; the engine returns no warnings.
+- **Query gaps.** `j` cannot read `x.`-prefixed columns in a join. Under `.EACHI`, a column of `i`
+  inside an aggregate is the matched rows' values, where data.table gives the row's one value.
+  A non-equi join's extra condition columns are named `t.1` where data.table repeats `t`.
+- **Warnings:** a `:=` that coerces a string into a number column does not warn, where data.table
+  does; only number narrowing does.
+- **Checker:** a non-equi `on =` and `by = .EACHI` give `Unknown`; the engine's `result_type`
+  already knows both results.
 - **Checker:** only a literal counts as a single value, so `f[, y := sum(x)]` replaces `y`'s type
   where data.table keeps it, and a frame updated in a nested closure is not refined there.
-- **Naming:** at runtime `frame()` clashes with `graphics::frame`.
+- **Naming:** the interpreter must bind `frame` as the delegating closure `decisions.md` describes
+  ("the built-in frame"), ahead of `package:graphics`.
 - **A writable ALTREP pointer copies the column into R's layout.** That is the value-semantics
   contract (Arrow buffers are shared and immutable), so only revisit it if profiling shows it.
 - **The 5 GB (1e8 rows) run has not been done**: its CSVs need about 16 GB of disk.

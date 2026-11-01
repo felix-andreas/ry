@@ -14,6 +14,11 @@ character | null
 #++++
 character | NULL
 
+#---- leading_pipe_lines_up_members
+| integer | NULL
+#++++
+integer | NULL
+
 #---- nullable_integer_with_null_on_left
 NULL | integer
 #++++

@@ -72,8 +72,8 @@ Every typed example in the docs is a pair of tabs, `Inline` first and `Comments`
 Starlight `<Tabs syncKey="annotation-style">`, so a reader's choice follows them across pages. Pages
 with tabs are `.mdx`. After editing one, run `python3 docs/check-tabs.py docs/src/content/docs/**/*.mdx`
 with a built `ry` (set `RY` if it is not at `target/debug/ry`): it checks both tabs of each pair and
-fails when their diagnostics differ. Type definitions (`@type`, `@alias`), `@new`, `@trust` and
-`@if-unknown` exist only as comments, so an example that needs one carries that line in both tabs.
+fails when their diagnostics differ. Every annotation form has both spellings, type definitions
+included, so the Inline tab carries no `#:` line except to show the two spellings together.
 
 Run `just docs` for a live preview, and `cd docs && bun run build` for a full build, which needs
 Node 22.23.4 or newer.

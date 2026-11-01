@@ -2,11 +2,12 @@
 //! current handle scope (see the crate documentation), so callers never protect by hand.
 
 use crate::{
-    interp,
+    interp, records, standard_library,
     unwind::{R, error},
 };
 use heap::{
     Heap, Marker,
+    records::NativeKind,
     object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
     strings::Encoding,
 };
@@ -497,7 +498,10 @@ pub unsafe fn length(object: Sexp) -> usize {
         SexpType::Nil => 0,
         SexpType::Pairlist | SexpType::Language | SexpType::Dots => pairlist_length(object),
         SexpType::Environment => env_length(object),
-        SexpType::Record => object.record_slot_count(),
+        SexpType::Record => match records::native_kind(object) {
+            NativeKind::Dict | NativeKind::Set => standard_library::entry_count(object),
+            NativeKind::Record | NativeKind::Tuple | NativeKind::Tag => object.record_slot_count(),
+        },
         _ if object.kind().is_vector() => {
             if object.is_altrep() {
                 altrep_length(object)

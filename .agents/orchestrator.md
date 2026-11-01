@@ -70,14 +70,13 @@ Velocity comes first, so do not de-risk. Broken code on main is allowed, and nob
 ## In flight
 
 - Runtime step 3 follow-up (session_0111kWqCeajgVo7m8XVxpfDk, Opus): stats natives, review fixes, GNU R `tests/*.R`, connection builtins, stringi, task callbacks.
-- Table engine follow-up (session_0111kWqB9LKMquDanx18xVTC, Opus): .EACHI, non-equi joins, warning channel, frame() name clash. PR #116 (beats data.table on all 19 db-benchmark queries) merged as 693ee85.
+- Typed table (session_0111kWqB9LKMquDanx18xVTC, Opus): precise checker types for every table operation, plus the x.-column, .EACHI-aggregate and string-into-number gaps. PR #119 (non-equi joins, .EACHI, warnings) merged as f6c1374.
 - Runtime step 4 completion (session_0111kWqDJJsagmnUNcuZLJp4, Opus): all 232 corpus packages pass their tests.
 - JIT round 2 (session_0111kWqBQdpLjmrdiA5ajbhR, Opus): direct calls with promise elision, builtin inlining, the closures regression, the why-ry benchmark. The JIT (PR #117) merged as 3401282.
 - Wire the table engine into the interpreter (session_0111kWqCxpbzWznPZjGyyBYk, Opus).
 - Run the benchmark code bases on ry's runtime (session_0111kWqEYviXMfUZx1qCaLE1, Opus).
 - Analysis performance round 2: memory and incremental latency (session_0111kWqEhvxZmGPocu7FZkAe, Opus).
 - Standard library in the style of Roc (session_0111kWqD1BjWFRsQLrnpUHXu, Opus).
-- Inline syntax for type definitions: inline forms of `@type`, `@alias`, `@new`, `@trust`, `@if-unknown` (session_0111kWqBAhfBuJKm2r4beMZm, Opus).
 - Persistent merge agent: an in-session subagent that squash-merges cloud PRs on request.
 
 ## Next

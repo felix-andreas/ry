@@ -258,8 +258,8 @@ impl Lexer<'_> {
         }
     }
 
-    /// R strings may span lines, but an unterminated one would swallow the rest
-    /// of the file; cutting it at its first line break confines a stray quote's
+    /// R strings may span lines, except inside an annotation, which ends with
+    /// its line. An unterminated string would swallow the rest of the file; cutting it at its first line break confines a stray quote's
     /// damage to its own line.
     fn end_unterminated_at_line_break(&mut self, start: usize) {
         if let Some(offset) = self.text[start..self.pos].find(['\n', '\r']) {
@@ -281,6 +281,7 @@ impl Lexer<'_> {
                     self.bump();
                 }
                 Some(c) if c == quote => return kind,
+                Some('\n' | '\r') if self.in_annotation => break,
                 Some(_) => {}
                 None => break,
             }
@@ -309,7 +310,13 @@ impl Lexer<'_> {
         };
         self.bump();
         let closer = format!("{close}{}{quote}", "-".repeat(dashes));
-        match self.text[self.pos..].find(&closer) {
+        let line_end = self.text[self.pos..]
+            .find(['\n', '\r'])
+            .unwrap_or(self.text.len() - self.pos);
+        match self.text[self.pos..]
+            .find(&closer)
+            .filter(|offset| !self.in_annotation || *offset < line_end)
+        {
             Some(offset) => {
                 self.pos += offset + closer.len();
                 RAW_STRING

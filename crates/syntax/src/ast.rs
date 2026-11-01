@@ -79,6 +79,7 @@ pub fn is_expression_kind(kind: SyntaxKind) -> bool {
             | RECORD_EXPR
             | TAG_EXPR
             | MATCH_EXPR
+            | NEW_EXPR
     )
 }
 

@@ -21,7 +21,8 @@ use table::{
         SerReader,
     },
     query::{
-        Aggregate, BinaryOp, Expr, Join, Mult, Output, Query, Roll, Rows, Select, SortKey,
+        Aggregate, BinaryOp, Executed, Expr, Join, Mult, On, Output, Query, Roll, Rows, Select,
+        SortKey,
         build::{aggregate, binary, column},
         execute,
     },
@@ -258,13 +259,11 @@ fn rolling_join(dir: &Path) -> Result<()> {
     time_question("rolljoin keyed", || {
         let rows = Rows::Join(Join {
             other: trades.clone(),
-            on: vec![
-                ("ticker".into(), "ticker".into()),
-                ("time".into(), "time".into()),
-            ],
+            on: vec![On::equal("ticker", "ticker"), On::equal("time", "time")],
             drop_unmatched: false,
             roll: Roll::Backward(None),
             mult: Mult::All,
+            each_i: false,
         });
         Ok(execute(
             &mut prices,
@@ -309,10 +308,10 @@ fn read(dir: &Path, name: &str) -> Result<Table> {
 }
 
 /// Times one question. The checksum is computed after the clock stops, as `datatable.R` does.
-fn time_question(question: &str, mut run: impl FnMut() -> Result<Output>) -> Result<()> {
+fn time_question(question: &str, mut run: impl FnMut() -> Result<Executed>) -> Result<()> {
     for run_number in 1..=2 {
         let start = Instant::now();
-        let output = run()?;
+        let output = run()?.output;
         let seconds = start.elapsed().as_secs_f64();
         let answer = answer(output)?;
         println!(
@@ -397,10 +396,11 @@ fn assign(name: &str, expr: Expr) -> Query {
 fn equi_join(other: &Table, on: &str, drop_unmatched: bool) -> Rows {
     Rows::Join(Join {
         other: other.clone(),
-        on: vec![(on.into(), on.into())],
+        on: vec![On::equal(on, on)],
         drop_unmatched,
         roll: Roll::None,
         mult: Mult::All,
+        each_i: false,
     })
 }
 

@@ -807,8 +807,8 @@ carries its own annotation).
 
 **Both spellings on one statement** merge per slot (value, parameter, rest, return), and type
 parameters pair by position (the comment's are renamed to the inline names first), with the inline
-side winning, except that a `#:` coercion form (`@trust`, `@if-unknown`, `@new`) governs the value
-(`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
+side winning, except that a coercion (`@trust`, `@if-unknown`, `@new`) governs the value wherever it
+is written, and the inline one wins when both sides carry one (`merge_annotations`). Disagreement is judged separately in `annotation_agreement_diagnostics`, on
 file-absolute ranges, comparing types after alias expansion and union-member sorting, so the warning
 can point at both written types. Positional comment parameter types pair with formals the way
 `check_declared_function` pairs them.
@@ -833,6 +833,43 @@ A parameter a `#:` block also names keeps the comment's `[name]`, which is check
 
 **Known gap.** A generic lambda passed as an argument keeps its binders rigid, so
 `lapply(xs, function<T>(v: T) -> T v)` is reported. `backlog.md` tracks it.
+
+## Inline type definitions, coercions and nominal constructors
+
+**Syntax.** `type Name<T: c> = TYPE` declares a nominal type and `alias Name = TYPE` an alias, as
+statements at the top level of a file; `x: @trust T <- v` (also `@if-unknown`, `@new`) is a coercing
+binding; and `@Name(value)` or `@Name<Args>(value)` constructs a nominal value, the expression form of
+`#: @new Name`. Docs: `reference/type-system.mdx#inline-annotation-syntax`.
+
+**Why it is unambiguous.** Two names in a row are not valid R, and neither is `@` at the start of an
+expression, so none of these forms gives a valid R program a new reading. `type` and `alias` are
+contextual: the definition is recognized only at a statement start with the defined name on the same
+line, so `type <- 1`, `alias(type)` and `type` as a parameter keep working. At a line start
+`@Name` is a constructor only before `(` or `<`, so `obj` newline `@slot` keeps R's own error;
+after an operator a bare `@Name` is a constructor, so completion works while it is typed. A nested definition is an
+`annotation` error rather than a silent new scope, because a type's scope is the file. Rejected:
+`@type Name = T` (reads as a decorator, and `@` at statement start would collide with the constructor),
+and `newtype` (a second keyword for no new meaning).
+
+**Leading `|`.** A union may open with `|`, in `#:` comments too, and inline a union continues onto a
+line that starts with `|`. No R statement starts with `|`, so this never swallows the next statement,
+and it lets a tagged union list one member per line.
+
+**One meaning.** A definition lowers to the same `NamedDefinition` as its `#:` block, and every
+consumer reads definitions through `file_type_definitions`. A `#:` definition directly above an
+inline one of the same name is one definition written twice (`paired_comment_definition`): with
+inline annotations on, the inline one is used and any disagreement in kind, parameters, constraints
+or body is an `annotation-mismatch` warning; with them off, the comment applies alone. An unpaired
+inline definition with inline annotations off still declares its name, with an `Unknown` body, so
+uses of the name do not turn into unknown-type errors on top of the `inline-annotation` warning.
+
+**Erasure and run time.** Erasure turns a definition into its `#: @type`/`#: @alias` comment, line
+for line and keeping comments, so the erased program still declares the type. A paired definition
+erases to nothing, since its partner already declares it (two copies would be a duplicate). Because
+the comment would swallow the rest of its line, a definition must end its line, which the parser
+enforces. Erasure also drops the `@Name` of a constructor, leaving `(value)`, and drops
+a coercing binding's `: @trust T`. The runtime skips definitions and lowers `@Name(value)` to its
+parenthesized value; a nominal type has no run-time representation.
 
 ## Testing doctrine for `syntax`
 
@@ -2179,6 +2216,16 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   `c("frame", "data.frame")` use a name base R does not give a meaning to in a type position.
   `graphics::frame()` exists, so the checker treats `frame()` as the built-in only with at least one
   argument and when the project defines no `frame` of its own.
+- **At run time `frame` is one closure that delegates a call without arguments to
+  `graphics::frame`**, and it is bound in an environment attached ahead of `package:graphics` on
+  the search path. `graphics::frame` is `plot.new`, which takes no arguments, so every call that
+  worked before still runs graphics' code, and every call with arguments, which was an error, now
+  builds a frame. R's own lookup then gives the checker's rule for free: a `frame` defined in
+  `.GlobalEnv` or a package namespace is found first, and a package that imports `graphics::frame`
+  keeps it. The rejected options: binding it in base (top-level code finds `package:graphics` before
+  `package:base`, so `frame(a = 1)` would hit `plot.new`), and renaming the type (the name was
+  chosen to stay clear of base's `table`). The cost is that `identical(frame, graphics::frame)` is
+  `FALSE`, which no known code tests. The interpreter wiring that binds it is still open.
 - **`:=` has value semantics in the checker.** `f[, y := e]` rebinds `f` to the extended type, and
   aliases keep the old type. Column sets are exact. At runtime the update is copy-on-write: the
   interpreter passes an unshared `&mut Table` (reference count one) and the update happens in place,
@@ -2270,6 +2317,30 @@ which links Polars as a Rust crate, and the checker types it as `frame{col: type
   stays logical), and hidden probe sums pick the version
   (`assign` in `query.rs`). Where data.table's grouped `:=` takes the column type from the first
   group, the engine makes the column a double if any group overflows.
+- **Non-equi joins and `.EACHI` follow data.table, with one naming exception.** A join condition is
+  an `On { x, op, i }`; an ordering compares numbers only (data.table refuses characters too), and
+  a rolling join must be all `==`. `join_layout` is the single description of the output columns,
+  read by the plan, the kernel and `join_schema`: `x`'s columns with a join column taking `i`'s
+  values from its first condition, then one column per further condition on the same `x` column
+  (`t.1`, `t.2`), then `i`'s unused columns. data.table names those extra columns `t, t`, a
+  duplicate that ry does not reproduce. A name that still repeats (a real column `t.1`, or `i`
+  holding both `v` and `i.v`) takes the next free numeric suffix, as `make.unique` would. NA and NaN match only the same missing value, and only
+  under `<=`, `>=` or `==`, as data.table does. The kernel (`non_equi` in `join.rs`) groups the
+  equality conditions, sorts each group's rows of `x` by the first ordering column and narrows
+  every row of `i` by binary search, checking any other condition per candidate. `.EACHI` reruns the
+  query as a join with hidden row numbers and groups by the row of `i`, so `j` sees an unmatched row
+  as one NA row with `.N` zero, and a column of `i` outside an aggregate is that row's value.
+- **Warnings are data in `Executed`, not side effects.** `execute` returns the output with a list
+  of `Warning`s, which the interpreter raises as R warnings after the query succeeds, so a failed
+  query raises none and the kernels and plans can be compared on them. Two exist, raised where
+  data.table raises its own: an integer `sum` that a grouped query (`by` or `keyby`) selects plainly
+  or assigns with `:=` and that overflows (one warning per column, none for an ungrouped, nested or
+  `.EACHI` sum), and a `:=` into an existing column whose type loses part of the value (a double
+  truncated or out of range in an integer column, a number other than 0 or 1 in a logical one).
+  NaN becomes NA silently, as in R. In a grouped join, `j` is typed against the joined rows, whose
+  join columns carry `i`'s types.
+  The wording is ry's. A narrowing `:=` skips the kernel, because detecting the loss needs the
+  value before the conversion; it is not a db-benchmark shape.
 
 ## Records, tuples and tags are ry values, not R lists
 
@@ -2423,3 +2494,32 @@ first lines R had already read, leaving R mid-command.
   calls; `RY_JIT=force` still compiles them so the tier tests cover the same code.
 - **Interrupts deoptimize.** A compiled backward jump reads the interrupt flag and deoptimizes to
   tier 0's backward `Jump`, which raises the interrupt, so there is one place that handles it.
+
+# Decision record: ry's standard library (`List`, `Str`, `Num`, `Result`, `Dict`, `Set`)
+
+- **Previous shape:** none. Results were a user-declared `@alias`, and the only stdlib was the stubs
+  for R's own packages (the first record in this file), so every project re-declared `Result` and
+  wrote its own helpers over plain lists.
+- **Names:** plain qualified names such as `List.map` are ordinary R symbols with a dot, bound in a
+  `package:ry` environment attached just above `package:base` (`standard_library::attach`). There
+  is no static dispatch, so a call is a symbol lookup and the checker reads one stub per name. A
+  definition in the user's code shadows a library name like any R binding, and
+  `test_standard_library.rs` asserts that no shipped package's `.exports` holds a library name, so
+  plain R cannot change meaning. Module names are Roc's; a Roc name that already means something
+  else in R is renamed (`Result.try` is `Result.and_then`).
+- **One source of truth per side:** the types live once in `types/ry.Rtypes` (namespace `ry`,
+  always active), and the runtime functions live once in `crates/interp/src/standard_library.rs`,
+  registered with `BuiltinDef::accepting_native`. A test asserts the two name sets are equal and
+  that every declared parameter name is accepted at run time.
+- **`Dict` and `Set` are native kinds** (`Fields::Dict`, `Fields::Set` in `crates/heap/src/records.rs`)
+  with value semantics, insertion order and an open-addressing index, because a named list
+  matches partially and allows duplicates, and an environment has reference semantics.
+  `identical()` ignores order, as Roc's equality does. Updates copy, which makes a growing loop
+  quadratic until the compiler can reuse a value it owns (backlog).
+- **Errors are tags, not conditions:** a function that can fail returns `:Ok(x) | :Err(:Tag)`, and a
+  wrong argument type raises an R error that names the parameter, so a misuse is loud and a domain
+  failure is a value.
+- **Impact:** no change for plain R (no shipped name collides, and all names are new symbols). The
+  checker, hover, completion and goto-definition read the stub file like any other, so incremental
+  analysis gains nothing new to invalidate. The user contract is `reference/standard-library.mdx`;
+  the draft with open questions is `contributing/design/standard-library.md`.
