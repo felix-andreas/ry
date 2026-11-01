@@ -291,6 +291,14 @@ impl<'a> States<'a> {
         self.visible.len()
     }
 
+    /// Makes room for `rows` more rows. Growing a list in the arena copies it and abandons the
+    /// old buffer, so a pass that knows roughly how many rows it adds reserves them first.
+    fn reserve(&mut self, rows: usize) {
+        self.types.reserve(rows * self.registers);
+        self.slot_rows.reserve(rows * self.slots);
+        self.visible.reserve(rows);
+    }
+
     fn push(&mut self, state: &State) -> StateId {
         let id = self.rows() as StateId;
         self.types.extend_from_slice(&state.registers);
@@ -798,6 +806,8 @@ pub unsafe fn plan<'a>(
     let mut edge_ranges = List::with_capacity_in(count + 1, arena);
     let mut edges = List::new_in(arena);
     let mut state = State::bottom(arena, registers + TEMPORARIES, builder.slots.len());
+    // Each instruction adds the row before it and usually a fallthrough edge.
+    builder.states.reserve(2 * count + blocks.len());
     for block in &blocks {
         let Some(entry) = block.entry else {
             for _ in block.start..block.end {
@@ -1181,6 +1191,13 @@ impl<'a> Builder<'a> {
         loop_headers: &[usize],
     ) -> Result<(), Refusal> {
         let mut state = State::bottom(self.arena, self.registers + TEMPORARIES, self.slots.len());
+        // One entry row per block, then the edge rows of whichever block is being visited.
+        let longest = blocks
+            .iter()
+            .map(|block| block.end - block.start)
+            .max()
+            .unwrap_or(0);
+        self.states.reserve(blocks.len() + 2 * longest);
         for _ in 0..blocks.len() {
             self.states.push(&state);
         }
